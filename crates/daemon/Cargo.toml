@@ -35,5 +35,6 @@ futures = "0.3"
 base64 = "0.22"
 rand = "0.8"
 portable-pty = "0.9"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }

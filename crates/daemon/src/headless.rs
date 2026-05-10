@@ -4,6 +4,8 @@
 //! emits structured JSON over stdout. We line-buffer the stream, parse each
 //! event, and update the session record's `metrics` + `recent_actions`.
 
+use crate::orphan;
+use crate::paths::Dirs;
 use crate::session::{SessionRegistry, push_recent_action};
 use anyhow::{Context as _, anyhow};
 use protocol::SessionStatus;
@@ -26,6 +28,7 @@ pub struct HeadlessSpec {
 
 pub struct HeadlessHandle {
     child: AsyncMutex<Option<Child>>,
+    pid: Option<u32>,
 }
 
 impl HeadlessHandle {
@@ -37,14 +40,20 @@ impl HeadlessHandle {
             warn!(?err, "failed to kill headless child");
         }
     }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
 }
 
 /// Spawn the headless child and wire its stdout into the registry.
-/// Returns immediately; the parser runs in a background task.
+/// Returns immediately; the parser runs in a background task. `dirs` is used
+/// to clean up the orphan-meta sidecar when the child exits.
 pub fn spawn(
     spec: &HeadlessSpec,
     registry: &Arc<SessionRegistry>,
     session_id: String,
+    dirs: Dirs,
 ) -> anyhow::Result<Arc<HeadlessHandle>> {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
@@ -58,11 +67,13 @@ pub fn spawn(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning {} for headless mode", spec.program))?;
+    let pid = child.id();
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
 
     let handle = Arc::new(HeadlessHandle {
         child: AsyncMutex::new(Some(child)),
+        pid,
     });
 
     // stdout: parse stream-json line by line.
@@ -105,6 +116,7 @@ pub fn spawn(
     let registry_for_exit = Arc::clone(registry);
     let session_for_exit = session_id;
     let handle_for_exit = Arc::clone(&handle);
+    let dirs_for_exit = dirs;
     tokio::spawn(async move {
         let mut guard = handle_for_exit.child.lock().await;
         let exit = if let Some(mut child) = guard.take() {
@@ -121,9 +133,10 @@ pub fn spawn(
             );
         });
         registry_for_exit.fan_out_attention(
-            session_for_exit,
+            session_for_exit.clone(),
             protocol::AttentionReason::Stopped,
         );
+        orphan::try_delete_meta(&dirs_for_exit, &session_for_exit);
     });
 
     Ok(handle)

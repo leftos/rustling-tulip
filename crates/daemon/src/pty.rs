@@ -36,11 +36,19 @@ pub struct PtyHandle {
     /// Master kill switch. Dropping closes input/resize channels and the
     /// reader task observes EOF.
     killer: Mutex<Option<Box<dyn portable_pty::ChildKiller + Send + Sync>>>,
+    /// OS process id of the spawned child, captured at spawn time. Used to
+    /// write orphan-recovery sidecar so daemon restarts can detect surviving
+    /// children. `None` if the platform refused to expose one.
+    pid: Option<u32>,
 }
 
 impl PtyHandle {
     pub fn write_input(&self, data: Vec<u8>) {
         let _ = self.input_tx.send(data);
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
@@ -91,6 +99,7 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
     let mut child = pair.slave.spawn_command(cmd).context("spawn child")?;
     drop(pair.slave);
 
+    let pid = child.process_id();
     let killer = child.clone_killer();
 
     let mut reader = pair.master.try_clone_reader().context("clone reader")?;
@@ -177,5 +186,6 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
         resize_tx,
         exit_rx: Mutex::new(Some(exit_rx)),
         killer: Mutex::new(Some(killer)),
+        pid,
     }))
 }

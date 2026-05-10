@@ -1,5 +1,6 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
+use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{self, PtySpawnSpec};
 use crate::registry::{add_repo, remove_repo, remove_workspace, upsert_workspace};
@@ -38,9 +39,14 @@ pub struct Hub {
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
     pub attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    pub dirs: Dirs,
 }
 
-pub async fn run(state: Arc<AppState>, dirs: Dirs) -> anyhow::Result<()> {
+pub async fn run(
+    state: Arc<AppState>,
+    dirs: Dirs,
+    orphans: Vec<OrphanMeta>,
+) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(48)
@@ -49,6 +55,12 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs) -> anyhow::Result<()> {
 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new();
+
+    // Reattach orphan sessions before any clients connect so the initial
+    // state snapshot already includes them.
+    for meta in orphans {
+        sessions.insert_orphan(&meta);
+    }
 
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
@@ -65,6 +77,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs) -> anyhow::Result<()> {
         sessions,
         auth_token: auth_token.clone(),
         attention_tx,
+        dirs: dirs.clone(),
     };
 
     let app = Router::new()
@@ -578,14 +591,16 @@ fn spawn_interactive_session(
         rows: 32,
     };
     let pty = pty::spawn(spec).context("spawning claude pty")?;
+    let pid = pty.pid();
 
+    let started_at = Utc::now();
     let mut record = SessionRecord {
         id: session_id.clone(),
-        label,
-        kind,
-        members,
+        label: label.clone(),
+        kind: kind.clone(),
+        members: members.clone(),
         mode: SessionMode::Interactive,
-        started_at: Utc::now(),
+        started_at,
         status: SessionStatus::Idle,
         exit_code: None,
         metrics: SessionMetrics::default(),
@@ -601,13 +616,32 @@ fn spawn_interactive_session(
         .map(|rec| crate::sync::lock(&rec).snapshot())
         .ok_or_else(|| anyhow!("session vanished"))?;
 
+    if let Some(pid) = pid
+        && let Ok(meta) = orphan::meta_from_record(
+            session_id.clone(),
+            pid,
+            label,
+            kind,
+            SessionMode::Interactive,
+            members,
+            started_at,
+        )
+    {
+        orphan::try_write_meta(&hub.dirs, &meta);
+    }
+
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
         hub.attention_tx.clone(),
     );
-    attach_lifecycle(&hub.sessions, session_id, &pty);
+    attach_lifecycle(
+        &hub.sessions,
+        session_id,
+        &pty,
+        Some(hub.dirs.clone()),
+    );
     Ok(snap)
 }
 
@@ -648,13 +682,14 @@ fn spawn_headless_session(
         env: merged_env(&cfg.extra_env),
     };
 
+    let started_at = Utc::now();
     let mut record = SessionRecord {
         id: session_id.clone(),
-        label,
-        kind,
-        members,
+        label: label.clone(),
+        kind: kind.clone(),
+        members: members.clone(),
         mode: SessionMode::Headless,
-        started_at: Utc::now(),
+        started_at,
         status: SessionStatus::Spawning,
         exit_code: None,
         metrics: SessionMetrics::default(),
@@ -665,8 +700,22 @@ fn spawn_headless_session(
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
 
-    let handle = headless::spawn(&spec, &hub.sessions, session_id.clone())
+    let handle = headless::spawn(&spec, &hub.sessions, session_id.clone(), hub.dirs.clone())
         .context("spawning headless claude")?;
+
+    if let Some(pid) = handle.pid()
+        && let Ok(meta) = orphan::meta_from_record(
+            session_id.clone(),
+            pid,
+            label,
+            kind,
+            SessionMode::Headless,
+            members,
+            started_at,
+        )
+    {
+        orphan::try_write_meta(&hub.dirs, &meta);
+    }
 
     hub.sessions.update(&session_id, |rec| {
         rec.headless = Some(Arc::clone(&handle));
@@ -792,6 +841,7 @@ async fn stop_session(
         }
     }
     hub.sessions.remove(session_id);
+    orphan::try_delete_session_dir(&hub.dirs, session_id);
     Ok(())
 }
 

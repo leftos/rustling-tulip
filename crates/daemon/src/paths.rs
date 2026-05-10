@@ -9,6 +9,9 @@ pub struct Dirs {
     pub config: PathBuf,
     pub state_file: PathBuf,
     pub handshake_file: PathBuf,
+    /// Per-session sidecar directory: `<config>/sessions/<session-id>/` holds
+    /// `meta.json` (orphan recovery) and `scrollback.bin` (replay on attach).
+    pub sessions_dir: PathBuf,
 }
 
 impl Dirs {
@@ -19,9 +22,13 @@ impl Dirs {
         let config = pd.config_dir().to_path_buf();
         std::fs::create_dir_all(&config).context("creating config dir")?;
 
+        let sessions_dir = config.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).context("creating sessions dir")?;
+
         Ok(Self {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
+            sessions_dir,
             config,
         })
     }

@@ -118,6 +118,12 @@ pub struct SessionSnapshot {
     pub exit_code: Option<i32>,
     pub metrics: SessionMetrics,
     pub recent_actions: Vec<String>,
+    /// True when the session was reattached on daemon startup and we no
+    /// longer have a live PTY/headless handle. The underlying `claude`
+    /// process is still running but its stdio is detached from us, so the
+    /// UI shows the session in read-only mode (scrollback only).
+    #[serde(default)]
+    pub is_orphan: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

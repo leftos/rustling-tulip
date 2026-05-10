@@ -1,0 +1,188 @@
+//! Orphan-session recovery sidecar.
+//!
+//! At spawn time the daemon writes `<sessions_dir>/<id>/meta.json` recording
+//! the OS pid plus enough state to rebuild a [`SessionRecord`] without a live
+//! PTY/headless handle. On startup the daemon walks the sessions dir, drops
+//! stale entries whose pid no longer points at a `claude` process, and
+//! reattaches the survivors so they appear in the dashboard with their
+//! scrollback intact (PTY stream is gone, but state and history are not).
+//!
+//! Decoupled from Claude Code's own `~/.claude/projects/<encoded-cwd>/*.jsonl`
+//! files so we don't depend on the undocumented log layout.
+
+use crate::paths::Dirs;
+use anyhow::{Context as _, anyhow};
+use chrono::{DateTime, Utc};
+use protocol::{SessionKind, SessionMember, SessionMode};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use tracing::warn;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanMeta {
+    pub session_id: String,
+    pub pid: u32,
+    pub label: String,
+    pub kind: SessionKind,
+    pub mode: SessionMode,
+    pub members: Vec<SessionMember>,
+    pub started_at: DateTime<Utc>,
+}
+
+fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
+    dirs.sessions_dir.join(session_id).join("meta.json")
+}
+
+pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
+    let dir = dirs.sessions_dir.join(&meta.session_id);
+    std::fs::create_dir_all(&dir).context("creating session sidecar dir")?;
+    let path = dir.join("meta.json");
+    let bytes = serde_json::to_vec_pretty(meta).context("serializing orphan meta")?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).context("writing meta tmp")?;
+    std::fs::rename(&tmp, &path).context("renaming meta")?;
+    Ok(())
+}
+
+pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(&dirs.sessions_dir) {
+        Ok(e) => e,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(err) => return Err(err).context("reading sessions dir"),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                warn!(?err, "skipping unreadable session dir entry");
+                continue;
+            }
+        };
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let path = entry.path().join("meta.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                warn!(?err, path = %path.display(), "skipping unreadable meta.json");
+                continue;
+            }
+        };
+        match serde_json::from_slice::<OrphanMeta>(&bytes) {
+            Ok(meta) => out.push(meta),
+            Err(err) => {
+                warn!(?err, path = %path.display(), "skipping malformed meta.json");
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Remove the meta sidecar for a session that has stopped or errored. Leaves
+/// the rest of the session dir (e.g. `scrollback.bin`) in place — the caller
+/// decides whether to nuke the dir entirely.
+pub fn delete_meta(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+/// Remove the entire `<sessions_dir>/<id>/` directory. Use when stopping a
+/// session for good (cleanup) so scrollback doesn't leak across recreations.
+pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
+    let path = dirs.sessions_dir.join(session_id);
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+/// Returns true iff `pid` exists *and* its executable name suggests it is a
+/// `claude` process. The name check guards against PID reuse: if the pid was
+/// recycled to an unrelated process, the meta is stale and should be dropped.
+pub fn is_claude_alive(pid: u32) -> bool {
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+    );
+    let pid = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::new(),
+    );
+    let Some(process) = sys.process(pid) else {
+        return false;
+    };
+    let name = process.name().to_string_lossy().to_lowercase();
+    // `claude` (Unix) or `claude.exe` / `node.exe` shim on Windows. The TUI is
+    // a Node script invoked via a shim; allow either.
+    name.contains("claude") || name.contains("node")
+}
+
+/// Filter a list of metas down to those whose pid is still a live claude-ish
+/// process. Returns `(live, dead)` so callers can clean up dead entries.
+pub fn partition_live(metas: Vec<OrphanMeta>) -> (Vec<OrphanMeta>, Vec<OrphanMeta>) {
+    let mut live = Vec::new();
+    let mut dead = Vec::new();
+    for m in metas {
+        if is_claude_alive(m.pid) {
+            live.push(m);
+        } else {
+            dead.push(m);
+        }
+    }
+    (live, dead)
+}
+
+/// Best-effort wrapper that logs and swallows non-fatal sidecar errors. Used
+/// in lifecycle paths where a missing or unwritable meta should never abort
+/// session handling.
+pub fn try_write_meta(dirs: &Dirs, meta: &OrphanMeta) {
+    if let Err(err) = write_meta(dirs, meta) {
+        warn!(?err, session_id = %meta.session_id, "failed to write orphan meta");
+    }
+}
+
+pub fn try_delete_meta(dirs: &Dirs, session_id: &str) {
+    if let Err(err) = delete_meta(dirs, session_id) {
+        warn!(?err, %session_id, "failed to delete orphan meta");
+    }
+}
+
+pub fn try_delete_session_dir(dirs: &Dirs, session_id: &str) {
+    if let Err(err) = delete_session_dir(dirs, session_id) {
+        warn!(?err, %session_id, "failed to delete session dir");
+    }
+}
+
+/// Convenience constructor used by the spawn paths.
+pub fn meta_from_record(
+    session_id: String,
+    pid: u32,
+    label: String,
+    kind: SessionKind,
+    mode: SessionMode,
+    members: Vec<SessionMember>,
+    started_at: DateTime<Utc>,
+) -> anyhow::Result<OrphanMeta> {
+    if pid == 0 {
+        return Err(anyhow!("refusing to write orphan meta with pid=0"));
+    }
+    Ok(OrphanMeta {
+        session_id,
+        pid,
+        label,
+        kind,
+        mode,
+        members,
+        started_at,
+    })
+}

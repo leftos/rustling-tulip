@@ -185,6 +185,14 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   border-radius: 999px;
 }
 
+.orphan-banner {
+  padding: 8px 14px;
+  background: #4a3a1a;
+  color: #ffd388;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
 .terminal-host {
   flex: 1; min-height: 0; padding: 6px;
   background: var(--bg);

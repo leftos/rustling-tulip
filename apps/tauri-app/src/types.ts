@@ -51,6 +51,7 @@ export interface SessionSnapshot {
   exit_code: number | null;
   metrics: SessionMetrics;
   recent_actions: string[];
+  is_orphan: boolean;
 }
 
 export type BranchTarget =

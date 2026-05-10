@@ -1,6 +1,8 @@
 //! In-memory session registry: spawned `claude` processes plus their state.
 
 use crate::headless::HeadlessHandle;
+use crate::orphan::{self, OrphanMeta};
+use crate::paths::Dirs;
 use crate::pty::PtyHandle;
 use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
@@ -47,6 +49,13 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     pub fn snapshot(&self) -> SessionSnapshot {
+        // Orphan = session still tracked but with no live stdio handle, and
+        // not in a terminal state. After the child exits we keep the record
+        // around with status=Stopped and pty=None — that's not an orphan,
+        // it's just a finished session.
+        let is_orphan = self.pty.is_none()
+            && self.headless.is_none()
+            && !matches!(self.status, SessionStatus::Stopped | SessionStatus::Error);
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -58,6 +67,7 @@ impl SessionRecord {
             exit_code: self.exit_code,
             metrics: self.metrics.clone(),
             recent_actions: self.recent_actions.clone(),
+            is_orphan,
         }
     }
 }
@@ -148,7 +158,15 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
 
 /// Wires up the lifecycle tasks for a freshly-spawned PTY session: copies
 /// output to the registry's broadcast and updates state when the child exits.
-pub fn attach_lifecycle(registry: &Arc<SessionRegistry>, session_id: String, pty: &Arc<PtyHandle>) {
+/// `dirs` is `Some` for normal spawns so the orphan-meta sidecar gets cleaned
+/// up on exit; pass `None` for reattached orphans where the sidecar is owned
+/// by the original spawner.
+pub fn attach_lifecycle(
+    registry: &Arc<SessionRegistry>,
+    session_id: String,
+    pty: &Arc<PtyHandle>,
+    dirs: Option<Dirs>,
+) {
     // Output forwarder.
     let mut output = pty.output.subscribe();
     let registry_for_output = Arc::clone(registry);
@@ -178,9 +196,39 @@ pub fn attach_lifecycle(registry: &Arc<SessionRegistry>, session_id: String, pty
                 push_recent_action(rec, format!("exited with code {code}"));
             });
             registry_for_exit.fan_out_attention(
-                session_for_exit,
+                session_for_exit.clone(),
                 protocol::AttentionReason::Stopped,
             );
+            if let Some(dirs) = dirs {
+                orphan::try_delete_meta(&dirs, &session_for_exit);
+            }
         });
+    }
+}
+
+/// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
+/// `insert` so all attached clients see the reattached session in their next
+/// snapshot. The PTY/headless handles are `None` because we missed the spawn
+/// moment — the underlying `claude` is still running but its stdio is detached
+/// from us. Status is set conservatively to `Idle` until something proves
+/// otherwise.
+impl SessionRegistry {
+    pub fn insert_orphan(&self, meta: &OrphanMeta) {
+        let mut record = SessionRecord {
+            id: meta.session_id.clone(),
+            label: meta.label.clone(),
+            kind: meta.kind.clone(),
+            members: meta.members.clone(),
+            mode: meta.mode,
+            started_at: meta.started_at,
+            status: SessionStatus::Idle,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+        };
+        push_recent_action(&mut record, "reattached after daemon restart".to_string());
+        self.insert(record);
     }
 }
