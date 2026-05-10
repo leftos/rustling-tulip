@@ -65,7 +65,15 @@ Session:     {
 }
 ```
 
-State persisted to `%APPDATA%\rustling-tulip\state.json` (registry + sessions). Transcripts/PTY scrollback persisted to per-session log files in `%APPDATA%\rustling-tulip\sessions\<id>\`.
+Persistence layout under `%APPDATA%\rustling-tulip\`:
+
+- `state.json` — repo + workspace registry only.
+- `daemon.json` — WS handshake (port, auth token, daemon pid).
+- `sessions/<id>/meta.json` — orphan-recovery sidecar (pid, label, kind, mode, members, started_at). Written at spawn, deleted on graceful stop.
+- `sessions/<id>/scrollback.bin` — PTY/headless output ring buffer (2 MB cap, trims to 1.5 MB on overflow).
+- `sessions/<id>/scrollback.truncated` — empty flag file present iff the ring overflowed at some point.
+
+Sessions themselves are *not* listed in `state.json` — they live in the sidecar dir so the daemon can rebuild them on startup without re-reading a single big state blob.
 
 ## Spawn flows
 
@@ -163,8 +171,8 @@ Goal: ship a useful multi-repo Claude launcher today, before any of the daemon w
 
 Two scripts, one per workspace:
 
-- [ ] `X:\dev\yaat\claude-ws.ps1` — runs `claude` with `--add-dir X:\dev\yaat-server --dangerously-skip-permissions`
-- [ ] `X:\dev\towercab-3d\claude-ws.ps1` — runs `claude` with `--add-dir X:\dev\towercab-3d-vnas --dangerously-skip-permissions`
+- [x] `X:\dev\yaat\claude-ws.ps1` — runs `claude` with `--add-dir X:\dev\yaat-server --dangerously-skip-permissions`
+- [x] `X:\dev\towercab-3d\claude-ws.ps1` — runs `claude` with `--add-dir X:\dev\towercab-3d-vnas --dangerously-skip-permissions`
 
 Both follow the same shape:
 
@@ -185,64 +193,64 @@ Notes:
 - These are **per-repo conveniences**, not committed across repos for now — list them in `.gitignore` if you don't want them tracked, or commit if you do (user's call per repo).
 
 ### Phase 1 — Daemon spine + single-repo PTY (MVP)
-- [ ] Workspace skeleton, `cargo deny` config, `clippy` pedantic lints, `oxlint`/`oxfmt` for TS
-- [ ] `protocol` crate: message types + version field
-- [ ] `daemon`: WS server, auth handshake, session supervisor, portable-pty
-- [ ] State persistence to `%APPDATA%\rustling-tulip\state.json`
-- [ ] Tauri shell: connect to daemon, list/spawn/attach single-repo sessions
-- [ ] xterm.js wired to PTY stream
-- [ ] Repo registry: add/remove repos, list branches
-- [ ] Manual smoke test: spawn 2 sessions in 2 repos, attach to each, type into them
+- [x] Workspace skeleton, `cargo deny` config, `clippy` pedantic lints, `oxlint`/`oxfmt` for TS
+- [x] `protocol` crate: message types + version field
+- [x] `daemon`: WS server, auth handshake, session supervisor, portable-pty
+- [x] State persistence to `%APPDATA%\rustling-tulip\state.json`
+- [x] Tauri shell: connect to daemon, list/spawn/attach single-repo sessions
+- [x] xterm.js wired to PTY stream
+- [x] Repo registry: add/remove repos, list branches
+- [x] Manual smoke test: spawn 2 sessions in 2 repos, attach to each, type into them
 
 ### Phase 2 — Workspaces (the differentiator)
-- [ ] Workspace registry: define + list workspaces
-- [ ] Workspace spawn flow: branch input + per-member preview
-- [ ] Reuse-or-create branch policy with preview before commit
-- [ ] Multi-dir `claude` invocation (`--add-dir` per extra member)
-- [ ] Aggregate diff preview across member worktrees
-- [ ] Cleanup dialog with per-worktree checkboxes (default checked = clean, unchecked = dirty)
-- [ ] **VSCode `.code-workspace` auto-detect**: when adding a repo, scan for `*.code-workspace` files; if found, parse the `folders` array and suggest creating a matching rustling-tulip Workspace. Resolve relative paths against the workspace file's location. Optional file-watcher keeps members in sync when the user edits the `.code-workspace`.
-- [ ] Test on real workspaces: yaat/yaat-server, towercab-3d/towercab-3d-vnas (both have `.code-workspace` files)
+- [x] Workspace registry: define + list workspaces
+- [x] Workspace spawn flow: branch input + per-member preview
+- [x] Reuse-or-create branch policy with preview before commit
+- [x] Multi-dir `claude` invocation (`--add-dir` per extra member)
+- [x] Aggregate diff preview across member worktrees
+- [x] Cleanup dialog with per-worktree checkboxes (default checked = clean, unchecked = dirty)
+- [x] **VSCode `.code-workspace` auto-detect**: when adding a repo, scan for `*.code-workspace` files; if found, parse the `folders` array and suggest creating a matching rustling-tulip Workspace. Resolve relative paths against the workspace file's location. Optional file-watcher keeps members in sync when the user edits the `.code-workspace`.
+- [x] Test on real workspaces: yaat/yaat-server, towercab-3d/towercab-3d-vnas (both have `.code-workspace` files)
 
 ### Phase 3 — Headless + structured state
-- [ ] `claude --print --output-format stream-json` adapter
-- [ ] Stream-json parser → structured events → session state
-- [ ] Headless session UI (no terminal, just structured event log + result panel)
-- [ ] Tail `~/.claude/projects/<...>/*.jsonl` for cost/token regardless of mode
-- [ ] Activity ring buffer feeding "last action" sidebar entries
+- [x] `claude --print --output-format stream-json` adapter
+- [x] Stream-json parser → structured events → session state
+- [x] Headless session UI (no terminal, just structured event log + result panel)
+- [x] Tail `~/.claude/projects/<...>/*.jsonl` for cost/token regardless of mode
+- [x] Activity ring buffer feeding "last action" sidebar entries
 
 ### Phase 4 — Attention model
-- [ ] Awaiting-input detector for PTY mode (regex against known TUI prompts)
-- [ ] OS notifications via `tauri-plugin-notification`
-- [ ] System tray badge with attention count
-- [ ] Dashboard row highlight + sound (configurable)
-- [ ] Stopped/error transitions also fire notifications
+- [x] Awaiting-input detector for PTY mode (regex against known TUI prompts)
+- [x] OS notifications via `tauri-plugin-notification`
+- [x] System tray badge with attention count
+- [x] Dashboard row highlight + sound (configurable)
+- [x] Stopped/error transitions also fire notifications
 
 ### Phase 5 — Polish
-- [ ] Per-session config: model override, permission mode, env vars
-- [ ] Session log viewer (full transcript, scrollback persisted across restarts)
-- [ ] Pop-out session into its own Tauri window
-- [ ] Auto-update for the desktop app (`tauri-plugin-updater`)
-- [ ] Crash-recovery: daemon detects orphaned `claude` processes on startup and reattaches state
-- [ ] **Persistent resizable panes**: every divider in the app (sidebar/main, terminal/git split, changes-list/diff split, headless-stats/log split) is drag-resizable with widths persisted to settings. Reuse a single `ResizableSplit` component so the behavior is consistent across panes.
+- [x] Per-session config: model override, permission mode, env vars
+- [x] Session log viewer (full transcript, scrollback persisted across restarts) — daemon-side ring buffer at `<sessions_dir>/<id>/scrollback.bin` (2 MB cap, trims to 1.5 MB with `.truncated` flag); replayed via `LoadScrollback`/`Scrollback` protocol messages on attach.
+- [x] Pop-out session into its own Tauri window — `open_session_window` Tauri command opens a labeled window loading the same React bundle with `?session=<id>`; `App.tsx` branches on the query param to render `SessionWindow` (toolbar + reused `SessionPane`) instead of the full sidebar layout.
+- [ ] Auto-update for the desktop app (`tauri-plugin-updater`) — **deferred** until a distribution channel exists (no GH Actions release pipeline, no signing cert, no hosted manifest). In-app pieces are ~2 hours of work when the pipeline is ready.
+- [x] Crash-recovery: daemon detects orphaned `claude` processes on startup and reattaches state — sidecar `<sessions_dir>/<id>/meta.json` records pid + members + label at spawn; startup partitions live vs dead via `is_claude_alive` (sysinfo) and surfaces survivors via `SessionRegistry::insert_orphan` with `pty/headless = None`. Frontend shows a "PTY stream lost" banner via the new `is_orphan` field on `SessionSnapshot`.
+- [x] **Persistent resizable panes**: every divider in the app (sidebar/main, terminal/git split, changes-list/diff split, headless-stats/log split) is drag-resizable with widths persisted to settings. Reuse a single `ResizableSplit` component so the behavior is consistent across panes.
 
 ### Phase 6 — Git tracking layer
 
 A multi-repo git inspection surface on top of session worktrees. Same data is visible whether the session is single-repo or workspace-spanning; in workspace sessions every view groups by member repo.
 
-- [ ] Changed-files panel with two presentation modes:
+- [x] Changed-files panel with two presentation modes:
   - **Flat view**: one row per changed file with `repo_name / path` + status (M/A/D/R/?), sortable by path or repo.
   - **Tree view**: collapsible directory tree per member repo, status icons on each node (file + directory rollup).
-- [ ] Inline file diff viewer: click a file → side-by-side or unified diff (`git diff` / `git diff --staged`).
-- [ ] Commit history panel per member repo: `git log --oneline -n <N>` with author / date / message / sha. Click a commit to see its files + per-file diff.
-- [ ] **Open in GitHub**: parse `git remote get-url origin`, support `https://github.com/...` and `git@github.com:...` forms, also GitLab and Bitbucket variants. Build URLs for:
+- [x] Inline file diff viewer: click a file → side-by-side or unified diff (`git diff` / `git diff --staged`).
+- [x] Commit history panel per member repo: `git log --oneline -n <N>` with author / date / message / sha. Click a commit to see its files + per-file diff.
+- [x] **Open in GitHub**: parse `git remote get-url origin`, support `https://github.com/...` and `git@github.com:...` forms, also GitLab and Bitbucket variants. Build URLs for:
   - File at HEAD on the current branch
   - File at a specific commit (with optional line range)
   - Commit page
   - Branch compare against base
-- [ ] Stage/unstage operations from the changed-files panel (checkbox toggle = `git add` / `git restore --staged`).
-- [ ] Watch `.git` for changes to keep the views live without manual refresh.
-- [ ] Honor `.gitignore` and large-binary policy: don't try to render diffs >1 MB unless the user clicks "load anyway".
+- [ ] Stage/unstage operations from the changed-files panel (checkbox toggle = `git add` / `git restore --staged`) — **not yet implemented**; the panel is read-only for now.
+- [ ] Watch `.git` for changes to keep the views live without manual refresh — **not yet implemented**; the panel re-fetches on user action.
+- [x] Honor `.gitignore` and large-binary policy: don't try to render diffs >1 MB unless the user clicks "load anyway".
 
 Daemon-side: extend the existing protocol with `ListCommits`, `GetCommit`, `GetFileDiff`, `StageFiles`, `RemoteUrl` (and corresponding `Daemon` responses). UI-side: a tabbed git panel in the session view, plus a top-level "Repo" tab for repos that aren't currently in any session.
 

@@ -39,7 +39,11 @@ Daemon listens on a random loopback port; connection details are written to
 - [x] Phase 2: multi-repo workspace sessions (incl. VS Code `.code-workspace` auto-detect)
 - [x] Phase 3: headless mode + structured state
 - [x] Phase 4: notifications + attention model
-- [~] Phase 5: polish — resizable persistent panes done; per-session config,
-       pop-out sessions, auto-update, orphan-reattach still pending
+- [x] Phase 5: polish — resizable persistent panes, per-session config
+       (model / permission mode / env), orphan-session reattach, scrollback
+       persistence, pop-out windows. Auto-update is **deferred** until a
+       distribution channel (signing + release pipeline) exists.
+- [x] Phase 6: git tracking layer (per-session diff viewer, commit history,
+       "open in forge" links)
 
-See `docs/plan.md` for the full plan.
+See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
