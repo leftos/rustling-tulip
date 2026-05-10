@@ -19,8 +19,8 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     AttentionReason, BranchTarget, ClientMessage, DaemonHandshake, DaemonMessage, MemberDiff,
-    PROTOCOL_VERSION, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
-    SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
+    PROTOCOL_VERSION, PermissionMode, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionStatus, SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -466,6 +466,9 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         mode,
         initial_prompt,
         dangerously_skip_permissions,
+        model,
+        permission_mode,
+        extra_env,
     } = req;
 
     let (kind, members, primary_cwd, default_label) = match target {
@@ -479,6 +482,12 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
 
     let session_id = new_id();
     let label = label.unwrap_or(default_label);
+    let cfg = SpawnConfig {
+        dangerously_skip_permissions,
+        model,
+        permission_mode,
+        extra_env,
+    };
 
     if mode == SessionMode::Headless {
         let prompt = initial_prompt
@@ -492,7 +501,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
             members,
             primary_cwd,
             prompt,
-            dangerously_skip_permissions,
+            &cfg,
         );
     }
 
@@ -504,8 +513,35 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         members,
         primary_cwd,
         initial_prompt,
-        dangerously_skip_permissions,
+        &cfg,
     )
+}
+
+/// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
+struct SpawnConfig {
+    dangerously_skip_permissions: bool,
+    model: Option<String>,
+    permission_mode: Option<PermissionMode>,
+    extra_env: Vec<(String, String)>,
+}
+
+impl SpawnConfig {
+    /// Append `--model` and `--permission-mode` (when applicable) plus
+    /// `--dangerously-skip-permissions` to the argv being built. The CLI
+    /// rejects `--permission-mode` together with `--dangerously-skip-permissions`,
+    /// so the latter wins when both are set.
+    fn extend_args(&self, args: &mut Vec<String>) {
+        if let Some(model) = &self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+        if self.dangerously_skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        } else if let Some(mode) = self.permission_mode {
+            args.push("--permission-mode".to_string());
+            args.push(mode.as_cli_arg().to_string());
+        }
+    }
 }
 
 #[expect(
@@ -520,16 +556,14 @@ fn spawn_interactive_session(
     members: Vec<SessionMember>,
     primary_cwd: PathBuf,
     initial_prompt: Option<String>,
-    dangerously_skip_permissions: bool,
+    cfg: &SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let mut args: Vec<String> = Vec::new();
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
     }
-    if dangerously_skip_permissions {
-        args.push("--dangerously-skip-permissions".to_string());
-    }
+    cfg.extend_args(&mut args);
     if let Some(prompt) = initial_prompt {
         args.push("-p".to_string());
         args.push(prompt);
@@ -539,7 +573,7 @@ fn spawn_interactive_session(
         program: claude_program(),
         args,
         cwd: primary_cwd,
-        env: passthrough_env(),
+        env: merged_env(&cfg.extra_env),
         cols: 120,
         rows: 32,
     };
@@ -591,7 +625,7 @@ fn spawn_headless_session(
     members: Vec<SessionMember>,
     primary_cwd: PathBuf,
     prompt: String,
-    dangerously_skip_permissions: bool,
+    cfg: &SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let mut args: Vec<String> = vec![
         "--print".to_string(),
@@ -603,9 +637,7 @@ fn spawn_headless_session(
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
     }
-    if dangerously_skip_permissions {
-        args.push("--dangerously-skip-permissions".to_string());
-    }
+    cfg.extend_args(&mut args);
     args.push("-p".to_string());
     args.push(prompt);
 
@@ -613,7 +645,7 @@ fn spawn_headless_session(
         program: claude_program(),
         args,
         cwd: primary_cwd,
-        env: passthrough_env(),
+        env: merged_env(&cfg.extra_env),
     };
 
     let mut record = SessionRecord {
@@ -858,5 +890,21 @@ fn passthrough_env() -> Vec<(String, String)> {
         }
     }
     out.push(("TERM".to_string(), "xterm-256color".to_string()));
+    out
+}
+
+/// Build the env list for a spawn: the daemon's keep-list plus user-supplied
+/// `extra_env`, with `extra_env` overriding the keep-list on key collision so
+/// users can override values like `ANTHROPIC_API_KEY`. Deduplicated to avoid
+/// passing the same key twice to the child process.
+fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = passthrough_env();
+    for (k, v) in extra {
+        if let Some(slot) = out.iter_mut().find(|(existing, _)| existing == k) {
+            slot.1.clone_from(v);
+        } else {
+            out.push((k.clone(), v.clone()));
+        }
+    }
     out
 }

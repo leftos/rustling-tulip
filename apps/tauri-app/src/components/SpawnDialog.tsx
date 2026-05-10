@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import type { DaemonClient } from "../api";
+import { CLAUDE_MODELS } from "../constants";
 import type {
   DaemonMessage,
   MemberSpawnPreview,
+  PermissionMode,
   RepoEntry,
   WorkspaceEntry,
 } from "../types";
@@ -17,6 +19,40 @@ interface Props {
 type Mode = "single" | "workspace";
 type BranchMode = "existing" | "new";
 type RunMode = "interactive" | "headless";
+
+interface EnvRow {
+  key: string;
+  value: string;
+}
+
+interface AdvancedConfig {
+  model: string | null;
+  permissionMode: PermissionMode | null;
+  envRows: EnvRow[];
+}
+
+function emptyAdvanced(): AdvancedConfig {
+  return { model: null, permissionMode: null, envRows: [] };
+}
+
+function advancedToWire(
+  cfg: AdvancedConfig,
+  skipPerms: boolean,
+): {
+  model: string | null;
+  permission_mode: PermissionMode | null;
+  extra_env: Array<[string, string]>;
+} {
+  return {
+    model: cfg.model,
+    // Daemon ignores permission_mode when skip-permissions is true; mirror
+    // that here so the wire payload reflects what will actually run.
+    permission_mode: skipPerms ? null : cfg.permissionMode,
+    extra_env: cfg.envRows
+      .filter((r) => r.key.trim().length > 0)
+      .map<[string, string]>((r) => [r.key.trim(), r.value]),
+  };
+}
 
 interface BranchesState {
   branches: string[];
@@ -35,6 +71,7 @@ export default function SpawnDialog({
   const [runMode, setRunMode] = useState<RunMode>("interactive");
   const [headlessPrompt, setHeadlessPrompt] = useState("");
   const [skipPerms, setSkipPerms] = useState(true);
+  const [advanced, setAdvanced] = useState<AdvancedConfig>(emptyAdvanced);
 
   const sharedFooter = (
     <Footer
@@ -44,6 +81,8 @@ export default function SpawnDialog({
       onRunModeChange={setRunMode}
       headlessPrompt={headlessPrompt}
       onHeadlessPromptChange={setHeadlessPrompt}
+      advanced={advanced}
+      onAdvancedChange={setAdvanced}
     />
   );
 
@@ -85,6 +124,7 @@ export default function SpawnDialog({
               skipPerms={skipPerms}
               runMode={runMode}
               headlessPrompt={headlessPrompt}
+              advanced={advanced}
               onClose={onClose}
               header={sharedFooter}
             />
@@ -95,6 +135,7 @@ export default function SpawnDialog({
               skipPerms={skipPerms}
               runMode={runMode}
               headlessPrompt={headlessPrompt}
+              advanced={advanced}
               onClose={onClose}
               header={sharedFooter}
             />
@@ -112,6 +153,8 @@ function Footer({
   onRunModeChange,
   headlessPrompt,
   onHeadlessPromptChange,
+  advanced,
+  onAdvancedChange,
 }: {
   skipPerms: boolean;
   onSkipPermsChange: (v: boolean) => void;
@@ -119,6 +162,8 @@ function Footer({
   onRunModeChange: (m: RunMode) => void;
   headlessPrompt: string;
   onHeadlessPromptChange: (s: string) => void;
+  advanced: AdvancedConfig;
+  onAdvancedChange: (cfg: AdvancedConfig) => void;
 }) {
   return (
     <>
@@ -160,7 +205,128 @@ function Footer({
         />
         <span>Pass --dangerously-skip-permissions</span>
       </label>
+      <AdvancedSection
+        skipPerms={skipPerms}
+        advanced={advanced}
+        onAdvancedChange={onAdvancedChange}
+      />
     </>
+  );
+}
+
+function AdvancedSection({
+  skipPerms,
+  advanced,
+  onAdvancedChange,
+}: {
+  skipPerms: boolean;
+  advanced: AdvancedConfig;
+  onAdvancedChange: (cfg: AdvancedConfig) => void;
+}) {
+  const setModel = (model: string | null) =>
+    onAdvancedChange({ ...advanced, model });
+  const setPermissionMode = (permissionMode: PermissionMode | null) =>
+    onAdvancedChange({ ...advanced, permissionMode });
+  const setEnvRows = (envRows: EnvRow[]) =>
+    onAdvancedChange({ ...advanced, envRows });
+
+  return (
+    <details className="field advanced-config">
+      <summary>Advanced</summary>
+      <label className="field">
+        <span>Model</span>
+        <select
+          value={advanced.model ?? ""}
+          onChange={(e) => setModel(e.target.value || null)}
+        >
+          <option value="">Use CLI default</option>
+          {CLAUDE_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="field">
+        <span>Permission mode</span>
+        <select
+          value={advanced.permissionMode ?? ""}
+          onChange={(e) =>
+            setPermissionMode(
+              e.target.value === "" ? null : (e.target.value as PermissionMode),
+            )
+          }
+          disabled={skipPerms}
+        >
+          <option value="">CLI default</option>
+          <option value="default">default</option>
+          <option value="accept_edits">acceptEdits</option>
+          <option value="bypass_permissions">bypassPermissions</option>
+          <option value="plan">plan</option>
+        </select>
+        {skipPerms && (
+          <span className="muted small">
+            Disabled because skip-permissions is on
+          </span>
+        )}
+      </label>
+
+      <fieldset className="field">
+        <legend>Extra environment variables</legend>
+        {advanced.envRows.length === 0 && (
+          <div className="muted small">No extra env vars.</div>
+        )}
+        {advanced.envRows.map((row, idx) => (
+          <div
+            key={idx}
+            className="env-row"
+            style={{ display: "flex", gap: "0.5rem", marginBottom: "0.25rem" }}
+          >
+            <input
+              type="text"
+              placeholder="KEY"
+              value={row.key}
+              onChange={(e) => {
+                const next = advanced.envRows.slice();
+                next[idx] = { ...row, key: e.target.value };
+                setEnvRows(next);
+              }}
+              style={{ flex: "1 1 35%" }}
+            />
+            <input
+              type="text"
+              placeholder="value"
+              value={row.value}
+              onChange={(e) => {
+                const next = advanced.envRows.slice();
+                next[idx] = { ...row, value: e.target.value };
+                setEnvRows(next);
+              }}
+              style={{ flex: "1 1 55%" }}
+            />
+            <button
+              type="button"
+              className="link"
+              onClick={() =>
+                setEnvRows(advanced.envRows.filter((_, i) => i !== idx))
+              }
+              aria-label="Remove env var"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() =>
+            setEnvRows([...advanced.envRows, { key: "", value: "" }])
+          }
+        >
+          + Add env var
+        </button>
+      </fieldset>
+    </details>
   );
 }
 
@@ -172,6 +338,7 @@ function SingleForm({
   skipPerms,
   runMode,
   headlessPrompt,
+  advanced,
   onClose,
   header,
 }: {
@@ -180,6 +347,7 @@ function SingleForm({
   skipPerms: boolean;
   runMode: RunMode;
   headlessPrompt: string;
+  advanced: AdvancedConfig;
   onClose: () => void;
   header: React.ReactNode;
 }) {
@@ -232,6 +400,7 @@ function SingleForm({
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
+      ...advancedToWire(advanced, skipPerms),
     });
     onClose();
   };
@@ -339,6 +508,7 @@ function WorkspaceForm({
   skipPerms,
   runMode,
   headlessPrompt,
+  advanced,
   onClose,
   header,
 }: {
@@ -347,6 +517,7 @@ function WorkspaceForm({
   skipPerms: boolean;
   runMode: RunMode;
   headlessPrompt: string;
+  advanced: AdvancedConfig;
   onClose: () => void;
   header: React.ReactNode;
 }) {
@@ -412,6 +583,7 @@ function WorkspaceForm({
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
+      ...advancedToWire(advanced, skipPerms),
     });
     onClose();
   };

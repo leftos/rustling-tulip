@@ -66,12 +66,21 @@ export type SpawnTarget =
       base_branch: string | null;
     };
 
+export type PermissionMode =
+  | "default"
+  | "accept_edits"
+  | "bypass_permissions"
+  | "plan";
+
 export interface SpawnRequest {
   label: string | null;
   target: SpawnTarget;
   mode: SessionMode;
   initial_prompt: string | null;
   dangerously_skip_permissions: boolean;
+  model: string | null;
+  permission_mode: PermissionMode | null;
+  extra_env: Array<[string, string]>;
 }
 
 export interface CleanupAction {

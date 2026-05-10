@@ -146,6 +146,28 @@ pub enum SpawnTarget {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    Default,
+    AcceptEdits,
+    BypassPermissions,
+    Plan,
+}
+
+impl PermissionMode {
+    /// CLI flag value as expected by `claude --permission-mode <X>`.
+    #[must_use]
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
+            Self::Plan => "plan",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpawnRequest {
     pub label: Option<String>,
@@ -153,6 +175,19 @@ pub struct SpawnRequest {
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
     pub dangerously_skip_permissions: bool,
+    /// Optional model override. When `None`, the CLI's default applies.
+    /// Sent as `--model <id>` to the `claude` CLI.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional permission mode. Ignored (and `--permission-mode` omitted)
+    /// when `dangerously_skip_permissions` is true.
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
+    /// Extra environment variables merged on top of the daemon's keep-list.
+    /// Later entries override the keep-list on key collision so users can
+    /// override values like `ANTHROPIC_API_KEY`.
+    #[serde(default)]
+    pub extra_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
