@@ -20,10 +20,19 @@ import type {
 } from "./types";
 import Sidebar from "./components/Sidebar";
 import SessionPane from "./components/SessionPane";
+import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import ResizableSplit from "./components/ResizableSplit";
+
+/// Pop-out session window: when launched with `?session=<id>` we render
+/// only the SessionWindow component, no sidebar or modals. The daemon
+/// already accepts multiple WS clients, so this window opens its own
+/// connection independently of the main window.
+const popoutSessionId = new URLSearchParams(window.location.search).get(
+  "session",
+);
 
 interface AppState {
   client: DaemonClient | null;
@@ -151,6 +160,32 @@ export default function App() {
     () => state.sessions.find((s) => s.id === state.selectedSessionId) ?? null,
     [state.sessions, state.selectedSessionId],
   );
+
+  if (popoutSessionId) {
+    const popoutSession = state.sessions.find((s) => s.id === popoutSessionId);
+    return (
+      <div className="app-root">
+        {state.client && popoutSession ? (
+          <SessionWindow
+            session={popoutSession}
+            client={state.client}
+            subscribePty={subscribePty}
+          />
+        ) : (
+          <div className="empty-state">
+            <h1>Session not found</h1>
+            <p className="status-line">
+              Daemon: <ConnectionBadge state={state.status} />
+            </p>
+            <p className="hint">
+              Session id <code>{popoutSessionId}</code> is not currently
+              registered with the daemon.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="app-root">

@@ -1,8 +1,15 @@
 import { useCallback, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
 import Terminal from "./Terminal";
 import GitPanel from "./GitPanel";
+
+/// True when running inside the pop-out session window. Pop-out windows
+/// shouldn't show "Pop out" themselves — the toolbar already lives in the
+/// SessionWindow chrome.
+const isPopoutWindow =
+  new URLSearchParams(window.location.search).get("session") !== null;
 
 interface Props {
   session: SessionSnapshot;
@@ -29,6 +36,10 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
     setConfirming(false);
   }, [client, session]);
 
+  const onPopOut = useCallback(() => {
+    void invoke("open_session_window", { sessionId: session.id });
+  }, [session.id]);
+
   const isHeadless = session.mode === "headless";
 
   return (
@@ -45,6 +56,15 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
           </span>
         </div>
         <div className="session-actions">
+          {!isPopoutWindow && (
+            <button
+              type="button"
+              onClick={onPopOut}
+              title="Open this session in its own window"
+            >
+              Pop out
+            </button>
+          )}
           {session.status !== "stopped" ? (
             confirming ? (
               <>
