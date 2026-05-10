@@ -52,6 +52,9 @@ export interface SessionSnapshot {
   metrics: SessionMetrics;
   recent_actions: string[];
   is_orphan: boolean;
+  // For workspace-kind sessions: the workspace this session belongs to.
+  // null for single-repo sessions.
+  workspace_id: string | null;
 }
 
 export type BranchTarget =

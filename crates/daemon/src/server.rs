@@ -3,13 +3,13 @@
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{self, PtySpawnSpec};
-use crate::scrollback;
 use crate::registry::{add_repo, remove_repo, remove_workspace, upsert_workspace};
+use crate::scrollback;
 use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
-use crate::{git, git_inspect, headless, pty_state, vscode, workspace as ws};
+use crate::{git, git_inspect, headless, osc_title, pty_state, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -43,11 +43,7 @@ pub struct Hub {
     pub dirs: Dirs,
 }
 
-pub async fn run(
-    state: Arc<AppState>,
-    dirs: Dirs,
-    orphans: Vec<OrphanMeta>,
-) -> anyhow::Result<()> {
+pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(48)
@@ -171,15 +167,15 @@ async fn client_session(hub: Hub, socket: WebSocket) {
                 }
                 Ok(SessionEvent::PtyOutput { session_id, data }) => {
                     if attached_for_events.lock().await.contains(&session_id) {
-                        let data_b64 =
-                            base64::engine::general_purpose::STANDARD.encode(&data);
-                        let _ = out_for_events
-                            .send(DaemonMessage::PtyOutput { session_id, data_b64 });
+                        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        let _ = out_for_events.send(DaemonMessage::PtyOutput {
+                            session_id,
+                            data_b64,
+                        });
                     }
                 }
                 Ok(SessionEvent::Attention { session_id, reason }) => {
-                    let _ = out_for_events
-                        .send(DaemonMessage::Attention { session_id, reason });
+                    let _ = out_for_events.send(DaemonMessage::Attention { session_id, reason });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client event stream lagged");
@@ -233,8 +229,7 @@ async fn handshake(
         Message::Text(t) => t.to_string(),
         _ => return Err(anyhow!("first frame must be text Hello")),
     };
-    let parsed: ClientMessage =
-        serde_json::from_str(&text).context("parsing handshake message")?;
+    let parsed: ClientMessage = serde_json::from_str(&text).context("parsing handshake message")?;
     let ClientMessage::Hello {
         protocol_version,
         auth_token,
@@ -413,7 +408,12 @@ async fn dispatch(
         ClientMessage::ListBranches { repo_id } => {
             let repo_path = hub
                 .state
-                .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).map(|r| r.path.clone()))
+                .with_persisted(|s| {
+                    s.repos
+                        .iter()
+                        .find(|r| r.id == repo_id)
+                        .map(|r| r.path.clone())
+                })
                 .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
             let path = PathBuf::from(&repo_path);
             let branches = git::list_branches(&path).await.unwrap_or_default();
@@ -477,7 +477,12 @@ async fn dispatch(
 
 fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
     hub.state
-        .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).map(|r| r.path.clone()))
+        .with_persisted(|s| {
+            s.repos
+                .iter()
+                .find(|r| r.id == repo_id)
+                .map(|r| r.path.clone())
+        })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
 }
@@ -494,7 +499,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         extra_env,
     } = req;
 
-    let (kind, members, primary_cwd, default_label) = match target {
+    let (kind, members, primary_cwd, default_label, workspace_id) = match target {
         SpawnTarget::Single { repo_id, branch } => spawn_single(hub, &repo_id, branch).await?,
         SpawnTarget::Workspace {
             workspace_id,
@@ -522,6 +527,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
             label,
             kind,
             members,
+            workspace_id,
             primary_cwd,
             prompt,
             &cfg,
@@ -534,6 +540,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         label,
         kind,
         members,
+        workspace_id,
         primary_cwd,
         initial_prompt,
         &cfg,
@@ -577,6 +584,7 @@ fn spawn_interactive_session(
     label: String,
     kind: SessionKind,
     members: Vec<SessionMember>,
+    workspace_id: Option<String>,
     primary_cwd: PathBuf,
     initial_prompt: Option<String>,
     cfg: &SpawnConfig,
@@ -617,6 +625,7 @@ fn spawn_interactive_session(
         recent_actions: Vec::new(),
         pty: Some(Arc::clone(&pty)),
         headless: None,
+        workspace_id: workspace_id.clone(),
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -635,6 +644,7 @@ fn spawn_interactive_session(
             SessionMode::Interactive,
             members,
             started_at,
+            workspace_id,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -646,12 +656,13 @@ fn spawn_interactive_session(
         pty.output.subscribe(),
         hub.attention_tx.clone(),
     );
-    attach_lifecycle(
+    osc_title::watch(
         &hub.sessions,
-        session_id,
-        &pty,
-        Some(hub.dirs.clone()),
+        session_id.clone(),
+        pty.output.subscribe(),
+        hub.dirs.clone(),
     );
+    attach_lifecycle(&hub.sessions, session_id, &pty, Some(hub.dirs.clone()));
     Ok(snap)
 }
 
@@ -667,6 +678,7 @@ fn spawn_headless_session(
     label: String,
     kind: SessionKind,
     members: Vec<SessionMember>,
+    workspace_id: Option<String>,
     primary_cwd: PathBuf,
     prompt: String,
     cfg: &SpawnConfig,
@@ -706,6 +718,7 @@ fn spawn_headless_session(
         recent_actions: Vec::new(),
         pty: None,
         headless: None,
+        workspace_id: workspace_id.clone(),
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
@@ -722,6 +735,7 @@ fn spawn_headless_session(
             SessionMode::Headless,
             members,
             started_at,
+            workspace_id,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -743,7 +757,13 @@ async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
     branch: BranchTarget,
-) -> anyhow::Result<(SessionKind, Vec<SessionMember>, PathBuf, String)> {
+) -> anyhow::Result<(
+    SessionKind,
+    Vec<SessionMember>,
+    PathBuf,
+    String,
+    Option<String>,
+)> {
     let repo = hub
         .state
         .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
@@ -774,7 +794,13 @@ async fn spawn_single(
         worktree_path: worktree_path.to_string_lossy().into_owned(),
     };
     let label = format!("{}: {branch_name}", repo.name);
-    Ok((SessionKind::Single, vec![member], worktree_path, label))
+    Ok((
+        SessionKind::Single,
+        vec![member],
+        worktree_path,
+        label,
+        None,
+    ))
 }
 
 async fn spawn_workspace(
@@ -782,7 +808,13 @@ async fn spawn_workspace(
     workspace_id: &str,
     branch_name: &str,
     base_branch: Option<String>,
-) -> anyhow::Result<(SessionKind, Vec<SessionMember>, PathBuf, String)> {
+) -> anyhow::Result<(
+    SessionKind,
+    Vec<SessionMember>,
+    PathBuf,
+    String,
+    Option<String>,
+)> {
     let (workspace, resolved) = ws::resolve_workspace(
         &hub.state,
         workspace_id,
@@ -807,7 +839,13 @@ async fn spawn_workspace(
         })
         .collect();
     let label = format!("{}: {branch_name}", workspace.name);
-    Ok((SessionKind::Workspace, members, primary, label))
+    Ok((
+        SessionKind::Workspace,
+        members,
+        primary,
+        label,
+        Some(workspace.id.clone()),
+    ))
 }
 
 async fn stop_session(
@@ -839,9 +877,12 @@ async fn stop_session(
         let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
             continue;
         };
-        let repo_path = hub
-            .state
-            .with_persisted(|s| s.repos.iter().find(|r| r.id == member.repo_id).map(|r| r.path.clone()));
+        let repo_path = hub.state.with_persisted(|s| {
+            s.repos
+                .iter()
+                .find(|r| r.id == member.repo_id)
+                .map(|r| r.path.clone())
+        });
         let Some(repo_path) = repo_path else {
             continue;
         };
@@ -881,9 +922,12 @@ fn claude_program() -> String {
 }
 
 fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
-    let known: Vec<(String, String)> = hub
-        .state
-        .with_persisted(|s| s.repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect());
+    let known: Vec<(String, String)> = hub.state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .map(|r| (r.id.clone(), r.path.clone()))
+            .collect()
+    });
     let dir = std::path::Path::new(repo_path);
     vscode::find_workspace_files(dir)
         .into_iter()

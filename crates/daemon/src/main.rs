@@ -4,6 +4,7 @@ mod git;
 mod git_inspect;
 mod headless;
 mod orphan;
+mod osc_title;
 mod paths;
 mod pty;
 mod pty_state;

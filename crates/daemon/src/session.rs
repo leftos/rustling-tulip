@@ -46,6 +46,9 @@ pub struct SessionRecord {
     pub recent_actions: Vec<String>,
     pub pty: Option<Arc<PtyHandle>>,
     pub headless: Option<Arc<HeadlessHandle>>,
+    /// Workspace this session belongs to (`Some` iff `kind == Workspace`).
+    /// Used by clients to group sessions in the sidebar tree.
+    pub workspace_id: Option<String>,
 }
 
 impl SessionRecord {
@@ -69,6 +72,7 @@ impl SessionRecord {
             metrics: self.metrics.clone(),
             recent_actions: self.recent_actions.clone(),
             is_orphan,
+            workspace_id: self.workspace_id.clone(),
         }
     }
 }
@@ -140,7 +144,9 @@ impl SessionRegistry {
     }
 
     pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
-        let _ = self.events.send(SessionEvent::Attention { session_id, reason });
+        let _ = self
+            .events
+            .send(SessionEvent::Attention { session_id, reason });
     }
 }
 
@@ -204,10 +210,8 @@ pub fn attach_lifecycle(
                 rec.pty = None;
                 push_recent_action(rec, format!("exited with code {code}"));
             });
-            registry_for_exit.fan_out_attention(
-                session_for_exit.clone(),
-                protocol::AttentionReason::Stopped,
-            );
+            registry_for_exit
+                .fan_out_attention(session_for_exit.clone(), protocol::AttentionReason::Stopped);
             if let Some(dirs) = dirs {
                 orphan::try_delete_meta(&dirs, &session_for_exit);
             }
@@ -236,6 +240,7 @@ impl SessionRegistry {
             recent_actions: Vec::new(),
             pty: None,
             headless: None,
+            workspace_id: meta.workspace_id.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);

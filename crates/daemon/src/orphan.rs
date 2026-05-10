@@ -28,6 +28,10 @@ pub struct OrphanMeta {
     pub mode: SessionMode,
     pub members: Vec<SessionMember>,
     pub started_at: DateTime<Utc>,
+    /// Workspace id for `kind == Workspace`. `None` for single-repo sessions
+    /// and for metas written by earlier daemon versions.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -109,9 +113,8 @@ pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
 /// `claude` process. The name check guards against PID reuse: if the pid was
 /// recycled to an unrelated process, the meta is stale and should be dropped.
 pub fn is_claude_alive(pid: u32) -> bool {
-    let mut sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
-    );
+    let mut sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
     let pid = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
@@ -164,6 +167,10 @@ pub fn try_delete_session_dir(dirs: &Dirs, session_id: &str) {
 }
 
 /// Convenience constructor used by the spawn paths.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Spawn paths construct the meta from scattered locals; bundling adds noise"
+)]
 pub fn meta_from_record(
     session_id: String,
     pid: u32,
@@ -172,6 +179,7 @@ pub fn meta_from_record(
     mode: SessionMode,
     members: Vec<SessionMember>,
     started_at: DateTime<Utc>,
+    workspace_id: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -184,5 +192,33 @@ pub fn meta_from_record(
         mode,
         members,
         started_at,
+        workspace_id,
     })
+}
+
+/// Best-effort: read the meta sidecar, mutate `label`, write it back. Used by
+/// the OSC-title parser when the agent updates the terminal title — we want
+/// the new title to survive a daemon restart (orphan reattach restores from
+/// this file). Returns `Ok(())` for both "meta did not exist" and "meta
+/// updated" — only true I/O errors surface.
+pub fn update_label(dirs: &Dirs, session_id: &str, new_label: &str) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("reading meta for label update"),
+    };
+    let mut meta: OrphanMeta =
+        serde_json::from_slice(&bytes).context("parsing meta for label update")?;
+    if meta.label == new_label {
+        return Ok(());
+    }
+    meta.label = new_label.to_string();
+    write_meta(dirs, &meta)
+}
+
+pub fn try_update_label(dirs: &Dirs, session_id: &str, new_label: &str) {
+    if let Err(err) = update_label(dirs, session_id, new_label) {
+        warn!(?err, %session_id, "failed to update orphan meta label");
+    }
 }

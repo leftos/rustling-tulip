@@ -124,6 +124,11 @@ pub struct SessionSnapshot {
     /// UI shows the session in read-only mode (scrollback only).
     #[serde(default)]
     pub is_orphan: bool,
+    /// For `kind == Workspace`, the id of the workspace this session belongs
+    /// to. `None` for single-repo sessions. Clients use this to group sessions
+    /// under their workspace node in the sidebar tree.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
