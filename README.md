@@ -35,10 +35,11 @@ Daemon listens on a random loopback port; connection details are written to
 ## Phase status
 
 - [x] Phase 0: standalone `claude-ws.ps1` launchers in workspace member repos
-- [ ] Phase 1: daemon spine + single-repo PTY sessions
-- [ ] Phase 2: multi-repo workspace sessions
-- [ ] Phase 3: headless mode + structured state
-- [ ] Phase 4: notifications + attention model
-- [ ] Phase 5: polish
+- [x] Phase 1: daemon spine + single-repo PTY sessions
+- [x] Phase 2: multi-repo workspace sessions (incl. VS Code `.code-workspace` auto-detect)
+- [x] Phase 3: headless mode + structured state
+- [x] Phase 4: notifications + attention model
+- [~] Phase 5: polish — resizable persistent panes done; per-session config,
+       pop-out sessions, auto-update, orphan-reattach still pending
 
 See `docs/plan.md` for the full plan.
