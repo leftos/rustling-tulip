@@ -20,7 +20,14 @@ const EVENT_BROADCAST_CAPACITY: usize = 256;
 pub enum SessionEvent {
     Updated(SessionSnapshot),
     Removed(String),
-    PtyOutput { session_id: String, data: Vec<u8> },
+    PtyOutput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    Attention {
+        session_id: String,
+        reason: protocol::AttentionReason,
+    },
 }
 
 pub struct SessionRecord {
@@ -120,6 +127,10 @@ impl SessionRegistry {
             data,
         });
     }
+
+    pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
+        let _ = self.events.send(SessionEvent::Attention { session_id, reason });
+    }
 }
 
 pub fn new_id() -> String {
@@ -166,6 +177,10 @@ pub fn attach_lifecycle(registry: &Arc<SessionRegistry>, session_id: String, pty
                 rec.pty = None;
                 push_recent_action(rec, format!("exited with code {code}"));
             });
+            registry_for_exit.fan_out_attention(
+                session_for_exit,
+                protocol::AttentionReason::Stopped,
+            );
         });
     }
 }

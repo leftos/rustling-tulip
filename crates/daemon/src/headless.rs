@@ -120,6 +120,10 @@ pub fn spawn(
                 format!("exited with code {}", exit.map_or_else(|| "?".into(), |c| c.to_string())),
             );
         });
+        registry_for_exit.fan_out_attention(
+            session_for_exit,
+            protocol::AttentionReason::Stopped,
+        );
     });
 
     Ok(handle)

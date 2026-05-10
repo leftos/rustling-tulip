@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import {
   connectDaemon,
   ensureDaemonStarted,
   pickDirectory,
@@ -29,6 +34,7 @@ interface AppState {
   spawnOpen: boolean;
   workspaceCreatorOpen: boolean;
   vscodeQueue: VscodeWorkspaceSuggestion[];
+  attentionSessions: Set<string>;
 }
 
 export default function App() {
@@ -42,7 +48,15 @@ export default function App() {
     spawnOpen: false,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
+    attentionSessions: new Set(),
   });
+
+  useEffect(() => {
+    void (async () => {
+      const granted = await isPermissionGranted();
+      if (!granted) await requestPermission();
+    })();
+  }, []);
 
   // PTY output is high-volume — keep it out of React state.
   const ptyListenersRef = useRef(
@@ -86,7 +100,11 @@ export default function App() {
   }, [state.client]);
 
   const onSelectSession = useCallback((id: string) => {
-    setState((s) => ({ ...s, selectedSessionId: id }));
+    setState((s) => {
+      const next = new Set(s.attentionSessions);
+      next.delete(id);
+      return { ...s, selectedSessionId: id, attentionSessions: next };
+    });
   }, []);
 
   const onOpenSpawn = useCallback(() => {
@@ -140,6 +158,7 @@ export default function App() {
         workspaces={state.workspaces}
         sessions={state.sessions}
         selectedSessionId={state.selectedSessionId}
+        attentionSessions={state.attentionSessions}
         connection={state.status}
         onAddRepo={onAddRepo}
         onRemoveRepo={(id) =>
@@ -244,10 +263,36 @@ function handleMessage(
         vscodeQueue: [...s.vscodeQueue, msg.suggestion],
       }));
       return;
+    case "attention": {
+      // Update the attention state for badge rendering.
+      setState((s) => {
+        if (s.selectedSessionId === msg.session_id) return s;
+        const next = new Set(s.attentionSessions);
+        next.add(msg.session_id);
+        return { ...s, attentionSessions: next };
+      });
+      // Fire OS notification for non-stopped reasons (stopped is loud already).
+      const session = findSession(setState, msg.session_id);
+      const title =
+        msg.reason === "awaiting_input"
+          ? "Claude is awaiting input"
+          : msg.reason === "error"
+            ? "Claude session errored"
+            : "Claude session stopped";
+      void (async () => {
+        const granted = await isPermissionGranted();
+        if (!granted) return;
+        sendNotification({
+          title,
+          body: session?.label ?? "rustling-tulip",
+        });
+      })();
+      window.dispatchEvent(new CustomEvent("rt:attention", { detail: msg }));
+      return;
+    }
     case "branches":
     case "session_diff":
     case "workspace_spawn_preview":
-    case "attention":
       // Routed by components that asked for it via custom events.
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
@@ -257,6 +302,18 @@ function handleMessage(
       console.error("daemon error:", msg.message);
       return;
   }
+}
+
+function findSession(
+  setState: React.Dispatch<React.SetStateAction<AppState>>,
+  id: string,
+): SessionSnapshot | null {
+  let found: SessionSnapshot | null = null;
+  setState((s) => {
+    found = s.sessions.find((sn) => sn.id === id) ?? null;
+    return s;
+  });
+  return found;
 }
 
 function EmptyState({

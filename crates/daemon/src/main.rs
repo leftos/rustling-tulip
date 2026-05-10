@@ -4,6 +4,7 @@ mod git;
 mod headless;
 mod paths;
 mod pty;
+mod pty_state;
 mod registry;
 mod server;
 mod session;

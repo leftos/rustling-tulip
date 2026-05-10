@@ -7,7 +7,7 @@ use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
-use crate::{git, headless, vscode, workspace as ws};
+use crate::{git, headless, pty_state, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -37,6 +37,7 @@ pub struct Hub {
     pub state: Arc<AppState>,
     pub sessions: Arc<SessionRegistry>,
     pub auth_token: String,
+    pub attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
 }
 
 pub async fn run(state: Arc<AppState>, dirs: Dirs) -> anyhow::Result<()> {
@@ -46,10 +47,24 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs) -> anyhow::Result<()> {
         .map(char::from)
         .collect();
 
+    let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
+    let sessions = SessionRegistry::new();
+
+    // Forward attention events through the registry's broadcast so all
+    // attached clients see them via the same SessionEvent channel they
+    // already subscribe to.
+    let sessions_for_attention = Arc::clone(&sessions);
+    tokio::spawn(async move {
+        while let Some(evt) = attention_rx.recv().await {
+            sessions_for_attention.fan_out_attention(evt.session_id, evt.reason);
+        }
+    });
+
     let hub = Hub {
         state,
-        sessions: SessionRegistry::new(),
+        sessions,
         auth_token: auth_token.clone(),
+        attention_tx,
     };
 
     let app = Router::new()
@@ -147,6 +162,10 @@ async fn client_session(hub: Hub, socket: WebSocket) {
                         let _ = out_for_events
                             .send(DaemonMessage::PtyOutput { session_id, data_b64 });
                     }
+                }
+                Ok(SessionEvent::Attention { session_id, reason }) => {
+                    let _ = out_for_events
+                        .send(DaemonMessage::Attention { session_id, reason });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client event stream lagged");
@@ -503,6 +522,12 @@ fn spawn_interactive_session(
         .map(|rec| crate::sync::lock(&rec).snapshot())
         .ok_or_else(|| anyhow!("session vanished"))?;
 
+    pty_state::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        hub.attention_tx.clone(),
+    );
     attach_lifecycle(&hub.sessions, session_id, &pty);
     Ok(snap)
 }

@@ -8,6 +8,7 @@ interface Props {
   workspaces: WorkspaceEntry[];
   sessions: SessionSnapshot[];
   selectedSessionId: string | null;
+  attentionSessions: Set<string>;
   connection: ConnectionState | { kind: "init" } | { kind: "error"; reason: string };
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
@@ -29,21 +30,32 @@ export default function Sidebar(props: Props) {
           <Empty>none yet</Empty>
         ) : (
           <ul className="list">
-            {props.sessions.map((s) => (
-              <li
-                key={s.id}
-                className={
-                  s.id === props.selectedSessionId
-                    ? "list-item selected"
-                    : "list-item"
-                }
-                onClick={() => props.onSelectSession(s.id)}
-              >
-                <span className={`status-dot status-${s.status}`} />
-                <span className="list-item-label">{s.label}</span>
-                <span className="list-item-meta">{s.kind === "workspace" ? "ws" : "1"}</span>
-              </li>
-            ))}
+            {props.sessions.map((s) => {
+              const needsAttention = props.attentionSessions.has(s.id);
+              const classes = [
+                "list-item",
+                s.id === props.selectedSessionId ? "selected" : "",
+                needsAttention ? "needs-attention" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <li
+                  key={s.id}
+                  className={classes}
+                  onClick={() => props.onSelectSession(s.id)}
+                >
+                  <span className={`status-dot status-${s.status}`} />
+                  <span className="list-item-label">{s.label}</span>
+                  {needsAttention && (
+                    <span className="badge badge-warn small">!</span>
+                  )}
+                  <span className="list-item-meta">
+                    {s.kind === "workspace" ? "ws" : "1"}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Section>
