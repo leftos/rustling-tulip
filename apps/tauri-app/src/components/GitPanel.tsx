@@ -8,6 +8,7 @@ import type {
   GitRemoteUrl,
   SessionMember,
 } from "../types";
+import ResizableSplit from "./ResizableSplit";
 
 interface Props {
   members: SessionMember[];
@@ -128,8 +129,13 @@ function ChangesView({
   }, [activeRepoId, selected, client]);
 
   return (
-    <div className="git-split">
-      <div className="git-list">
+    <ResizableSplit
+      storageKey="git.list"
+      defaultSize={320}
+      minSize={200}
+      direction="horizontal"
+    >
+      <div className="git-list git-pane-content">
         {!changes ? (
           <p className="empty">loading…</p>
         ) : changes.length === 0 ? (
@@ -168,7 +174,7 @@ function ChangesView({
         )}
       </div>
       <DiffView diff={diff} />
-    </div>
+    </ResizableSplit>
   );
 }
 
@@ -240,8 +246,13 @@ function HistoryView({
   }, [activeRepoId, selected, client]);
 
   return (
-    <div className="git-split">
-      <div className="git-list">
+    <ResizableSplit
+      storageKey="git.list"
+      defaultSize={320}
+      minSize={200}
+      direction="horizontal"
+    >
+      <div className="git-list git-pane-content">
         {!commits ? (
           <p className="empty">loading…</p>
         ) : commits.length === 0 ? (
@@ -270,7 +281,7 @@ function HistoryView({
         )}
       </div>
       <DiffView diff={detailDiff} />
-    </div>
+    </ResizableSplit>
   );
 }
 

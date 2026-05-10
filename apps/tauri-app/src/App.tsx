@@ -23,6 +23,7 @@ import SessionPane from "./components/SessionPane";
 import SpawnDialog from "./components/SpawnDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
+import ResizableSplit from "./components/ResizableSplit";
 
 interface AppState {
   client: DaemonClient | null;
@@ -153,39 +154,46 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <Sidebar
-        repos={state.repos}
-        workspaces={state.workspaces}
-        sessions={state.sessions}
-        selectedSessionId={state.selectedSessionId}
-        attentionSessions={state.attentionSessions}
-        connection={state.status}
-        onAddRepo={onAddRepo}
-        onRemoveRepo={(id) =>
-          state.client?.send({ type: "remove_repo", repo_id: id })
-        }
-        onRemoveWorkspace={(id) =>
-          state.client?.send({ type: "remove_workspace", workspace_id: id })
-        }
-        onSelectSession={onSelectSession}
-        onOpenSpawn={onOpenSpawn}
-        onOpenWorkspaceCreator={onOpenWorkspaceCreator}
-      />
-      <main className="main-pane">
-        {selectedSession ? (
-          <SessionPane
-            session={selectedSession}
-            client={state.client}
-            subscribePty={subscribePty}
-          />
-        ) : (
-          <EmptyState
-            connection={state.status}
-            onOpenSpawn={onOpenSpawn}
-            hasRepos={state.repos.length > 0}
-          />
-        )}
-      </main>
+      <ResizableSplit
+        storageKey="root.sidebar"
+        defaultSize={280}
+        minSize={200}
+        direction="horizontal"
+      >
+        <Sidebar
+          repos={state.repos}
+          workspaces={state.workspaces}
+          sessions={state.sessions}
+          selectedSessionId={state.selectedSessionId}
+          attentionSessions={state.attentionSessions}
+          connection={state.status}
+          onAddRepo={onAddRepo}
+          onRemoveRepo={(id) =>
+            state.client?.send({ type: "remove_repo", repo_id: id })
+          }
+          onRemoveWorkspace={(id) =>
+            state.client?.send({ type: "remove_workspace", workspace_id: id })
+          }
+          onSelectSession={onSelectSession}
+          onOpenSpawn={onOpenSpawn}
+          onOpenWorkspaceCreator={onOpenWorkspaceCreator}
+        />
+        <main className="main-pane">
+          {selectedSession ? (
+            <SessionPane
+              session={selectedSession}
+              client={state.client}
+              subscribePty={subscribePty}
+            />
+          ) : (
+            <EmptyState
+              connection={state.status}
+              onOpenSpawn={onOpenSpawn}
+              hasRepos={state.repos.length > 0}
+            />
+          )}
+        </main>
+      </ResizableSplit>
       {state.spawnOpen && state.client && (
         <SpawnDialog
           repos={state.repos}
