@@ -1,0 +1,42 @@
+[package]
+name = "rustling-tulip-app"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "rustling-tulip Tauri desktop client"
+
+[lib]
+name = "rustling_tulip_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["fs", "process", "rt", "time", "macros"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

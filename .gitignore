@@ -1,0 +1,30 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+dist-ssr/
+
+# Tauri
+apps/tauri-app/src-tauri/gen/
+
+# Editor
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local state / temp
+.tmp/
+.env
+.env.local
+*.log

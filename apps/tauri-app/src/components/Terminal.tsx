@@ -1,0 +1,90 @@
+import { useEffect, useRef } from "react";
+import { Terminal as XTerm } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { base64ToBytes, bytesToBase64, type DaemonClient } from "../api";
+
+interface Props {
+  sessionId: string;
+  client: DaemonClient;
+  subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
+}
+
+export default function Terminal({ sessionId, client, subscribePty }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const termRef = useRef<XTerm | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const term = new XTerm({
+      cursorBlink: true,
+      fontFamily:
+        "Cascadia Mono, Consolas, 'Courier New', monospace",
+      fontSize: 13,
+      theme: {
+        background: "#0e1116",
+        foreground: "#d6d6d6",
+      },
+      scrollback: 5000,
+      convertEol: false,
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(containerRef.current);
+
+    termRef.current = term;
+    fitRef.current = fit;
+
+    // Initial fit + signal size to daemon.
+    requestAnimationFrame(() => {
+      fit.fit();
+      client.send({
+        type: "resize",
+        session_id: sessionId,
+        cols: term.cols,
+        rows: term.rows,
+      });
+      client.send({ type: "attach", session_id: sessionId });
+    });
+
+    const decoder = new TextDecoder();
+    const unsubPty = subscribePty(sessionId, (b64) => {
+      const bytes = base64ToBytes(b64);
+      term.write(decoder.decode(bytes, { stream: true }));
+    });
+
+    const onDataHandler = term.onData((data) => {
+      const enc = new TextEncoder();
+      client.send({
+        type: "send_input",
+        session_id: sessionId,
+        data_b64: bytesToBase64(enc.encode(data)),
+      });
+    });
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (!fitRef.current || !termRef.current) return;
+      fitRef.current.fit();
+      client.send({
+        type: "resize",
+        session_id: sessionId,
+        cols: termRef.current.cols,
+        rows: termRef.current.rows,
+      });
+    });
+    if (containerRef.current) resizeObserver.observe(containerRef.current);
+
+    return () => {
+      onDataHandler.dispose();
+      unsubPty();
+      resizeObserver.disconnect();
+      client.send({ type: "detach", session_id: sessionId });
+      term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
+    };
+  }, [sessionId, client, subscribePty]);
+
+  return <div ref={containerRef} className="terminal-container" />;
+}
