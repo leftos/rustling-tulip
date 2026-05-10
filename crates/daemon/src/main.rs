@@ -8,6 +8,8 @@ mod server;
 mod session;
 mod state;
 mod sync;
+mod vscode;
+mod workspace;
 
 use anyhow::Context as _;
 use std::sync::Arc;

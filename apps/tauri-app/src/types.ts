@@ -86,6 +86,26 @@ export interface MemberDiff {
   clean: boolean;
 }
 
+export interface MemberSpawnPreview {
+  repo_id: string;
+  repo_name: string;
+  branch_exists: boolean;
+  effective_base: string | null;
+  worktree_path: string;
+}
+
+export interface VscodeWorkspaceFolder {
+  path: string;
+  name: string | null;
+  matched_repo_id: string | null;
+}
+
+export interface VscodeWorkspaceSuggestion {
+  source_path: string;
+  suggested_name: string;
+  folders: VscodeWorkspaceFolder[];
+}
+
 // ------- Wire envelopes -------
 
 export type ClientMessage =
@@ -110,7 +130,18 @@ export type ClientMessage =
   | { type: "resize"; session_id: string; cols: number; rows: number }
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
   | { type: "session_diff"; session_id: string }
-  | { type: "list_branches"; repo_id: string };
+  | { type: "list_branches"; repo_id: string }
+  | {
+      type: "preview_workspace_spawn";
+      workspace_id: string;
+      branch_name: string;
+      base_branch: string | null;
+    }
+  | {
+      type: "accept_vscode_workspace_suggestion";
+      suggestion: VscodeWorkspaceSuggestion;
+      watch: boolean;
+    };
 
 export type DaemonMessage =
   | { type: "welcome"; protocol_version: number }
@@ -129,4 +160,15 @@ export type DaemonMessage =
   | { type: "pty_output"; session_id: string; data_b64: string }
   | { type: "attention"; session_id: string; reason: string }
   | { type: "session_diff"; session_id: string; per_member: MemberDiff[] }
+  | {
+      type: "workspace_spawn_preview";
+      workspace_id: string;
+      branch_name: string;
+      per_member: MemberSpawnPreview[];
+    }
+  | {
+      type: "vscode_workspace_suggestion";
+      repo_id: string;
+      suggestion: VscodeWorkspaceSuggestion;
+    }
   | { type: "error"; message: string };

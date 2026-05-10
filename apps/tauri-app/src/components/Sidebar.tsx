@@ -11,8 +11,10 @@ interface Props {
   connection: ConnectionState | { kind: "init" } | { kind: "error"; reason: string };
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
+  onRemoveWorkspace: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenSpawn: () => void;
+  onOpenWorkspaceCreator: () => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -70,9 +72,19 @@ export default function Sidebar(props: Props) {
         )}
       </Section>
 
-      <Section title="Workspaces">
+      <Section
+        title="Workspaces"
+        actionLabel="+ New"
+        onAction={
+          props.repos.length >= 2 ? props.onOpenWorkspaceCreator : undefined
+        }
+      >
         {props.workspaces.length === 0 ? (
-          <Empty>none defined</Empty>
+          <Empty>
+            {props.repos.length < 2
+              ? "register at least 2 repos first"
+              : "none defined"}
+          </Empty>
         ) : (
           <ul className="list">
             {props.workspaces.map((w) => (
@@ -81,6 +93,14 @@ export default function Sidebar(props: Props) {
                 <span className="list-item-meta">
                   {w.member_repo_ids.length}
                 </span>
+                <button
+                  type="button"
+                  className="list-item-action"
+                  title="Remove workspace"
+                  onClick={() => props.onRemoveWorkspace(w.id)}
+                >
+                  ×
+                </button>
               </li>
             ))}
           </ul>
@@ -90,28 +110,25 @@ export default function Sidebar(props: Props) {
   );
 }
 
-function Section({
-  title,
-  actionLabel,
-  onAction,
-  children,
-}: {
+type SectionProps = {
   title: string;
-  actionLabel?: string;
-  onAction?: () => void;
   children: React.ReactNode;
-}) {
+  actionLabel?: string | undefined;
+  onAction?: (() => void) | undefined;
+};
+
+function Section(props: SectionProps) {
   return (
     <section className="sidebar-section">
       <div className="sidebar-section-header">
-        <h2>{title}</h2>
-        {actionLabel && onAction && (
-          <button type="button" className="link" onClick={onAction}>
-            {actionLabel}
+        <h2>{props.title}</h2>
+        {props.actionLabel && props.onAction && (
+          <button type="button" className="link" onClick={props.onAction}>
+            {props.actionLabel}
           </button>
         )}
       </div>
-      {children}
+      {props.children}
     </section>
   );
 }

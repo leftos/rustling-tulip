@@ -10,11 +10,14 @@ import type {
   DaemonMessage,
   RepoEntry,
   SessionSnapshot,
+  VscodeWorkspaceSuggestion,
   WorkspaceEntry,
 } from "./types";
 import Sidebar from "./components/Sidebar";
 import SessionPane from "./components/SessionPane";
 import SpawnDialog from "./components/SpawnDialog";
+import WorkspaceCreator from "./components/WorkspaceCreator";
+import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 
 interface AppState {
   client: DaemonClient | null;
@@ -24,6 +27,8 @@ interface AppState {
   sessions: SessionSnapshot[];
   selectedSessionId: string | null;
   spawnOpen: boolean;
+  workspaceCreatorOpen: boolean;
+  vscodeQueue: VscodeWorkspaceSuggestion[];
 }
 
 export default function App() {
@@ -35,10 +40,11 @@ export default function App() {
     sessions: [],
     selectedSessionId: null,
     spawnOpen: false,
+    workspaceCreatorOpen: false,
+    vscodeQueue: [],
   });
 
-  // PTY output is high-volume — keep it out of React state. Per-session
-  // listeners pull from this map.
+  // PTY output is high-volume — keep it out of React state.
   const ptyListenersRef = useRef(
     new Map<string, Set<(b64: string) => void>>(),
   );
@@ -55,7 +61,9 @@ export default function App() {
         client.onConnectionChange((next) => {
           setState((s) => ({ ...s, status: next }));
         });
-        client.onMessage((msg) => handleMessage(msg, setState, ptyListenersRef.current));
+        client.onMessage((msg) =>
+          handleMessage(msg, setState, ptyListenersRef.current),
+        );
         setState((s) => ({ ...s, client }));
       } catch (err) {
         setState((s) => ({
@@ -87,6 +95,18 @@ export default function App() {
 
   const onCloseSpawn = useCallback(() => {
     setState((s) => ({ ...s, spawnOpen: false }));
+  }, []);
+
+  const onOpenWorkspaceCreator = useCallback(() => {
+    setState((s) => ({ ...s, workspaceCreatorOpen: true }));
+  }, []);
+
+  const onCloseWorkspaceCreator = useCallback(() => {
+    setState((s) => ({ ...s, workspaceCreatorOpen: false }));
+  }, []);
+
+  const onDismissVscodeSuggestion = useCallback(() => {
+    setState((s) => ({ ...s, vscodeQueue: s.vscodeQueue.slice(1) }));
   }, []);
 
   const subscribePty = useCallback(
@@ -125,8 +145,12 @@ export default function App() {
         onRemoveRepo={(id) =>
           state.client?.send({ type: "remove_repo", repo_id: id })
         }
+        onRemoveWorkspace={(id) =>
+          state.client?.send({ type: "remove_workspace", workspace_id: id })
+        }
         onSelectSession={onSelectSession}
         onOpenSpawn={onOpenSpawn}
+        onOpenWorkspaceCreator={onOpenWorkspaceCreator}
       />
       <main className="main-pane">
         {selectedSession ? (
@@ -146,8 +170,23 @@ export default function App() {
       {state.spawnOpen && state.client && (
         <SpawnDialog
           repos={state.repos}
+          workspaces={state.workspaces}
           client={state.client}
           onClose={onCloseSpawn}
+        />
+      )}
+      {state.workspaceCreatorOpen && state.client && (
+        <WorkspaceCreator
+          repos={state.repos}
+          client={state.client}
+          onClose={onCloseWorkspaceCreator}
+        />
+      )}
+      {state.vscodeQueue[0] && state.client && (
+        <VscodeSuggestionToast
+          suggestion={state.vscodeQueue[0]}
+          client={state.client}
+          onDismiss={onDismissVscodeSuggestion}
         />
       )}
     </div>
@@ -199,8 +238,15 @@ function handleMessage(
       if (set) for (const cb of set) cb(msg.data_b64);
       return;
     }
+    case "vscode_workspace_suggestion":
+      setState((s) => ({
+        ...s,
+        vscodeQueue: [...s.vscodeQueue, msg.suggestion],
+      }));
+      return;
     case "branches":
     case "session_diff":
+    case "workspace_spawn_preview":
     case "attention":
       // Routed by components that asked for it via custom events.
       window.dispatchEvent(

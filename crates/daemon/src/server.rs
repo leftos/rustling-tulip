@@ -7,7 +7,7 @@ use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
-use crate::git;
+use crate::{git, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -20,7 +20,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     AttentionReason, BranchTarget, ClientMessage, DaemonHandshake, DaemonMessage, MemberDiff,
     PROTOCOL_VERSION, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
-    SpawnRequest, SpawnTarget,
+    SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -257,7 +257,12 @@ async fn dispatch(
             let entry = add_repo(&hub.state, &path, name).await?;
             let repos = hub.state.with_persisted(|s| s.repos.clone());
             let _ = out_tx.send(DaemonMessage::Repos { repos });
-            // Phase 2 will scan for .code-workspace here and emit a suggestion.
+            for suggestion in scan_vscode_workspaces(hub, &entry.path) {
+                let _ = out_tx.send(DaemonMessage::VscodeWorkspaceSuggestion {
+                    repo_id: entry.id.clone(),
+                    suggestion,
+                });
+            }
             debug!(repo_id = %entry.id, "repo added");
         }
         ClientMessage::RemoveRepo { repo_id } => {
@@ -292,9 +297,26 @@ async fn dispatch(
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
             let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
         }
-        ClientMessage::AcceptVscodeWorkspaceSuggestion { .. }
-        | ClientMessage::PreviewWorkspaceSpawn { .. } => {
-            return Err(anyhow!("workspace operations land in Phase 2"));
+        ClientMessage::PreviewWorkspaceSpawn {
+            workspace_id,
+            branch_name,
+            base_branch,
+        } => {
+            let (_, resolved) = ws::resolve_workspace(
+                &hub.state,
+                &workspace_id,
+                &branch_name,
+                base_branch.as_deref(),
+            )
+            .await?;
+            let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
+                workspace_id,
+                branch_name,
+                per_member: ws::previews(&resolved),
+            });
+        }
+        ClientMessage::AcceptVscodeWorkspaceSuggestion { suggestion, watch } => {
+            accept_vscode_suggestion(hub, suggestion, watch, out_tx).await?;
         }
         ClientMessage::ListSessions => {
             let _ = out_tx.send(DaemonMessage::Sessions {
@@ -386,34 +408,20 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         return Err(anyhow!("headless mode lands in Phase 3"));
     }
 
-    let SpawnTarget::Single { repo_id, branch } = target else {
-        return Err(anyhow!("workspace spawn lands in Phase 2"));
+    let (kind, members, primary_cwd, default_label) = match target {
+        SpawnTarget::Single { repo_id, branch } => spawn_single(hub, &repo_id, branch).await?,
+        SpawnTarget::Workspace {
+            workspace_id,
+            branch_name,
+            base_branch,
+        } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch).await?,
     };
-
-    let repo = hub
-        .state
-        .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
-        .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
-    let repo_path = PathBuf::from(&repo.path);
-
-    let (branch_name, base_for_create): (String, Option<String>) = match branch {
-        BranchTarget::Existing { name } => (name, None),
-        BranchTarget::NewFromBase { name, base } => (name, Some(base)),
-    };
-
-    let worktree_path = git::default_worktree_path(&repo_path, &branch_name);
-    if !worktree_path.exists() {
-        git::worktree_add(
-            &repo_path,
-            &worktree_path,
-            &branch_name,
-            base_for_create.as_deref(),
-        )
-        .await
-        .context("creating worktree")?;
-    }
 
     let mut args: Vec<String> = Vec::new();
+    for extra in members.iter().skip(1) {
+        args.push("--add-dir".to_string());
+        args.push(extra.worktree_path.clone());
+    }
     if dangerously_skip_permissions {
         args.push("--dangerously-skip-permissions".to_string());
     }
@@ -425,27 +433,21 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
     let spec = PtySpawnSpec {
         program: claude_program(),
         args,
-        cwd: worktree_path.clone(),
+        cwd: primary_cwd,
         env: passthrough_env(),
         cols: 120,
         rows: 32,
     };
     let pty = pty::spawn(spec).context("spawning claude pty")?;
 
-    let label = label.unwrap_or_else(|| format!("{}: {branch_name}", repo.name));
+    let label = label.unwrap_or(default_label);
     let session_id = new_id();
-    let member = SessionMember {
-        repo_id: repo.id.clone(),
-        repo_name: repo.name.clone(),
-        branch: branch_name,
-        worktree_path: worktree_path.to_string_lossy().into_owned(),
-    };
 
     let mut record = SessionRecord {
         id: session_id.clone(),
         label,
-        kind: SessionKind::Single,
-        members: vec![member],
+        kind,
+        members,
         mode,
         started_at: Utc::now(),
         status: SessionStatus::Idle,
@@ -464,6 +466,77 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
 
     attach_lifecycle(&hub.sessions, session_id, &pty);
     Ok(snap)
+}
+
+async fn spawn_single(
+    hub: &Hub,
+    repo_id: &str,
+    branch: BranchTarget,
+) -> anyhow::Result<(SessionKind, Vec<SessionMember>, PathBuf, String)> {
+    let repo = hub
+        .state
+        .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
+        .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
+    let repo_path = PathBuf::from(&repo.path);
+
+    let (branch_name, base_for_create) = match branch {
+        BranchTarget::Existing { name } => (name, None),
+        BranchTarget::NewFromBase { name, base } => (name, Some(base)),
+    };
+
+    let worktree_path = git::default_worktree_path(&repo_path, &branch_name);
+    if !worktree_path.exists() {
+        git::worktree_add(
+            &repo_path,
+            &worktree_path,
+            &branch_name,
+            base_for_create.as_deref(),
+        )
+        .await
+        .context("creating worktree")?;
+    }
+
+    let member = SessionMember {
+        repo_id: repo.id.clone(),
+        repo_name: repo.name.clone(),
+        branch: branch_name.clone(),
+        worktree_path: worktree_path.to_string_lossy().into_owned(),
+    };
+    let label = format!("{}: {branch_name}", repo.name);
+    Ok((SessionKind::Single, vec![member], worktree_path, label))
+}
+
+async fn spawn_workspace(
+    hub: &Hub,
+    workspace_id: &str,
+    branch_name: &str,
+    base_branch: Option<String>,
+) -> anyhow::Result<(SessionKind, Vec<SessionMember>, PathBuf, String)> {
+    let (workspace, resolved) = ws::resolve_workspace(
+        &hub.state,
+        workspace_id,
+        branch_name,
+        base_branch.as_deref(),
+    )
+    .await?;
+    ws::ensure_worktrees(&resolved, branch_name).await?;
+
+    let primary = resolved
+        .first()
+        .ok_or_else(|| anyhow!("workspace has no members"))?
+        .worktree_path
+        .clone();
+    let members: Vec<SessionMember> = resolved
+        .iter()
+        .map(|m| SessionMember {
+            repo_id: m.repo.id.clone(),
+            repo_name: m.repo.name.clone(),
+            branch: branch_name.to_string(),
+            worktree_path: m.worktree_path.to_string_lossy().into_owned(),
+        })
+        .collect();
+    let label = format!("{}: {branch_name}", workspace.name);
+    Ok((SessionKind::Workspace, members, primary, label))
 }
 
 async fn stop_session(
@@ -526,6 +599,54 @@ async fn compute_session_diff(hub: &Hub, session_id: &str) -> anyhow::Result<Vec
 
 fn claude_program() -> String {
     std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "claude".to_string())
+}
+
+fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
+    let known: Vec<(String, String)> = hub
+        .state
+        .with_persisted(|s| s.repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect());
+    let dir = std::path::Path::new(repo_path);
+    vscode::find_workspace_files(dir)
+        .into_iter()
+        .filter_map(|file| match vscode::parse_workspace_file(&file, &known) {
+            Ok(s) if s.folders.len() > 1 => Some(s),
+            Ok(_) => None,
+            Err(err) => {
+                warn!(?err, file = %file.display(), "failed to parse code-workspace");
+                None
+            }
+        })
+        .collect()
+}
+
+async fn accept_vscode_suggestion(
+    hub: &Hub,
+    suggestion: VscodeWorkspaceSuggestion,
+    _watch: bool,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<()> {
+    let mut member_repo_ids = Vec::with_capacity(suggestion.folders.len());
+    for folder in &suggestion.folders {
+        let repo_id = if let Some(id) = folder.matched_repo_id.clone() {
+            id
+        } else {
+            let entry = add_repo(&hub.state, &folder.path, folder.name.clone()).await?;
+            entry.id
+        };
+        member_repo_ids.push(repo_id);
+    }
+    upsert_workspace(
+        &hub.state,
+        None,
+        suggestion.suggested_name.clone(),
+        member_repo_ids,
+        Some(suggestion.source_path.clone()),
+    )?;
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
+    let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+    let _ = out_tx.send(DaemonMessage::Repos { repos });
+    let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+    Ok(())
 }
 
 fn passthrough_env() -> Vec<(String, String)> {
