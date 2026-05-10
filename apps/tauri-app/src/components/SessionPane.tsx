@@ -19,11 +19,13 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
       session_id: session.id,
       cleanup: session.members.map((m) => ({
         repo_id: m.repo_id,
-        remove_worktree: false, // Phase 2 will offer per-member toggles
+        remove_worktree: false,
       })),
     });
     setConfirming(false);
   }, [client, session]);
+
+  const isHeadless = session.mode === "headless";
 
   return (
     <div className="session-pane">
@@ -35,6 +37,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             {session.kind === "workspace"
               ? `${session.members.length} repos`
               : session.members[0]?.repo_name ?? ""}
+            {isHeadless ? " · headless" : ""}
           </span>
         </div>
         <div className="session-actions">
@@ -67,21 +70,62 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
           </span>
         ))}
       </div>
-      <div className="terminal-host">
-        {client && session.status !== "stopped" ? (
-          <Terminal
-            sessionId={session.id}
-            client={client}
-            subscribePty={subscribePty}
-          />
+
+      {isHeadless ? (
+        <HeadlessView session={session} />
+      ) : (
+        <div className="terminal-host">
+          {client && session.status !== "stopped" ? (
+            <Terminal
+              sessionId={session.id}
+              client={client}
+              subscribePty={subscribePty}
+            />
+          ) : (
+            <div className="terminal-placeholder">
+              {session.status === "stopped"
+                ? "Session has exited."
+                : "Waiting for daemon connection..."}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HeadlessView({ session }: { session: SessionSnapshot }) {
+  const m = session.metrics;
+  return (
+    <div className="headless-view">
+      <div className="headless-stats">
+        <Stat label="status" value={session.status} />
+        <Stat label="in tokens" value={m.input_tokens.toLocaleString()} />
+        <Stat label="out tokens" value={m.output_tokens.toLocaleString()} />
+        <Stat label="cost" value={`$${m.cost_usd.toFixed(4)}`} />
+      </div>
+      <div className="headless-log">
+        {session.recent_actions.length === 0 ? (
+          <p className="empty">No events yet…</p>
         ) : (
-          <div className="terminal-placeholder">
-            {session.status === "stopped"
-              ? "Session has exited."
-              : "Waiting for daemon connection..."}
-          </div>
+          <ol>
+            {session.recent_actions.map((line, idx) => (
+              // Stable order, append-only — index is fine here.
+              // eslint-disable-next-line react/no-array-index-key
+              <li key={idx}>{line}</li>
+            ))}
+          </ol>
         )}
       </div>
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="stat">
+      <span className="stat-label">{label}</span>
+      <span className="stat-value">{value}</span>
     </div>
   );
 }

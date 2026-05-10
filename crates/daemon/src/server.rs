@@ -7,7 +7,7 @@ use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
-use crate::{git, vscode, workspace as ws};
+use crate::{git, headless, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -404,10 +404,6 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         dangerously_skip_permissions,
     } = req;
 
-    if mode == SessionMode::Headless {
-        return Err(anyhow!("headless mode lands in Phase 3"));
-    }
-
     let (kind, members, primary_cwd, default_label) = match target {
         SpawnTarget::Single { repo_id, branch } => spawn_single(hub, &repo_id, branch).await?,
         SpawnTarget::Workspace {
@@ -417,6 +413,51 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch).await?,
     };
 
+    let session_id = new_id();
+    let label = label.unwrap_or(default_label);
+
+    if mode == SessionMode::Headless {
+        let prompt = initial_prompt
+            .clone()
+            .ok_or_else(|| anyhow!("headless sessions require an initial_prompt"))?;
+        return spawn_headless_session(
+            hub,
+            session_id,
+            label,
+            kind,
+            members,
+            primary_cwd,
+            prompt,
+            dangerously_skip_permissions,
+        );
+    }
+
+    spawn_interactive_session(
+        hub,
+        session_id,
+        label,
+        kind,
+        members,
+        primary_cwd,
+        initial_prompt,
+        dangerously_skip_permissions,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
+)]
+fn spawn_interactive_session(
+    hub: &Hub,
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    primary_cwd: PathBuf,
+    initial_prompt: Option<String>,
+    dangerously_skip_permissions: bool,
+) -> anyhow::Result<protocol::SessionSnapshot> {
     let mut args: Vec<String> = Vec::new();
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
@@ -440,21 +481,19 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
     };
     let pty = pty::spawn(spec).context("spawning claude pty")?;
 
-    let label = label.unwrap_or(default_label);
-    let session_id = new_id();
-
     let mut record = SessionRecord {
         id: session_id.clone(),
         label,
         kind,
         members,
-        mode,
+        mode: SessionMode::Interactive,
         started_at: Utc::now(),
         status: SessionStatus::Idle,
         exit_code: None,
         metrics: SessionMetrics::default(),
         recent_actions: Vec::new(),
         pty: Some(Arc::clone(&pty)),
+        headless: None,
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -465,6 +504,77 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         .ok_or_else(|| anyhow!("session vanished"))?;
 
     attach_lifecycle(&hub.sessions, session_id, &pty);
+    Ok(snap)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    reason = "Constructing a session record is naturally wide; the String args are partly \
+              consumed and partly cloned, splitting them by ownership clarifies nothing"
+)]
+fn spawn_headless_session(
+    hub: &Hub,
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    primary_cwd: PathBuf,
+    prompt: String,
+    dangerously_skip_permissions: bool,
+) -> anyhow::Result<protocol::SessionSnapshot> {
+    let mut args: Vec<String> = vec![
+        "--print".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+    ];
+    for extra in members.iter().skip(1) {
+        args.push("--add-dir".to_string());
+        args.push(extra.worktree_path.clone());
+    }
+    if dangerously_skip_permissions {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    args.push("-p".to_string());
+    args.push(prompt);
+
+    let spec = headless::HeadlessSpec {
+        program: claude_program(),
+        args,
+        cwd: primary_cwd,
+        env: passthrough_env(),
+    };
+
+    let mut record = SessionRecord {
+        id: session_id.clone(),
+        label,
+        kind,
+        members,
+        mode: SessionMode::Headless,
+        started_at: Utc::now(),
+        status: SessionStatus::Spawning,
+        exit_code: None,
+        metrics: SessionMetrics::default(),
+        recent_actions: Vec::new(),
+        pty: None,
+        headless: None,
+    };
+    push_recent_action(&mut record, "headless session started".to_string());
+    hub.sessions.insert(record);
+
+    let handle = headless::spawn(&spec, &hub.sessions, session_id.clone())
+        .context("spawning headless claude")?;
+
+    hub.sessions.update(&session_id, |rec| {
+        rec.headless = Some(Arc::clone(&handle));
+    });
+
+    let snap = hub
+        .sessions
+        .get(&session_id)
+        .map(|rec| crate::sync::lock(&rec).snapshot())
+        .ok_or_else(|| anyhow!("session vanished"))?;
     Ok(snap)
 }
 
@@ -547,12 +657,19 @@ async fn stop_session(
     let Some(rec) = hub.sessions.get(session_id) else {
         return Err(anyhow!("unknown session: {session_id}"));
     };
-    let (members, pty) = {
+    let (members, pty, headless_handle) = {
         let guard = crate::sync::lock(&rec);
-        (guard.members.clone(), guard.pty.clone())
+        (
+            guard.members.clone(),
+            guard.pty.clone(),
+            guard.headless.clone(),
+        )
     };
     if let Some(pty) = pty {
         pty.kill();
+    }
+    if let Some(h) = headless_handle {
+        h.kill().await;
     }
     for action in cleanup {
         if !action.remove_worktree {

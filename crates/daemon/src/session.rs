@@ -1,5 +1,6 @@
 //! In-memory session registry: spawned `claude` processes plus their state.
 
+use crate::headless::HeadlessHandle;
 use crate::pty::PtyHandle;
 use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
@@ -34,6 +35,7 @@ pub struct SessionRecord {
     pub metrics: SessionMetrics,
     pub recent_actions: Vec<String>,
     pub pty: Option<Arc<PtyHandle>>,
+    pub headless: Option<Arc<HeadlessHandle>>,
 }
 
 impl SessionRecord {

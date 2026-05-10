@@ -16,6 +16,7 @@ interface Props {
 
 type Mode = "single" | "workspace";
 type BranchMode = "existing" | "new";
+type RunMode = "interactive" | "headless";
 
 interface BranchesState {
   branches: string[];
@@ -31,7 +32,20 @@ export default function SpawnDialog({
   const [mode, setMode] = useState<Mode>(
     workspaces.length > 0 ? "workspace" : "single",
   );
+  const [runMode, setRunMode] = useState<RunMode>("interactive");
+  const [headlessPrompt, setHeadlessPrompt] = useState("");
   const [skipPerms, setSkipPerms] = useState(true);
+
+  const sharedFooter = (
+    <Footer
+      skipPerms={skipPerms}
+      onSkipPermsChange={setSkipPerms}
+      runMode={runMode}
+      onRunModeChange={setRunMode}
+      headlessPrompt={headlessPrompt}
+      onHeadlessPromptChange={setHeadlessPrompt}
+    />
+  );
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -69,26 +83,20 @@ export default function SpawnDialog({
               repos={repos}
               client={client}
               skipPerms={skipPerms}
+              runMode={runMode}
+              headlessPrompt={headlessPrompt}
               onClose={onClose}
-              header={
-                <Footer
-                  skipPerms={skipPerms}
-                  onSkipPermsChange={setSkipPerms}
-                />
-              }
+              header={sharedFooter}
             />
           ) : (
             <WorkspaceForm
               workspaces={workspaces}
               client={client}
               skipPerms={skipPerms}
+              runMode={runMode}
+              headlessPrompt={headlessPrompt}
               onClose={onClose}
-              header={
-                <Footer
-                  skipPerms={skipPerms}
-                  onSkipPermsChange={setSkipPerms}
-                />
-              }
+              header={sharedFooter}
             />
           )}
         </div>
@@ -100,19 +108,59 @@ export default function SpawnDialog({
 function Footer({
   skipPerms,
   onSkipPermsChange,
+  runMode,
+  onRunModeChange,
+  headlessPrompt,
+  onHeadlessPromptChange,
 }: {
   skipPerms: boolean;
   onSkipPermsChange: (v: boolean) => void;
+  runMode: RunMode;
+  onRunModeChange: (m: RunMode) => void;
+  headlessPrompt: string;
+  onHeadlessPromptChange: (s: string) => void;
 }) {
   return (
-    <label className="checkbox">
-      <input
-        type="checkbox"
-        checked={skipPerms}
-        onChange={(e) => onSkipPermsChange(e.target.checked)}
-      />
-      <span>Pass --dangerously-skip-permissions</span>
-    </label>
+    <>
+      <fieldset className="field">
+        <legend>Run mode</legend>
+        <label className="radio">
+          <input
+            type="radio"
+            checked={runMode === "interactive"}
+            onChange={() => onRunModeChange("interactive")}
+          />
+          Interactive
+        </label>
+        <label className="radio">
+          <input
+            type="radio"
+            checked={runMode === "headless"}
+            onChange={() => onRunModeChange("headless")}
+          />
+          Headless (one-shot prompt, no terminal)
+        </label>
+      </fieldset>
+      {runMode === "headless" && (
+        <label className="field">
+          <span>Prompt</span>
+          <textarea
+            rows={3}
+            value={headlessPrompt}
+            onChange={(e) => onHeadlessPromptChange(e.target.value)}
+            placeholder="What should claude do?"
+          />
+        </label>
+      )}
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={skipPerms}
+          onChange={(e) => onSkipPermsChange(e.target.checked)}
+        />
+        <span>Pass --dangerously-skip-permissions</span>
+      </label>
+    </>
   );
 }
 
@@ -122,12 +170,16 @@ function SingleForm({
   repos,
   client,
   skipPerms,
+  runMode,
+  headlessPrompt,
   onClose,
   header,
 }: {
   repos: RepoEntry[];
   client: DaemonClient;
   skipPerms: boolean;
+  runMode: RunMode;
+  headlessPrompt: string;
   onClose: () => void;
   header: React.ReactNode;
 }) {
@@ -158,9 +210,10 @@ function SingleForm({
   }, [repoId, client]);
 
   const canSubmit =
-    repoId &&
-    (branchMode === "existing" ? existingBranch : newBranchName) &&
-    (branchMode === "new" ? baseBranch : true);
+    !!repoId &&
+    !!(branchMode === "existing" ? existingBranch : newBranchName) &&
+    (branchMode === "new" ? !!baseBranch : true) &&
+    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
     if (!canSubmit) return;
@@ -176,8 +229,8 @@ function SingleForm({
       type: "spawn_session",
       label: null,
       target: { kind: "single", repo_id: repoId, branch },
-      mode: "interactive",
-      initial_prompt: null,
+      mode: runMode,
+      initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
     });
     onClose();
@@ -284,12 +337,16 @@ function WorkspaceForm({
   workspaces,
   client,
   skipPerms,
+  runMode,
+  headlessPrompt,
   onClose,
   header,
 }: {
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
   skipPerms: boolean;
+  runMode: RunMode;
+  headlessPrompt: string;
   onClose: () => void;
   header: React.ReactNode;
 }) {
@@ -335,7 +392,11 @@ function WorkspaceForm({
   };
 
   const canSpawn =
-    !!preview && previewBranch === branchName && workspaceId && branchName;
+    !!preview &&
+    previewBranch === branchName &&
+    !!workspaceId &&
+    !!branchName &&
+    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
     if (!canSpawn) return;
@@ -348,8 +409,8 @@ function WorkspaceForm({
         branch_name: branchName,
         base_branch: baseBranch || null,
       },
-      mode: "interactive",
-      initial_prompt: null,
+      mode: runMode,
+      initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
     });
     onClose();
