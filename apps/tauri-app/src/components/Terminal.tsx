@@ -1,7 +1,12 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { base64ToBytes, bytesToBase64, type DaemonClient } from "../api";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  loadScrollback,
+  type DaemonClient,
+} from "../api";
 
 interface Props {
   sessionId: string;
@@ -36,19 +41,33 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
-    // Initial fit + signal size to daemon.
-    requestAnimationFrame(() => {
-      fit.fit();
-      client.send({
-        type: "resize",
-        session_id: sessionId,
-        cols: term.cols,
-        rows: term.rows,
-      });
-      client.send({ type: "attach", session_id: sessionId });
-    });
-
     const decoder = new TextDecoder();
+    let cancelled = false;
+
+    // Replay persisted scrollback first so users see their history before
+    // any live PTY chunks arrive. The attach + subscribe happen after the
+    // replay completes (or times out) to keep ordering correct.
+    void (async () => {
+      const sb = await loadScrollback(client, sessionId);
+      if (cancelled) return;
+      if (sb && sb.data_b64.length > 0) {
+        if (sb.truncated) {
+          term.writeln("[33m[earlier output discarded][0m");
+        }
+        term.write(decoder.decode(base64ToBytes(sb.data_b64), { stream: true }));
+      }
+      requestAnimationFrame(() => {
+        fit.fit();
+        client.send({
+          type: "resize",
+          session_id: sessionId,
+          cols: term.cols,
+          rows: term.rows,
+        });
+        client.send({ type: "attach", session_id: sessionId });
+      });
+    })();
+
     const unsubPty = subscribePty(sessionId, (b64) => {
       const bytes = base64ToBytes(b64);
       term.write(decoder.decode(bytes, { stream: true }));
@@ -76,6 +95,7 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
     if (containerRef.current) resizeObserver.observe(containerRef.current);
 
     return () => {
+      cancelled = true;
       onDataHandler.dispose();
       unsubPty();
       resizeObserver.disconnect();

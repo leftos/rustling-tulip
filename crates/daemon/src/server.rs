@@ -3,6 +3,7 @@
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{self, PtySpawnSpec};
+use crate::scrollback;
 use crate::registry::{add_repo, remove_repo, remove_workspace, upsert_workspace};
 use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
@@ -460,6 +461,15 @@ async fn dispatch(
             let repo = repo_path_or_err(hub, &repo_id)?;
             let changes = git_inspect::repo_status(&repo).await?;
             let _ = out_tx.send(DaemonMessage::RepoStatus { repo_id, changes });
+        }
+        ClientMessage::LoadScrollback { session_id } => {
+            let (data, truncated) = scrollback::load(&hub.dirs, &session_id);
+            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            let _ = out_tx.send(DaemonMessage::Scrollback {
+                session_id,
+                data_b64,
+                truncated,
+            });
         }
     }
     Ok(())

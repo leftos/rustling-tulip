@@ -195,7 +195,8 @@ export type ClientMessage =
       against: string | null;
     }
   | { type: "get_remote_url"; repo_id: string }
-  | { type: "repo_status"; repo_id: string };
+  | { type: "repo_status"; repo_id: string }
+  | { type: "load_scrollback"; session_id: string };
 
 export type DaemonMessage =
   | { type: "welcome"; protocol_version: number }
@@ -236,4 +237,10 @@ export type DaemonMessage =
     }
   | ({ type: "remote_url" } & GitRemoteUrl)
   | { type: "repo_status"; repo_id: string; changes: GitFileChange[] }
+  | {
+      type: "scrollback";
+      session_id: string;
+      data_b64: string;
+      truncated: boolean;
+    }
   | { type: "error"; message: string };

@@ -306,6 +306,7 @@ function handleMessage(
     case "file_diff":
     case "remote_url":
     case "repo_status":
+    case "scrollback":
       // Routed by components that asked for it via custom events.
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),

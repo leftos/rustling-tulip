@@ -314,6 +314,11 @@ pub enum ClientMessage {
     RepoStatus {
         repo_id: String,
     },
+    /// Request the persisted scrollback for a session, replayed on attach.
+    /// The daemon answers with [`DaemonMessage::Scrollback`].
+    LoadScrollback {
+        session_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +393,15 @@ pub enum DaemonMessage {
     RepoStatus {
         repo_id: String,
         changes: Vec<GitFileChange>,
+    },
+    /// Persisted scrollback bytes (raw PTY output for interactive sessions,
+    /// raw stream-json lines for headless), base64-encoded. `truncated` is
+    /// true when the on-disk ring buffer overflowed at some point and the
+    /// caller should surface "earlier output discarded" to the user.
+    Scrollback {
+        session_id: String,
+        data_b64: String,
+        truncated: bool,
     },
     Error {
         message: String,

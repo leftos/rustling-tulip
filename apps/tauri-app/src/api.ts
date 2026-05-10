@@ -116,6 +116,42 @@ export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
   };
 }
 
+/**
+ * Request the persisted scrollback for a session and resolve with the
+ * decoded payload. Times out after 2 s if the daemon never answers (e.g.
+ * because the session was already removed) — the terminal still attaches
+ * after the promise resolves.
+ *
+ * Listens on the `rt:scrollback` window event (dispatched by App.tsx's
+ * message router) so this works from any component without piercing the
+ * client's onMessage subscription.
+ */
+export function loadScrollback(
+  client: DaemonClient,
+  sessionId: string,
+): Promise<{ data_b64: string; truncated: boolean } | null> {
+  return new Promise((resolve) => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "scrollback" || detail.session_id !== sessionId) {
+        return;
+      }
+      cleanup();
+      resolve({ data_b64: detail.data_b64, truncated: detail.truncated });
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 2000);
+    const cleanup = () => {
+      window.removeEventListener("rt:scrollback", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:scrollback", handler);
+    client.send({ type: "load_scrollback", session_id: sessionId });
+  });
+}
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.byteLength; i++) {

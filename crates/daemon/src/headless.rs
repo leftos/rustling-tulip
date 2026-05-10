@@ -6,6 +6,7 @@
 
 use crate::orphan;
 use crate::paths::Dirs;
+use crate::scrollback;
 use crate::session::{SessionRegistry, push_recent_action};
 use anyhow::{Context as _, anyhow};
 use protocol::SessionStatus;
@@ -76,9 +77,11 @@ pub fn spawn(
         pid,
     });
 
-    // stdout: parse stream-json line by line.
+    // stdout: parse stream-json line by line. Also persist each line to the
+    // scrollback file so the headless event log can be replayed on reattach.
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
+    let dirs_for_stdout = dirs.clone();
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
@@ -87,6 +90,9 @@ pub fn spawn(
                     if line.trim().is_empty() {
                         continue;
                     }
+                    let mut chunk = line.clone().into_bytes();
+                    chunk.push(b'\n');
+                    scrollback::append(&dirs_for_stdout, &session_for_stdout, &chunk);
                     handle_stream_event(&registry_for_stdout, &session_for_stdout, &line);
                 }
                 Ok(None) => break,

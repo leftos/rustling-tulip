@@ -4,6 +4,7 @@ use crate::headless::HeadlessHandle;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtyHandle;
+use crate::scrollback;
 use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
 use protocol::{
@@ -167,14 +168,22 @@ pub fn attach_lifecycle(
     pty: &Arc<PtyHandle>,
     dirs: Option<Dirs>,
 ) {
-    // Output forwarder.
+    // Output forwarder. Also persists each chunk to scrollback when dirs is
+    // provided (i.e. for normal spawns, not reattached orphans which don't
+    // own a stream to capture from).
     let mut output = pty.output.subscribe();
     let registry_for_output = Arc::clone(registry);
     let session_for_output = session_id.clone();
+    let dirs_for_output = dirs.clone();
     tokio::spawn(async move {
         loop {
             match output.recv().await {
-                Ok(bytes) => registry_for_output.fan_out_pty(&session_for_output, bytes),
+                Ok(bytes) => {
+                    if let Some(d) = &dirs_for_output {
+                        scrollback::append(d, &session_for_output, &bytes);
+                    }
+                    registry_for_output.fan_out_pty(&session_for_output, bytes);
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(session_id = %session_for_output, lagged = n, "pty output lagged");
                 }

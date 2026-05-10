@@ -8,6 +8,7 @@ mod paths;
 mod pty;
 mod pty_state;
 mod registry;
+mod scrollback;
 mod server;
 mod session;
 mod state;
