@@ -224,6 +224,7 @@ Notes:
 - [ ] Pop-out session into its own Tauri window
 - [ ] Auto-update for the desktop app (`tauri-plugin-updater`)
 - [ ] Crash-recovery: daemon detects orphaned `claude` processes on startup and reattaches state
+- [ ] **Persistent resizable panes**: every divider in the app (sidebar/main, terminal/git split, changes-list/diff split, headless-stats/log split) is drag-resizable with widths persisted to settings. Reuse a single `ResizableSplit` component so the behavior is consistent across panes.
 
 ### Phase 6 — Git tracking layer
 

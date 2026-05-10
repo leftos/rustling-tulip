@@ -1,6 +1,7 @@
 //! rustling-tulipd: long-lived daemon that owns Claude Code sessions.
 
 mod git;
+mod git_inspect;
 mod headless;
 mod paths;
 mod pty;

@@ -293,6 +293,11 @@ function handleMessage(
     case "branches":
     case "session_diff":
     case "workspace_spawn_preview":
+    case "commits":
+    case "commit_detail":
+    case "file_diff":
+    case "remote_url":
+    case "repo_status":
       // Routed by components that asked for it via custom events.
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),

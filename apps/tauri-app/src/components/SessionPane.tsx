@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
 import Terminal from "./Terminal";
+import GitPanel from "./GitPanel";
 
 interface Props {
   session: SessionSnapshot;
@@ -9,8 +10,11 @@ interface Props {
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
 
+type View = "terminal" | "git";
+
 export default function SessionPane({ session, client, subscribePty }: Props) {
   const [confirming, setConfirming] = useState(false);
+  const [view, setView] = useState<View>("terminal");
 
   const onStop = useCallback(() => {
     if (!client) return;
@@ -69,9 +73,27 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             {m.repo_name}: {m.branch}
           </span>
         ))}
+        <div className="view-toggle">
+          <button
+            type="button"
+            className={view === "terminal" ? "tab active" : "tab"}
+            onClick={() => setView("terminal")}
+          >
+            {isHeadless ? "Events" : "Terminal"}
+          </button>
+          <button
+            type="button"
+            className={view === "git" ? "tab active" : "tab"}
+            onClick={() => setView("git")}
+          >
+            Git
+          </button>
+        </div>
       </div>
 
-      {isHeadless ? (
+      {view === "git" && client ? (
+        <GitPanel members={session.members} client={client} />
+      ) : isHeadless ? (
         <HeadlessView session={session} />
       ) : (
         <div className="terminal-host">

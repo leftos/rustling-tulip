@@ -106,6 +106,35 @@ export interface VscodeWorkspaceSuggestion {
   folders: VscodeWorkspaceFolder[];
 }
 
+export interface GitCommit {
+  sha: string;
+  short_sha: string;
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  subject: string;
+}
+
+export interface GitFileChange {
+  path: string;
+  status: string;
+  from_path: string | null;
+}
+
+export interface GitCommitDetail {
+  commit: GitCommit;
+  body: string;
+  parent_shas: string[];
+  changes: GitFileChange[];
+}
+
+export interface GitRemoteUrl {
+  repo_id: string;
+  raw_url: string;
+  web_url: string | null;
+  forge: string;
+}
+
 // ------- Wire envelopes -------
 
 export type ClientMessage =
@@ -141,7 +170,22 @@ export type ClientMessage =
       type: "accept_vscode_workspace_suggestion";
       suggestion: VscodeWorkspaceSuggestion;
       watch: boolean;
-    };
+    }
+  | {
+      type: "list_commits";
+      repo_id: string;
+      branch: string | null;
+      limit: number;
+    }
+  | { type: "get_commit"; repo_id: string; sha: string }
+  | {
+      type: "get_file_diff";
+      repo_id: string;
+      path: string;
+      against: string | null;
+    }
+  | { type: "get_remote_url"; repo_id: string }
+  | { type: "repo_status"; repo_id: string };
 
 export type DaemonMessage =
   | { type: "welcome"; protocol_version: number }
@@ -171,4 +215,15 @@ export type DaemonMessage =
       repo_id: string;
       suggestion: VscodeWorkspaceSuggestion;
     }
+  | { type: "commits"; repo_id: string; commits: GitCommit[] }
+  | { type: "commit_detail"; repo_id: string; detail: GitCommitDetail }
+  | {
+      type: "file_diff";
+      repo_id: string;
+      path: string;
+      against: string | null;
+      diff: string;
+    }
+  | ({ type: "remote_url" } & GitRemoteUrl)
+  | { type: "repo_status"; repo_id: string; changes: GitFileChange[] }
   | { type: "error"; message: string };

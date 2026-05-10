@@ -7,7 +7,7 @@ use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
-use crate::{git, headless, pty_state, vscode, workspace as ws};
+use crate::{git, git_inspect, headless, pty_state, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -410,8 +410,53 @@ async fn dispatch(
                 current,
             });
         }
+        ClientMessage::ListCommits {
+            repo_id,
+            branch,
+            limit,
+        } => {
+            let path = repo_path_or_err(hub, &repo_id)?;
+            let commits = git_inspect::list_commits(&path, branch.as_deref(), limit).await?;
+            let _ = out_tx.send(DaemonMessage::Commits { repo_id, commits });
+        }
+        ClientMessage::GetCommit { repo_id, sha } => {
+            let path = repo_path_or_err(hub, &repo_id)?;
+            let detail = git_inspect::get_commit(&path, &sha).await?;
+            let _ = out_tx.send(DaemonMessage::CommitDetail { repo_id, detail });
+        }
+        ClientMessage::GetFileDiff {
+            repo_id,
+            path,
+            against,
+        } => {
+            let repo = repo_path_or_err(hub, &repo_id)?;
+            let diff = git_inspect::file_diff(&repo, &path, against.as_deref()).await?;
+            let _ = out_tx.send(DaemonMessage::FileDiff {
+                repo_id,
+                path,
+                against,
+                diff,
+            });
+        }
+        ClientMessage::GetRemoteUrl { repo_id } => {
+            let repo = repo_path_or_err(hub, &repo_id)?;
+            let info = git_inspect::remote_url(&repo_id, &repo).await?;
+            let _ = out_tx.send(DaemonMessage::RemoteUrl(info));
+        }
+        ClientMessage::RepoStatus { repo_id } => {
+            let repo = repo_path_or_err(hub, &repo_id)?;
+            let changes = git_inspect::repo_status(&repo).await?;
+            let _ = out_tx.send(DaemonMessage::RepoStatus { repo_id, changes });
+        }
     }
     Ok(())
+}
+
+fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
+    hub.state
+        .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).map(|r| r.path.clone()))
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
 }
 
 async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol::SessionSnapshot> {

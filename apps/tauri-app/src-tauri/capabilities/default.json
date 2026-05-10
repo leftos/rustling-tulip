@@ -7,6 +7,14 @@
     "core:default",
     "dialog:default",
     "notification:default",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://github.com/*" },
+        { "url": "https://gitlab.com/*" },
+        { "url": "https://bitbucket.org/*" }
+      ]
+    }
   ]
 }

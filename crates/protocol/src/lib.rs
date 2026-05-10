@@ -245,6 +245,34 @@ pub enum ClientMessage {
     ListBranches {
         repo_id: String,
     },
+    /// Recent commits for a repo. `branch` defaults to current.
+    ListCommits {
+        repo_id: String,
+        branch: Option<String>,
+        limit: u32,
+    },
+    /// Full detail (subject, body, parents, file list) for one commit.
+    GetCommit {
+        repo_id: String,
+        sha: String,
+    },
+    /// Unified diff for a single file. `against` is `None` for working-tree
+    /// vs index, `Some("HEAD")` for index vs HEAD, or a sha for that commit.
+    GetFileDiff {
+        repo_id: String,
+        path: String,
+        against: Option<String>,
+    },
+    /// Resolve the repo's `origin` remote URL and parse it into a forge link
+    /// for "Open in GitHub" actions.
+    GetRemoteUrl {
+        repo_id: String,
+    },
+    /// Working-tree status (changed files) for a single repo. Useful for the
+    /// non-session-scoped repo view.
+    RepoStatus {
+        repo_id: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +329,25 @@ pub enum DaemonMessage {
         branch_name: String,
         per_member: Vec<MemberSpawnPreview>,
     },
+    Commits {
+        repo_id: String,
+        commits: Vec<GitCommit>,
+    },
+    CommitDetail {
+        repo_id: String,
+        detail: GitCommitDetail,
+    },
+    FileDiff {
+        repo_id: String,
+        path: String,
+        against: Option<String>,
+        diff: String,
+    },
+    RemoteUrl(GitRemoteUrl),
+    RepoStatus {
+        repo_id: String,
+        changes: Vec<GitFileChange>,
+    },
     Error {
         message: String,
     },
@@ -321,4 +368,48 @@ pub struct MemberSpawnPreview {
     pub branch_exists: bool,
     pub effective_base: Option<String>,
     pub worktree_path: String,
+}
+
+// ---------------------------------------------------------------------------
+// Git inspection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitCommit {
+    pub sha: String,
+    pub short_sha: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub authored_at: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitFileChange {
+    pub path: String,
+    /// Single-character status from `git status --porcelain` or `git
+    /// diff-tree`: `M`, `A`, `D`, `R`, `?`, etc.
+    pub status: String,
+    /// Source path for renames (`R` status); `None` otherwise.
+    pub from_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitCommitDetail {
+    pub commit: GitCommit,
+    pub body: String,
+    pub parent_shas: Vec<String>,
+    pub changes: Vec<GitFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitRemoteUrl {
+    pub repo_id: String,
+    /// Raw URL from `git remote get-url origin` (or other remote).
+    pub raw_url: String,
+    /// Canonicalized https form for browser links, when recognizable
+    /// (github / gitlab / bitbucket). `None` for unknown forge formats.
+    pub web_url: Option<String>,
+    /// Forge identifier: `github`, `gitlab`, `bitbucket`, or `unknown`.
+    pub forge: String,
 }
