@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
-import { getRemoteUrl, type DaemonClient } from "../../api";
+import { getRemoteUrl, openDiffTab, type DaemonClient } from "../../api";
 import type {
   DaemonMessage,
   GitCommit,
@@ -27,12 +27,16 @@ interface Props {
   repos: RepoEntry[];
   focusedRepoId: string | null;
   client: DaemonClient;
+  /// Called with the freshly opened diff tab's id so the host can switch to
+  /// it. Passed through to `ChangesView` for the per-row click handler.
+  onActivateTab: (tabId: string) => void;
 }
 
 export default function SourceControlSidebar({
   repos,
   focusedRepoId,
   client,
+  onActivateTab,
 }: Props) {
   const [tab, setTab] = useState<Tab>("changes");
   const [override, setOverride] = useState<string | null>(() => {
@@ -131,6 +135,7 @@ export default function SourceControlSidebar({
           activeRepoId={activeRepoId}
           activeRepoName={activeRepo?.name ?? ""}
           client={client}
+          onActivateTab={onActivateTab}
         />
       )}
       {activeRepoId && tab === "history" && (
@@ -146,13 +151,17 @@ interface ChangesViewProps {
   activeRepoId: string;
   activeRepoName: string;
   client: DaemonClient;
+  onActivateTab: (tabId: string) => void;
 }
 
-function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps) {
+function ChangesView({
+  activeRepoId,
+  activeRepoName,
+  client,
+  onActivateTab,
+}: ChangesViewProps) {
   const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
   const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
-  const [selected, setSelected] = useState<SelectedFile | null>(null);
-  const [diff, setDiff] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [pendingOp, setPendingOp] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -160,8 +169,6 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
   useEffect(() => {
     setIndexChanges(null);
     setWorktreeChanges(null);
-    setSelected(null);
-    setDiff(null);
     setErrorBanner(null);
     setCommitMessage("");
     client.send({ type: "repo_status", repo_id: activeRepoId });
@@ -205,30 +212,15 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
     };
   }, [activeRepoId]);
 
-  // Diff fetching. `selected` distinguishes index vs worktree to choose the
-  // right `against` argument.
-  useEffect(() => {
-    if (!selected) return;
-    setDiff(null);
-    client.send({
-      type: "get_file_diff",
-      repo_id: activeRepoId,
-      path: selected.path,
-      against: selected.bucket === "index" ? "HEAD" : null,
+  const openDiff = (path: string, bucket: "index" | "worktree") => {
+    void openDiffTab(client, {
+      repoId: activeRepoId,
+      path,
+      against: bucket === "index" ? "HEAD" : null,
+    }).then((tabId) => {
+      if (tabId) onActivateTab(tabId);
     });
-    const handler = (ev: Event) => {
-      const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (
-        detail.type !== "file_diff" ||
-        detail.repo_id !== activeRepoId ||
-        detail.path !== selected.path
-      )
-        return;
-      setDiff(detail.diff);
-    };
-    window.addEventListener("rt:file_diff", handler);
-    return () => window.removeEventListener("rt:file_diff", handler);
-  }, [activeRepoId, selected, client]);
+  };
 
   const stagedPaths = useMemo(
     () => (indexChanges ?? []).map((c) => c.path),
@@ -266,16 +258,10 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
     pendingOp !== "commit";
 
   return (
-    <ResizableSplit
-      storageKey="source-control.changes"
-      defaultSize={320}
-      minSize={200}
-      direction="vertical"
+    <div
+      className="git-list source-control-list source-control-changes-full"
+      data-testid="source-control-changes-list"
     >
-      <div
-        className="git-list source-control-list"
-        data-testid="source-control-changes-list"
-      >
         <div className="source-control-commit">
           <textarea
             className="commit-input"
@@ -342,10 +328,8 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
                 />
                 <ChangesTree
                   changes={indexChanges}
-                  selectedPath={
-                    selected?.bucket === "index" ? selected.path : null
-                  }
-                  onSelect={(path) => setSelected({ bucket: "index", path })}
+                  selectedPath={null}
+                  onSelect={(path) => openDiff(path, "index")}
                   rowAction={{
                     glyph: "−",
                     label: "Unstage",
@@ -372,10 +356,8 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
                 />
                 <ChangesTree
                   changes={worktreeChanges}
-                  selectedPath={
-                    selected?.bucket === "worktree" ? selected.path : null
-                  }
-                  onSelect={(path) => setSelected({ bucket: "worktree", path })}
+                  selectedPath={null}
+                  onSelect={(path) => openDiff(path, "worktree")}
                   rowAction={{
                     glyph: "+",
                     label: "Stage",
@@ -398,15 +380,8 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
             open in forge ↗
           </button>
         </div>
-      </div>
-      <DiffView diff={diff} testId="source-control-changes-diff" />
-    </ResizableSplit>
+    </div>
   );
-}
-
-interface SelectedFile {
-  bucket: "index" | "worktree";
-  path: string;
 }
 
 interface BucketHeaderProps {

@@ -311,6 +311,42 @@ export function getRemoteUrl(
 }
 
 /**
+ * Open (or focus) a diff tab for a given (repo, path, against) triple.
+ * Resolves with the tab id once the daemon replies, so callers can
+ * activate the freshly opened tab. Times out after 4 s.
+ */
+export function openDiffTab(
+  client: DaemonClient,
+  args: { repoId: string; path: string; against: string | null },
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "diff_tab_opened" || detail.id !== reqId) return;
+      cleanup();
+      resolve(detail.tab_id);
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 4000);
+    const cleanup = () => {
+      window.removeEventListener("rt:diff_tab_opened", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:diff_tab_opened", handler);
+    client.send({
+      type: "open_diff_tab",
+      id: reqId,
+      repo_id: args.repoId,
+      path: args.path,
+      against: args.against,
+    });
+  });
+}
+
+/**
  * Build a forge browse URL for `<base>` (the repo home, e.g.
  * `https://github.com/owner/repo`) at the given branch. Returns `null` when
  * forge is unrecognized so callers can fall back to the repo home.

@@ -285,6 +285,70 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 .changes-tree .tree-row:focus-within .row-action { opacity: 1; }
 .changes-tree .row-action:hover { color: var(--fg); }
 
+/* Diff tab content (Monaco editor host). */
+.diff-pane-host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  position: relative;
+}
+.diff-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.diff-pane-header .path {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+.diff-pane-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+.diff-pane-loading {
+  position: absolute;
+  inset: auto 12px 12px auto;
+  padding: 4px 8px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+}
+
+/* Distinguish diff tabs in the tab bar. */
+.tab-pill-kind-icon {
+  display: inline-block;
+  width: 14px;
+  text-align: center;
+  margin-right: 4px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.tab-pill-kind-diff {
+  background: rgba(0, 122, 204, 0.06);
+}
+.tab-pill-kind-diff.is-active {
+  background: rgba(0, 122, 204, 0.12);
+}
+
+/* When the changes list takes the whole sidebar (no inline diff split). */
+.source-control-changes-full {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
 /* Inline error banner above the changes list. */
 .source-control-error {
   display: flex;

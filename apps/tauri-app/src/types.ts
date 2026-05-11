@@ -286,7 +286,14 @@ export type GridNode =
       second: GridNode;
     };
 
-export type TabContent = { kind: "grid"; grid: GridNode };
+export type TabContent =
+  | { kind: "grid"; grid: GridNode }
+  | {
+      kind: "diff";
+      repo_id: string;
+      path: string;
+      against: string | null;
+    };
 
 export interface TabEntry {
   id: string;
@@ -358,6 +365,20 @@ export type ClientMessage =
   | { type: "stage_files"; repo_id: string; paths: string[] }
   | { type: "unstage_files"; repo_id: string; paths: string[] }
   | { type: "commit_repo"; repo_id: string; message: string }
+  | {
+      type: "open_diff_tab";
+      id: string;
+      repo_id: string;
+      path: string;
+      against: string | null;
+    }
+  | {
+      type: "get_file_snapshot";
+      id: string;
+      repo_id: string;
+      path: string;
+      against: string | null;
+    }
   | { type: "load_scrollback"; session_id: string }
   | { type: "shutdown" }
   | { type: "set_repo_worktree_default"; repo_id: string; value: boolean }
@@ -489,6 +510,25 @@ export type DaemonMessage =
       type: "git_write_error";
       repo_id: string;
       operation: string;
+      error: string;
+    }
+  | { type: "diff_tab_opened"; id: string; tab_id: string }
+  | {
+      type: "file_snapshot";
+      id: string;
+      repo_id: string;
+      path: string;
+      against: string | null;
+      old: string;
+      new: string;
+      language: string;
+    }
+  | {
+      type: "file_snapshot_error";
+      id: string;
+      repo_id: string;
+      path: string;
+      against: string | null;
       error: string;
     }
   | {

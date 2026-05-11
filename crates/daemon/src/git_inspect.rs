@@ -197,6 +197,111 @@ fn parse_porcelain_z(raw: &str) -> (Vec<GitFileChange>, Vec<GitFileChange>) {
     (index, worktree)
 }
 
+/// Snapshot the old + new content backing a Monaco diff view.
+///
+/// `against = None` → unstaged: old = index entry (`git show :0:<path>`),
+///                    new = worktree file. Untracked files show as
+///                    additions (empty old).
+/// `against = Some("HEAD")` → staged: old = HEAD content
+///                    (`git show HEAD:<path>`), new = index entry.
+/// `against = Some(sha)` → historical: old = `git show <sha>~:<path>`,
+///                    new = `git show <sha>:<path>`. If the file does not
+///                    exist on either side (added/removed in the commit),
+///                    that side becomes empty.
+pub async fn file_snapshot(
+    repo: &Path,
+    path: &str,
+    against: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    match against {
+        None => {
+            let old = run_git_quiet(repo, &["show", &format!(":0:{path}")]).await;
+            let old = old.unwrap_or_default();
+            let new = tokio::fs::read_to_string(repo.join(path))
+                .await
+                .unwrap_or_default();
+            Ok((old, new))
+        }
+        Some("HEAD") => {
+            let old = run_git_quiet(repo, &["show", &format!("HEAD:{path}")])
+                .await
+                .unwrap_or_default();
+            let new = run_git_quiet(repo, &["show", &format!(":0:{path}")])
+                .await
+                .unwrap_or_default();
+            Ok((old, new))
+        }
+        Some(rev) => {
+            let old = run_git_quiet(repo, &["show", &format!("{rev}~:{path}")])
+                .await
+                .unwrap_or_default();
+            let new = run_git_quiet(repo, &["show", &format!("{rev}:{path}")])
+                .await
+                .unwrap_or_default();
+            Ok((old, new))
+        }
+    }
+}
+
+/// Like [`run_git`] but does not error on non-zero exit — callers that
+/// want "empty string when the object is missing" semantics (e.g. file
+/// added since HEAD has no HEAD side) use this.
+async fn run_git_quiet(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
+        .output()
+        .await
+        .with_context(|| format!("spawning git {args:?}"))?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Map a file path's extension to a Monaco language id. Defaults to
+/// `"plaintext"` for unknown extensions; Monaco renders unstyled.
+#[must_use]
+pub fn language_for_path(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    let ext = lower.rsplit_once('.').map_or("", |(_, e)| e);
+    match ext {
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "rs" => "rust",
+        "py" => "python",
+        "json" => "json",
+        "md" | "markdown" => "markdown",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "html" | "htm" => "html",
+        "xml" => "xml",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "sh" | "bash" | "zsh" => "shell",
+        "ps1" | "psm1" | "psd1" => "powershell",
+        "go" => "go",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "sql" => "sql",
+        "dockerfile" => "dockerfile",
+        _ => "plaintext",
+    }
+}
+
 pub async fn remote_url(repo_id: &str, repo: &Path) -> anyhow::Result<GitRemoteUrl> {
     let raw = run_git(repo, &["remote", "get-url", "origin"]).await?;
     let raw = raw.trim().to_string();

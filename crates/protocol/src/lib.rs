@@ -386,7 +386,22 @@ pub enum MergeLayout {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TabContent {
-    Grid { grid: GridNode },
+    Grid {
+        grid: GridNode,
+    },
+    /// A Monaco-backed diff view. Identified by the (repo, path, against)
+    /// tuple so clicking the same file in the source-control sidebar twice
+    /// just focuses the existing tab instead of opening a duplicate.
+    Diff {
+        repo_id: String,
+        path: String,
+        /// Selects the "old" side of the diff. Mirrors
+        /// [`ClientMessage::GetFileDiff::against`]: `None` = worktree vs
+        /// index (the CHANGES bucket), `Some("HEAD")` = index vs HEAD (the
+        /// STAGED bucket), `Some(sha)` = that commit's content as the old
+        /// side.
+        against: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -405,6 +420,7 @@ impl TabEntry {
     pub fn grid(&self) -> Option<&GridNode> {
         match &self.content {
             TabContent::Grid { grid } => Some(grid),
+            TabContent::Diff { .. } => None,
         }
     }
 
@@ -412,6 +428,7 @@ impl TabEntry {
     pub fn grid_mut(&mut self) -> Option<&mut GridNode> {
         match &mut self.content {
             TabContent::Grid { grid } => Some(grid),
+            TabContent::Diff { .. } => None,
         }
     }
 }
@@ -815,6 +832,30 @@ pub enum ClientMessage {
         repo_id: String,
         message: String,
     },
+    /// Open (or focus, if one already exists) a diff tab for the given
+    /// (repo, path, against) triple. The daemon broadcasts a `TabUpdated`
+    /// when a new tab is created, then replies with
+    /// [`DaemonMessage::DiffTabOpened`] so the requesting client knows
+    /// which tab id to activate.
+    OpenDiffTab {
+        /// Client-assigned request id, echoed back on
+        /// [`DaemonMessage::DiffTabOpened`].
+        id: String,
+        repo_id: String,
+        path: String,
+        against: Option<String>,
+    },
+    /// Fetch the OLD and NEW file contents that back a Monaco diff view.
+    /// Single round-trip (atomic snapshot) — see
+    /// [`DaemonMessage::FileSnapshot`].
+    GetFileSnapshot {
+        /// Client-assigned request id, echoed back on the response so the
+        /// caller can drop stale replies.
+        id: String,
+        repo_id: String,
+        path: String,
+        against: Option<String>,
+    },
     /// Request the persisted scrollback for a session, replayed on attach.
     /// The daemon answers with [`DaemonMessage::Scrollback`].
     LoadScrollback {
@@ -1053,6 +1094,34 @@ pub enum DaemonMessage {
     GitWriteError {
         repo_id: String,
         operation: String,
+        error: String,
+    },
+    /// Response to [`ClientMessage::OpenDiffTab`]. Carries the tab id (new
+    /// or pre-existing) so the requesting client can activate it.
+    DiffTabOpened {
+        id: String,
+        tab_id: String,
+    },
+    /// Response to [`ClientMessage::GetFileSnapshot`]. `old` + `new` are
+    /// the file contents Monaco's `DiffEditor` needs to render. `language`
+    /// is an extension-derived hint (e.g. `"typescript"`, `"rust"`); the
+    /// client uses it to set Monaco's model language for syntax
+    /// highlighting.
+    FileSnapshot {
+        id: String,
+        repo_id: String,
+        path: String,
+        against: Option<String>,
+        old: String,
+        new: String,
+        language: String,
+    },
+    /// Failure response to [`ClientMessage::GetFileSnapshot`].
+    FileSnapshotError {
+        id: String,
+        repo_id: String,
+        path: String,
+        against: Option<String>,
         error: String,
     },
     /// Persisted scrollback bytes (raw PTY output for interactive sessions,
@@ -1499,7 +1568,9 @@ mod tests {
             "created_at": "2024-01-01T00:00:00Z"
         }"#;
         let tab: TabEntry = serde_json::from_str(legacy).expect("parse legacy");
-        let TabContent::Grid { grid } = &tab.content;
+        let TabContent::Grid { grid } = &tab.content else {
+            panic!("expected grid variant");
+        };
         match grid {
             GridNode::Pane {
                 pane_id,
@@ -1521,7 +1592,9 @@ mod tests {
             "created_at": "2024-01-01T00:00:00Z"
         }"#;
         let tab: TabEntry = serde_json::from_str(modern).expect("parse modern");
-        let TabContent::Grid { grid } = &tab.content;
+        let TabContent::Grid { grid } = &tab.content else {
+            panic!("expected grid variant");
+        };
         assert!(matches!(grid, GridNode::Pane { pane_id, .. } if pane_id == "px"));
     }
 

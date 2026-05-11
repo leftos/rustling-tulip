@@ -28,7 +28,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
     MemberDiff, PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SessionKind, SessionMember,
-    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabEntry,
+    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
     VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
@@ -752,6 +752,51 @@ async fn dispatch(
             })
             .await;
         }
+        ClientMessage::OpenDiffTab {
+            id,
+            repo_id,
+            path,
+            against,
+        } => {
+            let outcome = open_diff_tab(hub, &repo_id, &path, against.as_deref())?;
+            if let Some(new_tab) = outcome.created {
+                let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            }
+            let _ = out_tx.send(DaemonMessage::DiffTabOpened {
+                id,
+                tab_id: outcome.tab_id,
+            });
+        }
+        ClientMessage::GetFileSnapshot {
+            id,
+            repo_id,
+            path,
+            against,
+        } => {
+            let repo = repo_path_or_err(hub, &repo_id)?;
+            match git_inspect::file_snapshot(&repo, &path, against.as_deref()).await {
+                Ok((old, new)) => {
+                    let _ = out_tx.send(DaemonMessage::FileSnapshot {
+                        id,
+                        repo_id,
+                        path: path.clone(),
+                        against,
+                        old,
+                        new,
+                        language: git_inspect::language_for_path(&path).to_string(),
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::FileSnapshotError {
+                        id,
+                        repo_id,
+                        path,
+                        against,
+                        error: format!("{err:#}"),
+                    });
+                }
+            }
+        }
         ClientMessage::LoadScrollback { session_id } => {
             let (data, truncated) = scrollback::load(&hub.dirs, &session_id);
             let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -1063,6 +1108,72 @@ async fn shutdown_all(hub: &Hub) {
         info!(session_id = %id, "shutdown_all: session stopped");
     }
     info!("shutdown_all: complete");
+}
+
+struct OpenDiffOutcome {
+    tab_id: String,
+    /// `Some` when a new tab was created (caller should broadcast
+    /// `TabUpdated`); `None` when an existing diff tab matched and we just
+    /// focused it.
+    created: Option<TabEntry>,
+}
+
+/// Find or create a diff tab keyed on (`repo_id`, `path`, `against`).
+/// Returns the tab id either way so the client can activate it.
+fn open_diff_tab(
+    hub: &Hub,
+    repo_id: &str,
+    path: &str,
+    against: Option<&str>,
+) -> anyhow::Result<OpenDiffOutcome> {
+    let against_owned = against.map(str::to_string);
+    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate(|s| {
+        if let Some(existing) = s.tabs.iter().find(|t| {
+            matches!(
+                &t.content,
+                TabContent::Diff {
+                    repo_id: r,
+                    path: p,
+                    against: a,
+                } if r == repo_id && p == path && a.as_deref() == against
+            )
+        }) {
+            return Ok(OpenDiffOutcome {
+                tab_id: existing.id.clone(),
+                created: None,
+            });
+        }
+        let new_tab = TabEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: diff_tab_name(path, against_owned.as_deref()),
+            content: TabContent::Diff {
+                repo_id: repo_id.to_string(),
+                path: path.to_string(),
+                against: against_owned.clone(),
+            },
+            created_at: chrono::Utc::now(),
+        };
+        let id = new_tab.id.clone();
+        s.tabs.push(new_tab.clone());
+        Ok(OpenDiffOutcome {
+            tab_id: id,
+            created: Some(new_tab),
+        })
+    })?;
+    outcome
+}
+
+fn diff_tab_name(path: &str, against: Option<&str>) -> String {
+    let basename = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    match against {
+        None => format!("{basename} (changes)"),
+        Some("HEAD") => format!("{basename} (staged)"),
+        Some(rev) => format!("{basename} @ {}", short_rev(rev)),
+    }
+}
+
+fn short_rev(rev: &str) -> &str {
+    if rev.len() > 7 { &rev[..7] } else { rev }
 }
 
 fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {

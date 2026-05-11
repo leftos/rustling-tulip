@@ -94,18 +94,20 @@ pub enum GridNode {
 
 ### Phase B — Monaco diff editor + diff-tab protocol extension
 
-- [ ] Bump `PROTOCOL_VERSION` 4 → 5.
-- [ ] Define `PaneContent` enum in `crates/protocol/src/lib.rs` and update `GridNode::Pane`. Add the serde shim for old `session_id` field.
-- [ ] Update `crates/daemon/src/tabs.rs` everywhere it constructs/manipulates `GridNode::Pane`. Tests in `lib.rs:982-1050`.
-- [ ] Update `crates/daemon/src/server.rs` handlers: `SplitPane`, `ReplacePaneSession`, `MovePane`, `ExtractToNewTab`, `MergeTabs` — preserve diff content across moves.
-- [ ] Add `ClientMessage::OpenDiffTab { repo_id, path, against }`. Handler creates a new tab with one diff pane via the same `make_tab` path. Daemon broadcasts `TabUpdated` like any other tab op.
-- [ ] Update `apps/tauri-app/src/types.ts` and every grid/pane consumer:
-  - [ ] `GridRenderer.tsx` reads `pane.content?.kind`. New branch for `kind === "diff"` renders `<DiffPane />`.
-  - [ ] `apps/tauri-app/src/components/DiffPane.tsx` — wraps Monaco's `DiffEditor`. Sends `GetFileDiff` for the `against` revision and `git show <rev>:<path>` for the "old" content (new daemon endpoint `GetFileContent { repo_id, path, against }` returning the raw file at that ref).
-  - [ ] `EmptyPane.tsx` and `SessionPane.tsx` are unchanged; the new path is purely additive at the renderer level.
-- [ ] Bundle Monaco eagerly: install `monaco-editor` directly, configure Vite with `monaco-editor/esm/vs/editor/editor.api`. Theme inherits dark from CSS variables. Pre-load only the diff editor (not the full editor language workers) to keep bundle weight down where possible.
-- [ ] Pop-out windows for diff tabs: reuse `open_session_window` plumbing in `apps/tauri-app/src-tauri/src/lib.rs` — generalize to `open_pane_window` that takes a `pane_id`. Old `open_session_window` becomes a wrapper.
-- [ ] Sidebar click handler: `client.send({ type: "open_diff_tab", repo_id, path, against: null })` then on the resulting `TabUpdated` arrival, activate that tab.
+Architecture shift from the original plan: a diff is its own **tab kind**,
+not a pane inside a grid (user pref). Pane-level operations are unchanged.
+`TabEntry` becomes a struct with a `content: TabContent` enum
+(`Grid { grid }` | `Diff { repo_id, path, against }`). PROTOCOL_VERSION 7 → 8.
+
+- [x] **iter 11** (commit `26999a3`): introduce `TabContent` enum on `TabEntry` with a custom `Deserialize` impl that migrates legacy state.json. Add `TabEntry::grid()`/`grid_mut()` helpers; daemon pane handlers thread through `grid_or_err`/`grid_or_err_mut` so future non-Grid tab kinds cleanly error instead of silently no-oping. Behavior preserved.
+- [x] **iter 12**: `TabContent::Diff` variant + Monaco DiffEditor wiring:
+  - [x] New protocol messages: `ClientMessage::OpenDiffTab { id, repo_id, path, against }`, `DaemonMessage::DiffTabOpened { id, tab_id }` (dedup keyed on (repo, path, against)); `ClientMessage::GetFileSnapshot { id, repo_id, path, against }`, `DaemonMessage::FileSnapshot { id, repo_id, path, against, old, new, language }`, `DaemonMessage::FileSnapshotError { ... }`.
+  - [x] Daemon helpers: `git_inspect::file_snapshot` for the dual-side fetch (worktree+index, HEAD+index, or sha-anchored); `git_inspect::language_for_path` for the Monaco language hint.
+  - [x] Eager Monaco bundle: `monaco-editor` direct, `monacoSetup.ts` registers the editor worker via Vite's `?worker` import. Vite splits language tokenizers into per-language chunks.
+  - [x] `DiffPane.tsx` wraps `monaco.editor.createDiffEditor` (read-only, side-by-side, vs-dark). Listens for the matching `rt:file_snapshot[_error]` event by request id.
+  - [x] `App.tsx` + `TabWindow.tsx` branch on `tab.content.kind`. Pop-out support is automatic — the existing `open_tab_window` + `?tab=<id>` plumbing carries diff tabs through unchanged.
+  - [x] `SourceControlSidebar`'s `ChangesView` click handler sends `open_diff_tab` and activates the returned tab id; the inline `<pre>` diff is gone.
+  - [x] `TabBar` adds a `Δ` glyph + `tab-pill-kind-diff` styling so diff tabs are visually distinguishable from grid tabs.
 
 ### Phase C — Staging + commit
 

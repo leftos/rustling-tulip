@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot, TabEntry } from "../types";
 import GridRenderer from "./GridRenderer";
+import DiffPane from "./DiffPane";
 
 interface Props {
   tab: TabEntry;
@@ -31,16 +32,25 @@ export default function TabWindow({
       <header className="tab-window-header">
         <h2>{tab.name}</h2>
       </header>
-      <GridRenderer
-        tab={tab}
-        client={client}
-        sessions={sessions}
-        subscribePty={subscribePty}
-        focusedPaneId={focusedPaneId}
-        onFocusPane={setFocusedPaneId}
-        onSpawnInPane={onSpawnInPane}
-        hasRepos={hasRepos}
-      />
+      {tab.content.kind === "diff" ? (
+        <DiffPane
+          client={client}
+          repoId={tab.content.repo_id}
+          path={tab.content.path}
+          against={tab.content.against}
+        />
+      ) : (
+        <GridRenderer
+          tab={tab}
+          client={client}
+          sessions={sessions}
+          subscribePty={subscribePty}
+          focusedPaneId={focusedPaneId}
+          onFocusPane={setFocusedPaneId}
+          onSpawnInPane={onSpawnInPane}
+          hasRepos={hasRepos}
+        />
+      )}
     </div>
   );
 }

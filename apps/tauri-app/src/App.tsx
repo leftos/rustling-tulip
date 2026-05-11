@@ -43,6 +43,7 @@ import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
+import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
 import { logToFile } from "./utils/logger";
 import { collectPanes, findTabContainingSession } from "./utils/grid";
@@ -653,6 +654,7 @@ export default function App() {
             repos={state.repos}
             focusedRepoId={focusedRepoId}
             client={state.client!}
+            onActivateTab={onActivateTab}
           />
         )}
         <main className="main-pane">
@@ -663,16 +665,25 @@ export default function App() {
             onActivate={onActivateTab}
           />
           {activeTab && state.client ? (
-            <GridRenderer
-              tab={activeTab}
-              client={state.client}
-              sessions={state.sessions}
-              subscribePty={subscribePty}
-              focusedPaneId={state.focusedPaneId}
-              onFocusPane={onFocusPane}
-              onSpawnInPane={onSpawnInPane}
-              hasRepos={state.repos.length > 0}
-            />
+            activeTab.content.kind === "diff" ? (
+              <DiffPane
+                client={state.client}
+                repoId={activeTab.content.repo_id}
+                path={activeTab.content.path}
+                against={activeTab.content.against}
+              />
+            ) : (
+              <GridRenderer
+                tab={activeTab}
+                client={state.client}
+                sessions={state.sessions}
+                subscribePty={subscribePty}
+                focusedPaneId={state.focusedPaneId}
+                onFocusPane={onFocusPane}
+                onSpawnInPane={onSpawnInPane}
+                hasRepos={state.repos.length > 0}
+              />
+            )
           ) : (
             <EmptyState
               connection={state.status}
@@ -944,6 +955,9 @@ function handleMessage(
     case "preset_preview_error":
     case "commit_ok":
     case "git_write_error":
+    case "diff_tab_opened":
+    case "file_snapshot":
+    case "file_snapshot_error":
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );

@@ -246,8 +246,10 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
             dragState?.overId === t.id && dragState.side === "before";
           const dropAfter =
             dragState?.overId === t.id && dragState.side === "after";
+          const kind = t.content.kind;
           const classes = [
             "tab-pill",
+            `tab-pill-kind-${kind}`,
             isActive ? "is-active" : "",
             isSelected ? "is-multi-selected" : "",
             dropBefore ? "drop-before" : "",
@@ -273,6 +275,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
               data-testid="tab-pill"
               data-tab-id={t.id}
               data-tab-name={t.name}
+              data-tab-kind={kind}
               data-tab-active={isActive ? "true" : "false"}
             >
               {isRenaming ? (
@@ -283,6 +286,15 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
                 />
               ) : (
                 <>
+                  {kind === "diff" && (
+                    <span
+                      className="tab-pill-kind-icon"
+                      aria-hidden="true"
+                      title="Diff tab"
+                    >
+                      Δ
+                    </span>
+                  )}
                   <span className="tab-pill-label" title={t.name}>
                     {t.name}
                   </span>

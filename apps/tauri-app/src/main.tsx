@@ -2,6 +2,10 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { installConsoleCapture } from "./utils/consoleCapture";
+// Side-effecting Monaco worker bootstrap; must run before any DiffEditor
+// mounts. See `utils/monacoSetup.ts` for the rationale on which workers
+// are bundled.
+import "./utils/monacoSetup";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 
