@@ -9,7 +9,7 @@ import {
   type TabEntry,
   type WorkspaceEntry,
 } from "../types";
-import { useEscape } from "../utils/a11y";
+import { clampMenuCoord, useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
 
 /// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
@@ -813,9 +813,13 @@ function ContainerContextMenu(p: ContextMenuProps) {
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
   useEscape(p.onClose);
 
-  // Backdrop catches clicks/keys to close. The menu itself is positioned at
-  // the cursor; max-bounds-checking is left to the browser for now (the
-  // panel is small and the sidebar is the main interaction surface).
+  // Clamp the menu against the window so a right-click near the
+  // bottom-right corner doesn't render the menu beyond the viewport.
+  // Estimates: menus average ~200px wide, ~300px tall (presets push higher
+  // — overlap-safe, viewport-stable beats pixel-perfect). The 12px margin
+  // keeps the menu off the edge.
+  const clampedLeft = clampMenuCoord(p.state.x, 200);
+  const clampedTop = clampMenuCoord(p.state.y, 300, "height");
   return (
     <div
       className="context-menu-backdrop"
@@ -827,7 +831,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
     >
       <ul
         className="context-menu"
-        style={{ left: p.state.x, top: p.state.y }}
+        style={{ left: clampedLeft, top: clampedTop }}
         onClick={(e) => e.stopPropagation()}
       >
         <li>

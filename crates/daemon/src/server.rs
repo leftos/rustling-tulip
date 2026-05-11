@@ -583,7 +583,7 @@ async fn dispatch(
             upsert_workspace(
                 &hub.state,
                 id,
-                name,
+                &name,
                 member_repo_ids,
                 linked_vscode_workspace,
             )?;
@@ -2210,7 +2210,7 @@ async fn accept_vscode_suggestion(
     upsert_workspace(
         &hub.state,
         None,
-        suggestion.suggested_name.clone(),
+        &suggestion.suggested_name,
         member_repo_ids,
         Some(suggestion.source_path.clone()),
     )?;

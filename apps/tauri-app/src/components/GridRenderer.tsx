@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
+import { clampMenuCoord } from "../utils/a11y";
 import {
   tabGrid,
   type GridNode,
@@ -411,7 +412,10 @@ function PaneContextMenu(p: PaneContextMenuProps) {
     >
       <ul
         className="context-menu"
-        style={{ left: p.state.x, top: p.state.y }}
+        style={{
+          left: clampMenuCoord(p.state.x, 200),
+          top: clampMenuCoord(p.state.y, 200, "height"),
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         <li>

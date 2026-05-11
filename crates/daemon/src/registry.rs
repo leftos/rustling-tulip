@@ -101,11 +101,30 @@ pub fn remove_repo(state: &AppState, repo_id: &str) -> anyhow::Result<()> {
 pub fn upsert_workspace(
     state: &AppState,
     id: Option<String>,
-    name: String,
+    name: &str,
     member_repo_ids: Vec<String>,
     linked_vscode_workspace: Option<String>,
 ) -> anyhow::Result<WorkspaceEntry> {
+    // Reject empty or whitespace-only names — they render as `WS ` rows in
+    // the sidebar with nothing to disambiguate from one another. Also reject
+    // duplicate names (case-insensitive, trimmed) against OTHER workspaces.
+    // Comparing against `id` lets a rename-to-its-own-name no-op through.
+    let trimmed_name = name.trim().to_string();
+    if trimmed_name.is_empty() {
+        return Err(anyhow!("workspace name cannot be empty"));
+    }
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let normalized_new = trimmed_name.to_lowercase();
+    let collision = state.with_persisted(|s| {
+        s.workspaces
+            .iter()
+            .any(|w| w.id != id && w.name.trim().to_lowercase() == normalized_new)
+    });
+    if collision {
+        return Err(anyhow!(
+            "another workspace already uses the name {trimmed_name:?}"
+        ));
+    }
     // Preserve the existing worktree-default when updating; only first-time
     // upserts start at the `true` default.
     let prior_default_use_worktree = state.with_persisted(|s| {
@@ -116,7 +135,7 @@ pub fn upsert_workspace(
     });
     let entry = WorkspaceEntry {
         id: id.clone(),
-        name,
+        name: trimmed_name,
         member_repo_ids,
         linked_vscode_workspace,
         default_use_worktree: prior_default_use_worktree.unwrap_or(true),
