@@ -1,6 +1,7 @@
 //! Repo / workspace registry mutations on top of `AppState`.
 
 use crate::git;
+use crate::paths::simplify_path;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
 use protocol::{RepoEntry, WorkspaceEntry};
@@ -19,7 +20,7 @@ pub async fn add_repo(
     if !path.join(".git").exists() {
         return Err(anyhow!("not a git repo (no .git): {path_str}"));
     }
-    let canonical = std::fs::canonicalize(path).context("canonicalizing repo path")?;
+    let canonical = simplify_path(&std::fs::canonicalize(path).context("canonicalizing repo path")?);
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     let existing = state.with_persisted(|s| {

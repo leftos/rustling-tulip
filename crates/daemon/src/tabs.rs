@@ -271,6 +271,40 @@ pub fn prune_session(grid: &mut GridNode, removed_session_id: &str) -> bool {
     }
 }
 
+/// Clear every pane whose `session_id` is not in `keep`. Used on daemon
+/// startup to drop dangling references to sessions that did not survive the
+/// restart. Returns true if at least one pane was modified.
+pub fn prune_sessions_not_in(grid: &mut GridNode, keep: &std::collections::HashSet<String>) -> bool {
+    match grid {
+        GridNode::Pane { session_id, .. } => {
+            if let Some(id) = session_id.as_deref()
+                && !keep.contains(id)
+            {
+                *session_id = None;
+                true
+            } else {
+                false
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            let a = prune_sessions_not_in(first, keep);
+            let b = prune_sessions_not_in(second, keep);
+            a || b
+        }
+    }
+}
+
+/// True iff at least one pane in the grid is still bound to a session id.
+/// A tab where every pane has `session_id == None` carries no recoverable
+/// state across a daemon restart, so the supervisor drops it on startup.
+#[must_use]
+pub fn has_any_session(grid: &GridNode) -> bool {
+    match grid {
+        GridNode::Pane { session_id, .. } => session_id.is_some(),
+        GridNode::Split { first, second, .. } => has_any_session(first) || has_any_session(second),
+    }
+}
+
 /// Extract a pane (leaf) from the grid, collapsing parent splits as needed.
 /// Returns the extracted Pane node plus a flag indicating whether the source
 /// tab is now empty (caller should remove the tab).
@@ -713,6 +747,43 @@ mod tests {
         ));
         assert!(matches!(&**inner_second, GridNode::Pane { session_id, .. }
                                     if session_id.as_deref() == Some("s-survives")));
+    }
+
+    #[test]
+    fn prune_sessions_not_in_clears_unmatched_panes_only() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            pane("p1", Some("s-live")),
+            split(
+                Vertical,
+                0.5,
+                pane("p2", Some("s-dead")),
+                pane("p3", None),
+            ),
+        );
+        let mut keep = std::collections::HashSet::new();
+        keep.insert("s-live".to_string());
+        assert!(prune_sessions_not_in(&mut grid, &keep));
+        assert!(!prune_sessions_not_in(&mut grid, &keep));
+        let panes = collect_panes(&grid);
+        let by_pane: std::collections::HashMap<_, _> = panes.into_iter().collect();
+        assert_eq!(by_pane.get("p1"), Some(&Some("s-live".to_string())));
+        assert_eq!(by_pane.get("p2"), Some(&None));
+        assert_eq!(by_pane.get("p3"), Some(&None));
+    }
+
+    #[test]
+    fn has_any_session_distinguishes_bound_from_empty() {
+        let bound = split(
+            Horizontal,
+            0.5,
+            pane("p1", None),
+            pane("p2", Some("s-live")),
+        );
+        assert!(has_any_session(&bound));
+        let empty = split(Horizontal, 0.5, pane("p1", None), pane("p2", None));
+        assert!(!has_any_session(&empty));
     }
 
     #[test]

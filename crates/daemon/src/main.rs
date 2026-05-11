@@ -21,6 +21,7 @@ mod vscode;
 mod workspace;
 
 use anyhow::Context as _;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -48,9 +49,44 @@ async fn main() -> anyhow::Result<()> {
         orphan::try_delete_meta(&dirs, &meta.session_id);
     }
 
+    // Persisted tabs reference session ids that may no longer be valid. After
+    // orphan recovery, clear panes that point at dead sessions and drop tabs
+    // with no surviving session bindings — otherwise a killed-daemon restart
+    // resurrects an empty layout the user has to clear by hand.
+    prune_stale_tabs(&state, &live);
+
     let result = server::run(state, dirs, live).await;
     info!(?result, "rustling-tulipd main returning");
     result
+}
+
+fn prune_stale_tabs(state: &Arc<state::AppState>, live_orphans: &[orphan::OrphanMeta]) {
+    let live_ids: HashSet<String> = live_orphans
+        .iter()
+        .map(|m| m.session_id.clone())
+        .collect();
+    let result = state.mutate(|s| {
+        let prev_tab_count = s.tabs.len();
+        let mut panes_cleared = 0usize;
+        for tab in &mut s.tabs {
+            if tabs::prune_sessions_not_in(&mut tab.grid, &live_ids) {
+                panes_cleared += 1;
+            }
+        }
+        s.tabs.retain(|t| tabs::has_any_session(&t.grid));
+        let tabs_dropped = prev_tab_count.saturating_sub(s.tabs.len());
+        (panes_cleared, tabs_dropped)
+    });
+    match result {
+        Ok((panes_cleared, tabs_dropped)) if panes_cleared > 0 || tabs_dropped > 0 => {
+            info!(
+                panes_cleared,
+                tabs_dropped, "pruned tabs referencing dead sessions"
+            );
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!(?err, "tab prune failed; continuing with stale state"),
+    }
 }
 
 fn init_tracing(dirs: &paths::Dirs) {

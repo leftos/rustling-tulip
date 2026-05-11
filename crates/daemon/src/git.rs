@@ -4,6 +4,7 @@ use anyhow::{Context as _, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
+use tracing::debug;
 
 /// On Windows, suppresses the brief console window flash that would otherwise
 /// appear for each git child. No-op on other platforms.
@@ -11,6 +12,11 @@ use tokio::process::Command;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+    // Per-invocation timing logged at debug; bumped to info when slower than
+    // 500ms so the user sees outliers without flipping log filters. Worktree
+    // operations on Windows commonly hit several seconds and we want that to
+    // surface during slow-spawn investigations.
+    let started = std::time::Instant::now();
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)
@@ -24,6 +30,12 @@ async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
         .output()
         .await
         .with_context(|| format!("spawning git {args:?}"))?;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if elapsed_ms >= 500 {
+        tracing::info!(elapsed_ms, ?args, "slow git invocation");
+    } else {
+        debug!(elapsed_ms, ?args, "git invocation");
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(

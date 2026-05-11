@@ -35,7 +35,7 @@ import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
 import TabWindow from "./components/TabWindow";
 import { logToFile } from "./utils/logger";
-import { collectPanes } from "./utils/grid";
+import { collectPanes, findTabContainingSession } from "./utils/grid";
 
 /// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
 /// `?session=<id>` (legacy single-session pop-out). The branch in App
@@ -57,9 +57,6 @@ interface AppState {
   focusedPaneId: string | null;
   spawnOpen: boolean;
   spawnInitial: SpawnInitialTarget | undefined;
-  /// Pipeline: when SpawnDialog fires `onSpawned`, this flag is set. The next
-  /// new session triggers an automatic `create_tab` (see `pendingTabActivate`).
-  pendingSessionToTab: boolean;
   /// Set after we send `create_tab` for a freshly spawned session; the next
   /// `tab_updated` for an unseen tab id becomes the active tab.
   pendingTabActivate: boolean;
@@ -83,7 +80,6 @@ export default function App() {
     focusedPaneId: null,
     spawnOpen: false,
     spawnInitial: undefined,
-    pendingSessionToTab: false,
     pendingTabActivate: false,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
@@ -102,6 +98,42 @@ export default function App() {
   // messages (create_tab after a session spawns) without needing to thread
   // state through every closure.
   const clientRef = useRef<DaemonClient | null>(null);
+
+  // Side-effect decisions live in refs, not state. Reasons:
+  //   - State updater functions must stay pure (StrictMode double-invokes them
+  //     in dev to surface side effects), so we cannot `client.send(...)` from
+  //     inside one without double-firing the message.
+  //   - The daemon emits each `session_updated` twice for a new session (once
+  //     from the registry broadcast, once from the spawn-dispatch direct send),
+  //     and click handlers may fire faster than React can commit a render. A
+  //     synchronous ref guarantees one-shot semantics across those races.
+  const seenSessionIdsRef = useRef(new Set<string>());
+  /// One-shot follow-up for the next freshly-spawned session id.
+  ///   - `newTab`     : open a fresh tab containing the session.
+  ///   - `replacePane`: drop the session into a specific empty pane (set when
+  ///                    the user opened the spawn dialog from that pane's
+  ///                    "+ spawn" button).
+  /// Consumed by the `session_updated` handler the first time it sees an
+  /// unseen session id.
+  const pendingSpawnIntentRef = useRef<
+    | { kind: "newTab" }
+    | { kind: "replacePane"; tabId: string; paneId: string }
+    | null
+  >(null);
+
+  /// Captured when the spawn dialog is opened from an empty pane's "+ spawn"
+  /// button. Read at `onSpawned` to upgrade the pending intent from `newTab`
+  /// (the default) to `replacePane`. Cleared on dialog close so a manual reopen
+  /// from the toolbar doesn't inherit a stale target.
+  const spawnTargetPaneRef = useRef<{ tabId: string; paneId: string } | null>(
+    null,
+  );
+
+  // Snapshot of the latest committed state, for click handlers that need to
+  // read state and dispatch side effects without putting the send inside a
+  // state updater.
+  const latestStateRef = useRef<AppState | null>(null);
+  latestStateRef.current = state;
 
   useEffect(() => {
     void (async () => {
@@ -124,7 +156,14 @@ export default function App() {
           setState((s) => ({ ...s, status: next }));
         });
         client.onMessage((msg) =>
-          handleMessage(msg, setState, ptyListenersRef.current, clientRef),
+          handleMessage(
+            msg,
+            setState,
+            ptyListenersRef.current,
+            clientRef,
+            seenSessionIdsRef,
+            pendingSpawnIntentRef,
+          ),
         );
         setState((s) => ({ ...s, client }));
       } catch (err) {
@@ -165,40 +204,81 @@ export default function App() {
   }, []);
 
   const onSelectSession = useCallback((sessionId: string) => {
-    setState((s) => {
-      const next = new Set(s.attentionSessions);
-      next.delete(sessionId);
-      if (!s.client) return { ...s, attentionSessions: next };
-      const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
-      if (activeTab) {
-        const panes = collectPanes(activeTab.grid);
-        const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
-        if (focusedPane && focusedPane.session_id === null) {
-          s.client.send({
-            type: "replace_pane_session",
-            tab_id: activeTab.id,
-            pane_id: focusedPane.pane_id,
-            session_id: sessionId,
-          });
-          return { ...s, attentionSessions: next };
-        }
+    // Decide the side-effect from the latest committed state (read via ref so
+    // it stays current), THEN dispatch a pure state update. Doing it the other
+    // way around would put `client.send(...)` inside a state updater, which
+    // StrictMode would double-invoke in dev — hence the two-tabs-per-spawn bug.
+    //
+    // Resolution order:
+    //   1. If the session is already shown in some tab → activate that tab
+    //      (and focus its pane). No new tab, no daemon round-trip.
+    //   2. Else if the active tab has a focused empty pane → fill that pane.
+    //   3. Else → open the session in a fresh tab.
+    const s = latestStateRef.current;
+    const client = s?.client;
+    if (!client) {
+      setState((cur) => {
+        if (!cur.attentionSessions.has(sessionId)) return cur;
+        const next = new Set(cur.attentionSessions);
+        next.delete(sessionId);
+        return { ...cur, attentionSessions: next };
+      });
+      return;
+    }
+    const existing = findTabContainingSession(s.tabs, sessionId);
+    if (existing) {
+      setState((cur) => {
+        const nextAttention = new Set(cur.attentionSessions);
+        nextAttention.delete(sessionId);
+        return {
+          ...cur,
+          attentionSessions: nextAttention,
+          activeTabId: existing.tabId,
+          focusedPaneId: existing.paneId,
+        };
+      });
+      return;
+    }
+    let openInNewTab = true;
+    const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
+    if (activeTab) {
+      const panes = collectPanes(activeTab.grid);
+      const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
+      if (focusedPane && focusedPane.session_id === null) {
+        client.send({
+          type: "replace_pane_session",
+          tab_id: activeTab.id,
+          pane_id: focusedPane.pane_id,
+          session_id: sessionId,
+        });
+        openInNewTab = false;
       }
-      // No focused empty pane → open the session in a fresh tab.
-      s.client.send({
+    }
+    if (openInNewTab) {
+      client.send({
         type: "create_tab",
         name: null,
         initial_session_id: sessionId,
       });
-      return {
-        ...s,
-        attentionSessions: next,
-        pendingTabActivate: true,
-      };
+    }
+    setState((cur) => {
+      const next = new Set(cur.attentionSessions);
+      next.delete(sessionId);
+      return openInNewTab
+        ? { ...cur, attentionSessions: next, pendingTabActivate: true }
+        : { ...cur, attentionSessions: next };
     });
   }, []);
 
   const onSpawnInPane = useCallback(
     (paneId: string) => {
+      // Record the (tab, pane) the user clicked from so the spawn follow-up
+      // can route the new session into that pane via `replace_pane_session`
+      // instead of opening a fresh tab.
+      const cur = latestStateRef.current;
+      if (cur?.activeTabId) {
+        spawnTargetPaneRef.current = { tabId: cur.activeTabId, paneId };
+      }
       setState((s) => ({
         ...s,
         spawnOpen: true,
@@ -210,10 +290,14 @@ export default function App() {
   );
 
   const onOpenSpawn = useCallback((initial?: SpawnInitialTarget) => {
+    // Toolbar/sidebar spawn — explicitly clear any prior pane intent so a
+    // leftover from a cancelled "spawn in this pane" doesn't re-target.
+    spawnTargetPaneRef.current = null;
     setState((s) => ({ ...s, spawnOpen: true, spawnInitial: initial }));
   }, []);
 
   const onCloseSpawn = useCallback(() => {
+    spawnTargetPaneRef.current = null;
     setState((s) => ({ ...s, spawnOpen: false, spawnInitial: undefined }));
   }, []);
 
@@ -229,7 +313,14 @@ export default function App() {
   }, []);
 
   const onSpawned = useCallback(() => {
-    setState((s) => ({ ...s, pendingSessionToTab: true }));
+    // Arm the one-shot follow-up for the next new session. If the user opened
+    // the dialog from an empty pane's "+ spawn" button, route the result into
+    // that pane (replacePane). Otherwise open a fresh tab (newTab).
+    const target = spawnTargetPaneRef.current;
+    pendingSpawnIntentRef.current = target
+      ? { kind: "replacePane", tabId: target.tabId, paneId: target.paneId }
+      : { kind: "newTab" };
+    spawnTargetPaneRef.current = null;
   }, []);
 
   const onOpenWorkspaceCreator = useCallback(() => {
@@ -537,11 +628,18 @@ function loadActiveTab(): string | null {
   }
 }
 
+type PendingSpawnIntent =
+  | { kind: "newTab" }
+  | { kind: "replacePane"; tabId: string; paneId: string }
+  | null;
+
 function handleMessage(
   msg: DaemonMessage,
   setState: React.Dispatch<React.SetStateAction<AppState>>,
   ptyListeners: Map<string, Set<(b64: string) => void>>,
   clientRef: React.MutableRefObject<DaemonClient | null>,
+  seenSessionIdsRef: React.MutableRefObject<Set<string>>,
+  pendingSpawnIntentRef: React.MutableRefObject<PendingSpawnIntent>,
 ) {
   switch (msg.type) {
     case "welcome":
@@ -558,35 +656,65 @@ function handleMessage(
     case "workspaces":
       setState((s) => ({ ...s, workspaces: msg.workspaces }));
       return;
-    case "sessions":
+    case "sessions": {
+      // Initial snapshot. Seed the seen-set so a subsequent session_updated
+      // for one of these ids is recognized as not-new.
+      for (const s of msg.sessions) seenSessionIdsRef.current.add(s.id);
       setState((s) => ({ ...s, sessions: msg.sessions }));
       return;
-    case "session_updated":
+    }
+    case "session_updated": {
+      // Decide one-shot follow-up BEFORE setState so the state updater stays
+      // pure (StrictMode double-invokes updaters in dev). The seen-set is the
+      // source of truth for "is this a new session id" — relying on state in
+      // the reducer would mis-fire if the daemon emits the same id back-to-back
+      // (which it currently does after a spawn).
+      const session = msg.session;
+      const isNew = !seenSessionIdsRef.current.has(session.id);
+      if (isNew) seenSessionIdsRef.current.add(session.id);
+      const intent = isNew ? pendingSpawnIntentRef.current : null;
+      if (intent) pendingSpawnIntentRef.current = null;
       setState((s) => {
-        const idx = s.sessions.findIndex((sn) => sn.id === msg.session.id);
+        const idx = s.sessions.findIndex((sn) => sn.id === session.id);
         const next = s.sessions.slice();
-        const isNew = idx === -1;
-        if (isNew) next.push(msg.session);
-        else next[idx] = msg.session;
-        if (isNew && s.pendingSessionToTab) {
-          clientRef.current?.send({
-            type: "create_tab",
-            name: null,
-            initial_session_id: msg.session.id,
-          });
+        if (idx === -1) next.push(session);
+        else next[idx] = session;
+        if (intent?.kind === "newTab") {
+          return { ...s, sessions: next, pendingTabActivate: true };
+        }
+        if (intent?.kind === "replacePane") {
+          // Activate the target tab and focus the pane locally; the
+          // `replace_pane_session` send below tells the daemon to attach
+          // the session, which will round-trip as a `tab_updated`.
           return {
             ...s,
             sessions: next,
-            pendingSessionToTab: false,
-            pendingTabActivate: true,
+            activeTabId: intent.tabId,
+            focusedPaneId: intent.paneId,
           };
         }
         return { ...s, sessions: next };
       });
+      if (intent?.kind === "newTab") {
+        clientRef.current?.send({
+          type: "create_tab",
+          name: null,
+          initial_session_id: session.id,
+        });
+      } else if (intent?.kind === "replacePane") {
+        clientRef.current?.send({
+          type: "replace_pane_session",
+          tab_id: intent.tabId,
+          pane_id: intent.paneId,
+          session_id: session.id,
+        });
+      }
       return;
+    }
     case "session_removed":
       // Daemon prunes pane references and broadcasts tab_updated separately;
       // here we only update the session list.
+      seenSessionIdsRef.current.delete(msg.session_id);
       setState((s) => ({
         ...s,
         sessions: s.sessions.filter((sn) => sn.id !== msg.session_id),

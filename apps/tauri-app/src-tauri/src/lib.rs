@@ -84,6 +84,20 @@ fn app_log_path() -> Result<PathBuf, String> {
     Ok(log_dir.join("app.log"))
 }
 
+/// Truncate `app.log` (creating it if missing). Called once on app startup so
+/// each launch produces a clean log file rather than ever-growing append. The
+/// daemon mirrors this on its side with truncate-on-start for `daemon.log`.
+fn truncate_app_log() -> Result<(), String> {
+    let path = app_log_path()?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("truncate {}: {e}", path.display()))?;
+    Ok(())
+}
+
 /// Append a single timestamped line to `app.log`. Frontend code invokes this
 /// from key paths (especially shutdown) so we have something to look at when
 /// the UI hangs. The file is shared with the daemon's logs in the same
@@ -232,6 +246,9 @@ pub fn run() {
         ])
         .setup(|_app| {
             info!("rustling-tulip Tauri app starting");
+            if let Err(err) = truncate_app_log() {
+                tracing::warn!(err, "failed to truncate app.log on boot");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

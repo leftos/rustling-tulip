@@ -944,10 +944,21 @@ fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "Spawn is naturally a flat pipeline (resolve → config → mode switch → \
+              timing). Extracting helpers would require threading the timing values \
+              and adding a result wrapper for diminishing returns"
+)]
 pub(crate) async fn spawn_session(
     hub: &Hub,
     req: SpawnRequest,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
+    // Phase-level timing for the spawn pipeline so we can tell at a glance
+    // whether a slow spawn was the git worktree setup, the PTY/child boot,
+    // or something on the registry side. Logged at info so users debugging
+    // perceived slowness can read them without flipping log filters.
+    let t_total = std::time::Instant::now();
     let SpawnRequest {
         label,
         target,
@@ -959,7 +970,16 @@ pub(crate) async fn spawn_session(
         extra_env,
         prompt_injector,
     } = req;
+    info!(
+        ?mode,
+        target_kind = match &target {
+            SpawnTarget::Single { .. } => "single",
+            SpawnTarget::Workspace { .. } => "workspace",
+        },
+        "spawn_session: begin"
+    );
 
+    let t_resolve = std::time::Instant::now();
     let (kind, members, primary_cwd, default_label, workspace_id) = match target {
         SpawnTarget::Single {
             repo_id,
@@ -974,6 +994,12 @@ pub(crate) async fn spawn_session(
             use_worktree,
         } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?,
     };
+    info!(
+        elapsed_ms = u64::try_from(t_resolve.elapsed().as_millis()).unwrap_or(u64::MAX),
+        member_count = members.len(),
+        cwd = %primary_cwd.display(),
+        "spawn_session: git/worktree resolution done"
+    );
 
     let session_id = new_id();
     let label = label.unwrap_or(default_label);
@@ -985,7 +1011,8 @@ pub(crate) async fn spawn_session(
         prompt_injector,
     };
 
-    match mode {
+    let t_child = std::time::Instant::now();
+    let result = match mode {
         SessionMode::Headless => {
             let prompt = initial_prompt
                 .clone()
@@ -1030,7 +1057,15 @@ pub(crate) async fn spawn_session(
             initial_prompt,
             &cfg,
         ),
-    }
+    };
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    info!(
+        outcome,
+        elapsed_child_ms = u64::try_from(t_child.elapsed().as_millis()).unwrap_or(u64::MAX),
+        elapsed_total_ms = u64::try_from(t_total.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "spawn_session: child boot done"
+    );
+    result
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.

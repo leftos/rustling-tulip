@@ -65,7 +65,9 @@ pub fn parse_workspace_file(
         } else {
             base_dir.join(raw)
         };
-        let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
+        let canonical = std::fs::canonicalize(&abs)
+            .map(|p| crate::paths::simplify_path(&p))
+            .unwrap_or(abs);
         let canonical_str = canonical.to_string_lossy().into_owned();
         let matched_repo_id = known_repos
             .iter()

@@ -65,6 +65,10 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 
 .split { min-height: 0; min-width: 0; }
 .split-pane { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+/* Make the single child of a split pane fill the pane on both axes — without
+   this, .main-pane and .sidebar collapse to content height inside the column
+   flex container, leaving empty space below the terminal. */
+.split-pane > * { flex: 1 1 0; min-width: 0; min-height: 0; }
 .split-divider {
   background: var(--border);
   transition: background 0.1s;

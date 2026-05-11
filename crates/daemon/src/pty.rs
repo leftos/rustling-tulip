@@ -69,7 +69,14 @@ impl PtyHandle {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "PTY spawn wires up reader, writer, resize, waiter, and exit handles \
+              in one go; splitting them apart would force every helper to grow its \
+              own channel signature for marginal clarity gain"
+)]
 pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
+    let started = std::time::Instant::now();
     let PtySpawnSpec {
         program,
         args,
@@ -80,6 +87,7 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
     } = spec;
 
     let pty_system = NativePtySystem::default();
+    let t_open = std::time::Instant::now();
     let pair = pty_system
         .openpty(PtySize {
             rows: rows.max(10),
@@ -88,6 +96,10 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
             pixel_height: 0,
         })
         .context("openpty")?;
+    debug!(
+        elapsed_ms = u64::try_from(t_open.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "pty: openpty done"
+    );
 
     let mut cmd = CommandBuilder::new(&program);
     cmd.args(&args);
@@ -96,7 +108,13 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
         cmd.env(k, v);
     }
 
+    let t_child = std::time::Instant::now();
     let mut child = pair.slave.spawn_command(cmd).context("spawn child")?;
+    tracing::info!(
+        elapsed_ms = u64::try_from(t_child.elapsed().as_millis()).unwrap_or(u64::MAX),
+        program,
+        "pty: child spawned"
+    );
     drop(pair.slave);
 
     let pid = child.process_id();
@@ -179,6 +197,12 @@ pub fn spawn(spec: PtySpawnSpec) -> anyhow::Result<Arc<PtyHandle>> {
         drop(master_for_waiter);
         let _ = exit_tx.send(code);
     });
+
+    debug!(
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        ?pid,
+        "pty: spawn complete"
+    );
 
     Ok(Arc::new(PtyHandle {
         output: output_tx,
