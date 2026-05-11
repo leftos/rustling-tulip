@@ -3,6 +3,7 @@ import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 import { randomWorktreeBranchName } from "../utils/randomName";
+import { loadSettings } from "../utils/settings";
 import type {
   Agent,
   CodexSandbox,
@@ -47,10 +48,16 @@ interface AdvancedConfig {
 }
 
 function emptyAdvanced(): AdvancedConfig {
+  // Read defaults from Settings so users who configured a default
+  // permission_mode or codex_sandbox (iter 49 Settings modal) get them
+  // pre-filled. Read at dialog-open time (vs once-at-module-load) so a
+  // user who flips the setting in the modal and then re-opens spawn
+  // picks up the new value without restarting the app.
+  const settings = loadSettings();
   return {
     model: null,
-    permissionMode: null,
-    codexSandbox: null,
+    permissionMode: settings.spawn.default_permission_mode,
+    codexSandbox: settings.spawn.default_codex_sandbox,
     envRows: [],
   };
 }
@@ -111,7 +118,9 @@ export default function SpawnDialog({
   );
   const [runMode, setRunMode] = useState<RunMode>("interactive");
   const [headlessPrompt, setHeadlessPrompt] = useState("");
-  const [skipPerms, setSkipPerms] = useState(true);
+  const [skipPerms, setSkipPerms] = useState(
+    () => loadSettings().spawn.skip_permissions_default,
+  );
   const [agent, setAgent] = useState<Agent>("claude");
   const [advanced, setAdvanced] = useState<AdvancedConfig>(emptyAdvanced);
 

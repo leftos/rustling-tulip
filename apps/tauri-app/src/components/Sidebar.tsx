@@ -11,6 +11,7 @@ import {
 } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
+import { saveSettings, useSettings } from "../utils/settings";
 
 /// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
 /// into existing pane drop zones. Payload is `${tabId}:${paneId}` — identical
@@ -56,6 +57,9 @@ interface Props {
   onOpenWorkspaceCreator: () => void;
   onRevealInExplorer: (path: string) => void;
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
+  /// Open the Settings modal (iter 49). Gear icon in the sidebar header
+  /// + Ctrl/Cmd+, in App-level keyboard shortcuts both invoke this.
+  onOpenSettings: () => void;
 }
 
 type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
@@ -64,7 +68,6 @@ type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
 /// (matches the daemon's registry view); "tab" groups by which tab each
 /// session is currently open in. User-toggled, persisted to localStorage.
 type SidebarView = "container" | "tab";
-const SIDEBAR_VIEW_KEY = "rt.sidebar.view";
 /// Render a small connection-state badge for the sidebar header. Returns
 /// `null` when the connection is `open` so the happy path stays uncluttered;
 /// any other state surfaces as a coloured chip with a tooltip carrying the
@@ -130,21 +133,6 @@ function renderConnectionBadge(
   );
 }
 
-function readView(): SidebarView {
-  try {
-    const v = localStorage.getItem(SIDEBAR_VIEW_KEY);
-    return v === "tab" ? "tab" : "container";
-  } catch {
-    return "container";
-  }
-}
-function writeView(v: SidebarView): void {
-  try {
-    localStorage.setItem(SIDEBAR_VIEW_KEY, v);
-  } catch {
-    /* localStorage unavailable — best-effort persistence only. */
-  }
-}
 
 interface TreeContainer {
   key: string;
@@ -169,10 +157,21 @@ interface ContextMenuState {
 }
 
 export default function Sidebar(props: Props) {
-  const [view, setView] = useState<SidebarView>(() => readView());
+  // The current sidebar view is a per-window selection but it also serves
+  // as the persisted default for the next window — same key, same value.
+  // Source-of-truth is `settings.sidebar.default_view` (managed by
+  // `utils/settings.ts`), seeded on first load from the legacy
+  // `rt.sidebar.view` localStorage key.
+  const [settings] = useSettings();
+  const [view, setView] = useState<SidebarView>(
+    () => settings.sidebar.default_view,
+  );
   const updateView = (next: SidebarView) => {
     setView(next);
-    writeView(next);
+    saveSettings({
+      ...settings,
+      sidebar: { default_view: next },
+    });
   };
   const containers = useMemo(
     () =>
@@ -268,6 +267,16 @@ export default function Sidebar(props: Props) {
       <header className="sidebar-header">
         <span className="brand">rustling-tulip</span>
         {connectionBadge}
+        <button
+          type="button"
+          className="sidebar-settings-btn"
+          onClick={props.onOpenSettings}
+          aria-label="Open settings"
+          title="Settings (Ctrl+,)"
+          data-testid="sidebar-settings-btn"
+        >
+          ⚙
+        </button>
         <div
           className="sidebar-view-toggle"
           role="tablist"

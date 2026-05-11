@@ -137,8 +137,7 @@ The per-session `GitPanel` is gone since iter 7 (replaced by the global Source C
 - [x] **Connection badge is only visible in the EmptyState.** *Resolved (iter 21.)*
 - [x] **`AppState.pendingTabActivate` is reset for the first new tab but tracks no actual tab id.** *Resolved (iter 35 — counter.)*
 - [x] **`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.** *Resolved (iter 22.)*
-- [ ] **Notification permission is requested on every app start.** *Partially resolved (iter 21 — log to `app.log` when denied).* A real settings UI to inspect/re-trigger is still out of scope (no settings surface exists yet).
-  - File: `apps/tauri-app/src/App.tsx:175-189`.
+- [x] **Notification permission is requested on every app start.** *Resolved (iter 49 — Settings modal shows permission status + Re-request button, plus per-event toggles for awaiting_input / stopped / error.)*
 
 ### Dev / testing workflow
 

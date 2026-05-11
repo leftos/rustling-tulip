@@ -41,6 +41,7 @@ import RepoRemoveDialog from "./components/RepoRemoveDialog";
 import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
+import SettingsModal from "./components/SettingsModal";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
 import DiffPane from "./components/DiffPane";
@@ -48,6 +49,7 @@ import TabWindow from "./components/TabWindow";
 import { logToFile } from "./utils/logger";
 import { collectPanes, findTabContainingSession } from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
+import { loadSettings, useSettings } from "./utils/settings";
 
 /// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
 /// `?session=<id>` (legacy single-session pop-out). The branch in App
@@ -85,6 +87,7 @@ interface AppState {
   /// banner + Force-quit button in the exit dialog so the user isn't
   /// trapped staring at "Stopping…" forever when the daemon hangs.
   exitStuck: boolean;
+  settingsOpen: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
   toasts: ToastEntry[];
   /// Repo-remove modal state, set when the sidebar's × click hit a repo
@@ -111,10 +114,19 @@ export default function App() {
     exitConfirmOpen: false,
     exitInFlight: false,
     exitStuck: false,
+    settingsOpen: false,
     presetLaunch: null,
     toasts: [],
     repoRemove: null,
   });
+
+  // App-wide user preferences (localStorage-backed). `useSettings` returns
+  // a live tuple — any other component that calls `useSettings` will
+  // re-render on writes from anywhere (modal, migration), so we don't
+  // prop-drill the settings object.
+  const [settings] = useSettings();
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   // PTY output is high-volume — keep it out of React state.
   const ptyListenersRef = useRef(
@@ -593,6 +605,14 @@ export default function App() {
     setState((s) => ({ ...s, exitConfirmOpen: false }));
   }, []);
 
+  const onOpenSettings = useCallback(() => {
+    setState((s) => (s.settingsOpen ? s : { ...s, settingsOpen: true }));
+  }, []);
+
+  const onCloseSettings = useCallback(() => {
+    setState((s) => ({ ...s, settingsOpen: false }));
+  }, []);
+
   const onQuitLeaveRunning = useCallback(() => {
     logToFile("info", "exit modal: Quit, leave running");
     void closeMainWindow();
@@ -737,6 +757,7 @@ export default function App() {
     state.workspaceCreatorOpen ||
     state.exitConfirmOpen ||
     state.repoRemove !== null ||
+    state.settingsOpen ||
     state.vscodeQueue.length > 0;
   const shortcuts = useMemo<KeyboardShortcut[]>(() => {
     if (anyModalOpen || popoutTabId !== null || popoutSessionId !== null) {
@@ -757,6 +778,9 @@ export default function App() {
     if (state.repos.length > 0) {
       list.push({ key: "n", handler: () => onOpenSpawn() });
     }
+    // Ctrl/Cmd+, opens the Settings modal — same chord every macOS
+    // app uses, and `,` doesn't collide with anything else we bind.
+    list.push({ key: ",", handler: onOpenSettings });
     if (state.tabs.length > 1) {
       const cycle = (dir: 1 | -1) => {
         const ids = state.tabs.map((t) => t.id);
@@ -789,6 +813,7 @@ export default function App() {
     state.activeTabId,
     onActivateTab,
     onOpenSpawn,
+    onOpenSettings,
   ]);
   useKeyboardShortcuts(shortcuts);
 
@@ -878,6 +903,7 @@ export default function App() {
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
             onRevealInExplorer={onRevealInExplorer}
             onLaunchPreset={onLaunchPreset}
+            onOpenSettings={onOpenSettings}
           />
         ) : (
           <SourceControlSidebar
@@ -962,6 +988,9 @@ export default function App() {
           client={state.client}
           onDismiss={onDismissVscodeSuggestion}
         />
+      )}
+      {state.settingsOpen && (
+        <SettingsModal settings={settings} onClose={onCloseSettings} />
       )}
       {state.exitConfirmOpen && (
         <ExitConfirmDialog
@@ -1222,14 +1251,27 @@ function handleMessage(
           : msg.reason === "error"
             ? "Claude session errored"
             : "Claude session stopped";
-      void (async () => {
-        const granted = await isPermissionGranted();
-        if (!granted) return;
-        sendNotification({
-          title,
-          body: session?.label ?? "rustling-tulip",
-        });
-      })();
+      // Honour the per-reason toggles from Settings. Loaded fresh on
+      // each attention event so a live toggle takes effect immediately
+      // without round-tripping through React state. Cheap — a
+      // localStorage.getItem + JSON.parse.
+      const prefs = loadSettings().notifications;
+      const enabled =
+        msg.reason === "awaiting_input"
+          ? prefs.awaiting_input
+          : msg.reason === "error"
+            ? prefs.error
+            : prefs.stopped;
+      if (enabled) {
+        void (async () => {
+          const granted = await isPermissionGranted();
+          if (!granted) return;
+          sendNotification({
+            title,
+            body: session?.label ?? "rustling-tulip",
+          });
+        })();
+      }
       window.dispatchEvent(new CustomEvent("rt:attention", { detail: msg }));
       return;
     }
