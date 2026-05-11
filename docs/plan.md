@@ -266,6 +266,7 @@ Once Phase 6 closed, work moved to subordinate plans tracked under `docs/plans/`
 - **Don't reorder casually.** The order below is deliberate: each step either unblocks the next (e.g. config-dir isolation made the harness safe to iterate against) or is sequenced to keep small-and-isolated work ahead of large refactors.
 - **New designs go in `docs/plans/*.md`.** Add a new entry to this section when you introduce a new plan, and tick the box when the entry's exit criterion is met.
 - **Completed plans move to `docs/plans/completed/`.** When a plan's exit criterion is fully met (all tasks ticked, verification done, no in-flight deferred work that belongs to the *same* plan), `git mv` it under `docs/plans/completed/` rather than leaving it in the top-level. Keeps the active set scannable. Update any pointers in this file. *Deferred follow-up work belongs in a new plan, not as unchecked items in the moved one.*
+- **Iter entries are one-liners (iter 49+).** Per-finding progress lives in `docs/ux-audit.md` as checkboxes. The iter prose below stays verbose for iters 14–48 (historical archive). From iter 49 onward each iter is a single line: `*Iteration N (sha):* headline. Audit items closed: X, Y. Detail in commit message.` Don't dump design rationale here when the commit message + audit doc + code already carry it.
 
 ### Ordered checklist
 

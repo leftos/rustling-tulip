@@ -2,6 +2,8 @@
 
 A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell + React/xterm.js frontend) plus a parallel checklist of behaviours that need a human at the keyboard to validate. The findings only cover UX-visible issues; architecture/refactor concerns and items called out as deferred in `CLAUDE.md` are out of scope.
 
+**Tracking convention.** Each finding is a `- [ ]` / `- [x]` checkbox. Resolved items keep an `(iter N)` annotation only — the original "Suggested direction:" prose stays for context, but the long "Resolved" paragraphs that used to live here got compressed in 2026-05-11 to keep the doc scannable. The full design reasoning for any closed finding lives in the matching commit message + the iter entry in `docs/plan.md` (iters 14–48 verbose; iters 49+ one-liners).
+
 ## Table of contents
 
 - [Section 1 — Code-evidence findings](#section-1--code-evidence-findings)
@@ -14,6 +16,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - [Exit flow](#exit-flow)
   - [Global: keyboard, focus, accessibility, theming, error surfacing](#global-keyboard-focus-accessibility-theming-error-surfacing)
   - [Dev / testing workflow](#dev--testing-workflow)
+- [Findings from hand-test 2026-05-11](#findings-from-hand-test-2026-05-11)
 - [Section 2 — Hand-test checklist](#section-2--hand-test-checklist)
 
 ---
@@ -22,201 +25,145 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 
 ### Sidebar / repo & workspace management
 
-- **Destructive remove with no confirmation (inline × button).** Clicking the `×` next to a repo or workspace fires `remove_repo` / `remove_workspace` immediately. There is no "Are you sure?" or undo. Same path from the context menu's "Remove repo" / "Remove workspace" entries.
-  - File: `apps/tauri-app/src/components/Sidebar.tsx:276-287`, `apps/tauri-app/src/components/Sidebar.tsx:199-204`.
-  - Suggested direction: confirm step (inline two-state button like SessionPane's Stop, or a small modal) before sending the remove.
-- **Removing a repo silently abandons its live sessions.** The daemon's `remove_repo` only retains-filters the registry; sessions running against that repo stay alive but their container disappears from the tree and they re-appear under "Detached" with no visible explanation.
-  - Files: `crates/daemon/src/registry.rs:79-86`; rendering in `apps/tauri-app/src/components/Sidebar.tsx:516-561` (Detached bucket only labelled "Sessions whose containing repo or workspace is no longer registered" via `hoverTitle`).
-  - Suggested direction: confirmation step that lists active sessions and offers "Remove anyway / stop them too / cancel".
-- ~~**No name-uniqueness on workspaces.**~~ **Resolved (iter 25).** `upsert_workspace` now rejects empty/whitespace-only names AND case-insensitive trimmed-name collisions against OTHER workspaces (a rename-to-itself no-ops through fine). The daemon's `error` reply surfaces through the existing toast plumbing.
-- ~~**`Sidebar` accepts a `connection` prop but never renders it.**~~ **Resolved (iter 21).** Sidebar header now renders a compact connection badge that hides itself when the connection is `open` and surfaces a `badge-warn` or `badge-err` chip (with the reason as a tooltip) for every other state. Visible from any view, not just the EmptyState.
-- ~~**Force-expand silently overrides the user's collapse state.**~~ **Resolved (iter 23).** `attentionSessions` no longer participates in `forceExpand` (only the user-initiated `highlightedSessionIds` does). A new `container-attention-chip` (`!` in a small warn-coloured circle) appears on a container's header whenever at least one of its sessions is in `attentionSessions`, so the warning is still visible from a collapsed container without disturbing the user's layout choice.
-- ~~**Attention flag is never cleared automatically.**~~ **Resolved (iter 16).** `session_updated` clears the id from `attentionSessions` on transition back to `working`/`idle`/`spawning`. `stopped`/`error` still count as attention-worthy and require user acknowledgement.
-- ~~**`session_removed` leaks the id in `attentionSessions`.**~~ **Resolved (iter 16).** Removal handler now flushes the id from `attentionSessions` too.
-- ~~**Preset context-menu loading state never times out.**~~ **Resolved (iter 38).** `listPresets` now returns a discriminated `{ ok: true, entries: PresetEntry[] } | { ok: false, reason: string }` and the 2s timeout resolves with `{ ok: false, reason: "timed out (daemon not responding)" }`. The Sidebar's preset cache stores the discriminated result; the submenu renders "Launch preset… (failed to load)" with the reason as a tooltip when `!ok`, separately from "(none defined)" when `ok && entries.length === 0` and "(loading)" while the request is in flight.
-- ~~**Sidebar context menu is anchored to raw cursor coords with no bounds check.**~~ **Resolved (iter 25).** New `clampMenuCoord` helper in `utils/a11y.ts` clamps `(x, y)` against `window.innerWidth/Height - menu size - 12px margin`. Applied to all three context menus (sidebar's `ContainerContextMenu`, `TabBar`'s `TabContextMenu`, `GridRenderer`'s pane context menu).
-- **No empty state for a sidebar that has workspaces but only orphan/detached sessions.** The empty-state copy fires only when `containers.length === 0`. A detached bucket is `kind === "detached"` and counts as a container, so the user sees "Detached" with red tag and a session list but no narrative explaining what to do about it.
+- [x] **Destructive remove with no confirmation (inline × button).** Clicking the `×` next to a repo or workspace fires `remove_repo` / `remove_workspace` immediately — no "Are you sure?" or undo. *Resolved (iter 3).*
+- [x] **Removing a repo silently abandons its live sessions.** Daemon's `remove_repo` retain-filters the registry; sessions stay alive but their container disappears and they re-appear under "Detached". *Resolved (iter 3 — RepoRemoveDialog modal lists active sessions + 3-way choice.)*
+- [x] **No name-uniqueness on workspaces.** *Resolved (iter 25.)*
+- [x] **`Sidebar` accepts a `connection` prop but never renders it.** *Resolved (iter 21 — header connection badge for non-`open` states.)*
+- [x] **Force-expand silently overrides the user's collapse state.** *Resolved (iter 23 — attentionSessions dropped from forceExpand; container header gains attention chip instead.)*
+- [x] **Attention flag is never cleared automatically.** *Resolved (iter 16.)*
+- [x] **`session_removed` leaks the id in `attentionSessions`.** *Resolved (iter 16.)*
+- [x] **Preset context-menu loading state never times out.** *Resolved (iter 38 — discriminated `{ok, entries}|{ok:false, reason}`.)*
+- [x] **Sidebar context menu is anchored to raw cursor coords with no bounds check.** *Resolved (iter 25 — `clampMenuCoord` in `utils/a11y.ts`.)*
+- [ ] **No empty state for a sidebar that has workspaces but only orphan/detached sessions.** The empty-state copy fires only when `containers.length === 0`. A detached bucket is `kind === "detached"` and counts as a container, so the user sees "Detached" with red tag and a session list but no narrative explaining what to do about it.
   - File: `apps/tauri-app/src/components/Sidebar.tsx:550-561`.
-  - Suggested direction: hover title is good; add an inline action like "stop all" or "re-register repo" near the bucket header.
+  - Suggested direction: hover title is good; add an inline action like "stop all" or "re-register repo" near the bucket header. (Iter 4 added a banner; the open work is the inline action.)
 
 ### Spawn dialog
 
-- ~~**Repo dropdown can be empty.**~~ **Resolved (iter 27).** The sidebar toolbar already disabled `+ Session` when `repos.length === 0` (iter 4), and the dialog itself now renders a dedicated `EmptyRepoState` panel ("No repos registered" + Cancel / + Add repo buttons) instead of the form when invoked with no repos. The + Add repo button closes the dialog and triggers the directory picker via the same `onAddRepo` callback the sidebar's Add repo button uses.
-- ~~**Backdrop click discards all typed input with no warning.**~~ **Resolved (iter 27).** Backdrop click is no longer a close trigger on the spawn dialog. The dialog still has three ways to dismiss (Escape, Cancel, ✕) but a stray click outside silently destroying form state is gone.
-- ~~**No loading state after Submit.**~~ **Resolved (iter 42).** `onSpawned` now pushes an info-severity toast `Spawning session… · Worktree creation may take a few seconds.` immediately on submit. Auto-dismisses on the normal 8s timer; by the time it dismisses, the session is normally already live in the sidebar. Keeping the dialog open with a spinner was rejected because the next spawn shouldn't be blocked by the previous one's worktree creation.
-- ~~**Spawn failures surface only as `console.error`.**~~ **Resolved (iter 2 + 22).** Every `DaemonMessage::Error` now hits the bottom-right toast stack via `pushToast(..., severity: "error", message: "Daemon error", detail: msg.message)`. The same handler also disarms any armed spawn intent, so a daemon-rejected spawn doesn't leave stale pane/tab routing for the next attempt. Routing the toast specifically to the spawn dialog (vs the global stack) is still deferred — the cost (correlating an error reply to a request id) outweighs the benefit when the toast is already prominent.
-- ~~**`spawning` and `working` share the same accent-blue dot.**~~ **Resolved (iter 23).** `.status-spawning` is now a hollow accent ring (transparent fill + 1.5px border) while `.status-working` stays solid accent. A glance differentiates "still bootstrapping" from "actively running".
-- ~~**Workspace form has no "Cancel preview" / refresh affordance.**~~ **Resolved (iter 18).** Preview-reset `useEffect` now depends on `useWorktree` too, so toggling worktree mode clears the stale preview table and requires an explicit re-Preview.
-- ~~**Random worktree branch name regenerates every dialog open.**~~ **Resolved (iter 41).** `useBranchField` takes a `targetKey` (`repo:<id>` / `workspace:<id>`) and reads/writes a module-scoped `branchSuggestionCache: Map<string, string>`. Cancel-then-reopen for the same target preserves the suggestion. Manual edit clears the cached entry (so a later reopen suggests fresh). Successful submit also clears the entry. Cache lives only for the browser session (module scope) — doesn't pollute localStorage forever.
-- ~~**`Spawn → Spawn` double-click submits twice.**~~ **Resolved (iter 18).** Both `SingleForm.submit` and `WorkspaceForm.submit` guard via a `submittedRef = useRef(false)` flip that survives synchronous double-clicks before the dialog unmounts.
-- ~~**Permission-mode dropdown silently retains a value while disabled.**~~ **Resolved (iter 24).** Inline hint is now explicit: "Ignored while {skip-permissions|yolo} is on — claude will run without --permission-mode. The dropdown value is preserved for when you toggle it off." So the user knows both what will happen (no flag sent) and that the value is intentionally remembered for later. Same pattern for the codex sandbox dropdown.
-- ~~**Env var rows have no key-uniqueness or `KEY=value` syntax check.**~~ **Resolved (iter 27).** Each env row now validates the key against `/^[A-Za-z_][A-Za-z0-9_]*$/` and flags duplicates against other rows in the same dialog. Invalid keys get a `.input-invalid` outline + inline error; duplicates get a "Duplicate key — only the last row wins" hint. Submit is gated on `envRowsAreValid` in both SingleForm and WorkspaceForm.
-- ~~**Worktree-default toggle persists immediately on click.**~~ **Resolved (iter 42).** `toggleUseWorktree` no longer fires `set_*_worktree_default` on toggle — the choice stays local to the dialog. The successful-submit path sends the daemon update only when `useWorktree` differs from the persisted default for that repo/workspace, so a Cancel leaves the prior default untouched.
+- [x] **Repo dropdown can be empty.** *Resolved (iter 27 — `EmptyRepoState` panel.)*
+- [x] **Backdrop click discards all typed input with no warning.** *Resolved (iter 27 — backdrop click no longer closes.)*
+- [x] **No loading state after Submit.** *Resolved (iter 42 — info-severity toast.)*
+- [x] **Spawn failures surface only as `console.error`.** *Resolved (iter 2 + 22 — error toast + intent disarm.)*
+- [x] **`spawning` and `working` share the same accent-blue dot.** *Resolved (iter 23 — hollow ring vs solid.)*
+- [x] **Workspace form has no "Cancel preview" / refresh affordance.** *Resolved (iter 18 — preview-reset depends on `useWorktree`.)*
+- [x] **Random worktree branch name regenerates every dialog open.** *Resolved (iter 41 — `branchSuggestionCache` keyed on target.)*
+- [x] **`Spawn → Spawn` double-click submits twice.** *Resolved (iter 18 — `submittedRef`.)*
+- [x] **Permission-mode dropdown silently retains a value while disabled.** *Resolved (iter 24 — explicit hint.)*
+- [x] **Env var rows have no key-uniqueness or `KEY=value` syntax check.** *Resolved (iter 27 — regex + duplicate detection.)*
+- [x] **Worktree-default toggle persists immediately on click.** *Resolved (iter 42 — local-only until submit.)*
 
 ### Tabs + panes (grid, drag/drop, pop-out)
 
-- ~~**All freshly-created tabs are named "Tab".**~~ **Resolved (iter 17).** `make_tab` picks the next free default name (`"Tab"`, `"Tab 2"`, `"Tab 3"`, ...) based on the current tab list, with gap-filling so closed-and-reopened slots reuse their old number. Applies to plain `create_tab`, `merge_tabs`, and `extract_to_new_tab`.
-- ~~**Merge-tabs is hard-coded to `tile_horizontal` layout.**~~ **Resolved (iter 28).** Context menu now splits the merge entry into two: "Side by side (horizontal)" and "Stacked (vertical)" under a `Merge N selected into new tab` label. Layout flows through `onMergeSelected(layout)` to the daemon `merge_tabs` message.
-- ~~**Merge doesn't switch to the new tab.**~~ **Resolved (iter 17).** `TabBar.onMergeSelected` calls a new `onArmNextNewTab` App-level callback that flips `pendingTabActivate` before sending `merge_tabs`, so the resulting `tab_updated` auto-activates the merged tab.
-- **Tab pill close × has no confirmation.** Closing the last pane-bearing tab destroys all its grid layout. Sessions survive but their tab/grid placement is gone — including across all pop-outs.
-  - File: `apps/tauri-app/src/components/TabBar.tsx:50-56`.
-  - Suggested direction: confirm when the tab has 2+ panes or contains active sessions, or offer an undo toast.
-- **Context-menu "Close other tabs" sends one `close_tab` per other tab in a loop.** That's N WebSocket messages with no batch primitive, and no confirmation — same issue as above amplified.
-  - File: `apps/tauri-app/src/components/TabBar.tsx:110-120`.
-  - Suggested direction: confirm; consider adding a batched `close_tabs` message, although that's protocol scope.
-- ~~**Reorder is daemon-round-tripped, no optimistic update.**~~ **Resolved (iter 41).** TabBar's drop handler now invokes a new App-level `onLocalReorder(orderedIds)` callback that reshuffles `state.tabs` immediately, before sending the `reorder_tabs` message to the daemon. The daemon's `tabs_reordered` broadcast still arrives and the existing reducer reconciles — for a same-order broadcast it's a no-op. Defensive: unknown ids are filtered out and any tabs the caller forgot are appended, so the optimistic update can't drop tabs even if its order list was stale.
-- **Drag a tab onto itself: nothing happens but no feedback either.** `if (!src || src === tabId) return;` silently noops. With no drop-target highlight, the user can't tell whether the gesture failed because of the self-target or a sticky drag state.
-  - File: `apps/tauri-app/src/components/TabBar.tsx:190`.
-  - Suggested direction: don't show `drop-before/after` indicator on the source pill (currently filtered via `dragState.draggingId !== tabId`, but still confusing).
-- **Pane drag onto a tab pill activates the tab but offers no drop target.** Dropping on a pill is ignored (only pane-to-pane drops via `MovePane` work). The "activate-on-enter" UX means the user can drag, hover over a different tab to switch to it, but if they release on a pill nothing happens.
-  - Files: `apps/tauri-app/src/components/TabBar.tsx:158-167`, `171-178`.
-  - Suggested direction: accept pane drop on a pill as "create a new pane in the target tab and place the source there"; or render a "drop here" hint informing the user to release over a pane.
-- **`split_pane` is hard-wired to `place: "second"`.** The protocol supports `first` (new pane on the left/top) but no UI ever sets that. Users can only split right and split down.
-  - File: `apps/tauri-app/src/components/GridRenderer.tsx:190-202`.
-  - Suggested direction: either add buttons for "split left / split up" or pick one direction and remove the protocol option.
-- ~~**After a split, focus stays on the source pane.**~~ **Resolved (iter 29).** New `onArmFocusNewPane(tabId, knownPaneIds)` callback on `GridRenderer` is called by `PaneChrome.sendSplit` right before sending `split_pane`. The App stores the snapshot in `pendingPaneFocusRef`; the next `tab_updated` for the matching tab diffs against the snapshot and sets `focusedPaneId` to whichever pane id wasn't there before. Mirrored locally in `TabWindow` (pop-out) since the pop-out has its own focus state. Disarms after the first matching update so the arm doesn't outlive its intent.
-- ~~**`Move to new tab` in pane context menu is silent.**~~ **Resolved (iter 17).** `GridRenderer.PaneChrome.onExtract` calls `onArmNextNewTab` before sending `extract_to_new_tab`, so the new tab gets activated.
-- ~~**Pane controls overlay covers the session header on small panes.**~~ **Resolved (iter 37).** Dropped the `.is-focused` baseline opacity of 0.45 — controls now fade in only on hover or focus-within. Previously they sat half-visible on the focused pane regardless of cursor position, overlapping `.session-actions` (Pop out / Stop) on narrow widths. Keyboard users still reach the controls via Tab (focus-within reveals them); on hover they show at full opacity. Cleaner narrow-pane chrome without dropping discoverability.
-- ~~**Pop-out session window never auto-closes when its session is stopped or removed.**~~ **Resolved (iter 19).** Parallel `useEffect` watches `popoutSessionId` and closes the window via `getCurrentWindow().close()` when the session disappears from `state.sessions`.
-- ~~**Pop-out session window has TWO Stop buttons with different behaviours.**~~ **Resolved (iter 19).** Inner `SessionPane`'s Stop button (and exit-code label) is hidden when `isPopoutWindow`; the chrome `SessionWindow` toolbar's single-click Stop remains. One destructive control per window.
-- ~~**`isPopoutWindow` in `SessionPane` only checks `?session`, not `?tab`.**~~ **Resolved (iter 19).** Now treats both `?session=` and `?tab=` as pop-out modes; session panes inside a `TabWindow` no longer show a redundant "Pop out" button.
-- ~~**Pop-out tab window's "Spawn one here" is a no-op.**~~ **Resolved (iter 34).** `EmptyPane` gains an `inPopout` prop threaded down from `TabWindow` via `GridRenderer.inPopout`. When `inPopout` is true the "Spawn one here" button is replaced by an explanatory hint: "Use the main window to spawn a session, then drag it here." The pop-out's empty-pane state is now coherent — no button that silently no-ops, and the no-sidebar fallback is replaced by the drag-in workflow that actually works there.
-- ~~**TabWindow has no chrome controls.**~~ **Resolved (iter 21).** Header now flex-aligns the tab name (with ellipsis when long, full name in tooltip) and a right-justified "Close window" button. The button only closes the pop-out window; the tab and its sessions stay in the main window's tab list. Rename + "Bring back to main" remain deferred.
-- **TabWindow's focusedPaneId state is independent from the main window's.** Each window's pane focus is tracked locally. If the user spawns into a focused empty pane from the main window, only the main window sees the focus change. Probably intentional — flagged in hand-test.
+- [x] **All freshly-created tabs are named "Tab".** *Resolved (iter 17 — next-free default name.)*
+- [x] **Merge-tabs is hard-coded to `tile_horizontal` layout.** *Resolved (iter 28 — horizontal/vertical picker.)*
+- [x] **Merge doesn't switch to the new tab.** *Resolved (iter 17 — `onArmNextNewTab`.)*
+- [x] **Tab pill close × has no confirmation.** *Resolved across iters 3 (bound sessions) + 45 (2+ panes). Closing a multi-pane or session-bearing tab now arms a two-state confirm.*
+- [x] **Context-menu "Close other tabs" sends one `close_tab` per other tab in a loop.** *Resolved (iter 3 — two-state confirm; N-message loop preserved as protocol scope.)*
+- [x] **Reorder is daemon-round-tripped, no optimistic update.** *Resolved (iter 41 — `onLocalReorder`.)*
+- [x] **Drag a tab onto itself: nothing happens but no feedback either.** *Resolved (iter 48 — source pill gets `is-dragging` class at 45% opacity, so self-target is legibly different from a real drop edge.)*
+- [x] **Pane drag onto a tab pill activates the tab but offers no drop target.** *Resolved (iter 45 — pill `onDrop` accepts `text/x-rt-pane` and routes via `move_pane` with `edge: "right"`.)*
+- [x] **`split_pane` is hard-wired to `place: "second"`.** *Resolved (iter 46 — Shift+click on split-right/down inverts to `place: "first"`; tooltip advertises.)*
+- [x] **After a split, focus stays on the source pane.** *Resolved (iter 29 — `onArmFocusNewPane`.)*
+- [x] **`Move to new tab` in pane context menu is silent.** *Resolved (iter 17 — `onArmNextNewTab`.)*
+- [x] **Pane controls overlay covers the session header on small panes.** *Resolved (iter 37 — hover/focus-within only.)*
+- [x] **Pop-out session window never auto-closes when its session is stopped or removed.** *Resolved (iter 19.)*
+- [x] **Pop-out session window has TWO Stop buttons with different behaviours.** *Resolved (iter 19.)*
+- [x] **`isPopoutWindow` in `SessionPane` only checks `?session`, not `?tab`.** *Resolved (iter 19.)*
+- [x] **Pop-out tab window's "Spawn one here" is a no-op.** *Resolved (iter 34 — drag-in hint instead.)*
+- [x] **TabWindow has no chrome controls.** *Resolved (iter 21 — Close window button + ellipsised tab name.)*
+- [ ] **TabWindow's focusedPaneId state is independent from the main window's.** Each window's pane focus is tracked locally. Probably intentional — flagged in hand-test.
   - File: `apps/tauri-app/src/components/TabWindow.tsx:21`.
-- **`SessionWindow` ignores the daemon-emitted `Repos` / `Workspaces` payloads.** Each pop-out window opens a fresh WebSocket and receives the initial state, but the SessionWindow doesn't subscribe to repo changes — irrelevant for it directly, but if the session disappears nothing flushes the stale snapshot.
+- [ ] **`SessionWindow` ignores the daemon-emitted `Repos` / `Workspaces` payloads.** Each pop-out window opens a fresh WebSocket and receives the initial state, but doesn't subscribe to repo changes — irrelevant for it directly, but if the session disappears nothing flushes the stale snapshot. (Iter 19's close-on-disappear handles the session-removed case; the repo/workspace listener gap remains.)
 
 ### Terminal
 
-- **Body-level `user-select: none` prevents selecting diff text and headless logs.** `body { user-select: none; -webkit-user-select: none; }` is global. `.terminal-container` is xterm-managed (xterm injects its own selection handling) but `.diff-pane`, `.headless-log`, `.preset-preview-list`, and `recent_actions` are all unselectable. Users cannot copy a diff line, an event log entry, or a session label.
-  - File: `apps/tauri-app/src/styles.css:25-31`.
-  - Suggested direction: restrict the rule to chrome (sidebar, tab bar, modals) and re-enable selection on content surfaces (`.diff-pane`, `.headless-log`, `.terminal-host`, `.preset-preview-list`, plus the SessionPane label).
-- ~~**Orphan banner instructs to "Stop the session and spawn a new one" — but Stop on an orphan does nothing to the underlying claude process.**~~ **Resolved (iter 34).** Daemon `stop_session` now branches on `had_live_handle = pty.is_some() || headless.is_some()`: when neither survived (orphan case), it loads the sidecar `meta.json` via the new `orphan::load_meta` helper and calls `orphan::kill_pid` to send SIGKILL/TerminateProcess to the recorded pid. The kill is name-checked first (`is_session_alive`) so a recycled pid won't get hit. The frontend orphan banner text is updated to match: "Use Stop to kill the recorded PID and clean up, then spawn a new session." (Tested with `cargo test -p daemon` — 68/68 green; the existing `partition_live` test exercises the name-match path on which `kill_pid` relies.)
-- ~~**No reconnection on socket close.**~~ **Resolved (iter 31).** The App-level connection effect now wraps its connect-and-subscribe block in a `connect()` callback and reschedules it via `setTimeout` whenever the WS hits `closed` (or `ensureDaemonStarted` itself throws). Exponential backoff: `500ms * 2^attempt`, capped at 10s; attempt counter resets to 0 on every successful `open`. `auth_failed` is terminal — no retry, as that's a config issue. Cleanup on unmount cancels the pending timer. Sidebar connection badge (iter 21) already surfaces the non-`open` state from any view, so the user sees "disconnected" / "connecting" / "auth failed" without needing the EmptyState.
-- **No copy-paste hot-keys in xterm config.** Standard xterm allows Ctrl+Shift+C / Ctrl+Shift+V but the config doesn't bind explicit copy/paste handlers. Combined with `user-select: none` on body (xterm's own selection still works inside the terminal), users may not realise selection is active.
-  - File: `apps/tauri-app/src/components/Terminal.tsx:25-40`.
-  - Suggested direction: bind explicit keymap or surface a "right-click to copy selection" hint.
-- ~~**Headless `recent_actions` list grows unbounded in the UI.**~~ **Resolved (iter 36).** `HeadlessView` now slices to the last `HEADLESS_RECENT_ACTIONS_TAIL = 200` entries by default, with a "Show all N entries (earlier M hidden)" button that opts into the full list. Composed `<li>` keys (`sliceStart + idx`) keep React reconciliation stable across slice changes. Avoids the renderer freeze on long-running headless sessions while preserving access to earlier events when the user actually needs them.
-- ~~**PTY input is sent on every keystroke even when the session is stopped.**~~ **Resolved (iter 40).** `Terminal` now takes a `status` prop, mirrors it into `statusRef`, and the `onData` handler skips `send_input` when the latest known status is `stopped` or `error`. The window between the daemon broadcasting Stopped and React unmounting the Terminal no longer leaks keystrokes to a dying PTY.
+- [x] **Body-level `user-select: none` prevents selecting diff text and headless logs.** *Resolved (iter 1 — selection re-enabled on `.diff-pane` / `.headless-log` / `.preset-preview-list` / `.terminal-host` / `.session-title h2`.)*
+- [x] **Orphan banner instructs to "Stop the session and spawn a new one" — but Stop on an orphan does nothing to the underlying claude process.** *Resolved (iter 34 — `orphan::kill_pid` + banner copy updated.)*
+- [x] **No reconnection on socket close.** *Resolved (iter 31 — exponential backoff capped at 10 s.)*
+- [x] **No copy-paste hot-keys in xterm config.** *Resolved (iter 44 — Ctrl+Shift+C/V via `attachCustomKeyEventHandler`.)*
+- [x] **Headless `recent_actions` list grows unbounded in the UI.** *Resolved (iter 36 — tail 200 + "Show all".)*
+- [x] **PTY input is sent on every keystroke even when the session is stopped.** *Resolved (iter 40 — `statusRef` guard.)*
 
 ### Git panel
 
-- **"Open in forge ↗" goes to the repo home, not the branch.** `openInForge` requests `get_remote_url`, gets the repo's parsed web URL, and opens it. The branch is never appended to the URL.
-  - Files: `apps/tauri-app/src/components/GitPanel.tsx:317-331`, `crates/daemon/src/git_inspect.rs:193-…`.
-  - Suggested direction: append `/tree/<branch>` for github, `/-/tree/<branch>` for gitlab, etc. The `branch` argument is already plumbed (`_branch: string`).
-- **`openInForge` listener leak.** Each click registers a `rt:remote_url` listener that removes itself only on the first matching event. If the daemon never replies (e.g. network repo, no remote configured) the listener stays attached forever. Three rapid clicks register three handlers — each will call `openInShell` when the response arrives.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:317-331`.
-  - Suggested direction: 2 s timeout + cleanup like `loadScrollback` / `listPresets`; debounce on the button.
-- **No surface for the read-only-ness of the panel.** `CLAUDE.md` flags Stage/unstage as deferred, but there's no visual note in the Changes view explaining that the file rows are click-to-view-only. New users may try to right-click for stage actions and find nothing.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:144-162`.
-  - Suggested direction: footer text "Read-only · stage from your terminal" or remove the visual cursor:pointer on the rows.
-- ~~**Diff body has no virtualization, no syntax limit.**~~ **Resolved (iter 12 retroactively).** The original `<pre>`-based diff body in `GitPanel.tsx` is gone — clicking a changed file in the Source Control sidebar now opens a Monaco diff editor as its own tab kind (`TabContent::Diff`). Monaco virtualizes natively, so a 50k-line `pnpm-lock.yaml` diff scrolls smoothly. The "1MB threshold + load anyway" plan-item from Phase 6 is already wired in `git_inspect::file_snapshot` on the daemon side.
-- **`HistoryView` commit list is capped at `COMMIT_LIMIT = 50` with no "load more".** Users on long-history branches see only the most recent 50 commits.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:20`, `196-214`.
-  - Suggested direction: paginated `list_commits` plus a "load more" button at the bottom of the list.
-- **Changes / History views re-issue their request on every `activeRepoId` change but don't cancel previous in-flight handlers.** Two rapid switches register two `rt:repo_status` listeners; the second remains until cleanup. Subsequent responses for the stale repo will be dropped via the id check but listener registration accumulates briefly.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:92-129`, `196-246`.
-  - Suggested direction: probably OK in practice; tighten if you see lag.
-- ~~**`select an item` placeholder is the same for both Changes and History.**~~ **Resolved (iter 40 retroactively for the survived path).** `GitPanel.tsx` is gone since iter 7 (replaced by the Source Control sidebar). The Changes view now opens Monaco diff tabs instead of an inline pane, so the "select an item" placeholder isn't shown there at all. The remaining shared `DiffView` (history detail) now accepts an optional `placeholder` prop; the history call site passes "Select a commit to view its diff." Default placeholder unchanged.
-- **`ResizableSplit` storage key `git.list` is shared across every git panel mount.** Resizing the file list in tab A persists for every git panel in every tab/pop-out. May be desirable, but not configurable.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:132-138`, `249-254`.
+The per-session `GitPanel` is gone since iter 7 (replaced by the global Source Control sidebar). Remaining items below are tracked against either the sidebar or stale code that no longer exists.
+
+- [x] **"Open in forge ↗" goes to the repo home, not the branch.** *Resolved (iter 2 — `branchUrl` builds `/tree/<branch>` / `/-/tree/<branch>` / `/src/<branch>`.)*
+- [x] **`openInForge` listener leak.** *Resolved (iter 2 — Promise-based `getRemoteUrl` with 2s timeout.)*
+- [x] **No surface for the read-only-ness of the panel.** *Resolved (iter 9 — Source Control sidebar Phase C ships stage/unstage/commit.)*
+- [x] **Diff body has no virtualization, no syntax limit.** *Resolved (iter 12 — Monaco diff tabs.)*
+- [x] **`HistoryView` commit list is capped at `COMMIT_LIMIT = 50` with no "load more".** *Resolved (iter 14 — paginated `list_commits`.)*
+- [x] **Changes / History views re-issue their request on every `activeRepoId` change but don't cancel previous in-flight handlers.** *Resolved (Source Control sidebar replaces `GitPanel` with proper `useEffect` cleanup — the listener is removed on repo change.)*
+- [x] **`select an item` placeholder is the same for both Changes and History.** *Resolved (iter 40 — History gains a dedicated placeholder; Changes diffs moved to Monaco tabs.)*
+- [x] **`ResizableSplit` storage key `git.list` is shared across every git panel mount.** *Stale — `GitPanel.tsx` deleted in iter 7.*
 
 ### Preset launch
 
-- **File and folder prompt sources cannot be launched from the UI.** `computePreview` only parses `inline`; for `file`/`folder` it returns `[]` (comment: "would require a daemon round-trip; for v1, show a placeholder count via the source picker stage"). `canSubmit` requires `previewPrompts.length > 0`. Result: any preset declaring `file` or `folder` in `prompt_sources` has a broken launch path — the preview stage shows "0 prompts" with disabled "Launch 0 sessions" button.
-  - Files: `apps/tauri-app/src/components/PresetLaunchDialog.tsx:83-87`, `544-554`, `467-477`.
-  - Suggested direction: either send a preview-only request to the daemon (it already parses files in `presets.rs`) and populate `previewPrompts`, or drop `canSubmit > 0` when source is file/folder (treat as "trust the daemon").
-- ~~**Preset launch has no progress UI.**~~ **Resolved (iter 26).** A sticky info-severity toast `Launching preset 'X' — N / total sessions` updates in place via the new `pushToast` dedup-key path. When `launched >= total`, the toast flips to `Preset 'X' launched` and unsticks so it auto-dismisses naturally.
-- ~~**Preset launch failure is `console.error` only.**~~ **Resolved (iter 2).** The `preset_launch_failed` message handler now also pushes a warning-severity toast: `Preset 'X' launch failed · <error> · N session(s), M tab(s) partial`. The "Open partial tab / Stop partial sessions" affordances suggested in the audit are explicit follow-up scope — the toast at least makes the failure visible.
-- ~~**Auto-activate-tab during preset launch hijacks user focus.**~~ **Resolved (iter 26).** Auto-activate now only fires on the FIRST tab created during a launch (`msg.tab_ids.length === 1`) — kicks off context for the user, then the launch runs silently with the progress toast keeping them informed.
-- ~~**No way to cancel a launch in progress.**~~ **Resolved (iter 30).** Preview stage now renders an italicised caveat right below the prompt count: "Launching is one-shot — there's no in-app cancel once the daemon starts spawning. To stop a partial launch you'd have to stop each spawned session by hand, or kill the daemon process." A protocol-level cancel is still deferred — the audit's "at minimum surface that it's irreversible" ask is met.
-- **Folder-source picker pre-fills with `repo.path + relative_path` regardless of file separator.** `joinPath` tries to match base separator style but falls back to `/` on mixed input. Windows users with mixed `\` / `/` paths could see ugly results, though the daemon will normalize.
-  - File: `apps/tauri-app/src/components/PresetLaunchDialog.tsx:503-508`.
-- ~~**Variable inputs offer no validation.**~~ **Resolved (iter 30).** Variables stage now derives a `missingRequiredVariables` set (prompt_at_launch + !optional + empty trimmed value). The Next button is disabled when any required variable is empty, with a tooltip listing the labels that still need filling. Empty required fields get a `.input-invalid` outline (red border) + inline "Required — fill in before continuing." hint. `aria-invalid` is wired on the input so screen readers announce it.
-- **Preview stage says "→ X tabs" but cannot tell the user when each tab will hold which prompts.** No grouping visualisation, just a count.
-  - File: `apps/tauri-app/src/components/PresetLaunchDialog.tsx:437-449`.
+- [x] **File and folder prompt sources cannot be launched from the UI.** *Resolved (iter 1 — `PreviewPreset` daemon round-trip.)*
+- [x] **Preset launch has no progress UI.** *Resolved (iter 26 — sticky info toast.)*
+- [x] **Preset launch failure is `console.error` only.** *Resolved (iter 2 — warn-severity toast.)*
+- [x] **Auto-activate-tab during preset launch hijacks user focus.** *Resolved (iter 26 — first tab only.)*
+- [x] **No way to cancel a launch in progress.** *Resolved (iter 30 — caveat copy. Protocol-level cancel still deferred.)*
+- [x] **Folder-source picker pre-fills with `repo.path + relative_path` regardless of file separator.** *Resolved (iter 46 — `joinPath` detects Windows base + normalises rel.)*
+- [x] **Variable inputs offer no validation.** *Resolved (iter 30 — `missingRequiredVariables` + `aria-invalid`.)*
+- [x] **Preview stage says "→ X tabs" but cannot tell the user when each tab will hold which prompts.** *Resolved (iter 47 — `PreviewPromptList` groups by destination tab.)*
 
 ### Exit flow
 
-- ~~**"No active sessions" message hides orphan sessions.**~~ **Resolved (iter 24).** Exit dialog now receives a separate `orphanSessionCount` and appends "(N orphans — daemon can't stop these; they'll stay running)" to the session-count line so the user knows `Stop sessions & quit` won't kill them.
-- **Backdrop click closes the dialog only when `!busy`.** Good; but during `busy` the user is stuck — no way to abort the shutdown attempt if the daemon hangs.
-  - File: `apps/tauri-app/src/components/ExitConfirmDialog.tsx:21`.
-  - Suggested direction: after 2 s of `busy`, surface a "Daemon not responding — force quit" button.
-- **`onStopAndQuit` resolves the shutdown promise on `closed`-or-`disconnected` connection state, NOT on the daemon actually quitting.** The 2 s timeout falls back to force-closing the window. If shutdown was slow but successful, fine. If shutdown is silently stuck, the daemon is left running — and on next launch, the user will see daemon-supervisor errors.
-  - File: `apps/tauri-app/src/App.tsx:392-422`.
-  - Suggested direction: probe `daemon.json` pid liveness during the 2 s window; if the daemon is still up after timeout, warn explicitly.
-- ~~**Three buttons of similar visual weight, ambiguous priority order.**~~ **Resolved (iter 24).** Button order is now Cancel · Stop sessions & quit · **Quit, leave running** (primary, accent-coloured, autofocused). The destructive option keeps its `danger` class but is no longer the visual focal point. Matches the design goal of "long-lived daemon by default".
-- ~~**No Escape key to cancel.**~~ **Resolved (iter 20).** `useEscape(onCancel, !busy)` — Escape dismisses while idle, no-ops during in-flight shutdown.
-- **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** The pop-out only listens for `onCloseRequested` in `App.tsx:354-370`, which is gated on `if (popoutSessionId || popoutTabId) return;`. So pop-out close is unhandled; the OS closes the window immediately. That's actually probably correct, but worth flagging.
+- [x] **"No active sessions" message hides orphan sessions.** *Resolved (iter 24 — separate `orphanSessionCount`.)*
+- [x] **Backdrop click closes the dialog only when `!busy`. During `busy` the user is stuck.** *Resolved (iter 44 — stuck-daemon warning + force-quit button after 2 s.)*
+- [x] **`onStopAndQuit` resolves the shutdown promise on `closed`-or-`disconnected` connection state, NOT on the daemon actually quitting.** *Resolved (iter 44 — 2 s auto-close removed; stuck path surfaces explicit force-quit affordance instead.)*
+- [x] **Three buttons of similar visual weight, ambiguous priority order.** *Resolved (iter 24.)*
+- [x] **No Escape key to cancel.** *Resolved (iter 20.)*
+- [ ] **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** OS closes pop-out windows immediately. Probably correct, but worth flagging.
+  - File: `apps/tauri-app/src/App.tsx:354-370`.
 
 ### Global: keyboard, focus, accessibility, theming, error surfacing
 
-- ~~**No global keyboard shortcuts at all.**~~ **Resolved (iter 32).** New `useKeyboardShortcuts` hook in `utils/a11y.ts` binds document-level keydown handlers; skips when focus is in an editable surface (input/textarea/contenteditable/xterm) and when any modal is open. App.tsx wires: **Ctrl/Cmd+T** (new tab), **Ctrl/Cmd+N** (spawn session, gated on `repos.length > 0`), **Ctrl/Cmd+Tab** + **Ctrl/Cmd+Shift+Tab** (cycle tabs forward/back, only when 2+ tabs exist), **Ctrl/Cmd+1..9** (activate tab at index N-1; only registered for slots that have a tab). Pop-out windows don't get any shortcuts to keep the surface predictable. F2-to-rename and Ctrl+W (collides with browser/Tauri window-close) deliberately not bound.
-- ~~**No Escape to dismiss modals.**~~ **Resolved across iters 6 + 20.** `useEscape` hook now wired into SpawnDialog, PresetLaunchDialog, RepoRemoveDialog, DiscardConfirmDialog (iter 6 + 13), and WorkspaceCreator, VscodeSuggestionToast, ExitConfirmDialog (iter 20). ExitConfirmDialog gates the binding on `!busy` so a mid-shutdown Escape doesn't fight the in-flight quit.
-- ~~**No autofocus on modals (except WorkspaceCreator).**~~ **Resolved (iter 38).** SpawnDialog's `SingleForm` and `WorkspaceForm` now autofocus their branch name input via `useAutoFocus(branchInputRef)` — the field the user most likely wants to edit, with the random worktree name preselected for easy overwrite. RepoRemoveDialog + DiscardConfirmDialog + ExitConfirmDialog still autofocus Cancel/least-destructive (their long-standing pattern). PresetLaunchDialog stays without autofocus — the source-stage radio buttons start as the first interactive element, which is exactly where keyboard users want to be.
-- ~~**No focus return after modal close.**~~ **Resolved (iter 33).** New `useFocusReturn()` hook in `utils/a11y.ts` captures `document.activeElement` on modal mount and restores focus on unmount (defers to next tick so React's DOM teardown doesn't clobber the restored focus). Skips when the previously focused element has been removed from the DOM by the time the modal unmounts. Wired into SpawnDialog, PresetLaunchDialog, WorkspaceCreator, RepoRemoveDialog, ExitConfirmDialog, DiscardConfirmDialog, and VscodeSuggestionToast.
-- **Sidebar tree leaves are `role="button"` but have no `tabIndex` or keyboard handler.** Screen reader announces "button" but Enter / Space do nothing.
-  - File: `apps/tauri-app/src/components/Sidebar.tsx:262-263`, `328-329`.
-  - Suggested direction: add `tabIndex={0}` and an `onKeyDown` that maps Enter/Space to `onSelect`.
-- ~~**No `aria-label` on close × buttons.**~~ **Resolved across iters 6 + 39.** Every modal close ✕ now carries `aria-label="Close dialog"` (or `"Dismiss notification"` / `"Dismiss suggestion"` for toast-like modals). Sidebar inline remove × already had `aria-label`. TabBar tab-pill-close labels with the tab name. The audit's last open close-× was `PresetLaunchDialog`, closed in iter 39.
-- ~~**No `role="dialog"` / `aria-modal` on modals.**~~ **Resolved across iters 6 + 13 + 20.** Every component using `.modal-backdrop` now adds `role="dialog"` + `aria-modal="true"` + a descriptive `aria-label` on the inner `.modal`. Pure-toast surfaces (`ErrorToast`) are intentionally NOT marked as dialogs — they don't take focus or block input.
-- ~~**Status dot uses colour as the only differentiator.**~~ **Resolved (iter 16).** Status dots in `Sidebar` and `SessionPane` gained `title="status: <state>"` + `aria-label="status <state>"` + `role="img"` so screen-reader users and hover-tooltip users get the underlying state.
-- ~~**Modal stacking order is render-order, all at `z-index: 100`.**~~ **Resolved (iter 33).** Three new modifier classes layered on top of `.modal-backdrop`: `modal-backdrop-destructive` (z 120, used by RepoRemoveDialog + DiscardConfirmDialog), `modal-backdrop-vscode` (z 130, VscodeSuggestionToast), `modal-backdrop-exit` (z 140, ExitConfirmDialog). Ordinary forms (SpawnDialog, PresetLaunchDialog, WorkspaceCreator) keep the base z 100. The ordering reflects intent: exit (system-level quit) wins over everything; daemon-pushed events outrank confirms; destructive confirms outrank ordinary forms.
-- **All daemon `error` messages are silenced.** The only handler is `console.error("daemon error:", msg.message);` — Tauri apps don't have a visible dev console for end users.
-  - File: `apps/tauri-app/src/App.tsx:848-850`.
-  - Suggested direction: dedicated error-toast component; route every Error there.
-- **`preset_launch_failed` lands in `console.error` AND a window event, but no listener consumes the event.** Same fate as Error.
-  - File: `apps/tauri-app/src/App.tsx:822-833`.
-- ~~**Unused protocol surface: `SessionDiff` request/response.**~~ **Resolved (iter 37).** Deleted: `ClientMessage::SessionDiff` + `DaemonMessage::SessionDiff` + `MemberDiff` struct from `crates/protocol/src/lib.rs`; the server handler + `compute_session_diff` async fn from `crates/daemon/src/server.rs`; the dispatch case + `MemberDiff` interface from `apps/tauri-app/src/types.ts` and `App.tsx`. `PROTOCOL_VERSION` bumped 10 → 11. The Source Control sidebar handles per-repo dirty-file display, so the per-session aggregate was redundant.
-- **Daemon repo/workspace updates are NOT broadcast to all clients.** `add_repo`, `remove_repo`, `upsert_workspace`, `remove_workspace`, `set_*_worktree_default` all send `Repos` / `Workspaces` only via `out_tx` (the per-client channel). A pop-out window connected at the same time won't see the change until it reconnects.
-  - File: `crates/daemon/src/server.rs:466-508`, `670-682`.
-  - Suggested direction: fan these out via the broadcast channel like tabs/sessions.
-- ~~**No `lang="…"` on `<html>`, no `<title>` for popped-out windows beyond Tauri builder's `Session — <id>` / `Tab — <id>` raw-UUID labels.**~~ **Resolved (iter 22).** `<html lang="en">` was already set; pop-out `SessionWindow` / `TabWindow` now call `getCurrentWebviewWindow().setTitle(...)` with the session label / tab name on mount and on every label/name change, so renames propagate to the OS taskbar and alt-tab list.
-- ~~**Connection badge is only visible in the EmptyState.**~~ **Resolved (iter 21).** Sidebar header now always renders a connection badge for non-`open` states (hidden in the happy path). Live sessions that lose connection now show the warn/error chip in the persistent sidebar chrome.
-- ~~**`AppState.pendingTabActivate` is reset for the first new tab but tracks no actual tab id.**~~ **Resolved (iter 35).** `pendingTabActivate: boolean` → `pendingTabActivate: number`. Each `onArmNextNewTab` call (merge_tabs / extract_to_new_tab) and each `session_updated` with a `newTab` intent increments; each `tab_updated` for an unseen tab id decrements. If the user mashes Spawn three times, all three resulting new tabs get activated as they arrive instead of only the first. The "match-by-id" approach the audit suggested would be stricter but more invasive — the counter is sufficient for the spawn-race case it described, and avoids tracking session→tab correlation across the spawn pipeline.
-- ~~**`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.**~~ **Resolved (iter 22).** Daemon `error` handler now disarms the pending spawn intent before pushing the toast — a daemon-rejected spawn no longer leaves stale routing armed for the next spawn.
-- **Notification permission is requested on every app start.** *Partially resolved (iter 21).* The startup effect now `logToFile("warn", ...)` when `requestPermission()` returns anything other than `"granted"`, so `app.log` has an explanation when attention notifications stay silent. A real settings UI to inspect/re-trigger is still out of scope (no settings surface exists yet).
+- [x] **No global keyboard shortcuts at all.** *Resolved (iter 32 — Ctrl/Cmd+T/N/Tab/1..9.)*
+- [x] **No Escape to dismiss modals.** *Resolved across iters 6 + 20.*
+- [x] **No autofocus on modals (except WorkspaceCreator).** *Resolved (iter 38 — branch input on spawn dialogs.)*
+- [x] **No focus return after modal close.** *Resolved (iter 33 — `useFocusReturn`.)*
+- [x] **Sidebar tree leaves are `role="button"` but have no `tabIndex` or keyboard handler.** *Resolved (iter 6 — `tabIndex={0}` + Enter/Space.)*
+- [x] **No `aria-label` on close × buttons.** *Resolved across iters 6 + 39.*
+- [x] **No `role="dialog"` / `aria-modal` on modals.** *Resolved across iters 6 + 13 + 20.*
+- [x] **Status dot uses colour as the only differentiator.** *Resolved (iter 16 — title + aria-label + role="img".)*
+- [x] **Modal stacking order is render-order, all at `z-index: 100`.** *Resolved (iter 33 — z-layered destructive/vscode/exit.)*
+- [x] **All daemon `error` messages are silenced.** *Resolved (iter 2 — error toast.)*
+- [x] **`preset_launch_failed` lands in `console.error` AND a window event, but no listener consumes the event.** *Resolved (iter 2 — warn toast.)*
+- [x] **Unused protocol surface: `SessionDiff` request/response.** *Resolved (iter 37 — deleted; `PROTOCOL_VERSION` 10 → 11.)*
+- [x] **Daemon repo/workspace updates are NOT broadcast to all clients.** *Resolved (iter 3 — `state_events` broadcast.)*
+- [x] **No `lang="…"` on `<html>`, no `<title>` for popped-out windows beyond raw-UUID labels.** *Resolved (iter 22 — `setTitle`.)*
+- [x] **Connection badge is only visible in the EmptyState.** *Resolved (iter 21.)*
+- [x] **`AppState.pendingTabActivate` is reset for the first new tab but tracks no actual tab id.** *Resolved (iter 35 — counter.)*
+- [x] **`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.** *Resolved (iter 22.)*
+- [ ] **Notification permission is requested on every app start.** *Partially resolved (iter 21 — log to `app.log` when denied).* A real settings UI to inspect/re-trigger is still out of scope (no settings surface exists yet).
+  - File: `apps/tauri-app/src/App.tsx:175-189`.
 
 ### Dev / testing workflow
 
 Strictly speaking outside the user-facing UX surface, but a user-visible risk if a developer runs the E2E harness against their daily-driver install — flagged here so it's tracked alongside the rest of the audit.
 
-- ~~**E2E harness writes to the user's real config dir.**~~ **Resolved.** `RUSTLING_TULIP_CONFIG_DIR` is honored by `Dirs::ensure` (`crates/daemon/src/paths.rs`) and `config_dir` (`apps/tauri-app/src-tauri/src/lib.rs`); `tools/e2e/wdio.conf.ts` sets it to `.tmp/e2e/config/` per run and wipes the dir after killing any prior test daemon. Verified end-to-end: the wdio smoke spec writes to the tmpdir, real `%APPDATA%\leftos\rustling-tulip\config\` is untouched.
+- [x] **E2E harness writes to the user's real config dir.** *Resolved (commit `094a2d3` — `RUSTLING_TULIP_CONFIG_DIR` plumbed; harness writes to `.tmp/e2e/config/`.)*
 
 ---
 
 ## Findings from hand-test 2026-05-11
 
-Run-through of the live app (after iter 1–3 fixes). Bottom line: the core idea is useful, but the UX currently feels like an internal operator console. The biggest problems are orientation, trust, and recovery — not aesthetics. Numbered roughly in priority order.
+Run-through of the live app (after iter 1–3 fixes). Bottom line: the core idea is useful, but the UX currently feels like an internal operator console. The biggest problems are orientation, trust, and recovery — not aesthetics.
 
-1. **First-run onboarding is misleading.** `+ Session` is enabled with no repos. Opens a full spawn form with an empty repo dropdown, random branch name, disabled Spawn button, and no explanation. New users hit a dead end immediately.
-   - Suggested direction: disable `+ Session` when `repos.length === 0`. In the spawn dialog itself, show an empty-state CTA with a button that closes the dialog and opens the directory picker.
-   - Files: `apps/tauri-app/src/components/Sidebar.tsx:127-132` (toolbar `+ Session` always enabled), `apps/tauri-app/src/components/SpawnDialog.tsx:535-546` (empty repo dropdown).
+- [x] **1. First-run onboarding is misleading.** `+ Session` enabled with no repos, opening a full spawn form with empty dropdown. *Resolved (iter 4 — toolbar gating + EmptyState `+ Add repo` button.)*
+- [x] **2. Workspace creation disrupts mental model.** Existing single-repo sessions move into Detached with only a `?` marker. *Resolved (iter 4 — Detached banner explains; iter 5 — `[unbound]` pill rebinds.)*
+- [x] **3. Session identity is too weak.** OSC-emitted terminal titles overwrote canonical labels. *Resolved (iter 4 — canonical label sticks; `terminal_title` surfaces as tooltip only.)*
+- [x] **4. Workspace preview is effectively broken.** `.preview-table` collapsed to ~2 px when other modal content competed for space. *Resolved (iter 4 — `flex: 0 0 auto` + `min-height: 80px`.)*
+- [x] **5. Risky actions lack recovery.** *Partially addressed in iter 3 (repo/workspace/tab confirms).* Remaining items below.
+  - [ ] Detached-bucket session stop currently lives in the per-session Stop button. Audit asked for inline bucket-level "stop all" affordance.
+  - [ ] Undo-last-action shelf — substantial feature, not started.
+  - [ ] Longer-undo window for tab close — substantial feature, not started.
+- [x] **6. Keyboard/focus accessibility is weak.** *Resolved (iter 6 — `useEscape` + `useAutoFocus` + tabIndex/Enter/Space on tree leaves + aria-labels.)*
+- [x] **7. Pane controls are cryptic and crowded.** *Resolved (iter 6 — quieter baseline + aria-labels; iter 37 — hover/focus-within only.)*
 
-2. **Workspace creation disrupts mental model.** Creating a workspace from two repos moves their existing single-repo sessions into `Detached` with only a tiny `?` marker. Feels like the app lost or orphaned the sessions, even though they're still running.
-   - Suggested direction: the Detached bucket needs a banner explaining what happened ("These sessions were running before their repo got grouped into a workspace. They're still alive and attached.") plus a per-session "reattach to workspace" action.
-   - Files: `apps/tauri-app/src/components/Sidebar.tsx:516-561` (Detached rendering).
-
-3. **Session identity is too weak.** Sidebar and pane header show e.g. `C:\WINDOWS\system32\cmd.exe`. With tabs all named "Tab" the user can't tell what is what.
-   - Suggested direction: label priority should be `user-provided label > "<repo>:<branch> · <agent>" > terminal title`. Terminal title should be hover-only / tooltip metadata, not the primary visible label.
-   - Files: `apps/tauri-app/src/components/SessionPane.tsx` (header `<h2>`), `apps/tauri-app/src/components/Sidebar.tsx` (session row label).
-
-4. **Workspace preview is effectively broken.** Clicking Preview creates the table in the DOM, but its container collapses to ~2 px high in normal layout — user can't actually read the multi-repo worktree plan before spawning.
-   - Suggested direction: audit the flex parent chain. The `.preview-table` container likely needs `min-height` or its parent needs `flex: 1 1 auto` instead of `flex: 0 1 auto`.
-   - Files: `apps/tauri-app/src/components/SpawnDialog.tsx:938-968` (`.preview-table`), `apps/tauri-app/src/styles.css` (selector definitions).
-
-5. **Risky actions lack recovery.** *Partially addressed in iter 3* — repo remove / workspace remove / tab close / close-other-tabs now have confirms. Remaining: detached-bucket session stop, undo-last-action shelf, and a longer-undo window for tab close.
-
-6. **Keyboard/focus accessibility is weak.** Spawn dialog doesn't autofocus, focus stays behind the modal. Several `role="button"` / `role="tab"` divs have no `tabIndex` or keyboard handlers. Icon/glyph buttons have `title` but no `aria-label`.
-   - Suggested direction: whole-app sweep. Add a `useEscape(onClose)` hook + autofocus to every modal; add `tabIndex={0}` + Enter/Space handlers to tree leaves; add `aria-label` to all `×` and icon-only buttons.
-
-7. **Pane controls are cryptic and crowded.** The `⠿`, `▶|`, `▼=`, `×` overlay near the session header is compact but not self-evident, and crowds the Pop out / Stop buttons on narrow panes.
-   - Suggested direction: either re-design (text+icon labels), only show on hover, or move into a dedicated chrome strip above the session header on small widths.
-   - Files: `apps/tauri-app/src/components/GridRenderer.tsx` (pane controls), `apps/tauri-app/src/styles.css:605-637`.
-
-What works as-is: terminal attach flow, Stop session two-step confirm (which is the pattern we replicated for repo / workspace / tab in iter 3), workspace creation itself (simple + autofocused), Git panel Changes/History structure.
-
-**Recommended priority:** identity + trust first (stable labels, fixed workspace preview, Detached explanation, confirms ✓), then keyboard/focus and modal layout. Visual polish matters less until users can confidently tell what will happen and recover when they click the wrong thing.
+**Recommended priority (historical):** identity + trust first, then keyboard/focus and modal layout. Visual polish matters less until users can confidently tell what will happen and recover when they click the wrong thing.
 
 ---
 
