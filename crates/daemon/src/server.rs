@@ -285,8 +285,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // unconditionally to every connected client.
     let tab_event_task = spawn_tab_forwarder(hub.tab_events.subscribe(), out_tx.clone());
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
-    let state_event_task =
-        spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
+    let state_event_task = spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
 
     // Send initial state snapshots.
     push_initial_state(&hub, &out_tx);
@@ -1301,6 +1300,7 @@ fn spawn_interactive_session(
         headless: None,
         workspace_id: workspace_id.clone(),
         agent: cfg.agent,
+        terminal_title: None,
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -1417,6 +1417,7 @@ fn spawn_plain_shell_session(
         // Plain-shell sessions have no agent CLI in the picture; label them
         // as claude so the UI badge doesn't render `· codex` on a pwsh prompt.
         agent: Agent::Claude,
+        terminal_title: None,
     };
     push_recent_action(&mut record, format!("session started: {shell_label}"));
     hub.sessions.insert(record);
@@ -1446,7 +1447,8 @@ fn spawn_plain_shell_session(
     // Deliberately skip `pty_state::watch` — its Claude TUI prompt heuristic
     // would mis-classify a normal shell prompt as `AwaitingInput`. Keep
     // `osc_title::watch` so window-title escape sequences (which pwsh emits
-    // by default) still update the session label.
+    // by default) are recorded as `terminal_title` annotations; the canonical
+    // session `label` stays whatever the spawn pipeline assigned.
     osc_title::watch(
         &hub.sessions,
         session_id.clone(),
@@ -1514,6 +1516,7 @@ fn spawn_headless_session(
         headless: None,
         workspace_id: workspace_id.clone(),
         agent: cfg.agent,
+        terminal_title: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);

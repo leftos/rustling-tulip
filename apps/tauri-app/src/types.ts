@@ -66,6 +66,13 @@ export interface SessionSnapshot {
   workspace_id: string | null;
   // Which CLI is driving this session. Drives the agent badge in the UI.
   agent: Agent;
+  // Last OSC 0/2 window title emitted by the agent/shell. Distinct from
+  // `label` so the canonical sidebar/header name stays the daemon-curated
+  // `<repo>:<branch>` (or user override) rather than being clobbered by
+  // shell-emitted titles like `C:\WINDOWS\system32\cmd.exe`. Surfaced as a
+  // tooltip; never as the primary label. null until the agent emits its
+  // first title.
+  terminal_title: string | null;
 }
 
 export type SpawnTarget =

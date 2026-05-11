@@ -136,7 +136,15 @@ export default function Sidebar(props: Props) {
         <button
           type="button"
           className="primary small"
-          onClick={() => props.onOpenSpawn()}
+          onClick={
+            props.repos.length > 0 ? () => props.onOpenSpawn() : undefined
+          }
+          disabled={props.repos.length === 0}
+          title={
+            props.repos.length === 0
+              ? "Register a repo first"
+              : "Spawn a new session"
+          }
           data-testid="sidebar-add-session"
         >
           + Session
@@ -376,6 +384,14 @@ function ContainerNode(p: ContainerNodeProps) {
       </div>
       {hasChildren && !p.collapsed && (
         <ul className="tree-children">
+          {c.kind === "detached" && (
+            <li className="tree-children-banner" data-testid="detached-banner">
+              These sessions are still alive, but their owning repo or
+              workspace is no longer registered (or got rolled into a
+              workspace after they spawned). Use the session header to stop or
+              pop them out.
+            </li>
+          )}
           {c.sessions.map((s) => (
             <SessionLeaf
               key={s.id}
@@ -435,7 +451,14 @@ function SessionLeaf(p: SessionLeafProps) {
         ) : (
           <span className={`status-dot status-${s.status}`} />
         )}
-        <span className="tree-label" title={s.label}>
+        <span
+          className="tree-label"
+          title={
+            s.terminal_title && s.terminal_title !== s.label
+              ? `${s.label}\nTerminal: ${s.terminal_title}`
+              : s.label
+          }
+        >
           {s.label}
         </span>
         {isCodex && (

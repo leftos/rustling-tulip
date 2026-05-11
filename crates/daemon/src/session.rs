@@ -52,6 +52,11 @@ pub struct SessionRecord {
     /// Which CLI is driving this session. Surfaced to clients via the
     /// `SessionSnapshot.agent` field.
     pub agent: Agent,
+    /// Latest window title emitted by the agent/shell via OSC 0/2. Kept
+    /// separate from `label` so the canonical name (set at spawn time, or by
+    /// the user) is not overwritten by transient shell titles like
+    /// `C:\WINDOWS\system32\cmd.exe`. `None` until the first OSC title arrives.
+    pub terminal_title: Option<String>,
 }
 
 impl SessionRecord {
@@ -77,6 +82,7 @@ impl SessionRecord {
             is_orphan,
             workspace_id: self.workspace_id.clone(),
             agent: self.agent,
+            terminal_title: self.terminal_title.clone(),
         }
     }
 }
@@ -246,6 +252,7 @@ impl SessionRegistry {
             headless: None,
             workspace_id: meta.workspace_id.clone(),
             agent: meta.agent.unwrap_or_default(),
+            terminal_title: meta.terminal_title.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);

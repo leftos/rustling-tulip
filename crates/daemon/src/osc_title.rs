@@ -177,9 +177,9 @@ pub fn watch(
                         debug!(session_id = %session_id, %title, "applying OSC title");
                         let title_for_update = title.clone();
                         registry.update(&session_id, |rec| {
-                            rec.label.clone_from(&title_for_update);
+                            rec.terminal_title = Some(title_for_update.clone());
                         });
-                        orphan::try_update_label(&dirs, &session_id, &title);
+                        orphan::try_update_terminal_title(&dirs, &session_id, &title);
                         last_applied = Some(title);
                     }
                 }

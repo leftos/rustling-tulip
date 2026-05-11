@@ -631,6 +631,7 @@ export default function App() {
             <EmptyState
               connection={state.status}
               onOpenSpawn={() => onOpenSpawn()}
+              onAddRepo={onAddRepo}
               hasRepos={state.repos.length > 0}
               hasTabs={state.tabs.length > 0}
             />
@@ -954,16 +955,18 @@ function findSession(
 function EmptyState({
   connection,
   onOpenSpawn,
+  onAddRepo,
   hasRepos,
   hasTabs,
 }: {
   connection: AppState["status"];
   onOpenSpawn: () => void;
+  onAddRepo: () => void;
   hasRepos: boolean;
   hasTabs: boolean;
 }) {
   return (
-    <div className="empty-state">
+    <div className="empty-state" data-testid="empty-state">
       <h1>rustling-tulip</h1>
       <p className="status-line">
         Daemon: <ConnectionBadge state={connection} />
@@ -971,11 +974,29 @@ function EmptyState({
       {hasTabs ? (
         <p className="hint">Select a tab above.</p>
       ) : hasRepos ? (
-        <button type="button" onClick={onOpenSpawn} className="primary">
+        <button
+          type="button"
+          onClick={onOpenSpawn}
+          className="primary"
+          data-testid="empty-state-spawn"
+        >
           Spawn a session
         </button>
       ) : (
-        <p className="hint">Add a repo from the sidebar to get started.</p>
+        <>
+          <p className="hint">
+            No repos registered yet. Add one to spawn sessions and create
+            workspaces.
+          </p>
+          <button
+            type="button"
+            onClick={onAddRepo}
+            className="primary"
+            data-testid="empty-state-add-repo"
+          >
+            + Add repo
+          </button>
+        </>
       )}
     </div>
   );

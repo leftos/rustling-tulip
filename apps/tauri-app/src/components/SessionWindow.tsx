@@ -38,7 +38,15 @@ export default function SessionWindow({
     <div className="session-window-root">
       <header className="session-window-toolbar">
         <span className={`status-dot status-${session.status}`} />
-        <h1>{session.label}</h1>
+        <h1
+          title={
+            session.terminal_title && session.terminal_title !== session.label
+              ? `${session.label}\nTerminal: ${session.terminal_title}`
+              : session.label
+          }
+        >
+          {session.label}
+        </h1>
         <span className="session-window-meta">
           {session.kind === "workspace"
             ? `${session.members.length} repos`

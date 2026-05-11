@@ -180,6 +180,13 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree { list-style: none; margin: 0; padding: 6px 6px 12px; display: flex; flex-direction: column; gap: 1px; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
 .tree-children { padding-left: 16px; display: flex; flex-direction: column; gap: 1px; margin-top: 1px; }
+.tree-children-banner {
+  font-size: 11px; color: var(--fg-muted); line-height: 1.4;
+  background: var(--bg-elev2); border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px; margin: 2px 0 4px;
+  user-select: text; -webkit-user-select: text;
+}
 .tree-row {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 8px;
@@ -411,6 +418,12 @@ button.link.inline { display: inline; padding: 0 2px; }
 .preview-table {
   border: 1px solid var(--border); border-radius: var(--radius);
   overflow: auto; max-height: 240px;
+  /* Flex children with overflow auto default to min-height: 0, which lets the
+     modal-body's column flex squash the preview to a few pixels when other
+     form content competes for space. Pin a sensible floor so the table is
+     always legible. */
+  flex: 0 0 auto;
+  min-height: 80px;
 }
 .preview-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .preview-table th, .preview-table td {

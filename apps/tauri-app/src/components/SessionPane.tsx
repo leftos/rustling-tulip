@@ -67,7 +67,15 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
           ) : (
             <span className={`status-dot status-${session.status}`} />
           )}
-          <h2>{session.label}</h2>
+          <h2
+            title={
+              session.terminal_title && session.terminal_title !== session.label
+                ? `${session.label}\nTerminal: ${session.terminal_title}`
+                : session.label
+            }
+          >
+            {session.label}
+          </h2>
           <span className="session-meta">
             {session.kind === "workspace"
               ? `${session.members.length} repos`

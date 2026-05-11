@@ -50,6 +50,7 @@ export interface SessionSnapshot {
   recent_actions: string[];
   is_orphan: boolean;
   workspace_id: string | null;
+  terminal_title?: string | null;
 }
 
 // --- Client → Daemon ---------------------------------------------------------

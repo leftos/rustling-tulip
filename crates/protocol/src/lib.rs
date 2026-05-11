@@ -197,6 +197,13 @@ pub struct SessionSnapshot {
     /// Which CLI is driving this session. Daemon always populates this so the
     /// UI can label the session.
     pub agent: Agent,
+    /// Window title last emitted by the agent via OSC 0/2 escape sequences.
+    /// Distinct from `label` so the canonical sidebar/header name stays
+    /// `<repo>:<branch>` (or the user override) instead of being clobbered by
+    /// whatever the underlying shell/agent broadcasts. UIs may surface it as a
+    /// tooltip or subtitle. `None` until the agent emits its first title.
+    #[serde(default)]
+    pub terminal_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

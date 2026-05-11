@@ -45,6 +45,12 @@ pub struct OrphanMeta {
     /// `Agent::Claude` in that case (the only agent that existed then).
     #[serde(default)]
     pub agent: Option<Agent>,
+    /// Latest OSC-emitted window title. Stored alongside the canonical label
+    /// so a daemon restart reattaches the orphan with the same annotation it
+    /// had. `None` for metas written before this field existed; the OSC
+    /// watcher will repopulate it on the next title broadcast.
+    #[serde(default)]
+    pub terminal_title: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -220,32 +226,35 @@ pub fn meta_from_record(
         workspace_id,
         program_name,
         agent: Some(agent),
+        terminal_title: None,
     })
 }
 
-/// Best-effort: read the meta sidecar, mutate `label`, write it back. Used by
-/// the OSC-title parser when the agent updates the terminal title — we want
-/// the new title to survive a daemon restart (orphan reattach restores from
-/// this file). Returns `Ok(())` for both "meta did not exist" and "meta
-/// updated" — only true I/O errors surface.
-pub fn update_label(dirs: &Dirs, session_id: &str, new_label: &str) -> anyhow::Result<()> {
+/// Best-effort: read the meta sidecar, mutate `terminal_title`, write it back.
+/// Used by the OSC-title parser when the agent emits an OSC 0/2 sequence — we
+/// want that annotation to survive a daemon restart so a reattached orphan
+/// keeps its terminal-title hint. The canonical `label` is intentionally not
+/// touched (it stays whatever the spawn pipeline chose). Returns `Ok(())` for
+/// both "meta did not exist" and "meta updated" — only true I/O errors
+/// surface.
+pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> anyhow::Result<()> {
     let path = meta_path(dirs, session_id);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for label update"),
+        Err(err) => return Err(err).context("reading meta for terminal_title update"),
     };
     let mut meta: OrphanMeta =
-        serde_json::from_slice(&bytes).context("parsing meta for label update")?;
-    if meta.label == new_label {
+        serde_json::from_slice(&bytes).context("parsing meta for terminal_title update")?;
+    if meta.terminal_title.as_deref() == Some(new_title) {
         return Ok(());
     }
-    meta.label = new_label.to_string();
+    meta.terminal_title = Some(new_title.to_string());
     write_meta(dirs, &meta)
 }
 
-pub fn try_update_label(dirs: &Dirs, session_id: &str, new_label: &str) {
-    if let Err(err) = update_label(dirs, session_id, new_label) {
-        warn!(?err, %session_id, "failed to update orphan meta label");
+pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
+    if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
+        warn!(?err, %session_id, "failed to update orphan meta terminal_title");
     }
 }
