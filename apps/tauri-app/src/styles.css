@@ -982,6 +982,17 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
 }
 .preset-preview-row { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .preset-preview-index { color: var(--fg-muted); margin-right: 4px; }
+.preset-preview-group { display: flex; flex-direction: column; gap: 2px; }
+.preset-preview-group + .preset-preview-group { margin-top: 6px; }
+.preset-preview-group-header {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 0 1px;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 2px;
+}
 
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { color: var(--fg-muted); font-size: 11px; }

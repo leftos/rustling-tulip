@@ -635,14 +635,76 @@ function PreviewStage({
         {loading || error !== null ? null : prompts.length === 0 ? (
           <p className="muted">No prompts found in the chosen source.</p>
         ) : (
-          prompts.map((p, i) => (
-            <div key={i} className="preset-preview-row" data-testid="preset-preview-row">
-              <span className="preset-preview-index">[{i + 1}]</span>{" "}
-              <span>{firstLinePreview(p)}</span>
-            </div>
-          ))
+          <PreviewPromptList
+            prompts={prompts}
+            cap={parseMaxPerTab(maxPerTab)}
+          />
         )}
       </div>
+    </>
+  );
+}
+
+/// Renders the preview list either flat (single-tab case) or grouped by
+/// destination tab with a small `Tab N of M` header above each chunk.
+/// Pre-iter-47 the user only saw "→ 3 tabs" in the prose line above and
+/// had no idea which prompts would land in which tab. The grouping uses
+/// the same sequential `prompts.slice(i, i + cap)` partition the daemon
+/// applies in `presets.rs::launch` (single-tab path falls through cleanly
+/// when `cap === null` or `prompts.length <= cap`).
+function PreviewPromptList({
+  prompts,
+  cap,
+}: {
+  prompts: string[];
+  cap: number | null;
+}) {
+  if (cap === null || prompts.length <= cap) {
+    return (
+      <>
+        {prompts.map((p, i) => (
+          <div
+            key={i}
+            className="preset-preview-row"
+            data-testid="preset-preview-row"
+          >
+            <span className="preset-preview-index">[{i + 1}]</span>{" "}
+            <span>{firstLinePreview(p)}</span>
+          </div>
+        ))}
+      </>
+    );
+  }
+  const groups: Array<{ start: number; items: string[] }> = [];
+  for (let i = 0; i < prompts.length; i += cap) {
+    groups.push({ start: i, items: prompts.slice(i, i + cap) });
+  }
+  return (
+    <>
+      {groups.map((g, gi) => (
+        <div
+          key={gi}
+          className="preset-preview-group"
+          data-testid="preset-preview-group"
+        >
+          <div className="preset-preview-group-header">
+            Tab {gi + 1} of {groups.length}
+          </div>
+          {g.items.map((p, j) => {
+            const idx = g.start + j;
+            return (
+              <div
+                key={idx}
+                className="preset-preview-row"
+                data-testid="preset-preview-row"
+              >
+                <span className="preset-preview-index">[{idx + 1}]</span>{" "}
+                <span>{firstLinePreview(p)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </>
   );
 }
