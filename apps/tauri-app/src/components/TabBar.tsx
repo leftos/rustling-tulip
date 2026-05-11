@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { TabEntry } from "../types";
+import { useEscape } from "../utils/a11y";
 import { tabHasBoundSessions } from "../utils/grid";
 
 interface Props {
@@ -420,6 +421,7 @@ interface ContextMenuProps {
 }
 
 function TabContextMenu(p: ContextMenuProps) {
+  useEscape(p.onClose);
   return (
     <div
       className="context-menu-backdrop"

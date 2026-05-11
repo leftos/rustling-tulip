@@ -8,6 +8,7 @@ import type {
   TabEntry,
   WorkspaceEntry,
 } from "../types";
+import { useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
 
 /// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
@@ -396,6 +397,19 @@ function ContainerNode(p: ContainerNodeProps) {
         onClick={hasChildren ? p.onToggle : undefined}
         onContextMenu={onContext}
         role={hasChildren ? "button" : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        aria-expanded={hasChildren ? !p.collapsed : undefined}
+        aria-label={hasChildren ? `${c.kind} ${c.name}` : undefined}
+        onKeyDown={
+          hasChildren
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  p.onToggle();
+                }
+              }
+            : undefined
+        }
         title={c.hoverTitle}
         data-testid={`sidebar-container-${c.kind}`}
         data-container-id={c.id}
@@ -554,6 +568,14 @@ function SessionLeaf(p: SessionLeafProps) {
         className={classes}
         onClick={() => p.onSelect(s.id)}
         role="button"
+        tabIndex={0}
+        aria-label={`Session ${s.label}`}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            p.onSelect(s.id);
+          }
+        }}
         draggable={draggable}
         onDragStart={onDragStart}
         data-testid="sidebar-session"
@@ -626,6 +648,7 @@ function TabPill(p: TabPillProps) {
         type="button"
         className="tree-tab-pill unbound"
         title="No tab references this session — click to open it in a new tab"
+        aria-label="Open session in a new tab (currently unbound)"
         data-testid="session-tab-pill-unbound"
         onClick={p.onBindUnbound}
       >
@@ -676,6 +699,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   const canLaunchPreset = c.kind === "repo" || c.kind === "workspace";
   const removeLabel =
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
+  useEscape(p.onClose);
 
   // Backdrop catches clicks/keys to close. The menu itself is positioned at
   // the cursor; max-bounds-checking is left to the browser for now (the

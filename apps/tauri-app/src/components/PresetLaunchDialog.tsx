@@ -14,6 +14,7 @@ import type {
   PresetVariable,
   RepoEntry,
 } from "../types";
+import { useEscape } from "../utils/a11y";
 import { parsePrompts } from "../utils/parsePrompts";
 
 interface Props {
@@ -175,9 +176,17 @@ export default function PresetLaunchDialog({
     onClose();
   };
 
+  useEscape(onClose);
+
   return (
     <div className="modal-backdrop" onClick={onClose} data-testid="preset-launch-dialog">
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Launch preset ${preset.name}`}
+      >
         <header className="modal-header">
           <h2>
             Launch preset · {preset.name}{" "}

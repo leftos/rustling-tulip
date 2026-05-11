@@ -677,10 +677,15 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   gap: 2px;
   z-index: 2;
   opacity: 0;
-  transition: opacity 0.1s;
+  transition: opacity 0.12s;
 }
+/* Focused panes get a subtle baseline (so keyboard users can still see the
+   controls exist), full opacity on hover or when something inside is keyboard-
+   focused. Hover anywhere on the pane also reveals. */
+.grid-pane.is-focused .grid-pane-controls { opacity: 0.45; }
 .grid-pane:hover .grid-pane-controls,
-.grid-pane.is-focused .grid-pane-controls {
+.grid-pane:focus-within .grid-pane-controls,
+.grid-pane.is-focused:hover .grid-pane-controls {
   opacity: 1;
 }
 .grid-pane-btn {

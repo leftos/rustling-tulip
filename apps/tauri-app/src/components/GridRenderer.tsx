@@ -294,7 +294,8 @@ function PaneChrome(props: PaneChromeProps) {
           className="grid-pane-drag"
           draggable
           onDragStart={onDragStart}
-          title="Drag pane"
+          title="Drag pane to move"
+          aria-hidden="true"
         >
           ⠿
         </span>
@@ -302,6 +303,7 @@ function PaneChrome(props: PaneChromeProps) {
           type="button"
           className="grid-pane-btn"
           title="Split right"
+          aria-label="Split pane horizontally"
           onClick={() => sendSplit("horizontal")}
         >
           ▶|
@@ -310,6 +312,7 @@ function PaneChrome(props: PaneChromeProps) {
           type="button"
           className="grid-pane-btn"
           title="Split down"
+          aria-label="Split pane vertically"
           onClick={() => sendSplit("vertical")}
         >
           ▼=
@@ -318,6 +321,7 @@ function PaneChrome(props: PaneChromeProps) {
           type="button"
           className="grid-pane-btn grid-pane-btn-close"
           title="Close pane"
+          aria-label="Close pane"
           onClick={onClose}
         >
           ×

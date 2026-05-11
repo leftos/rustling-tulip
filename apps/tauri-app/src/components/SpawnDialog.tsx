@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
+import { useEscape } from "../utils/a11y";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import type {
   Agent,
@@ -132,15 +133,26 @@ export default function SpawnDialog({
   const initialWorkspaceId =
     initialTarget?.kind === "workspace" ? initialTarget.workspace_id : null;
 
+  // Escape closes the dialog (matches × and backdrop click). Modal forms
+  // are dense — Escape is the keyboard escape hatch.
+  useEscape(onClose);
+
   return (
     <div className="modal-backdrop" onClick={onClose} data-testid="spawn-dialog">
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Spawn session"
+      >
         <header className="modal-header">
           <h2>Spawn session</h2>
           <button
             type="button"
             className="link"
             onClick={onClose}
+            aria-label="Close dialog"
             data-testid="spawn-close"
           >
             ✕

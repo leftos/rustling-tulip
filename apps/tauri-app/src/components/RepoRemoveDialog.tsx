@@ -1,4 +1,6 @@
+import { useRef } from "react";
 import type { SessionSnapshot } from "../types";
+import { useAutoFocus, useEscape } from "../utils/a11y";
 
 interface Props {
   repoName: string;
@@ -24,13 +26,25 @@ export default function RepoRemoveDialog({
   onStopAndRemove,
 }: Props) {
   const count = liveSessions.length;
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // Escape dismisses the modal — same as clicking Cancel / the backdrop.
+  // Land focus on Cancel (the safest of the three actions) so a stray
+  // Enter doesn't destroy state.
+  useEscape(onCancel);
+  useAutoFocus(cancelRef);
   return (
     <div
       className="modal-backdrop"
       onClick={onCancel}
       data-testid="repo-remove-dialog"
     >
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Remove repo ${repoName}`}
+      >
         <header className="modal-header">
           <h2>Remove repo &middot; {repoName}</h2>
           <button
@@ -67,6 +81,7 @@ export default function RepoRemoveDialog({
         </div>
         <footer className="modal-footer">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onCancel}
             data-testid="repo-remove-cancel"
