@@ -654,13 +654,19 @@ function SingleForm({
     }
   };
 
+  // Guard against double-click submit. submit() is synchronous and onClose
+  // is setState; a fast double-click on the primary button could otherwise
+  // fire two spawn_session messages before React unmounts the dialog.
+  const submittedRef = useRef(false);
+
   const canSubmit =
     !!repoId &&
     branch.value.trim().length > 0 &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
-    if (!canSubmit) return;
+    if (!canSubmit || submittedRef.current) return;
+    submittedRef.current = true;
     client.send({
       type: "spawn_session",
       label: null,
@@ -839,8 +845,13 @@ function WorkspaceForm({
 
   const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
   useEffect(() => {
+    // Clear the preview whenever any input that changes the worktree-add
+    // plan changes — that includes `useWorktree`, which alters paths. Audit
+    // finding: previously the preview went stale when the user toggled
+    // worktree mode after a Preview, leaving the table showing paths that
+    // no longer matched the active mode.
     setPreview(null);
-  }, [workspaceId, branch.value, baseBranch]);
+  }, [workspaceId, branch.value, baseBranch, useWorktree]);
 
   useEffect(() => {
     const handler = (ev: Event) => {
@@ -880,13 +891,17 @@ function WorkspaceForm({
     });
   };
 
+  // Mirror SingleForm's double-click guard.
+  const submittedRef = useRef(false);
+
   const canSpawn =
     !!workspaceId &&
     branch.value.trim().length > 0 &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
-    if (!canSpawn) return;
+    if (!canSpawn || submittedRef.current) return;
+    submittedRef.current = true;
     client.send({
       type: "spawn_session",
       label: null,

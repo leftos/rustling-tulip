@@ -66,15 +66,11 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **`spawning` and `working` share the same accent-blue dot.** Status colour mapping makes it impossible to tell whether claude is still in the middle of its bootstrap or already running.
   - File: `apps/tauri-app/src/styles.css:137` (`.status-spawning, .status-working { background: var(--accent); }`).
   - Suggested direction: distinct hue or a small spinner overlay on `spawning`.
-- **Workspace form has no "Cancel preview" / refresh affordance.** Once a preview is requested the table renders, but if the user toggles `useWorktree` after the preview, the preview is NOT cleared (it only resets on `workspaceId / branch.value / baseBranch` changes) so the displayed paths can be stale.
-  - File: `apps/tauri-app/src/components/SpawnDialog.tsx:667-670`.
-  - Suggested direction: include `useWorktree` in the dependency list, or clear preview on any field change and require explicit re-Preview.
+- ~~**Workspace form has no "Cancel preview" / refresh affordance.**~~ **Resolved (iter 18).** Preview-reset `useEffect` now depends on `useWorktree` too, so toggling worktree mode clears the stale preview table and requires an explicit re-Preview.
 - **Random worktree branch name regenerates every dialog open.** Closing and reopening the spawn dialog (even on the same target) gives a different `wt/<adj>-<noun>` suggestion, so users who Cancel-then-reopen lose their intended branch name.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:388-431` (`useBranchField`, regenerates on mount via `useState(defaultBranch)` + `defaultBranch` change effect; mount alone seeds `randomWorktreeBranchName()`).
   - Suggested direction: persist last-suggested name per-target in component state at the App level, or accept this as a freshness feature with a "regenerate" button.
-- **`Spawn → Spawn` double-click submits twice.** `submit()` is synchronous and `onClose()` is `setState`, so a fast double-click on the primary button can fire two `spawn_session` messages before React unmounts the dialog. Same in both forms.
-  - File: `apps/tauri-app/src/components/SpawnDialog.tsx:511-531`, `715-735`.
-  - Suggested direction: disable the button on first click using local state, or check `!canSubmit || sentRef.current` before sending.
+- ~~**`Spawn → Spawn` double-click submits twice.**~~ **Resolved (iter 18).** Both `SingleForm.submit` and `WorkspaceForm.submit` guard via a `submittedRef = useRef(false)` flip that survives synchronous double-clicks before the dialog unmounts.
 - **Permission-mode dropdown silently retains a value while disabled.** When `skipPerms` is on, the dropdown is disabled but its current value is still sent through `advancedToWire` (which clamps to `null` because `skipPerms`). If the user toggles `skipPerms` off, the previously chosen value re-emerges — which the user may have forgotten about.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:43-64` (`advancedToWire` masks but `cfg` retains), `293-318` (disabled but value preserved).
   - Suggested direction: visible read-only display of what mode will be used at the bottom of the dialog ("Will run: `--permission-mode default`"); or reset on toggle.
