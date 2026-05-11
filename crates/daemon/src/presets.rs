@@ -1033,6 +1033,43 @@ mod tests {
         assert!(err.error.contains("required"));
     }
 
+    /// Parses the smoke-test preset that lives at the root of this repo
+    /// (`.rustling-tulip/presets.json`). Failing this test means a checked-in
+    /// preset file no longer round-trips through the protocol shape and the
+    /// app would also fail to load it.
+    #[test]
+    fn repo_smoke_preset_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".rustling-tulip")
+            .join("presets.json");
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        let entries: Vec<protocol::PresetEntry> = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|err| panic!("parsing {}: {err}", path.display()));
+        assert!(!entries.is_empty(), "expected at least one preset");
+        let smoke = entries
+            .iter()
+            .find(|p| p.id == "smoke-inline")
+            .expect("smoke-inline preset present");
+        // Sanity: a single inline source, two-step injector framing,
+        // tab grouping enabled with no cap.
+        assert!(
+            smoke
+                .prompt_sources
+                .iter()
+                .any(|s| matches!(s, protocol::PresetPromptSource::Inline))
+        );
+        assert_eq!(smoke.stagger_ms, 3000);
+        match &smoke.tab_grouping {
+            protocol::TabGroupingConfig::NewTab {
+                max_panes_per_tab, ..
+            } => assert!(max_panes_per_tab.is_none()),
+            protocol::TabGroupingConfig::None => panic!("expected new_tab grouping"),
+        }
+    }
+
     #[test]
     fn resolve_variables_uses_default_when_missing() {
         let vars = vec![PresetVariable {

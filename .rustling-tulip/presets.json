@@ -1,0 +1,41 @@
+[
+  {
+    "id": "smoke-inline",
+    "name": "Smoke test (inline)",
+    "description": "Two paste-in prompts on tmp/preset-test branches. Use to verify the preset pipeline end-to-end after a fresh checkout — does NOT depend on any external files.",
+    "prompt_sources": [{ "kind": "inline" }],
+    "prompt_template": "{prompt}",
+    "context_footer_lines": [],
+    "variables": [],
+    "branch_template": "tmp/preset-test/{index}",
+    "session_label_template": "smoke {index}",
+    "default_use_worktree": true,
+    "dangerously_skip_permissions": true,
+    "model": null,
+    "permission_mode": null,
+    "tab_grouping": {
+      "kind": "new_tab",
+      "layout": "balanced_horizontal",
+      "max_panes_per_tab": null,
+      "tab_name_template": "smoke test {date}"
+    },
+    "injector": {
+      "startup_delay_ms": 6000,
+      "pre_input": [
+        { "kind": "write", "data_b64": "G1ta" },
+        { "kind": "delay", "ms": 200 },
+        { "kind": "write", "data_b64": "G1ta" },
+        { "kind": "delay", "ms": 200 },
+        { "kind": "write", "data_b64": "G1ta" },
+        { "kind": "delay", "ms": 200 },
+        { "kind": "write", "data_b64": "G1ta" },
+        { "kind": "delay", "ms": 500 }
+      ],
+      "post_input": [
+        { "kind": "delay", "ms": 500 },
+        { "kind": "text", "content": "", "newline": true }
+      ]
+    },
+    "stagger_ms": 3000
+  }
+]
