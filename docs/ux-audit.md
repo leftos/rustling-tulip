@@ -108,9 +108,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No copy-paste hot-keys in xterm config.** Standard xterm allows Ctrl+Shift+C / Ctrl+Shift+V but the config doesn't bind explicit copy/paste handlers. Combined with `user-select: none` on body (xterm's own selection still works inside the terminal), users may not realise selection is active.
   - File: `apps/tauri-app/src/components/Terminal.tsx:25-40`.
   - Suggested direction: bind explicit keymap or surface a "right-click to copy selection" hint.
-- **Headless `recent_actions` list grows unbounded in the UI.** `HeadlessView` renders all entries. Daemon may cap it, but the UI does no virtualization. Long-running headless sessions could render thousands of `<li>` entries.
-  - File: `apps/tauri-app/src/components/SessionPane.tsx:171-185`.
-  - Suggested direction: window the list (`react-window` or a simple max-N + "load more"), or fade older entries.
+- ~~**Headless `recent_actions` list grows unbounded in the UI.**~~ **Resolved (iter 36).** `HeadlessView` now slices to the last `HEADLESS_RECENT_ACTIONS_TAIL = 200` entries by default, with a "Show all N entries (earlier M hidden)" button that opts into the full list. Composed `<li>` keys (`sliceStart + idx`) keep React reconciliation stable across slice changes. Avoids the renderer freeze on long-running headless sessions while preserving access to earlier events when the user actually needs them.
 - **PTY input is sent on every keystroke even when the session is stopped.** `Terminal` is unmounted when `session.status === "stopped"` (line 142 SessionPane), but the `onData` handler in xterm fires after dispose — fine. However, between the daemon emitting Stopped and the UI receiving `session_updated`, keystrokes are forwarded to a dying PTY, the daemon may log warnings.
   - File: `apps/tauri-app/src/components/Terminal.tsx:76-84`.
   - Suggested direction: guard `send_input` on the latest known session status (low priority).
@@ -126,9 +124,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No surface for the read-only-ness of the panel.** `CLAUDE.md` flags Stage/unstage as deferred, but there's no visual note in the Changes view explaining that the file rows are click-to-view-only. New users may try to right-click for stage actions and find nothing.
   - File: `apps/tauri-app/src/components/GitPanel.tsx:144-162`.
   - Suggested direction: footer text "Read-only · stage from your terminal" or remove the visual cursor:pointer on the rows.
-- **Diff body has no virtualization, no syntax limit.** A 50 k-line diff renders as 50 k `<span>` elements, all at once. For a generated `pnpm-lock.yaml` change this freezes the renderer.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:295-305`.
-  - Suggested direction: cap at N lines with "show more" or virtualize.
+- ~~**Diff body has no virtualization, no syntax limit.**~~ **Resolved (iter 12 retroactively).** The original `<pre>`-based diff body in `GitPanel.tsx` is gone — clicking a changed file in the Source Control sidebar now opens a Monaco diff editor as its own tab kind (`TabContent::Diff`). Monaco virtualizes natively, so a 50k-line `pnpm-lock.yaml` diff scrolls smoothly. The "1MB threshold + load anyway" plan-item from Phase 6 is already wired in `git_inspect::file_snapshot` on the daemon side.
 - **`HistoryView` commit list is capped at `COMMIT_LIMIT = 50` with no "load more".** Users on long-history branches see only the most recent 50 commits.
   - File: `apps/tauri-app/src/components/GitPanel.tsx:20`, `196-214`.
   - Suggested direction: paginated `list_commits` plus a "load more" button at the bottom of the list.

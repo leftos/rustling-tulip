@@ -724,6 +724,12 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
 .env-row-error { margin-top: 2px; color: var(--warn); }
 .input-invalid { border-color: var(--warn); }
 .preset-launch-caveat { font-style: italic; margin: 0.5rem 0; }
+.headless-show-all {
+  display: block; width: 100%; text-align: center;
+  padding: 6px 8px; margin-bottom: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed var(--border); border-radius: 4px;
+}
 .status-line { color: var(--fg-muted); }
 
 .badge {

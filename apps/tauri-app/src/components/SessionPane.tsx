@@ -175,8 +175,22 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
   );
 }
 
+/// Cap on the number of recent_actions rows rendered at once. Beyond
+/// this, the user can click "Show all N entries" to opt into the full
+/// list. Audit finding: a long-running headless session can accumulate
+/// thousands of entries, and rendering them all as `<li>` elements at
+/// once freezes the React reconciler.
+const HEADLESS_RECENT_ACTIONS_TAIL = 200;
+
 function HeadlessView({ session }: { session: SessionSnapshot }) {
   const m = session.metrics;
+  const [showAll, setShowAll] = useState(false);
+  const total = session.recent_actions.length;
+  const overflowed = total > HEADLESS_RECENT_ACTIONS_TAIL && !showAll;
+  // Slice from the end so the most recent N stay visible; the user can
+  // expand to see earlier entries.
+  const sliceStart = overflowed ? total - HEADLESS_RECENT_ACTIONS_TAIL : 0;
+  const visible = session.recent_actions.slice(sliceStart);
   return (
     <div className="headless-view">
       <div className="headless-stats">
@@ -186,16 +200,28 @@ function HeadlessView({ session }: { session: SessionSnapshot }) {
         <Stat label="cost" value={`$${m.cost_usd.toFixed(4)}`} />
       </div>
       <div className="headless-log">
-        {session.recent_actions.length === 0 ? (
+        {total === 0 ? (
           <p className="empty">No events yet…</p>
         ) : (
-          <ol>
-            {session.recent_actions.map((line, idx) => (
-              // Stable order, append-only — index is fine here.
-              // eslint-disable-next-line react/no-array-index-key
-              <li key={idx}>{line}</li>
-            ))}
-          </ol>
+          <>
+            {overflowed && (
+              <button
+                type="button"
+                className="link headless-show-all"
+                onClick={() => setShowAll(true)}
+                data-testid="headless-show-all"
+              >
+                Show all {total} entries (earlier {sliceStart} hidden)
+              </button>
+            )}
+            <ol>
+              {visible.map((line, idx) => (
+                // Stable order, append-only — composed index is fine.
+                // eslint-disable-next-line react/no-array-index-key
+                <li key={sliceStart + idx}>{line}</li>
+              ))}
+            </ol>
+          </>
         )}
       </div>
     </div>
