@@ -80,7 +80,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - [x] **Body-level `user-select: none` prevents selecting diff text and headless logs.** *Resolved (iter 1 — selection re-enabled on `.diff-pane` / `.headless-log` / `.preset-preview-list` / `.terminal-host` / `.session-title h2`.)*
 - [x] **Orphan banner instructs to "Stop the session and spawn a new one" — but Stop on an orphan does nothing to the underlying claude process.** *Resolved (iter 34 — `orphan::kill_pid` + banner copy updated.)*
 - [x] **No reconnection on socket close.** *Resolved (iter 31 — exponential backoff capped at 10 s.)*
-- [x] **No copy-paste hot-keys in xterm config.** *Resolved (iter 44 — Ctrl+Shift+C/V via `attachCustomKeyEventHandler`.)*
+- [x] **No copy-paste hot-keys in xterm config.** *Resolved across iters 44 + 50. Iter 44 added Ctrl+Shift+C; iter 50 unblocked bare Ctrl+V (return-false so xterm doesn't `preventDefault` the keydown, letting the browser's paste event reach xterm's native textarea listener) and added Shift+Enter → `\` + CR for newline-without-submit in Claude / codex TUIs. Matches the bindings Claude Code's `terminal-setup` injects into VS Code.*
 - [x] **Headless `recent_actions` list grows unbounded in the UI.** *Resolved (iter 36 — tail 200 + "Show all".)*
 - [x] **PTY input is sent on every keystroke even when the session is stopped.** *Resolved (iter 40 — `statusRef` guard.)*
 

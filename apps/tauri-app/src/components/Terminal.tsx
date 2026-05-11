@@ -110,46 +110,76 @@ export default function Terminal({ sessionId, client, subscribePty, status }: Pr
       });
     });
 
-    // Ctrl+Shift+C copies the current xterm selection to the OS clipboard;
-    // Ctrl+Shift+V pastes from the clipboard into the PTY. xterm.js does not
-    // wire either by default — without these handlers users on body-level
-    // `user-select: none` have no visible affordance and the typical
-    // terminal-app muscle memory fails. Returning `false` tells xterm to
-    // skip its default handling (which would send `\x03` for Ctrl+C and
-    // `\x16` for Ctrl+V into the PTY); modifier+Shift variants are
-    // specifically non-PTY-meaningful so we don't lose ^C/^V on bare Ctrl.
+    // Custom keymap on top of xterm's default. Returning `false` from
+    // this handler tells xterm to bail out *before* it processes the
+    // keystroke — meaning xterm will not generate any PTY bytes AND will
+    // not call `event.preventDefault()`. The latter half matters for
+    // paste: if xterm calls preventDefault on a Ctrl+V keydown, the
+    // browser silently skips firing its synthetic `paste` event, and the
+    // native xterm `paste` DOM-event listener on the helper textarea
+    // never gets a chance to run.
+    //
+    //   * **Ctrl/Cmd+V** and **Ctrl/Cmd+Shift+V** — return false so the
+    //     browser fires its native paste event; xterm's textarea paste
+    //     listener reads `clipboardData`, pipes through inputHandler.paste
+    //     (with bracketed-paste mode), and fires onData. Without this
+    //     case, xterm's default keydown sends `\x16` (SYN) to the PTY
+    //     and preventDefaults the event, suppressing paste entirely.
+    //     Iter 50 added a manual paste path that double-fired alongside
+    //     the native handler; iter 51 dropped it but accidentally also
+    //     broke the native path because xterm's default still ate Ctrl+V;
+    //     iter 52 fixes that by explicitly returning false.
+    //   * **Ctrl/Cmd+Shift+C** — copy the current selection. xterm has
+    //     no default binding for this; read via `term.getSelection()`
+    //     and write through `navigator.clipboard.writeText()`. Write-
+    //     clipboard does not trigger a permission prompt for user-
+    //     initiated actions.
+    //   * **Shift+Enter** — send `\` + CR. Claude and codex TUIs convert
+    //     this to "newline within input without submitting"; bash treats
+    //     it as a line continuation so plain-shell sessions don't break.
+    //     Matches the `\\\r` sequence Claude Code's `terminal-setup`
+    //     injects into VS Code's terminal keybindings.
+    //
+    // Bare Ctrl+C still reaches the PTY as ^C (SIGINT) — only the
+    // Ctrl+Shift+C combo is intercepted.
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const mod = event.ctrlKey || event.metaKey;
-      if (!mod || !event.shiftKey) return true;
+      const stopped =
+        statusRef.current === "stopped" || statusRef.current === "error";
+
+      if (event.shiftKey && !mod && event.key === "Enter") {
+        // We handle this combo ourselves — block the browser's default
+        // so the helper textarea doesn't *also* receive an Enter
+        // (which would insert "\n" into the textarea, trigger xterm's
+        // input listener, and forward a stray "\n" to the PTY after our
+        // intended "\\\r" sequence; Claude then sees CR + LF and
+        // submits anyway). Returning false alone isn't enough — xterm
+        // skips its own processing but doesn't preventDefault for us.
+        event.preventDefault();
+        if (stopped) return false;
+        const enc = new TextEncoder();
+        client.send({
+          type: "send_input",
+          session_id: sessionId,
+          data_b64: bytesToBase64(enc.encode("\\\r")),
+        });
+        return false;
+      }
+
+      if (!mod) return true;
       const key = event.key.toLowerCase();
-      if (key === "c") {
+
+      // Step aside for paste — see the block comment above.
+      if (key === "v") return false;
+
+      if (event.shiftKey && key === "c") {
         const sel = term.getSelection();
         if (sel.length === 0) return true;
         navigator.clipboard.writeText(sel).catch(() => {});
         return false;
       }
-      if (key === "v") {
-        if (
-          statusRef.current === "stopped" ||
-          statusRef.current === "error"
-        ) {
-          return false;
-        }
-        navigator.clipboard
-          .readText()
-          .then((text) => {
-            if (!text) return;
-            const enc = new TextEncoder();
-            client.send({
-              type: "send_input",
-              session_id: sessionId,
-              data_b64: bytesToBase64(enc.encode(text)),
-            });
-          })
-          .catch(() => {});
-        return false;
-      }
+
       return true;
     });
 
