@@ -13,7 +13,7 @@ apps/tauri-app/
   src-tauri/            Rust side: spawns the daemon, exposes Tauri commands (file picker, pop-out window)
   src/                  React 19 + xterm.js frontend
 docs/plan.md            full architecture and phased rollout (Phase 0–6)
-docs/plans/*.md         follow-up designs (semi-autonomous mode, etc.)
+docs/plans/*.md         follow-up designs (source-control sidebar, codex support, etc.)
 ```
 
 ## Common commands
