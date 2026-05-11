@@ -428,6 +428,18 @@ export default function App() {
     void getCurrentWindow().close();
   }, [state.tabs]);
 
+  // Session pop-out: close itself when the session it was rendering is
+  // removed from the registry (Stop session in the main window, or any
+  // daemon-side cleanup). Previously the pop-out kept rendering an
+  // exit-code state forever — see ux-audit "Pop-out session window never
+  // auto-closes when its session is stopped or removed".
+  useEffect(() => {
+    if (!popoutSessionId) return;
+    if (state.sessions.length === 0) return; // not yet hydrated
+    if (state.sessions.some((s) => s.id === popoutSessionId)) return;
+    void getCurrentWindow().close();
+  }, [state.sessions]);
+
   // Intercept main-window close so we can ask whether to stop the daemon.
   useEffect(() => {
     if (popoutSessionId || popoutTabId) return;

@@ -113,15 +113,9 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Pane controls overlay covers the session header on small panes.** Absolute-positioned at `top: 4px; right: 4px;` — on narrow panes the close `×` overlaps `session-actions` (Pop out / Stop) buttons.
   - File: `apps/tauri-app/src/styles.css:605-637`.
   - Suggested direction: move controls into a dedicated chrome bar above the session header on small widths, or hide overlay buttons when session controls are within N px.
-- **Pop-out session window never auto-closes when its session is stopped or removed.** `App.tsx`'s pop-out useEffect only handles `popoutTabId` (closes the tab pop-out when the tab disappears). For `popoutSessionId` there is no such effect — stop the session in the main window and the pop-out keeps rendering exit-code state forever.
-  - File: `apps/tauri-app/src/App.tsx:344-351` (only handles tab pop-out).
-  - Suggested direction: parallel effect: when `popoutSessionId` is set and the session is missing from `state.sessions`, call `getCurrentWindow().close()`.
-- **Pop-out session window has TWO Stop buttons with different behaviours.** `SessionWindow`'s chrome shows a direct-action "Stop session" (one click); the embedded `SessionPane`'s toolbar shows the two-step Stop / Confirm stop. Same session, two flows.
-  - Files: `apps/tauri-app/src/components/SessionWindow.tsx:49-53`, `apps/tauri-app/src/components/SessionPane.tsx:82-101`.
-  - Suggested direction: hide the inner SessionPane Stop in pop-out mode (`isPopoutWindow` already exists), OR make both two-step.
-- **`isPopoutWindow` in `SessionPane` only checks `?session`, not `?tab`.** So inside a popped-out TabWindow, every session pane still shows its "Pop out" button — clicking it opens yet another window for one session.
-  - File: `apps/tauri-app/src/components/SessionPane.tsx:11-12`.
-  - Suggested direction: check either query param, or pass `isInPopout` from the renderer.
+- ~~**Pop-out session window never auto-closes when its session is stopped or removed.**~~ **Resolved (iter 19).** Parallel `useEffect` watches `popoutSessionId` and closes the window via `getCurrentWindow().close()` when the session disappears from `state.sessions`.
+- ~~**Pop-out session window has TWO Stop buttons with different behaviours.**~~ **Resolved (iter 19).** Inner `SessionPane`'s Stop button (and exit-code label) is hidden when `isPopoutWindow`; the chrome `SessionWindow` toolbar's single-click Stop remains. One destructive control per window.
+- ~~**`isPopoutWindow` in `SessionPane` only checks `?session`, not `?tab`.**~~ **Resolved (iter 19).** Now treats both `?session=` and `?tab=` as pop-out modes; session panes inside a `TabWindow` no longer show a redundant "Pop out" button.
 - **Pop-out tab window's "Spawn one here" is a no-op.** `TabWindow` passes an empty `onSpawnInPane` callback (line 23) because pop-outs have no `SpawnDialog`. Clicking the prominent empty-pane button does nothing visible. Same window has no sidebar so the EmptyPane's fallback hint "Add a repo from the sidebar first." is also useless.
   - Files: `apps/tauri-app/src/components/TabWindow.tsx:23-27`, `apps/tauri-app/src/components/EmptyPane.tsx:6-18`.
   - Suggested direction: either disable the button in pop-out mode, route to the main window via a Tauri event, or open a minimal SpawnDialog in the pop-out.

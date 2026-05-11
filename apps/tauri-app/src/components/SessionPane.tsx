@@ -4,11 +4,15 @@ import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
 import Terminal from "./Terminal";
 
-/// True when running inside the pop-out session window. Pop-out windows
-/// shouldn't show "Pop out" themselves — the toolbar already lives in the
-/// SessionWindow chrome.
-const isPopoutWindow =
-  new URLSearchParams(window.location.search).get("session") !== null;
+/// True when running inside any pop-out window (single-session
+/// `?session=<id>` OR full-tab `?tab=<id>`). Pop-out windows shouldn't
+/// show "Pop out" themselves — opening yet another window from inside a
+/// pop-out gives the user nothing useful, and the SessionWindow chrome
+/// already exposes the right toolbar for the single-session form.
+const isPopoutWindow = (() => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("session") !== null || params.get("tab") !== null;
+})();
 
 interface Props {
   session: SessionSnapshot;
@@ -95,35 +99,41 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
               Pop out
             </button>
           )}
-          {session.status !== "stopped" ? (
-            confirming ? (
-              <>
+          {/* Hide both the Stop button and the exit-code label inside a
+              pop-out — SessionWindow's chrome toolbar already exposes
+              the right controls. Previously the two were behaving
+              differently (chrome single-click vs inner two-step) which
+              confused which Stop the user thought they were clicking. */}
+          {!isPopoutWindow &&
+            (session.status !== "stopped" ? (
+              confirming ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={onStop}
+                    className="danger"
+                    data-testid="session-stop-confirm"
+                  >
+                    Confirm stop
+                  </button>
+                  <button type="button" onClick={() => setConfirming(false)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
                 <button
                   type="button"
-                  onClick={onStop}
-                  className="danger"
-                  data-testid="session-stop-confirm"
+                  onClick={() => setConfirming(true)}
+                  data-testid="session-stop"
                 >
-                  Confirm stop
+                  Stop
                 </button>
-                <button type="button" onClick={() => setConfirming(false)}>
-                  Cancel
-                </button>
-              </>
+              )
             ) : (
-              <button
-                type="button"
-                onClick={() => setConfirming(true)}
-                data-testid="session-stop"
-              >
-                Stop
-              </button>
-            )
-          ) : (
-            <span className="muted">
-              exit code {session.exit_code ?? "?"}
-            </span>
-          )}
+              <span className="muted">
+                exit code {session.exit_code ?? "?"}
+              </span>
+            ))}
         </div>
       </header>
       <div className="session-members">
