@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 11;
+include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
 fn default_true() -> bool {
     true
@@ -204,6 +204,15 @@ pub struct SessionSnapshot {
     /// tooltip or subtitle. `None` until the agent emits its first title.
     #[serde(default)]
     pub terminal_title: Option<String>,
+    /// Short label for whatever program is driving this session — `"claude"`,
+    /// `"codex"`, `"pwsh"`, `"powershell"`, `"cmd"`, `"bash"`, `"sh"`, etc.
+    /// Surfaced in the UI next to the session title so users can tell
+    /// what's running at a glance regardless of mode. `None` for sessions
+    /// reattached from sidecars written by daemons that pre-date this
+    /// field — the UI falls back to `agent` (which only distinguishes
+    /// claude / codex) in that case.
+    #[serde(default)]
+    pub program_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

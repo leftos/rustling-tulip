@@ -2,6 +2,11 @@ import { useCallback, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
+import {
+  sessionDisplayLabel,
+  sessionLabelTooltip,
+  sessionRuntimeLabel,
+} from "../utils/sessionLabel";
 import SessionPane from "./SessionPane";
 
 interface Props {
@@ -35,33 +40,43 @@ export default function SessionWindow({
   }, []);
 
   // Replace the OS window title (originally set to a raw UUID by the
-  // Tauri builder in `open_session_window`) with the user-visible label
-  // so the taskbar / window switcher / alt-tab list shows useful text.
-  // Update on every label change so renames propagate.
+  // Tauri builder in `open_session_window`) with the user-visible
+  // label — preferring the agent's OSC title when set, falling back to
+  // the canonical `<repo>:<branch>` otherwise. Renames + agent-side
+  // title changes both flow through here.
+  const displayLabel = sessionDisplayLabel(session);
   useEffect(() => {
-    void getCurrentWebviewWindow().setTitle(session.label);
-  }, [session.label]);
+    void getCurrentWebviewWindow().setTitle(displayLabel);
+  }, [displayLabel]);
 
   return (
     <div className="session-window-root">
       <header className="session-window-toolbar">
         <span className={`status-dot status-${session.status}`} />
-        <h1
-          title={
-            session.terminal_title && session.terminal_title !== session.label
-              ? `${session.label}\nTerminal: ${session.terminal_title}`
-              : session.label
-          }
-        >
-          {session.label}
-        </h1>
-        <span className="session-window-meta">
-          {session.kind === "workspace"
-            ? `${session.members.length} repos`
-            : (session.members[0]?.repo_name ?? "")}
-          {session.mode === "headless" ? " · headless" : ""}
-          {session.mode !== "plain_shell" && ` · ${session.agent}`}
-        </span>
+        <h1 title={sessionLabelTooltip(session)}>{displayLabel}</h1>
+        {session.members.map((m) => (
+          <span
+            key={m.repo_id}
+            className="chip session-member-chip"
+            title={m.worktree_path}
+          >
+            {m.repo_name}: {m.branch}
+          </span>
+        ))}
+        {(() => {
+          const runtime = sessionRuntimeLabel(session);
+          return runtime ? (
+            <span
+              className="chip session-runtime-chip"
+              title={`Running ${runtime}`}
+            >
+              {runtime}
+            </span>
+          ) : null;
+        })()}
+        {session.mode === "headless" && (
+          <span className="session-window-meta">· headless</span>
+        )}
         <span className="spacer" />
         {session.status !== "stopped" && (
           <button type="button" onClick={onStop} className="danger">

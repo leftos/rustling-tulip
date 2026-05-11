@@ -57,6 +57,13 @@ pub struct SessionRecord {
     /// the user) is not overwritten by transient shell titles like
     /// `C:\WINDOWS\system32\cmd.exe`. `None` until the first OSC title arrives.
     pub terminal_title: Option<String>,
+    /// Short program name driving this session. For `Mode::PlainShell`
+    /// this is the shell label (`"pwsh"`, `"cmd"`, `"bash"`, …); for
+    /// `Mode::Interactive` / `Mode::Headless` it's the agent token
+    /// (`"claude"`, `"codex"`). Mirrored on disk via
+    /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
+    /// the same chip after a daemon restart.
+    pub program_name: Option<String>,
 }
 
 impl SessionRecord {
@@ -83,6 +90,7 @@ impl SessionRecord {
             workspace_id: self.workspace_id.clone(),
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
+            program_name: self.program_name.clone(),
         }
     }
 }
@@ -253,6 +261,7 @@ impl SessionRegistry {
             workspace_id: meta.workspace_id.clone(),
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
+            program_name: meta.program_name.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);

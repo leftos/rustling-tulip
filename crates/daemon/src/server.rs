@@ -1708,6 +1708,7 @@ fn spawn_interactive_session(
         workspace_id: workspace_id.clone(),
         agent: cfg.agent,
         terminal_title: None,
+        program_name: Some(cfg.agent.as_label().to_string()),
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -1825,6 +1826,7 @@ fn spawn_plain_shell_session(
         // as claude so the UI badge doesn't render `· codex` on a pwsh prompt.
         agent: Agent::Claude,
         terminal_title: None,
+        program_name: Some(shell_label.clone()),
     };
     push_recent_action(&mut record, format!("session started: {shell_label}"));
     hub.sessions.insert(record);
@@ -1928,6 +1930,7 @@ fn spawn_headless_session(
         workspace_id: workspace_id.clone(),
         agent: cfg.agent,
         terminal_title: None,
+        program_name: Some(cfg.agent.as_label().to_string()),
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);

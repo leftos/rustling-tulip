@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 
+import protocolVersion from "../../../protocol-version.json" with { type: "json" };
+
 /**
  * Mirror of `protocol::DaemonHandshake` (crates/protocol/src/lib.rs:18).
  * The daemon writes this to `daemon.json` on startup; we read it to discover
@@ -15,7 +17,7 @@ export interface DaemonHandshake {
 }
 
 /** Subset of `protocol::PROTOCOL_VERSION` we know how to speak. */
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION: number = protocolVersion.version;
 
 /**
  * Reproduces `crates/daemon/src/paths.rs:Dirs::handshake_file` — the

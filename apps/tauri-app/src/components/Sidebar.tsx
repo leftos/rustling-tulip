@@ -11,6 +11,11 @@ import {
 } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
+import {
+  sessionDisplayLabel,
+  sessionLabelTooltip,
+  sessionRuntimeLabel,
+} from "../utils/sessionLabel";
 import { saveSettings, useSettings } from "../utils/settings";
 
 /// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
@@ -723,23 +728,23 @@ function SessionLeaf(p: SessionLeafProps) {
         )}
         <span
           className="tree-label"
-          title={
-            s.terminal_title && s.terminal_title !== s.label
-              ? `${s.label}\nTerminal: ${s.terminal_title}`
-              : s.label
-          }
+          title={sessionLabelTooltip(s)}
         >
-          {s.label}
+          {sessionDisplayLabel(s)}
         </span>
-        {isCodex && (
-          <span
-            className="tree-kind-tag"
-            title="Codex session"
-            data-testid="session-agent-tag"
-          >
-            CDX
-          </span>
-        )}
+        {(() => {
+          const runtime = sessionRuntimeLabel(s);
+          if (!runtime) return null;
+          return (
+            <span
+              className="tree-kind-tag"
+              title={`Running ${runtime}`}
+              data-testid="session-runtime-tag"
+            >
+              {runtime}
+            </span>
+          );
+        })()}
         {p.needsAttention && <span className="badge badge-warn small">!</span>}
         {s.is_orphan && (
           <span className="list-item-meta" title="Reattached after daemon restart; PTY detached">

@@ -2,6 +2,11 @@ import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
+import {
+  sessionDisplayLabel,
+  sessionLabelTooltip,
+  sessionRuntimeLabel,
+} from "../utils/sessionLabel";
 import Terminal from "./Terminal";
 
 /// True when running inside any pop-out window (single-session
@@ -42,11 +47,8 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
 
   const isHeadless = session.mode === "headless";
   const isPlainShell = session.mode === "plain_shell";
-  const modeSuffix = isHeadless
-    ? " · headless"
-    : isPlainShell
-      ? " · shell"
-      : "";
+  const runtimeLabel = sessionRuntimeLabel(session);
+  const modeSuffix = isHeadless ? " · headless" : "";
 
   return (
     <div
@@ -72,22 +74,34 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
               role="img"
             />
           )}
-          <h2
-            title={
-              session.terminal_title && session.terminal_title !== session.label
-                ? `${session.label}\nTerminal: ${session.terminal_title}`
-                : session.label
-            }
-          >
-            {session.label}
+          <h2 title={sessionLabelTooltip(session)}>
+            {sessionDisplayLabel(session)}
           </h2>
-          <span className="session-meta">
-            {session.kind === "workspace"
-              ? `${session.members.length} repos`
-              : session.members[0]?.repo_name ?? ""}
-            {modeSuffix}
-            {!isPlainShell && ` · ${session.agent}`}
-          </span>
+          {/* Per-member <repo>:<branch> chips sit inline with the title
+              now (iter 51) so a workspace session doesn't waste an
+              entire row. Single-repo sessions render one chip; workspace
+              sessions render N. Hover surfaces the worktree path. */}
+          {session.members.map((m) => (
+            <span
+              key={m.repo_id}
+              className="chip session-member-chip"
+              title={m.worktree_path}
+            >
+              {m.repo_name}: {m.branch}
+            </span>
+          ))}
+          {runtimeLabel && (
+            <span
+              className="chip session-runtime-chip"
+              title={`Running ${runtimeLabel}`}
+              data-testid="session-runtime-chip"
+            >
+              {runtimeLabel}
+            </span>
+          )}
+          {modeSuffix && (
+            <span className="session-meta">{modeSuffix}</span>
+          )}
         </div>
         <div className="session-actions">
           {!isPopoutWindow && (
@@ -136,13 +150,6 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             ))}
         </div>
       </header>
-      <div className="session-members">
-        {session.members.map((m) => (
-          <span key={m.repo_id} className="chip" title={m.worktree_path}>
-            {m.repo_name}: {m.branch}
-          </span>
-        ))}
-      </div>
       {session.is_orphan && (
         <div className="orphan-banner">
           PTY stream lost across daemon restart. The underlying{" "}

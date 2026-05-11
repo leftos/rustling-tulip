@@ -11,8 +11,17 @@
   --err: #f44e4e;
   --border: #232b35;
   --radius: 6px;
-  --font-sans: -apple-system, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  /* Emoji fonts appended so OSC titles containing emoji (Claude's
+   * `/rename` emits a ✓-style chip; shells sometimes prefix with
+   * status icons) render the way the OS tooltip already does.
+   * Without these the app's text falls into the Cascadia/Consolas
+   * void for any codepoint outside the BMP-ish coverage. */
+  --font-sans:
+    -apple-system, "Segoe UI", system-ui, sans-serif,
+    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji";
+  --font-mono:
+    "Cascadia Mono", Consolas, "Courier New", monospace,
+    "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji";
 }
 
 * { box-sizing: border-box; }
@@ -764,16 +773,18 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   padding: 10px 14px; border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
 }
-.session-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.session-title {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+  /* Iter 51: member chips moved inline with the title row to drop the
+   * standalone .session-members row. Wrap when the chip count + label
+   * exceeds the pane width so narrow workspace panes don't truncate. */
+  flex-wrap: wrap;
+}
 .session-title h2 { margin: 0; font-size: 14px; font-weight: 500; }
 .session-meta { color: var(--fg-muted); font-size: 12px; }
 .session-actions { display: flex; gap: 6px; }
 
-.session-members {
-  display: flex; gap: 6px; flex-wrap: wrap;
-  padding: 8px 14px; border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
 .chip {
   background: var(--bg-elev2);
   color: var(--fg);
@@ -781,6 +792,22 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 999px;
+}
+/* Slightly tighter than the bare `.chip` since these now share their
+ * row with the larger session title. */
+.session-member-chip { padding: 1px 7px; }
+
+/* Runtime label ("claude" / "codex" / "pwsh" / "cmd" / "bash" / "sh")
+ * shown next to the session title so users can tell what's actually
+ * running at a glance — replaces the audit-reported `· {agent}` meta
+ * text. Muted by default so it doesn't compete with the title; deeper
+ * muting on plain shells where the runtime is usually less interesting. */
+.session-runtime-chip {
+  padding: 1px 7px;
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  text-transform: lowercase;
 }
 
 .orphan-banner {

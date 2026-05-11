@@ -1,6 +1,8 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 11;
+import protocolVersion from "../../../protocol-version.json";
+
+export const PROTOCOL_VERSION: number = protocolVersion.version;
 
 export type Agent = "claude" | "codex";
 
@@ -73,6 +75,12 @@ export interface SessionSnapshot {
   // tooltip; never as the primary label. null until the agent emits its
   // first title.
   terminal_title: string | null;
+  // Short program label driving this session — "claude" / "codex" for
+  // agent sessions, "pwsh" / "powershell" / "cmd" / "bash" / "sh" for
+  // plain_shell sessions. Used by the UI to render a muted runtime chip
+  // next to the session title. null when reattached from a daemon
+  // sidecar written before this field existed.
+  program_name: string | null;
 }
 
 export type SpawnTarget =
