@@ -153,6 +153,30 @@ export interface GitRemoteUrl {
   forge: string;
 }
 
+// ------- Tabs and grids -------
+
+export type SplitDirection = "horizontal" | "vertical";
+export type SplitPlace = "first" | "second";
+export type PaneDropEdge = "left" | "right" | "top" | "bottom" | "replace";
+export type MergeLayout = "tile_horizontal" | "tile_vertical";
+
+export type GridNode =
+  | { kind: "pane"; pane_id: string; session_id: string | null }
+  | {
+      kind: "split";
+      direction: SplitDirection;
+      ratio: number;
+      first: GridNode;
+      second: GridNode;
+    };
+
+export interface TabEntry {
+  id: string;
+  name: string;
+  grid: GridNode;
+  created_at: string;
+}
+
 // ------- Wire envelopes -------
 
 export type ClientMessage =
@@ -211,6 +235,56 @@ export type ClientMessage =
       type: "set_workspace_worktree_default";
       workspace_id: string;
       value: boolean;
+    }
+  | { type: "list_tabs" }
+  | {
+      type: "create_tab";
+      name: string | null;
+      initial_session_id: string | null;
+    }
+  | { type: "close_tab"; tab_id: string }
+  | { type: "rename_tab"; tab_id: string; name: string }
+  | { type: "reorder_tabs"; ordered_ids: string[] }
+  | {
+      type: "split_pane";
+      tab_id: string;
+      pane_id: string;
+      direction: SplitDirection;
+      place: SplitPlace;
+      new_session_id: string | null;
+    }
+  | { type: "close_pane"; tab_id: string; pane_id: string }
+  | {
+      type: "set_pane_ratio";
+      tab_id: string;
+      split_path: number[];
+      ratio: number;
+    }
+  | {
+      type: "move_pane";
+      src_tab_id: string;
+      src_pane_id: string;
+      dst_tab_id: string;
+      dst_pane_id: string;
+      edge: PaneDropEdge;
+    }
+  | {
+      type: "replace_pane_session";
+      tab_id: string;
+      pane_id: string;
+      session_id: string | null;
+    }
+  | {
+      type: "merge_tabs";
+      tab_ids: string[];
+      name: string | null;
+      layout: MergeLayout;
+    }
+  | {
+      type: "extract_to_new_tab";
+      source_tab_id: string;
+      pane_ids: string[];
+      name: string | null;
     };
 
 export type DaemonMessage =
@@ -258,4 +332,8 @@ export type DaemonMessage =
       data_b64: string;
       truncated: boolean;
     }
+  | { type: "tabs"; tabs: TabEntry[] }
+  | { type: "tab_updated"; tab: TabEntry }
+  | { type: "tab_removed"; tab_id: string }
+  | { type: "tabs_reordered"; ordered_ids: string[] }
   | { type: "error"; message: string };

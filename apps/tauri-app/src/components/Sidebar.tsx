@@ -10,7 +10,10 @@ interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   sessions: SessionSnapshot[];
-  selectedSessionId: string | null;
+  /// Session ids visually highlighted in the tree because they appear in
+  /// the currently-active tab. Multiple sessions can be highlighted at once
+  /// (one tab can hold several panes referencing different sessions).
+  highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   connection: ConnectionState | { kind: "init" } | { kind: "error"; reason: string };
   onAddRepo: () => void;
@@ -65,13 +68,13 @@ export default function Sidebar(props: Props) {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeMenu = () => setContextMenu(null);
 
-  // Force-expand any container whose selected/attention session lives inside.
+  // Force-expand any container whose highlighted/attention session lives inside.
   const forceExpand = useMemo(() => {
     const out = new Set<string>();
     for (const c of containers) {
       for (const s of c.sessions) {
         if (
-          s.id === props.selectedSessionId ||
+          props.highlightedSessionIds.has(s.id) ||
           props.attentionSessions.has(s.id)
         ) {
           out.add(c.key);
@@ -80,7 +83,7 @@ export default function Sidebar(props: Props) {
       }
     }
     return out;
-  }, [containers, props.selectedSessionId, props.attentionSessions]);
+  }, [containers, props.highlightedSessionIds, props.attentionSessions]);
 
   return (
     <aside className="sidebar">
@@ -134,7 +137,7 @@ export default function Sidebar(props: Props) {
                 container={c}
                 collapsed={isCollapsed}
                 onToggle={() => toggle(c.key)}
-                selectedSessionId={props.selectedSessionId}
+                highlightedSessionIds={props.highlightedSessionIds}
                 attentionSessions={props.attentionSessions}
                 onSelectSession={props.onSelectSession}
                 onRemoveRepo={props.onRemoveRepo}
@@ -187,7 +190,7 @@ interface ContainerNodeProps {
   container: TreeContainer;
   collapsed: boolean;
   onToggle: () => void;
-  selectedSessionId: string | null;
+  highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   onSelectSession: (id: string) => void;
   onRemoveRepo: (id: string) => void;
@@ -252,7 +255,7 @@ function ContainerNode(p: ContainerNodeProps) {
             <SessionLeaf
               key={s.id}
               session={s}
-              selected={s.id === p.selectedSessionId}
+              selected={p.highlightedSessionIds.has(s.id)}
               needsAttention={p.attentionSessions.has(s.id)}
               onSelect={p.onSelectSession}
             />

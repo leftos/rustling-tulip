@@ -17,26 +17,29 @@ import type {
   DaemonMessage,
   RepoEntry,
   SessionSnapshot,
+  TabEntry,
   VscodeWorkspaceSuggestion,
   WorkspaceEntry,
 } from "./types";
 import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
-import SessionPane from "./components/SessionPane";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
+import TabBar from "./components/TabBar";
+import GridRenderer from "./components/GridRenderer";
 import { logToFile } from "./utils/logger";
+import { collectPanes } from "./utils/grid";
 
 /// Pop-out session window: when launched with `?session=<id>` we render
-/// only the SessionWindow component, no sidebar or modals. The daemon
-/// already accepts multiple WS clients, so this window opens its own
-/// connection independently of the main window.
+/// only the SessionWindow component, no sidebar or modals.
 const popoutSessionId = new URLSearchParams(window.location.search).get(
   "session",
 );
+
+const ACTIVE_TAB_KEY = "rt:active-tab:main";
 
 interface AppState {
   client: DaemonClient | null;
@@ -44,14 +47,17 @@ interface AppState {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   sessions: SessionSnapshot[];
-  selectedSessionId: string | null;
+  tabs: TabEntry[];
+  activeTabId: string | null;
+  focusedPaneId: string | null;
   spawnOpen: boolean;
   spawnInitial: SpawnInitialTarget | undefined;
-  /// True after the user submitted SpawnDialog and we're waiting for the
-  /// daemon's session_updated to know the new id. The first arriving session
-  /// that we haven't seen before gets auto-selected. Cleared once consumed
-  /// or after a short timeout in case spawn fails server-side.
-  pendingSpawnSelect: boolean;
+  /// Pipeline: when SpawnDialog fires `onSpawned`, this flag is set. The next
+  /// new session triggers an automatic `create_tab` (see `pendingTabActivate`).
+  pendingSessionToTab: boolean;
+  /// Set after we send `create_tab` for a freshly spawned session; the next
+  /// `tab_updated` for an unseen tab id becomes the active tab.
+  pendingTabActivate: boolean;
   workspaceCreatorOpen: boolean;
   vscodeQueue: VscodeWorkspaceSuggestion[];
   attentionSessions: Set<string>;
@@ -66,10 +72,13 @@ export default function App() {
     repos: [],
     workspaces: [],
     sessions: [],
-    selectedSessionId: null,
+    tabs: [],
+    activeTabId: loadActiveTab(),
+    focusedPaneId: null,
     spawnOpen: false,
     spawnInitial: undefined,
-    pendingSpawnSelect: false,
+    pendingSessionToTab: false,
+    pendingTabActivate: false,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
     attentionSessions: new Set(),
@@ -77,17 +86,22 @@ export default function App() {
     exitInFlight: false,
   });
 
+  // PTY output is high-volume — keep it out of React state.
+  const ptyListenersRef = useRef(
+    new Map<string, Set<(b64: string) => void>>(),
+  );
+
+  // Held in a ref so handleMessage's `client.send(...)` can dispatch derived
+  // messages (create_tab after a session spawns) without needing to thread
+  // state through every closure.
+  const clientRef = useRef<DaemonClient | null>(null);
+
   useEffect(() => {
     void (async () => {
       const granted = await isPermissionGranted();
       if (!granted) await requestPermission();
     })();
   }, []);
-
-  // PTY output is high-volume — keep it out of React state.
-  const ptyListenersRef = useRef(
-    new Map<string, Set<(b64: string) => void>>(),
-  );
 
   useEffect(() => {
     let cancelled = false;
@@ -98,11 +112,12 @@ export default function App() {
         const handshake = await ensureDaemonStarted();
         if (cancelled) return;
         client = connectDaemon(handshake);
+        clientRef.current = client;
         client.onConnectionChange((next) => {
           setState((s) => ({ ...s, status: next }));
         });
         client.onMessage((msg) =>
-          handleMessage(msg, setState, ptyListenersRef.current),
+          handleMessage(msg, setState, ptyListenersRef.current, clientRef),
         );
         setState((s) => ({ ...s, client }));
       } catch (err) {
@@ -116,8 +131,17 @@ export default function App() {
     return () => {
       cancelled = true;
       client?.close();
+      clientRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (state.activeTabId) {
+      localStorage.setItem(ACTIVE_TAB_KEY, state.activeTabId);
+    } else {
+      localStorage.removeItem(ACTIVE_TAB_KEY);
+    }
+  }, [state.activeTabId]);
 
   const onAddRepo = useCallback(async () => {
     const path = await pickDirectory();
@@ -125,13 +149,58 @@ export default function App() {
     state.client?.send({ type: "add_repo", path, name: null });
   }, [state.client]);
 
-  const onSelectSession = useCallback((id: string) => {
+  const onActivateTab = useCallback((tabId: string) => {
+    setState((s) => ({ ...s, activeTabId: tabId, focusedPaneId: null }));
+  }, []);
+
+  const onFocusPane = useCallback((paneId: string) => {
+    setState((s) => (s.focusedPaneId === paneId ? s : { ...s, focusedPaneId: paneId }));
+  }, []);
+
+  const onSelectSession = useCallback((sessionId: string) => {
     setState((s) => {
       const next = new Set(s.attentionSessions);
-      next.delete(id);
-      return { ...s, selectedSessionId: id, attentionSessions: next };
+      next.delete(sessionId);
+      if (!s.client) return { ...s, attentionSessions: next };
+      const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
+      if (activeTab) {
+        const panes = collectPanes(activeTab.grid);
+        const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
+        if (focusedPane && focusedPane.session_id === null) {
+          s.client.send({
+            type: "replace_pane_session",
+            tab_id: activeTab.id,
+            pane_id: focusedPane.pane_id,
+            session_id: sessionId,
+          });
+          return { ...s, attentionSessions: next };
+        }
+      }
+      // No focused empty pane → open the session in a fresh tab.
+      s.client.send({
+        type: "create_tab",
+        name: null,
+        initial_session_id: sessionId,
+      });
+      return {
+        ...s,
+        attentionSessions: next,
+        pendingTabActivate: true,
+      };
     });
   }, []);
+
+  const onSpawnInPane = useCallback(
+    (paneId: string) => {
+      setState((s) => ({
+        ...s,
+        spawnOpen: true,
+        spawnInitial: undefined,
+        focusedPaneId: paneId,
+      }));
+    },
+    [],
+  );
 
   const onOpenSpawn = useCallback((initial?: SpawnInitialTarget) => {
     setState((s) => ({ ...s, spawnOpen: true, spawnInitial: initial }));
@@ -142,7 +211,7 @@ export default function App() {
   }, []);
 
   const onSpawned = useCallback(() => {
-    setState((s) => ({ ...s, pendingSpawnSelect: true }));
+    setState((s) => ({ ...s, pendingSessionToTab: true }));
   }, []);
 
   const onOpenWorkspaceCreator = useCallback(() => {
@@ -164,7 +233,6 @@ export default function App() {
   }, []);
 
   // Intercept main-window close so we can ask whether to stop the daemon.
-  // Pop-out windows skip this entirely (popoutSessionId is non-null there).
   useEffect(() => {
     if (popoutSessionId) return;
     let unlisten: (() => void) | null = null;
@@ -185,14 +253,9 @@ export default function App() {
 
   const closeMainWindow = useCallback(async () => {
     logToFile("info", "closeMainWindow: invoking quit_app");
-    // Tauri v2's WebviewWindow.destroy() can hang when called from inside
-    // the webview's own event loop (the round-trip IPC waits on a loop
-    // that's awaiting the IPC). AppHandle::exit on the host side avoids
-    // that deadlock — it tears down every window and returns control to
-    // the OS, bypassing our onCloseRequested handler.
     try {
       await invoke("quit_app");
-      logToFile("info", "closeMainWindow: quit_app returned (process should exit shortly)");
+      logToFile("info", "closeMainWindow: quit_app returned");
     } catch (err) {
       logToFile("error", `closeMainWindow: quit_app threw: ${String(err)}`);
     }
@@ -217,9 +280,6 @@ export default function App() {
       void closeMainWindow();
       return;
     }
-    // Subscribe before sending so the daemon can race-close before we get
-    // here. Resolves on the first non-open connection state, or after a
-    // safety timeout in case the daemon never closes the socket cleanly.
     const closed = new Promise<void>((resolve) => {
       let done = false;
       const finish = (reason: string) => {
@@ -269,10 +329,21 @@ export default function App() {
     [],
   );
 
-  const selectedSession = useMemo(
-    () => state.sessions.find((s) => s.id === state.selectedSessionId) ?? null,
-    [state.sessions, state.selectedSessionId],
+  const activeTab = useMemo(
+    () => state.tabs.find((t) => t.id === state.activeTabId) ?? null,
+    [state.tabs, state.activeTabId],
   );
+
+  // Set of session ids referenced by the active tab — used by the sidebar for
+  // visual selection state.
+  const sessionIdsInActiveTab = useMemo(() => {
+    if (!activeTab) return new Set<string>();
+    return new Set(
+      collectPanes(activeTab.grid)
+        .map((p) => p.session_id)
+        .filter((id): id is string => id !== null),
+    );
+  }, [activeTab]);
 
   if (popoutSessionId) {
     const popoutSession = state.sessions.find((s) => s.id === popoutSessionId);
@@ -312,7 +383,7 @@ export default function App() {
           repos={state.repos}
           workspaces={state.workspaces}
           sessions={state.sessions}
-          selectedSessionId={state.selectedSessionId}
+          highlightedSessionIds={sessionIdsInActiveTab}
           attentionSessions={state.attentionSessions}
           connection={state.status}
           onAddRepo={onAddRepo}
@@ -328,17 +399,29 @@ export default function App() {
           onRevealInExplorer={onRevealInExplorer}
         />
         <main className="main-pane">
-          {selectedSession ? (
-            <SessionPane
-              session={selectedSession}
+          <TabBar
+            tabs={state.tabs}
+            activeTabId={state.activeTabId}
+            client={state.client!}
+            onActivate={onActivateTab}
+          />
+          {activeTab && state.client ? (
+            <GridRenderer
+              tab={activeTab}
               client={state.client}
+              sessions={state.sessions}
               subscribePty={subscribePty}
+              focusedPaneId={state.focusedPaneId}
+              onFocusPane={onFocusPane}
+              onSpawnInPane={onSpawnInPane}
+              hasRepos={state.repos.length > 0}
             />
           ) : (
             <EmptyState
               connection={state.status}
               onOpenSpawn={() => onOpenSpawn()}
               hasRepos={state.repos.length > 0}
+              hasTabs={state.tabs.length > 0}
             />
           )}
         </main>
@@ -380,10 +463,19 @@ export default function App() {
   );
 }
 
+function loadActiveTab(): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_TAB_KEY);
+  } catch {
+    return null;
+  }
+}
+
 function handleMessage(
   msg: DaemonMessage,
   setState: React.Dispatch<React.SetStateAction<AppState>>,
   ptyListeners: Map<string, Set<(b64: string) => void>>,
+  clientRef: React.MutableRefObject<DaemonClient | null>,
 ) {
   switch (msg.type) {
     case "welcome":
@@ -410,25 +502,83 @@ function handleMessage(
         const isNew = idx === -1;
         if (isNew) next.push(msg.session);
         else next[idx] = msg.session;
-        // Auto-select the first new session that arrives after the user
-        // submitted SpawnDialog. The pending flag is consumed so subsequent
-        // session_updated messages don't yank the selection around.
-        const shouldSelect = isNew && s.pendingSpawnSelect;
-        return {
-          ...s,
-          sessions: next,
-          selectedSessionId: shouldSelect ? msg.session.id : s.selectedSessionId,
-          pendingSpawnSelect: shouldSelect ? false : s.pendingSpawnSelect,
-        };
+        if (isNew && s.pendingSessionToTab) {
+          clientRef.current?.send({
+            type: "create_tab",
+            name: null,
+            initial_session_id: msg.session.id,
+          });
+          return {
+            ...s,
+            sessions: next,
+            pendingSessionToTab: false,
+            pendingTabActivate: true,
+          };
+        }
+        return { ...s, sessions: next };
       });
       return;
     case "session_removed":
+      // Daemon prunes pane references and broadcasts tab_updated separately;
+      // here we only update the session list.
       setState((s) => ({
         ...s,
         sessions: s.sessions.filter((sn) => sn.id !== msg.session_id),
-        selectedSessionId:
-          s.selectedSessionId === msg.session_id ? null : s.selectedSessionId,
       }));
+      return;
+    case "tabs":
+      setState((s) => {
+        const ids = new Set(msg.tabs.map((t) => t.id));
+        const active =
+          s.activeTabId && ids.has(s.activeTabId)
+            ? s.activeTabId
+            : (msg.tabs[0]?.id ?? null);
+        return {
+          ...s,
+          tabs: msg.tabs,
+          activeTabId: active,
+        };
+      });
+      return;
+    case "tab_updated":
+      setState((s) => {
+        const idx = s.tabs.findIndex((t) => t.id === msg.tab.id);
+        const isNew = idx === -1;
+        const next = s.tabs.slice();
+        if (isNew) next.push(msg.tab);
+        else next[idx] = msg.tab;
+        let active = s.activeTabId;
+        let pendingTabActivate = s.pendingTabActivate;
+        if (isNew && (pendingTabActivate || active === null)) {
+          active = msg.tab.id;
+          pendingTabActivate = false;
+        }
+        return {
+          ...s,
+          tabs: next,
+          activeTabId: active,
+          pendingTabActivate,
+        };
+      });
+      return;
+    case "tab_removed":
+      setState((s) => {
+        const next = s.tabs.filter((t) => t.id !== msg.tab_id);
+        const active =
+          s.activeTabId === msg.tab_id
+            ? (next[0]?.id ?? null)
+            : s.activeTabId;
+        return { ...s, tabs: next, activeTabId: active };
+      });
+      return;
+    case "tabs_reordered":
+      setState((s) => {
+        const byId = new Map(s.tabs.map((t) => [t.id, t] as const));
+        const next = msg.ordered_ids
+          .map((id) => byId.get(id))
+          .filter((t): t is TabEntry => t !== undefined);
+        return { ...s, tabs: next };
+      });
       return;
     case "pty_output": {
       const set = ptyListeners.get(msg.session_id);
@@ -442,14 +592,11 @@ function handleMessage(
       }));
       return;
     case "attention": {
-      // Update the attention state for badge rendering.
       setState((s) => {
-        if (s.selectedSessionId === msg.session_id) return s;
         const next = new Set(s.attentionSessions);
         next.add(msg.session_id);
         return { ...s, attentionSessions: next };
       });
-      // Fire OS notification for non-stopped reasons (stopped is loud already).
       const session = findSession(setState, msg.session_id);
       const title =
         msg.reason === "awaiting_input"
@@ -477,7 +624,6 @@ function handleMessage(
     case "remote_url":
     case "repo_status":
     case "scrollback":
-      // Routed by components that asked for it via custom events.
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );
@@ -504,10 +650,12 @@ function EmptyState({
   connection,
   onOpenSpawn,
   hasRepos,
+  hasTabs,
 }: {
   connection: AppState["status"];
   onOpenSpawn: () => void;
   hasRepos: boolean;
+  hasTabs: boolean;
 }) {
   return (
     <div className="empty-state">
@@ -515,14 +663,14 @@ function EmptyState({
       <p className="status-line">
         Daemon: <ConnectionBadge state={connection} />
       </p>
-      {hasRepos ? (
+      {hasTabs ? (
+        <p className="hint">Select a tab above.</p>
+      ) : hasRepos ? (
         <button type="button" onClick={onOpenSpawn} className="primary">
           Spawn a session
         </button>
       ) : (
-        <p className="hint">
-          Add a repo from the sidebar to get started.
-        </p>
+        <p className="hint">Add a repo from the sidebar to get started.</p>
       )}
     </div>
   );
