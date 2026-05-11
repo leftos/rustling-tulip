@@ -70,12 +70,6 @@ pub enum TabEvent {
 
 #[derive(Debug, Clone)]
 pub enum PresetEvent {
-    // The current `presets::launch` stub only emits `Failed`. Progress is
-    // wired in alongside the real orchestrator implementation.
-    #[expect(
-        dead_code,
-        reason = "real preset::launch emits this once the orchestrator lands"
-    )]
     Progress {
         preset_id: String,
         total: u32,
@@ -855,17 +849,16 @@ async fn dispatch(
             // spawn. Progress/failed messages stream back via the daemon-wide
             // preset_events broadcast that every connected client forwards.
             let hub = hub.clone();
+            let args = crate::presets::LaunchArgs {
+                target,
+                preset_id,
+                source,
+                variable_values,
+                use_worktree_override,
+                max_panes_per_tab_override,
+            };
             tokio::spawn(async move {
-                crate::presets::launch(
-                    hub,
-                    target,
-                    preset_id,
-                    source,
-                    variable_values,
-                    use_worktree_override,
-                    max_panes_per_tab_override,
-                )
-                .await;
+                crate::presets::launch(hub, args).await;
             });
         }
     }
