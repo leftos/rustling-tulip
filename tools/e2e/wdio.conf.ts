@@ -121,7 +121,7 @@ export const config: WebdriverIO.Config = {
     mkdirSync(testConfigDir, { recursive: true });
   },
 
-  beforeSession: () => {
+  beforeSession: async () => {
     const tdPath = join(
       homedir(),
       ".cargo",
@@ -134,6 +134,15 @@ export const config: WebdriverIO.Config = {
           "Install with: cargo install tauri-driver --locked",
       );
     }
+    // Per-session reset: kill any lingering daemon from the prior spec and
+    // wipe daemon.json so the new Tauri session's supervisor spawns a fresh
+    // daemon instead of inheriting a possibly-dying one. Daemons survive
+    // their parent Tauri inconsistently on Windows (DETACHED_PROCESS +
+    // job-object inheritance), and concurrent daemons race the rename of
+    // daemon.json.tmp → daemon.json. Clean-slate per spec is simpler than
+    // making the daemon's startup race-safe.
+    await shutdownExistingDaemon({ timeoutMs: 4_000 });
+    await unlink(handshakeFilePath()).catch(() => undefined);
     // Inject the fake-claude shim path and the test config dir into
     // tauri-driver's environment. The driver inherits its env to
     // msedgedriver, which in turn inherits it to the spawned Tauri app —

@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
-import type { DaemonClient } from "../api";
+import { branchUrl, getRemoteUrl, type DaemonClient } from "../api";
 import type {
   DaemonMessage,
   GitCommit,
   GitFileChange,
-  GitRemoteUrl,
   SessionMember,
 } from "../types";
 import ResizableSplit from "./ResizableSplit";
@@ -328,18 +327,16 @@ function diffLineClass(line: string): string {
   return "";
 }
 
-function openInForge(client: DaemonClient, repoId: string, _branch: string) {
-  client.send({ type: "get_remote_url", repo_id: repoId });
-  const handler = (ev: Event) => {
-    window.removeEventListener("rt:remote_url", handler);
-    const detail = (ev as CustomEvent<GitRemoteUrl & { type: "remote_url" }>)
-      .detail;
-    if (detail.repo_id !== repoId) return;
-    if (detail.web_url) {
-      void openInShell(detail.web_url);
-    } else {
-      console.warn("unrecognized forge for", detail.raw_url);
-    }
-  };
-  window.addEventListener("rt:remote_url", handler);
+async function openInForge(
+  client: DaemonClient,
+  repoId: string,
+  branch: string,
+): Promise<void> {
+  const remote = await getRemoteUrl(client, repoId);
+  if (!remote || !remote.web_url) {
+    console.warn("unrecognized forge or no remote", remote?.raw_url);
+    return;
+  }
+  const branchHref = branchUrl(remote.web_url, remote.forge, branch);
+  void openInShell(branchHref ?? remote.web_url);
 }

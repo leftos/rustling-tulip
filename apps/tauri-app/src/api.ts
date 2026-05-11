@@ -3,6 +3,7 @@ import {
   PROTOCOL_VERSION,
   type ClientMessage,
   type DaemonMessage,
+  type GitRemoteUrl,
   type LaunchPresetSource,
   type PresetEntry,
   type PresetTarget,
@@ -276,6 +277,61 @@ export function previewPreset(
     window.addEventListener("rt:preset_preview_error", onError);
     client.send({ type: "preview_preset", id, ...opts });
   });
+}
+
+/**
+ * Request the remote URL for a repo via the daemon. Resolves on the first
+ * `rt:remote_url` event whose `repo_id` matches, times out after 2 s if the
+ * daemon never replies. Fixes the previous "remove listener on first event"
+ * bug where a concurrent request for another repo would consume our handler.
+ */
+export function getRemoteUrl(
+  client: DaemonClient,
+  repoId: string,
+): Promise<GitRemoteUrl | null> {
+  return new Promise((resolve) => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "remote_url" || detail.repo_id !== repoId) return;
+      cleanup();
+      const { repo_id, raw_url, web_url, forge } = detail;
+      resolve({ repo_id, raw_url, web_url, forge });
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 2000);
+    const cleanup = () => {
+      window.removeEventListener("rt:remote_url", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:remote_url", handler);
+    client.send({ type: "get_remote_url", repo_id: repoId });
+  });
+}
+
+/**
+ * Build a forge browse URL for `<base>` (the repo home, e.g.
+ * `https://github.com/owner/repo`) at the given branch. Returns `null` when
+ * forge is unrecognized so callers can fall back to the repo home.
+ */
+export function branchUrl(
+  webUrl: string,
+  forge: string,
+  branch: string,
+): string | null {
+  const trimmed = webUrl.replace(/\/+$/, "");
+  const encoded = encodeURIComponent(branch).replace(/%2F/g, "/");
+  switch (forge) {
+    case "github":
+      return `${trimmed}/tree/${encoded}`;
+    case "gitlab":
+      return `${trimmed}/-/tree/${encoded}`;
+    case "bitbucket":
+      return `${trimmed}/src/${encoded}`;
+    default:
+      return null;
+  }
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

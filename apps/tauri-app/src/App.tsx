@@ -29,6 +29,7 @@ import SpawnDialog from "./components/SpawnDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
+import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import TabBar from "./components/TabBar";
@@ -66,6 +67,7 @@ interface AppState {
   exitConfirmOpen: boolean;
   exitInFlight: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
+  toasts: ToastEntry[];
 }
 
 export default function App() {
@@ -87,6 +89,7 @@ export default function App() {
     exitConfirmOpen: false,
     exitInFlight: false,
     presetLaunch: null,
+    toasts: [],
   });
 
   // PTY output is high-volume — keep it out of React state.
@@ -165,6 +168,13 @@ export default function App() {
             pendingSpawnIntentRef,
           ),
         );
+        // Dev-only: expose the daemon client on window for e2e specs that
+        // need to send messages through the React app's WS (so server
+        // replies arrive at this client's onMessage handler). Mirrors the
+        // `__rt_terms` / `__rt_console` pattern. Tree-shaken in prod.
+        if (import.meta.env.DEV) {
+          (globalThis as unknown as { __rt_daemon_client?: DaemonClient }).__rt_daemon_client = client;
+        }
         setState((s) => ({ ...s, client }));
       } catch (err) {
         setState((s) => ({
@@ -333,6 +343,10 @@ export default function App() {
 
   const onDismissVscodeSuggestion = useCallback(() => {
     setState((s) => ({ ...s, vscodeQueue: s.vscodeQueue.slice(1) }));
+  }, []);
+
+  const onDismissToast = useCallback((id: string) => {
+    setState((s) => ({ ...s, toasts: s.toasts.filter((t) => t.id !== id) }));
   }, []);
 
   const onRevealInExplorer = useCallback((path: string) => {
@@ -616,6 +630,7 @@ export default function App() {
           onCancel={onExitCancel}
         />
       )}
+      <ErrorToast toasts={state.toasts} onDismiss={onDismissToast} />
     </div>
   );
 }
@@ -826,11 +841,12 @@ function handleMessage(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );
       if (msg.type === "preset_launch_failed") {
-        console.error(
-          `preset launch failed (${msg.preset_id}): ${msg.error}`,
-          `${msg.partial_session_ids.length} sessions and ` +
-            `${msg.partial_tab_ids.length} tabs were created before failure`,
-        );
+        const partials = `${msg.partial_session_ids.length} session(s), ${msg.partial_tab_ids.length} tab(s) partial`;
+        pushToast(setState, {
+          severity: "warning",
+          message: `Preset '${msg.preset_id}' launch failed`,
+          detail: `${msg.error} · ${partials}`,
+        });
       }
       return;
     case "preset_launch_progress":
@@ -848,9 +864,21 @@ function handleMessage(
       );
       return;
     case "error":
-      console.error("daemon error:", msg.message);
+      pushToast(setState, {
+        severity: "error",
+        message: "Daemon error",
+        detail: msg.message,
+      });
       return;
   }
+}
+
+function pushToast(
+  setState: React.Dispatch<React.SetStateAction<AppState>>,
+  toast: Omit<ToastEntry, "id">,
+) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  setState((s) => ({ ...s, toasts: [...s.toasts, { id, ...toast }] }));
 }
 
 function findSession(

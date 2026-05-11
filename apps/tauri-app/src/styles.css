@@ -714,3 +714,65 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   font-weight: 500;
   color: var(--fg);
 }
+
+/* Error / warning toast stack — bottom-right, newest closest to the corner.
+   Items in DOM order render top-to-bottom; the container itself is anchored
+   to bottom-right so the visual stack grows upward. */
+.error-toast-container {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  pointer-events: none;
+  max-width: min(420px, calc(100vw - 32px));
+}
+.error-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.error-toast-error {
+  border-color: var(--err);
+  background: linear-gradient(180deg, rgba(244, 78, 78, 0.12), var(--bg-elev));
+}
+.error-toast-warning {
+  border-color: var(--warn);
+  background: linear-gradient(180deg, rgba(245, 165, 36, 0.12), var(--bg-elev));
+}
+.error-toast-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.error-toast-message {
+  font-weight: 500;
+  color: var(--fg);
+  word-break: break-word;
+}
+.error-toast-detail {
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  word-break: break-word;
+}
+.error-toast-close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.error-toast-close:hover { color: var(--fg); background: none; }
