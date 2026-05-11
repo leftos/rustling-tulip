@@ -724,6 +724,22 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
 .env-row-error { margin-top: 2px; color: var(--warn); }
 .input-invalid { border-color: var(--warn); }
 .preset-launch-caveat { font-style: italic; margin: 0.5rem 0; }
+.modal-warning {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.8rem;
+  background: rgba(245, 165, 36, 0.1);
+  border: 1px solid rgba(245, 165, 36, 0.4);
+  border-radius: 4px;
+  color: var(--warn);
+  font-size: 13px;
+}
+.modal-warning strong { color: var(--warn); }
+.modal-warning code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
 .headless-show-all {
   display: block; width: 100%; text-align: center;
   padding: 6px 8px; margin-bottom: 6px;

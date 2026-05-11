@@ -80,6 +80,11 @@ interface AppState {
   attentionSessions: Set<string>;
   exitConfirmOpen: boolean;
   exitInFlight: boolean;
+  /// True once `onStopAndQuit` has sent `shutdown` to the daemon and 2 s
+  /// have elapsed without the WS connection closing. Surfaces a warning
+  /// banner + Force-quit button in the exit dialog so the user isn't
+  /// trapped staring at "Stopping…" forever when the daemon hangs.
+  exitStuck: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
   toasts: ToastEntry[];
   /// Repo-remove modal state, set when the sidebar's × click hit a repo
@@ -105,6 +110,7 @@ export default function App() {
     attentionSessions: new Set(),
     exitConfirmOpen: false,
     exitInFlight: false,
+    exitStuck: false,
     presetLaunch: null,
     toasts: [],
     repoRemove: null,
@@ -592,36 +598,53 @@ export default function App() {
     void closeMainWindow();
   }, [closeMainWindow]);
 
+  const onForceQuit = useCallback(() => {
+    logToFile("warn", "exit modal: Force quit clicked (daemon stuck)");
+    void closeMainWindow();
+  }, [closeMainWindow]);
+
   const onStopAndQuit = useCallback(() => {
     logToFile("info", "exit modal: Stop sessions & quit clicked");
-    setState((s) => ({ ...s, exitInFlight: true }));
+    setState((s) => ({ ...s, exitInFlight: true, exitStuck: false }));
     const client = state.client;
     if (!client) {
       logToFile("warn", "onStopAndQuit: no client; closing window directly");
       void closeMainWindow();
       return;
     }
-    const closed = new Promise<void>((resolve) => {
-      let done = false;
-      const finish = (reason: string) => {
-        if (done) return;
-        done = true;
-        logToFile("info", `onStopAndQuit: closed promise resolving (${reason})`);
-        window.clearTimeout(timer);
-        unsubscribe();
-        resolve();
-      };
-      const unsubscribe = client.onConnectionChange((next) => {
-        logToFile("info", `onStopAndQuit: connection state -> ${next.kind}`);
-        if (next.kind !== "open" && next.kind !== "connecting") {
-          finish(`connection ${next.kind}`);
-        }
-      });
-      const timer = window.setTimeout(() => finish("timeout 2s"), 2000);
+    // Two timers gate the shutdown UX:
+    //   - At 2 s with the WS still open, flip `exitStuck` so the dialog
+    //     swaps to a warning + Force-quit affordance instead of pretending
+    //     to still be making progress.
+    //   - When the WS actually closes (graceful daemon shutdown), close
+    //     the OS window normally.
+    // Previously the 2 s timer itself closed the window, which silently
+    // dropped the user out of the app while the daemon was still up —
+    // they'd see "daemon supervisor failed" errors on next launch.
+    let resolved = false;
+    const stuckTimer = window.setTimeout(() => {
+      if (resolved) return;
+      logToFile(
+        "warn",
+        "onStopAndQuit: 2 s elapsed without WS close; surfacing force-quit option",
+      );
+      setState((s) => ({ ...s, exitStuck: true }));
+    }, 2000);
+    const unsubscribe = client.onConnectionChange((next) => {
+      logToFile("info", `onStopAndQuit: connection state -> ${next.kind}`);
+      if (next.kind === "open" || next.kind === "connecting") return;
+      if (resolved) return;
+      resolved = true;
+      window.clearTimeout(stuckTimer);
+      unsubscribe();
+      logToFile(
+        "info",
+        `onStopAndQuit: WS closed (${next.kind}); closing window`,
+      );
+      void closeMainWindow();
     });
     logToFile("info", "onStopAndQuit: sending shutdown message");
     client.send({ type: "shutdown" });
-    void closed.then(closeMainWindow);
   }, [closeMainWindow, state.client]);
 
   const activeSessionCount = useMemo(
@@ -945,8 +968,10 @@ export default function App() {
           activeSessionCount={activeSessionCount}
           orphanSessionCount={orphanSessionCount}
           busy={state.exitInFlight}
+          stuck={state.exitStuck}
           onStopAndQuit={onStopAndQuit}
           onQuitLeaveRunning={onQuitLeaveRunning}
+          onForceQuit={onForceQuit}
           onCancel={onExitCancel}
         />
       )}

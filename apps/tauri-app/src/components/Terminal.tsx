@@ -110,6 +110,49 @@ export default function Terminal({ sessionId, client, subscribePty, status }: Pr
       });
     });
 
+    // Ctrl+Shift+C copies the current xterm selection to the OS clipboard;
+    // Ctrl+Shift+V pastes from the clipboard into the PTY. xterm.js does not
+    // wire either by default — without these handlers users on body-level
+    // `user-select: none` have no visible affordance and the typical
+    // terminal-app muscle memory fails. Returning `false` tells xterm to
+    // skip its default handling (which would send `\x03` for Ctrl+C and
+    // `\x16` for Ctrl+V into the PTY); modifier+Shift variants are
+    // specifically non-PTY-meaningful so we don't lose ^C/^V on bare Ctrl.
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown") return true;
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod || !event.shiftKey) return true;
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        const sel = term.getSelection();
+        if (sel.length === 0) return true;
+        navigator.clipboard.writeText(sel).catch(() => {});
+        return false;
+      }
+      if (key === "v") {
+        if (
+          statusRef.current === "stopped" ||
+          statusRef.current === "error"
+        ) {
+          return false;
+        }
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (!text) return;
+            const enc = new TextEncoder();
+            client.send({
+              type: "send_input",
+              session_id: sessionId,
+              data_b64: bytesToBase64(enc.encode(text)),
+            });
+          })
+          .catch(() => {});
+        return false;
+      }
+      return true;
+    });
+
     const resizeObserver = new ResizeObserver(() => {
       if (!fitRef.current || !termRef.current) return;
       fitRef.current.fit();

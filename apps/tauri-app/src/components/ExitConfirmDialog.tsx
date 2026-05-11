@@ -10,8 +10,17 @@ interface Props {
   /// `claude` processes. Surfaced so the user can act on that knowledge.
   orphanSessionCount: number;
   busy: boolean;
+  /// True once the 2 s shutdown grace window has elapsed without the
+  /// daemon's WS connection closing. Without this the dialog sits in
+  /// "Stopping…" forever — App.tsx used to auto-close the window after
+  /// 2 s, which silently abandoned a hung daemon. Now the user gets a
+  /// warning + explicit Force-quit affordance instead.
+  stuck: boolean;
   onStopAndQuit: () => void;
   onQuitLeaveRunning: () => void;
+  /// Bypass the daemon round-trip and close the OS window immediately.
+  /// Only reachable when `stuck` is true.
+  onForceQuit: () => void;
   onCancel: () => void;
 }
 
@@ -24,8 +33,10 @@ export default function ExitConfirmDialog({
   activeSessionCount,
   orphanSessionCount,
   busy,
+  stuck,
   onStopAndQuit,
   onQuitLeaveRunning,
+  onForceQuit,
   onCancel,
 }: Props) {
   const quitLeaveRef = useRef<HTMLButtonElement | null>(null);
@@ -77,30 +88,52 @@ export default function ExitConfirmDialog({
               </>
             )}
           </p>
+          {busy && stuck && (
+            <p className="modal-warning" data-testid="exit-stuck-warning">
+              <strong>Daemon not responding after 2 seconds.</strong> The
+              shutdown request may have hung. You can force-close this window
+              now; on next launch the supervisor will try to reattach to any
+              leftover <code>claude</code> processes.
+            </p>
+          )}
         </div>
         <footer className="modal-footer">
-          <button type="button" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onClick={onStopAndQuit}
-            disabled={busy}
-            title="Terminate every session and stop the daemon"
-          >
-            {busy ? "Stopping…" : "Stop sessions & quit"}
-          </button>
-          <button
-            ref={quitLeaveRef}
-            type="button"
-            className="primary"
-            onClick={onQuitLeaveRunning}
-            disabled={busy}
-            title="Close the window; daemon and sessions keep running"
-          >
-            Quit, leave running
-          </button>
+          {busy && stuck ? (
+            <button
+              type="button"
+              className="danger"
+              onClick={onForceQuit}
+              data-testid="exit-force-quit"
+              title="Close the window now; the daemon may continue shutting down in the background"
+            >
+              Force quit
+            </button>
+          ) : (
+            <>
+              <button type="button" onClick={onCancel} disabled={busy}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={onStopAndQuit}
+                disabled={busy}
+                title="Terminate every session and stop the daemon"
+              >
+                {busy ? "Stopping…" : "Stop sessions & quit"}
+              </button>
+              <button
+                ref={quitLeaveRef}
+                type="button"
+                className="primary"
+                onClick={onQuitLeaveRunning}
+                disabled={busy}
+                title="Close the window; daemon and sessions keep running"
+              >
+                Quit, leave running
+              </button>
+            </>
+          )}
         </footer>
       </div>
     </div>
