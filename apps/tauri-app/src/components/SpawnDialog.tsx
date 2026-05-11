@@ -769,15 +769,13 @@ function SingleForm({
     setBaseBranch(defaultBranch);
   }, [defaultBranch]);
 
+  // Local-only until submit. Previously this fired
+  // `set_repo_worktree_default` immediately on toggle, which left the
+  // persisted preference changed even if the user cancelled the spawn
+  // (audit: "Worktree-default toggle persists immediately on click").
+  // Submit re-sends the daemon update; cancel does nothing.
   const toggleUseWorktree = (next: boolean) => {
     setUseWorktree(next);
-    if (repo) {
-      client.send({
-        type: "set_repo_worktree_default",
-        repo_id: repo.id,
-        value: next,
-      });
-    }
   };
 
   // Guard against double-click submit. submit() is synchronous and onClose
@@ -798,6 +796,17 @@ function SingleForm({
     // next dialog open generates a fresh one rather than re-pinning the
     // name the user just spawned with.
     branchSuggestionCache.delete(`repo:${repoId}`);
+    // Persist the worktree-toggle choice as the new default for this
+    // repo only on successful submit. Was previously fired live on
+    // toggle, but that left the preference changed even if the user
+    // cancelled (audit finding closed in iter 42).
+    if (repo && useWorktree !== (repo.default_use_worktree ?? true)) {
+      client.send({
+        type: "set_repo_worktree_default",
+        repo_id: repo.id,
+        value: useWorktree,
+      });
+    }
     client.send({
       type: "spawn_session",
       label: null,
@@ -1011,15 +1020,9 @@ function WorkspaceForm({
       window.removeEventListener("rt:workspace_spawn_preview", handler);
   }, [workspaceId, branch.value]);
 
+  // Local-only until submit; see SingleForm's note for rationale.
   const toggleUseWorktree = (next: boolean) => {
     setUseWorktree(next);
-    if (workspace) {
-      client.send({
-        type: "set_workspace_worktree_default",
-        workspace_id: workspace.id,
-        value: next,
-      });
-    }
   };
 
   const requestPreview = () => {
@@ -1045,6 +1048,16 @@ function WorkspaceForm({
     if (!canSpawn || submittedRef.current) return;
     submittedRef.current = true;
     branchSuggestionCache.delete(`workspace:${workspaceId}`);
+    if (
+      workspace &&
+      useWorktree !== (workspace.default_use_worktree ?? true)
+    ) {
+      client.send({
+        type: "set_workspace_worktree_default",
+        workspace_id: workspace.id,
+        value: useWorktree,
+      });
+    }
     client.send({
       type: "spawn_session",
       label: null,

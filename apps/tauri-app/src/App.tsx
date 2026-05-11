@@ -456,6 +456,16 @@ export default function App() {
       ? { kind: "replacePane", tabId: target.tabId, paneId: target.paneId }
       : { kind: "newTab" };
     spawnTargetPaneRef.current = null;
+    // Optimistic feedback while the daemon resolves the spawn. Worktree
+    // creation can take several seconds (Phase 2 workspace flows resolve
+    // multiple repos), and previously the dialog vanished without trace
+    // until session_updated arrived. The toast auto-dismisses after 8s,
+    // by which point the session is normally live in the sidebar.
+    pushToast(setState, {
+      severity: "info",
+      message: "Spawning session…",
+      detail: "Worktree creation may take a few seconds.",
+    });
   }, []);
 
   const onOpenWorkspaceCreator = useCallback(() => {
