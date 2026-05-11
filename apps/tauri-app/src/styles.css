@@ -470,6 +470,25 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--fg);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
+.tab-pill.is-multi-selected {
+  background: rgba(78, 168, 255, 0.14);
+}
+.tab-pill.drop-before {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.tab-pill.drop-after {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+.tab-pill-rename {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--fg);
+  padding: 1px 4px;
+  font: inherit;
+  width: 140px;
+  outline: none;
+}
 .tab-pill-label {
   overflow: hidden;
   text-overflow: ellipsis;
