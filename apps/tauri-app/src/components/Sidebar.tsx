@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { type ConnectionState, type DaemonClient, listPresets } from "../api";
-import type {
-  PresetEntry,
-  PresetTarget,
-  RepoEntry,
-  SessionSnapshot,
-  TabEntry,
-  WorkspaceEntry,
+import {
+  tabGrid,
+  type PresetEntry,
+  type PresetTarget,
+  type RepoEntry,
+  type SessionSnapshot,
+  type TabEntry,
+  type WorkspaceEntry,
 } from "../types";
 import { useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
@@ -918,13 +919,16 @@ function buildTabContainers(
   for (const tab of tabs) {
     const tabSessions: SessionSnapshot[] = [];
     const seen = new Set<string>();
-    for (const pane of collectPanes(tab.grid)) {
-      if (!pane.session_id) continue;
-      if (seen.has(pane.session_id)) continue;
-      seen.add(pane.session_id);
-      referencedIds.add(pane.session_id);
-      const s = sessionById.get(pane.session_id);
-      if (s) tabSessions.push(s);
+    const grid = tabGrid(tab);
+    if (grid) {
+      for (const pane of collectPanes(grid)) {
+        if (!pane.session_id) continue;
+        if (seen.has(pane.session_id)) continue;
+        seen.add(pane.session_id);
+        referencedIds.add(pane.session_id);
+        const s = sessionById.get(pane.session_id);
+        if (s) tabSessions.push(s);
+      }
     }
     out.push({
       key: `tab:${tab.id}`,

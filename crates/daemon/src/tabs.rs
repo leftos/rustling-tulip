@@ -6,7 +6,9 @@
 
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
-use protocol::{GridNode, MergeLayout, PaneDropEdge, SplitDirection, SplitPlace, TabEntry};
+use protocol::{
+    GridNode, MergeLayout, PaneDropEdge, SplitDirection, SplitPlace, TabContent, TabEntry,
+};
 use uuid::Uuid;
 
 const MIN_RATIO: f32 = 0.05;
@@ -40,12 +42,28 @@ pub fn make_tab(name: Option<String>, initial_session_id: Option<String>) -> Tab
     TabEntry {
         id,
         name: name.unwrap_or(default_name),
-        grid: GridNode::Pane {
-            pane_id,
-            session_id: initial_session_id,
+        content: TabContent::Grid {
+            grid: GridNode::Pane {
+                pane_id,
+                session_id: initial_session_id,
+            },
         },
         created_at: Utc::now(),
     }
+}
+
+/// Borrow the grid of `tab` or fail with a clear error when the tab is
+/// not a grid kind. Pane-level operations only make sense on grid tabs.
+pub fn grid_or_err(tab: &TabEntry) -> anyhow::Result<&GridNode> {
+    tab.grid()
+        .ok_or_else(|| anyhow!("tab {} is not a grid tab", tab.id))
+}
+
+/// Mutable counterpart to [`grid_or_err`].
+pub fn grid_or_err_mut(tab: &mut TabEntry) -> anyhow::Result<&mut GridNode> {
+    let id = tab.id.clone();
+    tab.grid_mut()
+        .ok_or_else(|| anyhow!("tab {id} is not a grid tab"))
 }
 
 /// Find the tab by id, returning a mutable reference.
@@ -467,7 +485,8 @@ pub fn merge_tabs(
             .iter()
             .find(|t| &t.id == id)
             .with_context(|| format!("unknown tab: {id}"))?;
-        collected.extend(collect_panes(&entry.grid));
+        let grid = grid_or_err(entry)?;
+        collected.extend(collect_panes(grid));
     }
     let direction = match layout {
         MergeLayout::TileHorizontal => SplitDirection::Horizontal,
@@ -479,7 +498,7 @@ pub fn merge_tabs(
     let entry = TabEntry {
         id: new_id(),
         name: name.unwrap_or_else(|| "Tab".to_string()),
-        grid,
+        content: TabContent::Grid { grid },
         created_at: Utc::now(),
     };
     tabs.push(entry.clone());
@@ -499,10 +518,11 @@ pub fn extract_to_new_tab(
         return Err(anyhow!("extract requires at least one pane"));
     }
     let source = find_tab_mut(tabs, source_tab_id)?;
+    let source_grid = grid_or_err_mut(source)?;
     let mut extracted: Vec<(String, Option<String>)> = Vec::with_capacity(pane_ids.len());
     let mut source_empty = false;
     for pid in pane_ids {
-        let (node, empty) = extract_pane(&mut source.grid, pid)?;
+        let (node, empty) = extract_pane(source_grid, pid)?;
         let GridNode::Pane {
             pane_id,
             session_id,
@@ -524,7 +544,7 @@ pub fn extract_to_new_tab(
     let entry = TabEntry {
         id: new_id(),
         name: name.unwrap_or_else(|| "Tab".to_string()),
-        grid,
+        content: TabContent::Grid { grid },
         created_at: Utc::now(),
     };
     tabs.push(entry.clone());
@@ -892,7 +912,7 @@ mod tests {
         TabEntry {
             id: id.to_string(),
             name: name.to_string(),
-            grid,
+            content: TabContent::Grid { grid },
             created_at: Utc::now(),
         }
     }
@@ -917,7 +937,7 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].id, merged.id);
         assert_eq!(tabs[0].name, "Merged");
-        let panes = collect_panes(&tabs[0].grid);
+        let panes = collect_panes(grid_or_err(&tabs[0]).expect("grid"));
         assert_eq!(
             panes.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
             vec!["a1", "b1", "b2"]
@@ -941,8 +961,12 @@ mod tests {
         assert!(!source_empty);
         assert_eq!(tabs.len(), 2);
         let source = tabs.iter().find(|t| t.id == "t1").expect("source");
-        assert!(matches!(&source.grid, GridNode::Pane { pane_id, .. } if pane_id == "p2"));
-        assert!(matches!(&new_tab.grid, GridNode::Pane { pane_id, .. } if pane_id == "p1"));
+        assert!(
+            matches!(grid_or_err(source).expect("src grid"), GridNode::Pane { pane_id, .. } if pane_id == "p2")
+        );
+        assert!(
+            matches!(grid_or_err(&new_tab).expect("new grid"), GridNode::Pane { pane_id, .. } if pane_id == "p1")
+        );
     }
 
     #[test]

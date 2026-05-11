@@ -1,4 +1,5 @@
 import type { GridNode, TabEntry } from "../types";
+import { tabGrid } from "../types";
 
 /**
  * Walk a grid tree and return every leaf pane in left-then-right order.
@@ -29,7 +30,9 @@ function walk(
  * confirm when at least one carries a session).
  */
 export function tabHasBoundSessions(tab: TabEntry): boolean {
-  return collectPanes(tab.grid).some((p) => p.session_id !== null);
+  const grid = tabGrid(tab);
+  if (!grid) return false;
+  return collectPanes(grid).some((p) => p.session_id !== null);
 }
 
 /**
@@ -43,7 +46,9 @@ export function findTabContainingSession(
   sessionId: string,
 ): { tabId: string; paneId: string } | null {
   for (const tab of tabs) {
-    for (const pane of collectPanes(tab.grid)) {
+    const grid = tabGrid(tab);
+    if (!grid) continue;
+    for (const pane of collectPanes(grid)) {
       if (pane.session_id === sessionId) {
         return { tabId: tab.id, paneId: pane.pane_id };
       }
@@ -64,7 +69,9 @@ export function sessionTabBindings(
 ): Array<{ tab_id: string; tab_name: string; pane_id: string }> {
   const out: Array<{ tab_id: string; tab_name: string; pane_id: string }> = [];
   for (const tab of tabs) {
-    for (const pane of collectPanes(tab.grid)) {
+    const grid = tabGrid(tab);
+    if (!grid) continue;
+    for (const pane of collectPanes(grid)) {
       if (pane.session_id === sessionId) {
         out.push({ tab_id: tab.id, tab_name: tab.name, pane_id: pane.pane_id });
       }
@@ -81,6 +88,8 @@ export function sessionTabBindings(
 export function firstLeafPane(
   tab: TabEntry,
 ): { pane_id: string; session_id: string | null } | null {
-  const panes = collectPanes(tab.grid);
+  const grid = tabGrid(tab);
+  if (!grid) return null;
+  const panes = collectPanes(grid);
   return panes[0] ?? null;
 }

@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 export type Agent = "claude" | "codex";
 
@@ -286,11 +286,22 @@ export type GridNode =
       second: GridNode;
     };
 
+export type TabContent = { kind: "grid"; grid: GridNode };
+
 export interface TabEntry {
   id: string;
   name: string;
-  grid: GridNode;
+  content: TabContent;
   created_at: string;
+}
+
+/**
+ * Borrow the grid of `tab` when the tab is a grid kind. Returns `null` for
+ * other kinds — callers that render pane layouts must guard on this, since
+ * pane-level operations are undefined for non-grid tabs.
+ */
+export function tabGrid(tab: TabEntry): GridNode | null {
+  return tab.content.kind === "grid" ? tab.content.grid : null;
 }
 
 // ------- Wire envelopes -------

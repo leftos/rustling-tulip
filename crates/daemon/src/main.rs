@@ -71,11 +71,17 @@ fn prune_stale_tabs(state: &Arc<state::AppState>, live_orphans: &[orphan::Orphan
         let prev_tab_count = s.tabs.len();
         let mut panes_cleared = 0usize;
         for tab in &mut s.tabs {
-            if tabs::prune_sessions_not_in(&mut tab.grid, &live_ids) {
+            let Some(grid) = tab.grid_mut() else {
+                continue;
+            };
+            if tabs::prune_sessions_not_in(grid, &live_ids) {
                 panes_cleared += 1;
             }
         }
-        s.tabs.retain(|t| tabs::has_any_session(&t.grid));
+        // Non-grid tabs (e.g. diff tabs) survive the prune unconditionally;
+        // grid tabs are kept only if they still bind at least one session.
+        s.tabs
+            .retain(|t| t.grid().is_none_or(tabs::has_any_session));
         let tabs_dropped = prev_tab_count.saturating_sub(s.tabs.len());
         (panes_cleared, tabs_dropped)
     });

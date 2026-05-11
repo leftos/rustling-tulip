@@ -13,15 +13,16 @@ import {
   type ConnectionState,
   type DaemonClient,
 } from "./api";
-import type {
-  DaemonMessage,
-  PresetEntry,
-  PresetTarget,
-  RepoEntry,
-  SessionSnapshot,
-  TabEntry,
-  VscodeWorkspaceSuggestion,
-  WorkspaceEntry,
+import {
+  tabGrid,
+  type DaemonMessage,
+  type PresetEntry,
+  type PresetTarget,
+  type RepoEntry,
+  type SessionSnapshot,
+  type TabEntry,
+  type VscodeWorkspaceSuggestion,
+  type WorkspaceEntry,
 } from "./types";
 import ActivityBar, {
   type ActivitySection,
@@ -263,8 +264,9 @@ export default function App() {
     }
     let openInNewTab = true;
     const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
-    if (activeTab) {
-      const panes = collectPanes(activeTab.grid);
+    const activeGrid = activeTab ? tabGrid(activeTab) : null;
+    if (activeTab && activeGrid) {
+      const panes = collectPanes(activeGrid);
       const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
       if (focusedPane && focusedPane.session_id === null) {
         client.send({
@@ -524,8 +526,10 @@ export default function App() {
   // visual selection state.
   const sessionIdsInActiveTab = useMemo(() => {
     if (!activeTab) return new Set<string>();
+    const grid = tabGrid(activeTab);
+    if (!grid) return new Set<string>();
     return new Set(
-      collectPanes(activeTab.grid)
+      collectPanes(grid)
         .map((p) => p.session_id)
         .filter((id): id is string => id !== null),
     );
@@ -547,7 +551,9 @@ export default function App() {
   // back to a manual override or the first registered repo.
   const focusedRepoId = useMemo(() => {
     if (!activeTab || !state.focusedPaneId) return null;
-    const pane = collectPanes(activeTab.grid).find(
+    const grid = tabGrid(activeTab);
+    if (!grid) return null;
+    const pane = collectPanes(grid).find(
       (p) => p.pane_id === state.focusedPaneId,
     );
     if (!pane?.session_id) return null;

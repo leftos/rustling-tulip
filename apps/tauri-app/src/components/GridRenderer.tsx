@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
-import type {
-  GridNode,
-  PaneDropEdge,
-  SessionSnapshot,
-  SplitDirection,
-  TabEntry,
+import {
+  tabGrid,
+  type GridNode,
+  type PaneDropEdge,
+  type SessionSnapshot,
+  type SplitDirection,
+  type TabEntry,
 } from "../types";
 import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
@@ -33,10 +34,20 @@ export default function GridRenderer({
   onSpawnInPane,
   hasRepos,
 }: Props) {
+  const grid = tabGrid(tab);
+  if (!grid) {
+    return (
+      <div className="grid-root grid-root-non-grid" data-testid="grid-root-non-grid">
+        <p className="empty" style={{ padding: "16px 18px" }}>
+          This tab has no pane layout.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="grid-root">
       <NodeRenderer
-        node={tab.grid}
+        node={grid}
         path={[]}
         tabId={tab.id}
         client={client}

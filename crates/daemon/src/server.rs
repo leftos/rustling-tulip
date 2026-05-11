@@ -829,7 +829,8 @@ async fn dispatch(
         } => {
             let updated = hub.state.mutate(|s| {
                 let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
-                tabs::split_pane(&mut tab.grid, &pane_id, direction, place, new_session_id)?;
+                let grid = tabs::grid_or_err_mut(tab)?;
+                tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             let _ = hub.tab_events.send(TabEvent::Updated(updated));
@@ -837,7 +838,8 @@ async fn dispatch(
         ClientMessage::ClosePane { tab_id, pane_id } => {
             let outcome = hub.state.mutate(|s| {
                 let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
-                let empty = tabs::close_pane(&mut tab.grid, &pane_id)?;
+                let grid = tabs::grid_or_err_mut(tab)?;
+                let empty = tabs::close_pane(grid, &pane_id)?;
                 if empty {
                     s.tabs.retain(|t| t.id != tab_id);
                     Ok::<_, anyhow::Error>(CloseOutcome::TabRemoved(tab_id.clone()))
@@ -861,7 +863,8 @@ async fn dispatch(
         } => {
             let updated = hub.state.mutate(|s| {
                 let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
-                tabs::set_pane_ratio(&mut tab.grid, &split_path, ratio)?;
+                let grid = tabs::grid_or_err_mut(tab)?;
+                tabs::set_pane_ratio(grid, &split_path, ratio)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             let _ = hub.tab_events.send(TabEvent::Updated(updated));
@@ -873,7 +876,8 @@ async fn dispatch(
         } => {
             let updated = hub.state.mutate(|s| {
                 let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
-                tabs::replace_pane_session(&mut tab.grid, &pane_id, session_id)?;
+                let grid = tabs::grid_or_err_mut(tab)?;
+                tabs::replace_pane_session(grid, &pane_id, session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
             let _ = hub.tab_events.send(TabEvent::Updated(updated));
@@ -1010,16 +1014,18 @@ fn move_pane(
     hub.state.mutate(|s| {
         if src_tab_id == dst_tab_id {
             let tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
-            let (extracted, source_empty) = tabs::extract_pane(&mut tab.grid, src_pane_id)?;
+            let grid = tabs::grid_or_err_mut(tab)?;
+            let (extracted, source_empty) = tabs::extract_pane(grid, src_pane_id)?;
             if source_empty {
                 return Err(anyhow!("cannot move the only pane within the same tab"));
             }
-            tabs::insert_adjacent(&mut tab.grid, dst_pane_id, edge, extracted)?;
+            tabs::insert_adjacent(grid, dst_pane_id, edge, extracted)?;
             Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
         } else {
             let (extracted_node, source_empty) = {
                 let src_tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
-                tabs::extract_pane(&mut src_tab.grid, src_pane_id)?
+                let src_grid = tabs::grid_or_err_mut(src_tab)?;
+                tabs::extract_pane(src_grid, src_pane_id)?
             };
             let mut events = Vec::new();
             if source_empty {
@@ -1035,7 +1041,8 @@ fn move_pane(
                 events.push(TabEvent::Updated(src_snapshot));
             }
             let dst_tab = tabs::find_tab_mut(&mut s.tabs, dst_tab_id)?;
-            tabs::insert_adjacent(&mut dst_tab.grid, dst_pane_id, edge, extracted_node)?;
+            let dst_grid = tabs::grid_or_err_mut(dst_tab)?;
+            tabs::insert_adjacent(dst_grid, dst_pane_id, edge, extracted_node)?;
             events.push(TabEvent::Updated(dst_tab.clone()));
             Ok(events)
         }
@@ -1815,7 +1822,10 @@ fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
     let modified = match hub.state.mutate(|s| {
         let mut out = Vec::new();
         for tab in &mut s.tabs {
-            if tabs::prune_session(&mut tab.grid, session_id) {
+            let Some(grid) = tab.grid_mut() else {
+                continue;
+            };
+            if tabs::prune_session(grid, session_id) {
                 out.push(tab.clone());
             }
         }

@@ -812,7 +812,10 @@ fn attach_to_tab(
                 .iter_mut()
                 .find(|t| t.id == tab_id)
                 .ok_or_else(|| anyhow!("tab vanished mid-launch: {tab_id}"))?;
-            tab.grid = new_grid;
+            let grid = tab
+                .grid_mut()
+                .ok_or_else(|| anyhow!("cannot populate non-grid tab: {tab_id}"))?;
+            *grid = new_grid;
             Ok::<_, anyhow::Error>(tab.clone())
         })
         .map_err(|e| {
@@ -841,9 +844,11 @@ fn open_new_tab(
     let tab = TabEntry {
         id: Uuid::new_v4().to_string(),
         name,
-        grid: GridNode::Pane {
-            pane_id: Uuid::new_v4().to_string(),
-            session_id: None,
+        content: protocol::TabContent::Grid {
+            grid: GridNode::Pane {
+                pane_id: Uuid::new_v4().to_string(),
+                session_id: None,
+            },
         },
         created_at: Utc::now(),
     };

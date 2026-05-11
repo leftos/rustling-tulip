@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 fn default_true() -> bool {
     true
@@ -379,12 +379,78 @@ pub enum MergeLayout {
     TileVertical,
 }
 
+/// What a tab is rendering. Most tabs hold a grid of panes/splits
+/// (`Grid`); future variants (e.g. `Diff` for Monaco-backed file diffs)
+/// hang off this enum without reshaping the tab list or invalidating
+/// pane-level operations, which only apply to `Grid` tabs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TabContent {
+    Grid { grid: GridNode },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct TabEntry {
     pub id: String,
     pub name: String,
-    pub grid: GridNode,
+    pub content: TabContent,
     pub created_at: DateTime<Utc>,
+}
+
+impl TabEntry {
+    /// Borrow the underlying grid when this tab is a [`TabContent::Grid`].
+    /// Returns `None` for non-grid tab kinds; callers that mutate panes
+    /// must error with a clear message when this returns `None`.
+    #[must_use]
+    pub fn grid(&self) -> Option<&GridNode> {
+        match &self.content {
+            TabContent::Grid { grid } => Some(grid),
+        }
+    }
+
+    /// Mutable counterpart to [`Self::grid`].
+    pub fn grid_mut(&mut self) -> Option<&mut GridNode> {
+        match &mut self.content {
+            TabContent::Grid { grid } => Some(grid),
+        }
+    }
+}
+
+// Custom Deserialize so legacy `state.json` files written before the
+// TabContent split (top-level `grid` field, no `content`) still load.
+// Newer files have `content` and we use it directly.
+impl<'de> Deserialize<'de> for TabEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: String,
+            name: String,
+            #[serde(default)]
+            content: Option<TabContent>,
+            #[serde(default)]
+            grid: Option<GridNode>,
+            created_at: DateTime<Utc>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let content = match (raw.content, raw.grid) {
+            (Some(c), _) => c,
+            (None, Some(grid)) => TabContent::Grid { grid },
+            (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "tab entry missing both `content` and legacy `grid`",
+                ));
+            }
+        };
+        Ok(TabEntry {
+            id: raw.id,
+            name: raw.name,
+            content,
+            created_at: raw.created_at,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,25 +1203,27 @@ mod tests {
         TabEntry {
             id: "tab-1".to_string(),
             name: "Main".to_string(),
-            grid: GridNode::Split {
-                direction: SplitDirection::Horizontal,
-                ratio: 0.6,
-                first: Box::new(GridNode::Pane {
-                    pane_id: "p1".to_string(),
-                    session_id: Some("s1".to_string()),
-                }),
-                second: Box::new(GridNode::Split {
-                    direction: SplitDirection::Vertical,
-                    ratio: 0.5,
+            content: TabContent::Grid {
+                grid: GridNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    ratio: 0.6,
                     first: Box::new(GridNode::Pane {
-                        pane_id: "p2".to_string(),
-                        session_id: None,
+                        pane_id: "p1".to_string(),
+                        session_id: Some("s1".to_string()),
                     }),
-                    second: Box::new(GridNode::Pane {
-                        pane_id: "p3".to_string(),
-                        session_id: Some("s3".to_string()),
+                    second: Box::new(GridNode::Split {
+                        direction: SplitDirection::Vertical,
+                        ratio: 0.5,
+                        first: Box::new(GridNode::Pane {
+                            pane_id: "p2".to_string(),
+                            session_id: None,
+                        }),
+                        second: Box::new(GridNode::Pane {
+                            pane_id: "p3".to_string(),
+                            session_id: Some("s3".to_string()),
+                        }),
                     }),
-                }),
+                },
             },
             created_at: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
         }
@@ -1418,6 +1486,50 @@ mod tests {
         let repo: RepoEntry = serde_json::from_str(legacy).expect("parse legacy repo");
         assert_eq!(repo.last_agent, None);
         assert!(repo.default_use_worktree, "default_use_worktree default");
+    }
+
+    #[test]
+    fn tab_entry_legacy_grid_field_migrates_to_content_grid() {
+        // Old state.json files (pre-PROTOCOL_VERSION 8) wrote `grid` at the
+        // top level. The custom Deserialize impl must keep loading those.
+        let legacy = r#"{
+            "id": "tab-1",
+            "name": "Main",
+            "grid": {"kind":"pane","pane_id":"p1","session_id":"s1"},
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let tab: TabEntry = serde_json::from_str(legacy).expect("parse legacy");
+        let TabContent::Grid { grid } = &tab.content;
+        match grid {
+            GridNode::Pane {
+                pane_id,
+                session_id,
+            } => {
+                assert_eq!(pane_id, "p1");
+                assert_eq!(session_id.as_deref(), Some("s1"));
+            }
+            GridNode::Split { .. } => panic!("expected pane"),
+        }
+    }
+
+    #[test]
+    fn tab_entry_modern_content_field_loads_directly() {
+        let modern = r#"{
+            "id": "tab-2",
+            "name": "Modern",
+            "content": {"kind":"grid","grid":{"kind":"pane","pane_id":"px","session_id":null}},
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let tab: TabEntry = serde_json::from_str(modern).expect("parse modern");
+        let TabContent::Grid { grid } = &tab.content;
+        assert!(matches!(grid, GridNode::Pane { pane_id, .. } if pane_id == "px"));
+    }
+
+    #[test]
+    fn tab_entry_missing_both_fields_errors() {
+        let bad = r#"{"id":"x","name":"x","created_at":"2024-01-01T00:00:00Z"}"#;
+        let res: Result<TabEntry, _> = serde_json::from_str(bad);
+        assert!(res.is_err());
     }
 
     #[test]
