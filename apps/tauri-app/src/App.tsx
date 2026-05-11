@@ -155,7 +155,17 @@ export default function App() {
   useEffect(() => {
     void (async () => {
       const granted = await isPermissionGranted();
-      if (!granted) await requestPermission();
+      if (granted) return;
+      const requested = await requestPermission();
+      // Tauri returns "granted" | "denied" | "default". If the user denied,
+      // attention notifications won't fire — log it once at startup so the
+      // dev/app.log has a paper trail explaining the silence.
+      if (requested !== "granted") {
+        logToFile(
+          "warn",
+          `notification permission state: ${requested} - attention notifications will be silent`,
+        );
+      }
     })();
   }, []);
 

@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot, TabEntry } from "../types";
 import GridRenderer from "./GridRenderer";
@@ -27,10 +28,23 @@ export default function TabWindow({
     // there because the daemon broadcasts tab_updated to both windows.
   }, []);
 
+  const onCloseWindow = useCallback(() => {
+    void getCurrentWebviewWindow().close();
+  }, []);
+
   return (
     <div className="tab-window">
       <header className="tab-window-header">
-        <h2>{tab.name}</h2>
+        <h2 title={tab.name}>{tab.name}</h2>
+        <span className="spacer" />
+        <button
+          type="button"
+          onClick={onCloseWindow}
+          title="Close this window. The tab and its sessions stay in the main window."
+          data-testid="tab-window-close"
+        >
+          Close window
+        </button>
       </header>
       {tab.content.kind === "diff" ? (
         <DiffPane

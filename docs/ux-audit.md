@@ -31,9 +31,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No name-uniqueness on workspaces.** Two workspaces can share a name; the sidebar renders them as identical `WS <name>` rows with no disambiguator.
   - File: `crates/daemon/src/registry.rs:88-104` (no dedup), `apps/tauri-app/src/components/Sidebar.tsx:264-274`.
   - Suggested direction: enforce uniqueness on `upsert_workspace`, surface the error, OR append `(2)` style suffixes.
-- **`Sidebar` accepts a `connection` prop but never renders it.** The connection badge only appears on the centre `EmptyState`. When the daemon disconnects the sidebar happily shows stale repos/sessions with no visual cue.
-  - File: `apps/tauri-app/src/components/Sidebar.tsx:25` (prop typed), prop unused — and `App.tsx:528-548` passes `connection={state.status}` for nothing.
-  - Suggested direction: render the badge in `sidebar-header` (always visible) and remove the dead prop, or have it actually do something.
+- ~~**`Sidebar` accepts a `connection` prop but never renders it.**~~ **Resolved (iter 21).** Sidebar header now renders a compact connection badge that hides itself when the connection is `open` and surfaces a `badge-warn` or `badge-err` chip (with the reason as a tooltip) for every other state. Visible from any view, not just the EmptyState.
 - **Force-expand silently overrides the user's collapse state.** A collapsed container that contains any highlighted or attention-flagged session is force-expanded, undoing the user's last action without telling them.
   - File: `apps/tauri-app/src/components/Sidebar.tsx:103-117`.
   - Suggested direction: scroll the relevant leaf into view but leave collapse state alone (or only auto-expand on first attention, not for the duration).
@@ -119,9 +117,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Pop-out tab window's "Spawn one here" is a no-op.** `TabWindow` passes an empty `onSpawnInPane` callback (line 23) because pop-outs have no `SpawnDialog`. Clicking the prominent empty-pane button does nothing visible. Same window has no sidebar so the EmptyPane's fallback hint "Add a repo from the sidebar first." is also useless.
   - Files: `apps/tauri-app/src/components/TabWindow.tsx:23-27`, `apps/tauri-app/src/components/EmptyPane.tsx:6-18`.
   - Suggested direction: either disable the button in pop-out mode, route to the main window via a Tauri event, or open a minimal SpawnDialog in the pop-out.
-- **TabWindow has no chrome controls.** Only `<h2>{tab.name}</h2>` — no close-window button, no "Bring back to main window", no rename. User can only use the OS X to dismiss.
-  - File: `apps/tauri-app/src/components/TabWindow.tsx:29-46`.
-  - Suggested direction: add at least a "Close window" button (won't affect the tab in the main window).
+- ~~**TabWindow has no chrome controls.**~~ **Resolved (iter 21).** Header now flex-aligns the tab name (with ellipsis when long, full name in tooltip) and a right-justified "Close window" button. The button only closes the pop-out window; the tab and its sessions stay in the main window's tab list. Rename + "Bring back to main" remain deferred.
 - **TabWindow's focusedPaneId state is independent from the main window's.** Each window's pane focus is tracked locally. If the user spawns into a focused empty pane from the main window, only the main window sees the focus change. Probably intentional — flagged in hand-test.
   - File: `apps/tauri-app/src/components/TabWindow.tsx:21`.
 - **`SessionWindow` ignores the daemon-emitted `Repos` / `Workspaces` payloads.** Each pop-out window opens a fresh WebSocket and receives the initial state, but the SessionWindow doesn't subscribe to repo changes — irrelevant for it directly, but if the session disappears nothing flushes the stale snapshot.
@@ -246,18 +242,14 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No `lang="…"` on `<html>`, no `<title>` for popped-out windows beyond Tauri builder's `Session — <id>` / `Tab — <id>` raw-UUID labels.**
   - File: `apps/tauri-app/src-tauri/src/lib.rs:189` (`format!("Session — {session_id}")`), line 211 same for tabs.
   - Suggested direction: use the session label / tab name for the window title; update on rename.
-- **Connection badge is only visible in the EmptyState.** Once the user has a tab open, there's no on-screen indication of disconnection. The terminal-host placeholder mentions it for stopped sessions, but a live session that loses connection still displays cached PTY output with no badge.
-  - File: `apps/tauri-app/src/App.tsx:567-574` (EmptyState only).
-  - Suggested direction: always-visible badge in the TabBar or a dedicated status bar.
+- ~~**Connection badge is only visible in the EmptyState.**~~ **Resolved (iter 21).** Sidebar header now always renders a connection badge for non-`open` states (hidden in the happy path). Live sessions that lose connection now show the warn/error chip in the persistent sidebar chrome.
 - **`AppState.pendingTabActivate` is reset for the first new tab but tracks no actual tab id.** If two spawns race (e.g. user mashes Spawn), the flag is consumed by whichever `tab_updated` arrives first — the second new tab is created but not activated.
   - File: `apps/tauri-app/src/App.tsx:737-756`.
   - Suggested direction: store the spawn intent's session-id alongside the flag; activate only when the matching tab arrives.
 - **`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.** A future spawn could inherit the stale intent. The `seenSessionIdsRef` saves it most of the time (next new session is unseen and consumes the intent) — but if the daemon rejects the spawn, the intent stays armed.
   - File: `apps/tauri-app/src/App.tsx:118-130`, `315-324`.
   - Suggested direction: clear `pendingSpawnIntentRef` on Error response, or set a TTL.
-- **Notification permission is requested on every app start.** `useEffect` at App.tsx:138-143 silently `requestPermission()`. On Windows/macOS this is benign once granted, but if the user denies, no UI explains why notifications stop arriving on attention events.
-  - File: `apps/tauri-app/src/App.tsx:138-143`.
-  - Suggested direction: surface in settings (if/when settings exist) or at minimum log to `app.log` when denied.
+- **Notification permission is requested on every app start.** *Partially resolved (iter 21).* The startup effect now `logToFile("warn", ...)` when `requestPermission()` returns anything other than `"granted"`, so `app.log` has an explanation when attention notifications stay silent. A real settings UI to inspect/re-trigger is still out of scope (no settings surface exists yet).
 
 ### Dev / testing workflow
 

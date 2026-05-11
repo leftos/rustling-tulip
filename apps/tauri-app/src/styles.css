@@ -515,6 +515,15 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   display: flex; justify-content: space-between; align-items: center; gap: 8px;
 }
 .sidebar-header .brand { font-size: 14px; color: var(--fg); text-transform: none; }
+/* Compact connection badge surfaced in the sidebar header when the
+   daemon connection is anything but open. Hidden by default; only the
+   non-`open` states render. */
+.sidebar-connection-badge {
+  padding: 1px 6px;
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
 .sidebar-view-toggle {
   display: inline-flex;
   border: 1px solid var(--border);
@@ -1189,13 +1198,20 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .tab-window-header h2 {
   margin: 0;
   font-size: 13px;
   font-weight: 500;
   color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.tab-window-header .spacer { flex: 1 1 auto; }
 
 /* Error / warning toast stack — bottom-right, newest closest to the corner.
    Items in DOM order render top-to-bottom; the container itself is anchored

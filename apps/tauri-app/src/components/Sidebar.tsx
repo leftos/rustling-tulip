@@ -65,6 +65,71 @@ type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
 /// session is currently open in. User-toggled, persisted to localStorage.
 type SidebarView = "container" | "tab";
 const SIDEBAR_VIEW_KEY = "rt.sidebar.view";
+/// Render a small connection-state badge for the sidebar header. Returns
+/// `null` when the connection is `open` so the happy path stays uncluttered;
+/// any other state surfaces as a coloured chip with a tooltip carrying the
+/// reason. Closes the audit's "Connection badge is only visible in the
+/// EmptyState" finding for non-EmptyState views.
+function renderConnectionBadge(
+  state:
+    | ConnectionState
+    | { kind: "init" }
+    | { kind: "error"; reason: string },
+): React.ReactNode {
+  if (state.kind === "open") return null;
+  if (state.kind === "init") {
+    return (
+      <span
+        className="badge badge-warn sidebar-connection-badge"
+        data-testid="sidebar-connection-badge"
+      >
+        starting
+      </span>
+    );
+  }
+  if (state.kind === "connecting") {
+    return (
+      <span
+        className="badge badge-warn sidebar-connection-badge"
+        data-testid="sidebar-connection-badge"
+      >
+        connecting
+      </span>
+    );
+  }
+  if (state.kind === "auth_failed") {
+    return (
+      <span
+        className="badge badge-err sidebar-connection-badge"
+        title={state.reason}
+        data-testid="sidebar-connection-badge"
+      >
+        auth failed
+      </span>
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <span
+        className="badge badge-err sidebar-connection-badge"
+        title={state.reason}
+        data-testid="sidebar-connection-badge"
+      >
+        error
+      </span>
+    );
+  }
+  return (
+    <span
+      className="badge badge-warn sidebar-connection-badge"
+      title={state.reason}
+      data-testid="sidebar-connection-badge"
+    >
+      disconnected
+    </span>
+  );
+}
+
 function readView(): SidebarView {
   try {
     const v = localStorage.getItem(SIDEBAR_VIEW_KEY);
@@ -170,10 +235,13 @@ export default function Sidebar(props: Props) {
     return out;
   }, [containers, props.highlightedSessionIds, props.attentionSessions]);
 
+  const connectionBadge = renderConnectionBadge(props.connection);
+
   return (
     <aside className="sidebar" data-testid="sidebar">
       <header className="sidebar-header">
         <span className="brand">rustling-tulip</span>
+        {connectionBadge}
         <div
           className="sidebar-view-toggle"
           role="tablist"
