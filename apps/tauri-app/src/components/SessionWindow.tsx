@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
@@ -33,6 +33,14 @@ export default function SessionWindow({
   const onCloseWindow = useCallback(() => {
     void getCurrentWebviewWindow().close();
   }, []);
+
+  // Replace the OS window title (originally set to a raw UUID by the
+  // Tauri builder in `open_session_window`) with the user-visible label
+  // so the taskbar / window switcher / alt-tab list shows useful text.
+  // Update on every label change so renames propagate.
+  useEffect(() => {
+    void getCurrentWebviewWindow().setTitle(session.label);
+  }, [session.label]);
 
   return (
     <div className="session-window-root">

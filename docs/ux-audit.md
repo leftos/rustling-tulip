@@ -239,16 +239,12 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Daemon repo/workspace updates are NOT broadcast to all clients.** `add_repo`, `remove_repo`, `upsert_workspace`, `remove_workspace`, `set_*_worktree_default` all send `Repos` / `Workspaces` only via `out_tx` (the per-client channel). A pop-out window connected at the same time won't see the change until it reconnects.
   - File: `crates/daemon/src/server.rs:466-508`, `670-682`.
   - Suggested direction: fan these out via the broadcast channel like tabs/sessions.
-- **No `lang="…"` on `<html>`, no `<title>` for popped-out windows beyond Tauri builder's `Session — <id>` / `Tab — <id>` raw-UUID labels.**
-  - File: `apps/tauri-app/src-tauri/src/lib.rs:189` (`format!("Session — {session_id}")`), line 211 same for tabs.
-  - Suggested direction: use the session label / tab name for the window title; update on rename.
+- ~~**No `lang="…"` on `<html>`, no `<title>` for popped-out windows beyond Tauri builder's `Session — <id>` / `Tab — <id>` raw-UUID labels.**~~ **Resolved (iter 22).** `<html lang="en">` was already set; pop-out `SessionWindow` / `TabWindow` now call `getCurrentWebviewWindow().setTitle(...)` with the session label / tab name on mount and on every label/name change, so renames propagate to the OS taskbar and alt-tab list.
 - ~~**Connection badge is only visible in the EmptyState.**~~ **Resolved (iter 21).** Sidebar header now always renders a connection badge for non-`open` states (hidden in the happy path). Live sessions that lose connection now show the warn/error chip in the persistent sidebar chrome.
 - **`AppState.pendingTabActivate` is reset for the first new tab but tracks no actual tab id.** If two spawns race (e.g. user mashes Spawn), the flag is consumed by whichever `tab_updated` arrives first — the second new tab is created but not activated.
   - File: `apps/tauri-app/src/App.tsx:737-756`.
   - Suggested direction: store the spawn intent's session-id alongside the flag; activate only when the matching tab arrives.
-- **`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.** A future spawn could inherit the stale intent. The `seenSessionIdsRef` saves it most of the time (next new session is unseen and consumes the intent) — but if the daemon rejects the spawn, the intent stays armed.
-  - File: `apps/tauri-app/src/App.tsx:118-130`, `315-324`.
-  - Suggested direction: clear `pendingSpawnIntentRef` on Error response, or set a TTL.
+- ~~**`spawnTargetPaneRef` is cleared on dialog close, but the pending intent ref (`pendingSpawnIntentRef`) is NOT cleared if the spawn-message round-trip fails.**~~ **Resolved (iter 22).** Daemon `error` handler now disarms the pending spawn intent before pushing the toast — a daemon-rejected spawn no longer leaves stale routing armed for the next spawn.
 - **Notification permission is requested on every app start.** *Partially resolved (iter 21).* The startup effect now `logToFile("warn", ...)` when `requestPermission()` returns anything other than `"granted"`, so `app.log` has an explanation when attention notifications stay silent. A real settings UI to inspect/re-trigger is still out of scope (no settings surface exists yet).
 
 ### Dev / testing workflow

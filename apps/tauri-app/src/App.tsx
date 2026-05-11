@@ -1055,6 +1055,11 @@ function handleMessage(
       );
       return;
     case "error":
+      // Surface to the user via toast AND disarm any pending spawn intent.
+      // Without the second step a daemon-rejected spawn would leave the
+      // intent armed, so the NEXT spawn would inherit the stale "open in
+      // a new tab" / "replace pane" routing.
+      pendingSpawnIntentRef.current = null;
       pushToast(setState, {
         severity: "error",
         message: "Daemon error",

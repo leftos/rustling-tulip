@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot, TabEntry } from "../types";
@@ -31,6 +31,13 @@ export default function TabWindow({
   const onCloseWindow = useCallback(() => {
     void getCurrentWebviewWindow().close();
   }, []);
+
+  // Replace the OS window title (originally a raw UUID set by
+  // `open_tab_window`) with the human-readable tab name. Updates on
+  // rename so the taskbar entry stays in sync.
+  useEffect(() => {
+    void getCurrentWebviewWindow().setTitle(tab.name);
+  }, [tab.name]);
 
   return (
     <div className="tab-window">
