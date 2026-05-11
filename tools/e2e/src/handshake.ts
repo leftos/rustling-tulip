@@ -20,13 +20,21 @@ export const PROTOCOL_VERSION = 4;
 /**
  * Reproduces `crates/daemon/src/paths.rs:Dirs::handshake_file` — the
  * path layout the `directories` crate produces from
- * `ProjectDirs::from("dev", "leftos", "rustling-tulip")`.
+ * `ProjectDirs::from("dev", "leftos", "rustling-tulip")`, with an env-var
+ * override (`RUSTLING_TULIP_CONFIG_DIR`) that mirrors the daemon's and
+ * Tauri app's resolution logic. The override lets the harness isolate test
+ * runs to a tmpdir instead of writing to the user's real `%APPDATA%`.
  *
- *   Windows : %APPDATA%\leftos\rustling-tulip\config\daemon.json
- *   macOS   : $HOME/Library/Application Support/dev.leftos.rustling-tulip/daemon.json
- *   Linux   : ${XDG_CONFIG_HOME:-$HOME/.config}/rustling-tulip/daemon.json
+ *   Override : $RUSTLING_TULIP_CONFIG_DIR/daemon.json (when set)
+ *   Windows  : %APPDATA%\leftos\rustling-tulip\config\daemon.json
+ *   macOS    : $HOME/Library/Application Support/dev.leftos.rustling-tulip/daemon.json
+ *   Linux    : ${XDG_CONFIG_HOME:-$HOME/.config}/rustling-tulip/daemon.json
  */
 export function handshakeFilePath(): string {
+  const override = process.env["RUSTLING_TULIP_CONFIG_DIR"];
+  if (override !== undefined && override !== "") {
+    return join(override, "daemon.json");
+  }
   const plat = platform();
   if (plat === "win32") {
     const appData = process.env["APPDATA"];

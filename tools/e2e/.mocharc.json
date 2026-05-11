@@ -1,8 +1,0 @@
-{
-  "extension": ["ts"],
-  "spec": ["tests/e2e/specs/daemon-smoke.spec.ts"],
-  "require": ["tsx"],
-  "node-option": ["import=tsx"],
-  "timeout": 120000,
-  "reporter": "spec"
-}

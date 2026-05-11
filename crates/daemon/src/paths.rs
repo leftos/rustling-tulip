@@ -77,10 +77,7 @@ mod tests {
 
 impl Dirs {
     pub fn ensure() -> anyhow::Result<Self> {
-        let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
-            .ok_or_else(|| anyhow!("could not resolve config directory"))?;
-
-        let config = pd.config_dir().to_path_buf();
+        let config = resolve_config_dir()?;
         std::fs::create_dir_all(&config).context("creating config dir")?;
 
         let sessions_dir = config.join("sessions");
@@ -93,4 +90,20 @@ impl Dirs {
             config,
         })
     }
+}
+
+/// Resolve the config directory, honoring `RUSTLING_TULIP_CONFIG_DIR` when
+/// set. The override lets the e2e harness point at a per-run tmpdir so test
+/// runs never write to the user's real `%APPDATA%`. When unset (the
+/// production path), falls back to `ProjectDirs::from("dev", "leftos",
+/// "rustling-tulip").config_dir()`.
+fn resolve_config_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| anyhow!("could not resolve config directory"))?;
+    Ok(pd.config_dir().to_path_buf())
 }

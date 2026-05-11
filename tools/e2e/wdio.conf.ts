@@ -8,7 +8,7 @@
  * spawned app process — the daemon supervisor will inherit it.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +21,17 @@ import { shutdownExistingDaemon } from "./src/lifecycle.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = resolve(here, "..", "..");
+
+// Per-run test config dir. The daemon's `paths::Dirs::ensure` and the Tauri
+// app's `config_dir` both honor RUSTLING_TULIP_CONFIG_DIR; setting it here
+// at module evaluation ensures `handshakeFilePath()` (called by
+// `shutdownExistingDaemon` in onPrepare) and every downstream child process
+// resolve to this directory instead of the user's real %APPDATA%. Without
+// this, a crashed test could corrupt the user's real state.json, and
+// leftover repos/workspaces from real use would contaminate specs.
+const testConfigDir = join(repoRoot, ".tmp", "e2e", "config");
+mkdirSync(testConfigDir, { recursive: true });
+process.env["RUSTLING_TULIP_CONFIG_DIR"] = testConfigDir;
 
 // Resolve the fake-claude shim once. The daemon's `claude_program()` honors
 // RUSTLING_TULIP_CLAUDE; on Windows we point it at the .cmd shim, on POSIX
@@ -102,6 +113,12 @@ export const config: WebdriverIO.Config = {
     // side-channel handshake reader. shutdownExistingDaemon unlinks on the
     // error path; do it unconditionally here so every run starts clean.
     await unlink(handshakeFilePath()).catch(() => undefined);
+
+    // Wipe leftover test state (state.json, sessions/, logs/) so every run
+    // starts hermetic. Done AFTER shutdownExistingDaemon so any prior test
+    // daemon is gone — wiping while one is alive would orphan its process.
+    rmSync(testConfigDir, { recursive: true, force: true });
+    mkdirSync(testConfigDir, { recursive: true });
   },
 
   beforeSession: () => {
@@ -117,14 +134,21 @@ export const config: WebdriverIO.Config = {
           "Install with: cargo install tauri-driver --locked",
       );
     }
-    // Inject the fake-claude shim path into tauri-driver's environment.
-    // The driver inherits its env to msedgedriver, which in turn inherits
-    // it to the spawned Tauri app — and the daemon supervisor inherits it
-    // to the daemon. This is the only way to feed env to the app under
-    // tauri-driver 2.0.6 (the `tauri:options.env` field is unsupported).
+    // Inject the fake-claude shim path and the test config dir into
+    // tauri-driver's environment. The driver inherits its env to
+    // msedgedriver, which in turn inherits it to the spawned Tauri app —
+    // and the daemon supervisor inherits it to the daemon. This is the
+    // only way to feed env to the app under tauri-driver 2.0.6 (the
+    // `tauri:options.env` field is unsupported). `process.env` already
+    // carries RUSTLING_TULIP_CONFIG_DIR from module load; making it
+    // explicit here documents the contract.
     tauriDriver = spawn(tdPath, [], {
       stdio: ["ignore", "inherit", "inherit"],
-      env: { ...process.env, RUSTLING_TULIP_CLAUDE: fakeClaudePath },
+      env: {
+        ...process.env,
+        RUSTLING_TULIP_CLAUDE: fakeClaudePath,
+        RUSTLING_TULIP_CONFIG_DIR: testConfigDir,
+      },
     });
     tauriDriver.on("error", (err) => {
       // eslint-disable-next-line no-console

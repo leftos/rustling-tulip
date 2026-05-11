@@ -67,17 +67,20 @@ Every subcommand prints JSON (or a path) on stdout — friendly to scripted use.
 pnpm test
 ```
 
-Runs `tests/e2e/specs/smoke.spec.ts`: launches the app, bypasses the native
-"add repo" dialog by sending `add_repo` over the daemon's WS API directly,
-spawns a session against the bundled fake-claude binary, and asserts the
-prompt banner appears in the xterm buffer.
+Runs `tests/e2e/specs/webview.spec.ts` under tauri-driver + wdio: launches
+the real Tauri shell, bypasses the native "add repo" dialog by sending
+`add_repo` over the daemon's WS API directly, spawns a session against the
+bundled fake-claude binary, and asserts the prompt banner appears in the
+xterm buffer.
 
 ## How it works
 
 - `src/handshake.ts` mirrors `crates/daemon/src/paths.rs` to find
-  `daemon.json` (`%APPDATA%\leftos\rustling-tulip\config\daemon.json` on
-  Windows) — the file the daemon writes on startup with its port and auth
-  token.
+  `daemon.json`. In tests the harness sets `RUSTLING_TULIP_CONFIG_DIR` to
+  `.tmp/e2e/config/` so the daemon writes its state, sessions, and logs
+  there instead of the user's real `%APPDATA%\leftos\rustling-tulip\config\`
+  (Windows) / XDG dir. The override is honored by both `Dirs::ensure` in
+  the daemon and `config_dir` in the Tauri app.
 - `src/ws-client.ts` opens a side-channel WebSocket to the daemon. The Tauri
   app already has its own WS client; the side channel exists so tests can
   send `add_repo` etc. without driving the OS file dialog (which is

@@ -96,14 +96,12 @@ testids first would make specs readable and stable.
       run-mode radios, spawn button)
 - [ ] Add testids to `GitPanel` (status/commits/file-diff tabs, file rows, diff pane)
 - [ ] Spike a second-WebDriver-session helper so pop-out windows become testable
-- [ ] **Config-dir isolation for the harness.** Today the test daemon writes to the
-      user's real `%APPDATA%\leftos\rustling-tulip\config\` — observed in practice as
-      leftover workspaces / repos from real user state breaking specs (and the inverse
-      risk: a crashed test corrupting `state.json`). Plumb a `RUSTLING_TULIP_CONFIG_DIR`
-      env var through the daemon's `Dirs::ensure` and the Tauri app's path resolvers,
-      and have the harness point at a per-run tmpdir. Removes the user-state stomping
-      risk and makes specs hermetic. The `RUSTLING_TULIP_CLAUDE` env-propagation path
-      we just built is the template.
+- [x] **Config-dir isolation for the harness.** `RUSTLING_TULIP_CONFIG_DIR` is now
+      honored by the daemon's `Dirs::ensure` (`crates/daemon/src/paths.rs`) and the
+      Tauri app's path resolvers (`apps/tauri-app/src-tauri/src/lib.rs::config_dir`),
+      and `tools/e2e/wdio.conf.ts` points at `.tmp/e2e/config/` per run. Verified:
+      the wdio smoke spec writes state to the tmpdir, real
+      `%APPDATA%\leftos\rustling-tulip\config\` is untouched.
 
 ## High-leverage move: failing-test → fix → green
 

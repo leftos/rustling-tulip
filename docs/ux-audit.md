@@ -292,9 +292,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 
 Strictly speaking outside the user-facing UX surface, but a user-visible risk if a developer runs the E2E harness against their daily-driver install — flagged here so it's tracked alongside the rest of the audit.
 
-- **E2E harness writes to the user's real config dir.** `tools/e2e` and the Tauri app both resolve `ProjectDirs::from("dev", "leftos", "rustling-tulip")` with no override, so `pnpm test:wdio` reads and writes the user's actual `%APPDATA%\leftos\rustling-tulip\config\state.json`, `daemon.json`, and `sessions/`. Observed in practice as a leftover "yaat" workspace from real user state poisoning a test run. Inverse risk: a crashed test can leave stale repos/workspaces/sessions in `state.json` — user has to clean up by hand. The harness can scrub `daemon.json` in `onPrepare` but can't safely touch `state.json` (it contains real data).
-  - Files: `crates/daemon/src/paths.rs:79-94`, `apps/tauri-app/src-tauri/src/lib.rs:21-26` (both call `ProjectDirs::from(...)` with no env override).
-  - Suggested direction: plumb a `RUSTLING_TULIP_CONFIG_DIR` env var through both `Dirs::ensure` and the Tauri app's path resolvers. Make the harness point it at a per-run tmpdir. Tracked in `docs/plans/e2e-test-coverage-strategy.md`.
+- ~~**E2E harness writes to the user's real config dir.**~~ **Resolved.** `RUSTLING_TULIP_CONFIG_DIR` is honored by `Dirs::ensure` (`crates/daemon/src/paths.rs`) and `config_dir` (`apps/tauri-app/src-tauri/src/lib.rs`); `tools/e2e/wdio.conf.ts` sets it to `.tmp/e2e/config/` per run and wipes the dir after killing any prior test daemon. Verified end-to-end: the wdio smoke spec writes to the tmpdir, real `%APPDATA%\leftos\rustling-tulip\config\` is untouched.
 
 ---
 

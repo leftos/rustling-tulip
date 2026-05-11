@@ -16,13 +16,26 @@ pub struct DaemonHandshake {
     pub pid: u32,
 }
 
+/// Resolve the per-user config directory. Mirrors
+/// `daemon::paths::Dirs::ensure`'s resolution: honors
+/// `RUSTLING_TULIP_CONFIG_DIR` if set (used by the e2e harness to isolate
+/// test runs to a tmpdir), otherwise falls back to
+/// `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`.
+fn config_dir() -> Result<PathBuf, String> {
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| "could not resolve config directory".to_string())?;
+    Ok(pd.config_dir().to_path_buf())
+}
+
 /// Returns the path that the daemon writes its handshake to. Mirrors
 /// `daemon::paths::Dirs::ensure().handshake_file`.
 pub fn handshake_file() -> Result<PathBuf, String> {
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| "could not resolve config directory".to_string())?;
-    let dir = pd.config_dir().to_path_buf();
-    Ok(dir.join("daemon.json"))
+    Ok(config_dir()?.join("daemon.json"))
 }
 
 #[tauri::command]
@@ -77,9 +90,7 @@ async fn pick_file(
 /// path to `app.log` under it. Errors surface as `Result<_, String>` so they
 /// flow back through Tauri's invoke pipeline.
 fn app_log_path() -> Result<PathBuf, String> {
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| "could not resolve config directory".to_string())?;
-    let log_dir = pd.config_dir().join("logs");
+    let log_dir = config_dir()?.join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     Ok(log_dir.join("app.log"))
 }
@@ -251,9 +262,13 @@ pub fn run() {
             }
             let rt_claude = std::env::var("RUSTLING_TULIP_CLAUDE")
                 .unwrap_or_else(|_| "(unset)".to_string());
+            let rt_config_dir = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
+                .unwrap_or_else(|_| "(unset)".to_string());
             if let Err(err) = log_message(
                 "INFO".to_string(),
-                format!("tauri env RUSTLING_TULIP_CLAUDE={rt_claude}"),
+                format!(
+                    "tauri env RUSTLING_TULIP_CLAUDE={rt_claude} RUSTLING_TULIP_CONFIG_DIR={rt_config_dir}"
+                ),
             ) {
                 tracing::warn!(err, "failed to write env status to app.log");
             }
