@@ -15,8 +15,23 @@ hand-test. Companion to `docs/ux-audit.md`.
   calls, predictable banner).
 - **`globalThis.__rt_terms` in dev builds** so `eval` can read xterm scrollback even
   though xterm renders to a canvas (DOM scraping doesn't work).
-- **WebDriverIO smoke spec** as the pattern for new specs — full app+daemon+fake-claude
-  path under tauri-driver.
+- **`globalThis.__rt_console` in dev builds** captures every `console.*` call plus
+  `window.error` / `unhandledrejection` into a bounded ring. Lets specs assert
+  "boot produced no errors" trivially and gives the failure dump real signal.
+  Tree-shaken from production bundles (`if (import.meta.env.DEV)` guard).
+- **`captureFailureDump` auto-diagnostics** (wired in `wdio.conf.ts` via
+  `afterTest` + `afterHook`, so before-hook crashes are caught too). On any
+  failure: URL, title, body snippet, captured console, WebDriver browser logs,
+  and a screenshot all land in `.tmp/e2e/<test>.{json,png}` with a printed
+  summary inline. No more DevTools copy-paste to diagnose flakes.
+- **WebDriverIO smoke spec** (`webview.spec.ts`) as the pattern for new specs —
+  full app+daemon+fake-claude path under tauri-driver.
+- **Mtime-gated dev rebuild** keyed off a `.e2e-dev-build` marker in `dist/`.
+  A re-run with no source changes hits ~6s; a re-run after a JS edit or a
+  prior `pnpm tauri build` clobber forces a `vite build --mode development`
+  in ~14s. Cargo handles incremental rebuilds of the app + daemon directly
+  (no more `pnpm tauri build` wrapper, which forced a full prod vite build
+  every time).
 
 ## Re-bucketed against the audit's 78 hand-test items
 
@@ -37,15 +52,23 @@ sidebar surface. Examples:
   is the highest-leverage outcome — they document the bug AND prevent regression once
   fixed.
 
-### Bucket B — spot-check via screenshots, you still eyeball (~25 items)
+### Bucket B — spot-check via screenshots, you still eyeball (~20 items)
 
-- "Tab pills truncate awkwardly at common widths" — I can screenshot, but the call on
-  whether it looks bad is the user's.
-- "Status badge contrast in light/dark mode" — I can render, the user judges.
-- "Drop-zone overlay is visible enough during drag" — I can drive, but can't tell whether
-  it's distracting or subtle.
-- "Pane resize feels smooth" — feel isn't measurable.
-- Most of the visual / sensory items in the Global and Terminal buckets.
+Some of these moved to Bucket A once the per-iteration cost dropped and the dump
+includes `getComputedStyle`-reachable state. Examples that promoted:
+
+- "Status badge contrast" → assertable via `getComputedStyle().color` + a contrast
+  ratio check. No human eye needed.
+- "Drop-zone overlay is visible during drag" → check the overlay element exists
+  with non-`display:none` styles during the WDIO drag sequence.
+- "Tab pill truncate behaviour" → measure `scrollWidth > clientWidth` plus a
+  computed-style ellipsis assertion.
+
+Still genuinely eyeball-only:
+
+- "Pane resize feels smooth" — feel isn't measurable from the DOM.
+- "Modal animation jank" — frame-rate questions need a profiler, not WDIO.
+- Most truly aesthetic items in the Global / Terminal buckets.
 
 ### Bucket C — still purely manual (~23 items)
 
@@ -73,14 +96,27 @@ testids first would make specs readable and stable.
       run-mode radios, spawn button)
 - [ ] Add testids to `GitPanel` (status/commits/file-diff tabs, file rows, diff pane)
 - [ ] Spike a second-WebDriver-session helper so pop-out windows become testable
+- [ ] **Config-dir isolation for the harness.** Today the test daemon writes to the
+      user's real `%APPDATA%\leftos\rustling-tulip\config\` — observed in practice as
+      leftover workspaces / repos from real user state breaking specs (and the inverse
+      risk: a crashed test corrupting `state.json`). Plumb a `RUSTLING_TULIP_CONFIG_DIR`
+      env var through the daemon's `Dirs::ensure` and the Tauri app's path resolvers,
+      and have the harness point at a per-run tmpdir. Removes the user-state stomping
+      risk and makes specs hermetic. The `RUSTLING_TULIP_CLAUDE` env-propagation path
+      we just built is the template.
 
 ## High-leverage move: failing-test → fix → green
 
-Rather than convert the whole checklist, pick the highest-impact audit findings and write
-each as a failing wdio spec, then fix until green. That's where the harness pays off
-most. The cost of a wdio iteration (tauri-driver bring-up, debug-binary launch, spec run)
-is too high for "is this finding actually a bug or did I misread the code?" — hand-run
-for triage, wdio for documenting & locking in fixes.
+Pick the highest-impact audit findings and write each as a failing wdio spec, then fix
+until green. That's where the harness pays off most.
+
+The iteration cost has dropped enough that wdio is now competitive with hand-running
+for triage, not just for locking in fixes: ~6s on a no-change re-run, ~14s on a JS
+edit (the prepare phase is mtime-gated; cargo handles its own incremental check). Plus
+the diagnostics dump means a failing spec already tells you URL + body + console +
+screenshot without further investigation. Hand-run when you want to *see* the app
+behave; reach for a wdio spec as soon as the question is "what state is the UI in
+after sequence X?".
 
 Candidate first specs:
 
@@ -103,9 +139,12 @@ Candidate first specs:
 
 ## Net effect on the audit workflow
 
-- Roughly a third of the hand-test list becomes scriptable.
+- Roughly **half** of the hand-test list becomes scriptable (was "a third" before the
+  iteration-cost drop and the diagnostics dump promoted several Bucket-B items).
 - Every confirmed audit finding gains a path to a regression test, so fixes don't rot.
-- Sensory and multi-window stuff stays the user's job until the testid gaps above and
-  the second-WebDriver-session helper close.
-- Hand-running for triage stays the right default; promote findings to wdio once they're
-  understood enough to be worth locking in.
+- Truly sensory items (feel, animation jank) and multi-window flows stay the user's
+  job until the testid gaps above and the second-WebDriver-session helper close.
+- Wdio is now cheap enough for triage — write the failing spec first, hand-run only
+  when you want to *see* it (or when the question is genuinely sensory).
+- Once config-dir isolation lands, the harness becomes safe to run on a developer
+  machine without grooming `state.json` afterward.
