@@ -405,6 +405,17 @@ button.link.inline { display: inline; padding: 0 2px; }
 .small { font-size: 11px; }
 .field code { font-family: var(--font-mono); background: var(--bg-elev2); padding: 1px 4px; border-radius: 4px; }
 
+.row { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+.row > input[type="text"] { flex: 1; }
+
+.preset-preview-list {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 8px 10px; max-height: 240px; overflow-y: auto;
+  font-size: 12px; display: flex; flex-direction: column; gap: 4px;
+}
+.preset-preview-row { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preset-preview-index { color: var(--fg-muted); margin-right: 4px; }
+
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { color: var(--fg-muted); font-size: 11px; }
 .field > legend { color: var(--fg-muted); font-size: 11px; padding: 0 4px; }

@@ -15,6 +15,8 @@ import {
 } from "./api";
 import type {
   DaemonMessage,
+  PresetEntry,
+  PresetTarget,
   RepoEntry,
   SessionSnapshot,
   TabEntry,
@@ -24,6 +26,7 @@ import type {
 import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
+import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import ResizableSplit from "./components/ResizableSplit";
@@ -65,6 +68,7 @@ interface AppState {
   attentionSessions: Set<string>;
   exitConfirmOpen: boolean;
   exitInFlight: boolean;
+  presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
 }
 
 export default function App() {
@@ -86,6 +90,7 @@ export default function App() {
     attentionSessions: new Set(),
     exitConfirmOpen: false,
     exitInFlight: false,
+    presetLaunch: null,
   });
 
   // PTY output is high-volume — keep it out of React state.
@@ -210,6 +215,17 @@ export default function App() {
 
   const onCloseSpawn = useCallback(() => {
     setState((s) => ({ ...s, spawnOpen: false, spawnInitial: undefined }));
+  }, []);
+
+  const onLaunchPreset = useCallback(
+    (preset: PresetEntry, target: PresetTarget) => {
+      setState((s) => ({ ...s, presetLaunch: { preset, target } }));
+    },
+    [],
+  );
+
+  const onClosePresetLaunch = useCallback(() => {
+    setState((s) => ({ ...s, presetLaunch: null }));
   }, []);
 
   const onSpawned = useCallback(() => {
@@ -422,6 +438,7 @@ export default function App() {
           repos={state.repos}
           workspaces={state.workspaces}
           sessions={state.sessions}
+          client={state.client!}
           highlightedSessionIds={sessionIdsInActiveTab}
           attentionSessions={state.attentionSessions}
           connection={state.status}
@@ -436,6 +453,7 @@ export default function App() {
           onOpenSpawn={onOpenSpawn}
           onOpenWorkspaceCreator={onOpenWorkspaceCreator}
           onRevealInExplorer={onRevealInExplorer}
+          onLaunchPreset={onLaunchPreset}
         />
         <main className="main-pane">
           <TabBar
@@ -473,6 +491,15 @@ export default function App() {
           initialTarget={state.spawnInitial}
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
+        />
+      )}
+      {state.presetLaunch && state.client && (
+        <PresetLaunchDialog
+          preset={state.presetLaunch.preset}
+          target={state.presetLaunch.target}
+          repos={state.repos}
+          client={state.client}
+          onClose={onClosePresetLaunch}
         />
       )}
       {state.workspaceCreatorOpen && state.client && (

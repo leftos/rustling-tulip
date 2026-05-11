@@ -1,6 +1,12 @@
-import { useMemo, useState } from "react";
-import type { ConnectionState } from "../api";
-import type { RepoEntry, SessionSnapshot, WorkspaceEntry } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import { type ConnectionState, type DaemonClient, listPresets } from "../api";
+import type {
+  PresetEntry,
+  PresetTarget,
+  RepoEntry,
+  SessionSnapshot,
+  WorkspaceEntry,
+} from "../types";
 
 export type SpawnInitialTarget =
   | { kind: "repo"; repo_id: string }
@@ -10,6 +16,7 @@ interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   sessions: SessionSnapshot[];
+  client: DaemonClient;
   /// Session ids visually highlighted in the tree because they appear in
   /// the currently-active tab. Multiple sessions can be highlighted at once
   /// (one tab can hold several panes referencing different sessions).
@@ -23,6 +30,7 @@ interface Props {
   onOpenSpawn: (initial?: SpawnInitialTarget) => void;
   onOpenWorkspaceCreator: () => void;
   onRevealInExplorer: (path: string) => void;
+  onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
 }
 
 type ContainerKind = "workspace" | "repo" | "detached";
@@ -67,6 +75,29 @@ export default function Sidebar(props: Props) {
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeMenu = () => setContextMenu(null);
+
+  // Presets are fetched on demand when the context menu opens. Per-target
+  // cache keeps subsequent opens snappy; null means "not fetched yet",
+  // empty array means "fetched, none available".
+  const [presetCache, setPresetCache] = useState<Map<string, PresetEntry[]>>(
+    () => new Map(),
+  );
+  const currentTarget = contextMenu ? menuTarget(contextMenu.container) : null;
+  const currentTargetKey = currentTarget ? targetCacheKey(currentTarget) : null;
+  const currentPresets =
+    currentTargetKey === null ? null : (presetCache.get(currentTargetKey) ?? null);
+
+  useEffect(() => {
+    if (!currentTarget || currentTargetKey === null) return;
+    if (presetCache.has(currentTargetKey)) return;
+    void listPresets(props.client, currentTarget).then((entries) => {
+      setPresetCache((prev) => {
+        const next = new Map(prev);
+        next.set(currentTargetKey, entries);
+        return next;
+      });
+    });
+  }, [currentTarget, currentTargetKey, presetCache, props.client]);
 
   // Force-expand any container whose highlighted/attention session lives inside.
   const forceExpand = useMemo(() => {
@@ -154,6 +185,7 @@ export default function Sidebar(props: Props) {
       {contextMenu && (
         <ContainerContextMenu
           state={contextMenu}
+          presets={currentPresets}
           onClose={closeMenu}
           onSpawn={() => {
             const c = contextMenu.container;
@@ -178,6 +210,11 @@ export default function Sidebar(props: Props) {
           onCopyPath={() => {
             const path = contextMenu.container.fsPath;
             if (path) void navigator.clipboard.writeText(path);
+            closeMenu();
+          }}
+          onLaunchPreset={(preset) => {
+            const target = menuTarget(contextMenu.container);
+            if (target) props.onLaunchPreset(preset, target);
             closeMenu();
           }}
         />
@@ -316,16 +353,19 @@ function SessionLeaf(p: SessionLeafProps) {
 
 interface ContextMenuProps {
   state: ContextMenuState;
+  presets: PresetEntry[] | null;
   onClose: () => void;
   onSpawn: () => void;
   onRemove: () => void;
   onReveal: () => void;
   onCopyPath: () => void;
+  onLaunchPreset: (preset: PresetEntry) => void;
 }
 
 function ContainerContextMenu(p: ContextMenuProps) {
   const c = p.state.container;
   const canReveal = c.fsPath !== null;
+  const canLaunchPreset = c.kind === "repo" || c.kind === "workspace";
   const removeLabel =
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
 
@@ -351,6 +391,9 @@ function ContainerContextMenu(p: ContextMenuProps) {
             Spawn new session
           </button>
         </li>
+        {canLaunchPreset && (
+          <PresetSubmenu presets={p.presets} onLaunch={p.onLaunchPreset} />
+        )}
         <li>
           <button type="button" onClick={p.onReveal} disabled={!canReveal}>
             Open in file explorer
@@ -370,6 +413,56 @@ function ContainerContextMenu(p: ContextMenuProps) {
       </ul>
     </div>
   );
+}
+
+function PresetSubmenu({
+  presets,
+  onLaunch,
+}: {
+  presets: PresetEntry[] | null;
+  onLaunch: (preset: PresetEntry) => void;
+}) {
+  if (presets === null) {
+    return (
+      <li>
+        <button type="button" disabled>
+          Launch preset… (loading)
+        </button>
+      </li>
+    );
+  }
+  if (presets.length === 0) {
+    return (
+      <li>
+        <button type="button" disabled title="No .rustling-tulip/presets.json in this repo">
+          Launch preset… (none defined)
+        </button>
+      </li>
+    );
+  }
+  return (
+    <>
+      {presets.map((preset) => (
+        <li key={`${preset.source_repo_id}:${preset.id}`}>
+          <button type="button" onClick={() => onLaunch(preset)}>
+            Launch preset · {preset.name}
+          </button>
+        </li>
+      ))}
+    </>
+  );
+}
+
+function menuTarget(c: TreeContainer): PresetTarget | null {
+  if (c.kind === "repo") return { kind: "repo", repo_id: c.id };
+  if (c.kind === "workspace") return { kind: "workspace", workspace_id: c.id };
+  return null;
+}
+
+function targetCacheKey(target: PresetTarget): string {
+  return target.kind === "repo"
+    ? `repo:${target.repo_id}`
+    : `workspace:${target.workspace_id}`;
 }
 
 function buildContainers(

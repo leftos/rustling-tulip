@@ -47,6 +47,32 @@ async fn pick_directory(
     }))
 }
 
+#[tauri::command]
+async fn pick_file(
+    app: tauri::AppHandle,
+    default_path: Option<String>,
+    extensions: Option<Vec<String>>,
+    filter_name: Option<String>,
+) -> Result<Option<String>, String> {
+    let mut builder = app.dialog().file();
+    if let Some(p) = default_path {
+        builder = builder.set_directory(p);
+    }
+    if let Some(exts) = extensions
+        && !exts.is_empty()
+    {
+        let name = filter_name.as_deref().unwrap_or("Files");
+        let refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+        builder = builder.add_filter(name, &refs);
+    }
+    let path = builder.blocking_pick_file();
+    Ok(path.and_then(|p| {
+        p.into_path()
+            .ok()
+            .map(|pb| pb.to_string_lossy().into_owned())
+    }))
+}
+
 /// Resolve the per-user app log directory and ensure it exists. Returns the
 /// path to `app.log` under it. Errors surface as `Result<_, String>` so they
 /// flow back through Tauri's invoke pipeline.
@@ -197,6 +223,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
             pick_directory,
+            pick_file,
             open_session_window,
             open_tab_window,
             reveal_in_explorer,

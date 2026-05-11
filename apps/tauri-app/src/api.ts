@@ -41,6 +41,20 @@ export async function pickDirectory(
   });
 }
 
+export interface PickFileOpts {
+  defaultPath?: string;
+  extensions?: string[];
+  filterName?: string;
+}
+
+export async function pickFile(opts: PickFileOpts = {}): Promise<string | null> {
+  return await invoke<string | null>("pick_file", {
+    defaultPath: opts.defaultPath ?? null,
+    extensions: opts.extensions ?? null,
+    filterName: opts.filterName ?? null,
+  });
+}
+
 export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
   const url = `ws://127.0.0.1:${handshake.port}/ws`;
   const ws = new WebSocket(url);
