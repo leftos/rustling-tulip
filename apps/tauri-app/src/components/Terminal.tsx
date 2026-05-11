@@ -41,11 +41,12 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
-    // Dev-only: expose XTerm instances so the e2e harness can read the
-    // scrollback buffer programmatically (xterm renders to a canvas, so DOM
-    // assertions can't see the text). Bundlers tree-shake `import.meta.env.DEV`
-    // false branches in production builds, so this never ships to users.
-    if (import.meta.env.DEV) {
+    // Expose XTerm instances on `window.__rt_terms` so the e2e harness (and
+    // anyone poking around in devtools) can read the scrollback buffer.
+    // xterm renders to a canvas, so DOM assertions can't see the text. The
+    // map holds only references to terminals already alive in React state,
+    // and the cleanup branch below removes them on unmount — no leak risk.
+    {
       const w = window as unknown as { __rt_terms?: Map<string, XTerm> };
       const map = w.__rt_terms ?? new Map<string, XTerm>();
       map.set(sessionId, term);
@@ -111,10 +112,8 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
       unsubPty();
       resizeObserver.disconnect();
       client.send({ type: "detach", session_id: sessionId });
-      if (import.meta.env.DEV) {
-        const w = window as unknown as { __rt_terms?: Map<string, XTerm> };
-        w.__rt_terms?.delete(sessionId);
-      }
+      const w = window as unknown as { __rt_terms?: Map<string, XTerm> };
+      w.__rt_terms?.delete(sessionId);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

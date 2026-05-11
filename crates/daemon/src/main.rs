@@ -31,6 +31,10 @@ async fn main() -> anyhow::Result<()> {
     let dirs = paths::Dirs::ensure()?;
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
+    info!(
+        rustling_tulip_claude = %std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "(unset)".to_string()),
+        "claude binary override status"
+    );
 
     let state = state::AppState::load_or_default(&dirs).context("loading persisted state")?;
     let state = Arc::new(state);

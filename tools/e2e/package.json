@@ -8,7 +8,8 @@
     "doctor": "tsx scripts/doctor.ts",
     "host": "tsx src/host.ts",
     "host:build": "tsx src/host.ts --build",
-    "test": "wdio run wdio.conf.ts",
+    "test": "mocha",
+    "test:wdio": "wdio run wdio.conf.ts",
     "typecheck": "tsc --noEmit"
   },
   "bin": {

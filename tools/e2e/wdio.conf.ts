@@ -9,11 +9,14 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { captureFailureDump, printFailureDump } from "./src/diagnostics.js";
 import { ensureTauriBinary } from "./src/driver.js";
+import { handshakeFilePath } from "./src/handshake.js";
 import { shutdownExistingDaemon } from "./src/lifecycle.js";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -38,24 +41,23 @@ let exited = false;
 
 export const config: WebdriverIO.Config = {
   runner: "local",
-  specs: [join(here, "tests", "e2e", "specs", "**", "*.spec.ts")],
+  specs: [join(here, "tests", "e2e", "specs", "webview.spec.ts")],
   exclude: [],
   maxInstances: 1,
 
   capabilities: [
     {
-      browserName: "wry",
-      browserVersion: "stable",
+      // No `browserName` — see comment in src/driver.ts. Setting it makes
+      // msedgedriver open a separate Edge window instead of attaching to
+      // the Tauri WebView.
+      //
+      // We do NOT set `env` here either: tauri-driver 2.0.6's TauriOptions
+      // accepts only `application`, `args`, and (Windows) `webviewOptions`.
+      // Any `env` field is silently ignored. To pass env to the Tauri child
+      // we inject it into tauri-driver's own process env in beforeSession
+      // — msedgedriver inherits it, and so does the Tauri app it spawns.
       "tauri:options": {
         application: tauriBinary,
-        env: {
-          RUSTLING_TULIP_CLAUDE: fakeClaudePath,
-          // Force dev mode so __rt_terms is exposed even in the built debug
-          // binary. (Vite's `import.meta.env.DEV` is a build-time constant
-          // resolved against MODE; setting it at runtime has no effect in
-          // production builds, but the debug build embeds DEV=true.)
-          NODE_ENV: "development",
-        },
       },
     },
   ],
@@ -77,7 +79,11 @@ export const config: WebdriverIO.Config = {
 
   onPrepare: async () => {
     // eslint-disable-next-line no-console
-    console.log("[wdio] preparing — building Tauri debug binary if needed…");
+    console.log("[wdio] preparing — ensuring binaries + frontend are fresh…");
+    // ensureTauriBinary is mtime-gated for the frontend and relies on
+    // cargo's own incremental check for the Rust binaries (app + daemon).
+    // On a no-change re-run this completes in well under a second; on a
+    // change it rebuilds exactly what's stale.
     await ensureTauriBinary();
     if (!existsSync(fakeClaudePath)) {
       throw new Error(`fake-claude shim missing at ${fakeClaudePath}`);
@@ -91,6 +97,11 @@ export const config: WebdriverIO.Config = {
         ? "[wdio] killed existing daemon"
         : "[wdio] no existing daemon found",
     );
+    // Belt-and-braces: a previous aborted run can leave a corrupt or stale
+    // daemon.json behind that confuses both the Tauri supervisor and the
+    // side-channel handshake reader. shutdownExistingDaemon unlinks on the
+    // error path; do it unconditionally here so every run starts clean.
+    await unlink(handshakeFilePath()).catch(() => undefined);
   },
 
   beforeSession: () => {
@@ -106,8 +117,14 @@ export const config: WebdriverIO.Config = {
           "Install with: cargo install tauri-driver --locked",
       );
     }
+    // Inject the fake-claude shim path into tauri-driver's environment.
+    // The driver inherits its env to msedgedriver, which in turn inherits
+    // it to the spawned Tauri app — and the daemon supervisor inherits it
+    // to the daemon. This is the only way to feed env to the app under
+    // tauri-driver 2.0.6 (the `tauri:options.env` field is unsupported).
     tauriDriver = spawn(tdPath, [], {
       stdio: ["ignore", "inherit", "inherit"],
+      env: { ...process.env, RUSTLING_TULIP_CLAUDE: fakeClaudePath },
     });
     tauriDriver.on("error", (err) => {
       // eslint-disable-next-line no-console
@@ -128,7 +145,31 @@ export const config: WebdriverIO.Config = {
     tauriDriver?.kill();
     tauriDriver = null;
   },
+
+  // Failure-diagnostics hooks. These fire for BOTH regular tests and
+  // before/after hooks — the spec-level `afterEach` would miss
+  // before-hook crashes (Mocha skips afterEach when no test ran). On a
+  // green run nothing is captured.
+  afterTest: async (test, _context, result) => {
+    if (result.passed) return;
+    await dumpFailure(`${test.parent} ${test.title}`);
+  },
+  afterHook: async (test, _context, result) => {
+    if (result.passed) return;
+    const label = test?.title ?? "hook";
+    await dumpFailure(`hook: ${label}`);
+  },
 };
+
+async function dumpFailure(name: string): Promise<void> {
+  try {
+    const dump = await captureFailureDump(name);
+    printFailureDump(name, dump);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[diagnostics] capture failed: ${String(err)}`);
+  }
+}
 
 const cleanup = (): void => {
   exited = true;

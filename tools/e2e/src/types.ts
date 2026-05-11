@@ -61,6 +61,9 @@ export type ClientMessage =
   | { type: "remove_repo"; repo_id: string }
   | { type: "list_sessions" }
   | { type: "spawn_session"; [k: string]: unknown }
+  | { type: "attach"; session_id: string }
+  | { type: "detach"; session_id: string }
+  | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "list_tabs" }
   | { type: "shutdown" };

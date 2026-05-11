@@ -249,6 +249,14 @@ pub fn run() {
             if let Err(err) = truncate_app_log() {
                 tracing::warn!(err, "failed to truncate app.log on boot");
             }
+            let rt_claude = std::env::var("RUSTLING_TULIP_CLAUDE")
+                .unwrap_or_else(|_| "(unset)".to_string());
+            if let Err(err) = log_message(
+                "INFO".to_string(),
+                format!("tauri env RUSTLING_TULIP_CLAUDE={rt_claude}"),
+            ) {
+                tracing::warn!(err, "failed to write env status to app.log");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

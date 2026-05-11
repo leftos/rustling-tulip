@@ -57,24 +57,38 @@ const handlers: Record<string, Handler> = {
     if (state.driver) {
       return { ok: true, note: "already started" };
     }
-    const forceBuild = Boolean(args["force_build"]);
+    const forceFrontend = Boolean(args["force_build"]);
     const env = (args["env"] as Record<string, string> | undefined) ?? {};
     state.driver = await startDriver({
-      forceBuild,
+      forceFrontend,
       env,
       sessionTimeoutMs: 30_000,
     });
-    state.ws = await DaemonWsClient.open({ waitTimeoutMs: 15_000 });
-    state.ws.onMessage((msg) => {
-      state.recentDaemonMessages.push({ ts: Date.now(), payload: msg });
-      if (state.recentDaemonMessages.length > MAX_RECENT_MESSAGES) {
-        state.recentDaemonMessages.splice(
-          0,
-          state.recentDaemonMessages.length - MAX_RECENT_MESSAGES,
-        );
-      }
-    });
-    return { ok: true, ws_port: state.ws.port };
+    // WS side-channel is best-effort: when the WebView is broken and never
+    // calls `ensure_daemon_started`, no daemon comes up and the connect
+    // would crash the host. We log the failure and keep the WebDriver
+    // session alive so the operator can still diagnose via screenshots/eval.
+    try {
+      state.ws = await DaemonWsClient.open({ waitTimeoutMs: 8_000 });
+      state.ws.onMessage((msg) => {
+        state.recentDaemonMessages.push({ ts: Date.now(), payload: msg });
+        if (state.recentDaemonMessages.length > MAX_RECENT_MESSAGES) {
+          state.recentDaemonMessages.splice(
+            0,
+            state.recentDaemonMessages.length - MAX_RECENT_MESSAGES,
+          );
+        }
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[host] ws connect failed (continuing without side-channel): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      state.ws = null;
+    }
+    return { ok: true, ws_port: state.ws?.port ?? null };
   },
 
   stop: async () => {
