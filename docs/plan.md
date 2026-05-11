@@ -1,5 +1,7 @@
 # Plan: Multi-Repo Claude Code Wrapper ("rustling-tulip")
 
+> **Picking up work?** Phases 0–5 are done and Phase 6 is ~90% complete. The next concrete task to pick up lives in the [Post-Phase-6 plan order](#post-phase-6-plan-order) section near the bottom — find the first unchecked item there and follow the linked detail plan in `docs/plans/`.
+
 ## Context
 
 **What this is.** A Tauri desktop app that orchestrates many parallel Claude Code sessions across many repos — including coordinated multi-repo "workspace" sessions where a single Claude Code instance operates across several linked repos at once (e.g. `yaat` + `yaat-server`, `towercab-3d` + `towercab-3d-vnas`).
@@ -230,7 +232,7 @@ Notes:
 - [x] Per-session config: model override, permission mode, env vars
 - [x] Session log viewer (full transcript, scrollback persisted across restarts) — daemon-side ring buffer at `<sessions_dir>/<id>/scrollback.bin` (2 MB cap, trims to 1.5 MB with `.truncated` flag); replayed via `LoadScrollback`/`Scrollback` protocol messages on attach.
 - [x] Pop-out session into its own Tauri window — `open_session_window` Tauri command opens a labeled window loading the same React bundle with `?session=<id>`; `App.tsx` branches on the query param to render `SessionWindow` (toolbar + reused `SessionPane`) instead of the full sidebar layout.
-- [ ] Auto-update for the desktop app (`tauri-plugin-updater`) — **deferred** until a distribution channel exists (no GH Actions release pipeline, no signing cert, no hosted manifest). In-app pieces are ~2 hours of work when the pipeline is ready.
+- [ ] Auto-update for the desktop app (`tauri-plugin-updater`) — **deferred** until a distribution channel exists (no GH Actions release pipeline, no signing cert, no hosted manifest). In-app pieces are ~2 hours of work when the pipeline is ready. → tracked in [Post-Phase-6 plan order](#post-phase-6-plan-order).
 - [x] Crash-recovery: daemon detects orphaned `claude` processes on startup and reattaches state — sidecar `<sessions_dir>/<id>/meta.json` records pid + members + label at spawn; startup partitions live vs dead via `is_claude_alive` (sysinfo) and surfaces survivors via `SessionRegistry::insert_orphan` with `pty/headless = None`. Frontend shows a "PTY stream lost" banner via the new `is_orphan` field on `SessionSnapshot`.
 - [x] **Persistent resizable panes**: every divider in the app (sidebar/main, terminal/git split, changes-list/diff split, headless-stats/log split) is drag-resizable with widths persisted to settings. Reuse a single `ResizableSplit` component so the behavior is consistent across panes.
 
@@ -248,11 +250,37 @@ A multi-repo git inspection surface on top of session worktrees. Same data is vi
   - File at a specific commit (with optional line range)
   - Commit page
   - Branch compare against base
-- [ ] Stage/unstage operations from the changed-files panel (checkbox toggle = `git add` / `git restore --staged`) — **not yet implemented**; the panel is read-only for now.
-- [ ] Watch `.git` for changes to keep the views live without manual refresh — **not yet implemented**; the panel re-fetches on user action.
+- [ ] Stage/unstage operations from the changed-files panel (checkbox toggle = `git add` / `git restore --staged`) — **not yet implemented**; the panel is read-only for now. → absorbed by the Source Control sidebar in [Post-Phase-6 plan order](#post-phase-6-plan-order); don't implement piecemeal.
+- [ ] Watch `.git` for changes to keep the views live without manual refresh — **not yet implemented**; the panel re-fetches on user action. → tracked in [Post-Phase-6 plan order](#post-phase-6-plan-order).
 - [x] Honor `.gitignore` and large-binary policy: don't try to render diffs >1 MB unless the user clicks "load anyway".
 
 Daemon-side: extend the existing protocol with `ListCommits`, `GetCommit`, `GetFileDiff`, `StageFiles`, `RemoteUrl` (and corresponding `Daemon` responses). UI-side: a tabbed git panel in the session view, plus a top-level "Repo" tab for repos that aren't currently in any session.
+
+## Post-Phase-6 plan order
+
+Once Phase 6 closed, work moved to subordinate plans tracked under `docs/plans/`. This section is the canonical pick-up point: **an agent resuming work on this repo should find the first unchecked item below and read the linked plan.** Each entry names the detail plan, current state, and the exit criterion that ticks the box.
+
+### Meta-decisions that shape this list
+
+- **Protocol breaking changes are free.** Nothing has shipped yet, so subordinate plans that propose `#[serde(default)]` shims, dual-decode paths, or coordinated `PROTOCOL_VERSION` bumps can simplify: just change the wire format. The version stays at 4 (or bumps once and never again until release).
+- **Don't reorder casually.** The order below is deliberate: each step either unblocks the next (e.g. config-dir isolation made the harness safe to iterate against) or is sequenced to keep small-and-isolated work ahead of large refactors.
+- **New designs go in `docs/plans/*.md`.** Add a new entry to this section when you introduce a new plan, and tick the box when the entry's exit criterion is met.
+
+### Ordered checklist
+
+- [x] **E2E config-dir isolation** — see `docs/plans/e2e-test-coverage-strategy.md`. Plumb `RUSTLING_TULIP_CONFIG_DIR` through `crates/daemon/src/paths.rs::Dirs::ensure`, `apps/tauri-app/src-tauri/src/lib.rs::config_dir`, and the harness so the test daemon writes to `.tmp/e2e/config/` instead of real `%APPDATA%`. **Done in `094a2d3`** — verified the wdio smoke spec writes to the tmpdir and real `%APPDATA%\leftos\rustling-tulip\config\` is untouched.
+
+- [ ] **Semi-autonomous mode** — see `docs/plans/semi-autonomous-mode.md`. Per-session auto-continue toggle: when on, the daemon injects a configurable instruction on `AttentionReason::AwaitingInput`, capped at 100 injections per session. State persists into the orphan-meta sidecar so it survives daemon restarts. *Exit criterion:* spawn a session with skip-permissions on, ask "list 5 facts about cats then list 5 facts about dogs", flip auto-continue on, confirm both lists complete and the counter advances. Tick when all 8 checklist items in the plan tick.
+
+- [ ] **Codex support** — see `docs/plans/add-support-for-codex.md`. Per-session agent choice (claude or codex) sharing the spawn/orphan/UI plumbing; headless stays claude-only. The plan's `#[serde(default)]` backwards-compat hedging can be dropped per the meta-decision above. *Exit criterion:* spawn a codex session, attach, scrollback works, orphan recovery survives a daemon restart, agent label visible in the sidebar.
+
+- [ ] **UX audit triage** — see `docs/ux-audit.md` and the failing-test→fix→green candidates listed in `docs/plans/e2e-test-coverage-strategy.md:121-138`. Close the testid gaps in `PresetLaunchDialog`, `SpawnDialog`, `GitPanel` first so specs read clean, then drive the top audit findings through wdio specs. Ongoing — stop when the polish-to-feature ratio gets uncomfortable, then move to the sidebar.
+
+- [ ] **Source Control sidebar** — see `docs/plans/source-control-sidebar.md`. VSCode-style activity-bar-driven sidebar with Monaco diff editor, stage/unstage/commit/discard/stash. Removes the per-session `GitPanel.tsx` toggle and absorbs Phase 6's deferred stage/unstage item — don't tick those Phase 6 boxes separately, they retire when the sidebar lands. The plan's dual-decode shim language can be dropped. *Exit criterion:* all 5 phases (A–E) in the plan tick.
+
+- [ ] **`.git` filesystem watcher** — Phase 6's deferred live-refresh item. Best done as a small follow-up after the Source Control sidebar exists, otherwise we're watching for changes that nothing renders live.
+
+- [ ] **Auto-update for the desktop app** — Phase 5's deferred `tauri-plugin-updater` work. Stays parked until a signed-release pipeline exists (no GH Actions release pipeline, no signing cert, no hosted manifest). In-app pieces are ~2 hours of work when the pipeline is ready.
 
 ## Verification
 
