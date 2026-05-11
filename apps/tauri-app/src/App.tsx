@@ -810,8 +810,27 @@ function handleMessage(
         const next = s.sessions.slice();
         if (idx === -1) next.push(session);
         else next[idx] = session;
+        // Auto-clear the attention flag when the session has transitioned
+        // back into a calm running state on its own. Stopped/Error still
+        // count as attention-worthy (the daemon's Attention event fires
+        // for those, and the user should acknowledge them), so we only
+        // clear on awaiting_input → working/idle/spawning self-resolves.
+        const calmAgain =
+          session.status === "working" ||
+          session.status === "idle" ||
+          session.status === "spawning";
+        let attention = s.attentionSessions;
+        if (calmAgain && attention.has(session.id)) {
+          attention = new Set(attention);
+          attention.delete(session.id);
+        }
         if (intent?.kind === "newTab") {
-          return { ...s, sessions: next, pendingTabActivate: true };
+          return {
+            ...s,
+            sessions: next,
+            attentionSessions: attention,
+            pendingTabActivate: true,
+          };
         }
         if (intent?.kind === "replacePane") {
           // Activate the target tab and focus the pane locally; the
@@ -820,11 +839,12 @@ function handleMessage(
           return {
             ...s,
             sessions: next,
+            attentionSessions: attention,
             activeTabId: intent.tabId,
             focusedPaneId: intent.paneId,
           };
         }
-        return { ...s, sessions: next };
+        return { ...s, sessions: next, attentionSessions: attention };
       });
       if (intent?.kind === "newTab") {
         clientRef.current?.send({
@@ -844,12 +864,23 @@ function handleMessage(
     }
     case "session_removed":
       // Daemon prunes pane references and broadcasts tab_updated separately;
-      // here we only update the session list.
+      // here we update the session list AND any per-session sets that
+      // could otherwise leak the dead id (attentionSessions in particular —
+      // without this, a stopped-then-removed session keeps its warning
+      // glyph on whatever container would otherwise show it).
       seenSessionIdsRef.current.delete(msg.session_id);
-      setState((s) => ({
-        ...s,
-        sessions: s.sessions.filter((sn) => sn.id !== msg.session_id),
-      }));
+      setState((s) => {
+        let attention = s.attentionSessions;
+        if (attention.has(msg.session_id)) {
+          attention = new Set(attention);
+          attention.delete(msg.session_id);
+        }
+        return {
+          ...s,
+          sessions: s.sessions.filter((sn) => sn.id !== msg.session_id),
+          attentionSessions: attention,
+        };
+      });
       return;
     case "tabs":
       setState((s) => {

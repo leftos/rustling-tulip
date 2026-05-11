@@ -61,7 +61,12 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
               {">_"}
             </span>
           ) : (
-            <span className={`status-dot status-${session.status}`} />
+            <span
+              className={`status-dot status-${session.status}`}
+              title={`status: ${session.status}`}
+              aria-label={`status ${session.status}`}
+              role="img"
+            />
           )}
           <h2
             title={

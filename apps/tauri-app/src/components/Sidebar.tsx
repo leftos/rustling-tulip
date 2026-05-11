@@ -594,7 +594,12 @@ function SessionLeaf(p: SessionLeafProps) {
             {">_"}
           </span>
         ) : (
-          <span className={`status-dot status-${s.status}`} />
+          <span
+            className={`status-dot status-${s.status}`}
+            title={`status: ${s.status}`}
+            aria-label={`status ${s.status}`}
+            role="img"
+          />
         )}
         <span
           className="tree-label"

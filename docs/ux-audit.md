@@ -37,12 +37,8 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Force-expand silently overrides the user's collapse state.** A collapsed container that contains any highlighted or attention-flagged session is force-expanded, undoing the user's last action without telling them.
   - File: `apps/tauri-app/src/components/Sidebar.tsx:103-117`.
   - Suggested direction: scroll the relevant leaf into view but leave collapse state alone (or only auto-expand on first attention, not for the duration).
-- **Attention flag is never cleared automatically.** `attentionSessions` only loses an id when the user clicks the leaf (`onSelectSession`); if a session transitions `awaiting_input → working` on its own, the warning glyph and tinted background persist forever.
-  - File: `apps/tauri-app/src/App.tsx:788-810`, only-add; `clear` paths at `App.tsx:222-225`, `230-237`, `265-269` are all user-driven.
-  - Suggested direction: drop the id from `attentionSessions` when `session_updated` arrives with a non-attention status, AND on `session_removed`.
-- **`session_removed` leaks the id in `attentionSessions`.** Related to the above: removal updates `sessions` and `seenSessionIdsRef` but not `attentionSessions`. The orphaned id sticks in the set indefinitely.
-  - File: `apps/tauri-app/src/App.tsx:714-722`.
-  - Suggested direction: also delete from `attentionSessions` in the `session_removed` case.
+- ~~**Attention flag is never cleared automatically.**~~ **Resolved (iter 16).** `session_updated` clears the id from `attentionSessions` on transition back to `working`/`idle`/`spawning`. `stopped`/`error` still count as attention-worthy and require user acknowledgement.
+- ~~**`session_removed` leaks the id in `attentionSessions`.**~~ **Resolved (iter 16).** Removal handler now flushes the id from `attentionSessions` too.
 - **Preset context-menu loading state never times out.** When `listPresets` returns empty after 2 s (the `api.ts` timeout), the cache stores `[]` and the menu shows "Launch preset… (none defined)". But while the request is in flight, the menu shows "Launch preset… (loading)" — if the daemon dies mid-request the user sees "loading" forever until they reopen.
   - Files: `apps/tauri-app/src/api.ts:177-200`, `apps/tauri-app/src/components/Sidebar.tsx:418-454`.
   - Suggested direction: explicit "Failed to load" state instead of silent fallback to `[]`.
@@ -255,9 +251,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - Suggested direction: `aria-label="Close dialog"` / `"Remove repo"` / `"Close tab"` on each.
 - **No `role="dialog"` / `aria-modal` on modals.** Screen readers can't tell that the rest of the page is inert.
   - Files: every component using `.modal-backdrop`.
-- **Status dot uses colour as the only differentiator.** `idle`/`working`/`awaiting_input`/`stopped`/`error` are 5 colours with the same shape and no text label or hover title.
-  - File: `apps/tauri-app/src/styles.css:134-141`, `apps/tauri-app/src/components/Sidebar.tsx:338-339`, `SessionPane.tsx:61-63`.
-  - Suggested direction: `title="status: awaiting_input"` at minimum, or a glyph + colour.
+- ~~**Status dot uses colour as the only differentiator.**~~ **Resolved (iter 16).** Status dots in `Sidebar` and `SessionPane` gained `title="status: <state>"` + `aria-label="status <state>"` + `role="img"` so screen-reader users and hover-tooltip users get the underlying state.
 - **Modal stacking order is render-order, all at `z-index: 100`.** Spawn dialog, preset launch, workspace creator, vscode toast, exit confirm — if two are open at once, the later-rendered one (in JSX order) sits on top. Clicking the backdrop of the top one dismisses it (its handler), but the lower one stays. The visual "front" cue is just opacity.
   - File: `apps/tauri-app/src/styles.css:368-372`, `apps/tauri-app/src/App.tsx:577-618`.
   - Suggested direction: explicit z-index layers (e.g. exit confirm > vscode toast > spawn/preset/workspace); OR enforce "only one modal at a time" gating.
