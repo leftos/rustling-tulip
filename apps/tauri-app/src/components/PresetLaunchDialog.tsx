@@ -134,6 +134,16 @@ export default function PresetLaunchDialog({
     inlineText,
   });
 
+  // Required variables (prompt_at_launch + !optional) must have a non-empty
+  // trimmed value before the Variables → Preview transition fires.
+  // Previously a missing required value only surfaced as a daemon-side
+  // launch failure — now Next gets disabled and the empty field gets a
+  // visual error hint.
+  const missingRequiredVariables = promptedVariables.filter(
+    (v) => !v.optional && (variableValues[v.name] ?? "").trim().length === 0,
+  );
+  const canAdvanceFromVariables = missingRequiredVariables.length === 0;
+
   const canSubmit =
     stage === "preview" &&
     !previewLoading &&
@@ -230,6 +240,7 @@ export default function PresetLaunchDialog({
               variables={promptedVariables}
               values={variableValues}
               onChange={setVariableValues}
+              missingRequired={new Set(missingRequiredVariables.map((v) => v.name))}
             />
           )}
           {stage === "preview" && (
@@ -257,7 +268,16 @@ export default function PresetLaunchDialog({
               type="button"
               className="primary"
               onClick={onAdvance}
-              disabled={!canAdvanceFromSource}
+              disabled={
+                stage === "source"
+                  ? !canAdvanceFromSource
+                  : !canAdvanceFromVariables
+              }
+              title={
+                stage === "variables" && !canAdvanceFromVariables
+                  ? `Fill in: ${missingRequiredVariables.map((v) => v.label).join(", ")}`
+                  : undefined
+              }
               data-testid="preset-launch-next"
             >
               Next
@@ -400,28 +420,39 @@ function VariablesStage({
   variables,
   values,
   onChange,
+  missingRequired,
 }: {
   variables: PresetVariable[];
   values: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
+  missingRequired: Set<string>;
 }) {
   const set = (name: string, value: string) =>
     onChange({ ...values, [name]: value });
   return (
     <>
-      {variables.map((v) => (
-        <label className="field" key={v.name}>
-          <span>
-            {v.label}
-            {!v.optional && <span className="muted"> · required</span>}
-          </span>
-          <VariableInput
-            variable={v}
-            value={values[v.name] ?? ""}
-            onChange={(val) => set(v.name, val)}
-          />
-        </label>
-      ))}
+      {variables.map((v) => {
+        const isMissing = missingRequired.has(v.name);
+        return (
+          <label className="field" key={v.name}>
+            <span>
+              {v.label}
+              {!v.optional && <span className="muted"> · required</span>}
+            </span>
+            <VariableInput
+              variable={v}
+              value={values[v.name] ?? ""}
+              onChange={(val) => set(v.name, val)}
+              invalid={isMissing}
+            />
+            {isMissing && (
+              <span className="muted small env-row-error">
+                Required — fill in before continuing.
+              </span>
+            )}
+          </label>
+        );
+      })}
       {variables.length === 0 && (
         <p className="muted">No variables to configure.</p>
       )}
@@ -433,11 +464,14 @@ function VariableInput({
   variable,
   value,
   onChange,
+  invalid,
 }: {
   variable: PresetVariable;
   value: string;
   onChange: (v: string) => void;
+  invalid: boolean;
 }) {
+  const invalidClass = invalid ? "input-invalid" : "";
   const { kind } = variable;
   if (kind.kind === "file_path") {
     return (
@@ -446,6 +480,8 @@ function VariableInput({
           type="text"
           readOnly
           value={value}
+          className={invalidClass}
+          aria-invalid={invalid}
           placeholder={
             kind.extensions.length > 0
               ? `Pick a ${kind.extensions.join(" / ")} file…`
@@ -484,6 +520,8 @@ function VariableInput({
           type="text"
           readOnly
           value={value}
+          className={invalidClass}
+          aria-invalid={invalid}
           placeholder="Pick a folder…"
           data-testid={`preset-variable-${variable.name}`}
         />
@@ -516,6 +554,8 @@ function VariableInput({
     <input
       type="text"
       value={value}
+      className={invalidClass}
+      aria-invalid={invalid}
       onChange={(e) => onChange(e.target.value)}
       placeholder={variable.default ?? ""}
       data-testid={`preset-variable-${variable.name}`}
@@ -579,6 +619,16 @@ function PreviewStage({
           data-testid="preset-max-per-tab"
         />
       </label>
+      {!loading && error === null && prompts.length > 0 && (
+        <p
+          className="muted small preset-launch-caveat"
+          data-testid="preset-launch-caveat"
+        >
+          Launching is one-shot — there's no in-app cancel once the daemon
+          starts spawning. To stop a partial launch you'd have to stop each
+          spawned session by hand, or kill the daemon process.
+        </p>
+      )}
       <div className="preset-preview-list" data-testid="preset-preview-list">
         {loading || error !== null ? null : prompts.length === 0 ? (
           <p className="muted">No prompts found in the chosen source.</p>

@@ -723,6 +723,7 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
 .env-row-inputs input:nth-of-type(2) { flex: 1 1 55%; }
 .env-row-error { margin-top: 2px; color: var(--warn); }
 .input-invalid { border-color: var(--warn); }
+.preset-launch-caveat { font-style: italic; margin: 0.5rem 0; }
 .status-line { color: var(--fg-muted); }
 
 .badge {
