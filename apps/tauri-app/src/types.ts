@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 export type Agent = "claude" | "codex";
 
@@ -344,6 +344,9 @@ export type ClientMessage =
     }
   | { type: "get_remote_url"; repo_id: string }
   | { type: "repo_status"; repo_id: string }
+  | { type: "stage_files"; repo_id: string; paths: string[] }
+  | { type: "unstage_files"; repo_id: string; paths: string[] }
+  | { type: "commit_repo"; repo_id: string; message: string }
   | { type: "load_scrollback"; session_id: string }
   | { type: "shutdown" }
   | { type: "set_repo_worktree_default"; repo_id: string; value: boolean }
@@ -459,7 +462,24 @@ export type DaemonMessage =
       diff: string;
     }
   | ({ type: "remote_url" } & GitRemoteUrl)
-  | { type: "repo_status"; repo_id: string; changes: GitFileChange[] }
+  | {
+      type: "repo_status";
+      repo_id: string;
+      index_changes: GitFileChange[];
+      worktree_changes: GitFileChange[];
+    }
+  | {
+      type: "commit_ok";
+      repo_id: string;
+      sha: string;
+      short_sha: string;
+    }
+  | {
+      type: "git_write_error";
+      repo_id: string;
+      operation: string;
+      error: string;
+    }
   | {
       type: "scrollback";
       session_id: string;

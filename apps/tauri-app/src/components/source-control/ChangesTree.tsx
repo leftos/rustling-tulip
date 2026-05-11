@@ -2,10 +2,18 @@ import { useMemo, useState } from "react";
 import type { GitFileChange } from "../../types";
 import { buildChangesTree, type FolderNode } from "../../utils/changesTree";
 
+export interface RowAction {
+  glyph: string;
+  label: string;
+  onClick: (path: string) => void;
+  testId: string;
+}
+
 interface Props {
   changes: GitFileChange[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  rowAction?: RowAction | undefined;
 }
 
 /**
@@ -24,6 +32,7 @@ export default function ChangesTree({
   changes,
   selectedPath,
   onSelect,
+  rowAction,
 }: Props) {
   const tree = useMemo(() => buildChangesTree(changes), [changes]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -50,6 +59,7 @@ export default function ChangesTree({
           onToggle={toggle}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          rowAction={rowAction}
         />
       ))}
       {tree.files.map((c) => (
@@ -59,6 +69,7 @@ export default function ChangesTree({
           depth={0}
           selected={c.path === selectedPath}
           onSelect={onSelect}
+          rowAction={rowAction}
         />
       ))}
     </ul>
@@ -72,6 +83,7 @@ interface FolderRowProps {
   onToggle: (path: string) => void;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  rowAction?: RowAction | undefined;
 }
 
 function FolderRow({
@@ -81,6 +93,7 @@ function FolderRow({
   onToggle,
   selectedPath,
   onSelect,
+  rowAction,
 }: FolderRowProps) {
   const isCollapsed = collapsed.has(node.fullPath);
   const fileCount = countFiles(node);
@@ -122,6 +135,7 @@ function FolderRow({
               onToggle={onToggle}
               selectedPath={selectedPath}
               onSelect={onSelect}
+              rowAction={rowAction}
             />
           ))}
           {node.files.map((c) => (
@@ -131,6 +145,7 @@ function FolderRow({
               depth={depth + 1}
               selected={c.path === selectedPath}
               onSelect={onSelect}
+              rowAction={rowAction}
             />
           ))}
         </ul>
@@ -144,9 +159,10 @@ interface FileRowProps {
   depth: number;
   selected: boolean;
   onSelect: (path: string) => void;
+  rowAction?: RowAction | undefined;
 }
 
-function FileRow({ change, depth, selected, onSelect }: FileRowProps) {
+function FileRow({ change, depth, selected, onSelect, rowAction }: FileRowProps) {
   const basename = change.path.split(/[/\\]/).pop() ?? change.path;
   const classes = [
     "tree-row",
@@ -180,6 +196,22 @@ function FileRow({ change, depth, selected, onSelect }: FileRowProps) {
         <span className="tree-label" title={change.path}>
           {basename}
         </span>
+        {rowAction && (
+          <button
+            type="button"
+            className="row-action"
+            onClick={(e) => {
+              e.stopPropagation();
+              rowAction.onClick(change.path);
+            }}
+            aria-label={`${rowAction.label} ${change.path}`}
+            title={rowAction.label}
+            data-testid={rowAction.testId}
+            data-file-path={change.path}
+          >
+            {rowAction.glyph}
+          </button>
+        )}
       </div>
     </li>
   );

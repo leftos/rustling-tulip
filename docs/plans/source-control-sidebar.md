@@ -90,7 +90,7 @@ pub enum GridNode {
 - [x] Wire focused-pane → focused-repo: derives from active tab → focused pane → `pane.session_id` → `session.members[0].repo_id`. Override picker pins a repo when desired (`rt.sourceControl.repoOverride` in localStorage).
 - [x] Remove `view: "git"` from `SessionPane.tsx`. Sessions only show Terminal / Events now.
 - [x] Delete `GitPanel.tsx` entirely.
-- [ ] Daemon `RepoStatus` extension: *deferred to Phase C* (the staging phase that needs the split). Iter 7 kept the existing `status: String` shape — sufficient for the read-only Phase A view.
+- [x] Daemon `RepoStatus` extension: shipped in Phase C — `repo_status` now returns `index_changes` + `worktree_changes` buckets (porcelain X/Y split). Bumped `PROTOCOL_VERSION` 6 → 7.
 
 ### Phase B — Monaco diff editor + diff-tab protocol extension
 
@@ -109,18 +109,18 @@ pub enum GridNode {
 
 ### Phase C — Staging + commit
 
-- [ ] New file `crates/daemon/src/git_write.rs` for write helpers. Each helper takes `repo: &Path` plus action-specific args and shells out to `git` (re-using the `run_git` pattern from `git_inspect.rs:12-31`, factored to a shared `git_cmd.rs`). Helpers:
+- [x] New file `crates/daemon/src/git_write.rs` for write helpers. Each helper takes `repo: &Path` plus action-specific args and shells out to `git` (separate `run_git` for the write side — sharing with `git_inspect.rs` would have required factoring out a helper module for one extra caller, premature). Helpers:
   - `stage(paths)` → `git add -- <paths>`
   - `unstage(paths)` → `git restore --staged -- <paths>`
-  - `commit(message)` → `git commit -m <message>` (let hooks run; do **not** pass `--no-verify`)
-- [ ] New protocol messages (`ClientMessage`):
+  - `commit(message)` → `git commit -m <message>` (hooks run; no `--no-verify`)
+- [x] New protocol messages (`ClientMessage`):
   - `StageFiles { repo_id, paths: Vec<String> }`
   - `UnstageFiles { repo_id, paths: Vec<String> }`
-  - `Commit { repo_id, message: String }`
-- [ ] Daemon responds with refreshed `RepoStatus` for the same `repo_id` so clients re-render automatically. On commit success, also push a fresh `Commits` snapshot for the active branch. Errors return `Error { message }`.
-- [ ] **Broadcast on writes:** repo-status responses fan out via the broadcast channel (not per-client `out_tx`), so a pop-out window with the sidebar open sees changes from the main window. This matches the existing fix-it note in `docs/ux-audit.md:271-273`.
-- [ ] `ChangesTree.tsx` splits into two sub-sections: STAGED (from `index_status != ' '`) and CHANGES (from `worktree_status != ' '`). Per-row `+`/`−` action buttons stage/unstage individual files; section header has bulk stage/unstage.
-- [ ] Commit message input + Commit button live above the STAGED section. Button disabled when message empty OR no staged files. Submitting disables both until `RepoStatus` round-trips.
+  - `CommitRepo { repo_id, message: String }`
+- [x] Daemon broadcasts refreshed `RepoStatus` (via the existing `StateEvent` channel) to every client after each successful write. `CommitRepo` additionally replies to the originating client with `CommitOk { repo_id, sha, short_sha }`. Failures emit `GitWriteError { repo_id, operation, error }`. The fresh `Commits` snapshot push after commit success is **deferred** — the sidebar's HistoryView re-requests on tab switch, so the divergence window is bounded; revisit if it bites in practice.
+- [x] **Broadcast on writes:** the post-write status refresh fans out via `StateEvent::RepoStatus` so a pop-out window with the sidebar open sees changes from the main window.
+- [x] `ChangesTree.tsx` splits into two sub-sections: STAGED (`index_changes`) and CHANGES (`worktree_changes`). Per-row `+`/`−` action buttons stage/unstage individual files; section header has bulk stage-all / unstage-all.
+- [x] Commit message input + Commit button live above the STAGED section. Button disabled when message empty OR no staged files. `Ctrl/Cmd+Enter` in the textarea submits.
 
 ### Phase D — Discard + stash
 

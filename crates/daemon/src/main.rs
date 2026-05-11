@@ -2,6 +2,7 @@
 
 mod git;
 mod git_inspect;
+mod git_write;
 mod headless;
 mod inject;
 mod orphan;

@@ -140,42 +140,61 @@ pub async fn file_diff(repo: &Path, path: &str, against: Option<&str>) -> anyhow
     run_git(repo, &args).await
 }
 
-pub async fn repo_status(repo: &Path) -> anyhow::Result<Vec<GitFileChange>> {
+/// Split working-tree status into two buckets keyed off the porcelain X/Y
+/// columns. Returns `(index_changes, worktree_changes)` so the UI can render
+/// STAGED + CHANGES sections independently. A file with both staged and
+/// unstaged edits appears in both lists with different `status` chars (X
+/// for the index entry, Y for the worktree entry); untracked files (`??`)
+/// land in `worktree_changes` only with `status = "?"`.
+pub async fn repo_status(repo: &Path) -> anyhow::Result<(Vec<GitFileChange>, Vec<GitFileChange>)> {
     let stdout = run_git(repo, &["status", "--porcelain=1", "-z"]).await?;
-    let mut out = Vec::new();
-    let mut iter = stdout.split('\0').peekable();
+    Ok(parse_porcelain_z(&stdout))
+}
+
+fn parse_porcelain_z(raw: &str) -> (Vec<GitFileChange>, Vec<GitFileChange>) {
+    let mut index = Vec::new();
+    let mut worktree = Vec::new();
+    let mut iter = raw.split('\0').peekable();
     while let Some(entry) = iter.next() {
         if entry.is_empty() {
             continue;
         }
-        let bytes = entry.as_bytes();
-        if bytes.len() < 3 {
+        if entry.len() < 3 {
             continue;
         }
-        let xy = &entry[..2];
+        let mut chars = entry.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
         let path = entry[3..].to_string();
-        let status = first_meaningful_status(xy).to_string();
-        let from_path = if status == "R" {
+        let from_path = if x == 'R' || y == 'R' {
             iter.next().map(String::from)
         } else {
             None
         };
-        out.push(GitFileChange {
-            path,
-            status,
-            from_path,
-        });
+        if x == '?' && y == '?' {
+            worktree.push(GitFileChange {
+                path,
+                status: "?".to_string(),
+                from_path: None,
+            });
+            continue;
+        }
+        if x != ' ' && x != '?' {
+            index.push(GitFileChange {
+                path: path.clone(),
+                status: x.to_string(),
+                from_path: from_path.clone(),
+            });
+        }
+        if y != ' ' && y != '?' {
+            worktree.push(GitFileChange {
+                path,
+                status: y.to_string(),
+                from_path,
+            });
+        }
     }
-    Ok(out)
-}
-
-fn first_meaningful_status(xy: &str) -> char {
-    let chars: Vec<char> = xy.chars().collect();
-    match (chars.first().copied(), chars.get(1).copied()) {
-        (Some('?'), _) => '?',
-        (Some(c), _) | (_, Some(c)) if c != ' ' => c,
-        _ => '?',
-    }
+    (index, worktree)
 }
 
 pub async fn remote_url(repo_id: &str, repo: &Path) -> anyhow::Result<GitRemoteUrl> {
@@ -219,4 +238,61 @@ fn parse_forge(raw: &str) -> (Option<String>, String) {
         }
     }
     (None, "unknown".to_string())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; panic messages aid debugging"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_splits_staged_and_worktree_buckets() {
+        // M=modified-and-staged, MM=staged AND further unstaged edits,
+        // ??=untracked, A=newly staged add, D=worktree delete only.
+        let raw = "M  staged.txt\0MM both.txt\0?? untracked.txt\0A  added.txt\0 D removed.txt\0";
+        let (index, worktree) = parse_porcelain_z(raw);
+
+        let idx_paths: Vec<_> = index.iter().map(|c| c.path.as_str()).collect();
+        let wt_paths: Vec<_> = worktree.iter().map(|c| c.path.as_str()).collect();
+
+        assert!(idx_paths.contains(&"staged.txt"));
+        assert!(idx_paths.contains(&"both.txt"));
+        assert!(idx_paths.contains(&"added.txt"));
+        assert!(!idx_paths.contains(&"untracked.txt"));
+        assert!(!idx_paths.contains(&"removed.txt"));
+
+        assert!(wt_paths.contains(&"both.txt"));
+        assert!(wt_paths.contains(&"untracked.txt"));
+        assert!(wt_paths.contains(&"removed.txt"));
+        assert!(!wt_paths.contains(&"staged.txt"));
+        assert!(!wt_paths.contains(&"added.txt"));
+
+        let untracked = worktree
+            .iter()
+            .find(|c| c.path == "untracked.txt")
+            .expect("untracked entry present");
+        assert_eq!(untracked.status, "?");
+    }
+
+    #[test]
+    fn parse_handles_renames_with_old_path() {
+        // `R  newname\0oldname` — old name is the follow-up entry.
+        let raw = "R  newname.txt\0oldname.txt\0";
+        let (index, _worktree) = parse_porcelain_z(raw);
+        assert_eq!(index.len(), 1);
+        let rename = &index[0];
+        assert_eq!(rename.path, "newname.txt");
+        assert_eq!(rename.status, "R");
+        assert_eq!(rename.from_path.as_deref(), Some("oldname.txt"));
+    }
+
+    #[test]
+    fn parse_empty_input_returns_empty_buckets() {
+        let (index, worktree) = parse_porcelain_z("");
+        assert!(index.is_empty());
+        assert!(worktree.is_empty());
+    }
 }

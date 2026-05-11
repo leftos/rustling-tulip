@@ -196,6 +196,119 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 .changes-tree-file .file-status.status-D { color: #f48771; }
 .changes-tree-file .file-status.status-U { color: #999; }
 .changes-tree-file .file-status.status-R { color: #569cd6; }
+.changes-tree-file .file-status.status-\? { color: #6a9955; }
+
+/* Commit input + button stack at top of changes view. */
+.source-control-commit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.source-control-commit .commit-input {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 5px 6px;
+  resize: vertical;
+  min-height: 36px;
+}
+.source-control-commit .commit-input:focus { outline: none; border-color: var(--accent); }
+.source-control-commit .commit-button {
+  align-self: flex-end;
+  font-size: 12px;
+  padding: 4px 12px;
+  background: var(--accent);
+  color: var(--bg);
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.source-control-commit .commit-button:disabled {
+  background: var(--border);
+  color: var(--fg-muted);
+  cursor: not-allowed;
+}
+
+/* STAGED / CHANGES section headers. */
+.changes-bucket { margin-bottom: 4px; }
+.changes-bucket-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.changes-bucket-header .bucket-label { font-weight: 600; }
+.changes-bucket-header .bucket-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+.changes-bucket-header .bucket-action {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.changes-bucket-header .bucket-action:hover:not(:disabled) { color: var(--fg); }
+.changes-bucket-header .bucket-action:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Per-row stage/unstage button — sits on the right edge of a FileRow. Visible
+   when the row is hovered or focused, faded otherwise so the layout doesn't
+   shift. */
+.changes-tree .row-action {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s;
+}
+.changes-tree .tree-row:hover .row-action,
+.changes-tree .tree-row:focus-within .row-action { opacity: 1; }
+.changes-tree .row-action:hover { color: var(--fg); }
+
+/* Inline error banner above the changes list. */
+.source-control-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 10px;
+  padding: 6px 8px;
+  background: rgba(244, 135, 113, 0.12);
+  border: 1px solid rgba(244, 135, 113, 0.4);
+  color: #f48771;
+  font-size: 12px;
+  border-radius: 3px;
+  word-break: break-word;
+}
+.source-control-error .dismiss {
+  margin-left: auto;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
 
 .split { min-height: 0; min-width: 0; }
 .split-pane { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }

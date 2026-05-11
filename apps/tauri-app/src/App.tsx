@@ -936,9 +936,18 @@ function handleMessage(
     case "preset_launch_failed":
     case "preset_preview":
     case "preset_preview_error":
+    case "commit_ok":
+    case "git_write_error":
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );
+      if (msg.type === "git_write_error") {
+        pushToast(setState, {
+          severity: "error",
+          message: `Git ${msg.operation} failed`,
+          detail: msg.error,
+        });
+      }
       if (msg.type === "preset_launch_failed") {
         const partials = `${msg.partial_session_ids.length} session(s), ${msg.partial_tab_ids.length} tab(s) partial`;
         pushToast(setState, {

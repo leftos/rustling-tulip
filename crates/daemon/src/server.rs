@@ -13,7 +13,9 @@ use crate::session::{
 };
 use crate::state::AppState;
 use crate::tabs;
-use crate::{git, git_inspect, headless, inject, osc_title, pty_state, vscode, workspace as ws};
+use crate::{
+    git, git_inspect, git_write, headless, inject, osc_title, pty_state, vscode, workspace as ws,
+};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -73,6 +75,14 @@ pub struct Hub {
 pub enum StateEvent {
     Repos(Vec<protocol::RepoEntry>),
     Workspaces(Vec<protocol::WorkspaceEntry>),
+    /// Broadcast after a successful stage/unstage/commit so every connected
+    /// source-control sidebar refreshes without each window having to
+    /// re-request explicitly.
+    RepoStatus {
+        repo_id: String,
+        index_changes: Vec<protocol::GitFileChange>,
+        worktree_changes: Vec<protocol::GitFileChange>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +349,17 @@ fn spawn_state_forwarder(
                 }
                 Ok(StateEvent::Workspaces(workspaces)) => {
                     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+                }
+                Ok(StateEvent::RepoStatus {
+                    repo_id,
+                    index_changes,
+                    worktree_changes,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::RepoStatus {
+                        repo_id,
+                        index_changes,
+                        worktree_changes,
+                    });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
@@ -696,8 +717,40 @@ async fn dispatch(
         }
         ClientMessage::RepoStatus { repo_id } => {
             let repo = repo_path_or_err(hub, &repo_id)?;
-            let changes = git_inspect::repo_status(&repo).await?;
-            let _ = out_tx.send(DaemonMessage::RepoStatus { repo_id, changes });
+            let (index_changes, worktree_changes) = git_inspect::repo_status(&repo).await?;
+            let _ = out_tx.send(DaemonMessage::RepoStatus {
+                repo_id,
+                index_changes,
+                worktree_changes,
+            });
+        }
+        ClientMessage::StageFiles { repo_id, paths } => {
+            handle_git_write(hub, out_tx, &repo_id, "stage", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::stage(&repo, &paths).await?;
+                Ok(None)
+            })
+            .await;
+        }
+        ClientMessage::UnstageFiles { repo_id, paths } => {
+            handle_git_write(hub, out_tx, &repo_id, "unstage", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::unstage(&repo, &paths).await?;
+                Ok(None)
+            })
+            .await;
+        }
+        ClientMessage::CommitRepo { repo_id, message } => {
+            handle_git_write(hub, out_tx, &repo_id, "commit", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                let (sha, short_sha) = git_write::commit(&repo, &message).await?;
+                Ok(Some(DaemonMessage::CommitOk {
+                    repo_id: repo_id.clone(),
+                    sha,
+                    short_sha,
+                }))
+            })
+            .await;
         }
         ClientMessage::LoadScrollback { session_id } => {
             let (data, truncated) = scrollback::load(&hub.dirs, &session_id);
@@ -1015,6 +1068,55 @@ fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
         })
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
+}
+
+/// Runs a stage/unstage/commit body, then on success broadcasts the fresh
+/// `RepoStatus` to all connected clients (including this one) and emits the
+/// optional follow-up message (e.g. `CommitOk`). On failure, sends
+/// `GitWriteError { operation }` to the caller only — peer clients learn
+/// nothing happened because the broadcast is never sent.
+async fn handle_git_write<F>(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    repo_id: &str,
+    operation: &str,
+    body: F,
+) where
+    F: std::future::Future<Output = anyhow::Result<Option<DaemonMessage>>>,
+{
+    let outcome = body.await;
+    match outcome {
+        Ok(follow_up) => {
+            match repo_path_or_err(hub, repo_id) {
+                Ok(repo) => match git_inspect::repo_status(&repo).await {
+                    Ok((index_changes, worktree_changes)) => {
+                        let _ = hub.state_events.send(StateEvent::RepoStatus {
+                            repo_id: repo_id.to_string(),
+                            index_changes,
+                            worktree_changes,
+                        });
+                    }
+                    Err(err) => {
+                        warn!(?err, repo_id, "git_write: post-write status refresh failed");
+                    }
+                },
+                Err(err) => {
+                    warn!(?err, repo_id, "git_write: repo path lookup failed");
+                }
+            }
+            if let Some(msg) = follow_up {
+                let _ = out_tx.send(msg);
+            }
+        }
+        Err(err) => {
+            warn!(operation, repo_id, ?err, "git_write: operation failed");
+            let _ = out_tx.send(DaemonMessage::GitWriteError {
+                repo_id: repo_id.to_string(),
+                operation: operation.to_string(),
+                error: format!("{err:#}"),
+            });
+        }
+    }
 }
 
 #[expect(

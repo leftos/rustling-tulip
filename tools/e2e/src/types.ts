@@ -82,6 +82,10 @@ export type ClientMessage =
       initial_session_id: string | null;
     }
   | { type: "close_tab"; tab_id: string }
+  | { type: "repo_status"; repo_id: string }
+  | { type: "stage_files"; repo_id: string; paths: string[] }
+  | { type: "unstage_files"; repo_id: string; paths: string[] }
+  | { type: "commit_repo"; repo_id: string; message: string }
   | { type: "list_presets"; target: PresetTarget }
   | {
       type: "preview_preset";

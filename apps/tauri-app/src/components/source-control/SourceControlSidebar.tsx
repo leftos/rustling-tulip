@@ -1,15 +1,10 @@
 /**
- * Global Source Control sidebar — Phase A of `docs/plans/source-control-sidebar.md`.
+ * Global Source Control sidebar — Phases A–C of
+ * `docs/plans/source-control-sidebar.md`.
  *
- * Replaces the per-session `GitPanel` toggle with a single sidebar that
- * tracks the focused pane's repo. Manual override is available when more
- * than one repo is registered. The data plumbing (`repo_status` /
- * `list_commits` / `get_file_diff` / `get_commit` round-trips) is unchanged
- * from the deleted `GitPanel.tsx` — only the host moves.
- *
- * Phase A keeps the read-only, flat-list shape on purpose. Tree-folded
- * changes, paginated graph, stage/unstage/commit, and Monaco diff are
- * scheduled for phases B–E.
+ * Tracks the focused pane's repo; manual override is available when more
+ * than one repo is registered. Phase C adds the staged/unstaged split and
+ * write actions (stage, unstage, commit) — error reporting is via toast.
  */
 import { useEffect, useMemo, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
@@ -40,7 +35,6 @@ export default function SourceControlSidebar({
   client,
 }: Props) {
   const [tab, setTab] = useState<Tab>("changes");
-  // null = follow focused pane; string = user-pinned override.
   const [override, setOverride] = useState<string | null>(() => {
     try {
       return localStorage.getItem(STORAGE_KEY);
@@ -58,9 +52,6 @@ export default function SourceControlSidebar({
     }
   };
 
-  // Resolve the active repo. Override wins; else follow focus; else fall
-  // back to the first registered repo (still useful as a no-session
-  // browsing surface).
   const activeRepoId = useMemo(() => {
     if (override && repos.some((r) => r.id === override)) return override;
     if (focusedRepoId && repos.some((r) => r.id === focusedRepoId)) {
@@ -158,40 +149,79 @@ interface ChangesViewProps {
 }
 
 function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps) {
-  const [changes, setChanges] = useState<GitFileChange[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
+  const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
+  const [selected, setSelected] = useState<SelectedFile | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
+  const [commitMessage, setCommitMessage] = useState("");
+  const [pendingOp, setPendingOp] = useState<string | null>(null);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   useEffect(() => {
-    setChanges(null);
+    setIndexChanges(null);
+    setWorktreeChanges(null);
     setSelected(null);
     setDiff(null);
+    setErrorBanner(null);
+    setCommitMessage("");
     client.send({ type: "repo_status", repo_id: activeRepoId });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "repo_status" || detail.repo_id !== activeRepoId)
         return;
-      setChanges(detail.changes);
+      setIndexChanges(detail.index_changes);
+      setWorktreeChanges(detail.worktree_changes);
     };
     window.addEventListener("rt:repo_status", handler);
     return () => window.removeEventListener("rt:repo_status", handler);
   }, [activeRepoId, client]);
 
+  // Listen for write errors + commit confirmation across the lifetime of
+  // this view.
+  useEffect(() => {
+    const onError = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (
+        detail.type !== "git_write_error" ||
+        detail.repo_id !== activeRepoId
+      )
+        return;
+      setPendingOp(null);
+      setErrorBanner(`${detail.operation}: ${detail.error}`);
+    };
+    const onOk = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "commit_ok" || detail.repo_id !== activeRepoId)
+        return;
+      setPendingOp(null);
+      setCommitMessage("");
+      setErrorBanner(null);
+    };
+    window.addEventListener("rt:git_write_error", onError);
+    window.addEventListener("rt:commit_ok", onOk);
+    return () => {
+      window.removeEventListener("rt:git_write_error", onError);
+      window.removeEventListener("rt:commit_ok", onOk);
+    };
+  }, [activeRepoId]);
+
+  // Diff fetching. `selected` distinguishes index vs worktree to choose the
+  // right `against` argument.
   useEffect(() => {
     if (!selected) return;
     setDiff(null);
     client.send({
       type: "get_file_diff",
       repo_id: activeRepoId,
-      path: selected,
-      against: null,
+      path: selected.path,
+      against: selected.bucket === "index" ? "HEAD" : null,
     });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (
         detail.type !== "file_diff" ||
         detail.repo_id !== activeRepoId ||
-        detail.path !== selected
+        detail.path !== selected.path
       )
         return;
       setDiff(detail.diff);
@@ -200,27 +230,162 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
     return () => window.removeEventListener("rt:file_diff", handler);
   }, [activeRepoId, selected, client]);
 
+  const stagedPaths = useMemo(
+    () => (indexChanges ?? []).map((c) => c.path),
+    [indexChanges],
+  );
+  const worktreePaths = useMemo(
+    () => (worktreeChanges ?? []).map((c) => c.path),
+    [worktreeChanges],
+  );
+
+  const sendStage = (paths: string[]) => {
+    if (paths.length === 0) return;
+    setPendingOp("stage");
+    client.send({ type: "stage_files", repo_id: activeRepoId, paths });
+  };
+  const sendUnstage = (paths: string[]) => {
+    if (paths.length === 0) return;
+    setPendingOp("unstage");
+    client.send({ type: "unstage_files", repo_id: activeRepoId, paths });
+  };
+  const sendCommit = () => {
+    const trimmed = commitMessage.trim();
+    if (trimmed.length === 0 || stagedPaths.length === 0) return;
+    setPendingOp("commit");
+    client.send({
+      type: "commit_repo",
+      repo_id: activeRepoId,
+      message: trimmed,
+    });
+  };
+
+  const canCommit =
+    stagedPaths.length > 0 &&
+    commitMessage.trim().length > 0 &&
+    pendingOp !== "commit";
+
   return (
     <ResizableSplit
       storageKey="source-control.changes"
-      defaultSize={260}
-      minSize={180}
+      defaultSize={320}
+      minSize={200}
       direction="vertical"
     >
       <div
         className="git-list source-control-list"
         data-testid="source-control-changes-list"
       >
-        {!changes ? (
+        <div className="source-control-commit">
+          <textarea
+            className="commit-input"
+            value={commitMessage}
+            onChange={(e) => setCommitMessage(e.target.value)}
+            placeholder="Commit message (Ctrl+Enter to commit)"
+            rows={2}
+            aria-label="Commit message"
+            data-testid="source-control-commit-message"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                sendCommit();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="commit-button"
+            disabled={!canCommit}
+            onClick={sendCommit}
+            data-testid="source-control-commit-submit"
+          >
+            {pendingOp === "commit" ? "Committing…" : "Commit"}
+          </button>
+        </div>
+        {errorBanner && (
+          <div
+            className="source-control-error"
+            role="alert"
+            data-testid="source-control-error"
+          >
+            {errorBanner}
+            <button
+              type="button"
+              className="dismiss"
+              onClick={() => setErrorBanner(null)}
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {indexChanges === null || worktreeChanges === null ? (
           <p className="empty">loading…</p>
-        ) : changes.length === 0 ? (
+        ) : indexChanges.length === 0 && worktreeChanges.length === 0 ? (
           <p className="empty">working tree clean</p>
         ) : (
-          <ChangesTree
-            changes={changes}
-            selectedPath={selected}
-            onSelect={setSelected}
-          />
+          <>
+            {indexChanges.length > 0 && (
+              <section
+                className="changes-bucket"
+                data-testid="source-control-bucket-index"
+              >
+                <BucketHeader
+                  label="Staged Changes"
+                  count={indexChanges.length}
+                  action={{
+                    label: "Unstage all",
+                    onClick: () => sendUnstage(stagedPaths),
+                    disabled: pendingOp !== null,
+                    testId: "source-control-unstage-all",
+                  }}
+                />
+                <ChangesTree
+                  changes={indexChanges}
+                  selectedPath={
+                    selected?.bucket === "index" ? selected.path : null
+                  }
+                  onSelect={(path) => setSelected({ bucket: "index", path })}
+                  rowAction={{
+                    glyph: "−",
+                    label: "Unstage",
+                    onClick: (path) => sendUnstage([path]),
+                    testId: "source-control-row-unstage",
+                  }}
+                />
+              </section>
+            )}
+            {worktreeChanges.length > 0 && (
+              <section
+                className="changes-bucket"
+                data-testid="source-control-bucket-worktree"
+              >
+                <BucketHeader
+                  label="Changes"
+                  count={worktreeChanges.length}
+                  action={{
+                    label: "Stage all",
+                    onClick: () => sendStage(worktreePaths),
+                    disabled: pendingOp !== null,
+                    testId: "source-control-stage-all",
+                  }}
+                />
+                <ChangesTree
+                  changes={worktreeChanges}
+                  selectedPath={
+                    selected?.bucket === "worktree" ? selected.path : null
+                  }
+                  onSelect={(path) => setSelected({ bucket: "worktree", path })}
+                  rowAction={{
+                    glyph: "+",
+                    label: "Stage",
+                    onClick: (path) => sendStage([path]),
+                    testId: "source-control-row-stage",
+                  }}
+                />
+              </section>
+            )}
+          </>
         )}
         <div className="git-meta">
           {activeRepoName}
@@ -236,6 +401,40 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
       </div>
       <DiffView diff={diff} testId="source-control-changes-diff" />
     </ResizableSplit>
+  );
+}
+
+interface SelectedFile {
+  bucket: "index" | "worktree";
+  path: string;
+}
+
+interface BucketHeaderProps {
+  label: string;
+  count: number;
+  action: {
+    label: string;
+    onClick: () => void;
+    disabled: boolean;
+    testId: string;
+  };
+}
+
+function BucketHeader({ label, count, action }: BucketHeaderProps) {
+  return (
+    <div className="changes-bucket-header">
+      <span className="bucket-label">{label}</span>
+      <span className="bucket-count">{count}</span>
+      <button
+        type="button"
+        className="bucket-action"
+        disabled={action.disabled}
+        onClick={action.onClick}
+        data-testid={action.testId}
+      >
+        {action.label}
+      </button>
+    </div>
   );
 }
 
@@ -393,8 +592,5 @@ async function openInForge(
   if (!remote || !remote.web_url) {
     return;
   }
-  // The global sidebar has no specific branch context (the focused-pane's
-  // branch may not match the repo's primary HEAD), so open the repo home
-  // and let the forge route from there.
   void openInShell(remote.web_url);
 }

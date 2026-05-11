@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 fn default_true() -> bool {
     true
@@ -719,9 +719,35 @@ pub enum ClientMessage {
         repo_id: String,
     },
     /// Working-tree status (changed files) for a single repo. Useful for the
-    /// non-session-scoped repo view.
+    /// non-session-scoped repo view. Daemon replies with
+    /// [`DaemonMessage::RepoStatus`], which splits results into staged
+    /// (index vs HEAD) and unstaged (worktree vs index) buckets so the UI
+    /// can render VSCode-style STAGED + CHANGES sections.
     RepoStatus {
         repo_id: String,
+    },
+    /// Stage one or more paths in `repo_id` (`git add -- <path>`...). On
+    /// success the daemon broadcasts a fresh [`DaemonMessage::RepoStatus`]
+    /// to every connected client. Failure surfaces as
+    /// [`DaemonMessage::GitWriteError`].
+    StageFiles {
+        repo_id: String,
+        paths: Vec<String>,
+    },
+    /// Unstage one or more paths (`git restore --staged -- <path>`...).
+    /// Same response shape as [`StageFiles`].
+    UnstageFiles {
+        repo_id: String,
+        paths: Vec<String>,
+    },
+    /// Commit the current index. The daemon shells out to
+    /// `git commit -m <message>` with no `--amend`, no `--no-verify`. On
+    /// success it broadcasts the fresh status and replies with
+    /// [`DaemonMessage::CommitOk`]; on failure it emits
+    /// [`DaemonMessage::GitWriteError`] with the operation tag `"commit"`.
+    CommitRepo {
+        repo_id: String,
+        message: String,
     },
     /// Request the persisted scrollback for a session, replayed on attach.
     /// The daemon answers with [`DaemonMessage::Scrollback`].
@@ -941,7 +967,27 @@ pub enum DaemonMessage {
     RemoteUrl(GitRemoteUrl),
     RepoStatus {
         repo_id: String,
-        changes: Vec<GitFileChange>,
+        /// Files with index-vs-HEAD differences (the "STAGED" bucket).
+        /// `status` is the porcelain X column (`A`, `M`, `D`, `R`).
+        index_changes: Vec<GitFileChange>,
+        /// Files with worktree-vs-index differences (the "CHANGES" bucket).
+        /// `status` is the porcelain Y column. Untracked files appear here
+        /// with `status = "?"`.
+        worktree_changes: Vec<GitFileChange>,
+    },
+    /// Successful response to [`ClientMessage::CommitRepo`].
+    CommitOk {
+        repo_id: String,
+        sha: String,
+        short_sha: String,
+    },
+    /// Failure response to a stage/unstage/commit request. `operation` is
+    /// `"stage"`, `"unstage"`, or `"commit"` so the UI can attribute the
+    /// error.
+    GitWriteError {
+        repo_id: String,
+        operation: String,
+        error: String,
     },
     /// Persisted scrollback bytes (raw PTY output for interactive sessions,
     /// raw stream-json lines for headless), base64-encoded. `truncated` is
