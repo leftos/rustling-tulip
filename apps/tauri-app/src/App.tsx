@@ -746,6 +746,7 @@ export default function App() {
           initialTarget={state.spawnInitial}
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
+          onAddRepo={onAddRepo}
         />
       )}
       {state.presetLaunch && state.client && (

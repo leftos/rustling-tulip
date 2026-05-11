@@ -21,7 +21,15 @@ interface Props {
   initialTarget?: SpawnInitialTarget | undefined;
   onClose: () => void;
   onSpawned: () => void;
+  /// Closes the dialog and opens the directory picker so a fresh user
+  /// can register a repo when they hit the empty-state CTA.
+  onAddRepo: () => void;
 }
+
+/// Regex for a syntactically valid env var key. Matches POSIX-ish names
+/// (letter or underscore, then alphanumerics/underscore). Empty strings
+/// are intentionally allowed (the row is treated as "not yet started").
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 type Mode = "single" | "workspace";
 type RunMode = "interactive" | "headless" | "plain_shell";
@@ -96,6 +104,7 @@ export default function SpawnDialog({
   initialTarget,
   onClose,
   onSpawned,
+  onAddRepo,
 }: Props) {
   const [mode, setMode] = useState<Mode>(() =>
     pickInitialMode(initialTarget, workspaces),
@@ -133,15 +142,16 @@ export default function SpawnDialog({
   const initialWorkspaceId =
     initialTarget?.kind === "workspace" ? initialTarget.workspace_id : null;
 
-  // Escape closes the dialog (matches × and backdrop click). Modal forms
-  // are dense — Escape is the keyboard escape hatch.
+  // Escape closes the dialog (still the keyboard escape hatch). Backdrop
+  // click is intentionally NOT a close trigger — the dialog can hold a
+  // dense form (custom branch, env vars, headless prompt), and a stray
+  // click silently discarding it was the most-reported papercut.
   useEscape(onClose);
 
   return (
-    <div className="modal-backdrop" onClick={onClose} data-testid="spawn-dialog">
+    <div className="modal-backdrop" data-testid="spawn-dialog">
       <div
         className="modal"
-        onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="Spawn session"
@@ -159,6 +169,10 @@ export default function SpawnDialog({
           </button>
         </header>
         <div className="modal-body">
+          {repos.length === 0 ? (
+            <EmptyRepoState onAddRepo={onAddRepo} onClose={onClose} />
+          ) : (
+            <>
           <fieldset className="field">
             <legend>Type</legend>
             <label className="radio">
@@ -214,7 +228,48 @@ export default function SpawnDialog({
               header={sharedFooter}
             />
           )}
+            </>
+          )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyRepoState({
+  onAddRepo,
+  onClose,
+}: {
+  onAddRepo: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="empty-state" data-testid="spawn-empty-repos">
+      <h3>No repos registered</h3>
+      <p className="muted">
+        Add a repo before spawning a session — sessions are scoped to a repo
+        or a workspace, and rustling-tulip needs at least one to know where
+        to run the agent.
+      </p>
+      <div className="modal-footer-inline">
+        <button
+          type="button"
+          onClick={onClose}
+          data-testid="spawn-empty-cancel"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => {
+            onClose();
+            onAddRepo();
+          }}
+          data-testid="spawn-empty-add-repo"
+        >
+          + Add repo
+        </button>
       </div>
     </div>
   );
@@ -433,46 +488,66 @@ function AdvancedSection({
         {advanced.envRows.length === 0 && (
           <div className="muted small">No extra env vars.</div>
         )}
-        {advanced.envRows.map((row, idx) => (
-          <div
-            key={idx}
-            className="env-row"
-            style={{ display: "flex", gap: "0.5rem", marginBottom: "0.25rem" }}
-          >
-            <input
-              type="text"
-              placeholder="KEY"
-              value={row.key}
-              onChange={(e) => {
-                const next = advanced.envRows.slice();
-                next[idx] = { ...row, key: e.target.value };
-                setEnvRows(next);
-              }}
-              style={{ flex: "1 1 35%" }}
-            />
-            <input
-              type="text"
-              placeholder="value"
-              value={row.value}
-              onChange={(e) => {
-                const next = advanced.envRows.slice();
-                next[idx] = { ...row, value: e.target.value };
-                setEnvRows(next);
-              }}
-              style={{ flex: "1 1 55%" }}
-            />
-            <button
-              type="button"
-              className="link"
-              onClick={() =>
-                setEnvRows(advanced.envRows.filter((_, i) => i !== idx))
-              }
-              aria-label="Remove env var"
-            >
-              ✕
-            </button>
-          </div>
-        ))}
+        {advanced.envRows.map((row, idx) => {
+          const trimmed = row.key.trim();
+          const invalid = trimmed.length > 0 && !ENV_KEY_RE.test(trimmed);
+          const duplicate =
+            trimmed.length > 0 &&
+            advanced.envRows.some(
+              (other, otherIdx) =>
+                otherIdx !== idx && other.key.trim() === trimmed,
+            );
+          return (
+            <div key={idx} className="env-row">
+              <div className="env-row-inputs">
+                <input
+                  type="text"
+                  placeholder="KEY"
+                  value={row.key}
+                  onChange={(e) => {
+                    const next = advanced.envRows.slice();
+                    next[idx] = { ...row, key: e.target.value };
+                    setEnvRows(next);
+                  }}
+                  className={invalid || duplicate ? "input-invalid" : ""}
+                  aria-invalid={invalid || duplicate}
+                  data-testid={`spawn-env-key-${idx}`}
+                />
+                <input
+                  type="text"
+                  placeholder="value"
+                  value={row.value}
+                  onChange={(e) => {
+                    const next = advanced.envRows.slice();
+                    next[idx] = { ...row, value: e.target.value };
+                    setEnvRows(next);
+                  }}
+                  data-testid={`spawn-env-value-${idx}`}
+                />
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() =>
+                    setEnvRows(advanced.envRows.filter((_, i) => i !== idx))
+                  }
+                  aria-label="Remove env var"
+                >
+                  ✕
+                </button>
+              </div>
+              {invalid && (
+                <div className="muted small env-row-error">
+                  Key must match <code>[A-Za-z_][A-Za-z0-9_]*</code>
+                </div>
+              )}
+              {!invalid && duplicate && (
+                <div className="muted small env-row-error">
+                  Duplicate key — only the last row wins
+                </div>
+              )}
+            </div>
+          );
+        })}
         <button
           type="button"
           onClick={() =>
@@ -484,6 +559,21 @@ function AdvancedSection({
       </fieldset>
     </details>
   );
+}
+
+/// Submit-gating helper shared by both forms. Returns true if every env
+/// row's key is either empty (unstarted row) or a syntactically valid name
+/// AND no two non-empty keys collide.
+function envRowsAreValid(rows: EnvRow[]): boolean {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const trimmed = row.key.trim();
+    if (trimmed.length === 0) continue;
+    if (!ENV_KEY_RE.test(trimmed)) return false;
+    if (seen.has(trimmed)) return false;
+    seen.add(trimmed);
+  }
+  return true;
 }
 
 function AgentPicker({
@@ -666,7 +756,8 @@ function SingleForm({
   const canSubmit =
     !!repoId &&
     branch.value.trim().length > 0 &&
-    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
+    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
+    envRowsAreValid(advanced.envRows);
 
   const submit = () => {
     if (!canSubmit || submittedRef.current) return;
@@ -901,7 +992,8 @@ function WorkspaceForm({
   const canSpawn =
     !!workspaceId &&
     branch.value.trim().length > 0 &&
-    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
+    (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
+    envRowsAreValid(advanced.envRows);
 
   const submit = () => {
     if (!canSpawn || submittedRef.current) return;

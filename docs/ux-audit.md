@@ -43,18 +43,12 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 
 ### Spawn dialog
 
-- **Repo dropdown can be empty.** With zero registered repos, the Single-form repo `<select>` renders no `<option>` — `repoId` is `""`, the Spawn button is disabled, but nothing explains the situation. The sidebar's `+ Session` button opens the dialog unconditionally.
-  - Files: `apps/tauri-app/src/components/SpawnDialog.tsx:535-546`, `apps/tauri-app/src/components/Sidebar.tsx:127-132` (`+ Session` always enabled).
-  - Suggested direction: short empty-state inside the dialog ("Add a repo first") with a button that closes the dialog and opens the directory picker, OR disable the toolbar `+ Session` when `repos.length === 0`.
-- **Backdrop click discards all typed input with no warning.** Clicking outside the modal calls `onClose` directly. Headless prompt, env-var rows, custom branch name — all gone.
-  - File: `apps/tauri-app/src/components/SpawnDialog.tsx:110` (`onClick={onClose}` on the backdrop).
-  - Suggested direction: confirm if the form is dirty, or require an explicit Cancel/X.
+- ~~**Repo dropdown can be empty.**~~ **Resolved (iter 27).** The sidebar toolbar already disabled `+ Session` when `repos.length === 0` (iter 4), and the dialog itself now renders a dedicated `EmptyRepoState` panel ("No repos registered" + Cancel / + Add repo buttons) instead of the form when invoked with no repos. The + Add repo button closes the dialog and triggers the directory picker via the same `onAddRepo` callback the sidebar's Add repo button uses.
+- ~~**Backdrop click discards all typed input with no warning.**~~ **Resolved (iter 27).** Backdrop click is no longer a close trigger on the spawn dialog. The dialog still has three ways to dismiss (Escape, Cancel, ✕) but a stray click outside silently destroying form state is gone.
 - **No loading state after Submit.** `submit` fires `spawn_session` then immediately `onSpawned()` + `onClose()`; the dialog vanishes. Until the daemon's `session_updated` arrives (which can take several seconds for worktree creation) the user is left staring at the empty state with no indication that a spawn is in flight.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:511-531` (single), `715-735` (workspace).
   - Suggested direction: optimistic toast/inline progress, or keep the dialog visible with a spinner until the new `session_updated` is observed.
-- **Spawn failures surface only as `console.error`.** The daemon's `Error { message }` reply (dirty working tree, can't create branch, etc.) is logged to the dev console and nothing else. End user sees nothing.
-  - File: `apps/tauri-app/src/App.tsx:848-850`.
-  - Suggested direction: surface as a toast/banner; ideally route to the spawn dialog if it's the response to a spawn we just sent.
+- ~~**Spawn failures surface only as `console.error`.**~~ **Resolved (iter 2 + 22).** Every `DaemonMessage::Error` now hits the bottom-right toast stack via `pushToast(..., severity: "error", message: "Daemon error", detail: msg.message)`. The same handler also disarms any armed spawn intent, so a daemon-rejected spawn doesn't leave stale pane/tab routing for the next attempt. Routing the toast specifically to the spawn dialog (vs the global stack) is still deferred — the cost (correlating an error reply to a request id) outweighs the benefit when the toast is already prominent.
 - ~~**`spawning` and `working` share the same accent-blue dot.**~~ **Resolved (iter 23).** `.status-spawning` is now a hollow accent ring (transparent fill + 1.5px border) while `.status-working` stays solid accent. A glance differentiates "still bootstrapping" from "actively running".
 - ~~**Workspace form has no "Cancel preview" / refresh affordance.**~~ **Resolved (iter 18).** Preview-reset `useEffect` now depends on `useWorktree` too, so toggling worktree mode clears the stale preview table and requires an explicit re-Preview.
 - **Random worktree branch name regenerates every dialog open.** Closing and reopening the spawn dialog (even on the same target) gives a different `wt/<adj>-<noun>` suggestion, so users who Cancel-then-reopen lose their intended branch name.
@@ -62,9 +56,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - Suggested direction: persist last-suggested name per-target in component state at the App level, or accept this as a freshness feature with a "regenerate" button.
 - ~~**`Spawn → Spawn` double-click submits twice.**~~ **Resolved (iter 18).** Both `SingleForm.submit` and `WorkspaceForm.submit` guard via a `submittedRef = useRef(false)` flip that survives synchronous double-clicks before the dialog unmounts.
 - ~~**Permission-mode dropdown silently retains a value while disabled.**~~ **Resolved (iter 24).** Inline hint is now explicit: "Ignored while {skip-permissions|yolo} is on — claude will run without --permission-mode. The dropdown value is preserved for when you toggle it off." So the user knows both what will happen (no flag sent) and that the value is intentionally remembered for later. Same pattern for the codex sandbox dropdown.
-- **Env var rows have no key-uniqueness or `KEY=value` syntax check.** Duplicate keys silently win the last-write, malformed keys are sent to the daemon and either rejected with the unhelpful `error` console log (above) or accepted into the child env.
-  - File: `apps/tauri-app/src/components/SpawnDialog.tsx:320-373`.
-  - Suggested direction: inline validation (`/^[A-Za-z_][A-Za-z0-9_]*$/`) and a dedup warning.
+- ~~**Env var rows have no key-uniqueness or `KEY=value` syntax check.**~~ **Resolved (iter 27).** Each env row now validates the key against `/^[A-Za-z_][A-Za-z0-9_]*$/` and flags duplicates against other rows in the same dialog. Invalid keys get a `.input-invalid` outline + inline error; duplicates get a "Duplicate key — only the last row wins" hint. Submit is gated on `envRowsAreValid` in both SingleForm and WorkspaceForm.
 - **Worktree-default toggle persists immediately on click.** Toggling "Create a worktree" fires `set_repo_worktree_default` / `set_workspace_worktree_default` to the daemon for the current repo/workspace, which is fine — but cancelling the spawn dialog leaves the changed default behind. The toggle in this dialog has dual purpose ("for this spawn" + "remember as default") with no UI to separate them.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:495-504`, `689-698`.
   - Suggested direction: separate the two intents, or only persist on a successful spawn.

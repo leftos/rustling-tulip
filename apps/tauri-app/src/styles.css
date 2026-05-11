@@ -713,7 +713,16 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   height: 100%; gap: 16px; padding: 32px;
 }
 .empty-state h1 { margin: 0; font-weight: 500; }
+.empty-state h3 { margin: 0; font-weight: 500; }
+.empty-state p { margin: 0; max-width: 40ch; text-align: center; line-height: 1.5; }
 .empty-state .hint { color: var(--fg-muted); }
+
+.env-row { margin-bottom: 0.5rem; }
+.env-row-inputs { display: flex; gap: 0.5rem; align-items: center; }
+.env-row-inputs input:nth-of-type(1) { flex: 1 1 35%; }
+.env-row-inputs input:nth-of-type(2) { flex: 1 1 55%; }
+.env-row-error { margin-top: 2px; color: var(--warn); }
+.input-invalid { border-color: var(--warn); }
 .status-line { color: var(--fg-muted); }
 
 .badge {
