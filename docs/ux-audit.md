@@ -87,15 +87,11 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 
 ### Tabs + panes (grid, drag/drop, pop-out)
 
-- **All freshly-created tabs are named "Tab".** The daemon's `make_tab` uses the literal `"Tab"` when the caller passes `name: None`, and every UI caller passes `null`. After two `+ New tab` clicks the tab bar shows `Tab │ Tab`.
-  - Files: `crates/daemon/src/tabs.rs:36-49`, `apps/tauri-app/src/components/TabBar.tsx:47`, `apps/tauri-app/src/App.tsx:259-262`, `app/.../App.tsx:699-703`.
-  - Suggested direction: derive default from the seeded session's label (when an `initial_session_id` is set), or append the next free integer.
+- ~~**All freshly-created tabs are named "Tab".**~~ **Resolved (iter 17).** `make_tab` picks the next free default name (`"Tab"`, `"Tab 2"`, `"Tab 3"`, ...) based on the current tab list, with gap-filling so closed-and-reopened slots reuse their old number. Applies to plain `create_tab`, `merge_tabs`, and `extract_to_new_tab`.
 - **Merge-tabs is hard-coded to `tile_horizontal` layout.** Protocol exposes vertical too, but the user cannot pick — the context menu offers only a single "Merge N selected into new tab" entry.
   - File: `apps/tauri-app/src/components/TabBar.tsx:96-108`.
   - Suggested direction: submenu choosing layout, or read the orientation from the source tabs.
-- **Merge doesn't switch to the new tab.** `merge_tabs` produces a fresh tab id, but neither `App.tsx` nor `TabBar` flags `pendingTabActivate`. Active id falls back to `next[0]` after the originals are removed, so the user lands on the first remaining tab, not the merged one.
-  - Files: `apps/tauri-app/src/App.tsx:758-766` (tab_removed handler), `apps/tauri-app/src/components/TabBar.tsx:96-108`.
-  - Suggested direction: set `pendingTabActivate = true` before sending `merge_tabs`, mirroring the spawn flow.
+- ~~**Merge doesn't switch to the new tab.**~~ **Resolved (iter 17).** `TabBar.onMergeSelected` calls a new `onArmNextNewTab` App-level callback that flips `pendingTabActivate` before sending `merge_tabs`, so the resulting `tab_updated` auto-activates the merged tab.
 - **Tab pill close × has no confirmation.** Closing the last pane-bearing tab destroys all its grid layout. Sessions survive but their tab/grid placement is gone — including across all pop-outs.
   - File: `apps/tauri-app/src/components/TabBar.tsx:50-56`.
   - Suggested direction: confirm when the tab has 2+ panes or contains active sessions, or offer an undo toast.
@@ -117,9 +113,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **After a split, focus stays on the source pane.** The fresh empty pane is invisible (focus border on the OTHER pane). User has to click the new pane to interact with `EmptyPane`'s "Spawn one here".
   - Files: `apps/tauri-app/src/components/GridRenderer.tsx:190-202` (no focus-follow), `App.tsx` doesn't drive focusedPaneId off TabUpdated.
   - Suggested direction: include the new pane id in the daemon's `TabUpdated` (already present), and the client switches `focusedPaneId` to it when triggered by a local split.
-- **`Move to new tab` in pane context menu is silent.** `extract_to_new_tab` succeeds and the user's pane disappears from the source tab. The new tab is appended at the end — and since no `pendingTabActivate` flag is set, the user stays on the source tab (or its fallback), not on the new tab. No toast, no scroll-to.
-  - File: `apps/tauri-app/src/components/GridRenderer.tsx:208-215`.
-  - Suggested direction: set `pendingTabActivate = true` before sending, same as the spawn flow.
+- ~~**`Move to new tab` in pane context menu is silent.**~~ **Resolved (iter 17).** `GridRenderer.PaneChrome.onExtract` calls `onArmNextNewTab` before sending `extract_to_new_tab`, so the new tab gets activated.
 - **Pane controls overlay covers the session header on small panes.** Absolute-positioned at `top: 4px; right: 4px;` — on narrow panes the close `×` overlaps `session-actions` (Pop out / Stop) buttons.
   - File: `apps/tauri-app/src/styles.css:605-637`.
   - Suggested direction: move controls into a dedicated chrome bar above the session header on small widths, or hide overlay buttons when session controls are within N px.

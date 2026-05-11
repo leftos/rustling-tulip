@@ -227,6 +227,13 @@ export default function App() {
     setState((s) => (s.focusedPaneId === paneId ? s : { ...s, focusedPaneId: paneId }));
   }, []);
 
+  /// Arm the App-level pending-activate-next-new-tab flag. Tab merges and
+  /// pane extracts call this right before sending the daemon message so
+  /// the subsequent `tab_updated` broadcast switches focus to the new tab.
+  const onArmNextNewTab = useCallback(() => {
+    setState((s) => (s.pendingTabActivate ? s : { ...s, pendingTabActivate: true }));
+  }, []);
+
   const onSelectSession = useCallback((sessionId: string) => {
     // Decide the side-effect from the latest committed state (read via ref so
     // it stays current), THEN dispatch a pure state update. Doing it the other
@@ -663,6 +670,7 @@ export default function App() {
             activeTabId={state.activeTabId}
             client={state.client!}
             onActivate={onActivateTab}
+            onArmNextNewTab={onArmNextNewTab}
           />
           {activeTab && state.client ? (
             activeTab.content.kind === "diff" ? (
@@ -682,6 +690,7 @@ export default function App() {
                 onFocusPane={onFocusPane}
                 onSpawnInPane={onSpawnInPane}
                 hasRepos={state.repos.length > 0}
+                onArmNextNewTab={onArmNextNewTab}
               />
             )
           ) : (

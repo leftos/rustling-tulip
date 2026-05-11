@@ -49,6 +49,11 @@ export default function TabWindow({
           onFocusPane={setFocusedPaneId}
           onSpawnInPane={onSpawnInPane}
           hasRepos={hasRepos}
+          /* Pop-out window has no tab bar / no concept of activating tabs,
+             so extract-to-new-tab from a pane here is best-effort: the new
+             tab still gets created in the daemon's tab list and shows up
+             in the main window; we just can't activate it from here. */
+          onArmNextNewTab={() => {}}
         />
       )}
     </div>

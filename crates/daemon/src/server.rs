@@ -913,8 +913,13 @@ async fn dispatch(
             name,
             initial_session_id,
         } => {
-            let new_tab = tabs::make_tab(name, initial_session_id);
-            hub.state.mutate(|s| s.tabs.push(new_tab.clone()))?;
+            // Resolve the default name against the current tab list so
+            // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
+            let new_tab = hub.state.mutate(|s| {
+                let tab = tabs::make_tab(name, initial_session_id, &s.tabs);
+                s.tabs.push(tab.clone());
+                tab
+            })?;
             let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
         }
         ClientMessage::CloseTab { tab_id } => {

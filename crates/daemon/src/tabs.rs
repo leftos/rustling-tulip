@@ -34,14 +34,19 @@ fn clamp_ratio(ratio: f32) -> f32 {
     }
 }
 
-/// Build a fresh single-pane tab.
-pub fn make_tab(name: Option<String>, initial_session_id: Option<String>) -> TabEntry {
+/// Build a fresh single-pane tab. When `name` is `None`, the helper picks
+/// the next free default name (`"Tab"`, `"Tab 2"`, `"Tab 3"`, ...) based on
+/// `existing` so the tab bar doesn't render `Tab │ Tab │ Tab`.
+pub fn make_tab(
+    name: Option<String>,
+    initial_session_id: Option<String>,
+    existing: &[TabEntry],
+) -> TabEntry {
     let id = new_id();
     let pane_id = new_id();
-    let default_name = "Tab".to_string();
     TabEntry {
         id,
-        name: name.unwrap_or(default_name),
+        name: name.unwrap_or_else(|| next_default_name(existing)),
         content: TabContent::Grid {
             grid: GridNode::Pane {
                 pane_id,
@@ -49,6 +54,32 @@ pub fn make_tab(name: Option<String>, initial_session_id: Option<String>) -> Tab
             },
         },
         created_at: Utc::now(),
+    }
+}
+
+/// Pick the smallest positive integer N such that neither `"Tab"` (for
+/// N == 1) nor `"Tab N"` (for N >= 2) already appears in `existing`'s
+/// names. Lets a closed-and-reopened tab reuse the freed slot instead of
+/// growing monotonically.
+fn next_default_name(existing: &[TabEntry]) -> String {
+    let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for t in existing {
+        if t.name == "Tab" {
+            used.insert(1);
+        } else if let Some(rest) = t.name.strip_prefix("Tab ")
+            && let Ok(n) = rest.parse::<u32>()
+        {
+            used.insert(n);
+        }
+    }
+    let mut n: u32 = 1;
+    while used.contains(&n) {
+        n += 1;
+    }
+    if n == 1 {
+        "Tab".to_string()
+    } else {
+        format!("Tab {n}")
     }
 }
 
@@ -495,9 +526,10 @@ pub fn merge_tabs(
     let grid = build_balanced(&collected, direction)
         .ok_or_else(|| anyhow!("merge would produce empty tab"))?;
     tabs.retain(|t| !tab_ids.contains(&t.id));
+    let resolved_name = name.unwrap_or_else(|| next_default_name(tabs));
     let entry = TabEntry {
         id: new_id(),
-        name: name.unwrap_or_else(|| "Tab".to_string()),
+        name: resolved_name,
         content: TabContent::Grid { grid },
         created_at: Utc::now(),
     };
@@ -541,9 +573,10 @@ pub fn extract_to_new_tab(
     }
     let grid = build_balanced(&extracted, SplitDirection::Horizontal)
         .ok_or_else(|| anyhow!("extract produced empty tab"))?;
+    let resolved_name = name.unwrap_or_else(|| next_default_name(tabs));
     let entry = TabEntry {
         id: new_id(),
-        name: name.unwrap_or_else(|| "Tab".to_string()),
+        name: resolved_name,
         content: TabContent::Grid { grid },
         created_at: Utc::now(),
     };
@@ -915,6 +948,28 @@ mod tests {
             content: TabContent::Grid { grid },
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn next_default_name_picks_smallest_free() {
+        let empty: Vec<TabEntry> = vec![];
+        assert_eq!(next_default_name(&empty), "Tab");
+
+        let with_first = vec![make_tab_with("t1", "Tab", pane("p1", None))];
+        assert_eq!(next_default_name(&with_first), "Tab 2");
+
+        let with_gap = vec![
+            make_tab_with("t1", "Tab", pane("p1", None)),
+            make_tab_with("t3", "Tab 3", pane("p3", None)),
+        ];
+        assert_eq!(next_default_name(&with_gap), "Tab 2");
+
+        // Custom names don't reserve slots — the user named those by hand.
+        let custom = vec![
+            make_tab_with("t1", "scratch", pane("p1", None)),
+            make_tab_with("t2", "review", pane("p2", None)),
+        ];
+        assert_eq!(next_default_name(&custom), "Tab");
     }
 
     #[test]

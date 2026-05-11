@@ -10,6 +10,10 @@ interface Props {
   activeTabId: string | null;
   client: DaemonClient;
   onActivate: (tabId: string) => void;
+  /// Arm the next-new-tab activation flag at the App level. Called right
+  /// before a merge/extract send so the freshly broadcast `tab_updated`
+  /// auto-switches the user into the new tab.
+  onArmNextNewTab: () => void;
 }
 
 interface ContextMenuState {
@@ -24,7 +28,13 @@ interface DragState {
   side: "before" | "after";
 }
 
-export default function TabBar({ tabs, activeTabId, client, onActivate }: Props) {
+export default function TabBar({
+  tabs,
+  activeTabId,
+  client,
+  onActivate,
+  onArmNextNewTab,
+}: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -116,6 +126,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
     const ordered = tabs
       .filter((t) => selectedTabIds.has(t.id))
       .map((t) => t.id);
+    onArmNextNewTab();
     client.send({
       type: "merge_tabs",
       tab_ids: ordered,
@@ -123,7 +134,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
       layout: "tile_horizontal",
     });
     setSelectedTabIds(new Set());
-  }, [tabs, selectedTabIds, client]);
+  }, [tabs, selectedTabIds, client, onArmNextNewTab]);
 
   const onCloseOthers = useCallback(
     (keepId: string) => {

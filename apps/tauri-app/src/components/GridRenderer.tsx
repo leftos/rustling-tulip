@@ -22,6 +22,10 @@ interface Props {
   onFocusPane: (paneId: string) => void;
   onSpawnInPane: (paneId: string) => void;
   hasRepos: boolean;
+  /// Arm the next-new-tab activation flag at the App level. Called right
+  /// before an extract-to-new-tab send so the freshly broadcast
+  /// `tab_updated` auto-switches the user into the new tab.
+  onArmNextNewTab: () => void;
 }
 
 export default function GridRenderer({
@@ -33,6 +37,7 @@ export default function GridRenderer({
   onFocusPane,
   onSpawnInPane,
   hasRepos,
+  onArmNextNewTab,
 }: Props) {
   const grid = tabGrid(tab);
   if (!grid) {
@@ -57,6 +62,7 @@ export default function GridRenderer({
         onFocusPane={onFocusPane}
         onSpawnInPane={onSpawnInPane}
         hasRepos={hasRepos}
+        onArmNextNewTab={onArmNextNewTab}
       />
     </div>
   );
@@ -73,6 +79,7 @@ interface NodeProps {
   onFocusPane: (paneId: string) => void;
   onSpawnInPane: (paneId: string) => void;
   hasRepos: boolean;
+  onArmNextNewTab: () => void;
 }
 
 function NodeRenderer(props: NodeProps) {
@@ -217,13 +224,14 @@ function PaneChrome(props: PaneChromeProps) {
   }, [client, tabId, node.pane_id]);
 
   const onExtract = useCallback(() => {
+    props.onArmNextNewTab();
     client.send({
       type: "extract_to_new_tab",
       source_tab_id: tabId,
       pane_ids: [node.pane_id],
       name: null,
     });
-  }, [client, tabId, node.pane_id]);
+  }, [client, tabId, node.pane_id, props]);
 
   const onDragStart = useCallback(
     (e: React.DragEvent) => {
