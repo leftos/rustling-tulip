@@ -66,7 +66,35 @@ export async function readHandshake(): Promise<DaemonHandshake> {
         `harness speaks ${PROTOCOL_VERSION}. Update src/types.ts and bump.`,
     );
   }
+  // Liveness: between sequential wdio specs, the previous Tauri session's
+  // daemon dies but its daemon.json lingers on disk pointing at a dead port.
+  // Reject stale handshakes so waitForHandshake keeps polling until the new
+  // supervisor writes a fresh file with a live pid.
+  if (!isPidAlive(parsed.pid)) {
+    throw new Error(`stale daemon.json: pid ${parsed.pid} is not alive`);
+  }
   return parsed;
+}
+
+/**
+ * Probe whether `pid` belongs to a running process. `process.kill(pid, 0)`
+ * never actually signals the target on POSIX (signal 0 is a no-op),
+ * and on Node-on-Windows it likewise resolves to a liveness probe via
+ * `OpenProcess` — see Node's libuv wrapper. Returns false on any error
+ * (ESRCH for dead pid, EPERM for not-our-process which we treat as
+ * "exists but inaccessible" → also "alive" in this context).
+ */
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EPERM means the process exists but we lack rights to signal it.
+    // Treat as alive — we don't need to signal, just probe.
+    return code === "EPERM";
+  }
 }
 
 /**

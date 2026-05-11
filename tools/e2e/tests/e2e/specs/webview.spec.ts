@@ -126,8 +126,10 @@ describe("rustling-tulip webview", function () {
       mode: "interactive",
       initial_prompt: null,
       dangerously_skip_permissions: false,
+      agent: "claude",
       model: null,
       permission_mode: null,
+      codex_sandbox: null,
       extra_env: [],
       prompt_injector: null,
     });
