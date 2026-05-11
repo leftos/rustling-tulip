@@ -84,9 +84,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **`split_pane` is hard-wired to `place: "second"`.** The protocol supports `first` (new pane on the left/top) but no UI ever sets that. Users can only split right and split down.
   - File: `apps/tauri-app/src/components/GridRenderer.tsx:190-202`.
   - Suggested direction: either add buttons for "split left / split up" or pick one direction and remove the protocol option.
-- **After a split, focus stays on the source pane.** The fresh empty pane is invisible (focus border on the OTHER pane). User has to click the new pane to interact with `EmptyPane`'s "Spawn one here".
-  - Files: `apps/tauri-app/src/components/GridRenderer.tsx:190-202` (no focus-follow), `App.tsx` doesn't drive focusedPaneId off TabUpdated.
-  - Suggested direction: include the new pane id in the daemon's `TabUpdated` (already present), and the client switches `focusedPaneId` to it when triggered by a local split.
+- ~~**After a split, focus stays on the source pane.**~~ **Resolved (iter 29).** New `onArmFocusNewPane(tabId, knownPaneIds)` callback on `GridRenderer` is called by `PaneChrome.sendSplit` right before sending `split_pane`. The App stores the snapshot in `pendingPaneFocusRef`; the next `tab_updated` for the matching tab diffs against the snapshot and sets `focusedPaneId` to whichever pane id wasn't there before. Mirrored locally in `TabWindow` (pop-out) since the pop-out has its own focus state. Disarms after the first matching update so the arm doesn't outlive its intent.
 - ~~**`Move to new tab` in pane context menu is silent.**~~ **Resolved (iter 17).** `GridRenderer.PaneChrome.onExtract` calls `onArmNextNewTab` before sending `extract_to_new_tab`, so the new tab gets activated.
 - **Pane controls overlay covers the session header on small panes.** Absolute-positioned at `top: 4px; right: 4px;` — on narrow panes the close `×` overlaps `session-actions` (Pop out / Stop) buttons.
   - File: `apps/tauri-app/src/styles.css:605-637`.

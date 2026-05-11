@@ -146,6 +146,16 @@ export default function App() {
     null,
   );
 
+  /// Captured when a pane sends `split_pane`. Records the tab id + the
+  /// pane ids that existed before the split. The next `tab_updated` for
+  /// the same tab diffs against this set and focuses whichever pane id
+  /// wasn't there before. Cleared after the first matching update or
+  /// (defensively) by a later tab/session removal that supersedes the
+  /// intent.
+  const pendingPaneFocusRef = useRef<
+    { tabId: string; knownPaneIds: Set<string> } | null
+  >(null);
+
   // Snapshot of the latest committed state, for click handlers that need to
   // read state and dispatch side effects without putting the send inside a
   // state updater.
@@ -190,6 +200,7 @@ export default function App() {
             clientRef,
             seenSessionIdsRef,
             pendingSpawnIntentRef,
+            pendingPaneFocusRef,
           ),
         );
         // Dev-only: expose the daemon client on window for e2e specs that
@@ -243,6 +254,16 @@ export default function App() {
   const onArmNextNewTab = useCallback(() => {
     setState((s) => (s.pendingTabActivate ? s : { ...s, pendingTabActivate: true }));
   }, []);
+
+  /// Capture the pre-split pane id set so the next tab_updated for the
+  /// same tab can diff and focus the fresh pane. See pendingPaneFocusRef
+  /// for the consumer.
+  const onArmFocusNewPane = useCallback(
+    (tabId: string, knownPaneIds: Set<string>) => {
+      pendingPaneFocusRef.current = { tabId, knownPaneIds };
+    },
+    [],
+  );
 
   const onSelectSession = useCallback((sessionId: string) => {
     // Decide the side-effect from the latest committed state (read via ref so
@@ -725,6 +746,7 @@ export default function App() {
                 onSpawnInPane={onSpawnInPane}
                 hasRepos={state.repos.length > 0}
                 onArmNextNewTab={onArmNextNewTab}
+                onArmFocusNewPane={onArmFocusNewPane}
               />
             )
           ) : (
@@ -816,6 +838,9 @@ function handleMessage(
   clientRef: React.MutableRefObject<DaemonClient | null>,
   seenSessionIdsRef: React.MutableRefObject<Set<string>>,
   pendingSpawnIntentRef: React.MutableRefObject<PendingSpawnIntent>,
+  pendingPaneFocusRef: React.MutableRefObject<
+    { tabId: string; knownPaneIds: Set<string> } | null
+  >,
 ) {
   switch (msg.type) {
     case "welcome":
@@ -954,11 +979,29 @@ function handleMessage(
           active = msg.tab.id;
           pendingTabActivate = false;
         }
+        // Post-split focus: if a split armed pendingPaneFocusRef for this
+        // tab, diff the new grid against the snapshot and focus the new
+        // pane. Disarms after the first matching update so a stale arm
+        // (e.g. user cancelled mentally and never split again, then later
+        // pane updates fire for unrelated reasons) doesn't yank focus.
+        let focusedPaneId = s.focusedPaneId;
+        const arm = pendingPaneFocusRef.current;
+        if (arm && arm.tabId === msg.tab.id) {
+          const grid = tabGrid(msg.tab);
+          if (grid) {
+            const fresh = collectPanes(grid).find(
+              (p) => !arm.knownPaneIds.has(p.pane_id),
+            );
+            if (fresh) focusedPaneId = fresh.pane_id;
+          }
+          pendingPaneFocusRef.current = null;
+        }
         return {
           ...s,
           tabs: next,
           activeTabId: active,
           pendingTabActivate,
+          focusedPaneId,
         };
       });
       return;

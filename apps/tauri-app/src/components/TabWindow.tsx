@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot, TabEntry } from "../types";
+import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
+import { collectPanes } from "../utils/grid";
 import GridRenderer from "./GridRenderer";
 import DiffPane from "./DiffPane";
 
@@ -21,6 +22,29 @@ export default function TabWindow({
   hasRepos,
 }: Props) {
   const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
+
+  // Mirror App's pendingPaneFocusRef: capture pre-split pane ids, then
+  // diff against the next tab prop change to focus the freshly created
+  // pane. Pop-out window has no daemon tab_updated handler of its own —
+  // the parent App pushes a new tab prop in via state.
+  const pendingPaneFocusRef = useRef<Set<string> | null>(null);
+
+  const onArmFocusNewPane = useCallback(
+    (_tabId: string, knownPaneIds: Set<string>) => {
+      pendingPaneFocusRef.current = knownPaneIds;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const arm = pendingPaneFocusRef.current;
+    if (!arm) return;
+    const grid = tabGrid(tab);
+    if (!grid) return;
+    const fresh = collectPanes(grid).find((p) => !arm.has(p.pane_id));
+    if (fresh) setFocusedPaneId(fresh.pane_id);
+    pendingPaneFocusRef.current = null;
+  }, [tab]);
 
   const onSpawnInPane = useCallback((_paneId: string) => {
     // Pop-out window has no SpawnDialog of its own; defer to the main
@@ -75,6 +99,7 @@ export default function TabWindow({
              tab still gets created in the daemon's tab list and shows up
              in the main window; we just can't activate it from here. */
           onArmNextNewTab={() => {}}
+          onArmFocusNewPane={onArmFocusNewPane}
         />
       )}
     </div>

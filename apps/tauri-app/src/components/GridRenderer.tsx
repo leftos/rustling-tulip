@@ -9,6 +9,7 @@ import {
   type SplitDirection,
   type TabEntry,
 } from "../types";
+import { collectPanes } from "../utils/grid";
 import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
 
@@ -27,6 +28,12 @@ interface Props {
   /// before an extract-to-new-tab send so the freshly broadcast
   /// `tab_updated` auto-switches the user into the new tab.
   onArmNextNewTab: () => void;
+  /// Arm the next-tab-update-for-this-tab to focus a freshly created pane.
+  /// Called right before a split send so the new pane (which the daemon
+  /// allocates the id for) gets focused on the resulting `tab_updated`.
+  /// Receives the tab id + the pane ids already present at split time —
+  /// the new pane id is whichever isn't in the set.
+  onArmFocusNewPane: (tabId: string, knownPaneIds: Set<string>) => void;
 }
 
 export default function GridRenderer({
@@ -39,6 +46,7 @@ export default function GridRenderer({
   onSpawnInPane,
   hasRepos,
   onArmNextNewTab,
+  onArmFocusNewPane,
 }: Props) {
   const grid = tabGrid(tab);
   if (!grid) {
@@ -50,6 +58,10 @@ export default function GridRenderer({
       </div>
     );
   }
+  // Snapshot of pane ids at render time. Captured once per render and
+  // passed by reference to PaneChrome's split handler — the handler reads
+  // it at click time, so renames between render and click are fine.
+  const knownPaneIds = new Set(collectPanes(grid).map((p) => p.pane_id));
   return (
     <div className="grid-root">
       <NodeRenderer
@@ -64,6 +76,8 @@ export default function GridRenderer({
         onSpawnInPane={onSpawnInPane}
         hasRepos={hasRepos}
         onArmNextNewTab={onArmNextNewTab}
+        onArmFocusNewPane={onArmFocusNewPane}
+        knownPaneIds={knownPaneIds}
       />
     </div>
   );
@@ -81,6 +95,8 @@ interface NodeProps {
   onSpawnInPane: (paneId: string) => void;
   hasRepos: boolean;
   onArmNextNewTab: () => void;
+  onArmFocusNewPane: (tabId: string, knownPaneIds: Set<string>) => void;
+  knownPaneIds: Set<string>;
 }
 
 function NodeRenderer(props: NodeProps) {
@@ -208,6 +224,10 @@ function PaneChrome(props: PaneChromeProps) {
 
   const sendSplit = useCallback(
     (direction: SplitDirection) => {
+      // Arm the focus-new-pane signal before sending. The daemon's
+      // tab_updated will arrive with one more pane than the snapshot;
+      // App diffs and focuses the new one.
+      props.onArmFocusNewPane(tabId, props.knownPaneIds);
       client.send({
         type: "split_pane",
         tab_id: tabId,
@@ -217,7 +237,7 @@ function PaneChrome(props: PaneChromeProps) {
         new_session_id: null,
       });
     },
-    [client, tabId, node.pane_id],
+    [client, tabId, node.pane_id, props],
   );
 
   const onClose = useCallback(() => {
