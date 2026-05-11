@@ -1,0 +1,133 @@
+# Add codex as an alternative agent
+
+## Context
+
+The daemon currently shells out to the `claude` CLI for every interactive and headless session. Users want to spawn `codex` (OpenAI Codex CLI) sessions through the same UI — same sidebar, same scrollback, same orphan recovery — without rewriting the spawn pipeline twice. The goal is per-session agent choice (claude or codex), defaulting to whatever the user picked last for that repo.
+
+The CLIs are similar enough to share a single spawn path: both support `--add-dir <path>` (repeatable), `--model`, working-directory selection, and a "bypass all safety" flag. They diverge on permission/sandbox semantics and on how the initial prompt is delivered (claude `-p <text>` vs codex positional `[PROMPT]`).
+
+Scope decisions (from the interview):
+- **Interactive only** for codex — headless mode stays claude-only for now (codex `exec` JSON parser is a follow-up).
+- **Agent-aware permission UI** — codex shows its own `--sandbox` enum + a `--yolo` toggle; claude keeps its existing picker.
+- **Workspace sessions supported** for codex via `--add-dir` (confirmed in OpenAI docs).
+- **Last-used agent per repo** is remembered in `state.json`.
+
+## Wire protocol (`crates/protocol/src/lib.rs`)
+
+Bump `PROTOCOL_VERSION` `4 → 5`. Add types:
+
+```rust
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Agent {
+    #[default]
+    Claude,
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexSandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandbox {
+    #[must_use]
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+```
+
+Add fields (all `#[serde(default)]` so v4 messages still decode):
+- `SpawnRequest`: `agent: Agent`, `codex_sandbox: Option<CodexSandbox>`. Reuse the existing `dangerously_skip_permissions: bool` — for codex it maps to `--yolo` (alias of `--dangerously-bypass-approvals-and-sandbox`). Reuse `model: Option<String>` (both CLIs accept `--model <id>`). For codex, `permission_mode` is ignored.
+- `SessionSnapshot`: `agent: Agent`. Daemon always populates this so the UI can label the session.
+- `RepoEntry`: `last_agent: Option<Agent>` for the dialog's per-repo default.
+
+## Daemon
+
+### Spawn path (`crates/daemon/src/server.rs`)
+
+- Rename `claude_program()` (line 1592) → `agent_program(agent: Agent) -> String`. For `Agent::Claude` keep `RUSTLING_TULIP_CLAUDE` / `"claude"` default. For `Agent::Codex` use `RUSTLING_TULIP_CODEX` / `"codex"`.
+- In `spawn_interactive_session()` (line 1107), branch arg construction on `req.agent`:
+  - **Claude branch** — unchanged from today.
+  - **Codex branch** — build args as:
+    - `--add-dir <path>` for every member after the first (same loop as claude — codex accepts the identical flag).
+    - `--model <id>` if `req.model.is_some()`.
+    - When `dangerously_skip_permissions` is true: `--yolo`. Otherwise, if `codex_sandbox.is_some()`: `--sandbox <value>` via `CodexSandbox::as_cli_arg()`.
+    - Initial prompt: append as **positional** trailing arg (not `-p`). Skip when `prompt_injector` is set, matching claude's behavior.
+- In `spawn_headless_session()` (line 1312), reject codex early with `anyhow!("headless mode is not yet supported for codex; use interactive mode")`. Return the error to the client like other spawn validation errors.
+- Persist `agent` on the `SessionRecord` (passed through to `SessionSnapshot` via `snapshot()`).
+- On every successful spawn against a single repo or workspace, update `RepoEntry::last_agent` for the targeted repo(s) and re-save `state.json` (existing pattern in `server.rs` for tab/workspace updates).
+
+### Session record (`crates/daemon/src/session.rs`)
+
+Add `agent: Agent` to `SessionRecord` (around line 36). Default to `Agent::Claude` in `snapshot()` for legacy orphan-meta files that lack it (covered below). Surface it in `SessionSnapshot`.
+
+### Orphan recovery (`crates/daemon/src/orphan.rs`)
+
+- Add `agent: Option<Agent>` (`#[serde(default)]`) and keep the existing `program_name: Option<String>` field. At write time, set `program_name = Some("codex")` for codex sessions; `is_session_alive` already matches `program_name` substring-insensitively, so no logic change there.
+- When reading legacy `meta.json` without `agent`, default to `Agent::Claude` (matches today's only behavior).
+
+### State persistence (`crates/daemon/src/state.rs`)
+
+`RepoEntry::last_agent: Option<Agent>` (serde-default `None`). Add a single helper `persist_last_agent(repo_id, agent)` used from both single-repo and workspace spawns.
+
+## Frontend
+
+### Types (`apps/tauri-app/src/types.ts`)
+
+Mirror the Rust additions: `Agent = "claude" | "codex"`, `CodexSandbox = "read-only" | "workspace-write" | "danger-full-access"`, fields on `SpawnRequest`, `SessionSnapshot`, `RepoEntry`. Bump the `PROTOCOL_VERSION` constant.
+
+### Spawn dialog (`apps/tauri-app/src/components/SpawnDialog.tsx`)
+
+- Add an **Agent** segmented control near the top of both `SingleForm` (line 435) and `WorkspaceForm` (line 608). Two pills: "claude" / "codex".
+- Default selection: `repo.last_agent ?? "claude"` for single-repo; `workspace.members[0].last_agent ?? "claude"` for workspace.
+- When `agent === "codex"`:
+  - In the mode picker, disable the "headless" option with a tooltip "headless mode is not yet supported for codex".
+  - In the Advanced section (line 273), replace the `PermissionMode` dropdown with a `CodexSandbox` dropdown (`read-only / workspace-write / danger-full-access`). Re-label the existing "Dangerously skip permissions" toggle to "Yolo (skip all approvals + sandbox)".
+- Send `agent` and `codex_sandbox` in the `SpawnRequest`.
+
+### Session display (`apps/tauri-app/src/components/SessionPane.tsx`)
+
+In the header (line 51), append a small agent badge after the mode suffix: ` · claude` / ` · codex`. Optionally mirror in `Sidebar.tsx` `SessionLeaf` (line 323) and `SessionWindow` (`App.tsx`).
+
+### xterm + pop-out
+
+No changes — both are agent-agnostic byte pipes.
+
+## Critical files to touch
+
+- `crates/protocol/src/lib.rs` — types + version bump.
+- `crates/daemon/src/server.rs` — spawn-args branching, `agent_program`, headless guard, `last_agent` write-through.
+- `crates/daemon/src/session.rs` — `SessionRecord.agent`.
+- `crates/daemon/src/orphan.rs` — `OrphanMeta.agent` (+ `program_name = "codex"` on write).
+- `crates/daemon/src/state.rs` — `RepoEntry.last_agent`.
+- `apps/tauri-app/src/types.ts` — mirrored TS types + version bump.
+- `apps/tauri-app/src/components/SpawnDialog.tsx` — agent picker + agent-aware fields.
+- `apps/tauri-app/src/components/SessionPane.tsx` — agent badge.
+
+## Reuse
+
+- `agent_program()` follows the existing `RUSTLING_TULIP_CLAUDE` env-override pattern (server.rs:1592) — just parameterized.
+- `--add-dir` loop body is copied verbatim from the claude branch — codex uses the identical flag.
+- `is_session_alive` (orphan.rs:128) already keys off `program_name`, so codex orphans get free liveness checks once we set `program_name = "codex"`.
+- `dangerously_skip_permissions: bool` is repurposed for codex `--yolo` rather than adding a new field.
+- `RepoEntry` mutate-then-save pattern (used by `default_use_worktree`) is the template for `last_agent` persistence.
+
+## Verification
+
+1. `cargo clippy --all-targets --all-features -- -D warnings` — zero warnings.
+2. `cargo fmt --check`.
+3. `cargo test -p protocol` — add a round-trip test for v5 messages with `agent: Codex` + `codex_sandbox: WorkspaceWrite`, plus one that decodes a v4-shaped `SpawnRequest` (missing `agent`) and confirms `Agent::Claude` default.
+4. `cargo test -p daemon` — new unit test for codex arg assembly: assert that a workspace `SpawnRequest` with `agent: Codex`, `codex_sandbox: WorkspaceWrite`, prompt `"hi"`, and two members produces args `["--add-dir", "<m1>", "--sandbox", "workspace-write", "hi"]` (factor the arg-builder out of `spawn_interactive_session` if needed to make it testable).
+5. `cd apps/tauri-app && pnpm typecheck`.
+6. Manual e2e: install codex CLI (`npm i -g @openai/codex`) or point `RUSTLING_TULIP_CODEX` at a fake binary; in the app, open the spawn dialog, pick "codex", spawn against a single repo and a workspace, confirm both attach with live PTY, scrollback persists, and the session header shows ` · codex`.
+7. Orphan check: with a live codex session running, `taskkill /F /IM rustling-tulipd.exe`, restart the app, confirm the codex session reattaches in read-only mode with the badge intact.
+8. Backward-compat check: with the new daemon, load an existing `state.json` (no `last_agent`) and an existing `sessions/<id>/meta.json` (no `agent`) — both should decode cleanly and the missing fields default to `None` / `Claude`.
