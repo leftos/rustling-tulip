@@ -64,9 +64,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 ### Tabs + panes (grid, drag/drop, pop-out)
 
 - ~~**All freshly-created tabs are named "Tab".**~~ **Resolved (iter 17).** `make_tab` picks the next free default name (`"Tab"`, `"Tab 2"`, `"Tab 3"`, ...) based on the current tab list, with gap-filling so closed-and-reopened slots reuse their old number. Applies to plain `create_tab`, `merge_tabs`, and `extract_to_new_tab`.
-- **Merge-tabs is hard-coded to `tile_horizontal` layout.** Protocol exposes vertical too, but the user cannot pick — the context menu offers only a single "Merge N selected into new tab" entry.
-  - File: `apps/tauri-app/src/components/TabBar.tsx:96-108`.
-  - Suggested direction: submenu choosing layout, or read the orientation from the source tabs.
+- ~~**Merge-tabs is hard-coded to `tile_horizontal` layout.**~~ **Resolved (iter 28).** Context menu now splits the merge entry into two: "Side by side (horizontal)" and "Stacked (vertical)" under a `Merge N selected into new tab` label. Layout flows through `onMergeSelected(layout)` to the daemon `merge_tabs` message.
 - ~~**Merge doesn't switch to the new tab.**~~ **Resolved (iter 17).** `TabBar.onMergeSelected` calls a new `onArmNextNewTab` App-level callback that flips `pendingTabActivate` before sending `merge_tabs`, so the resulting `tab_updated` auto-activates the merged tab.
 - **Tab pill close × has no confirmation.** Closing the last pane-bearing tab destroys all its grid layout. Sessions survive but their tab/grid placement is gone — including across all pop-outs.
   - File: `apps/tauri-app/src/components/TabBar.tsx:50-56`.

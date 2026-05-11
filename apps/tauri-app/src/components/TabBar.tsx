@@ -121,20 +121,23 @@ export default function TabBar({
 
   const closeMenu = useCallback(() => setContextMenu(null), []);
 
-  const onMergeSelected = useCallback(() => {
-    if (selectedTabIds.size < 2) return;
-    const ordered = tabs
-      .filter((t) => selectedTabIds.has(t.id))
-      .map((t) => t.id);
-    onArmNextNewTab();
-    client.send({
-      type: "merge_tabs",
-      tab_ids: ordered,
-      name: null,
-      layout: "tile_horizontal",
-    });
-    setSelectedTabIds(new Set());
-  }, [tabs, selectedTabIds, client, onArmNextNewTab]);
+  const onMergeSelected = useCallback(
+    (layout: "tile_horizontal" | "tile_vertical") => {
+      if (selectedTabIds.size < 2) return;
+      const ordered = tabs
+        .filter((t) => selectedTabIds.has(t.id))
+        .map((t) => t.id);
+      onArmNextNewTab();
+      client.send({
+        type: "merge_tabs",
+        tab_ids: ordered,
+        name: null,
+        layout,
+      });
+      setSelectedTabIds(new Set());
+    },
+    [tabs, selectedTabIds, client, onArmNextNewTab],
+  );
 
   const onCloseOthers = useCallback(
     (keepId: string) => {
@@ -378,8 +381,8 @@ export default function TabBar({
             setConfirmingCloseOthers(false);
             closeMenu();
           }}
-          onMergeSelected={() => {
-            onMergeSelected();
+          onMergeSelected={(layout) => {
+            onMergeSelected(layout);
             setConfirmingCloseOthers(false);
             closeMenu();
           }}
@@ -439,7 +442,7 @@ interface ContextMenuProps {
   onRename: () => void;
   onCloseTab: () => void;
   onCloseOthers: () => void;
-  onMergeSelected: () => void;
+  onMergeSelected: (layout: "tile_horizontal" | "tile_vertical") => void;
   onPopOut: () => void;
 }
 
@@ -496,9 +499,25 @@ function TabContextMenu(p: ContextMenuProps) {
         {p.selectedCount >= 2 && (
           <>
             <li className="context-menu-separator" aria-hidden="true" />
+            <li className="context-menu-label">
+              Merge {p.selectedCount} selected into new tab
+            </li>
             <li>
-              <button type="button" onClick={p.onMergeSelected}>
-                Merge {p.selectedCount} selected into new tab
+              <button
+                type="button"
+                onClick={() => p.onMergeSelected("tile_horizontal")}
+                data-testid="tab-context-merge-horizontal"
+              >
+                &nbsp;&nbsp;Side by side (horizontal)
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => p.onMergeSelected("tile_vertical")}
+                data-testid="tab-context-merge-vertical"
+              >
+                &nbsp;&nbsp;Stacked (vertical)
               </button>
             </li>
           </>

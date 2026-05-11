@@ -986,6 +986,13 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .context-menu-separator {
   height: 1px; background: var(--border); margin: 4px 2px;
 }
+.context-menu-label {
+  padding: 4px 12px 2px 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 /* ------- Tabs and grid renderer ------- */
 
