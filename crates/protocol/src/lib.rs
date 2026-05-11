@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 fn default_true() -> bool {
     true
@@ -832,6 +832,45 @@ pub enum ClientMessage {
         repo_id: String,
         message: String,
     },
+    /// Discard unstaged worktree changes for the named paths
+    /// (`git restore -- <path>`...). Index entries are untouched; callers
+    /// should unstage first if they want a fully clean reset for a file.
+    /// On success the daemon broadcasts a fresh [`DaemonMessage::RepoStatus`];
+    /// failures surface as [`DaemonMessage::GitWriteError`] with
+    /// `operation = "discard"`.
+    DiscardChanges {
+        repo_id: String,
+        paths: Vec<String>,
+    },
+    /// Push a new stash. Empty `message` is allowed — git falls back to its
+    /// default "WIP on <branch>" subject. Always run with `-u` so untracked
+    /// files come along. Daemon broadcasts a refreshed `RepoStatus` and a
+    /// fresh [`DaemonMessage::Stashes`] snapshot for `repo_id` on success.
+    StashPush {
+        repo_id: String,
+        message: String,
+    },
+    /// Request the current stash list. Daemon replies with
+    /// [`DaemonMessage::Stashes`].
+    ListStashes {
+        repo_id: String,
+    },
+    /// `git stash pop <stash_id>` — apply and drop. Broadcasts fresh
+    /// `RepoStatus` + `Stashes` on success.
+    StashPop {
+        repo_id: String,
+        stash_id: String,
+    },
+    /// `git stash apply <stash_id>` — apply without dropping.
+    StashApply {
+        repo_id: String,
+        stash_id: String,
+    },
+    /// `git stash drop <stash_id>` — drop without applying.
+    StashDrop {
+        repo_id: String,
+        stash_id: String,
+    },
     /// Open (or focus, if one already exists) a diff tab for the given
     /// (repo, path, against) triple. The daemon broadcasts a `TabUpdated`
     /// when a new tab is created, then replies with
@@ -1088,13 +1127,21 @@ pub enum DaemonMessage {
         sha: String,
         short_sha: String,
     },
-    /// Failure response to a stage/unstage/commit request. `operation` is
-    /// `"stage"`, `"unstage"`, or `"commit"` so the UI can attribute the
-    /// error.
+    /// Failure response to a stage/unstage/commit/discard/stash request.
+    /// `operation` is one of `"stage"`, `"unstage"`, `"commit"`,
+    /// `"discard"`, `"stash_push"`, `"stash_pop"`, `"stash_apply"`,
+    /// `"stash_drop"` so the UI can attribute the error.
     GitWriteError {
         repo_id: String,
         operation: String,
         error: String,
+    },
+    /// Response to [`ClientMessage::ListStashes`] and a broadcast after any
+    /// successful stash push/pop/drop. Carries the full current stash list
+    /// in `stash@{0}` → `stash@{N}` order (newest first).
+    Stashes {
+        repo_id: String,
+        stashes: Vec<GitStash>,
     },
     /// Response to [`ClientMessage::OpenDiffTab`]. Carries the tab id (new
     /// or pre-existing) so the requesting client can activate it.
@@ -1245,6 +1292,20 @@ pub struct GitCommitDetail {
     pub body: String,
     pub parent_shas: Vec<String>,
     pub changes: Vec<GitFileChange>,
+}
+
+/// One stash entry from `git stash list`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitStash {
+    /// Stash ref, e.g. `stash@{0}`. Stable for the duration of the listing
+    /// only — drop/pop renumbers subsequent stashes, so the UI must
+    /// re-request after every write.
+    pub id: String,
+    /// `%gs` from `git stash list` — the subject line including the
+    /// "WIP on <branch>: <sha> <message>" prefix git generates.
+    pub subject: String,
+    /// ISO-8601 timestamp from `%aI`.
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

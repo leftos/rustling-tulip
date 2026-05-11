@@ -266,11 +266,11 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 .changes-bucket-header .bucket-action:hover:not(:disabled) { color: var(--fg); }
 .changes-bucket-header .bucket-action:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Per-row stage/unstage button — sits on the right edge of a FileRow. Visible
-   when the row is hovered or focused, faded otherwise so the layout doesn't
-   shift. */
+/* Per-row stage/unstage/discard button — sits on the right edge of a
+   FileRow. Visible when the row is hovered or focused, faded otherwise so
+   the layout doesn't shift. Multiple actions can sit side-by-side; only
+   the first carries the auto-left margin so they stay clustered. */
 .changes-tree .row-action {
-  margin-left: auto;
   background: transparent;
   border: 0;
   color: var(--fg-muted);
@@ -281,9 +281,117 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   opacity: 0;
   transition: opacity 0.1s, color 0.1s;
 }
+.changes-tree .row-action:first-of-type { margin-left: auto; }
 .changes-tree .tree-row:hover .row-action,
 .changes-tree .tree-row:focus-within .row-action { opacity: 1; }
 .changes-tree .row-action:hover { color: var(--fg); }
+.changes-tree .row-action.danger:hover { color: var(--err, #f87171); }
+.changes-bucket-header .bucket-action.danger:hover:not(:disabled) {
+  color: var(--err, #f87171);
+}
+
+/* STASHES section — sits under the CHANGES buckets in the changes view. */
+.stashes-section {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+.stashes-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  user-select: none;
+}
+.stashes-header .bucket-label { font-weight: 600; }
+.stashes-header .bucket-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.stashes-body { padding: 4px 8px 8px; }
+.stash-push-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.stash-push-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.stash-push-button {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.stash-push-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.stash-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.stash-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.stash-row:last-child { border-bottom: 0; }
+.stash-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.stash-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.stash-subject {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stash-actions { display: flex; gap: 8px; }
+.stash-actions .link.danger { color: var(--err, #f87171); }
+
+/* Discard confirmation modal. */
+.discard-confirm-list {
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 10px;
+  margin: 8px 0;
+  list-style: none;
+}
+.discard-confirm-list li {
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Diff tab content (Monaco editor host). */
 .diff-pane-host {

@@ -958,6 +958,7 @@ function handleMessage(
     case "diff_tab_opened":
     case "file_snapshot":
     case "file_snapshot_error":
+    case "stashes":
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );

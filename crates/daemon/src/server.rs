@@ -75,13 +75,19 @@ pub struct Hub {
 pub enum StateEvent {
     Repos(Vec<protocol::RepoEntry>),
     Workspaces(Vec<protocol::WorkspaceEntry>),
-    /// Broadcast after a successful stage/unstage/commit so every connected
-    /// source-control sidebar refreshes without each window having to
-    /// re-request explicitly.
+    /// Broadcast after a successful stage/unstage/commit/discard so every
+    /// connected source-control sidebar refreshes without each window having
+    /// to re-request explicitly.
     RepoStatus {
         repo_id: String,
         index_changes: Vec<protocol::GitFileChange>,
         worktree_changes: Vec<protocol::GitFileChange>,
+    },
+    /// Broadcast after a successful stash push/pop/drop so the sidebar's
+    /// STASHES section stays in sync across multiple client windows.
+    Stashes {
+        repo_id: String,
+        stashes: Vec<protocol::GitStash>,
     },
 }
 
@@ -360,6 +366,9 @@ fn spawn_state_forwarder(
                         index_changes,
                         worktree_changes,
                     });
+                }
+                Ok(StateEvent::Stashes { repo_id, stashes }) => {
+                    let _ = out_tx.send(DaemonMessage::Stashes { repo_id, stashes });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
@@ -749,6 +758,60 @@ async fn dispatch(
                     sha,
                     short_sha,
                 }))
+            })
+            .await;
+        }
+        ClientMessage::DiscardChanges { repo_id, paths } => {
+            handle_git_write(hub, out_tx, &repo_id, "discard", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::discard(&repo, &paths).await?;
+                Ok(None)
+            })
+            .await;
+        }
+        ClientMessage::StashPush { repo_id, message } => {
+            handle_stash_write(hub, out_tx, &repo_id, "stash_push", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::stash_push(&repo, &message).await
+            })
+            .await;
+        }
+        ClientMessage::ListStashes { repo_id } => match repo_path_or_err(hub, &repo_id) {
+            Ok(repo) => match git_write::stash_list(&repo).await {
+                Ok(stashes) => {
+                    let _ = out_tx.send(DaemonMessage::Stashes { repo_id, stashes });
+                }
+                Err(err) => {
+                    warn!(?err, repo_id, "stash_list failed");
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: format!("stash list failed: {err:#}"),
+                    });
+                }
+            },
+            Err(err) => {
+                let _ = out_tx.send(DaemonMessage::Error {
+                    message: format!("{err:#}"),
+                });
+            }
+        },
+        ClientMessage::StashPop { repo_id, stash_id } => {
+            handle_stash_write(hub, out_tx, &repo_id, "stash_pop", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::stash_pop(&repo, &stash_id).await
+            })
+            .await;
+        }
+        ClientMessage::StashApply { repo_id, stash_id } => {
+            handle_stash_write(hub, out_tx, &repo_id, "stash_apply", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::stash_apply(&repo, &stash_id).await
+            })
+            .await;
+        }
+        ClientMessage::StashDrop { repo_id, stash_id } => {
+            handle_stash_write(hub, out_tx, &repo_id, "stash_drop", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                git_write::stash_drop(&repo, &stash_id).await
             })
             .await;
         }
@@ -1228,6 +1291,61 @@ async fn handle_git_write<F>(
         }
         Err(err) => {
             warn!(operation, repo_id, ?err, "git_write: operation failed");
+            let _ = out_tx.send(DaemonMessage::GitWriteError {
+                repo_id: repo_id.to_string(),
+                operation: operation.to_string(),
+                error: format!("{err:#}"),
+            });
+        }
+    }
+}
+
+/// Like [`handle_git_write`] but for stash mutations: in addition to the
+/// post-write `RepoStatus` refresh, broadcasts a fresh `Stashes` snapshot
+/// so every connected sidebar sees the new stash list without re-requesting.
+async fn handle_stash_write<F>(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    repo_id: &str,
+    operation: &str,
+    body: F,
+) where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let outcome = body.await;
+    match outcome {
+        Ok(()) => match repo_path_or_err(hub, repo_id) {
+            Ok(repo) => {
+                match git_inspect::repo_status(&repo).await {
+                    Ok((index_changes, worktree_changes)) => {
+                        let _ = hub.state_events.send(StateEvent::RepoStatus {
+                            repo_id: repo_id.to_string(),
+                            index_changes,
+                            worktree_changes,
+                        });
+                    }
+                    Err(err) => {
+                        warn!(?err, repo_id, "stash_write: post-write status refresh failed");
+                    }
+                }
+                match git_write::stash_list(&repo).await {
+                    Ok(stashes) => {
+                        let _ = hub.state_events.send(StateEvent::Stashes {
+                            repo_id: repo_id.to_string(),
+                            stashes,
+                        });
+                    }
+                    Err(err) => {
+                        warn!(?err, repo_id, "stash_write: stash_list refresh failed");
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(?err, repo_id, "stash_write: repo path lookup failed");
+            }
+        },
+        Err(err) => {
+            warn!(operation, repo_id, ?err, "stash_write: operation failed");
             let _ = out_tx.send(DaemonMessage::GitWriteError {
                 repo_id: repo_id.to_string(),
                 operation: operation.to_string(),

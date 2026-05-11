@@ -7,13 +7,19 @@ export interface RowAction {
   label: string;
   onClick: (path: string) => void;
   testId: string;
+  /// Optional CSS class on the button (e.g. `"danger"` for destructive
+  /// actions like discard). Falls back to the default `row-action` style.
+  variant?: string;
 }
 
 interface Props {
   changes: GitFileChange[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
-  rowAction?: RowAction | undefined;
+  /// Optional list of hover-visible action buttons. Rendered in the order
+  /// given, right-aligned at the end of the row. Pass an empty array
+  /// (or omit) to disable.
+  rowActions?: RowAction[];
 }
 
 /**
@@ -32,7 +38,7 @@ export default function ChangesTree({
   changes,
   selectedPath,
   onSelect,
-  rowAction,
+  rowActions,
 }: Props) {
   const tree = useMemo(() => buildChangesTree(changes), [changes]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -44,6 +50,7 @@ export default function ChangesTree({
       return next;
     });
   };
+  const actions = rowActions ?? [];
 
   return (
     <ul
@@ -59,7 +66,7 @@ export default function ChangesTree({
           onToggle={toggle}
           selectedPath={selectedPath}
           onSelect={onSelect}
-          rowAction={rowAction}
+          rowActions={actions}
         />
       ))}
       {tree.files.map((c) => (
@@ -69,7 +76,7 @@ export default function ChangesTree({
           depth={0}
           selected={c.path === selectedPath}
           onSelect={onSelect}
-          rowAction={rowAction}
+          rowActions={actions}
         />
       ))}
     </ul>
@@ -83,7 +90,7 @@ interface FolderRowProps {
   onToggle: (path: string) => void;
   selectedPath: string | null;
   onSelect: (path: string) => void;
-  rowAction?: RowAction | undefined;
+  rowActions: RowAction[];
 }
 
 function FolderRow({
@@ -93,7 +100,7 @@ function FolderRow({
   onToggle,
   selectedPath,
   onSelect,
-  rowAction,
+  rowActions,
 }: FolderRowProps) {
   const isCollapsed = collapsed.has(node.fullPath);
   const fileCount = countFiles(node);
@@ -135,7 +142,7 @@ function FolderRow({
               onToggle={onToggle}
               selectedPath={selectedPath}
               onSelect={onSelect}
-              rowAction={rowAction}
+              rowActions={rowActions}
             />
           ))}
           {node.files.map((c) => (
@@ -145,7 +152,7 @@ function FolderRow({
               depth={depth + 1}
               selected={c.path === selectedPath}
               onSelect={onSelect}
-              rowAction={rowAction}
+              rowActions={rowActions}
             />
           ))}
         </ul>
@@ -159,10 +166,10 @@ interface FileRowProps {
   depth: number;
   selected: boolean;
   onSelect: (path: string) => void;
-  rowAction?: RowAction | undefined;
+  rowActions: RowAction[];
 }
 
-function FileRow({ change, depth, selected, onSelect, rowAction }: FileRowProps) {
+function FileRow({ change, depth, selected, onSelect, rowActions }: FileRowProps) {
   const basename = change.path.split(/[/\\]/).pop() ?? change.path;
   const classes = [
     "tree-row",
@@ -196,22 +203,25 @@ function FileRow({ change, depth, selected, onSelect, rowAction }: FileRowProps)
         <span className="tree-label" title={change.path}>
           {basename}
         </span>
-        {rowAction && (
+        {rowActions.map((action) => (
           <button
+            key={action.testId}
             type="button"
-            className="row-action"
+            className={
+              action.variant ? `row-action ${action.variant}` : "row-action"
+            }
             onClick={(e) => {
               e.stopPropagation();
-              rowAction.onClick(change.path);
+              action.onClick(change.path);
             }}
-            aria-label={`${rowAction.label} ${change.path}`}
-            title={rowAction.label}
-            data-testid={rowAction.testId}
+            aria-label={`${action.label} ${change.path}`}
+            title={action.label}
+            data-testid={action.testId}
             data-file-path={change.path}
           >
-            {rowAction.glyph}
+            {action.glyph}
           </button>
-        )}
+        ))}
       </div>
     </li>
   );

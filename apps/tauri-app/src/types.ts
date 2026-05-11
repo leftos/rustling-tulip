@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 export type Agent = "claude" | "codex";
 
@@ -269,6 +269,16 @@ export interface GitRemoteUrl {
   forge: string;
 }
 
+export interface GitStash {
+  // `stash@{N}` ref. Renumbered after each drop/pop, so the UI must
+  // re-request after any stash mutation.
+  id: string;
+  // `WIP on <branch>: <sha> <message>` subject from `git stash list`.
+  subject: string;
+  // ISO-8601 timestamp.
+  created_at: string;
+}
+
 // ------- Tabs and grids -------
 
 export type SplitDirection = "horizontal" | "vertical";
@@ -365,6 +375,12 @@ export type ClientMessage =
   | { type: "stage_files"; repo_id: string; paths: string[] }
   | { type: "unstage_files"; repo_id: string; paths: string[] }
   | { type: "commit_repo"; repo_id: string; message: string }
+  | { type: "discard_changes"; repo_id: string; paths: string[] }
+  | { type: "stash_push"; repo_id: string; message: string }
+  | { type: "list_stashes"; repo_id: string }
+  | { type: "stash_pop"; repo_id: string; stash_id: string }
+  | { type: "stash_apply"; repo_id: string; stash_id: string }
+  | { type: "stash_drop"; repo_id: string; stash_id: string }
   | {
       type: "open_diff_tab";
       id: string;
@@ -512,6 +528,7 @@ export type DaemonMessage =
       operation: string;
       error: string;
     }
+  | { type: "stashes"; repo_id: string; stashes: GitStash[] }
   | { type: "diff_tab_opened"; id: string; tab_id: string }
   | {
       type: "file_snapshot";

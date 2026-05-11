@@ -16,7 +16,9 @@ import type {
   RepoEntry,
 } from "../../types";
 import ResizableSplit from "../ResizableSplit";
-import ChangesTree from "./ChangesTree";
+import ChangesTree, { type RowAction } from "./ChangesTree";
+import DiscardConfirmDialog from "./DiscardConfirmDialog";
+import StashesSection from "./StashesSection";
 
 type Tab = "changes" | "history";
 
@@ -165,6 +167,7 @@ function ChangesView({
   const [commitMessage, setCommitMessage] = useState("");
   const [pendingOp, setPendingOp] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [pendingDiscard, setPendingDiscard] = useState<string[] | null>(null);
 
   useEffect(() => {
     setIndexChanges(null);
@@ -251,6 +254,43 @@ function ChangesView({
       message: trimmed,
     });
   };
+  const requestDiscard = (paths: string[]) => {
+    if (paths.length === 0) return;
+    setPendingDiscard(paths);
+  };
+  const confirmDiscard = () => {
+    if (!pendingDiscard || pendingDiscard.length === 0) {
+      setPendingDiscard(null);
+      return;
+    }
+    setPendingOp("discard");
+    client.send({
+      type: "discard_changes",
+      repo_id: activeRepoId,
+      paths: pendingDiscard,
+    });
+    setPendingDiscard(null);
+  };
+
+  const stageAction: RowAction = {
+    glyph: "+",
+    label: "Stage",
+    onClick: (path) => sendStage([path]),
+    testId: "source-control-row-stage",
+  };
+  const discardAction: RowAction = {
+    glyph: "↺",
+    label: "Discard",
+    onClick: (path) => requestDiscard([path]),
+    testId: "source-control-row-discard",
+    variant: "danger",
+  };
+  const unstageAction: RowAction = {
+    glyph: "−",
+    label: "Unstage",
+    onClick: (path) => sendUnstage([path]),
+    testId: "source-control-row-unstage",
+  };
 
   const canCommit =
     stagedPaths.length > 0 &&
@@ -319,23 +359,20 @@ function ChangesView({
                 <BucketHeader
                   label="Staged Changes"
                   count={indexChanges.length}
-                  action={{
-                    label: "Unstage all",
-                    onClick: () => sendUnstage(stagedPaths),
-                    disabled: pendingOp !== null,
-                    testId: "source-control-unstage-all",
-                  }}
+                  actions={[
+                    {
+                      label: "Unstage all",
+                      onClick: () => sendUnstage(stagedPaths),
+                      disabled: pendingOp !== null,
+                      testId: "source-control-unstage-all",
+                    },
+                  ]}
                 />
                 <ChangesTree
                   changes={indexChanges}
                   selectedPath={null}
                   onSelect={(path) => openDiff(path, "index")}
-                  rowAction={{
-                    glyph: "−",
-                    label: "Unstage",
-                    onClick: (path) => sendUnstage([path]),
-                    testId: "source-control-row-unstage",
-                  }}
+                  rowActions={[unstageAction]}
                 />
               </section>
             )}
@@ -347,28 +384,33 @@ function ChangesView({
                 <BucketHeader
                   label="Changes"
                   count={worktreeChanges.length}
-                  action={{
-                    label: "Stage all",
-                    onClick: () => sendStage(worktreePaths),
-                    disabled: pendingOp !== null,
-                    testId: "source-control-stage-all",
-                  }}
+                  actions={[
+                    {
+                      label: "Discard all",
+                      onClick: () => requestDiscard(worktreePaths),
+                      disabled: pendingOp !== null,
+                      testId: "source-control-discard-all",
+                      variant: "danger",
+                    },
+                    {
+                      label: "Stage all",
+                      onClick: () => sendStage(worktreePaths),
+                      disabled: pendingOp !== null,
+                      testId: "source-control-stage-all",
+                    },
+                  ]}
                 />
                 <ChangesTree
                   changes={worktreeChanges}
                   selectedPath={null}
                   onSelect={(path) => openDiff(path, "worktree")}
-                  rowAction={{
-                    glyph: "+",
-                    label: "Stage",
-                    onClick: (path) => sendStage([path]),
-                    testId: "source-control-row-stage",
-                  }}
+                  rowActions={[discardAction, stageAction]}
                 />
               </section>
             )}
           </>
         )}
+        <StashesSection repoId={activeRepoId} client={client} />
         <div className="git-meta">
           {activeRepoName}
           <button
@@ -380,35 +422,50 @@ function ChangesView({
             open in forge ↗
           </button>
         </div>
+        {pendingDiscard && (
+          <DiscardConfirmDialog
+            paths={pendingDiscard}
+            onCancel={() => setPendingDiscard(null)}
+            onConfirm={confirmDiscard}
+          />
+        )}
     </div>
   );
+}
+
+interface BucketAction {
+  label: string;
+  onClick: () => void;
+  disabled: boolean;
+  testId: string;
+  variant?: string;
 }
 
 interface BucketHeaderProps {
   label: string;
   count: number;
-  action: {
-    label: string;
-    onClick: () => void;
-    disabled: boolean;
-    testId: string;
-  };
+  actions: BucketAction[];
 }
 
-function BucketHeader({ label, count, action }: BucketHeaderProps) {
+function BucketHeader({ label, count, actions }: BucketHeaderProps) {
   return (
     <div className="changes-bucket-header">
       <span className="bucket-label">{label}</span>
       <span className="bucket-count">{count}</span>
-      <button
-        type="button"
-        className="bucket-action"
-        disabled={action.disabled}
-        onClick={action.onClick}
-        data-testid={action.testId}
-      >
-        {action.label}
-      </button>
+      {actions.map((action) => (
+        <button
+          key={action.testId}
+          type="button"
+          className={
+            action.variant ? `bucket-action ${action.variant}` : "bucket-action"
+          }
+          disabled={action.disabled}
+          onClick={action.onClick}
+          data-testid={action.testId}
+        >
+          {action.label}
+        </button>
+      ))}
     </div>
   );
 }

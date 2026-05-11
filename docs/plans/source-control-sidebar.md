@@ -126,14 +126,14 @@ not a pane inside a grid (user pref). Pane-level operations are unchanged.
 
 ### Phase D — Discard + stash
 
-- [ ] Write helpers: `discard(paths)` → `git restore -- <paths>` (worktree only, leaves index alone). For deleted-and-staged files, also `git restore --staged --worktree -- <paths>` to fully revert.
-- [ ] `DiscardChanges { repo_id, paths }` client message. **Two-step confirm in the UI** (modal listing the files; "Discard N changes" red button + Cancel). Never auto-confirm.
-- [ ] Stash helpers:
-  - `stash_push(message)` → `git stash push -u -m <message>`
-  - `stash_list()` → `git stash list --format=%H%x1f%gs%x1f%aI`
+- [x] Write helpers: `discard(paths)` (`git_write::discard`) partitions input into tracked vs untracked via `git status --porcelain -z -- <paths>`; tracked paths are reverted via `git restore -- <paths>` (worktree only, leaves index alone), untracked paths are removed via `git clean -fd -- <paths>`. Deleted-and-staged files are out of scope for the discard action — they live in the STAGED bucket and need to be unstaged first, matching VSCode's behavior.
+- [x] `DiscardChanges { repo_id, paths }` client message. **Two-step confirm in the UI** via `DiscardConfirmDialog` (modal listing the files; "Discard N changes" red button + Cancel autofocused). Never auto-confirms.
+- [x] Stash helpers (iter 13):
+  - `stash_push(message)` → `git stash push -u [-m <message>]`
+  - `stash_list()` → `git stash list --format=%gd%x1f%gs%x1f%aI`
   - `stash_pop(stash_id)`, `stash_apply(stash_id)`, `stash_drop(stash_id)` → corresponding `git stash` subcommands
-- [ ] Protocol: `StashPush { repo_id, message }`, `ListStashes { repo_id }`, `StashPop { repo_id, stash_id }`, `StashApply { repo_id, stash_id }`, `StashDrop { repo_id, stash_id }`. Daemon response `Stashes { repo_id, stashes: Vec<GitStash> }` where `GitStash { id, subject, created_at }`.
-- [ ] `StashesSection.tsx` — collapsible section between CHANGES and GRAPH. Each stash row has a context menu (pop, apply, drop).
+- [x] Protocol: `StashPush { repo_id, message }`, `ListStashes { repo_id }`, `StashPop { repo_id, stash_id }`, `StashApply { repo_id, stash_id }`, `StashDrop { repo_id, stash_id }`. Daemon response `Stashes { repo_id, stashes: Vec<GitStash> }` where `GitStash { id, subject, created_at }`. `PROTOCOL_VERSION` 8 → 9.
+- [x] `StashesSection.tsx` — collapsible section at the bottom of the changes view. Each stash row exposes Pop / Apply / Drop link-style buttons; the section header has a message input + Push button for stashing without leaving the sidebar. Daemon broadcasts a fresh `Stashes` snapshot on every push/pop/drop via a new `StateEvent::Stashes` variant, so multiple sidebar instances stay in sync.
 
 ### Phase E — Graph pagination
 

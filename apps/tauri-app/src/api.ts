@@ -4,6 +4,7 @@ import {
   type ClientMessage,
   type DaemonMessage,
   type GitRemoteUrl,
+  type GitStash,
   type LaunchPresetSource,
   type PresetEntry,
   type PresetTarget,
@@ -368,6 +369,35 @@ export function branchUrl(
     default:
       return null;
   }
+}
+
+/**
+ * Request the current stash list for a repo and resolve with it. Times out
+ * after 2 s. Subsequent `rt:stashes` broadcast events keep the sidebar in
+ * sync without a fresh listStashes round-trip.
+ */
+export function listStashes(
+  client: DaemonClient,
+  repoId: string,
+): Promise<GitStash[]> {
+  return new Promise((resolve) => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "stashes" || detail.repo_id !== repoId) return;
+      cleanup();
+      resolve(detail.stashes);
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve([]);
+    }, 2000);
+    const cleanup = () => {
+      window.removeEventListener("rt:stashes", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:stashes", handler);
+    client.send({ type: "list_stashes", repo_id: repoId });
+  });
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {
