@@ -518,7 +518,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-root">
+    <div className="app-root" data-testid="app-root">
       <ResizableSplit
         storageKey="root.sidebar"
         defaultSize={280}

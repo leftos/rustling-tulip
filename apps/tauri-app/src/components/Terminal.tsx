@@ -41,6 +41,17 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
+    // Dev-only: expose XTerm instances so the e2e harness can read the
+    // scrollback buffer programmatically (xterm renders to a canvas, so DOM
+    // assertions can't see the text). Bundlers tree-shake `import.meta.env.DEV`
+    // false branches in production builds, so this never ships to users.
+    if (import.meta.env.DEV) {
+      const w = window as unknown as { __rt_terms?: Map<string, XTerm> };
+      const map = w.__rt_terms ?? new Map<string, XTerm>();
+      map.set(sessionId, term);
+      w.__rt_terms = map;
+    }
+
     const decoder = new TextDecoder();
     let cancelled = false;
 
@@ -100,11 +111,22 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
       unsubPty();
       resizeObserver.disconnect();
       client.send({ type: "detach", session_id: sessionId });
+      if (import.meta.env.DEV) {
+        const w = window as unknown as { __rt_terms?: Map<string, XTerm> };
+        w.__rt_terms?.delete(sessionId);
+      }
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
   }, [sessionId, client, subscribePty]);
 
-  return <div ref={containerRef} className="terminal-container" />;
+  return (
+    <div
+      ref={containerRef}
+      className="terminal-container"
+      data-testid="terminal-container"
+      data-session-id={sessionId}
+    />
+  );
 }

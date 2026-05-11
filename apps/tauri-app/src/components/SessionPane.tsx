@@ -49,7 +49,13 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
       : "";
 
   return (
-    <div className="session-pane">
+    <div
+      className="session-pane"
+      data-testid="session-pane"
+      data-session-id={session.id}
+      data-session-status={session.status}
+      data-session-mode={session.mode}
+    >
       <header className="session-header">
         <div className="session-title">
           {/* Shell sessions sit at Idle forever — a green dot would be
@@ -82,7 +88,12 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
           {session.status !== "stopped" ? (
             confirming ? (
               <>
-                <button type="button" onClick={onStop} className="danger">
+                <button
+                  type="button"
+                  onClick={onStop}
+                  className="danger"
+                  data-testid="session-stop-confirm"
+                >
                   Confirm stop
                 </button>
                 <button type="button" onClick={() => setConfirming(false)}>
@@ -90,7 +101,11 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
                 </button>
               </>
             ) : (
-              <button type="button" onClick={() => setConfirming(true)}>
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                data-testid="session-stop"
+              >
                 Stop
               </button>
             )

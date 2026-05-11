@@ -204,8 +204,13 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
 
   if (tabs.length === 0) {
     return (
-      <div className="tab-bar tab-bar-empty">
-        <button type="button" className="tab-bar-new" onClick={onNewTab}>
+      <div className="tab-bar tab-bar-empty" data-testid="tab-bar">
+        <button
+          type="button"
+          className="tab-bar-new"
+          onClick={onNewTab}
+          data-testid="tab-bar-new"
+        >
           + New tab
         </button>
       </div>
@@ -213,7 +218,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
   }
 
   return (
-    <div className="tab-bar">
+    <div className="tab-bar" data-testid="tab-bar">
       <div className="tab-bar-list" role="tablist">
         {tabs.map((t) => {
           const isActive = t.id === activeTabId;
@@ -247,6 +252,10 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
               onDragEnter={(e) => onPaneDragEnter(t.id, e)}
               onDragEnd={onDragEnd}
               onDrop={(e) => onDrop(t.id, e)}
+              data-testid="tab-pill"
+              data-tab-id={t.id}
+              data-tab-name={t.name}
+              data-tab-active={isActive ? "true" : "false"}
             >
               {isRenaming ? (
                 <RenameInput
@@ -278,6 +287,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
         className="tab-bar-new"
         title="New tab"
         onClick={onNewTab}
+        data-testid="tab-bar-new"
       >
         +
       </button>

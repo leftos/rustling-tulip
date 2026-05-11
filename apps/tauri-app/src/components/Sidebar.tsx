@@ -117,7 +117,7 @@ export default function Sidebar(props: Props) {
   }, [containers, props.highlightedSessionIds, props.attentionSessions]);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" data-testid="sidebar">
       <header className="sidebar-header">
         <span className="brand">rustling-tulip</span>
       </header>
@@ -127,10 +127,16 @@ export default function Sidebar(props: Props) {
           type="button"
           className="primary small"
           onClick={() => props.onOpenSpawn()}
+          data-testid="sidebar-add-session"
         >
           + Session
         </button>
-        <button type="button" className="link" onClick={props.onAddRepo}>
+        <button
+          type="button"
+          className="link"
+          onClick={props.onAddRepo}
+          data-testid="sidebar-add-repo"
+        >
           + Repo
         </button>
         <button
@@ -145,6 +151,7 @@ export default function Sidebar(props: Props) {
               ? "Register at least 2 repos first"
               : "Create a workspace"
           }
+          data-testid="sidebar-add-workspace"
         >
           + Workspace
         </button>
@@ -261,6 +268,9 @@ function ContainerNode(p: ContainerNodeProps) {
         onContextMenu={onContext}
         role={hasChildren ? "button" : undefined}
         title={c.hoverTitle}
+        data-testid={`sidebar-container-${c.kind}`}
+        data-container-id={c.id}
+        data-container-name={c.name}
       >
         <span className="tree-caret" aria-hidden="true">
           {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
@@ -325,7 +335,14 @@ function SessionLeaf(p: SessionLeafProps) {
     .join(" ");
   return (
     <li>
-      <div className={classes} onClick={() => p.onSelect(s.id)} role="button">
+      <div
+        className={classes}
+        onClick={() => p.onSelect(s.id)}
+        role="button"
+        data-testid="sidebar-session"
+        data-session-id={s.id}
+        data-session-status={s.status}
+      >
         {isPlainShell ? (
           <span
             className="status-glyph"
