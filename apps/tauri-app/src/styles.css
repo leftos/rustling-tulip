@@ -580,11 +580,36 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--fg-dim);
 }
-.status-spawning, .status-working { background: var(--accent); }
+.status-working { background: var(--accent); }
+/* Spawning is in-flight bootstrap, distinct from working. Hollow ring so
+   the user can tell at a glance that claude hasn't yet finished startup. */
+.status-spawning {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  box-sizing: border-box;
+}
 .status-idle { background: var(--ok); }
 .status-awaiting_input { background: var(--warn); }
 .status-stopped { background: var(--fg-dim); }
 .status-error { background: var(--err); }
+
+/* Container-level attention rollup chip. Shows when at least one
+   session inside the container is attention-flagged; lets the user
+   keep a container collapsed while still seeing the signal. */
+.container-attention-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  margin-left: 4px;
+  font-style: normal;
+}
 
 /* Plain-shell marker: replaces the status dot since shell sessions have no
    meaningful Idle/Working transitions to colour. */

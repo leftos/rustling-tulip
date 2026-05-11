@@ -32,9 +32,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - File: `crates/daemon/src/registry.rs:88-104` (no dedup), `apps/tauri-app/src/components/Sidebar.tsx:264-274`.
   - Suggested direction: enforce uniqueness on `upsert_workspace`, surface the error, OR append `(2)` style suffixes.
 - ~~**`Sidebar` accepts a `connection` prop but never renders it.**~~ **Resolved (iter 21).** Sidebar header now renders a compact connection badge that hides itself when the connection is `open` and surfaces a `badge-warn` or `badge-err` chip (with the reason as a tooltip) for every other state. Visible from any view, not just the EmptyState.
-- **Force-expand silently overrides the user's collapse state.** A collapsed container that contains any highlighted or attention-flagged session is force-expanded, undoing the user's last action without telling them.
-  - File: `apps/tauri-app/src/components/Sidebar.tsx:103-117`.
-  - Suggested direction: scroll the relevant leaf into view but leave collapse state alone (or only auto-expand on first attention, not for the duration).
+- ~~**Force-expand silently overrides the user's collapse state.**~~ **Resolved (iter 23).** `attentionSessions` no longer participates in `forceExpand` (only the user-initiated `highlightedSessionIds` does). A new `container-attention-chip` (`!` in a small warn-coloured circle) appears on a container's header whenever at least one of its sessions is in `attentionSessions`, so the warning is still visible from a collapsed container without disturbing the user's layout choice.
 - ~~**Attention flag is never cleared automatically.**~~ **Resolved (iter 16).** `session_updated` clears the id from `attentionSessions` on transition back to `working`/`idle`/`spawning`. `stopped`/`error` still count as attention-worthy and require user acknowledgement.
 - ~~**`session_removed` leaks the id in `attentionSessions`.**~~ **Resolved (iter 16).** Removal handler now flushes the id from `attentionSessions` too.
 - **Preset context-menu loading state never times out.** When `listPresets` returns empty after 2 s (the `api.ts` timeout), the cache stores `[]` and the menu shows "Launch preset… (none defined)". But while the request is in flight, the menu shows "Launch preset… (loading)" — if the daemon dies mid-request the user sees "loading" forever until they reopen.
@@ -61,9 +59,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Spawn failures surface only as `console.error`.** The daemon's `Error { message }` reply (dirty working tree, can't create branch, etc.) is logged to the dev console and nothing else. End user sees nothing.
   - File: `apps/tauri-app/src/App.tsx:848-850`.
   - Suggested direction: surface as a toast/banner; ideally route to the spawn dialog if it's the response to a spawn we just sent.
-- **`spawning` and `working` share the same accent-blue dot.** Status colour mapping makes it impossible to tell whether claude is still in the middle of its bootstrap or already running.
-  - File: `apps/tauri-app/src/styles.css:137` (`.status-spawning, .status-working { background: var(--accent); }`).
-  - Suggested direction: distinct hue or a small spinner overlay on `spawning`.
+- ~~**`spawning` and `working` share the same accent-blue dot.**~~ **Resolved (iter 23).** `.status-spawning` is now a hollow accent ring (transparent fill + 1.5px border) while `.status-working` stays solid accent. A glance differentiates "still bootstrapping" from "actively running".
 - ~~**Workspace form has no "Cancel preview" / refresh affordance.**~~ **Resolved (iter 18).** Preview-reset `useEffect` now depends on `useWorktree` too, so toggling worktree mode clears the stale preview table and requires an explicit re-Preview.
 - **Random worktree branch name regenerates every dialog open.** Closing and reopening the spawn dialog (even on the same target) gives a different `wt/<adj>-<noun>` suggestion, so users who Cancel-then-reopen lose their intended branch name.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:388-431` (`useBranchField`, regenerates on mount via `useState(defaultBranch)` + `defaultBranch` change effect; mount alone seeds `randomWorktreeBranchName()`).

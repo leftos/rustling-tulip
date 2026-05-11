@@ -218,22 +218,43 @@ export default function Sidebar(props: Props) {
     });
   }, [currentTarget, currentTargetKey, presetCache, props.client]);
 
-  // Force-expand any container whose highlighted/attention session lives inside.
+  // Force-expand any container whose **highlighted** session lives inside.
+  // Highlighting is user-initiated (clicking into a pane with that session),
+  // so the expand-on-discovery is welcome. Attention used to also force the
+  // expansion, but that overrode the user's collapse decision for sessions
+  // they intentionally backgrounded — audit's "Force-expand silently
+  // overrides the user's collapse state". The container header surfaces a
+  // distinct `has-attention` rollup chip instead, so the warning is still
+  // visible without disturbing the layout.
   const forceExpand = useMemo(() => {
     const out = new Set<string>();
     for (const c of containers) {
       for (const s of c.sessions) {
-        if (
-          props.highlightedSessionIds.has(s.id) ||
-          props.attentionSessions.has(s.id)
-        ) {
+        if (props.highlightedSessionIds.has(s.id)) {
           out.add(c.key);
           break;
         }
       }
     }
     return out;
-  }, [containers, props.highlightedSessionIds, props.attentionSessions]);
+  }, [containers, props.highlightedSessionIds]);
+
+  // Sets of container keys whose sessions include at least one
+  // attention-flagged id. Computed once per render and threaded into the
+  // container header below so collapsed containers can still show a
+  // warning chip.
+  const containersWithAttention = useMemo(() => {
+    const out = new Set<string>();
+    for (const c of containers) {
+      for (const s of c.sessions) {
+        if (props.attentionSessions.has(s.id)) {
+          out.add(c.key);
+          break;
+        }
+      }
+    }
+    return out;
+  }, [containers, props.attentionSessions]);
 
   const connectionBadge = renderConnectionBadge(props.connection);
 
@@ -333,6 +354,7 @@ export default function Sidebar(props: Props) {
                 key={c.key}
                 container={c}
                 collapsed={isCollapsed}
+                hasAttention={containersWithAttention.has(c.key)}
                 onToggle={() => toggle(c.key)}
                 tabs={props.tabs}
                 client={props.client}
@@ -405,6 +427,12 @@ export default function Sidebar(props: Props) {
 interface ContainerNodeProps {
   container: TreeContainer;
   collapsed: boolean;
+  /// True iff at least one of the container's sessions currently sits in
+  /// the `attentionSessions` set. Shown as a small chip on the container
+  /// header so a collapsed container still surfaces a "something inside
+  /// wants your attention" signal — closes the audit finding about
+  /// attention being invisible when the user collapses a container.
+  hasAttention: boolean;
   onToggle: () => void;
   tabs: TabEntry[];
   client: DaemonClient;
@@ -501,6 +529,16 @@ function ContainerNode(p: ContainerNodeProps) {
         <span className="tree-label">{c.name}</span>
         {c.sessions.length > 0 && (
           <span className="list-item-meta">{c.sessions.length}</span>
+        )}
+        {p.hasAttention && (
+          <span
+            className="container-attention-chip"
+            title="A session in this container is awaiting input or has stopped/errored"
+            aria-label="container has attention-flagged session"
+            data-testid="container-attention-chip"
+          >
+            !
+          </span>
         )}
         {c.removable && (
           <>
