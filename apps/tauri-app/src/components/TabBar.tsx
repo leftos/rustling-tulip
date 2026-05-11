@@ -14,6 +14,12 @@ interface Props {
   /// before a merge/extract send so the freshly broadcast `tab_updated`
   /// auto-switches the user into the new tab.
   onArmNextNewTab: () => void;
+  /// Apply a tab-reorder optimistically at the App level — no waiting for
+  /// the daemon's `tabs_reordered` broadcast. Without this, dropping a
+  /// pill briefly snaps back to its old position on slow links until the
+  /// round-trip completes. The daemon broadcast still reconciles on
+  /// arrival; for a same-order broadcast the reducer is a no-op.
+  onLocalReorder: (orderedIds: string[]) => void;
 }
 
 interface ContextMenuState {
@@ -34,6 +40,7 @@ export default function TabBar({
   client,
   onActivate,
   onArmNextNewTab,
+  onLocalReorder,
 }: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
@@ -229,9 +236,12 @@ export default function TabBar({
       if (toIdxBase === -1) return;
       const toIdx = side === "before" ? toIdxBase : toIdxBase + 1;
       order.splice(toIdx, 0, src);
+      // Apply optimistically; the daemon broadcast will reconcile on
+      // arrival. For a same-order broadcast the reducer is a no-op.
+      onLocalReorder(order);
       client.send({ type: "reorder_tabs", ordered_ids: order });
     },
-    [tabs, dragState, client],
+    [tabs, dragState, client, onLocalReorder],
   );
 
   if (tabs.length === 0) {

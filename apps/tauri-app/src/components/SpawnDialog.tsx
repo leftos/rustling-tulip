@@ -619,8 +619,24 @@ function AgentPicker({
 ///   * When `useWorktree` flips false while value is the auto-applied
 ///     random one (i.e. user hasn't touched it): revert to `defaultBranch`.
 ///   * Any manual edit disables the auto rule until the next entity switch.
-function useBranchField(defaultBranch: string, useWorktree: boolean) {
-  const [value, setValue] = useState<string>(defaultBranch);
+///
+/// `targetKey` keys the suggestion across dialog opens — if the user
+/// cancels and reopens with the same target, the suggested random name
+/// is preserved (audit: previously regenerated on every reopen).
+const branchSuggestionCache = new Map<string, string>();
+
+function useBranchField(
+  defaultBranch: string,
+  useWorktree: boolean,
+  targetKey: string,
+) {
+  const initial = useWorktree
+    ? (branchSuggestionCache.get(targetKey) ?? randomWorktreeBranchName())
+    : defaultBranch;
+  if (useWorktree && !branchSuggestionCache.has(targetKey)) {
+    branchSuggestionCache.set(targetKey, initial);
+  }
+  const [value, setValue] = useState<string>(initial);
   // Track whether the random rule should still fire. Reset to true whenever
   // the entity (and therefore `defaultBranch`) changes; flipped to false the
   // moment the user edits the field by hand.
@@ -629,20 +645,26 @@ function useBranchField(defaultBranch: string, useWorktree: boolean) {
   useEffect(() => {
     allowAutoRef.current = true;
     if (useWorktree && defaultBranch) {
-      setValue(randomWorktreeBranchName());
+      const cached = branchSuggestionCache.get(targetKey);
+      const next = cached ?? randomWorktreeBranchName();
+      if (!cached) branchSuggestionCache.set(targetKey, next);
+      setValue(next);
     } else {
       setValue(defaultBranch);
     }
     // The use_worktree effect below picks up the rest after a toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultBranch]);
+  }, [defaultBranch, targetKey]);
 
   useEffect(() => {
     if (!allowAutoRef.current) return;
     if (useWorktree) {
       // Toggling worktree on while still on the default → suggest a random.
       if (value === defaultBranch && defaultBranch) {
-        setValue(randomWorktreeBranchName());
+        const cached = branchSuggestionCache.get(targetKey);
+        const next = cached ?? randomWorktreeBranchName();
+        if (!cached) branchSuggestionCache.set(targetKey, next);
+        setValue(next);
       }
     } else {
       // Toggling worktree off while still on our auto-suggested random →
@@ -658,6 +680,10 @@ function useBranchField(defaultBranch: string, useWorktree: boolean) {
 
   const onChange = (next: string) => {
     allowAutoRef.current = false;
+    // User-edited the field — drop the cached suggestion so a later
+    // reopen suggests a fresh one rather than re-pinning the value
+    // they just walked away from.
+    branchSuggestionCache.delete(targetKey);
     setValue(next);
   };
 
@@ -736,7 +762,7 @@ function SingleForm({
     setUseWorktree(repo?.default_use_worktree ?? true);
   }, [repo]);
 
-  const branch = useBranchField(defaultBranch, useWorktree);
+  const branch = useBranchField(defaultBranch, useWorktree, `repo:${repoId}`);
 
   const [baseBranch, setBaseBranch] = useState<string>("");
   useEffect(() => {
@@ -768,6 +794,10 @@ function SingleForm({
   const submit = () => {
     if (!canSubmit || submittedRef.current) return;
     submittedRef.current = true;
+    // Successful submit consumes the cached branch suggestion so the
+    // next dialog open generates a fresh one rather than re-pinning the
+    // name the user just spawned with.
+    branchSuggestionCache.delete(`repo:${repoId}`);
     client.send({
       type: "spawn_session",
       label: null,
@@ -943,7 +973,11 @@ function WorkspaceForm({
     setUseWorktree(workspace?.default_use_worktree ?? true);
   }, [workspace]);
 
-  const branch = useBranchField(defaultBranch, useWorktree);
+  const branch = useBranchField(
+    defaultBranch,
+    useWorktree,
+    `workspace:${workspaceId}`,
+  );
 
   const [baseBranch, setBaseBranch] = useState<string>("");
   useEffect(() => {
@@ -1010,6 +1044,7 @@ function WorkspaceForm({
   const submit = () => {
     if (!canSpawn || submittedRef.current) return;
     submittedRef.current = true;
+    branchSuggestionCache.delete(`workspace:${workspaceId}`);
     client.send({
       type: "spawn_session",
       label: null,

@@ -307,6 +307,32 @@ export default function App() {
     [],
   );
 
+  /// Apply a tab-reorder optimistically. Called by TabBar's drag-drop
+  /// handler right before sending `reorder_tabs` so the dropped pill
+  /// doesn't snap back to its old position while waiting for the
+  /// daemon's broadcast. Filters out unknown ids defensively in case
+  /// the order list was built from stale prop state.
+  const onLocalReorder = useCallback((orderedIds: string[]) => {
+    setState((s) => {
+      const byId = new Map(s.tabs.map((t) => [t.id, t] as const));
+      const next: TabEntry[] = [];
+      const seen = new Set<string>();
+      for (const id of orderedIds) {
+        const tab = byId.get(id);
+        if (tab && !seen.has(id)) {
+          next.push(tab);
+          seen.add(id);
+        }
+      }
+      // Append any tabs the caller forgot (defensive — keeps state
+      // total even if the optimistic order was stale).
+      for (const tab of s.tabs) {
+        if (!seen.has(tab.id)) next.push(tab);
+      }
+      return { ...s, tabs: next };
+    });
+  }, []);
+
   const onSelectSession = useCallback((sessionId: string) => {
     // Decide the side-effect from the latest committed state (read via ref so
     // it stays current), THEN dispatch a pure state update. Doing it the other
@@ -835,6 +861,7 @@ export default function App() {
             client={state.client!}
             onActivate={onActivateTab}
             onArmNextNewTab={onArmNextNewTab}
+            onLocalReorder={onLocalReorder}
           />
           {activeTab && state.client ? (
             activeTab.content.kind === "diff" ? (
