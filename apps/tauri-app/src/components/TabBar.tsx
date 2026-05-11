@@ -310,6 +310,7 @@ export default function TabBar({
             dragState?.overId === t.id && dragState.side === "before";
           const dropAfter =
             dragState?.overId === t.id && dragState.side === "after";
+          const isDragging = dragState?.draggingId === t.id;
           const kind = t.content.kind;
           const classes = [
             "tab-pill",
@@ -318,6 +319,7 @@ export default function TabBar({
             isSelected ? "is-multi-selected" : "",
             dropBefore ? "drop-before" : "",
             dropAfter ? "drop-after" : "",
+            isDragging ? "is-dragging" : "",
           ]
             .filter(Boolean)
             .join(" ");

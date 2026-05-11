@@ -1087,6 +1087,9 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .tab-pill.drop-after {
   box-shadow: inset -2px 0 0 var(--accent);
 }
+.tab-pill.is-dragging {
+  opacity: 0.45;
+}
 .tab-pill-rename {
   background: var(--bg);
   border: 1px solid var(--accent);
