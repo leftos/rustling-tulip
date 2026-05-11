@@ -69,9 +69,12 @@ interface AppState {
   focusedPaneId: string | null;
   spawnOpen: boolean;
   spawnInitial: SpawnInitialTarget | undefined;
-  /// Set after we send `create_tab` for a freshly spawned session; the next
-  /// `tab_updated` for an unseen tab id becomes the active tab.
-  pendingTabActivate: boolean;
+  /// Counter incremented every time we arm a "next new tab becomes
+  /// active" intent (e.g. user spawns a session, merges tabs, extracts a
+  /// pane to a new tab). Each subsequent `tab_updated` for an unseen tab
+  /// id consumes one (decrements). Was a boolean previously, which lost
+  /// arms when two spawns raced — only the first new tab got activated.
+  pendingTabActivate: number;
   workspaceCreatorOpen: boolean;
   vscodeQueue: VscodeWorkspaceSuggestion[];
   attentionSessions: Set<string>;
@@ -96,7 +99,7 @@ export default function App() {
     focusedPaneId: null,
     spawnOpen: false,
     spawnInitial: undefined,
-    pendingTabActivate: false,
+    pendingTabActivate: 0,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
     attentionSessions: new Set(),
@@ -291,7 +294,7 @@ export default function App() {
   /// pane extracts call this right before sending the daemon message so
   /// the subsequent `tab_updated` broadcast switches focus to the new tab.
   const onArmNextNewTab = useCallback(() => {
-    setState((s) => (s.pendingTabActivate ? s : { ...s, pendingTabActivate: true }));
+    setState((s) => ({ ...s, pendingTabActivate: s.pendingTabActivate + 1 }));
   }, []);
 
   /// Capture the pre-split pane id set so the next tab_updated for the
@@ -367,7 +370,11 @@ export default function App() {
       const next = new Set(cur.attentionSessions);
       next.delete(sessionId);
       return openInNewTab
-        ? { ...cur, attentionSessions: next, pendingTabActivate: true }
+        ? {
+            ...cur,
+            attentionSessions: next,
+            pendingTabActivate: cur.pendingTabActivate + 1,
+          }
         : { ...cur, attentionSessions: next };
     });
   }, []);
@@ -1001,7 +1008,7 @@ function handleMessage(
             ...s,
             sessions: next,
             attentionSessions: attention,
-            pendingTabActivate: true,
+            pendingTabActivate: s.pendingTabActivate + 1,
           };
         }
         if (intent?.kind === "replacePane") {
@@ -1077,9 +1084,12 @@ function handleMessage(
         else next[idx] = msg.tab;
         let active = s.activeTabId;
         let pendingTabActivate = s.pendingTabActivate;
-        if (isNew && (pendingTabActivate || active === null)) {
+        if (isNew && (pendingTabActivate > 0 || active === null)) {
           active = msg.tab.id;
-          pendingTabActivate = false;
+          // Consume one arm. If the user mashed Spawn twice in a row,
+          // each resulting new tab gets the activation it asked for
+          // instead of only the first.
+          if (pendingTabActivate > 0) pendingTabActivate -= 1;
         }
         // Post-split focus: if a split armed pendingPaneFocusRef for this
         // tab, diff the new grid against the snapshot and focus the new
