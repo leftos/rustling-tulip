@@ -140,19 +140,40 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
 
   const onDragOver = useCallback(
     (tabId: string, e: React.DragEvent) => {
-      if (!dragState || dragState.draggingId === tabId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-      const side: "before" | "after" =
-        e.clientX < rect.left + rect.width / 2 ? "before" : "after";
-      setDragState((prev) =>
-        prev && (prev.overId !== tabId || prev.side !== side)
-          ? { ...prev, overId: tabId, side }
-          : prev,
-      );
+      // Tab-reorder drag: track which side of which pill we're over.
+      if (dragState && dragState.draggingId !== tabId) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const side: "before" | "after" =
+          e.clientX < rect.left + rect.width / 2 ? "before" : "after";
+        setDragState((prev) =>
+          prev && (prev.overId !== tabId || prev.side !== side)
+            ? { ...prev, overId: tabId, side }
+            : prev,
+        );
+        return;
+      }
+      // Pane-cross-tab drag: accept the dragover so the browser doesn't
+      // cancel the operation when the cursor briefly enters a pill on the
+      // way to a pane in another tab.
+      if (e.dataTransfer.types.includes("text/x-rt-pane")) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }
     },
     [dragState],
+  );
+
+  // Pane drag entering a tab pill activates that tab so the user can drop
+  // onto a pane in it.
+  const onPaneDragEnter = useCallback(
+    (tabId: string, e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes("text/x-rt-pane")) return;
+      if (tabId === activeTabId) return;
+      onActivate(tabId);
+    },
+    [activeTabId, onActivate],
   );
 
   const onDragEnd = useCallback(() => {
@@ -222,6 +243,7 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
               onDoubleClick={() => setRenamingTabId(t.id)}
               onDragStart={(e) => onDragStart(t.id, e)}
               onDragOver={(e) => onDragOver(t.id, e)}
+              onDragEnter={(e) => onPaneDragEnter(t.id, e)}
               onDragEnd={onDragEnd}
               onDrop={(e) => onDrop(t.id, e)}
             >

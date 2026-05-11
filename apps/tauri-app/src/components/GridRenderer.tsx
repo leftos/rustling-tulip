@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import type {
   GridNode,
+  PaneDropEdge,
   SessionSnapshot,
   SplitDirection,
   TabEntry,
 } from "../types";
 import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
+
+const DRAG_MIME = "text/x-rt-pane";
 
 interface Props {
   tab: TabEntry;
@@ -74,9 +77,6 @@ interface SplitProps extends Omit<NodeProps, "node"> {
 
 function SplitRenderer(props: SplitProps) {
   const { node, path } = props;
-  // Local optimistic ratio while the user drags. Synced to props.node.ratio on
-  // pointerup (when we send SetPaneRatio) and whenever the daemon broadcasts
-  // an updated tab snapshot.
   const [localRatio, setLocalRatio] = useState(node.ratio);
   useEffect(() => {
     setLocalRatio(node.ratio);
@@ -166,12 +166,22 @@ interface PaneChromeProps extends Omit<NodeProps, "node"> {
   node: Extract<GridNode, { kind: "pane" }>;
 }
 
+interface PaneContextMenuState {
+  x: number;
+  y: number;
+}
+
 function PaneChrome(props: PaneChromeProps) {
   const { node, tabId, client, sessions, subscribePty, focusedPaneId } = props;
   const session = node.session_id
     ? (sessions.find((s) => s.id === node.session_id) ?? null)
     : null;
   const isFocused = focusedPaneId === node.pane_id;
+  const [dropEdge, setDropEdge] = useState<PaneDropEdge | null>(null);
+  const [contextMenu, setContextMenu] = useState<PaneContextMenuState | null>(
+    null,
+  );
+  const paneRef = useRef<HTMLDivElement | null>(null);
 
   const onClick = useCallback(() => {
     props.onFocusPane(node.pane_id);
@@ -195,13 +205,99 @@ function PaneChrome(props: PaneChromeProps) {
     client.send({ type: "close_pane", tab_id: tabId, pane_id: node.pane_id });
   }, [client, tabId, node.pane_id]);
 
+  const onExtract = useCallback(() => {
+    client.send({
+      type: "extract_to_new_tab",
+      source_tab_id: tabId,
+      pane_ids: [node.pane_id],
+      name: null,
+    });
+  }, [client, tabId, node.pane_id]);
+
+  const onDragStart = useCallback(
+    (e: React.DragEvent) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData(DRAG_MIME, `${tabId}:${node.pane_id}`);
+    },
+    [tabId, node.pane_id],
+  );
+
+  const onDragOver = useCallback(
+    (e: React.DragEvent) => {
+      // Only accept our own pane-drag payload; ignore other DnD activity.
+      if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const rect = paneRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = (e.clientX - rect.left) / Math.max(1, rect.width);
+      const y = (e.clientY - rect.top) / Math.max(1, rect.height);
+      const next = computeEdge(x, y);
+      setDropEdge((prev) => (prev === next ? prev : next));
+    },
+    [],
+  );
+
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear when leaving the pane root, not when crossing into children.
+    if (e.currentTarget === e.target) setDropEdge(null);
+  }, []);
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      const payload = e.dataTransfer.getData(DRAG_MIME);
+      setDropEdge(null);
+      if (!payload) return;
+      e.preventDefault();
+      const sep = payload.indexOf(":");
+      if (sep === -1) return;
+      const srcTab = payload.slice(0, sep);
+      const srcPane = payload.slice(sep + 1);
+      if (srcTab === tabId && srcPane === node.pane_id) return; // self-drop
+      const rect = paneRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x = (e.clientX - rect.left) / Math.max(1, rect.width);
+      const y = (e.clientY - rect.top) / Math.max(1, rect.height);
+      const edge = computeEdge(x, y);
+      client.send({
+        type: "move_pane",
+        src_tab_id: srcTab,
+        src_pane_id: srcPane,
+        dst_tab_id: tabId,
+        dst_pane_id: node.pane_id,
+        edge,
+      });
+    },
+    [client, tabId, node.pane_id],
+  );
+
+  const onContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
   const classes = ["grid-pane", isFocused ? "is-focused" : ""]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <div className={classes} onPointerDownCapture={onClick}>
-      <div className="grid-pane-controls">
+    <div
+      ref={paneRef}
+      className={classes}
+      onPointerDownCapture={onClick}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <div className="grid-pane-controls" onContextMenu={onContextMenu}>
+        <span
+          className="grid-pane-drag"
+          draggable
+          onDragStart={onDragStart}
+          title="Drag pane"
+        >
+          ⠿
+        </span>
         <button
           type="button"
           className="grid-pane-btn"
@@ -241,6 +337,71 @@ function PaneChrome(props: PaneChromeProps) {
           />
         )}
       </div>
+      {dropEdge && <DropOverlay edge={dropEdge} />}
+      {contextMenu && (
+        <PaneContextMenu
+          state={contextMenu}
+          onClose={() => setContextMenu(null)}
+          onExtract={() => {
+            onExtract();
+            setContextMenu(null);
+          }}
+          onCloseItem={() => {
+            onClose();
+            setContextMenu(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function computeEdge(x: number, y: number): PaneDropEdge {
+  if (x > 0.4 && x < 0.6 && y > 0.4 && y < 0.6) return "replace";
+  const dx = Math.abs(x - 0.5);
+  const dy = Math.abs(y - 0.5);
+  if (dx > dy) return x < 0.5 ? "left" : "right";
+  return y < 0.5 ? "top" : "bottom";
+}
+
+function DropOverlay({ edge }: { edge: PaneDropEdge }) {
+  const cls = `grid-drop-overlay grid-drop-${edge}`;
+  return <div className={cls} aria-hidden="true" />;
+}
+
+interface PaneContextMenuProps {
+  state: PaneContextMenuState;
+  onClose: () => void;
+  onExtract: () => void;
+  onCloseItem: () => void;
+}
+
+function PaneContextMenu(p: PaneContextMenuProps) {
+  return (
+    <div
+      className="context-menu-backdrop"
+      onClick={p.onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        p.onClose();
+      }}
+    >
+      <ul
+        className="context-menu"
+        style={{ left: p.state.x, top: p.state.y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <li>
+          <button type="button" onClick={p.onExtract}>
+            Move to new tab
+          </button>
+        </li>
+        <li>
+          <button type="button" onClick={p.onCloseItem}>
+            Close pane
+          </button>
+        </li>
+      </ul>
     </div>
   );
 }

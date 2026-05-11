@@ -608,6 +608,44 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   border-color: var(--err);
   color: var(--err);
 }
+.grid-pane-drag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  width: 22px;
+  height: 20px;
+  font-size: 11px;
+  border-radius: 3px;
+  cursor: grab;
+  user-select: none;
+}
+.grid-pane-drag:active {
+  cursor: grabbing;
+}
+.grid-pane-drag:hover {
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+
+.grid-drop-overlay {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(78, 168, 255, 0.22);
+  border: 1px solid var(--accent);
+  z-index: 3;
+}
+.grid-drop-left   { top: 0; bottom: 0; left: 0;   width: 50%; }
+.grid-drop-right  { top: 0; bottom: 0; right: 0;  width: 50%; }
+.grid-drop-top    { left: 0; right: 0; top: 0;    height: 50%; }
+.grid-drop-bottom { left: 0; right: 0; bottom: 0; height: 50%; }
+.grid-drop-replace {
+  top: 12%; left: 12%;
+  right: 12%; bottom: 12%;
+  border-radius: var(--radius);
+}
 
 .empty-pane {
   flex: 1;
