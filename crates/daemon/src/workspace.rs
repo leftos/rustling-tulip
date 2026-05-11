@@ -11,7 +11,11 @@ pub struct ResolvedMember {
     pub repo: RepoEntry,
     pub branch_exists: bool,
     pub effective_base: Option<String>,
-    pub worktree_path: PathBuf,
+    /// Path where claude will run for this member. When `use_worktree` is
+    /// `true` this is the worktree dir under `<repo>.wt/<slug>`; when
+    /// `false` it is the repo's primary directory (an in-place checkout).
+    pub working_path: PathBuf,
+    pub use_worktree: bool,
 }
 
 pub async fn resolve_workspace(
@@ -19,6 +23,7 @@ pub async fn resolve_workspace(
     workspace_id: &str,
     branch_name: &str,
     explicit_base: Option<&str>,
+    use_worktree: bool,
 ) -> anyhow::Result<(WorkspaceEntry, Vec<ResolvedMember>)> {
     let (workspace, repos) = state.with_persisted(|s| {
         let ws = s.workspaces.iter().find(|w| w.id == workspace_id).cloned();
@@ -62,12 +67,17 @@ pub async fn resolve_workspace(
                     .unwrap_or_else(|| "main".to_string()),
             )
         };
-        let worktree_path = git::default_worktree_path(&path, branch_name);
+        let working_path = if use_worktree {
+            git::default_worktree_path(&path, branch_name)
+        } else {
+            path.clone()
+        };
         resolved.push(ResolvedMember {
             repo,
             branch_exists: exists,
             effective_base: base,
-            worktree_path,
+            working_path,
+            use_worktree,
         });
     }
     Ok((workspace, resolved))
@@ -81,30 +91,53 @@ pub fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
             repo_name: m.repo.name.clone(),
             branch_exists: m.branch_exists,
             effective_base: m.effective_base.clone(),
-            worktree_path: m.worktree_path.to_string_lossy().into_owned(),
+            worktree_path: m.working_path.to_string_lossy().into_owned(),
         })
         .collect()
 }
 
-pub async fn ensure_worktrees(
+/// Materialize each member's chosen branch. For `use_worktree` members, this
+/// adds a worktree (idempotent if the dir already exists). For in-place
+/// members, this errors on a dirty working tree and then checks out (or
+/// creates) the branch in the repo's primary directory.
+pub async fn ensure_branches(
     resolved: &[ResolvedMember],
     branch_name: &str,
 ) -> anyhow::Result<()> {
     for member in resolved {
-        if member.worktree_path.exists() {
-            continue;
+        if member.use_worktree {
+            if member.working_path.exists() {
+                continue;
+            }
+            let repo_path = PathBuf::from(&member.repo.path);
+            git::worktree_add(
+                &repo_path,
+                &member.working_path,
+                branch_name,
+                member.effective_base.as_deref(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "creating worktree in {} for branch {branch_name}",
+                    member.repo.name
+                )
+            })?;
+        } else {
+            let repo_path = PathBuf::from(&member.repo.path);
+            git::checkout_in_place(
+                &repo_path,
+                branch_name,
+                member.effective_base.as_deref(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "checking out {branch_name} in {} (in-place)",
+                    member.repo.name
+                )
+            })?;
         }
-        let repo_path = PathBuf::from(&member.repo.path);
-        git::worktree_add(
-            &repo_path,
-            &member.worktree_path,
-            branch_name,
-            member.effective_base.as_deref(),
-        )
-        .await
-        .with_context(|| {
-            format!("creating worktree in {} for branch {branch_name}", member.repo.name)
-        })?;
     }
     Ok(())
 }

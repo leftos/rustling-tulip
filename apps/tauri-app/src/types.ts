@@ -1,12 +1,13 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export interface RepoEntry {
   id: string;
   name: string;
   path: string;
   default_branch: string | null;
+  default_use_worktree: boolean;
 }
 
 export interface WorkspaceEntry {
@@ -14,6 +15,7 @@ export interface WorkspaceEntry {
   name: string;
   member_repo_ids: string[];
   linked_vscode_workspace: string | null;
+  default_use_worktree: boolean;
 }
 
 export type SessionKind = "single" | "workspace";
@@ -57,17 +59,20 @@ export interface SessionSnapshot {
   workspace_id: string | null;
 }
 
-export type BranchTarget =
-  | { kind: "existing"; name: string }
-  | { kind: "new_from_base"; name: string; base: string };
-
 export type SpawnTarget =
-  | { kind: "single"; repo_id: string; branch: BranchTarget }
+  | {
+      kind: "single";
+      repo_id: string;
+      branch_name: string;
+      base_branch: string | null;
+      use_worktree: boolean;
+    }
   | {
       kind: "workspace";
       workspace_id: string;
       branch_name: string;
       base_branch: string | null;
+      use_worktree: boolean;
     };
 
 export type PermissionMode =
@@ -199,7 +204,14 @@ export type ClientMessage =
     }
   | { type: "get_remote_url"; repo_id: string }
   | { type: "repo_status"; repo_id: string }
-  | { type: "load_scrollback"; session_id: string };
+  | { type: "load_scrollback"; session_id: string }
+  | { type: "shutdown" }
+  | { type: "set_repo_worktree_default"; repo_id: string; value: boolean }
+  | {
+      type: "set_workspace_worktree_default";
+      workspace_id: string;
+      value: boolean;
+    };
 
 export type DaemonMessage =
   | { type: "welcome"; protocol_version: number }

@@ -398,3 +398,32 @@ button.link.inline { display: inline; padding: 0 2px; }
 .field > legend { color: var(--fg-muted); font-size: 11px; padding: 0 4px; }
 fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; flex-direction: row; gap: 14px; }
 .radio, .checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.context-menu-backdrop {
+  position: fixed; inset: 0; z-index: 200;
+  background: transparent;
+}
+.context-menu {
+  position: fixed;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  list-style: none; margin: 0; padding: 4px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.context-menu li { padding: 0; }
+.context-menu button {
+  width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--fg);
+  padding: 6px 10px; font: inherit; border-radius: 4px;
+  cursor: pointer;
+}
+.context-menu button:hover { background: var(--bg-elev2); }
+.context-menu button:disabled { color: var(--fg-dim); cursor: not-allowed; }
+.context-menu button:disabled:hover { background: transparent; }
+.context-menu button.danger { color: var(--err); }
+.context-menu button.danger:hover { background: rgba(244, 78, 78, 0.12); }
+.context-menu-separator {
+  height: 1px; background: var(--border); margin: 4px 2px;
+}

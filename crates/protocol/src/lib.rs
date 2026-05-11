@@ -7,7 +7,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
+
+fn default_true() -> bool {
+    true
+}
 
 /// The `daemon.json` discovery file written by the daemon on startup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +32,13 @@ pub struct RepoEntry {
     pub name: String,
     pub path: String,
     pub default_branch: Option<String>,
+    /// Persistent UI preference: when a session is spawned against this repo,
+    /// should the spawn dialog default to creating a worktree (`true`) or to
+    /// running claude in the repo's main directory (`false`)? Defaults to
+    /// `true` for backwards compatibility with state.json files that don't
+    /// carry this field yet.
+    #[serde(default = "default_true")]
+    pub default_use_worktree: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +51,9 @@ pub struct WorkspaceEntry {
     /// changes. `None` for workspaces created manually.
     #[serde(default)]
     pub linked_vscode_workspace: Option<String>,
+    /// Persistent UI preference; see [`RepoEntry::default_use_worktree`].
+    #[serde(default = "default_true")]
+    pub default_use_worktree: bool,
 }
 
 /// Detected VS Code workspace alongside a registered repo that we may want to
@@ -133,20 +147,20 @@ pub struct SessionSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BranchTarget {
-    /// Use an existing branch as-is. The daemon will create the worktree
-    /// pointing at it (or reuse an existing worktree).
-    Existing { name: String },
-    /// Create a new branch off `base`, then check it out in a fresh worktree.
-    NewFromBase { name: String, base: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnTarget {
     Single {
         repo_id: String,
-        branch: BranchTarget,
+        /// Branch the session will run on. If it doesn't exist yet, the
+        /// daemon creates it from `base_branch` (or the repo's default
+        /// branch, falling back to `main`).
+        branch_name: String,
+        /// Base for branch creation. `None` means "use the repo's default".
+        base_branch: Option<String>,
+        /// When `true`, the daemon adds a worktree under
+        /// `<repo>.wt/<branch>` and runs claude there. When `false`, the
+        /// branch is checked out in the repo's primary directory and claude
+        /// runs there directly (errors out on a dirty working tree).
+        use_worktree: bool,
     },
     Workspace {
         workspace_id: String,
@@ -154,6 +168,9 @@ pub enum SpawnTarget {
         branch_name: String,
         /// Base branch when a member repo doesn't already have `branch_name`.
         base_branch: Option<String>,
+        /// See [`SpawnTarget::Single::use_worktree`]; applied independently to
+        /// each member.
+        use_worktree: bool,
     },
 }
 
@@ -323,6 +340,23 @@ pub enum ClientMessage {
     /// The daemon answers with [`DaemonMessage::Scrollback`].
     LoadScrollback {
         session_id: String,
+    },
+    /// Stop every active session and exit the daemon process. The client is
+    /// expected to wait for the WebSocket to close as the shutdown signal —
+    /// no explicit response is sent. Issued by the desktop app's exit
+    /// confirmation when the user opts to terminate everything.
+    Shutdown,
+    /// Update [`RepoEntry::default_use_worktree`]. Daemon replies with the
+    /// fresh `Repos` snapshot so every connected client refreshes its UI.
+    SetRepoWorktreeDefault {
+        repo_id: String,
+        value: bool,
+    },
+    /// Update [`WorkspaceEntry::default_use_worktree`]. Daemon replies with
+    /// the fresh `Workspaces` snapshot.
+    SetWorkspaceWorktreeDefault {
+        workspace_id: String,
+        value: bool,
     },
 }
 

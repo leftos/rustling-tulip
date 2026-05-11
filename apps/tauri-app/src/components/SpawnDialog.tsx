@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
+import { randomWorktreeBranchName } from "../utils/randomName";
 import type {
   DaemonMessage,
   MemberSpawnPreview,
@@ -8,16 +9,18 @@ import type {
   RepoEntry,
   WorkspaceEntry,
 } from "../types";
+import type { SpawnInitialTarget } from "./Sidebar";
 
 interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
+  initialTarget?: SpawnInitialTarget | undefined;
   onClose: () => void;
+  onSpawned: () => void;
 }
 
 type Mode = "single" | "workspace";
-type BranchMode = "existing" | "new";
 type RunMode = "interactive" | "headless";
 
 interface EnvRow {
@@ -45,8 +48,6 @@ function advancedToWire(
 } {
   return {
     model: cfg.model,
-    // Daemon ignores permission_mode when skip-permissions is true; mirror
-    // that here so the wire payload reflects what will actually run.
     permission_mode: skipPerms ? null : cfg.permissionMode,
     extra_env: cfg.envRows
       .filter((r) => r.key.trim().length > 0)
@@ -54,19 +55,25 @@ function advancedToWire(
   };
 }
 
-interface BranchesState {
-  branches: string[];
-  current: string | null;
+function pickInitialMode(
+  initial: SpawnInitialTarget | undefined,
+  workspaces: WorkspaceEntry[],
+): Mode {
+  if (initial?.kind === "repo") return "single";
+  if (initial?.kind === "workspace") return "workspace";
+  return workspaces.length > 0 ? "workspace" : "single";
 }
 
 export default function SpawnDialog({
   repos,
   workspaces,
   client,
+  initialTarget,
   onClose,
+  onSpawned,
 }: Props) {
-  const [mode, setMode] = useState<Mode>(
-    workspaces.length > 0 ? "workspace" : "single",
+  const [mode, setMode] = useState<Mode>(() =>
+    pickInitialMode(initialTarget, workspaces),
   );
   const [runMode, setRunMode] = useState<RunMode>("interactive");
   const [headlessPrompt, setHeadlessPrompt] = useState("");
@@ -85,6 +92,11 @@ export default function SpawnDialog({
       onAdvancedChange={setAdvanced}
     />
   );
+
+  const initialRepoId =
+    initialTarget?.kind === "repo" ? initialTarget.repo_id : null;
+  const initialWorkspaceId =
+    initialTarget?.kind === "workspace" ? initialTarget.workspace_id : null;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -125,18 +137,23 @@ export default function SpawnDialog({
               runMode={runMode}
               headlessPrompt={headlessPrompt}
               advanced={advanced}
+              initialRepoId={initialRepoId}
               onClose={onClose}
+              onSpawned={onSpawned}
               header={sharedFooter}
             />
           ) : (
             <WorkspaceForm
+              repos={repos}
               workspaces={workspaces}
               client={client}
               skipPerms={skipPerms}
               runMode={runMode}
               headlessPrompt={headlessPrompt}
               advanced={advanced}
+              initialWorkspaceId={initialWorkspaceId}
               onClose={onClose}
+              onSpawned={onSpawned}
               header={sharedFooter}
             />
           )}
@@ -330,6 +347,61 @@ function AdvancedSection({
   );
 }
 
+/// Branch field shared by both forms. Behavior:
+///   * On mount / when `defaultBranch` changes (entity switch): if
+///     `useWorktree`, seed with a random `wt/<adj>-<noun>` (because
+///     worktree-adding the default branch fails — it's already checked out
+///     in the primary worktree); otherwise seed with `defaultBranch`.
+///   * When `useWorktree` flips true while value still equals the default:
+///     swap in a random name.
+///   * When `useWorktree` flips false while value is the auto-applied
+///     random one (i.e. user hasn't touched it): revert to `defaultBranch`.
+///   * Any manual edit disables the auto rule until the next entity switch.
+function useBranchField(defaultBranch: string, useWorktree: boolean) {
+  const [value, setValue] = useState<string>(defaultBranch);
+  // Track whether the random rule should still fire. Reset to true whenever
+  // the entity (and therefore `defaultBranch`) changes; flipped to false the
+  // moment the user edits the field by hand.
+  const allowAutoRef = useRef(true);
+
+  useEffect(() => {
+    allowAutoRef.current = true;
+    if (useWorktree && defaultBranch) {
+      setValue(randomWorktreeBranchName());
+    } else {
+      setValue(defaultBranch);
+    }
+    // The use_worktree effect below picks up the rest after a toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultBranch]);
+
+  useEffect(() => {
+    if (!allowAutoRef.current) return;
+    if (useWorktree) {
+      // Toggling worktree on while still on the default → suggest a random.
+      if (value === defaultBranch && defaultBranch) {
+        setValue(randomWorktreeBranchName());
+      }
+    } else {
+      // Toggling worktree off while still on our auto-suggested random →
+      // revert to the default so the field doesn't keep an irrelevant name.
+      if (value.startsWith("wt/") && defaultBranch) {
+        setValue(defaultBranch);
+      }
+    }
+    // We deliberately ignore `value` from deps — this effect is meant to
+    // fire on toggle, not on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useWorktree]);
+
+  const onChange = (next: string) => {
+    allowAutoRef.current = false;
+    setValue(next);
+  };
+
+  return { value, setValue: onChange };
+}
+
 // ---------- single-repo form ----------
 
 function SingleForm({
@@ -339,7 +411,9 @@ function SingleForm({
   runMode,
   headlessPrompt,
   advanced,
+  initialRepoId,
   onClose,
+  onSpawned,
   header,
 }: {
   repos: RepoEntry[];
@@ -348,62 +422,86 @@ function SingleForm({
   runMode: RunMode;
   headlessPrompt: string;
   advanced: AdvancedConfig;
+  initialRepoId: string | null;
   onClose: () => void;
+  onSpawned: () => void;
   header: React.ReactNode;
 }) {
-  const [repoId, setRepoId] = useState<string>(repos[0]?.id ?? "");
-  const [branches, setBranches] = useState<BranchesState | null>(null);
-  const [branchMode, setBranchMode] = useState<BranchMode>("existing");
-  const [existingBranch, setExistingBranch] = useState("");
-  const [newBranchName, setNewBranchName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
+  const defaultRepoId = initialRepoId ?? repos[0]?.id ?? "";
+  const [repoId, setRepoId] = useState<string>(defaultRepoId);
 
+  const repo = useMemo(
+    () => repos.find((r) => r.id === repoId) ?? null,
+    [repos, repoId],
+  );
+
+  const [knownBranches, setKnownBranches] = useState<string[]>([]);
   useEffect(() => {
     if (!repoId) return;
-    setBranches(null);
+    setKnownBranches([]);
     client.send({ type: "list_branches", repo_id: repoId });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "branches" || detail.repo_id !== repoId) return;
-      setBranches({
-        branches: detail.branches,
-        current: detail.current,
-      });
-      const fallback = detail.current ?? detail.branches[0] ?? "";
-      setExistingBranch(fallback);
-      setBaseBranch(detail.current ?? detail.branches[0] ?? "main");
+      setKnownBranches(detail.branches);
     };
     window.addEventListener("rt:branches", handler);
     return () => window.removeEventListener("rt:branches", handler);
   }, [repoId, client]);
 
+  const defaultBranch = repo?.default_branch ?? "main";
+  const [useWorktree, setUseWorktree] = useState<boolean>(true);
+
+  // Reset the persistent-preference seed when the chosen repo changes.
+  useEffect(() => {
+    setUseWorktree(repo?.default_use_worktree ?? true);
+  }, [repo]);
+
+  const branch = useBranchField(defaultBranch, useWorktree);
+
+  const [baseBranch, setBaseBranch] = useState<string>("");
+  useEffect(() => {
+    setBaseBranch(defaultBranch);
+  }, [defaultBranch]);
+
+  const toggleUseWorktree = (next: boolean) => {
+    setUseWorktree(next);
+    if (repo) {
+      client.send({
+        type: "set_repo_worktree_default",
+        repo_id: repo.id,
+        value: next,
+      });
+    }
+  };
+
   const canSubmit =
     !!repoId &&
-    !!(branchMode === "existing" ? existingBranch : newBranchName) &&
-    (branchMode === "new" ? !!baseBranch : true) &&
+    branch.value.trim().length > 0 &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
     if (!canSubmit) return;
-    const branch =
-      branchMode === "existing"
-        ? { kind: "existing" as const, name: existingBranch }
-        : {
-            kind: "new_from_base" as const,
-            name: newBranchName,
-            base: baseBranch,
-          };
     client.send({
       type: "spawn_session",
       label: null,
-      target: { kind: "single", repo_id: repoId, branch },
+      target: {
+        kind: "single",
+        repo_id: repoId,
+        branch_name: branch.value.trim(),
+        base_branch: baseBranch.trim() || null,
+        use_worktree: useWorktree,
+      },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
       ...advancedToWire(advanced, skipPerms),
     });
+    onSpawned();
     onClose();
   };
+
+  const datalistId = `single-branches-${repoId || "none"}`;
 
   return (
     <>
@@ -418,69 +516,45 @@ function SingleForm({
         </select>
       </label>
 
-      <fieldset className="field">
-        <legend>Branch</legend>
-        <label className="radio">
-          <input
-            type="radio"
-            checked={branchMode === "existing"}
-            onChange={() => setBranchMode("existing")}
-          />
-          Existing
-        </label>
-        <label className="radio">
-          <input
-            type="radio"
-            checked={branchMode === "new"}
-            onChange={() => setBranchMode("new")}
-          />
-          New
-        </label>
-      </fieldset>
+      <label className="field">
+        <span>Branch name</span>
+        <input
+          type="text"
+          list={datalistId}
+          value={branch.value}
+          onChange={(e) => branch.setValue(e.target.value)}
+          placeholder={defaultBranch}
+        />
+        <datalist id={datalistId}>
+          {knownBranches.map((b) => (
+            <option key={b} value={b} />
+          ))}
+        </datalist>
+      </label>
 
-      {branchMode === "existing" ? (
-        <label className="field">
-          <span>Branch</span>
-          <select
-            value={existingBranch}
-            onChange={(e) => setExistingBranch(e.target.value)}
-            disabled={!branches}
-          >
-            {branches?.branches.map((b) => (
-              <option key={b} value={b}>
-                {b}
-                {b === branches.current ? " (current)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : (
-        <>
-          <label className="field">
-            <span>New branch name</span>
-            <input
-              type="text"
-              value={newBranchName}
-              onChange={(e) => setNewBranchName(e.target.value)}
-              placeholder="feat/whatever"
-            />
-          </label>
-          <label className="field">
-            <span>Base</span>
-            <select
-              value={baseBranch}
-              onChange={(e) => setBaseBranch(e.target.value)}
-              disabled={!branches}
-            >
-              {branches?.branches.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </label>
-        </>
-      )}
+      <label className="field">
+        <span>Base when creating new (optional)</span>
+        <input
+          type="text"
+          value={baseBranch}
+          onChange={(e) => setBaseBranch(e.target.value)}
+          placeholder={defaultBranch}
+        />
+      </label>
+
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={useWorktree}
+          onChange={(e) => toggleUseWorktree(e.target.checked)}
+        />
+        <span>
+          Create a worktree
+          <span className="muted small" style={{ marginLeft: 6 }}>
+            (unchecked: run claude in the repo's main directory)
+          </span>
+        </span>
+      </label>
 
       {header}
       <div className="modal-footer-inline">
@@ -503,36 +577,68 @@ function SingleForm({
 // ---------- workspace form ----------
 
 function WorkspaceForm({
+  repos,
   workspaces,
   client,
   skipPerms,
   runMode,
   headlessPrompt,
   advanced,
+  initialWorkspaceId,
   onClose,
+  onSpawned,
   header,
 }: {
+  repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
   skipPerms: boolean;
   runMode: RunMode;
   headlessPrompt: string;
   advanced: AdvancedConfig;
+  initialWorkspaceId: string | null;
   onClose: () => void;
+  onSpawned: () => void;
   header: React.ReactNode;
 }) {
-  const [workspaceId, setWorkspaceId] = useState<string>(
-    workspaces[0]?.id ?? "",
+  const defaultWorkspaceId = initialWorkspaceId ?? workspaces[0]?.id ?? "";
+  const [workspaceId, setWorkspaceId] = useState<string>(defaultWorkspaceId);
+
+  const workspace = useMemo(
+    () => workspaces.find((w) => w.id === workspaceId) ?? null,
+    [workspaces, workspaceId],
   );
-  const [branchName, setBranchName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
-  const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
-  const [previewBranch, setPreviewBranch] = useState<string | null>(null);
+
+  // Default branch + default_use_worktree are sourced from the first
+  // registered member of the workspace (this is also what the daemon does
+  // when filling in an unspecified base).
+  const firstMember = useMemo(() => {
+    if (!workspace) return null;
+    for (const id of workspace.member_repo_ids) {
+      const r = repos.find((rr) => rr.id === id);
+      if (r) return r;
+    }
+    return null;
+  }, [workspace, repos]);
+
+  const defaultBranch = firstMember?.default_branch ?? "main";
+  const [useWorktree, setUseWorktree] = useState<boolean>(true);
 
   useEffect(() => {
+    setUseWorktree(workspace?.default_use_worktree ?? true);
+  }, [workspace]);
+
+  const branch = useBranchField(defaultBranch, useWorktree);
+
+  const [baseBranch, setBaseBranch] = useState<string>("");
+  useEffect(() => {
+    setBaseBranch(defaultBranch);
+  }, [defaultBranch]);
+
+  const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
+  useEffect(() => {
     setPreview(null);
-    setPreviewBranch(null);
-  }, [workspaceId, branchName, baseBranch]);
+  }, [workspaceId, branch.value, baseBranch]);
 
   useEffect(() => {
     const handler = (ev: Event) => {
@@ -540,33 +646,41 @@ function WorkspaceForm({
       if (
         detail.type !== "workspace_spawn_preview" ||
         detail.workspace_id !== workspaceId ||
-        detail.branch_name !== branchName
+        detail.branch_name !== branch.value
       ) {
         return;
       }
       setPreview(detail.per_member);
-      setPreviewBranch(detail.branch_name);
     };
     window.addEventListener("rt:workspace_spawn_preview", handler);
     return () =>
       window.removeEventListener("rt:workspace_spawn_preview", handler);
-  }, [workspaceId, branchName]);
+  }, [workspaceId, branch.value]);
+
+  const toggleUseWorktree = (next: boolean) => {
+    setUseWorktree(next);
+    if (workspace) {
+      client.send({
+        type: "set_workspace_worktree_default",
+        workspace_id: workspace.id,
+        value: next,
+      });
+    }
+  };
 
   const requestPreview = () => {
-    if (!workspaceId || !branchName) return;
+    if (!workspaceId || !branch.value) return;
     client.send({
       type: "preview_workspace_spawn",
       workspace_id: workspaceId,
-      branch_name: branchName,
-      base_branch: baseBranch || null,
+      branch_name: branch.value,
+      base_branch: baseBranch.trim() || null,
     });
   };
 
   const canSpawn =
-    !!preview &&
-    previewBranch === branchName &&
     !!workspaceId &&
-    !!branchName &&
+    branch.value.trim().length > 0 &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true);
 
   const submit = () => {
@@ -577,14 +691,16 @@ function WorkspaceForm({
       target: {
         kind: "workspace",
         workspace_id: workspaceId,
-        branch_name: branchName,
-        base_branch: baseBranch || null,
+        branch_name: branch.value.trim(),
+        base_branch: baseBranch.trim() || null,
+        use_worktree: useWorktree,
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions: skipPerms,
       ...advancedToWire(advanced, skipPerms),
     });
+    onSpawned();
     onClose();
   };
 
@@ -608,9 +724,9 @@ function WorkspaceForm({
         <span>Branch name (same across all members)</span>
         <input
           type="text"
-          value={branchName}
-          onChange={(e) => setBranchName(e.target.value)}
-          placeholder="feat/whatever"
+          value={branch.value}
+          onChange={(e) => branch.setValue(e.target.value)}
+          placeholder={defaultBranch}
         />
       </label>
 
@@ -620,12 +736,30 @@ function WorkspaceForm({
           type="text"
           value={baseBranch}
           onChange={(e) => setBaseBranch(e.target.value)}
-          placeholder="main"
+          placeholder={defaultBranch}
         />
       </label>
 
+      <label className="checkbox">
+        <input
+          type="checkbox"
+          checked={useWorktree}
+          onChange={(e) => toggleUseWorktree(e.target.checked)}
+        />
+        <span>
+          Create worktrees
+          <span className="muted small" style={{ marginLeft: 6 }}>
+            (unchecked: check out the branch in each member's main directory)
+          </span>
+        </span>
+      </label>
+
       <div className="modal-footer-inline">
-        <button type="button" onClick={requestPreview} disabled={!branchName}>
+        <button
+          type="button"
+          onClick={requestPreview}
+          disabled={!branch.value}
+        >
           Preview
         </button>
       </div>
@@ -638,20 +772,20 @@ function WorkspaceForm({
                 <th>Repo</th>
                 <th>Branch</th>
                 <th>Action</th>
-                <th>Worktree</th>
+                <th>Path</th>
               </tr>
             </thead>
             <tbody>
               {preview.map((m) => (
                 <tr key={m.repo_id}>
                   <td>{m.repo_name}</td>
-                  <td>{branchName}</td>
+                  <td>{branch.value}</td>
                   <td>
                     {m.branch_exists ? (
                       <span className="badge badge-ok">reuse</span>
                     ) : (
                       <span className="badge badge-warn">
-                        new from {m.effective_base ?? "main"}
+                        new from {m.effective_base ?? defaultBranch}
                       </span>
                     )}
                   </td>

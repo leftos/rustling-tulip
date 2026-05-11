@@ -2,6 +2,10 @@ import { useMemo, useState } from "react";
 import type { ConnectionState } from "../api";
 import type { RepoEntry, SessionSnapshot, WorkspaceEntry } from "../types";
 
+export type SpawnInitialTarget =
+  | { kind: "repo"; repo_id: string }
+  | { kind: "workspace"; workspace_id: string };
+
 interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
@@ -13,8 +17,9 @@ interface Props {
   onRemoveRepo: (id: string) => void;
   onRemoveWorkspace: (id: string) => void;
   onSelectSession: (id: string) => void;
-  onOpenSpawn: () => void;
+  onOpenSpawn: (initial?: SpawnInitialTarget) => void;
   onOpenWorkspaceCreator: () => void;
+  onRevealInExplorer: (path: string) => void;
 }
 
 type ContainerKind = "workspace" | "repo" | "detached";
@@ -27,9 +32,18 @@ interface TreeContainer {
   name: string;
   // Subtitle line for repos (path) — hover-only via title attribute.
   hoverTitle?: string;
+  /// Filesystem path for repo containers; null for workspaces (which span
+  /// multiple repos) and the detached pseudo-container.
+  fsPath: string | null;
   sessions: SessionSnapshot[];
   // True iff this container can be removed via the inline × button.
   removable: boolean;
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  container: TreeContainer;
 }
 
 export default function Sidebar(props: Props) {
@@ -47,6 +61,9 @@ export default function Sidebar(props: Props) {
       else next.add(key);
       return next;
     });
+
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const closeMenu = () => setContextMenu(null);
 
   // Force-expand any container whose selected/attention session lives inside.
   const forceExpand = useMemo(() => {
@@ -72,7 +89,11 @@ export default function Sidebar(props: Props) {
       </header>
 
       <div className="sidebar-toolbar">
-        <button type="button" className="primary small" onClick={props.onOpenSpawn}>
+        <button
+          type="button"
+          className="primary small"
+          onClick={() => props.onOpenSpawn()}
+        >
           + Session
         </button>
         <button type="button" className="link" onClick={props.onAddRepo}>
@@ -118,10 +139,45 @@ export default function Sidebar(props: Props) {
                 onSelectSession={props.onSelectSession}
                 onRemoveRepo={props.onRemoveRepo}
                 onRemoveWorkspace={props.onRemoveWorkspace}
+                onContextMenu={(x, y) =>
+                  setContextMenu({ x, y, container: c })
+                }
               />
             );
           })}
         </ul>
+      )}
+
+      {contextMenu && (
+        <ContainerContextMenu
+          state={contextMenu}
+          onClose={closeMenu}
+          onSpawn={() => {
+            const c = contextMenu.container;
+            if (c.kind === "repo") {
+              props.onOpenSpawn({ kind: "repo", repo_id: c.id });
+            } else if (c.kind === "workspace") {
+              props.onOpenSpawn({ kind: "workspace", workspace_id: c.id });
+            }
+            closeMenu();
+          }}
+          onRemove={() => {
+            const c = contextMenu.container;
+            if (c.kind === "repo") props.onRemoveRepo(c.id);
+            else if (c.kind === "workspace") props.onRemoveWorkspace(c.id);
+            closeMenu();
+          }}
+          onReveal={() => {
+            const path = contextMenu.container.fsPath;
+            if (path) props.onRevealInExplorer(path);
+            closeMenu();
+          }}
+          onCopyPath={() => {
+            const path = contextMenu.container.fsPath;
+            if (path) void navigator.clipboard.writeText(path);
+            closeMenu();
+          }}
+        />
       )}
     </aside>
   );
@@ -136,6 +192,7 @@ interface ContainerNodeProps {
   onSelectSession: (id: string) => void;
   onRemoveRepo: (id: string) => void;
   onRemoveWorkspace: (id: string) => void;
+  onContextMenu: (x: number, y: number) => void;
 }
 
 function ContainerNode(p: ContainerNodeProps) {
@@ -150,11 +207,18 @@ function ContainerNode(p: ContainerNodeProps) {
     else if (c.kind === "workspace") p.onRemoveWorkspace(c.id);
   };
 
+  const onContext = (e: React.MouseEvent) => {
+    if (c.kind === "detached") return;
+    e.preventDefault();
+    p.onContextMenu(e.clientX, e.clientY);
+  };
+
   return (
     <li>
       <div
         className={headerClasses}
         onClick={hasChildren ? p.onToggle : undefined}
+        onContextMenu={onContext}
         role={hasChildren ? "button" : undefined}
         title={c.hoverTitle}
       >
@@ -235,6 +299,64 @@ function SessionLeaf(p: SessionLeafProps) {
   );
 }
 
+interface ContextMenuProps {
+  state: ContextMenuState;
+  onClose: () => void;
+  onSpawn: () => void;
+  onRemove: () => void;
+  onReveal: () => void;
+  onCopyPath: () => void;
+}
+
+function ContainerContextMenu(p: ContextMenuProps) {
+  const c = p.state.container;
+  const canReveal = c.fsPath !== null;
+  const removeLabel =
+    c.kind === "workspace" ? "Remove workspace" : "Remove repo";
+
+  // Backdrop catches clicks/keys to close. The menu itself is positioned at
+  // the cursor; max-bounds-checking is left to the browser for now (the
+  // panel is small and the sidebar is the main interaction surface).
+  return (
+    <div
+      className="context-menu-backdrop"
+      onClick={p.onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        p.onClose();
+      }}
+    >
+      <ul
+        className="context-menu"
+        style={{ left: p.state.x, top: p.state.y }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <li>
+          <button type="button" onClick={p.onSpawn}>
+            Spawn new session
+          </button>
+        </li>
+        <li>
+          <button type="button" onClick={p.onReveal} disabled={!canReveal}>
+            Open in file explorer
+          </button>
+        </li>
+        <li>
+          <button type="button" onClick={p.onCopyPath} disabled={!canReveal}>
+            Copy path
+          </button>
+        </li>
+        <li className="context-menu-separator" aria-hidden="true" />
+        <li>
+          <button type="button" className="danger" onClick={p.onRemove}>
+            {removeLabel}
+          </button>
+        </li>
+      </ul>
+    </div>
+  );
+}
+
 function buildContainers(
   repos: RepoEntry[],
   workspaces: WorkspaceEntry[],
@@ -242,6 +364,14 @@ function buildContainers(
 ): TreeContainer[] {
   const workspaceById = new Map(workspaces.map((w) => [w.id, w] as const));
   const repoById = new Map(repos.map((r) => [r.id, r] as const));
+
+  // Repos that are members of any workspace don't get their own top-level
+  // container — they live under the workspace instead. Their single-repo
+  // sessions (if any) still appear in the Detached bucket below.
+  const memberRepoIds = new Set<string>();
+  for (const w of workspaces) {
+    for (const id of w.member_repo_ids) memberRepoIds.add(id);
+  }
 
   // Group sessions by their owning container.
   const wsSessions = new Map<string, SessionSnapshot[]>();
@@ -256,9 +386,15 @@ function buildContainers(
         detached.push(s);
       }
     } else {
-      // Single-repo session: parent is members[0].repo_id.
+      // Single-repo session: parent is members[0].repo_id, but only if that
+      // repo is still a top-level container. If the repo became a workspace
+      // member, the session has no obvious home and we surface it as detached.
       const primaryRepoId = s.members[0]?.repo_id;
-      if (primaryRepoId && repoById.has(primaryRepoId)) {
+      if (
+        primaryRepoId &&
+        repoById.has(primaryRepoId) &&
+        !memberRepoIds.has(primaryRepoId)
+      ) {
         pushTo(repoSessions, primaryRepoId, s);
       } else {
         detached.push(s);
@@ -281,12 +417,15 @@ function buildContainers(
       kind: "workspace",
       id: w.id,
       name: w.name,
+      fsPath: null,
       sessions: sortSessions(wsSessions.get(w.id) ?? []),
       removable: true,
     });
   }
 
-  const sortedRepos = [...repos].sort((a, b) => a.name.localeCompare(b.name));
+  const sortedRepos = [...repos]
+    .filter((r) => !memberRepoIds.has(r.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
   for (const r of sortedRepos) {
     out.push({
       key: `repo:${r.id}`,
@@ -294,6 +433,7 @@ function buildContainers(
       id: r.id,
       name: r.name,
       hoverTitle: r.path,
+      fsPath: r.path,
       sessions: sortSessions(repoSessions.get(r.id) ?? []),
       removable: true,
     });
@@ -306,6 +446,7 @@ function buildContainers(
       id: "",
       name: "Detached",
       hoverTitle: "Sessions whose containing repo or workspace is no longer registered",
+      fsPath: null,
       sessions: sortSessions(detached),
       removable: false,
     });

@@ -3,7 +3,10 @@
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::{self, PtySpawnSpec};
-use crate::registry::{add_repo, remove_repo, remove_workspace, upsert_workspace};
+use crate::registry::{
+    add_repo, remove_repo, remove_workspace, set_repo_worktree_default,
+    set_workspace_worktree_default, upsert_workspace,
+};
 use crate::scrollback;
 use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
@@ -20,9 +23,9 @@ use base64::Engine as _;
 use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    AttentionReason, BranchTarget, ClientMessage, DaemonHandshake, DaemonMessage, MemberDiff,
-    PROTOCOL_VERSION, PermissionMode, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionStatus, SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
+    AttentionReason, ClientMessage, DaemonHandshake, DaemonMessage, MemberDiff, PROTOCOL_VERSION,
+    PermissionMode, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
+    SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -41,6 +44,10 @@ pub struct Hub {
     pub auth_token: String,
     pub attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
     pub dirs: Dirs,
+    /// Set to `true` by the [`ClientMessage::Shutdown`] handler; axum's
+    /// graceful-shutdown future awaits this and returns once flipped, after
+    /// which the daemon process exits cleanly.
+    pub shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
@@ -69,12 +76,15 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
         }
     });
 
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
     let hub = Hub {
         state,
         sessions,
         auth_token: auth_token.clone(),
         attention_tx,
         dirs: dirs.clone(),
+        shutdown_tx,
     };
 
     let app = Router::new()
@@ -91,10 +101,29 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
 
     write_handshake(&dirs, bound.port(), &auth_token)?;
 
-    axum::serve(listener, app)
+    let shutdown_signal = async move {
+        // Returns once the Shutdown handler flips the watch to `true`. A
+        // `recv_error` means the sender was dropped (programmer error) — fall
+        // through and let axum exit naturally rather than panicking.
+        while shutdown_rx.changed().await.is_ok() {
+            if *shutdown_rx.borrow() {
+                info!("shutdown signal: watch flipped true; stopping accept loop");
+                break;
+            }
+        }
+        info!("shutdown signal: future complete");
+    };
+    info!("server::run: entering axum::serve");
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
         .await
-        .context("axum serve failed")?;
-    Ok(())
+        .context("axum serve failed");
+    info!(?serve_result, "server::run: axum::serve returned");
+    // Best-effort cleanup: remove the discovery file so a subsequent app
+    // launch doesn't try to reconnect to a defunct port.
+    let _ = std::fs::remove_file(&dirs.handshake_file);
+    info!("server::run: discovery file removed; returning");
+    serve_result
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
@@ -188,33 +217,66 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // Send initial state snapshots.
     push_initial_state(&hub, &out_tx);
 
-    // Main receive loop.
-    while let Some(Ok(msg)) = receiver.next().await {
-        let text = match msg {
-            Message::Text(t) => t.to_string(),
-            Message::Close(_) => break,
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
-        };
-        let parsed: ClientMessage = match serde_json::from_str(&text) {
-            Ok(p) => p,
-            Err(err) => {
-                let _ = out_tx.send(DaemonMessage::Error {
-                    message: format!("malformed message: {err}"),
-                });
-                continue;
-            }
-        };
-        if let Err(err) = dispatch(&hub, parsed, &out_tx, &attached).await {
-            let _ = out_tx.send(DaemonMessage::Error {
-                message: err.to_string(),
-            });
-        }
-    }
+    recv_loop(&hub, &mut receiver, &out_tx, &attached).await;
 
-    debug!("client disconnected");
+    info!("client_session: recv_loop returned; tearing down");
     drop(out_tx);
     event_task.abort();
     let _ = send_task.await;
+    info!("client_session: returning");
+}
+
+/// Run the WebSocket receive loop until the peer closes or the daemon-wide
+/// shutdown flag flips. Honoring `shutdown_tx` here is what lets axum's
+/// graceful-shutdown future resolve after a [`ClientMessage::Shutdown`] —
+/// otherwise every `recv()` blocks forever and the daemon hangs.
+async fn recv_loop(
+    hub: &Hub,
+    receiver: &mut futures::stream::SplitStream<WebSocket>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    attached: &Arc<AsyncMutex<HashSet<String>>>,
+) {
+    let mut shutdown_rx = hub.shutdown_tx.subscribe();
+    loop {
+        tokio::select! {
+            biased;
+            res = shutdown_rx.changed() => {
+                if res.is_err() {
+                    info!("recv_loop: shutdown_rx closed; exiting");
+                    break;
+                }
+                if *shutdown_rx.borrow_and_update() {
+                    info!("recv_loop: observed daemon shutdown signal; exiting");
+                    break;
+                }
+            }
+            next = receiver.next() => {
+                let Some(Ok(msg)) = next else {
+                    info!("recv_loop: peer closed websocket; exiting");
+                    break;
+                };
+                let text = match msg {
+                    Message::Text(t) => t.to_string(),
+                    Message::Close(_) => break,
+                    Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
+                };
+                let parsed: ClientMessage = match serde_json::from_str(&text) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        let _ = out_tx.send(DaemonMessage::Error {
+                            message: format!("malformed message: {err}"),
+                        });
+                        continue;
+                    }
+                };
+                if let Err(err) = dispatch(hub, parsed, out_tx, attached).await {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: err.to_string(),
+                    });
+                }
+            }
+        }
+    }
 }
 
 async fn handshake(
@@ -330,11 +392,15 @@ async fn dispatch(
             branch_name,
             base_branch,
         } => {
+            // Preview always reflects the worktree path; the in-place
+            // affordance is hidden behind the use_worktree spawn flag and
+            // doesn't change preview output meaningfully.
             let (_, resolved) = ws::resolve_workspace(
                 &hub.state,
                 &workspace_id,
                 &branch_name,
                 base_branch.as_deref(),
+                true,
             )
             .await?;
             let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
@@ -471,8 +537,47 @@ async fn dispatch(
                 truncated,
             });
         }
+        ClientMessage::Shutdown => {
+            info!("dispatch: ClientMessage::Shutdown received");
+            shutdown_all(hub).await;
+            info!("dispatch: shutdown_all returned; flipping watch");
+            // Signal the accept loop to exit. The send may fail if a previous
+            // Shutdown already flipped it; either way the daemon is on its
+            // way out.
+            let send_result = hub.shutdown_tx.send(true);
+            info!(?send_result, "dispatch: shutdown_tx.send returned");
+        }
+        ClientMessage::SetRepoWorktreeDefault { repo_id, value } => {
+            set_repo_worktree_default(&hub.state, &repo_id, value)?;
+            let repos = hub.state.with_persisted(|s| s.repos.clone());
+            let _ = out_tx.send(DaemonMessage::Repos { repos });
+        }
+        ClientMessage::SetWorkspaceWorktreeDefault {
+            workspace_id,
+            value,
+        } => {
+            set_workspace_worktree_default(&hub.state, &workspace_id, value)?;
+            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+        }
     }
     Ok(())
+}
+
+/// Stop every active session (kill PTY / headless child, drop orphan sidecar)
+/// and clear the registry. Worktrees are intentionally left in place — exit
+/// is the wrong moment to ask the user about per-member cleanup.
+async fn shutdown_all(hub: &Hub) {
+    let ids: Vec<String> = hub.sessions.snapshots().into_iter().map(|s| s.id).collect();
+    info!(count = ids.len(), "shutdown_all: starting");
+    for id in &ids {
+        info!(session_id = %id, "shutdown_all: stopping session");
+        if let Err(err) = stop_session(hub, id, &[]).await {
+            warn!(session_id = %id, ?err, "stop_session during shutdown failed");
+        }
+        info!(session_id = %id, "shutdown_all: session stopped");
+    }
+    info!("shutdown_all: complete");
 }
 
 fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
@@ -500,12 +605,20 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
     } = req;
 
     let (kind, members, primary_cwd, default_label, workspace_id) = match target {
-        SpawnTarget::Single { repo_id, branch } => spawn_single(hub, &repo_id, branch).await?,
+        SpawnTarget::Single {
+            repo_id,
+            branch_name,
+            base_branch,
+            use_worktree,
+        } => spawn_single(hub, &repo_id, &branch_name, base_branch, use_worktree).await?,
         SpawnTarget::Workspace {
             workspace_id,
             branch_name,
             base_branch,
-        } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch).await?,
+            use_worktree,
+        } => {
+            spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?
+        }
     };
 
     let session_id = new_id();
@@ -756,7 +869,9 @@ fn spawn_headless_session(
 async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
-    branch: BranchTarget,
+    branch_name: &str,
+    base_branch: Option<String>,
+    use_worktree: bool,
 ) -> anyhow::Result<(
     SessionKind,
     Vec<SessionMember>,
@@ -770,34 +885,39 @@ async fn spawn_single(
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
     let repo_path = PathBuf::from(&repo.path);
 
-    let (branch_name, base_for_create) = match branch {
-        BranchTarget::Existing { name } => (name, None),
-        BranchTarget::NewFromBase { name, base } => (name, Some(base)),
-    };
+    // The base used when the branch needs to be created. Explicit caller
+    // value wins; otherwise we fall back to the repo's recorded default,
+    // then to "main" as a last resort.
+    let base_for_create = base_branch
+        .or_else(|| repo.default_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
 
-    let worktree_path = git::default_worktree_path(&repo_path, &branch_name);
-    if !worktree_path.exists() {
-        git::worktree_add(
-            &repo_path,
-            &worktree_path,
-            &branch_name,
-            base_for_create.as_deref(),
-        )
-        .await
-        .context("creating worktree")?;
-    }
+    let working_path = if use_worktree {
+        let worktree_path = git::default_worktree_path(&repo_path, branch_name);
+        if !worktree_path.exists() {
+            git::worktree_add(&repo_path, &worktree_path, branch_name, Some(&base_for_create))
+                .await
+                .context("creating worktree")?;
+        }
+        worktree_path
+    } else {
+        git::checkout_in_place(&repo_path, branch_name, Some(&base_for_create))
+            .await
+            .context("checking out branch in-place")?;
+        repo_path.clone()
+    };
 
     let member = SessionMember {
         repo_id: repo.id.clone(),
         repo_name: repo.name.clone(),
-        branch: branch_name.clone(),
-        worktree_path: worktree_path.to_string_lossy().into_owned(),
+        branch: branch_name.to_string(),
+        worktree_path: working_path.to_string_lossy().into_owned(),
     };
     let label = format!("{}: {branch_name}", repo.name);
     Ok((
         SessionKind::Single,
         vec![member],
-        worktree_path,
+        working_path,
         label,
         None,
     ))
@@ -808,6 +928,7 @@ async fn spawn_workspace(
     workspace_id: &str,
     branch_name: &str,
     base_branch: Option<String>,
+    use_worktree: bool,
 ) -> anyhow::Result<(
     SessionKind,
     Vec<SessionMember>,
@@ -820,14 +941,15 @@ async fn spawn_workspace(
         workspace_id,
         branch_name,
         base_branch.as_deref(),
+        use_worktree,
     )
     .await?;
-    ws::ensure_worktrees(&resolved, branch_name).await?;
+    ws::ensure_branches(&resolved, branch_name).await?;
 
     let primary = resolved
         .first()
         .ok_or_else(|| anyhow!("workspace has no members"))?
-        .worktree_path
+        .working_path
         .clone();
     let members: Vec<SessionMember> = resolved
         .iter()
@@ -835,7 +957,7 @@ async fn spawn_workspace(
             repo_id: m.repo.id.clone(),
             repo_name: m.repo.name.clone(),
             branch: branch_name.to_string(),
-            worktree_path: m.worktree_path.to_string_lossy().into_owned(),
+            worktree_path: m.working_path.to_string_lossy().into_owned(),
         })
         .collect();
     let label = format!("{}: {branch_name}", workspace.name);

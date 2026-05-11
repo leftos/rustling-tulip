@@ -5,14 +5,22 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
 
+/// On Windows, suppresses the brief console window flash that would otherwise
+/// appear for each git child. No-op on other platforms.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
         .arg(repo)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .await
         .with_context(|| format!("spawning git {args:?}"))?;
@@ -91,6 +99,37 @@ pub async fn changed_files(worktree: &Path) -> anyhow::Result<Vec<String>> {
         .filter_map(|l| l.get(3..).map(str::trim).map(String::from))
         .filter(|l| !l.is_empty())
         .collect())
+}
+
+pub async fn is_clean(repo: &Path) -> anyhow::Result<bool> {
+    Ok(changed_files(repo).await?.is_empty())
+}
+
+/// Check out `branch` directly in `repo`'s working tree (no worktree). If the
+/// branch doesn't exist, create it from `create_from_base`. The working tree
+/// must be clean — callers should surface the returned error to the user.
+pub async fn checkout_in_place(
+    repo: &Path,
+    branch: &str,
+    create_from_base: Option<&str>,
+) -> anyhow::Result<()> {
+    if !is_clean(repo).await? {
+        return Err(anyhow!(
+            "{} has uncommitted changes; commit or stash before spawning in-place",
+            repo.display()
+        ));
+    }
+    let branch_exists = run_git(repo, &["rev-parse", "--verify", branch])
+        .await
+        .is_ok();
+    if branch_exists {
+        run_git(repo, &["checkout", branch]).await.map(|_| ())
+    } else {
+        let base = create_from_base.unwrap_or("HEAD");
+        run_git(repo, &["checkout", "-b", branch, base])
+            .await
+            .map(|_| ())
+    }
 }
 
 /// Build a default worktree path: `<repo_parent>/<repo_name>.wt/<branch_slug>`.

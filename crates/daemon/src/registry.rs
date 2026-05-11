@@ -43,10 +43,35 @@ pub async fn add_repo(
         name,
         path: canonical_str,
         default_branch,
+        default_use_worktree: true,
     };
 
     state.mutate(|s| s.repos.push(entry.clone()))?;
     Ok(entry)
+}
+
+pub fn set_repo_worktree_default(
+    state: &AppState,
+    repo_id: &str,
+    value: bool,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.default_use_worktree = value;
+        }
+    })
+}
+
+pub fn set_workspace_worktree_default(
+    state: &AppState,
+    workspace_id: &str,
+    value: bool,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            ws.default_use_worktree = value;
+        }
+    })
 }
 
 pub fn remove_repo(state: &AppState, repo_id: &str) -> anyhow::Result<()> {
@@ -66,11 +91,20 @@ pub fn upsert_workspace(
     linked_vscode_workspace: Option<String>,
 ) -> anyhow::Result<WorkspaceEntry> {
     let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Preserve the existing worktree-default when updating; only first-time
+    // upserts start at the `true` default.
+    let prior_default_use_worktree = state.with_persisted(|s| {
+        s.workspaces
+            .iter()
+            .find(|w| w.id == id)
+            .map(|w| w.default_use_worktree)
+    });
     let entry = WorkspaceEntry {
         id: id.clone(),
         name,
         member_repo_ids,
         linked_vscode_workspace,
+        default_use_worktree: prior_default_use_worktree.unwrap_or(true),
     };
     state.mutate(|s| {
         if let Some(slot) = s.workspaces.iter_mut().find(|w| w.id == id) {

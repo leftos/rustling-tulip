@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
@@ -18,13 +20,15 @@ import type {
   VscodeWorkspaceSuggestion,
   WorkspaceEntry,
 } from "./types";
-import Sidebar from "./components/Sidebar";
+import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
 import SessionPane from "./components/SessionPane";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import ResizableSplit from "./components/ResizableSplit";
+import ExitConfirmDialog from "./components/ExitConfirmDialog";
+import { logToFile } from "./utils/logger";
 
 /// Pop-out session window: when launched with `?session=<id>` we render
 /// only the SessionWindow component, no sidebar or modals. The daemon
@@ -42,9 +46,17 @@ interface AppState {
   sessions: SessionSnapshot[];
   selectedSessionId: string | null;
   spawnOpen: boolean;
+  spawnInitial: SpawnInitialTarget | undefined;
+  /// True after the user submitted SpawnDialog and we're waiting for the
+  /// daemon's session_updated to know the new id. The first arriving session
+  /// that we haven't seen before gets auto-selected. Cleared once consumed
+  /// or after a short timeout in case spawn fails server-side.
+  pendingSpawnSelect: boolean;
   workspaceCreatorOpen: boolean;
   vscodeQueue: VscodeWorkspaceSuggestion[];
   attentionSessions: Set<string>;
+  exitConfirmOpen: boolean;
+  exitInFlight: boolean;
 }
 
 export default function App() {
@@ -56,9 +68,13 @@ export default function App() {
     sessions: [],
     selectedSessionId: null,
     spawnOpen: false,
+    spawnInitial: undefined,
+    pendingSpawnSelect: false,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
     attentionSessions: new Set(),
+    exitConfirmOpen: false,
+    exitInFlight: false,
   });
 
   useEffect(() => {
@@ -117,12 +133,16 @@ export default function App() {
     });
   }, []);
 
-  const onOpenSpawn = useCallback(() => {
-    setState((s) => ({ ...s, spawnOpen: true }));
+  const onOpenSpawn = useCallback((initial?: SpawnInitialTarget) => {
+    setState((s) => ({ ...s, spawnOpen: true, spawnInitial: initial }));
   }, []);
 
   const onCloseSpawn = useCallback(() => {
-    setState((s) => ({ ...s, spawnOpen: false }));
+    setState((s) => ({ ...s, spawnOpen: false, spawnInitial: undefined }));
+  }, []);
+
+  const onSpawned = useCallback(() => {
+    setState((s) => ({ ...s, pendingSpawnSelect: true }));
   }, []);
 
   const onOpenWorkspaceCreator = useCallback(() => {
@@ -136,6 +156,99 @@ export default function App() {
   const onDismissVscodeSuggestion = useCallback(() => {
     setState((s) => ({ ...s, vscodeQueue: s.vscodeQueue.slice(1) }));
   }, []);
+
+  const onRevealInExplorer = useCallback((path: string) => {
+    void invoke("reveal_in_explorer", { path }).catch((err: unknown) => {
+      console.error("reveal_in_explorer failed", err);
+    });
+  }, []);
+
+  // Intercept main-window close so we can ask whether to stop the daemon.
+  // Pop-out windows skip this entirely (popoutSessionId is non-null there).
+  useEffect(() => {
+    if (popoutSessionId) return;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const win = getCurrentWindow();
+      unlisten = await win.onCloseRequested((event) => {
+        logToFile("info", "main window onCloseRequested fired");
+        event.preventDefault();
+        setState((s) =>
+          s.exitConfirmOpen ? s : { ...s, exitConfirmOpen: true },
+        );
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const closeMainWindow = useCallback(async () => {
+    logToFile("info", "closeMainWindow: invoking quit_app");
+    // Tauri v2's WebviewWindow.destroy() can hang when called from inside
+    // the webview's own event loop (the round-trip IPC waits on a loop
+    // that's awaiting the IPC). AppHandle::exit on the host side avoids
+    // that deadlock — it tears down every window and returns control to
+    // the OS, bypassing our onCloseRequested handler.
+    try {
+      await invoke("quit_app");
+      logToFile("info", "closeMainWindow: quit_app returned (process should exit shortly)");
+    } catch (err) {
+      logToFile("error", `closeMainWindow: quit_app threw: ${String(err)}`);
+    }
+  }, []);
+
+  const onExitCancel = useCallback(() => {
+    logToFile("info", "exit modal: Cancel");
+    setState((s) => ({ ...s, exitConfirmOpen: false }));
+  }, []);
+
+  const onQuitLeaveRunning = useCallback(() => {
+    logToFile("info", "exit modal: Quit, leave running");
+    void closeMainWindow();
+  }, [closeMainWindow]);
+
+  const onStopAndQuit = useCallback(() => {
+    logToFile("info", "exit modal: Stop sessions & quit clicked");
+    setState((s) => ({ ...s, exitInFlight: true }));
+    const client = state.client;
+    if (!client) {
+      logToFile("warn", "onStopAndQuit: no client; closing window directly");
+      void closeMainWindow();
+      return;
+    }
+    // Subscribe before sending so the daemon can race-close before we get
+    // here. Resolves on the first non-open connection state, or after a
+    // safety timeout in case the daemon never closes the socket cleanly.
+    const closed = new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (reason: string) => {
+        if (done) return;
+        done = true;
+        logToFile("info", `onStopAndQuit: closed promise resolving (${reason})`);
+        window.clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const unsubscribe = client.onConnectionChange((next) => {
+        logToFile("info", `onStopAndQuit: connection state -> ${next.kind}`);
+        if (next.kind !== "open" && next.kind !== "connecting") {
+          finish(`connection ${next.kind}`);
+        }
+      });
+      const timer = window.setTimeout(() => finish("timeout 2s"), 2000);
+    });
+    logToFile("info", "onStopAndQuit: sending shutdown message");
+    client.send({ type: "shutdown" });
+    void closed.then(closeMainWindow);
+  }, [closeMainWindow, state.client]);
+
+  const activeSessionCount = useMemo(
+    () =>
+      state.sessions.filter((s) => s.status !== "stopped" && !s.is_orphan)
+        .length,
+    [state.sessions],
+  );
 
   const subscribePty = useCallback(
     (sessionId: string, cb: (b64: string) => void) => {
@@ -212,6 +325,7 @@ export default function App() {
           onSelectSession={onSelectSession}
           onOpenSpawn={onOpenSpawn}
           onOpenWorkspaceCreator={onOpenWorkspaceCreator}
+          onRevealInExplorer={onRevealInExplorer}
         />
         <main className="main-pane">
           {selectedSession ? (
@@ -223,7 +337,7 @@ export default function App() {
           ) : (
             <EmptyState
               connection={state.status}
-              onOpenSpawn={onOpenSpawn}
+              onOpenSpawn={() => onOpenSpawn()}
               hasRepos={state.repos.length > 0}
             />
           )}
@@ -234,7 +348,9 @@ export default function App() {
           repos={state.repos}
           workspaces={state.workspaces}
           client={state.client}
+          initialTarget={state.spawnInitial}
           onClose={onCloseSpawn}
+          onSpawned={onSpawned}
         />
       )}
       {state.workspaceCreatorOpen && state.client && (
@@ -249,6 +365,15 @@ export default function App() {
           suggestion={state.vscodeQueue[0]}
           client={state.client}
           onDismiss={onDismissVscodeSuggestion}
+        />
+      )}
+      {state.exitConfirmOpen && (
+        <ExitConfirmDialog
+          activeSessionCount={activeSessionCount}
+          busy={state.exitInFlight}
+          onStopAndQuit={onStopAndQuit}
+          onQuitLeaveRunning={onQuitLeaveRunning}
+          onCancel={onExitCancel}
         />
       )}
     </div>
@@ -282,9 +407,19 @@ function handleMessage(
       setState((s) => {
         const idx = s.sessions.findIndex((sn) => sn.id === msg.session.id);
         const next = s.sessions.slice();
-        if (idx === -1) next.push(msg.session);
+        const isNew = idx === -1;
+        if (isNew) next.push(msg.session);
         else next[idx] = msg.session;
-        return { ...s, sessions: next };
+        // Auto-select the first new session that arrives after the user
+        // submitted SpawnDialog. The pending flag is consumed so subsequent
+        // session_updated messages don't yank the selection around.
+        const shouldSelect = isNew && s.pendingSpawnSelect;
+        return {
+          ...s,
+          sessions: next,
+          selectedSessionId: shouldSelect ? msg.session.id : s.selectedSessionId,
+          pendingSpawnSelect: shouldSelect ? false : s.pendingSpawnSelect,
+        };
       });
       return;
     case "session_removed":
