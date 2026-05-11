@@ -595,6 +595,7 @@ export default function App() {
           highlightedSessionIds={sessionIdsInActiveTab}
           attentionSessions={state.attentionSessions}
           connection={state.status}
+          tabs={state.tabs}
           onAddRepo={onAddRepo}
           onRemoveRepo={(id) =>
             state.client?.send({ type: "remove_repo", repo_id: id })

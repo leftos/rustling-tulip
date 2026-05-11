@@ -105,8 +105,26 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   font-size: 12px;
   color: var(--fg-muted);
   text-transform: uppercase;
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
 }
 .sidebar-header .brand { font-size: 14px; color: var(--fg); text-transform: none; }
+.sidebar-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev1);
+  overflow: hidden;
+}
+.sidebar-view-toggle button {
+  background: transparent; border: 0; color: var(--fg-muted);
+  font: inherit; font-size: 10px; letter-spacing: 0.04em;
+  padding: 3px 8px; cursor: pointer; text-transform: uppercase;
+}
+.sidebar-view-toggle button:hover { color: var(--fg); background: var(--bg-elev2); }
+.sidebar-view-toggle button.active {
+  background: var(--bg-elev2); color: var(--fg);
+}
+.sidebar-view-toggle button + button { border-left: 1px solid var(--border); }
 .sidebar-section { padding: 10px 14px; border-bottom: 1px solid var(--border); }
 .sidebar-section-header {
   display: flex; justify-content: space-between; align-items: center;
@@ -212,12 +230,36 @@ button.link.inline { display: inline; padding: 0 2px; }
 }
 .tree-container.tree-container-workspace .tree-kind-tag { color: var(--accent); }
 .tree-container.tree-container-detached .tree-kind-tag { color: var(--err); }
+.tree-container.tree-container-tab .tree-kind-tag { color: var(--accent); }
+.tree-container.tree-container-unbound .tree-kind-tag { color: var(--fg-dim); }
 .tree-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .tree-leaf { padding-left: 14px; }
 .tree-leaf.selected { background: var(--bg-elev2); outline: 1px solid var(--accent); }
 .tree-leaf.needs-attention { background: rgba(245, 165, 36, 0.08); }
 .tree-leaf.needs-attention.selected { background: rgba(245, 165, 36, 0.18); }
 .tree-leaf.is-orphan .tree-label { color: var(--fg-dim); }
+.tree-tab-pill {
+  flex: none;
+  font-size: 10px; line-height: 1;
+  color: var(--fg-muted);
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 8px;
+  max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* Inline-flex so the `<button>` variant doesn't pick up default button block sizing. */
+  display: inline-flex; align-items: center;
+}
+button.tree-tab-pill { cursor: pointer; font-family: inherit; }
+button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
+.tree-tab-pill.unbound {
+  color: var(--fg-dim);
+  border-style: dashed;
+  font-style: italic;
+}
+.tree-tab-pill.multi { color: var(--accent); border-color: var(--accent); }
+.tree-leaf.is-draggable { cursor: grab; }
+.tree-leaf.is-draggable:active { cursor: grabbing; }
 
 .main-pane {
   display: flex;

@@ -51,3 +51,36 @@ export function findTabContainingSession(
   }
   return null;
 }
+
+/**
+ * Enumerate every tab+pane that references `sessionId`. A single session can
+ * be open in multiple panes across multiple tabs (rare but supported by the
+ * protocol); the sidebar uses this to render a pill that reveals all bindings
+ * and to pick a drag-source pane.
+ */
+export function sessionTabBindings(
+  sessionId: string,
+  tabs: TabEntry[],
+): Array<{ tab_id: string; tab_name: string; pane_id: string }> {
+  const out: Array<{ tab_id: string; tab_name: string; pane_id: string }> = [];
+  for (const tab of tabs) {
+    for (const pane of collectPanes(tab.grid)) {
+      if (pane.session_id === sessionId) {
+        out.push({ tab_id: tab.id, tab_name: tab.name, pane_id: pane.pane_id });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * First leaf pane in `tab`'s grid (left-to-right). Used by the "bind to
+ * existing tab" path: split this pane and seed the new sibling with the
+ * unbound session via `SplitPane { new_session_id: Some(s) }`.
+ */
+export function firstLeafPane(
+  tab: TabEntry,
+): { pane_id: string; session_id: string | null } | null {
+  const panes = collectPanes(tab.grid);
+  return panes[0] ?? null;
+}

@@ -76,6 +76,12 @@ export type ClientMessage =
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "list_tabs" }
+  | {
+      type: "create_tab";
+      name: string | null;
+      initial_session_id: string | null;
+    }
+  | { type: "close_tab"; tab_id: string }
   | { type: "list_presets"; target: PresetTarget }
   | {
       type: "preview_preset";

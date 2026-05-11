@@ -5,8 +5,16 @@ import type {
   PresetTarget,
   RepoEntry,
   SessionSnapshot,
+  TabEntry,
   WorkspaceEntry,
 } from "../types";
+import { collectPanes, sessionTabBindings } from "../utils/grid";
+
+/// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
+/// into existing pane drop zones. Payload is `${tabId}:${paneId}` — identical
+/// to GridRenderer's DRAG_MIME format. Kept in sync by convention; if this
+/// drifts, multi-surface drag stops working.
+const DRAG_MIME = "text/x-rt-pane";
 
 export type SpawnInitialTarget =
   | { kind: "repo"; repo_id: string }
@@ -22,6 +30,11 @@ interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   sessions: SessionSnapshot[];
+  /// Used to compute and display which tab(s) each session is currently
+  /// open in. A session leaf renders a `[T:<tab-name>]` pill when bound, or
+  /// `[unbound]` when no pane references it. Drives the drag-source payload
+  /// in iter 5.B as well.
+  tabs: TabEntry[];
   client: DaemonClient;
   /// Session ids visually highlighted in the tree because they appear in
   /// the currently-active tab. Multiple sessions can be highlighted at once
@@ -43,7 +56,28 @@ interface Props {
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
 }
 
-type ContainerKind = "workspace" | "repo" | "detached";
+type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
+
+/// Sidebar tree organization. "container" groups by workspace/repo/detached
+/// (matches the daemon's registry view); "tab" groups by which tab each
+/// session is currently open in. User-toggled, persisted to localStorage.
+type SidebarView = "container" | "tab";
+const SIDEBAR_VIEW_KEY = "rt.sidebar.view";
+function readView(): SidebarView {
+  try {
+    const v = localStorage.getItem(SIDEBAR_VIEW_KEY);
+    return v === "tab" ? "tab" : "container";
+  } catch {
+    return "container";
+  }
+}
+function writeView(v: SidebarView): void {
+  try {
+    localStorage.setItem(SIDEBAR_VIEW_KEY, v);
+  } catch {
+    /* localStorage unavailable — best-effort persistence only. */
+  }
+}
 
 interface TreeContainer {
   key: string;
@@ -68,9 +102,17 @@ interface ContextMenuState {
 }
 
 export default function Sidebar(props: Props) {
+  const [view, setView] = useState<SidebarView>(() => readView());
+  const updateView = (next: SidebarView) => {
+    setView(next);
+    writeView(next);
+  };
   const containers = useMemo(
-    () => buildContainers(props.repos, props.workspaces, props.sessions),
-    [props.repos, props.workspaces, props.sessions],
+    () =>
+      view === "tab"
+        ? buildTabContainers(props.tabs, props.sessions)
+        : buildContainers(props.repos, props.workspaces, props.sessions),
+    [view, props.tabs, props.repos, props.workspaces, props.sessions],
   );
 
   // Containers default to expanded. Local UI state; not persisted.
@@ -130,6 +172,35 @@ export default function Sidebar(props: Props) {
     <aside className="sidebar" data-testid="sidebar">
       <header className="sidebar-header">
         <span className="brand">rustling-tulip</span>
+        <div
+          className="sidebar-view-toggle"
+          role="tablist"
+          aria-label="Sidebar view"
+          data-testid="sidebar-view-toggle"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "container"}
+            className={view === "container" ? "active" : ""}
+            onClick={() => updateView("container")}
+            title="Group by workspace/repo"
+            data-testid="sidebar-view-container"
+          >
+            Repos
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "tab"}
+            className={view === "tab" ? "active" : ""}
+            onClick={() => updateView("tab")}
+            title="Group by tab"
+            data-testid="sidebar-view-tab"
+          >
+            Tabs
+          </button>
+        </div>
       </header>
 
       <div className="sidebar-toolbar">
@@ -193,6 +264,8 @@ export default function Sidebar(props: Props) {
                 container={c}
                 collapsed={isCollapsed}
                 onToggle={() => toggle(c.key)}
+                tabs={props.tabs}
+                client={props.client}
                 highlightedSessionIds={props.highlightedSessionIds}
                 attentionSessions={props.attentionSessions}
                 onSelectSession={props.onSelectSession}
@@ -263,6 +336,8 @@ interface ContainerNodeProps {
   container: TreeContainer;
   collapsed: boolean;
   onToggle: () => void;
+  tabs: TabEntry[];
+  client: DaemonClient;
   highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   onSelectSession: (id: string) => void;
@@ -307,7 +382,9 @@ function ContainerNode(p: ContainerNodeProps) {
   };
 
   const onContext = (e: React.MouseEvent) => {
-    if (c.kind === "detached") return;
+    // Only `workspace` / `repo` containers have a context menu. Detached,
+    // tab, and unbound are read-only groupings.
+    if (c.kind !== "workspace" && c.kind !== "repo") return;
     e.preventDefault();
     p.onContextMenu(e.clientX, e.clientY);
   };
@@ -328,7 +405,15 @@ function ContainerNode(p: ContainerNodeProps) {
           {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
         </span>
         <span className="tree-kind-tag">
-          {c.kind === "workspace" ? "WS" : c.kind === "repo" ? "REPO" : "?"}
+          {c.kind === "workspace"
+            ? "WS"
+            : c.kind === "repo"
+              ? "REPO"
+              : c.kind === "tab"
+                ? "TAB"
+                : c.kind === "unbound"
+                  ? "UNB"
+                  : "?"}
         </span>
         <span className="tree-label">{c.name}</span>
         {c.sessions.length > 0 && (
@@ -392,10 +477,19 @@ function ContainerNode(p: ContainerNodeProps) {
               pop them out.
             </li>
           )}
+          {c.kind === "unbound" && (
+            <li className="tree-children-banner" data-testid="unbound-banner">
+              These sessions are alive but no tab currently references them.
+              Click the <span className="tree-tab-pill unbound">unbound</span>
+              {" "}pill on a session to open it in a new tab.
+            </li>
+          )}
           {c.sessions.map((s) => (
             <SessionLeaf
               key={s.id}
               session={s}
+              tabs={p.tabs}
+              client={p.client}
               selected={p.highlightedSessionIds.has(s.id)}
               needsAttention={p.attentionSessions.has(s.id)}
               onSelect={p.onSelectSession}
@@ -409,6 +503,8 @@ function ContainerNode(p: ContainerNodeProps) {
 
 interface SessionLeafProps {
   session: SessionSnapshot;
+  tabs: TabEntry[];
+  client: DaemonClient;
   selected: boolean;
   needsAttention: boolean;
   onSelect: (id: string) => void;
@@ -418,6 +514,28 @@ function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
   const isPlainShell = s.mode === "plain_shell";
   const isCodex = !isPlainShell && s.agent === "codex";
+  const bindings = useMemo(
+    () => sessionTabBindings(s.id, p.tabs),
+    [s.id, p.tabs],
+  );
+  const draggable = bindings.length > 0 && !s.is_orphan;
+  const primaryBinding = bindings[0] ?? null;
+  const onDragStart = (e: React.DragEvent) => {
+    if (!primaryBinding) return;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData(
+      DRAG_MIME,
+      `${primaryBinding.tab_id}:${primaryBinding.pane_id}`,
+    );
+  };
+  const onBindUnbound = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    p.client.send({
+      type: "create_tab",
+      name: null,
+      initial_session_id: s.id,
+    });
+  };
   const classes = [
     "tree-row",
     "tree-leaf",
@@ -426,6 +544,7 @@ function SessionLeaf(p: SessionLeafProps) {
     s.is_orphan ? "is-orphan" : "",
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
+    draggable ? "is-draggable" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -435,10 +554,13 @@ function SessionLeaf(p: SessionLeafProps) {
         className={classes}
         onClick={() => p.onSelect(s.id)}
         role="button"
+        draggable={draggable}
+        onDragStart={onDragStart}
         data-testid="sidebar-session"
         data-session-id={s.id}
         data-session-status={s.status}
         data-session-agent={s.agent}
+        data-tab-binding-count={bindings.length}
       >
         {isPlainShell ? (
           <span
@@ -476,8 +598,64 @@ function SessionLeaf(p: SessionLeafProps) {
             orphan
           </span>
         )}
+        <TabPill
+          bindings={bindings}
+          sessionId={s.id}
+          onBindUnbound={onBindUnbound}
+        />
       </div>
     </li>
+  );
+}
+
+interface TabPillProps {
+  bindings: Array<{ tab_id: string; tab_name: string; pane_id: string }>;
+  sessionId: string;
+  onBindUnbound: (e: React.MouseEvent) => void;
+}
+
+/// Inline pill showing which tab(s) reference this session. Drives the
+/// "where is this session right now?" mental model and (when bound) provides
+/// the drag-source data-attrs that wdio specs key off of. Clicking the
+/// `[unbound]` variant fires CreateTab { initial_session_id } to bind the
+/// session to a new tab — fastest path to recover from a tab close.
+function TabPill(p: TabPillProps) {
+  if (p.bindings.length === 0) {
+    return (
+      <button
+        type="button"
+        className="tree-tab-pill unbound"
+        title="No tab references this session — click to open it in a new tab"
+        data-testid="session-tab-pill-unbound"
+        onClick={p.onBindUnbound}
+      >
+        unbound
+      </button>
+    );
+  }
+  if (p.bindings.length === 1) {
+    const b = p.bindings[0]!;
+    return (
+      <span
+        className="tree-tab-pill"
+        title={`Open in tab "${b.tab_name}"`}
+        data-testid="session-tab-pill"
+        data-tab-id={b.tab_id}
+      >
+        T:{b.tab_name}
+      </span>
+    );
+  }
+  const summary = p.bindings.map((b) => b.tab_name).join(", ");
+  return (
+    <span
+      className="tree-tab-pill multi"
+      title={`Open in ${p.bindings.length} tabs: ${summary}`}
+      data-testid="session-tab-pill"
+      data-tab-binding-count={p.bindings.length}
+    >
+      T:×{p.bindings.length}
+    </span>
   );
 }
 
@@ -698,3 +876,57 @@ function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V) {
   if (arr) arr.push(value);
   else map.set(key, [value]);
 }
+
+/// Build the "tab" view: top-level containers are tabs in their declared
+/// order, each holding the sessions whose panes the tab references. A
+/// trailing "Unbound" pseudo-container catches alive sessions that no tab
+/// pane references (rare — happens after CloseTab on a tab whose panes were
+/// the only references). The same SessionLeaf component renders here as in
+/// the container view, so the inline tab pill still appears (handy when a
+/// session is referenced by multiple tabs).
+function buildTabContainers(
+  tabs: TabEntry[],
+  sessions: SessionSnapshot[],
+): TreeContainer[] {
+  const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
+  const referencedIds = new Set<string>();
+  const out: TreeContainer[] = [];
+  for (const tab of tabs) {
+    const tabSessions: SessionSnapshot[] = [];
+    const seen = new Set<string>();
+    for (const pane of collectPanes(tab.grid)) {
+      if (!pane.session_id) continue;
+      if (seen.has(pane.session_id)) continue;
+      seen.add(pane.session_id);
+      referencedIds.add(pane.session_id);
+      const s = sessionById.get(pane.session_id);
+      if (s) tabSessions.push(s);
+    }
+    out.push({
+      key: `tab:${tab.id}`,
+      kind: "tab",
+      id: tab.id,
+      name: tab.name,
+      hoverTitle: `Tab "${tab.name}"`,
+      fsPath: null,
+      sessions: tabSessions,
+      removable: false,
+    });
+  }
+  const unbound = sessions.filter((s) => !referencedIds.has(s.id));
+  if (unbound.length > 0) {
+    out.push({
+      key: "unbound",
+      kind: "unbound",
+      id: "",
+      name: "Unbound",
+      hoverTitle:
+        "Sessions alive but not referenced by any tab. Click the unbound pill on a session to open it in a new tab.",
+      fsPath: null,
+      sessions: [...unbound].sort((a, b) => a.label.localeCompare(b.label)),
+      removable: false,
+    });
+  }
+  return out;
+}
+
