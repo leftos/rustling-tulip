@@ -84,10 +84,7 @@ pub async fn get_commit(repo: &Path, sha: &str) -> anyhow::Result<GitCommitDetai
     let commit = parse_commit_line(header)
         .ok_or_else(|| anyhow!("could not parse commit header: {header}"))?;
     let parents_line = lines.next().unwrap_or("");
-    let parent_shas: Vec<String> = parents_line
-        .split_whitespace()
-        .map(String::from)
-        .collect();
+    let parent_shas: Vec<String> = parents_line.split_whitespace().map(String::from).collect();
 
     let mut body = String::new();
     let mut changes = Vec::new();
@@ -133,11 +130,7 @@ fn parse_name_status_line(line: &str) -> Option<GitFileChange> {
     })
 }
 
-pub async fn file_diff(
-    repo: &Path,
-    path: &str,
-    against: Option<&str>,
-) -> anyhow::Result<String> {
+pub async fn file_diff(repo: &Path, path: &str, against: Option<&str>) -> anyhow::Result<String> {
     let mut args = vec!["diff", "--no-color"];
     if let Some(rev) = against {
         args.push(rev);

@@ -140,13 +140,14 @@ pub fn spawn(
             rec.exit_code = exit;
             push_recent_action(
                 rec,
-                format!("exited with code {}", exit.map_or_else(|| "?".into(), |c| c.to_string())),
+                format!(
+                    "exited with code {}",
+                    exit.map_or_else(|| "?".into(), |c| c.to_string())
+                ),
             );
         });
-        registry_for_exit.fan_out_attention(
-            session_for_exit.clone(),
-            protocol::AttentionReason::Stopped,
-        );
+        registry_for_exit
+            .fan_out_attention(session_for_exit.clone(), protocol::AttentionReason::Stopped);
         orphan::try_delete_meta(&dirs_for_exit, &session_for_exit);
     });
 
@@ -161,50 +162,47 @@ fn handle_stream_event(registry: &SessionRegistry, session_id: &str, raw_line: &
             return;
         }
     };
-    registry.update(session_id, |rec| {
-        match parsed {
-            StreamEvent::System { subtype, .. } => {
-                rec.status = SessionStatus::Working;
-                push_recent_action(rec, format!("system: {subtype}"));
-            }
-            StreamEvent::Assistant { message } => {
-                if let Some(content) = message.and_then(|m| m.content) {
-                    for block in content {
-                        match block {
-                            ContentBlock::ToolUse { name, .. } => {
-                                push_recent_action(rec, format!("tool: {name}"));
-                            }
-                            ContentBlock::Text { text } => {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    let snippet =
-                                        trimmed.chars().take(120).collect::<String>();
-                                    push_recent_action(rec, format!("assistant: {snippet}"));
-                                }
-                            }
-                            ContentBlock::Other => {}
+    registry.update(session_id, |rec| match parsed {
+        StreamEvent::System { subtype, .. } => {
+            rec.status = SessionStatus::Working;
+            push_recent_action(rec, format!("system: {subtype}"));
+        }
+        StreamEvent::Assistant { message } => {
+            if let Some(content) = message.and_then(|m| m.content) {
+                for block in content {
+                    match block {
+                        ContentBlock::ToolUse { name, .. } => {
+                            push_recent_action(rec, format!("tool: {name}"));
                         }
+                        ContentBlock::Text { text } => {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                let snippet = trimmed.chars().take(120).collect::<String>();
+                                push_recent_action(rec, format!("assistant: {snippet}"));
+                            }
+                        }
+                        ContentBlock::Other => {}
                     }
                 }
             }
-            StreamEvent::Result {
-                total_cost_usd,
-                usage,
-                subtype,
-                ..
-            } => {
-                if let Some(cost) = total_cost_usd {
-                    rec.metrics.cost_usd = cost;
-                }
-                if let Some(u) = usage {
-                    rec.metrics.input_tokens = u.input_tokens.unwrap_or(0);
-                    rec.metrics.output_tokens = u.output_tokens.unwrap_or(0);
-                }
-                rec.status = SessionStatus::Stopped;
-                push_recent_action(rec, format!("result: {subtype}"));
-            }
-            StreamEvent::User {} | StreamEvent::Other => {}
         }
+        StreamEvent::Result {
+            total_cost_usd,
+            usage,
+            subtype,
+            ..
+        } => {
+            if let Some(cost) = total_cost_usd {
+                rec.metrics.cost_usd = cost;
+            }
+            if let Some(u) = usage {
+                rec.metrics.input_tokens = u.input_tokens.unwrap_or(0);
+                rec.metrics.output_tokens = u.output_tokens.unwrap_or(0);
+            }
+            rec.status = SessionStatus::Stopped;
+            push_recent_action(rec, format!("result: {subtype}"));
+        }
+        StreamEvent::User {} | StreamEvent::Other => {}
     });
 }
 
