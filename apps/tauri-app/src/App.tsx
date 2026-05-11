@@ -47,6 +47,7 @@ import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
 import { logToFile } from "./utils/logger";
 import { collectPanes, findTabContainingSession } from "./utils/grid";
+import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
 
 /// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
 /// `?session=<id>` (legacy single-session pop-out). The branch in App
@@ -661,6 +662,69 @@ export default function App() {
     const session = state.sessions.find((s) => s.id === pane.session_id);
     return session?.members[0]?.repo_id ?? null;
   }, [activeTab, state.focusedPaneId, state.sessions]);
+
+  // App-level keyboard shortcuts. Skip when a modal is open so the
+  // user's typing in a dialog input doesn't fire a tab cycle.
+  const anyModalOpen =
+    state.spawnOpen ||
+    state.presetLaunch !== null ||
+    state.workspaceCreatorOpen ||
+    state.exitConfirmOpen ||
+    state.repoRemove !== null ||
+    state.vscodeQueue.length > 0;
+  const shortcuts = useMemo<KeyboardShortcut[]>(() => {
+    if (anyModalOpen || popoutTabId !== null || popoutSessionId !== null) {
+      return [];
+    }
+    const list: KeyboardShortcut[] = [];
+    if (state.client) {
+      list.push({
+        key: "t",
+        handler: () =>
+          state.client?.send({
+            type: "create_tab",
+            name: null,
+            initial_session_id: null,
+          }),
+      });
+    }
+    if (state.repos.length > 0) {
+      list.push({ key: "n", handler: () => onOpenSpawn() });
+    }
+    if (state.tabs.length > 1) {
+      const cycle = (dir: 1 | -1) => {
+        const ids = state.tabs.map((t) => t.id);
+        const cur = state.activeTabId
+          ? ids.indexOf(state.activeTabId)
+          : -1;
+        const next = (cur + dir + ids.length) % ids.length;
+        const target = ids[next];
+        if (target) onActivateTab(target);
+      };
+      list.push({ key: "Tab", handler: () => cycle(1) });
+      list.push({ key: "Tab", shift: true, handler: () => cycle(-1) });
+    }
+    // Ctrl+1..9: activate tab at index N-1 (1-indexed for users).
+    for (let i = 1; i <= 9; i++) {
+      const idx = i - 1;
+      const target = state.tabs[idx];
+      if (!target) break;
+      list.push({
+        key: String(i),
+        handler: () => onActivateTab(target.id),
+      });
+    }
+    return list;
+  }, [
+    anyModalOpen,
+    state.client,
+    state.repos.length,
+    state.tabs,
+    state.activeTabId,
+    onActivateTab,
+    onOpenSpawn,
+  ]);
+  useKeyboardShortcuts(shortcuts);
 
   if (popoutTabId) {
     const popoutTab = state.tabs.find((t) => t.id === popoutTabId);

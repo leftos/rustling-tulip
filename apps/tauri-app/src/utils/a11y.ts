@@ -58,3 +58,61 @@ export function useAutoFocus(
     ref.current?.focus();
   }, [enabled, ref]);
 }
+
+export interface KeyboardShortcut {
+  /// Key name as reported by KeyboardEvent.key (e.g. "t", "Tab", "1").
+  /// Compared case-insensitively for letters.
+  key: string;
+  /// Require Ctrl (Windows/Linux) or Meta (macOS). Defaults to true since
+  /// most app shortcuts are modified to avoid typing collisions.
+  ctrlOrMeta?: boolean;
+  /// Require Shift. Defaults to false.
+  shift?: boolean;
+  handler: () => void;
+}
+
+/// Returns true if the event target is an editable surface — a regular
+/// form input, a textarea, a contenteditable element, or the xterm.js
+/// terminal viewport. App-level shortcuts skip these so typing inside an
+/// input/terminal isn't hijacked.
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (target.isContentEditable) return true;
+  if (target.closest(".xterm")) return true;
+  return false;
+}
+
+/**
+ * Bind a set of document-level keyboard shortcuts. Shortcuts skip when
+ * focus is in an editable surface (input, textarea, contenteditable,
+ * xterm) so typing doesn't fire them by accident. preventDefault fires
+ * only after a match.
+ *
+ * Pass an empty array to disable without unmounting. The dependency on
+ * `shortcuts.length` ensures the effect re-subscribes when the binding
+ * list changes shape; for stable bindings prefer `useMemo` at the call
+ * site.
+ */
+export function useKeyboardShortcuts(shortcuts: KeyboardShortcut[]): void {
+  useEffect(() => {
+    if (shortcuts.length === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (isEditableTarget(e.target)) return;
+      for (const sc of shortcuts) {
+        const wantCtrl = sc.ctrlOrMeta !== false;
+        const wantShift = sc.shift === true;
+        const hasCtrl = e.ctrlKey || e.metaKey;
+        if (wantCtrl !== hasCtrl) continue;
+        if (wantShift !== e.shiftKey) continue;
+        if (sc.key.toLowerCase() !== e.key.toLowerCase()) continue;
+        e.preventDefault();
+        sc.handler();
+        return;
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [shortcuts]);
+}
