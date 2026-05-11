@@ -65,10 +65,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn prune_stale_tabs(state: &Arc<state::AppState>, live_orphans: &[orphan::OrphanMeta]) {
-    let live_ids: HashSet<String> = live_orphans
-        .iter()
-        .map(|m| m.session_id.clone())
-        .collect();
+    let live_ids: HashSet<String> = live_orphans.iter().map(|m| m.session_id.clone()).collect();
     let result = state.mutate(|s| {
         let prev_tab_count = s.tabs.len();
         let mut panes_cleared = 0usize;

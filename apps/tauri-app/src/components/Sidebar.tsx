@@ -323,6 +323,7 @@ interface SessionLeafProps {
 function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
   const isPlainShell = s.mode === "plain_shell";
+  const isCodex = !isPlainShell && s.agent === "codex";
   const classes = [
     "tree-row",
     "tree-leaf",
@@ -330,6 +331,7 @@ function SessionLeaf(p: SessionLeafProps) {
     p.needsAttention ? "needs-attention" : "",
     s.is_orphan ? "is-orphan" : "",
     isPlainShell ? "is-shell" : "",
+    isCodex ? "is-codex" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -342,6 +344,7 @@ function SessionLeaf(p: SessionLeafProps) {
         data-testid="sidebar-session"
         data-session-id={s.id}
         data-session-status={s.status}
+        data-session-agent={s.agent}
       >
         {isPlainShell ? (
           <span
@@ -357,6 +360,15 @@ function SessionLeaf(p: SessionLeafProps) {
         <span className="tree-label" title={s.label}>
           {s.label}
         </span>
+        {isCodex && (
+          <span
+            className="tree-kind-tag"
+            title="Codex session"
+            data-testid="session-agent-tag"
+          >
+            CDX
+          </span>
+        )}
         {p.needsAttention && <span className="badge badge-warn small">!</span>}
         {s.is_orphan && (
           <span className="list-item-meta" title="Reattached after daemon restart; PTY detached">

@@ -124,7 +124,15 @@ export default function PresetLaunchDialog({
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
-          <h2>Launch preset · {preset.name}</h2>
+          <h2>
+            Launch preset · {preset.name}{" "}
+            <span
+              className={`agent-badge agent-badge-${preset.agent}`}
+              title={`Spawns ${preset.agent} sessions`}
+            >
+              {preset.agent}
+            </span>
+          </h2>
           <button type="button" className="link" onClick={onClose}>
             ✕
           </button>

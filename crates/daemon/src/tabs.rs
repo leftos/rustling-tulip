@@ -274,7 +274,10 @@ pub fn prune_session(grid: &mut GridNode, removed_session_id: &str) -> bool {
 /// Clear every pane whose `session_id` is not in `keep`. Used on daemon
 /// startup to drop dangling references to sessions that did not survive the
 /// restart. Returns true if at least one pane was modified.
-pub fn prune_sessions_not_in(grid: &mut GridNode, keep: &std::collections::HashSet<String>) -> bool {
+pub fn prune_sessions_not_in(
+    grid: &mut GridNode,
+    keep: &std::collections::HashSet<String>,
+) -> bool {
     match grid {
         GridNode::Pane { session_id, .. } => {
             if let Some(id) = session_id.as_deref()
@@ -755,12 +758,7 @@ mod tests {
             Horizontal,
             0.5,
             pane("p1", Some("s-live")),
-            split(
-                Vertical,
-                0.5,
-                pane("p2", Some("s-dead")),
-                pane("p3", None),
-            ),
+            split(Vertical, 0.5, pane("p2", Some("s-dead")), pane("p3", None)),
         );
         let mut keep = std::collections::HashSet::new();
         keep.insert("s-live".to_string());

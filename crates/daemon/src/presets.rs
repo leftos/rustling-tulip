@@ -100,8 +100,8 @@ async fn load_repo_presets(repo_path: &Path, repo_id: &str) -> anyhow::Result<Ve
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("reading {}", path.display()))?;
-    let mut entries: Vec<PresetEntry> = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let mut entries: Vec<PresetEntry> =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
     for entry in &mut entries {
         entry.source_repo_id = repo_id.to_string();
     }
@@ -537,13 +537,28 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
     let vars = resolve_variables(&preset.variables, &args.variable_values, &repo_path)?;
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
     let datetime_str = Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let branch_names = render_branch_names(&preset, &raw_prompts, &vars, &repo, &date_str, &datetime_str)?;
+    let branch_names = render_branch_names(
+        &preset,
+        &raw_prompts,
+        &vars,
+        &repo,
+        &date_str,
+        &datetime_str,
+    )?;
     check_branch_uniqueness(&branch_names)?;
     let use_worktree = args
         .use_worktree_override
         .or(preset.default_use_worktree)
         .unwrap_or(repo.default_use_worktree);
-    let tab_state = build_tab_state(&preset, args, &raw_prompts, &vars, &repo, &date_str, &datetime_str)?;
+    let tab_state = build_tab_state(
+        &preset,
+        args,
+        &raw_prompts,
+        &vars,
+        &repo,
+        &date_str,
+        &datetime_str,
+    )?;
     Ok(LaunchPlan {
         preset,
         repo,
@@ -655,18 +670,13 @@ fn build_tab_state(
     }
 }
 
-async fn orchestrate(
-    hub: &Hub,
-    mut plan: LaunchPlan,
-    total: u32,
-) -> Result<(), LaunchFailure> {
+async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), LaunchFailure> {
     let mut session_ids: Vec<String> = Vec::new();
     let stagger = Duration::from_millis(u64::from(plan.preset.stagger_ms));
     let last_idx = plan.raw_prompts.len() - 1;
 
     for (i, raw) in plan.raw_prompts.iter().enumerate() {
-        let snapshot_id = spawn_one(hub, &plan, i, raw, &session_ids)
-            .await?;
+        let snapshot_id = spawn_one(hub, &plan, i, raw, &session_ids).await?;
         session_ids.push(snapshot_id.clone());
 
         if plan.tab_state.is_active() {
@@ -729,8 +739,10 @@ async fn spawn_one(
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
+        agent: plan.preset.agent,
         model: plan.preset.model.clone(),
         permission_mode: plan.preset.permission_mode,
+        codex_sandbox: plan.preset.codex_sandbox,
         extra_env: Vec::new(),
         prompt_injector: Some(injector),
     };
@@ -761,10 +773,9 @@ fn attach_to_tab(
         LaunchFailure::new("build_balanced returned None for non-empty input")
             .with_partials(session_ids, &state.tab_ids)
     })?;
-    let tab_id = state
-        .current_tab_id
-        .clone()
-        .ok_or_else(|| LaunchFailure::new("missing current tab id").with_partials(session_ids, &state.tab_ids))?;
+    let tab_id = state.current_tab_id.clone().ok_or_else(|| {
+        LaunchFailure::new("missing current tab id").with_partials(session_ids, &state.tab_ids)
+    })?;
     let updated = hub
         .state
         .mutate(|s| {
@@ -776,8 +787,14 @@ fn attach_to_tab(
             tab.grid = new_grid;
             Ok::<_, anyhow::Error>(tab.clone())
         })
-        .map_err(|e| LaunchFailure::new(format!("persisting tab update: {e}")).with_partials(session_ids, &state.tab_ids))?
-        .map_err(|e| LaunchFailure::new(format!("updating tab grid: {e}")).with_partials(session_ids, &state.tab_ids))?;
+        .map_err(|e| {
+            LaunchFailure::new(format!("persisting tab update: {e}"))
+                .with_partials(session_ids, &state.tab_ids)
+        })?
+        .map_err(|e| {
+            LaunchFailure::new(format!("updating tab grid: {e}"))
+                .with_partials(session_ids, &state.tab_ids)
+        })?;
     let _ = hub.tab_events.send(TabEvent::Updated(updated));
     Ok(())
 }
@@ -803,9 +820,10 @@ fn open_new_tab(
         created_at: Utc::now(),
     };
     let tab_id = tab.id.clone();
-    hub.state
-        .mutate(|s| s.tabs.push(tab))
-        .map_err(|e| LaunchFailure::new(format!("persisting new tab: {e}")).with_partials(session_ids, &state.tab_ids))?;
+    hub.state.mutate(|s| s.tabs.push(tab)).map_err(|e| {
+        LaunchFailure::new(format!("persisting new tab: {e}"))
+            .with_partials(session_ids, &state.tab_ids)
+    })?;
     state.tab_ids.push(tab_id.clone());
     state.current_tab_id = Some(tab_id);
     state.current_panes.clear();
@@ -860,7 +878,10 @@ mod tests {
         let long = "This is a fairly long bug report title that needs slugifying down";
         let slug = slugify(long);
         assert!(slug.len() <= 40);
-        assert!(slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(
+            slug.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        );
         assert!(!slug.ends_with('-'));
     }
 
@@ -967,10 +988,7 @@ mod tests {
 
     #[test]
     fn check_branch_uniqueness_rejects_dupes() {
-        let names = vec![
-            "bug/static".to_string(),
-            "bug/static".to_string(),
-        ];
+        let names = vec!["bug/static".to_string(), "bug/static".to_string()];
         let err = check_branch_uniqueness(&names).expect_err("duplicates should fail");
         assert!(err.error.contains("duplicate"));
     }
@@ -1004,7 +1022,10 @@ mod tests {
             }
             _ => panic!("expected Text step"),
         }
-        assert!(matches!(injector.steps[3], InjectorStep::Text { newline: true, .. }));
+        assert!(matches!(
+            injector.steps[3],
+            InjectorStep::Text { newline: true, .. }
+        ));
     }
 
     #[test]
@@ -1044,8 +1065,8 @@ mod tests {
             .join("..")
             .join(".rustling-tulip")
             .join("presets.json");
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|err| panic!("reading {}: {err}", path.display()));
         let entries: Vec<protocol::PresetEntry> = serde_json::from_slice(&bytes)
             .unwrap_or_else(|err| panic!("parsing {}: {err}", path.display()));
         assert!(!entries.is_empty(), "expected at least one preset");

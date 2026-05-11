@@ -7,10 +7,51 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 fn default_true() -> bool {
     true
+}
+
+/// Which CLI the daemon spawns for a given session.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Agent {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Agent {
+    /// Lowercase tag for UI badges and log messages.
+    #[must_use]
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// Codex sandbox policy. Maps to `codex --sandbox <value>`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexSandbox {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl CodexSandbox {
+    /// CLI value as expected by `codex --sandbox <X>`.
+    #[must_use]
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
 }
 
 /// The `daemon.json` discovery file written by the daemon on startup.
@@ -39,6 +80,12 @@ pub struct RepoEntry {
     /// carry this field yet.
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
+    /// Last agent spawned against this repo. Drives the spawn-dialog default
+    /// so repeated launches don't force the user to re-pick. `None` for repos
+    /// that have never been launched (or were last touched before this field
+    /// existed, hence the serde default).
+    #[serde(default)]
+    pub last_agent: Option<Agent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +194,9 @@ pub struct SessionSnapshot {
     /// under their workspace node in the sidebar tree.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Which CLI is driving this session. Daemon always populates this so the
+    /// UI can label the session.
+    pub agent: Agent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,24 +256,34 @@ pub struct SpawnRequest {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub initial_prompt: Option<String>,
+    /// For `agent == Claude`: corresponds to claude's
+    /// `--dangerously-skip-permissions`. For `agent == Codex`: corresponds to
+    /// codex's `--yolo` (`--dangerously-bypass-approvals-and-sandbox`).
     pub dangerously_skip_permissions: bool,
+    /// Which CLI to spawn. Drives both the executable resolution
+    /// (`RUSTLING_TULIP_CLAUDE` vs `RUSTLING_TULIP_CODEX`) and the per-agent
+    /// arg builder.
+    pub agent: Agent,
     /// Optional model override. When `None`, the CLI's default applies.
-    /// Sent as `--model <id>` to the `claude` CLI.
-    #[serde(default)]
+    /// Sent as `--model <id>` to both claude and codex.
     pub model: Option<String>,
-    /// Optional permission mode. Ignored (and `--permission-mode` omitted)
-    /// when `dangerously_skip_permissions` is true.
-    #[serde(default)]
+    /// Claude-only permission mode. Ignored (and `--permission-mode` omitted)
+    /// when `dangerously_skip_permissions` is true. Ignored entirely when
+    /// `agent == Codex`.
     pub permission_mode: Option<PermissionMode>,
+    /// Codex-only sandbox policy. Maps to `codex --sandbox <value>`. Ignored
+    /// when `dangerously_skip_permissions` is true (yolo overrides sandbox)
+    /// and ignored entirely when `agent == Claude`.
+    pub codex_sandbox: Option<CodexSandbox>,
     /// Extra environment variables merged on top of the daemon's keep-list.
     /// Later entries override the keep-list on key collision so users can
     /// override values like `ANTHROPIC_API_KEY`.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
     /// Optional scripted PTY input fed to the child after the PTY comes up.
-    /// When set on `SessionMode::Interactive`, the daemon omits the `-p
-    /// <prompt>` CLI arg (the injector is expected to deliver the prompt
-    /// instead). Ignored entirely for headless and plain-shell sessions.
+    /// When set on `SessionMode::Interactive`, the daemon omits the positional
+    /// prompt arg (the injector is expected to deliver the prompt instead).
+    /// Ignored entirely for headless and plain-shell sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
 }
@@ -533,6 +593,13 @@ pub struct PresetEntry {
     pub model: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Which CLI to spawn for sessions created from this preset. Defaults to
+    /// `Agent::Claude` for preset files that pre-date the codex field.
+    #[serde(default)]
+    pub agent: Agent,
+    /// Codex sandbox policy. Ignored when `agent != Codex`.
+    #[serde(default)]
+    pub codex_sandbox: Option<CodexSandbox>,
     pub tab_grouping: TabGroupingConfig,
     pub injector: InjectorTemplate,
     /// Pause between successive session spawns. Default 3000ms matches
@@ -753,7 +820,9 @@ pub enum ClientMessage {
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
     /// from each member repo of a workspace) and replies with
     /// [`DaemonMessage::Presets`].
-    ListPresets { target: PresetTarget },
+    ListPresets {
+        target: PresetTarget,
+    },
     /// Batch-spawn N sessions from a preset. The daemon expands the prompt
     /// source into raw prompts, renders templates with `variable_values`,
     /// and spawns sessions sequentially with `preset.stagger_ms` between
@@ -1107,6 +1176,8 @@ mod tests {
             dangerously_skip_permissions: true,
             model: None,
             permission_mode: None,
+            agent: Agent::Claude,
+            codex_sandbox: None,
             tab_grouping: TabGroupingConfig::NewTab {
                 layout: TabLayout::BalancedHorizontal,
                 max_panes_per_tab: Some(6),
@@ -1185,6 +1256,8 @@ mod tests {
         assert!(preset.variables.is_empty());
         assert!(preset.context_footer_lines.is_empty());
         assert_eq!(preset.default_use_worktree, None);
+        assert_eq!(preset.agent, Agent::Claude);
+        assert_eq!(preset.codex_sandbox, None);
     }
 
     #[test]
@@ -1200,8 +1273,10 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: true,
+            agent: Agent::Claude,
             model: None,
             permission_mode: None,
+            codex_sandbox: None,
             extra_env: vec![],
             prompt_injector: Some(PromptInjector {
                 steps: vec![
@@ -1219,5 +1294,65 @@ mod tests {
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn spawn_request_round_trip_codex() {
+        let req = SpawnRequest {
+            label: Some("codex-test".to_string()),
+            target: SpawnTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+                branch_name: "feat/x".to_string(),
+                base_branch: None,
+                use_worktree: true,
+            },
+            mode: SessionMode::Interactive,
+            initial_prompt: Some("refactor authentication".to_string()),
+            dangerously_skip_permissions: false,
+            agent: Agent::Codex,
+            model: Some("gpt-5.1-codex".to_string()),
+            permission_mode: None,
+            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+            extra_env: vec![],
+            prompt_injector: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, decoded);
+        assert!(json.contains(r#""agent":"codex""#));
+        assert!(json.contains(r#""codex_sandbox":"workspace-write""#));
+    }
+
+    #[test]
+    fn repo_entry_decodes_without_last_agent() {
+        // Existing state.json files lack `last_agent`; serde default must
+        // produce `None` so the daemon can load them after the version bump.
+        let legacy = r#"{
+            "id": "r1",
+            "name": "yaat",
+            "path": "X:/dev/yaat",
+            "default_branch": "main"
+        }"#;
+        let repo: RepoEntry = serde_json::from_str(legacy).expect("parse legacy repo");
+        assert_eq!(repo.last_agent, None);
+        assert!(repo.default_use_worktree, "default_use_worktree default");
+    }
+
+    #[test]
+    fn preset_entry_decodes_without_agent() {
+        // User-edited `.rustling-tulip/presets.json` files lack `agent`; the
+        // serde default keeps them loadable as claude presets.
+        let legacy = r#"{
+            "id": "smoke",
+            "name": "Smoke",
+            "prompt_sources": [{"kind":"inline"}],
+            "prompt_template": "{prompt}",
+            "branch_template": "tmp/{index}",
+            "tab_grouping": {"kind":"none"},
+            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+        }"#;
+        let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
+        assert_eq!(preset.agent, Agent::Claude);
+        assert_eq!(preset.codex_sandbox, None);
     }
 }

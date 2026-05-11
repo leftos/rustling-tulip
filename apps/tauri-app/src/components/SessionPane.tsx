@@ -73,6 +73,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
               ? `${session.members.length} repos`
               : session.members[0]?.repo_name ?? ""}
             {modeSuffix}
+            {!isPlainShell && ` · ${session.agent}`}
           </span>
         </div>
         <div className="session-actions">

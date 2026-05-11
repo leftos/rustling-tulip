@@ -4,7 +4,7 @@ use crate::git;
 use crate::paths::simplify_path;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
-use protocol::{RepoEntry, WorkspaceEntry};
+use protocol::{Agent, RepoEntry, WorkspaceEntry};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -20,7 +20,8 @@ pub async fn add_repo(
     if !path.join(".git").exists() {
         return Err(anyhow!("not a git repo (no .git): {path_str}"));
     }
-    let canonical = simplify_path(&std::fs::canonicalize(path).context("canonicalizing repo path")?);
+    let canonical =
+        simplify_path(&std::fs::canonicalize(path).context("canonicalizing repo path")?);
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     let existing = state.with_persisted(|s| {
@@ -46,6 +47,7 @@ pub async fn add_repo(
         path: canonical_str,
         default_branch,
         default_use_worktree: true,
+        last_agent: None,
     };
 
     state.mutate(|s| s.repos.push(entry.clone()))?;
@@ -60,6 +62,17 @@ pub fn set_repo_worktree_default(
     state.mutate(|s| {
         if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
             repo.default_use_worktree = value;
+        }
+    })
+}
+
+/// Record which agent was last spawned against a given repo. Drives the
+/// spawn-dialog default so repeated launches don't force the user to re-pick.
+/// Silently no-ops if `repo_id` does not match any registered repo.
+pub fn persist_last_agent(state: &AppState, repo_id: &str, agent: Agent) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.last_agent = Some(agent);
         }
     })
 }

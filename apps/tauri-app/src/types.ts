@@ -1,6 +1,10 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
+
+export type Agent = "claude" | "codex";
+
+export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface RepoEntry {
   id: string;
@@ -8,6 +12,9 @@ export interface RepoEntry {
   path: string;
   default_branch: string | null;
   default_use_worktree: boolean;
+  // Last agent spawned against this repo. Drives the spawn-dialog default.
+  // null for repos that have never been launched.
+  last_agent: Agent | null;
 }
 
 export interface WorkspaceEntry {
@@ -57,6 +64,8 @@ export interface SessionSnapshot {
   // For workspace-kind sessions: the workspace this session belongs to.
   // null for single-repo sessions.
   workspace_id: string | null;
+  // Which CLI is driving this session. Drives the agent badge in the UI.
+  agent: Agent;
 }
 
 export type SpawnTarget =
@@ -86,9 +95,16 @@ export interface SpawnRequest {
   target: SpawnTarget;
   mode: SessionMode;
   initial_prompt: string | null;
+  // For agent === "claude": claude's --dangerously-skip-permissions.
+  // For agent === "codex": codex's --yolo (--dangerously-bypass-approvals-and-sandbox).
   dangerously_skip_permissions: boolean;
+  // Which CLI to spawn.
+  agent: Agent;
   model: string | null;
+  // Claude-only. Ignored when agent === "codex".
   permission_mode: PermissionMode | null;
+  // Codex-only. Ignored when agent === "claude" or when dangerously_skip_permissions is true.
+  codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
   prompt_injector: PromptInjector | null;
 }
@@ -175,6 +191,11 @@ export interface PresetEntry {
   dangerously_skip_permissions: boolean;
   model: string | null;
   permission_mode: PermissionMode | null;
+  // Which CLI a preset launches. Defaults to "claude" for preset files that
+  // pre-date the codex field.
+  agent: Agent;
+  // Codex sandbox policy. Ignored when agent !== "codex".
+  codex_sandbox: CodexSandbox | null;
   tab_grouping: TabGroupingConfig;
   injector: InjectorTemplate;
   stagger_ms: number;

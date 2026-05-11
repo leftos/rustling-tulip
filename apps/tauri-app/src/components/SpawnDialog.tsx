@@ -3,6 +3,8 @@ import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import type {
+  Agent,
+  CodexSandbox,
   DaemonMessage,
   MemberSpawnPreview,
   PermissionMode,
@@ -31,30 +33,44 @@ interface EnvRow {
 interface AdvancedConfig {
   model: string | null;
   permissionMode: PermissionMode | null;
+  codexSandbox: CodexSandbox | null;
   envRows: EnvRow[];
 }
 
 function emptyAdvanced(): AdvancedConfig {
-  return { model: null, permissionMode: null, envRows: [] };
+  return {
+    model: null,
+    permissionMode: null,
+    codexSandbox: null,
+    envRows: [],
+  };
 }
 
 function advancedToWire(
   cfg: AdvancedConfig,
   skipPerms: boolean,
   runMode: RunMode,
+  agent: Agent,
 ): {
   model: string | null;
   permission_mode: PermissionMode | null;
+  codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
   prompt_injector: null;
 } {
   const isPlainShell = runMode === "plain_shell";
+  const isCodex = agent === "codex";
   return {
-    // Plain shell ignores claude-only fields; the daemon fail-fast checks
+    // Plain shell ignores claude/codex-only fields; the daemon fail-fast checks
     // that they are unset, so force them to null on the wire even if the
     // user left stale state from a previous run mode.
     model: isPlainShell ? null : cfg.model,
-    permission_mode: isPlainShell || skipPerms ? null : cfg.permissionMode,
+    // Permission mode is claude-only. Skip-perms (yolo) also wins over it.
+    permission_mode:
+      isPlainShell || skipPerms || isCodex ? null : cfg.permissionMode,
+    // Codex sandbox is codex-only. Skip-perms (yolo) wins over it too.
+    codex_sandbox:
+      isPlainShell || skipPerms || !isCodex ? null : cfg.codexSandbox,
     extra_env: cfg.envRows
       .filter((r) => r.key.trim().length > 0)
       .map<[string, string]>((r) => [r.key.trim(), r.value]),
@@ -86,10 +102,20 @@ export default function SpawnDialog({
   const [runMode, setRunMode] = useState<RunMode>("interactive");
   const [headlessPrompt, setHeadlessPrompt] = useState("");
   const [skipPerms, setSkipPerms] = useState(true);
+  const [agent, setAgent] = useState<Agent>("claude");
   const [advanced, setAdvanced] = useState<AdvancedConfig>(emptyAdvanced);
+
+  // Headless mode isn't supported for codex yet — snap back to interactive
+  // when the user picks codex while headless was selected.
+  useEffect(() => {
+    if (agent === "codex" && runMode === "headless") {
+      setRunMode("interactive");
+    }
+  }, [agent, runMode]);
 
   const sharedFooter = (
     <Footer
+      agent={agent}
       skipPerms={skipPerms}
       onSkipPermsChange={setSkipPerms}
       runMode={runMode}
@@ -145,6 +171,8 @@ export default function SpawnDialog({
               runMode={runMode}
               headlessPrompt={headlessPrompt}
               advanced={advanced}
+              agent={agent}
+              onAgentChange={setAgent}
               initialRepoId={initialRepoId}
               onClose={onClose}
               onSpawned={onSpawned}
@@ -159,6 +187,8 @@ export default function SpawnDialog({
               runMode={runMode}
               headlessPrompt={headlessPrompt}
               advanced={advanced}
+              agent={agent}
+              onAgentChange={setAgent}
               initialWorkspaceId={initialWorkspaceId}
               onClose={onClose}
               onSpawned={onSpawned}
@@ -172,6 +202,7 @@ export default function SpawnDialog({
 }
 
 function Footer({
+  agent,
   skipPerms,
   onSkipPermsChange,
   runMode,
@@ -181,6 +212,7 @@ function Footer({
   advanced,
   onAdvancedChange,
 }: {
+  agent: Agent;
   skipPerms: boolean;
   onSkipPermsChange: (v: boolean) => void;
   runMode: RunMode;
@@ -191,6 +223,13 @@ function Footer({
   onAdvancedChange: (cfg: AdvancedConfig) => void;
 }) {
   const isPlainShell = runMode === "plain_shell";
+  const isCodex = agent === "codex";
+  const headlessDisabledReason = isCodex
+    ? "headless mode is not yet supported for codex"
+    : undefined;
+  const skipPermsLabel = isCodex
+    ? "Pass --yolo (skip approvals + sandbox)"
+    : "Pass --dangerously-skip-permissions";
   return (
     <>
       <fieldset className="field">
@@ -203,10 +242,14 @@ function Footer({
           />
           Interactive
         </label>
-        <label className="radio">
+        <label
+          className={`radio${isCodex ? " radio-disabled" : ""}`}
+          title={headlessDisabledReason}
+        >
           <input
             type="radio"
             checked={runMode === "headless"}
+            disabled={isCodex}
             onChange={() => onRunModeChange("headless")}
           />
           Headless (one-shot prompt, no terminal)
@@ -217,7 +260,7 @@ function Footer({
             checked={runMode === "plain_shell"}
             onChange={() => onRunModeChange("plain_shell")}
           />
-          Plain shell (no claude)
+          Plain shell (no agent)
         </label>
       </fieldset>
       {runMode === "headless" && (
@@ -238,10 +281,11 @@ function Footer({
             checked={skipPerms}
             onChange={(e) => onSkipPermsChange(e.target.checked)}
           />
-          <span>Pass --dangerously-skip-permissions</span>
+          <span>{skipPermsLabel}</span>
         </label>
       )}
       <AdvancedSection
+        agent={agent}
         skipPerms={skipPerms}
         advanced={advanced}
         onAdvancedChange={onAdvancedChange}
@@ -252,11 +296,13 @@ function Footer({
 }
 
 function AdvancedSection({
+  agent,
   skipPerms,
   advanced,
   onAdvancedChange,
   isPlainShell,
 }: {
+  agent: Agent;
   skipPerms: boolean;
   advanced: AdvancedConfig;
   onAdvancedChange: (cfg: AdvancedConfig) => void;
@@ -266,8 +312,12 @@ function AdvancedSection({
     onAdvancedChange({ ...advanced, model });
   const setPermissionMode = (permissionMode: PermissionMode | null) =>
     onAdvancedChange({ ...advanced, permissionMode });
+  const setCodexSandbox = (codexSandbox: CodexSandbox | null) =>
+    onAdvancedChange({ ...advanced, codexSandbox });
   const setEnvRows = (envRows: EnvRow[]) =>
     onAdvancedChange({ ...advanced, envRows });
+  const isCodex = agent === "codex";
+  const skipPermsLabel = isCodex ? "yolo" : "skip-permissions";
 
   return (
     <details className="field advanced-config">
@@ -286,10 +336,16 @@ function AdvancedSection({
               </option>
             ))}
           </select>
+          {isCodex && (
+            <span className="muted small">
+              Model list is claude-named; type a codex model id manually if
+              none of these fit.
+            </span>
+          )}
         </label>
       )}
 
-      {!isPlainShell && (
+      {!isPlainShell && !isCodex && (
         <label className="field">
           <span>Permission mode</span>
           <select
@@ -311,7 +367,34 @@ function AdvancedSection({
           </select>
           {skipPerms && (
             <span className="muted small">
-              Disabled because skip-permissions is on
+              Disabled because {skipPermsLabel} is on
+            </span>
+          )}
+        </label>
+      )}
+
+      {!isPlainShell && isCodex && (
+        <label className="field">
+          <span>Sandbox</span>
+          <select
+            value={advanced.codexSandbox ?? ""}
+            onChange={(e) =>
+              setCodexSandbox(
+                e.target.value === ""
+                  ? null
+                  : (e.target.value as CodexSandbox),
+              )
+            }
+            disabled={skipPerms}
+          >
+            <option value="">CLI default (read-only)</option>
+            <option value="read-only">read-only</option>
+            <option value="workspace-write">workspace-write</option>
+            <option value="danger-full-access">danger-full-access</option>
+          </select>
+          {skipPerms && (
+            <span className="muted small">
+              Disabled because {skipPermsLabel} is on
             </span>
           )}
         </label>
@@ -372,6 +455,36 @@ function AdvancedSection({
         </button>
       </fieldset>
     </details>
+  );
+}
+
+function AgentPicker({
+  agent,
+  onChange,
+}: {
+  agent: Agent;
+  onChange: (a: Agent) => void;
+}) {
+  return (
+    <fieldset className="field">
+      <legend>Agent</legend>
+      <label className="radio">
+        <input
+          type="radio"
+          checked={agent === "claude"}
+          onChange={() => onChange("claude")}
+        />
+        claude
+      </label>
+      <label className="radio">
+        <input
+          type="radio"
+          checked={agent === "codex"}
+          onChange={() => onChange("codex")}
+        />
+        codex
+      </label>
+    </fieldset>
   );
 }
 
@@ -439,6 +552,8 @@ function SingleForm({
   runMode,
   headlessPrompt,
   advanced,
+  agent,
+  onAgentChange,
   initialRepoId,
   onClose,
   onSpawned,
@@ -450,6 +565,8 @@ function SingleForm({
   runMode: RunMode;
   headlessPrompt: string;
   advanced: AdvancedConfig;
+  agent: Agent;
+  onAgentChange: (a: Agent) => void;
   initialRepoId: string | null;
   onClose: () => void;
   onSpawned: () => void;
@@ -462,6 +579,14 @@ function SingleForm({
     () => repos.find((r) => r.id === repoId) ?? null,
     [repos, repoId],
   );
+
+  // Default the agent picker to whatever this repo was last launched with.
+  useEffect(() => {
+    if (repo) {
+      onAgentChange(repo.last_agent ?? "claude");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo?.id]);
 
   const [knownBranches, setKnownBranches] = useState<string[]>([]);
   useEffect(() => {
@@ -524,7 +649,8 @@ function SingleForm({
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions:
         runMode === "plain_shell" ? false : skipPerms,
-      ...advancedToWire(advanced, skipPerms, runMode),
+      agent,
+      ...advancedToWire(advanced, skipPerms, runMode, agent),
     });
     onSpawned();
     onClose();
@@ -534,6 +660,7 @@ function SingleForm({
 
   return (
     <>
+      <AgentPicker agent={agent} onChange={onAgentChange} />
       <label className="field">
         <span>Repo</span>
         <select value={repoId} onChange={(e) => setRepoId(e.target.value)}>
@@ -613,6 +740,8 @@ function WorkspaceForm({
   runMode,
   headlessPrompt,
   advanced,
+  agent,
+  onAgentChange,
   initialWorkspaceId,
   onClose,
   onSpawned,
@@ -625,6 +754,8 @@ function WorkspaceForm({
   runMode: RunMode;
   headlessPrompt: string;
   advanced: AdvancedConfig;
+  agent: Agent;
+  onAgentChange: (a: Agent) => void;
   initialWorkspaceId: string | null;
   onClose: () => void;
   onSpawned: () => void;
@@ -649,6 +780,14 @@ function WorkspaceForm({
     }
     return null;
   }, [workspace, repos]);
+
+  // Default the agent picker to the first member repo's last_agent.
+  useEffect(() => {
+    if (firstMember) {
+      onAgentChange(firstMember.last_agent ?? "claude");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstMember?.id]);
 
   const defaultBranch = firstMember?.default_branch ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(true);
@@ -728,7 +867,8 @@ function WorkspaceForm({
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions:
         runMode === "plain_shell" ? false : skipPerms,
-      ...advancedToWire(advanced, skipPerms, runMode),
+      agent,
+      ...advancedToWire(advanced, skipPerms, runMode, agent),
     });
     onSpawned();
     onClose();
@@ -736,6 +876,7 @@ function WorkspaceForm({
 
   return (
     <>
+      <AgentPicker agent={agent} onChange={onAgentChange} />
       <label className="field">
         <span>Workspace</span>
         <select

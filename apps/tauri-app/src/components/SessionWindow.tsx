@@ -44,6 +44,7 @@ export default function SessionWindow({
             ? `${session.members.length} repos`
             : (session.members[0]?.repo_name ?? "")}
           {session.mode === "headless" ? " · headless" : ""}
+          {session.mode !== "plain_shell" && ` · ${session.agent}`}
         </span>
         <span className="spacer" />
         {session.status !== "stopped" && (

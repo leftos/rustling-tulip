@@ -8,7 +8,7 @@ use crate::scrollback;
 use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
 use protocol::{
-    SessionKind, SessionMember, SessionMetrics, SessionMode, SessionSnapshot, SessionStatus,
+    Agent, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionSnapshot, SessionStatus,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -49,6 +49,9 @@ pub struct SessionRecord {
     /// Workspace this session belongs to (`Some` iff `kind == Workspace`).
     /// Used by clients to group sessions in the sidebar tree.
     pub workspace_id: Option<String>,
+    /// Which CLI is driving this session. Surfaced to clients via the
+    /// `SessionSnapshot.agent` field.
+    pub agent: Agent,
 }
 
 impl SessionRecord {
@@ -73,6 +76,7 @@ impl SessionRecord {
             recent_actions: self.recent_actions.clone(),
             is_orphan,
             workspace_id: self.workspace_id.clone(),
+            agent: self.agent,
         }
     }
 }
@@ -241,6 +245,7 @@ impl SessionRegistry {
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
+            agent: meta.agent.unwrap_or_default(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);

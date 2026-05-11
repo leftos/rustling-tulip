@@ -13,7 +13,7 @@
 use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
-use protocol::{SessionKind, SessionMember, SessionMode};
+use protocol::{Agent, SessionKind, SessionMember, SessionMode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -40,6 +40,11 @@ pub struct OrphanMeta {
     /// legacy `claude`/`node` heuristic.
     #[serde(default)]
     pub program_name: Option<String>,
+    /// Which CLI spawned this session. `None` for metas written by daemon
+    /// versions that pre-date codex support; reattach defaults to
+    /// `Agent::Claude` in that case (the only agent that existed then).
+    #[serde(default)]
+    pub agent: Option<Agent>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -199,6 +204,7 @@ pub fn meta_from_record(
     started_at: DateTime<Utc>,
     workspace_id: Option<String>,
     program_name: Option<String>,
+    agent: Agent,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -213,6 +219,7 @@ pub fn meta_from_record(
         started_at,
         workspace_id,
         program_name,
+        agent: Some(agent),
     })
 }
 
