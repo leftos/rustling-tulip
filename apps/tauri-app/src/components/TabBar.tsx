@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { TabEntry } from "../types";
 
@@ -301,6 +302,10 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
             onMergeSelected();
             closeMenu();
           }}
+          onPopOut={() => {
+            void invoke("open_tab_window", { tabId: contextMenu.tabId });
+            closeMenu();
+          }}
         />
       )}
     </div>
@@ -351,6 +356,7 @@ interface ContextMenuProps {
   onCloseTab: () => void;
   onCloseOthers: () => void;
   onMergeSelected: () => void;
+  onPopOut: () => void;
 }
 
 function TabContextMenu(p: ContextMenuProps) {
@@ -373,6 +379,12 @@ function TabContextMenu(p: ContextMenuProps) {
             Rename tab
           </button>
         </li>
+        <li>
+          <button type="button" onClick={p.onPopOut}>
+            Pop out tab
+          </button>
+        </li>
+        <li className="context-menu-separator" aria-hidden="true" />
         <li>
           <button type="button" onClick={p.onCloseTab}>
             Close tab

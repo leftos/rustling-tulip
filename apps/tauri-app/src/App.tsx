@@ -30,14 +30,16 @@ import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
+import TabWindow from "./components/TabWindow";
 import { logToFile } from "./utils/logger";
 import { collectPanes } from "./utils/grid";
 
-/// Pop-out session window: when launched with `?session=<id>` we render
-/// only the SessionWindow component, no sidebar or modals.
-const popoutSessionId = new URLSearchParams(window.location.search).get(
-  "session",
-);
+/// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
+/// `?session=<id>` (legacy single-session pop-out). The branch in App
+/// renders either TabWindow or SessionWindow without sidebar/modals.
+const queryParams = new URLSearchParams(window.location.search);
+const popoutTabId = queryParams.get("tab");
+const popoutSessionId = queryParams.get("session");
 
 const ACTIVE_TAB_KEY = "rt:active-tab:main";
 
@@ -232,9 +234,18 @@ export default function App() {
     });
   }, []);
 
+  // Pop-out window: close itself when the tab it was rendering disappears
+  // (e.g. user closed the tab from the main window).
+  useEffect(() => {
+    if (!popoutTabId) return;
+    if (state.tabs.length === 0) return; // not yet hydrated
+    if (state.tabs.some((t) => t.id === popoutTabId)) return;
+    void getCurrentWindow().close();
+  }, [state.tabs]);
+
   // Intercept main-window close so we can ask whether to stop the daemon.
   useEffect(() => {
-    if (popoutSessionId) return;
+    if (popoutSessionId || popoutTabId) return;
     let unlisten: (() => void) | null = null;
     void (async () => {
       const win = getCurrentWindow();
@@ -344,6 +355,34 @@ export default function App() {
         .filter((id): id is string => id !== null),
     );
   }, [activeTab]);
+
+  if (popoutTabId) {
+    const popoutTab = state.tabs.find((t) => t.id === popoutTabId);
+    return (
+      <div className="app-root">
+        {state.client && popoutTab ? (
+          <TabWindow
+            tab={popoutTab}
+            client={state.client}
+            sessions={state.sessions}
+            subscribePty={subscribePty}
+            hasRepos={state.repos.length > 0}
+          />
+        ) : (
+          <div className="empty-state">
+            <h1>Tab not found</h1>
+            <p className="status-line">
+              Daemon: <ConnectionBadge state={state.status} />
+            </p>
+            <p className="hint">
+              Tab <code>{popoutTabId}</code> is not currently registered with
+              the daemon.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (popoutSessionId) {
     const popoutSession = state.sessions.find((s) => s.id === popoutSessionId);

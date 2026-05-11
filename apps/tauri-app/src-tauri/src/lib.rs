@@ -40,7 +40,11 @@ async fn pick_directory(
         builder = builder.set_directory(p);
     }
     let path = builder.blocking_pick_folder();
-    Ok(path.and_then(|p| p.into_path().ok().map(|pb| pb.to_string_lossy().into_owned())))
+    Ok(path.and_then(|p| {
+        p.into_path()
+            .ok()
+            .map(|pb| pb.to_string_lossy().into_owned())
+    }))
 }
 
 /// Resolve the per-user app log directory and ensure it exists. Returns the
@@ -135,10 +139,7 @@ fn quit_app(app: tauri::AppHandle) {
 /// `?session=<id>` query parameter so `App.tsx` can render only the
 /// `SessionWindow` component for that session.
 #[tauri::command]
-async fn open_session_window(
-    app: tauri::AppHandle,
-    session_id: String,
-) -> Result<(), String> {
+async fn open_session_window(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
     let label = format!("session-{session_id}");
     if let Some(existing) = app.get_webview_window(&label) {
         let _ = existing.set_focus();
@@ -147,6 +148,27 @@ async fn open_session_window(
     let url = format!("index.html?session={session_id}");
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(format!("Session — {session_id}"))
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(700.0, 400.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open (or surface) a focused window for a single tab and its grid. Same
+/// label-dedup behavior as [`open_session_window`]: re-calls focus the
+/// existing window. The popped-out window loads `index.html?tab=<id>` so
+/// `App.tsx` renders only the `TabWindow` for that tab.
+#[tauri::command]
+async fn open_tab_window(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
+    let label = format!("tab-{tab_id}");
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = format!("index.html?tab={tab_id}");
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title(format!("Tab — {tab_id}"))
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
         .build()
@@ -176,6 +198,7 @@ pub fn run() {
             ensure_daemon_started,
             pick_directory,
             open_session_window,
+            open_tab_window,
             reveal_in_explorer,
             log_message,
             quit_app
