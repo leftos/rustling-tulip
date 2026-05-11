@@ -23,7 +23,13 @@ import type {
   VscodeWorkspaceSuggestion,
   WorkspaceEntry,
 } from "./types";
+import ActivityBar, {
+  type ActivitySection,
+  readActivitySection,
+  writeActivitySection,
+} from "./components/ActivityBar";
 import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
+import SourceControlSidebar from "./components/source-control/SourceControlSidebar";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
@@ -525,6 +531,30 @@ export default function App() {
     );
   }, [activeTab]);
 
+  // Which sidebar panel is showing (Sessions vs Source control). Persisted
+  // to localStorage so it survives reloads.
+  const [activitySection, setActivitySection] = useState<ActivitySection>(
+    () => readActivitySection(),
+  );
+  const onSelectActivity = useCallback((next: ActivitySection) => {
+    setActivitySection(next);
+    writeActivitySection(next);
+  }, []);
+
+  // Derive the focused-repo id from the focused pane's session. Walks
+  // active tab → focused pane → session → first member's repo_id.
+  // `null` when no session is focused; the source-control sidebar falls
+  // back to a manual override or the first registered repo.
+  const focusedRepoId = useMemo(() => {
+    if (!activeTab || !state.focusedPaneId) return null;
+    const pane = collectPanes(activeTab.grid).find(
+      (p) => p.pane_id === state.focusedPaneId,
+    );
+    if (!pane?.session_id) return null;
+    const session = state.sessions.find((s) => s.id === pane.session_id);
+    return session?.members[0]?.repo_id ?? null;
+  }, [activeTab, state.focusedPaneId, state.sessions]);
+
   if (popoutTabId) {
     const popoutTab = state.tabs.find((t) => t.id === popoutTabId);
     return (
@@ -581,35 +611,44 @@ export default function App() {
 
   return (
     <div className="app-root" data-testid="app-root">
+      <ActivityBar active={activitySection} onSelect={onSelectActivity} />
       <ResizableSplit
         storageKey="root.sidebar"
         defaultSize={280}
         minSize={200}
         direction="horizontal"
       >
-        <Sidebar
-          repos={state.repos}
-          workspaces={state.workspaces}
-          sessions={state.sessions}
-          client={state.client!}
-          highlightedSessionIds={sessionIdsInActiveTab}
-          attentionSessions={state.attentionSessions}
-          connection={state.status}
-          tabs={state.tabs}
-          onAddRepo={onAddRepo}
-          onRemoveRepo={(id) =>
-            state.client?.send({ type: "remove_repo", repo_id: id })
-          }
-          onRemoveRepoWithLiveSessions={onRemoveRepoWithLiveSessions}
-          onRemoveWorkspace={(id) =>
-            state.client?.send({ type: "remove_workspace", workspace_id: id })
-          }
-          onSelectSession={onSelectSession}
-          onOpenSpawn={onOpenSpawn}
-          onOpenWorkspaceCreator={onOpenWorkspaceCreator}
-          onRevealInExplorer={onRevealInExplorer}
-          onLaunchPreset={onLaunchPreset}
-        />
+        {activitySection === "sessions" ? (
+          <Sidebar
+            repos={state.repos}
+            workspaces={state.workspaces}
+            sessions={state.sessions}
+            client={state.client!}
+            highlightedSessionIds={sessionIdsInActiveTab}
+            attentionSessions={state.attentionSessions}
+            connection={state.status}
+            tabs={state.tabs}
+            onAddRepo={onAddRepo}
+            onRemoveRepo={(id) =>
+              state.client?.send({ type: "remove_repo", repo_id: id })
+            }
+            onRemoveRepoWithLiveSessions={onRemoveRepoWithLiveSessions}
+            onRemoveWorkspace={(id) =>
+              state.client?.send({ type: "remove_workspace", workspace_id: id })
+            }
+            onSelectSession={onSelectSession}
+            onOpenSpawn={onOpenSpawn}
+            onOpenWorkspaceCreator={onOpenWorkspaceCreator}
+            onRevealInExplorer={onRevealInExplorer}
+            onLaunchPreset={onLaunchPreset}
+          />
+        ) : (
+          <SourceControlSidebar
+            repos={state.repos}
+            focusedRepoId={focusedRepoId}
+            client={state.client!}
+          />
+        )}
         <main className="main-pane">
           <TabBar
             tabs={state.tabs}

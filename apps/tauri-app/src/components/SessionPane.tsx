@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
 import Terminal from "./Terminal";
-import GitPanel from "./GitPanel";
 
 /// True when running inside the pop-out session window. Pop-out windows
 /// shouldn't show "Pop out" themselves — the toolbar already lives in the
@@ -17,11 +16,8 @@ interface Props {
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
 
-type View = "terminal" | "git";
-
 export default function SessionPane({ session, client, subscribePty }: Props) {
   const [confirming, setConfirming] = useState(false);
-  const [view, setView] = useState<View>("terminal");
 
   const onStop = useCallback(() => {
     if (!client) return;
@@ -131,24 +127,6 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             {m.repo_name}: {m.branch}
           </span>
         ))}
-        <div className="view-toggle">
-          <button
-            type="button"
-            className={view === "terminal" ? "tab active" : "tab"}
-            onClick={() => setView("terminal")}
-            data-testid="session-view-terminal"
-          >
-            {isHeadless ? "Events" : "Terminal"}
-          </button>
-          <button
-            type="button"
-            className={view === "git" ? "tab active" : "tab"}
-            onClick={() => setView("git")}
-            data-testid="session-view-git"
-          >
-            Git
-          </button>
-        </div>
       </div>
       {session.is_orphan && (
         <div className="orphan-banner">
@@ -159,9 +137,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
         </div>
       )}
 
-      {view === "git" && client ? (
-        <GitPanel members={session.members} client={client} />
-      ) : isHeadless ? (
+      {isHeadless ? (
         <HeadlessView session={session} />
       ) : (
         <div className="terminal-host">

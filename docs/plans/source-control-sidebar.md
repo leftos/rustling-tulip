@@ -80,17 +80,17 @@ pub enum GridNode {
 
 ### Phase A — Activity bar + read-only sidebar shell
 
-- [ ] Add `apps/tauri-app/src/components/ActivityBar.tsx` (left rail, two icons: Sessions / Source Control). Persist active section in `localStorage` (key `rt.activity`).
-- [ ] Add `apps/tauri-app/src/components/source-control/` directory:
-  - [ ] `SourceControlSidebar.tsx` — root component, accepts `client`, `repos`, `workspaces`, `focusedRepoId`.
-  - [ ] `RepoHeader.tsx` — repo + branch dropdown (writes pinned repo to local state). Auto-follows `focusedRepoId` until user picks one.
-  - [ ] `ChangesTree.tsx` — path tree built from `GitFileChange[]`. Folds single-child intermediate folders (`apps/tauri-app/src/components` → one row) like VSCode. Status badge per file (M/U/A/D/R); folder rows show aggregate badge.
-  - [ ] `GraphList.tsx` — flat commit list with bullet column. Replaces hard `COMMIT_LIMIT=50` with paginated fetch.
-- [ ] Refactor `App.tsx` layout: `<ActivityBar /> + <Sessions sidebar | SourceControlSidebar /> + <main grid>`.
-- [ ] Wire focused-pane → focused-repo: `App.tsx` already tracks `highlightedSessionIds`; derive `focusedRepoId` from `session.members[0].repo_id` of the focused pane.
-- [ ] Remove `view: "git"` from `SessionPane.tsx:24-25, 125-152`. Sessions only show Terminal / Events now.
-- [ ] Delete `GitPanel.tsx` entirely once unreferenced.
-- [ ] Daemon `RepoStatus` extension: split single `status: String` into `index_status: char` and `worktree_status: char`. Update `git_inspect.rs:143-170` to keep both bytes from `git status --porcelain=1 -z`. Mirror in `crates/protocol/src/lib.rs:947-954` and `apps/tauri-app/src/types.ts`. Backwards-compat shim on the TS side maps to a derived UI label.
+- [x] Add `apps/tauri-app/src/components/ActivityBar.tsx` (left rail, two icons: Sessions / Source Control). Persist active section in `localStorage` (key `rt.activity`).
+- [x] Add `apps/tauri-app/src/components/source-control/` directory:
+  - [x] `SourceControlSidebar.tsx` — root component, accepts `client`, `repos`, `focusedRepoId`. (No separate `RepoHeader.tsx` for Phase A — the header is inlined; will split out in Phase C when stage/unstage adds enough surface to justify it.)
+  - [ ] `RepoHeader.tsx` — *deferred to Phase C*; iter 7 inlined the header into `SourceControlSidebar` since it was small and the file split was premature.
+  - [ ] `ChangesTree.tsx` — *deferred to follow-up.* Iter 7 ships a flat list (same shape as the deleted `GitPanel`) so Phase A is functionally equivalent to the in-pane git view it replaces. Path-folded tree + status badges land in a "Phase A part 2" iter once the rest of the audit-triage settles.
+  - [ ] `GraphList.tsx` — *deferred to Phase E* per its existing scope (pagination); iter 7 keeps the `COMMIT_LIMIT=50` cap inline in `SourceControlSidebar`'s HistoryView.
+- [x] Refactor `App.tsx` layout: `<ActivityBar /> + <Sessions sidebar | SourceControlSidebar /> + <main grid>`.
+- [x] Wire focused-pane → focused-repo: derives from active tab → focused pane → `pane.session_id` → `session.members[0].repo_id`. Override picker pins a repo when desired (`rt.sourceControl.repoOverride` in localStorage).
+- [x] Remove `view: "git"` from `SessionPane.tsx`. Sessions only show Terminal / Events now.
+- [x] Delete `GitPanel.tsx` entirely.
+- [ ] Daemon `RepoStatus` extension: *deferred to Phase C* (the staging phase that needs the split). Iter 7 kept the existing `status: String` shape — sufficient for the read-only Phase A view.
 
 ### Phase B — Monaco diff editor + diff-tab protocol extension
 

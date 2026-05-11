@@ -73,7 +73,102 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
 
 .app-root {
   height: 100%;
+  display: flex;
+  flex-direction: row;
 }
+/* The root-level ResizableSplit is the second flex child of .app-root (after
+   ActivityBar). It needs to fill the remaining width while keeping its own
+   internal width:100% grid working. */
+.app-root > .split { flex: 1 1 auto; min-width: 0; }
+
+.activity-bar {
+  flex: 0 0 36px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  padding: 4px 0;
+  gap: 2px;
+}
+.activity-btn {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 8px 0;
+  font-size: 18px;
+  line-height: 1;
+  border-left: 2px solid transparent;
+}
+.activity-btn:hover { color: var(--fg); background: var(--bg-elev2); }
+.activity-btn.active {
+  color: var(--fg);
+  border-left-color: var(--accent);
+  background: var(--bg-elev2);
+}
+.activity-btn:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+
+.source-control {
+  background: var(--bg-elev);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.source-control-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--fg-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.source-control-header .brand {
+  font-size: 14px;
+  color: var(--fg);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.source-control-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.source-control-header .repo-picker {
+  font-size: 11px;
+  max-width: 140px;
+}
+.source-control-active-repo {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.source-control-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.source-control-tabs .tab {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  padding: 6px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.source-control-tabs .tab:hover { color: var(--fg); }
+.source-control-tabs .tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.source-control-list { padding: 4px 0; }
 
 .split { min-height: 0; min-width: 0; }
 .split-pane { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }

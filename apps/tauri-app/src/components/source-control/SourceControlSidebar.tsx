@@ -1,37 +1,127 @@
-import { useEffect, useState } from "react";
+/**
+ * Global Source Control sidebar — Phase A of `docs/plans/source-control-sidebar.md`.
+ *
+ * Replaces the per-session `GitPanel` toggle with a single sidebar that
+ * tracks the focused pane's repo. Manual override is available when more
+ * than one repo is registered. The data plumbing (`repo_status` /
+ * `list_commits` / `get_file_diff` / `get_commit` round-trips) is unchanged
+ * from the deleted `GitPanel.tsx` — only the host moves.
+ *
+ * Phase A keeps the read-only, flat-list shape on purpose. Tree-folded
+ * changes, paginated graph, stage/unstage/commit, and Monaco diff are
+ * scheduled for phases B–E.
+ */
+import { useEffect, useMemo, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
-import { branchUrl, getRemoteUrl, type DaemonClient } from "../api";
+import { getRemoteUrl, type DaemonClient } from "../../api";
 import type {
   DaemonMessage,
   GitCommit,
   GitFileChange,
-  SessionMember,
-} from "../types";
-import ResizableSplit from "./ResizableSplit";
-
-interface Props {
-  members: SessionMember[];
-  client: DaemonClient;
-}
+  RepoEntry,
+} from "../../types";
+import ResizableSplit from "../ResizableSplit";
 
 type Tab = "changes" | "history";
 
 const COMMIT_LIMIT = 50;
+const STORAGE_KEY = "rt.sourceControl.repoOverride";
 
-export default function GitPanel({ members, client }: Props) {
+interface Props {
+  repos: RepoEntry[];
+  focusedRepoId: string | null;
+  client: DaemonClient;
+}
+
+export default function SourceControlSidebar({
+  repos,
+  focusedRepoId,
+  client,
+}: Props) {
   const [tab, setTab] = useState<Tab>("changes");
-  const [activeRepoId, setActiveRepoId] = useState<string>(
-    members[0]?.repo_id ?? "",
-  );
+  // null = follow focused pane; string = user-pinned override.
+  const [override, setOverride] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const updateOverride = (next: string | null) => {
+    setOverride(next);
+    try {
+      if (next === null) localStorage.removeItem(STORAGE_KEY);
+      else localStorage.setItem(STORAGE_KEY, next);
+    } catch {
+      /* best-effort */
+    }
+  };
+
+  // Resolve the active repo. Override wins; else follow focus; else fall
+  // back to the first registered repo (still useful as a no-session
+  // browsing surface).
+  const activeRepoId = useMemo(() => {
+    if (override && repos.some((r) => r.id === override)) return override;
+    if (focusedRepoId && repos.some((r) => r.id === focusedRepoId)) {
+      return focusedRepoId;
+    }
+    return repos[0]?.id ?? null;
+  }, [override, focusedRepoId, repos]);
+  const activeRepo = repos.find((r) => r.id === activeRepoId) ?? null;
+  const followingFocus = override === null && focusedRepoId !== null;
+
+  if (repos.length === 0) {
+    return (
+      <aside className="source-control" data-testid="source-control-sidebar">
+        <header className="source-control-header">Source control</header>
+        <p className="empty" style={{ padding: "12px 14px" }}>
+          Register a repo from the Sessions sidebar to inspect changes here.
+        </p>
+      </aside>
+    );
+  }
 
   return (
-    <div className="git-panel" data-testid="git-panel">
-      <header className="git-tabs">
+    <aside className="source-control" data-testid="source-control-sidebar">
+      <header className="source-control-header">
+        <div className="source-control-header-row">
+          <span className="brand">Source control</span>
+          {repos.length > 1 && (
+            <select
+              className="repo-picker"
+              value={override ?? ""}
+              onChange={(e) =>
+                updateOverride(e.target.value === "" ? null : e.target.value)
+              }
+              aria-label="Pin source-control sidebar to a specific repo"
+              data-testid="source-control-repo-picker"
+            >
+              <option value="">Follow focused pane</option>
+              {repos.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        {activeRepo && (
+          <div className="source-control-active-repo" title={activeRepo.path}>
+            <strong>{activeRepo.name}</strong>
+            {followingFocus && (
+              <span className="muted small" style={{ marginLeft: 6 }}>
+                · following focus
+              </span>
+            )}
+          </div>
+        )}
+      </header>
+      <div className="source-control-tabs">
         <button
           type="button"
           className={tab === "changes" ? "tab active" : "tab"}
           onClick={() => setTab("changes")}
-          data-testid="git-tab-changes"
+          data-testid="source-control-tab-changes"
         >
           Changes
         </button>
@@ -39,60 +129,39 @@ export default function GitPanel({ members, client }: Props) {
           type="button"
           className={tab === "history" ? "tab active" : "tab"}
           onClick={() => setTab("history")}
-          data-testid="git-tab-history"
+          data-testid="source-control-tab-history"
         >
           History
         </button>
-        {members.length > 1 && (
-          <select
-            value={activeRepoId}
-            onChange={(e) => setActiveRepoId(e.target.value)}
-            className="repo-picker"
-            data-testid="git-repo-picker"
-          >
-            {members.map((m) => (
-              <option key={m.repo_id} value={m.repo_id}>
-                {m.repo_name}
-              </option>
-            ))}
-          </select>
-        )}
-      </header>
-      {tab === "changes" ? (
+      </div>
+      {activeRepoId && tab === "changes" && (
         <ChangesView
-          members={members}
           activeRepoId={activeRepoId}
-          client={client}
-        />
-      ) : (
-        <HistoryView
-          activeRepoId={activeRepoId}
-          activeMember={members.find((m) => m.repo_id === activeRepoId)}
+          activeRepoName={activeRepo?.name ?? ""}
           client={client}
         />
       )}
-    </div>
+      {activeRepoId && tab === "history" && (
+        <HistoryView activeRepoId={activeRepoId} client={client} />
+      )}
+    </aside>
   );
 }
 
 // ---------- Changes ----------
 
-function ChangesView({
-  members,
-  activeRepoId,
-  client,
-}: {
-  members: SessionMember[];
+interface ChangesViewProps {
   activeRepoId: string;
+  activeRepoName: string;
   client: DaemonClient;
-}) {
-  const member = members.find((m) => m.repo_id === activeRepoId);
+}
+
+function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps) {
   const [changes, setChanges] = useState<GitFileChange[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!activeRepoId) return;
     setChanges(null);
     setSelected(null);
     setDiff(null);
@@ -108,7 +177,7 @@ function ChangesView({
   }, [activeRepoId, client]);
 
   useEffect(() => {
-    if (!selected || !activeRepoId) return;
+    if (!selected) return;
     setDiff(null);
     client.send({
       type: "get_file_diff",
@@ -132,12 +201,15 @@ function ChangesView({
 
   return (
     <ResizableSplit
-      storageKey="git.list"
-      defaultSize={320}
-      minSize={200}
-      direction="horizontal"
+      storageKey="source-control.changes"
+      defaultSize={260}
+      minSize={180}
+      direction="vertical"
     >
-      <div className="git-list git-pane-content" data-testid="git-changes-list">
+      <div
+        className="git-list source-control-list"
+        data-testid="source-control-changes-list"
+      >
         {!changes ? (
           <p className="empty">loading…</p>
         ) : changes.length === 0 ? (
@@ -151,7 +223,7 @@ function ChangesView({
                   c.path === selected ? "list-item selected" : "list-item"
                 }
                 onClick={() => setSelected(c.path)}
-                data-testid="git-changes-row"
+                data-testid="source-control-changes-row"
               >
                 <span className={`file-status status-${c.status}`}>
                   {c.status}
@@ -163,49 +235,43 @@ function ChangesView({
             ))}
           </ul>
         )}
-        {member && (
-          <div className="git-meta">
-            {member.repo_name} · {member.branch}
-            <button
-              type="button"
-              className="link"
-              onClick={() => openInForge(client, activeRepoId, member.branch)}
-              data-testid="git-open-in-forge"
-            >
-              open in forge ↗
-            </button>
-          </div>
-        )}
+        <div className="git-meta">
+          {activeRepoName}
+          <button
+            type="button"
+            className="link"
+            onClick={() => openInForge(client, activeRepoId)}
+            data-testid="source-control-open-in-forge"
+          >
+            open in forge ↗
+          </button>
+        </div>
       </div>
-      <DiffView diff={diff} testId="git-changes-diff" />
+      <DiffView diff={diff} testId="source-control-changes-diff" />
     </ResizableSplit>
   );
 }
 
 // ---------- History ----------
 
-function HistoryView({
-  activeRepoId,
-  activeMember,
-  client,
-}: {
+interface HistoryViewProps {
   activeRepoId: string;
-  activeMember: SessionMember | undefined;
   client: DaemonClient;
-}) {
+}
+
+function HistoryView({ activeRepoId, client }: HistoryViewProps) {
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detailDiff, setDetailDiff] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!activeRepoId) return;
     setCommits(null);
     setSelected(null);
     setDetailDiff(null);
     client.send({
       type: "list_commits",
       repo_id: activeRepoId,
-      branch: activeMember?.branch ?? null,
+      branch: null,
       limit: COMMIT_LIMIT,
     });
     const handler = (ev: Event) => {
@@ -215,16 +281,12 @@ function HistoryView({
     };
     window.addEventListener("rt:commits", handler);
     return () => window.removeEventListener("rt:commits", handler);
-  }, [activeRepoId, activeMember?.branch, client]);
+  }, [activeRepoId, client]);
 
   useEffect(() => {
-    if (!selected || !activeRepoId) return;
+    if (!selected) return;
     setDetailDiff(null);
-    client.send({
-      type: "get_commit",
-      repo_id: activeRepoId,
-      sha: selected,
-    });
+    client.send({ type: "get_commit", repo_id: activeRepoId, sha: selected });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (
@@ -251,12 +313,15 @@ function HistoryView({
 
   return (
     <ResizableSplit
-      storageKey="git.list"
-      defaultSize={320}
-      minSize={200}
-      direction="horizontal"
+      storageKey="source-control.history"
+      defaultSize={260}
+      minSize={180}
+      direction="vertical"
     >
-      <div className="git-list git-pane-content" data-testid="git-history-list">
+      <div
+        className="git-list source-control-list"
+        data-testid="source-control-history-list"
+      >
         {!commits ? (
           <p className="empty">loading…</p>
         ) : commits.length === 0 ? (
@@ -270,7 +335,7 @@ function HistoryView({
                   c.sha === selected ? "list-item selected" : "list-item"
                 }
                 onClick={() => setSelected(c.sha)}
-                data-testid="git-history-row"
+                data-testid="source-control-history-row"
               >
                 <span className="commit-sha">{c.short_sha}</span>
                 <span className="list-item-label" title={c.subject}>
@@ -285,10 +350,12 @@ function HistoryView({
           </ul>
         )}
       </div>
-      <DiffView diff={detailDiff} testId="git-history-diff" />
+      <DiffView diff={detailDiff} testId="source-control-history-diff" />
     </ResizableSplit>
   );
 }
+
+// ---------- DiffView (shared) ----------
 
 function DiffView({ diff, testId }: { diff: string | null; testId?: string }) {
   if (diff === null) {
@@ -319,7 +386,11 @@ function DiffView({ diff, testId }: { diff: string | null; testId?: string }) {
 }
 
 function diffLineClass(line: string): string {
-  if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff "))
+  if (
+    line.startsWith("+++") ||
+    line.startsWith("---") ||
+    line.startsWith("diff ")
+  )
     return "diff-meta";
   if (line.startsWith("@@")) return "diff-hunk";
   if (line.startsWith("+")) return "diff-add";
@@ -330,13 +401,13 @@ function diffLineClass(line: string): string {
 async function openInForge(
   client: DaemonClient,
   repoId: string,
-  branch: string,
 ): Promise<void> {
   const remote = await getRemoteUrl(client, repoId);
   if (!remote || !remote.web_url) {
-    console.warn("unrecognized forge or no remote", remote?.raw_url);
     return;
   }
-  const branchHref = branchUrl(remote.web_url, remote.forge, branch);
-  void openInShell(branchHref ?? remote.web_url);
+  // The global sidebar has no specific branch context (the focused-pane's
+  // branch may not match the repo's primary HEAD), so open the repo home
+  // and let the forge route from there.
+  void openInShell(remote.web_url);
 }
