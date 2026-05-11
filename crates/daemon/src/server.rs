@@ -27,8 +27,8 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
-    MemberDiff, PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SessionKind, SessionMember,
-    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SessionKind, SessionMember, SessionMetrics,
+    SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
     VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
@@ -670,13 +670,6 @@ async fn dispatch(
             let _ = out_tx.send(DaemonMessage::Attention {
                 session_id,
                 reason: AttentionReason::Stopped,
-            });
-        }
-        ClientMessage::SessionDiff { session_id } => {
-            let diff = compute_session_diff(hub, &session_id).await?;
-            let _ = out_tx.send(DaemonMessage::SessionDiff {
-                session_id,
-                per_member: diff,
             });
         }
         ClientMessage::ListBranches { repo_id } => {
@@ -2112,27 +2105,6 @@ fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
     for tab in modified {
         let _ = hub.tab_events.send(TabEvent::Updated(tab));
     }
-}
-
-async fn compute_session_diff(hub: &Hub, session_id: &str) -> anyhow::Result<Vec<MemberDiff>> {
-    let members = hub
-        .sessions
-        .get(session_id)
-        .map(|rec| crate::sync::lock(&rec).members.clone())
-        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let mut out = Vec::new();
-    for m in members {
-        let path = PathBuf::from(&m.worktree_path);
-        let changed = git::changed_files(&path).await.unwrap_or_default();
-        let clean = changed.is_empty();
-        out.push(MemberDiff {
-            repo_id: m.repo_id,
-            repo_name: m.repo_name,
-            changed_files: changed,
-            clean,
-        });
-    }
-    Ok(out)
 }
 
 fn agent_program(agent: Agent) -> String {

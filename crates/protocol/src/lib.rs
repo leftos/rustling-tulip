@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 fn default_true() -> bool {
     true
@@ -770,10 +770,6 @@ pub enum ClientMessage {
         session_id: String,
         cleanup: Vec<CleanupAction>,
     },
-    /// Request the diff status (changed file list) for a session's worktrees.
-    SessionDiff {
-        session_id: String,
-    },
     /// List branches in a registered repo.
     ListBranches {
         repo_id: String,
@@ -1091,10 +1087,6 @@ pub enum DaemonMessage {
         session_id: String,
         reason: AttentionReason,
     },
-    SessionDiff {
-        session_id: String,
-        per_member: Vec<MemberDiff>,
-    },
     WorkspaceSpawnPreview {
         workspace_id: String,
         branch_name: String,
@@ -1253,14 +1245,6 @@ pub enum DaemonMessage {
     Error {
         message: String,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MemberDiff {
-    pub repo_id: String,
-    pub repo_name: String,
-    pub changed_files: Vec<String>,
-    pub clean: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

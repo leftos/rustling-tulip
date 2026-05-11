@@ -1172,7 +1172,6 @@ function handleMessage(
       return;
     }
     case "branches":
-    case "session_diff":
     case "workspace_spawn_preview":
     case "commits":
     case "commit_detail":

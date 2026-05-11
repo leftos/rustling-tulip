@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 export type Agent = "claude" | "codex";
 
@@ -213,13 +213,6 @@ export interface CleanupAction {
   remove_worktree: boolean;
 }
 
-export interface MemberDiff {
-  repo_id: string;
-  repo_name: string;
-  changed_files: string[];
-  clean: boolean;
-}
-
 export interface MemberSpawnPreview {
   repo_id: string;
   repo_name: string;
@@ -344,7 +337,6 @@ export type ClientMessage =
   | { type: "send_input"; session_id: string; data_b64: string }
   | { type: "resize"; session_id: string; cols: number; rows: number }
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
-  | { type: "session_diff"; session_id: string }
   | { type: "list_branches"; repo_id: string }
   | {
       type: "preview_workspace_spawn";
@@ -490,7 +482,6 @@ export type DaemonMessage =
   | { type: "session_removed"; session_id: string }
   | { type: "pty_output"; session_id: string; data_b64: string }
   | { type: "attention"; session_id: string; reason: string }
-  | { type: "session_diff"; session_id: string; per_member: MemberDiff[] }
   | {
       type: "workspace_spawn_preview";
       workspace_id: string;

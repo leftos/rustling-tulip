@@ -15,7 +15,7 @@ export interface DaemonHandshake {
 }
 
 /** Subset of `protocol::PROTOCOL_VERSION` we know how to speak. */
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 /**
  * Reproduces `crates/daemon/src/paths.rs:Dirs::handshake_file` — the
