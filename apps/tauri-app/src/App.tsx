@@ -30,6 +30,8 @@ import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
+import RepoRemoveDialog from "./components/RepoRemoveDialog";
+import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import TabBar from "./components/TabBar";
@@ -68,6 +70,9 @@ interface AppState {
   exitInFlight: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
   toasts: ToastEntry[];
+  /// Repo-remove modal state, set when the sidebar's × click hit a repo
+  /// with at least one non-stopped session. `null` when no modal is open.
+  repoRemove: RepoRemoveIntent | null;
 }
 
 export default function App() {
@@ -90,6 +95,7 @@ export default function App() {
     exitInFlight: false,
     presetLaunch: null,
     toasts: [],
+    repoRemove: null,
   });
 
   // PTY output is high-volume — keep it out of React state.
@@ -349,6 +355,48 @@ export default function App() {
     setState((s) => ({ ...s, toasts: s.toasts.filter((t) => t.id !== id) }));
   }, []);
 
+  const onRemoveRepoWithLiveSessions = useCallback(
+    (intent: RepoRemoveIntent) => {
+      setState((s) => ({ ...s, repoRemove: intent }));
+    },
+    [],
+  );
+
+  const onCancelRepoRemove = useCallback(() => {
+    setState((s) => ({ ...s, repoRemove: null }));
+  }, []);
+
+  const onRepoRemoveAnyway = useCallback(() => {
+    setState((s) => {
+      if (s.repoRemove !== null) {
+        s.client?.send({ type: "remove_repo", repo_id: s.repoRemove.repoId });
+      }
+      return { ...s, repoRemove: null };
+    });
+  }, []);
+
+  const onRepoStopAndRemove = useCallback(() => {
+    setState((s) => {
+      if (s.repoRemove !== null && s.client) {
+        // Send stop_session for each live session, then remove the repo.
+        // Cleanup uses remove_worktree: false because the user said "stop"
+        // not "delete" — preserving the worktree is the safer default.
+        for (const session of s.repoRemove.liveSessions) {
+          s.client.send({
+            type: "stop_session",
+            session_id: session.id,
+            cleanup: [],
+          });
+        }
+        s.client.send({
+          type: "remove_repo",
+          repo_id: s.repoRemove.repoId,
+        });
+      }
+      return { ...s, repoRemove: null };
+    });
+  }, []);
+
   const onRevealInExplorer = useCallback((path: string) => {
     void invoke("reveal_in_explorer", { path }).catch((err: unknown) => {
       console.error("reveal_in_explorer failed", err);
@@ -551,6 +599,7 @@ export default function App() {
           onRemoveRepo={(id) =>
             state.client?.send({ type: "remove_repo", repo_id: id })
           }
+          onRemoveRepoWithLiveSessions={onRemoveRepoWithLiveSessions}
           onRemoveWorkspace={(id) =>
             state.client?.send({ type: "remove_workspace", workspace_id: id })
           }
@@ -631,6 +680,15 @@ export default function App() {
         />
       )}
       <ErrorToast toasts={state.toasts} onDismiss={onDismissToast} />
+      {state.repoRemove && (
+        <RepoRemoveDialog
+          repoName={state.repoRemove.repoName}
+          liveSessions={state.repoRemove.liveSessions}
+          onCancel={onCancelRepoRemove}
+          onRemoveAnyway={onRepoRemoveAnyway}
+          onStopAndRemove={onRepoStopAndRemove}
+        />
+      )}
     </div>
   );
 }

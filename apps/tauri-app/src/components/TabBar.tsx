@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { TabEntry } from "../types";
+import { tabHasBoundSessions } from "../utils/grid";
 
 interface Props {
   tabs: TabEntry[];
@@ -27,6 +28,13 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  /// Tab id currently in two-state "confirm close" mode. Only one tab can
+  /// be armed at a time; clicking × on another tab resets the previous arm.
+  const [confirmingCloseId, setConfirmingCloseId] = useState<string | null>(
+    null,
+  );
+  /// True when "Close other tabs" is armed for the menu's current target.
+  const [confirmingCloseOthers, setConfirmingCloseOthers] = useState(false);
   const lastClickedRef = useRef<string | null>(null);
 
   // Drop selection entries when those tabs go away (e.g. close after merge).
@@ -50,9 +58,18 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
   const onCloseTab = useCallback(
     (tabId: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
+      const tab = tabs.find((t) => t.id === tabId);
+      const requiresConfirm = tab !== undefined && tabHasBoundSessions(tab);
+      if (requiresConfirm && confirmingCloseId !== tabId) {
+        // First click on a tab that holds bound sessions — arm the confirm.
+        // Resets any other tab's arm to enforce one-at-a-time.
+        setConfirmingCloseId(tabId);
+        return;
+      }
+      setConfirmingCloseId(null);
       client.send({ type: "close_tab", tab_id: tabId });
     },
-    [client],
+    [client, tabs, confirmingCloseId],
   );
 
   const onPillClick = useCallback(
@@ -270,11 +287,28 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
                   </span>
                   <button
                     type="button"
-                    className="tab-pill-close"
-                    title="Close tab"
+                    className={
+                      confirmingCloseId === t.id
+                        ? "tab-pill-close danger"
+                        : "tab-pill-close"
+                    }
+                    title={
+                      confirmingCloseId === t.id
+                        ? "Click again to confirm closing this tab"
+                        : "Close tab"
+                    }
+                    aria-label={
+                      confirmingCloseId === t.id
+                        ? `Confirm close tab ${t.name}`
+                        : `Close tab ${t.name}`
+                    }
+                    data-testid="tab-pill-close"
+                    data-confirming={
+                      confirmingCloseId === t.id ? "true" : "false"
+                    }
                     onClick={(e) => onCloseTab(t.id, e)}
                   >
-                    ×
+                    {confirmingCloseId === t.id ? "✓?" : "×"}
                   </button>
                 </>
               )}
@@ -295,25 +329,39 @@ export default function TabBar({ tabs, activeTabId, client, onActivate }: Props)
         <TabContextMenu
           state={contextMenu}
           selectedCount={selectedTabIds.size}
-          onClose={closeMenu}
+          otherTabsCount={Math.max(0, tabs.length - 1)}
+          confirmingCloseOthers={confirmingCloseOthers}
+          onClose={() => {
+            setConfirmingCloseOthers(false);
+            closeMenu();
+          }}
           onRename={() => {
             setRenamingTabId(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
             closeMenu();
           }}
           onCloseTab={() => {
             onCloseTab(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
             closeMenu();
           }}
           onCloseOthers={() => {
+            if (!confirmingCloseOthers) {
+              setConfirmingCloseOthers(true);
+              return;
+            }
             onCloseOthers(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
             closeMenu();
           }}
           onMergeSelected={() => {
             onMergeSelected();
+            setConfirmingCloseOthers(false);
             closeMenu();
           }}
           onPopOut={() => {
             void invoke("open_tab_window", { tabId: contextMenu.tabId });
+            setConfirmingCloseOthers(false);
             closeMenu();
           }}
         />
@@ -361,6 +409,8 @@ function RenameInput({ initial, onCommit, onCancel }: RenameInputProps) {
 interface ContextMenuProps {
   state: ContextMenuState;
   selectedCount: number;
+  otherTabsCount: number;
+  confirmingCloseOthers: boolean;
   onClose: () => void;
   onRename: () => void;
   onCloseTab: () => void;
@@ -400,11 +450,21 @@ function TabContextMenu(p: ContextMenuProps) {
             Close tab
           </button>
         </li>
-        <li>
-          <button type="button" onClick={p.onCloseOthers}>
-            Close other tabs
-          </button>
-        </li>
+        {p.otherTabsCount > 0 && (
+          <li>
+            <button
+              type="button"
+              className={p.confirmingCloseOthers ? "danger" : undefined}
+              onClick={p.onCloseOthers}
+              data-testid="tab-context-close-others"
+              data-confirming={p.confirmingCloseOthers ? "true" : "false"}
+            >
+              {p.confirmingCloseOthers
+                ? `Confirm closing ${p.otherTabsCount} other tab${p.otherTabsCount === 1 ? "" : "s"}`
+                : "Close other tabs"}
+            </button>
+          </li>
+        )}
         {p.selectedCount >= 2 && (
           <>
             <li className="context-menu-separator" aria-hidden="true" />

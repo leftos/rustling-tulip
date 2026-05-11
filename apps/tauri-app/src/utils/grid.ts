@@ -24,6 +24,15 @@ function walk(
 }
 
 /**
+ * Whether any pane in this grid is bound to a session. Used by the tab
+ * close-confirm gate (close-immediately when all panes are empty, ask for
+ * confirm when at least one carries a session).
+ */
+export function tabHasBoundSessions(tab: TabEntry): boolean {
+  return collectPanes(tab.grid).some((p) => p.session_id !== null);
+}
+
+/**
  * Find the first tab whose grid contains a pane bound to `sessionId`. Returns
  * the tab id and the pane id, or `null` if no tab references the session.
  * Used to route a sidebar click back to an already-open tab instead of

@@ -296,6 +296,41 @@ Strictly speaking outside the user-facing UX surface, but a user-visible risk if
 
 ---
 
+## Findings from hand-test 2026-05-11
+
+Run-through of the live app (after iter 1–3 fixes). Bottom line: the core idea is useful, but the UX currently feels like an internal operator console. The biggest problems are orientation, trust, and recovery — not aesthetics. Numbered roughly in priority order.
+
+1. **First-run onboarding is misleading.** `+ Session` is enabled with no repos. Opens a full spawn form with an empty repo dropdown, random branch name, disabled Spawn button, and no explanation. New users hit a dead end immediately.
+   - Suggested direction: disable `+ Session` when `repos.length === 0`. In the spawn dialog itself, show an empty-state CTA with a button that closes the dialog and opens the directory picker.
+   - Files: `apps/tauri-app/src/components/Sidebar.tsx:127-132` (toolbar `+ Session` always enabled), `apps/tauri-app/src/components/SpawnDialog.tsx:535-546` (empty repo dropdown).
+
+2. **Workspace creation disrupts mental model.** Creating a workspace from two repos moves their existing single-repo sessions into `Detached` with only a tiny `?` marker. Feels like the app lost or orphaned the sessions, even though they're still running.
+   - Suggested direction: the Detached bucket needs a banner explaining what happened ("These sessions were running before their repo got grouped into a workspace. They're still alive and attached.") plus a per-session "reattach to workspace" action.
+   - Files: `apps/tauri-app/src/components/Sidebar.tsx:516-561` (Detached rendering).
+
+3. **Session identity is too weak.** Sidebar and pane header show e.g. `C:\WINDOWS\system32\cmd.exe`. With tabs all named "Tab" the user can't tell what is what.
+   - Suggested direction: label priority should be `user-provided label > "<repo>:<branch> · <agent>" > terminal title`. Terminal title should be hover-only / tooltip metadata, not the primary visible label.
+   - Files: `apps/tauri-app/src/components/SessionPane.tsx` (header `<h2>`), `apps/tauri-app/src/components/Sidebar.tsx` (session row label).
+
+4. **Workspace preview is effectively broken.** Clicking Preview creates the table in the DOM, but its container collapses to ~2 px high in normal layout — user can't actually read the multi-repo worktree plan before spawning.
+   - Suggested direction: audit the flex parent chain. The `.preview-table` container likely needs `min-height` or its parent needs `flex: 1 1 auto` instead of `flex: 0 1 auto`.
+   - Files: `apps/tauri-app/src/components/SpawnDialog.tsx:938-968` (`.preview-table`), `apps/tauri-app/src/styles.css` (selector definitions).
+
+5. **Risky actions lack recovery.** *Partially addressed in iter 3* — repo remove / workspace remove / tab close / close-other-tabs now have confirms. Remaining: detached-bucket session stop, undo-last-action shelf, and a longer-undo window for tab close.
+
+6. **Keyboard/focus accessibility is weak.** Spawn dialog doesn't autofocus, focus stays behind the modal. Several `role="button"` / `role="tab"` divs have no `tabIndex` or keyboard handlers. Icon/glyph buttons have `title` but no `aria-label`.
+   - Suggested direction: whole-app sweep. Add a `useEscape(onClose)` hook + autofocus to every modal; add `tabIndex={0}` + Enter/Space handlers to tree leaves; add `aria-label` to all `×` and icon-only buttons.
+
+7. **Pane controls are cryptic and crowded.** The `⠿`, `▶|`, `▼=`, `×` overlay near the session header is compact but not self-evident, and crowds the Pop out / Stop buttons on narrow panes.
+   - Suggested direction: either re-design (text+icon labels), only show on hover, or move into a dedicated chrome strip above the session header on small widths.
+   - Files: `apps/tauri-app/src/components/GridRenderer.tsx` (pane controls), `apps/tauri-app/src/styles.css:605-637`.
+
+What works as-is: terminal attach flow, Stop session two-step confirm (which is the pattern we replicated for repo / workspace / tab in iter 3), workspace creation itself (simple + autofocused), Git panel Changes/History structure.
+
+**Recommended priority:** identity + trust first (stable labels, fixed workspace preview, Detached explanation, confirms ✓), then keyboard/focus and modal layout. Visual polish matters less until users can confidently tell what will happen and recover when they click the wrong thing.
+
+---
+
 ## Section 2 — Hand-test checklist
 
 ### Sidebar / repo & workspace management

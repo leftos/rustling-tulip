@@ -12,6 +12,12 @@ export type SpawnInitialTarget =
   | { kind: "repo"; repo_id: string }
   | { kind: "workspace"; workspace_id: string };
 
+export interface RepoRemoveIntent {
+  repoId: string;
+  repoName: string;
+  liveSessions: SessionSnapshot[];
+}
+
 interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
@@ -25,6 +31,10 @@ interface Props {
   connection: ConnectionState | { kind: "init" } | { kind: "error"; reason: string };
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
+  /// Called when the user clicks × on a repo that has live sessions.
+  /// The app opens a confirmation modal with a 3-way choice
+  /// (cancel / remove anyway / stop sessions and remove).
+  onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
   onRemoveWorkspace: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenSpawn: (initial?: SpawnInitialTarget) => void;
@@ -179,6 +189,7 @@ export default function Sidebar(props: Props) {
                 attentionSessions={props.attentionSessions}
                 onSelectSession={props.onSelectSession}
                 onRemoveRepo={props.onRemoveRepo}
+                onRemoveRepoWithLiveSessions={props.onRemoveRepoWithLiveSessions}
                 onRemoveWorkspace={props.onRemoveWorkspace}
                 onContextMenu={(x, y) =>
                   setContextMenu({ x, y, container: c })
@@ -205,8 +216,18 @@ export default function Sidebar(props: Props) {
           }}
           onRemove={() => {
             const c = contextMenu.container;
-            if (c.kind === "repo") props.onRemoveRepo(c.id);
-            else if (c.kind === "workspace") props.onRemoveWorkspace(c.id);
+            if (c.kind === "repo") {
+              const live = c.sessions.filter((s) => s.status !== "stopped");
+              if (live.length > 0) {
+                props.onRemoveRepoWithLiveSessions({
+                  repoId: c.id,
+                  repoName: c.name,
+                  liveSessions: live,
+                });
+              } else {
+                props.onRemoveRepo(c.id);
+              }
+            } else if (c.kind === "workspace") props.onRemoveWorkspace(c.id);
             closeMenu();
           }}
           onReveal={() => {
@@ -238,6 +259,7 @@ interface ContainerNodeProps {
   attentionSessions: Set<string>;
   onSelectSession: (id: string) => void;
   onRemoveRepo: (id: string) => void;
+  onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
   onRemoveWorkspace: (id: string) => void;
   onContextMenu: (x: number, y: number) => void;
 }
@@ -249,7 +271,29 @@ function ContainerNode(p: ContainerNodeProps) {
     .filter(Boolean)
     .join(" ");
 
-  const onRemove = () => {
+  /// Inline two-state confirm for workspace remove and repo remove without
+  /// live sessions. The repo-with-live-sessions case bypasses this and
+  /// opens a modal directly, since the user needs the 3-way choice
+  /// (cancel / remove anyway / stop sessions and remove).
+  const [confirming, setConfirming] = useState(false);
+
+  const onRemoveClick = () => {
+    if (c.kind === "repo") {
+      const live = c.sessions.filter((s) => s.status !== "stopped");
+      if (live.length > 0) {
+        p.onRemoveRepoWithLiveSessions({
+          repoId: c.id,
+          repoName: c.name,
+          liveSessions: live,
+        });
+        return;
+      }
+    }
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    setConfirming(false);
     if (c.kind === "repo") p.onRemoveRepo(c.id);
     else if (c.kind === "workspace") p.onRemoveWorkspace(c.id);
   };
@@ -283,17 +327,51 @@ function ContainerNode(p: ContainerNodeProps) {
           <span className="list-item-meta">{c.sessions.length}</span>
         )}
         {c.removable && (
-          <button
-            type="button"
-            className="list-item-action"
-            title={c.kind === "workspace" ? "Remove workspace" : "Remove repo"}
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
-          >
-            ×
-          </button>
+          <>
+            <button
+              type="button"
+              className={
+                confirming
+                  ? "list-item-action danger"
+                  : "list-item-action"
+              }
+              title={
+                confirming
+                  ? "Click again to confirm"
+                  : c.kind === "workspace"
+                    ? "Remove workspace"
+                    : "Remove repo"
+              }
+              aria-label={
+                confirming
+                  ? `Confirm removal of ${c.kind} ${c.name}`
+                  : `Remove ${c.kind} ${c.name}`
+              }
+              data-testid={`sidebar-remove-${c.kind}`}
+              data-confirming={confirming ? "true" : "false"}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemoveClick();
+              }}
+            >
+              {confirming ? "✓?" : "×"}
+            </button>
+            {confirming && (
+              <button
+                type="button"
+                className="list-item-action"
+                title="Cancel"
+                aria-label="Cancel removal"
+                data-testid={`sidebar-remove-${c.kind}-cancel`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirming(false);
+                }}
+              >
+                ⌫
+              </button>
+            )}
+          </>
         )}
       </div>
       {hasChildren && !p.collapsed && (

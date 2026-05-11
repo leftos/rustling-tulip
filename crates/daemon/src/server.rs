@@ -60,6 +60,19 @@ pub struct Hub {
     /// client subscribes and forwards. Lets the launching client auto-switch
     /// tabs while the batch runs, and lets other clients see new tabs appear.
     pub preset_events: broadcast::Sender<PresetEvent>,
+    /// Broadcast for repo + workspace registry mutations. Every connected
+    /// client subscribes and forwards full `Repos` / `Workspaces` snapshots
+    /// to its WS sender. Without this, a registry change made on one client
+    /// (e.g. `add_repo` from the side-channel or a pop-out window) was never
+    /// visible to other clients until they reconnected. See ux-audit:
+    /// "Daemon repo/workspace updates are NOT broadcast to all clients."
+    pub state_events: broadcast::Sender<StateEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub enum StateEvent {
+    Repos(Vec<protocol::RepoEntry>),
+    Workspaces(Vec<protocol::WorkspaceEntry>),
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +101,7 @@ pub enum PresetEvent {
 
 const TAB_EVENT_CAPACITY: usize = 256;
 const PRESET_EVENT_CAPACITY: usize = 64;
+const STATE_EVENT_CAPACITY: usize = 64;
 
 pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
@@ -118,6 +132,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
     let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
+    let (state_events, _) = broadcast::channel(STATE_EVENT_CAPACITY);
 
     let hub = Hub {
         state,
@@ -128,6 +143,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
         shutdown_tx,
         tab_events,
         preset_events,
+        state_events,
     };
 
     let app = Router::new()
@@ -170,14 +186,22 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
+    let pid = std::process::id();
     let payload = DaemonHandshake {
         protocol_version: PROTOCOL_VERSION,
         port,
         auth_token: auth_token.to_string(),
-        pid: std::process::id(),
+        pid,
     };
     let bytes = serde_json::to_vec_pretty(&payload).context("serializing handshake")?;
-    let tmp = dirs.handshake_file.with_extension("json.tmp");
+    // Tag the tmp file with our pid so concurrent daemons don't stomp each
+    // other's mid-write file (which would lose one daemon's atomic rename
+    // when the other consumed the shared tmp). Two daemons can briefly
+    // co-exist during wdio test sessions; this lets both write+rename
+    // independently without colliding.
+    let tmp = dirs
+        .handshake_file
+        .with_extension(format!("json.tmp.{pid}"));
     std::fs::write(&tmp, &bytes).context("writing handshake tmp")?;
     std::fs::rename(&tmp, &dirs.handshake_file).context("renaming handshake")?;
     Ok(())
@@ -261,6 +285,8 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // unconditionally to every connected client.
     let tab_event_task = spawn_tab_forwarder(hub.tab_events.subscribe(), out_tx.clone());
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
+    let state_event_task =
+        spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
 
     // Send initial state snapshots.
     push_initial_state(&hub, &out_tx);
@@ -272,6 +298,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     event_task.abort();
     tab_event_task.abort();
     preset_event_task.abort();
+    state_event_task.abort();
     let _ = send_task.await;
     info!("client_session: returning");
 }
@@ -294,6 +321,28 @@ fn spawn_tab_forwarder(
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client tab event stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+fn spawn_state_forwarder(
+    mut rx: broadcast::Receiver<StateEvent>,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(StateEvent::Repos(repos)) => {
+                    let _ = out_tx.send(DaemonMessage::Repos { repos });
+                }
+                Ok(StateEvent::Workspaces(workspaces)) => {
+                    let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "client state event stream lagged");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -466,8 +515,10 @@ async fn dispatch(
         ClientMessage::AddRepo { path, name } => {
             let entry = add_repo(&hub.state, &path, name).await?;
             let repos = hub.state.with_persisted(|s| s.repos.clone());
-            let _ = out_tx.send(DaemonMessage::Repos { repos });
+            let _ = hub.state_events.send(StateEvent::Repos(repos));
             for suggestion in scan_vscode_workspaces(hub, &entry.path) {
+                // VSCode workspace suggestions are per-client (only the
+                // adder gets prompted), so this stays on out_tx.
                 let _ = out_tx.send(DaemonMessage::VscodeWorkspaceSuggestion {
                     repo_id: entry.id.clone(),
                     suggestion,
@@ -477,10 +528,11 @@ async fn dispatch(
         }
         ClientMessage::RemoveRepo { repo_id } => {
             remove_repo(&hub.state, &repo_id)?;
-            let repos = hub.state.with_persisted(|s| s.repos.clone());
-            let _ = out_tx.send(DaemonMessage::Repos { repos });
-            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+            let (repos, workspaces) = hub
+                .state
+                .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+            let _ = hub.state_events.send(StateEvent::Repos(repos));
+            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
         }
         ClientMessage::ListWorkspaces => {
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
@@ -500,12 +552,12 @@ async fn dispatch(
                 linked_vscode_workspace,
             )?;
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
         }
         ClientMessage::RemoveWorkspace { workspace_id } => {
             remove_workspace(&hub.state, &workspace_id)?;
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
         }
         ClientMessage::PreviewWorkspaceSpawn {
             workspace_id,
@@ -670,7 +722,7 @@ async fn dispatch(
         ClientMessage::SetRepoWorktreeDefault { repo_id, value } => {
             set_repo_worktree_default(&hub.state, &repo_id, value)?;
             let repos = hub.state.with_persisted(|s| s.repos.clone());
-            let _ = out_tx.send(DaemonMessage::Repos { repos });
+            let _ = hub.state_events.send(StateEvent::Repos(repos));
         }
         ClientMessage::SetWorkspaceWorktreeDefault {
             workspace_id,
@@ -678,7 +730,7 @@ async fn dispatch(
         } => {
             set_workspace_worktree_default(&hub.state, &workspace_id, value)?;
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-            let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
         }
         ClientMessage::ListTabs => {
             let tabs = hub.state.with_persisted(|s| s.tabs.clone());
@@ -1781,7 +1833,7 @@ async fn accept_vscode_suggestion(
     hub: &Hub,
     suggestion: VscodeWorkspaceSuggestion,
     _watch: bool,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    _out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<()> {
     let mut member_repo_ids = Vec::with_capacity(suggestion.folders.len());
     for folder in &suggestion.folders {
@@ -1800,10 +1852,11 @@ async fn accept_vscode_suggestion(
         member_repo_ids,
         Some(suggestion.source_path.clone()),
     )?;
-    let repos = hub.state.with_persisted(|s| s.repos.clone());
-    let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
-    let _ = out_tx.send(DaemonMessage::Repos { repos });
-    let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+    let (repos, workspaces) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let _ = hub.state_events.send(StateEvent::Repos(repos));
+    let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
     Ok(())
 }
 
