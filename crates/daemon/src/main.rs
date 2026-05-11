@@ -14,6 +14,7 @@ mod server;
 mod session;
 mod state;
 mod sync;
+mod tabs;
 mod vscode;
 mod workspace;
 

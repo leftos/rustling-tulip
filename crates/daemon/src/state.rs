@@ -5,7 +5,7 @@
 
 use crate::paths::Dirs;
 use anyhow::Context as _;
-use protocol::{RepoEntry, WorkspaceEntry};
+use protocol::{RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -13,6 +13,10 @@ use std::sync::Mutex;
 pub struct PersistedState {
     pub repos: Vec<RepoEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
+    /// Tab layouts shared by all connected clients. Vec order is display
+    /// order. Older state.json files without this field deserialize cleanly.
+    #[serde(default)]
+    pub tabs: Vec<TabEntry>,
 }
 
 #[derive(Debug)]

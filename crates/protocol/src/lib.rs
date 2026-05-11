@@ -233,6 +233,84 @@ pub enum AttentionReason {
 }
 
 // ---------------------------------------------------------------------------
+// Tabs and grids
+// ---------------------------------------------------------------------------
+
+/// Orientation of a split's two children.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitDirection {
+    /// Children are laid out left/right; the divider is a vertical line.
+    Horizontal,
+    /// Children are laid out top/bottom; the divider is a horizontal line.
+    Vertical,
+}
+
+/// Recursive tree describing a tab's layout: leaf panes (each referencing at
+/// most one session) joined by binary splits with adjustable ratios.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GridNode {
+    Pane {
+        /// Daemon-allocated UUID; stable across sibling-close tree rotations.
+        pane_id: String,
+        /// `None` when the pane has no session attached (empty placeholder).
+        /// Becomes `None` when the referenced session is removed.
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+    Split {
+        direction: SplitDirection,
+        /// Size of `first` as a fraction of the split (clamped 0.05..=0.95).
+        ratio: f32,
+        first: Box<GridNode>,
+        second: Box<GridNode>,
+    },
+}
+
+/// Which side of a [`SplitPane`](ClientMessage::SplitPane) the newly created
+/// pane occupies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SplitPlace {
+    /// New pane is the "first" child (left or top).
+    First,
+    /// New pane is the "second" child (right or bottom).
+    Second,
+}
+
+/// Edge of a destination pane onto which a source pane is dropped.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneDropEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Replace the destination pane's `session_id` with the source pane's
+    /// `session_id`; topology is unchanged and the source pane is removed.
+    Replace,
+}
+
+/// Layout used when merging multiple tabs into a single new tab.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeLayout {
+    /// Tile panes left-to-right (each pair joined by a horizontal split).
+    TileHorizontal,
+    /// Tile panes top-to-bottom (each pair joined by a vertical split).
+    TileVertical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TabEntry {
+    pub id: String,
+    pub name: String,
+    pub grid: GridNode,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
 
@@ -358,6 +436,84 @@ pub enum ClientMessage {
         workspace_id: String,
         value: bool,
     },
+    /// Request the full tab list. Also delivered automatically after
+    /// [`DaemonMessage::Welcome`].
+    ListTabs,
+    /// Create a new tab containing a single pane, optionally seeded with a
+    /// session. Daemon replies with [`DaemonMessage::TabUpdated`].
+    CreateTab {
+        name: Option<String>,
+        initial_session_id: Option<String>,
+    },
+    /// Close a tab. The underlying sessions are NOT stopped — only the tab's
+    /// layout entry is removed.
+    CloseTab {
+        tab_id: String,
+    },
+    RenameTab {
+        tab_id: String,
+        name: String,
+    },
+    /// Full reorder of the tab list. The set of ids must match the current
+    /// set; mismatches are rejected.
+    ReorderTabs {
+        ordered_ids: Vec<String>,
+    },
+    /// Split an existing pane in two along `direction`. The newly allocated
+    /// pane occupies `place`; the existing pane occupies the other side.
+    SplitPane {
+        tab_id: String,
+        pane_id: String,
+        direction: SplitDirection,
+        place: SplitPlace,
+        new_session_id: Option<String>,
+    },
+    /// Close a pane. If it was the only pane in the tab, the tab is removed.
+    /// Otherwise the parent split collapses to the remaining sibling.
+    ClosePane {
+        tab_id: String,
+        pane_id: String,
+    },
+    /// Update a single split's ratio. `split_path` is a sequence of 0/1
+    /// indices (0 = first child, 1 = second child) descending from the tab
+    /// root. The value is clamped to 0.05..=0.95 by the daemon.
+    SetPaneRatio {
+        tab_id: String,
+        split_path: Vec<u8>,
+        ratio: f32,
+    },
+    /// Move a pane to a new location (same tab if `src_tab_id == dst_tab_id`,
+    /// otherwise cross-tab). The source pane is removed from its current
+    /// position (with the parent split collapsing if needed) and inserted at
+    /// `edge` of the destination pane.
+    MovePane {
+        src_tab_id: String,
+        src_pane_id: String,
+        dst_tab_id: String,
+        dst_pane_id: String,
+        edge: PaneDropEdge,
+    },
+    /// Set the session a pane references without changing topology. `None`
+    /// turns the pane into an empty placeholder.
+    ReplacePaneSession {
+        tab_id: String,
+        pane_id: String,
+        session_id: Option<String>,
+    },
+    /// Combine multiple existing tabs into a single new tab, removing the
+    /// originals. Panes are collected in the order `tab_ids` is given.
+    MergeTabs {
+        tab_ids: Vec<String>,
+        name: Option<String>,
+        layout: MergeLayout,
+    },
+    /// Move a set of panes out of `source_tab_id` into a new tab. Panes are
+    /// appended to the new tab using horizontal tiling.
+    ExtractToNewTab {
+        source_tab_id: String,
+        pane_ids: Vec<String>,
+        name: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +598,24 @@ pub enum DaemonMessage {
         data_b64: String,
         truncated: bool,
     },
+    /// Initial tab snapshot sent on connect.
+    Tabs {
+        tabs: Vec<TabEntry>,
+    },
+    /// Broadcast on any structural change to a single tab (create, rename,
+    /// split, close pane, ratio adjustment, move, session-prune).
+    TabUpdated {
+        tab: TabEntry,
+    },
+    /// Broadcast when a tab is closed (explicit close or last pane removed).
+    TabRemoved {
+        tab_id: String,
+    },
+    /// Cheap broadcast for drag-reorder; avoids resending full `TabEntry`
+    /// payloads.
+    TabsReordered {
+        ordered_ids: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -506,4 +680,105 @@ pub struct GitRemoteUrl {
     pub web_url: Option<String>,
     /// Forge identifier: `github`, `gitlab`, `bitbucket`, or `unknown`.
     pub forge: String,
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "tests assert preconditions with expect/panic; failure messages aid debugging"
+)]
+mod tests {
+    use super::*;
+
+    fn sample_tab() -> TabEntry {
+        TabEntry {
+            id: "tab-1".to_string(),
+            name: "Main".to_string(),
+            grid: GridNode::Split {
+                direction: SplitDirection::Horizontal,
+                ratio: 0.6,
+                first: Box::new(GridNode::Pane {
+                    pane_id: "p1".to_string(),
+                    session_id: Some("s1".to_string()),
+                }),
+                second: Box::new(GridNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(GridNode::Pane {
+                        pane_id: "p2".to_string(),
+                        session_id: None,
+                    }),
+                    second: Box::new(GridNode::Pane {
+                        pane_id: "p3".to_string(),
+                        session_id: Some("s3".to_string()),
+                    }),
+                }),
+            },
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        }
+    }
+
+    #[test]
+    fn tab_entry_round_trip() {
+        let original = sample_tab();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: TabEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn grid_node_pane_omits_session_id_default() {
+        let json = r#"{"kind":"pane","pane_id":"p1"}"#;
+        let node: GridNode = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            node,
+            GridNode::Pane {
+                pane_id: "p1".to_string(),
+                session_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn client_message_tab_variants_tagged() {
+        let msg = ClientMessage::SplitPane {
+            tab_id: "t1".to_string(),
+            pane_id: "p1".to_string(),
+            direction: SplitDirection::Horizontal,
+            place: SplitPlace::Second,
+            new_session_id: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"split_pane""#));
+        assert!(json.contains(r#""direction":"horizontal""#));
+        assert!(json.contains(r#""place":"second""#));
+    }
+
+    #[test]
+    fn daemon_message_tab_variants_tagged() {
+        let msg = DaemonMessage::TabUpdated { tab: sample_tab() };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"tab_updated""#));
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        let DaemonMessage::TabUpdated { tab } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(tab, sample_tab());
+    }
+
+    #[test]
+    fn pane_drop_edge_serialization() {
+        let cases = [
+            (PaneDropEdge::Left, "left"),
+            (PaneDropEdge::Right, "right"),
+            (PaneDropEdge::Top, "top"),
+            (PaneDropEdge::Bottom, "bottom"),
+            (PaneDropEdge::Replace, "replace"),
+        ];
+        for (variant, expected) in cases {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, format!("\"{expected}\""));
+        }
+    }
 }

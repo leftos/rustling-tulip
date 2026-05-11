@@ -12,6 +12,7 @@ use crate::session::{
     SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
 };
 use crate::state::AppState;
+use crate::tabs;
 use crate::{git, git_inspect, headless, osc_title, pty_state, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
@@ -24,8 +25,8 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     AttentionReason, ClientMessage, DaemonHandshake, DaemonMessage, MemberDiff, PROTOCOL_VERSION,
-    PermissionMode, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionStatus,
-    SpawnRequest, SpawnTarget, VscodeWorkspaceSuggestion,
+    PaneDropEdge, PermissionMode, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionStatus, SpawnRequest, SpawnTarget, TabEntry, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -34,6 +35,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -48,7 +50,21 @@ pub struct Hub {
     /// graceful-shutdown future awaits this and returns once flipped, after
     /// which the daemon process exits cleanly.
     pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Broadcast for tab-layout changes. Mirrors the [`SessionRegistry`]
+    /// event channel: every connected client subscribes and forwards events
+    /// to its WebSocket sender. Buffered to keep up with bursty drag-reorder
+    /// or split-pane sequences.
+    pub tab_events: broadcast::Sender<TabEvent>,
 }
+
+#[derive(Debug, Clone)]
+pub enum TabEvent {
+    Updated(TabEntry),
+    Removed(String),
+    Reordered(Vec<String>),
+}
+
+const TAB_EVENT_CAPACITY: usize = 256;
 
 pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
@@ -77,6 +93,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
     });
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
 
     let hub = Hub {
         state,
@@ -85,6 +102,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
         attention_tx,
         dirs: dirs.clone(),
         shutdown_tx,
+        tab_events,
     };
 
     let app = Router::new()
@@ -206,10 +224,34 @@ async fn client_session(hub: Hub, socket: WebSocket) {
                 Ok(SessionEvent::Attention { session_id, reason }) => {
                     let _ = out_for_events.send(DaemonMessage::Attention { session_id, reason });
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client event stream lagged");
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // Subscribe to tab-layout events; forwarded unconditionally (all clients
+    // see structural changes).
+    let mut tab_events_rx = hub.tab_events.subscribe();
+    let out_for_tabs = out_tx.clone();
+    let tab_event_task = tokio::spawn(async move {
+        loop {
+            match tab_events_rx.recv().await {
+                Ok(TabEvent::Updated(tab)) => {
+                    let _ = out_for_tabs.send(DaemonMessage::TabUpdated { tab });
+                }
+                Ok(TabEvent::Removed(tab_id)) => {
+                    let _ = out_for_tabs.send(DaemonMessage::TabRemoved { tab_id });
+                }
+                Ok(TabEvent::Reordered(ids)) => {
+                    let _ = out_for_tabs.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "client tab event stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -222,6 +264,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     info!("client_session: recv_loop returned; tearing down");
     drop(out_tx);
     event_task.abort();
+    tab_event_task.abort();
     let _ = send_task.await;
     info!("client_session: returning");
 }
@@ -314,14 +357,15 @@ async fn handshake(
 }
 
 fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces) = hub
+    let (repos, workspaces, tabs) = hub
         .state
-        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone(), s.tabs.clone()));
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
     let _ = out_tx.send(DaemonMessage::Sessions {
         sessions: hub.sessions.snapshots(),
     });
+    let _ = out_tx.send(DaemonMessage::Tabs { tabs });
 }
 
 #[expect(
@@ -560,8 +604,211 @@ async fn dispatch(
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
             let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
         }
+        ClientMessage::ListTabs => {
+            let tabs = hub.state.with_persisted(|s| s.tabs.clone());
+            let _ = out_tx.send(DaemonMessage::Tabs { tabs });
+        }
+        ClientMessage::CreateTab {
+            name,
+            initial_session_id,
+        } => {
+            let new_tab = tabs::make_tab(name, initial_session_id);
+            hub.state.mutate(|s| s.tabs.push(new_tab.clone()))?;
+            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+        }
+        ClientMessage::CloseTab { tab_id } => {
+            let removed = hub.state.mutate(|s| {
+                let prev = s.tabs.len();
+                s.tabs.retain(|t| t.id != tab_id);
+                prev != s.tabs.len()
+            })?;
+            if removed {
+                let _ = hub.tab_events.send(TabEvent::Removed(tab_id));
+            }
+        }
+        ClientMessage::RenameTab { tab_id, name } => {
+            let updated = hub.state.mutate(|s| {
+                tabs::find_tab_mut(&mut s.tabs, &tab_id).map(|t| {
+                    t.name = name;
+                    t.clone()
+                })
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+        }
+        ClientMessage::ReorderTabs { ordered_ids } => {
+            hub.state
+                .mutate(|s| tabs::reorder_tabs(&mut s.tabs, &ordered_ids))??;
+            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+        }
+        ClientMessage::SplitPane {
+            tab_id,
+            pane_id,
+            direction,
+            place,
+            new_session_id,
+        } => {
+            let updated = hub.state.mutate(|s| {
+                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+                tabs::split_pane(&mut tab.grid, &pane_id, direction, place, new_session_id)?;
+                Ok::<_, anyhow::Error>(tab.clone())
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+        }
+        ClientMessage::ClosePane { tab_id, pane_id } => {
+            let outcome = hub.state.mutate(|s| {
+                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+                let empty = tabs::close_pane(&mut tab.grid, &pane_id)?;
+                if empty {
+                    s.tabs.retain(|t| t.id != tab_id);
+                    Ok::<_, anyhow::Error>(CloseOutcome::TabRemoved(tab_id.clone()))
+                } else {
+                    Ok(CloseOutcome::TabUpdated(tab.clone()))
+                }
+            })??;
+            match outcome {
+                CloseOutcome::TabRemoved(id) => {
+                    let _ = hub.tab_events.send(TabEvent::Removed(id));
+                }
+                CloseOutcome::TabUpdated(tab) => {
+                    let _ = hub.tab_events.send(TabEvent::Updated(tab));
+                }
+            }
+        }
+        ClientMessage::SetPaneRatio {
+            tab_id,
+            split_path,
+            ratio,
+        } => {
+            let updated = hub.state.mutate(|s| {
+                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+                tabs::set_pane_ratio(&mut tab.grid, &split_path, ratio)?;
+                Ok::<_, anyhow::Error>(tab.clone())
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+        }
+        ClientMessage::ReplacePaneSession {
+            tab_id,
+            pane_id,
+            session_id,
+        } => {
+            let updated = hub.state.mutate(|s| {
+                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+                tabs::replace_pane_session(&mut tab.grid, &pane_id, session_id)?;
+                Ok::<_, anyhow::Error>(tab.clone())
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+        }
+        ClientMessage::MovePane {
+            src_tab_id,
+            src_pane_id,
+            dst_tab_id,
+            dst_pane_id,
+            edge,
+        } => {
+            if src_pane_id == dst_pane_id {
+                // Self-move is a no-op; don't mutate or broadcast.
+            } else {
+                let events = move_pane(
+                    hub,
+                    &src_tab_id,
+                    &src_pane_id,
+                    &dst_tab_id,
+                    &dst_pane_id,
+                    edge,
+                )?;
+                for event in events {
+                    let _ = hub.tab_events.send(event);
+                }
+            }
+        }
+        ClientMessage::MergeTabs {
+            tab_ids,
+            name,
+            layout,
+        } => {
+            let new_tab = hub
+                .state
+                .mutate(|s| tabs::merge_tabs(&mut s.tabs, &tab_ids, name, layout))??;
+            for id in &tab_ids {
+                let _ = hub.tab_events.send(TabEvent::Removed(id.clone()));
+            }
+            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+        }
+        ClientMessage::ExtractToNewTab {
+            source_tab_id,
+            pane_ids,
+            name,
+        } => {
+            let (new_tab, source_empty, source_survivor) = hub.state.mutate(|s| {
+                let (new_tab, source_empty) =
+                    tabs::extract_to_new_tab(&mut s.tabs, &source_tab_id, &pane_ids, name)?;
+                let source_survivor = if source_empty {
+                    None
+                } else {
+                    s.tabs.iter().find(|t| t.id == source_tab_id).cloned()
+                };
+                Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
+            })??;
+            if source_empty {
+                let _ = hub.tab_events.send(TabEvent::Removed(source_tab_id));
+            } else if let Some(survivor) = source_survivor {
+                let _ = hub.tab_events.send(TabEvent::Updated(survivor));
+            }
+            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+        }
     }
     Ok(())
+}
+
+enum CloseOutcome {
+    TabRemoved(String),
+    TabUpdated(TabEntry),
+}
+
+/// Move a pane between (possibly same) tabs and produce the broadcast events
+/// to fire afterwards. Performs both extract + insert under a single
+/// `state.mutate` so the persisted snapshot is never half-applied.
+fn move_pane(
+    hub: &Hub,
+    src_tab_id: &str,
+    src_pane_id: &str,
+    dst_tab_id: &str,
+    dst_pane_id: &str,
+    edge: PaneDropEdge,
+) -> anyhow::Result<Vec<TabEvent>> {
+    hub.state.mutate(|s| {
+        if src_tab_id == dst_tab_id {
+            let tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+            let (extracted, source_empty) = tabs::extract_pane(&mut tab.grid, src_pane_id)?;
+            if source_empty {
+                return Err(anyhow!("cannot move the only pane within the same tab"));
+            }
+            tabs::insert_adjacent(&mut tab.grid, dst_pane_id, edge, extracted)?;
+            Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
+        } else {
+            let (extracted_node, source_empty) = {
+                let src_tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+                tabs::extract_pane(&mut src_tab.grid, src_pane_id)?
+            };
+            let mut events = Vec::new();
+            if source_empty {
+                s.tabs.retain(|t| t.id != src_tab_id);
+                events.push(TabEvent::Removed(src_tab_id.to_string()));
+            } else {
+                let src_snapshot = s
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == src_tab_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("source tab vanished mid-mutation: {src_tab_id}"))?;
+                events.push(TabEvent::Updated(src_snapshot));
+            }
+            let dst_tab = tabs::find_tab_mut(&mut s.tabs, dst_tab_id)?;
+            tabs::insert_adjacent(&mut dst_tab.grid, dst_pane_id, edge, extracted_node)?;
+            events.push(TabEvent::Updated(dst_tab.clone()));
+            Ok(events)
+        }
+    })?
 }
 
 /// Stop every active session (kill PTY / headless child, drop orphan sidecar)
@@ -616,9 +863,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
             branch_name,
             base_branch,
             use_worktree,
-        } => {
-            spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?
-        }
+        } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?,
     };
 
     let session_id = new_id();
@@ -895,9 +1140,14 @@ async fn spawn_single(
     let working_path = if use_worktree {
         let worktree_path = git::default_worktree_path(&repo_path, branch_name);
         if !worktree_path.exists() {
-            git::worktree_add(&repo_path, &worktree_path, branch_name, Some(&base_for_create))
-                .await
-                .context("creating worktree")?;
+            git::worktree_add(
+                &repo_path,
+                &worktree_path,
+                branch_name,
+                Some(&base_for_create),
+            )
+            .await
+            .context("creating worktree")?;
         }
         worktree_path
     } else {
@@ -914,13 +1164,7 @@ async fn spawn_single(
         worktree_path: working_path.to_string_lossy().into_owned(),
     };
     let label = format!("{}: {branch_name}", repo.name);
-    Ok((
-        SessionKind::Single,
-        vec![member],
-        working_path,
-        label,
-        None,
-    ))
+    Ok((SessionKind::Single, vec![member], working_path, label, None))
 }
 
 async fn spawn_workspace(
@@ -1015,7 +1259,32 @@ async fn stop_session(
     }
     hub.sessions.remove(session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
+    prune_session_from_tabs(hub, session_id);
     Ok(())
+}
+
+/// Drop dangling pane references to `session_id` from every tab. Each
+/// affected tab is broadcast as a fresh `TabUpdated` so all connected clients
+/// switch the pane to the empty-placeholder state.
+fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
+    let modified = match hub.state.mutate(|s| {
+        let mut out = Vec::new();
+        for tab in &mut s.tabs {
+            if tabs::prune_session(&mut tab.grid, session_id) {
+                out.push(tab.clone());
+            }
+        }
+        out
+    }) {
+        Ok(list) => list,
+        Err(err) => {
+            warn!(?err, "prune_session_from_tabs: state.mutate failed");
+            return;
+        }
+    };
+    for tab in modified {
+        let _ = hub.tab_events.send(TabEvent::Updated(tab));
+    }
 }
 
 async fn compute_session_diff(hub: &Hub, session_id: &str) -> anyhow::Result<Vec<MemberDiff>> {

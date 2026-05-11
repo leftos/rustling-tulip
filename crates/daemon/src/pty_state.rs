@@ -125,15 +125,11 @@ fn matches_prompt(tail: &str) -> bool {
     let has_numbered = tail.contains("1.") && tail.contains("2.");
     let has_chevron = tail.contains("❯") || tail.contains(">>>");
     let has_do_you_want = tail.contains("Do you want to");
-    let has_choose_option = tail.contains("Choose an option")
-        || tail.contains("Press 1")
-        || tail.contains("(y/n)");
+    let has_choose_option =
+        tail.contains("Choose an option") || tail.contains("Press 1") || tail.contains("(y/n)");
     let has_ask_user = tail.contains("│") && tail.contains("AskUserQuestion");
 
-    has_do_you_want
-        || has_choose_option
-        || has_ask_user
-        || (has_numbered && has_chevron)
+    has_do_you_want || has_choose_option || has_ask_user || (has_numbered && has_chevron)
 }
 
 fn strip_ansi(input: &[u8]) -> String {

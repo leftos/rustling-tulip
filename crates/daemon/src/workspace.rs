@@ -100,10 +100,7 @@ pub fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
 /// adds a worktree (idempotent if the dir already exists). For in-place
 /// members, this errors on a dirty working tree and then checks out (or
 /// creates) the branch in the repo's primary directory.
-pub async fn ensure_branches(
-    resolved: &[ResolvedMember],
-    branch_name: &str,
-) -> anyhow::Result<()> {
+pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> anyhow::Result<()> {
     for member in resolved {
         if member.use_worktree {
             if member.working_path.exists() {
@@ -125,18 +122,14 @@ pub async fn ensure_branches(
             })?;
         } else {
             let repo_path = PathBuf::from(&member.repo.path);
-            git::checkout_in_place(
-                &repo_path,
-                branch_name,
-                member.effective_base.as_deref(),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "checking out {branch_name} in {} (in-place)",
-                    member.repo.name
-                )
-            })?;
+            git::checkout_in_place(&repo_path, branch_name, member.effective_base.as_deref())
+                .await
+                .with_context(|| {
+                    format!(
+                        "checking out {branch_name} in {} (in-place)",
+                        member.repo.name
+                    )
+                })?;
         }
     }
     Ok(())

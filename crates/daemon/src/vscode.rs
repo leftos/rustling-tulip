@@ -52,9 +52,10 @@ pub fn parse_workspace_file(
     let base_dir = path
         .parent()
         .ok_or_else(|| anyhow!("workspace file has no parent dir"))?;
-    let stem = path
-        .file_stem()
-        .map_or_else(|| "workspace".to_string(), |s| s.to_string_lossy().into_owned());
+    let stem = path.file_stem().map_or_else(
+        || "workspace".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
 
     let mut folders = Vec::with_capacity(parsed.folders.len());
     for entry in parsed.folders {

@@ -33,9 +33,10 @@ pub async fn add_repo(
     }
 
     let name = explicit_name.unwrap_or_else(|| {
-        canonical
-            .file_name()
-            .map_or_else(|| canonical_str.clone(), |n| n.to_string_lossy().into_owned())
+        canonical.file_name().map_or_else(
+            || canonical_str.clone(),
+            |n| n.to_string_lossy().into_owned(),
+        )
     });
     let default_branch = git::default_branch(&canonical).await;
     let entry = RepoEntry {
