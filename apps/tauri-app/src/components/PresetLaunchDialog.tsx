@@ -668,10 +668,22 @@ function defaultFolderPath(
 }
 
 function joinPath(base: string, rel: string): string {
-  if (base.endsWith("/") || base.endsWith("\\")) return base + rel;
-  // Match the base's separator style if obvious; fall back to "/".
-  if (base.includes("\\") && !base.includes("/")) return `${base}\\${rel.replace(/\//g, "\\")}`;
-  return `${base}/${rel}`;
+  // The repo path comes from a Tauri file picker (native separators), but
+  // the preset's `relative_path` is whatever the preset author wrote — so
+  // the two halves often disagree on slash direction. Detect Windows from
+  // the base shape (drive letter `X:` or UNC `\\server`), normalise the
+  // relative half to match, and strip stray inner separators so we don't
+  // emit `C:\foo\\bar` or `C:\foo/bar` on either platform.
+  const isWindows = /^[A-Za-z]:/.test(base) || base.startsWith("\\\\");
+  const sep = isWindows ? "\\" : "/";
+  const trimmedBase = base.replace(/[/\\]+$/, "");
+  const trimmedRel = rel.replace(/^[/\\]+/, "");
+  const normalisedRel = isWindows
+    ? trimmedRel.replace(/\//g, "\\")
+    : trimmedRel.replace(/\\/g, "/");
+  return trimmedRel === ""
+    ? trimmedBase
+    : `${trimmedBase}${sep}${normalisedRel}`;
 }
 
 function initialVariableValues(

@@ -7,6 +7,7 @@ import {
   type PaneDropEdge,
   type SessionSnapshot,
   type SplitDirection,
+  type SplitPlace,
   type TabEntry,
 } from "../types";
 import { collectPanes } from "../utils/grid";
@@ -230,7 +231,7 @@ function PaneChrome(props: PaneChromeProps) {
   }, [props, node.pane_id]);
 
   const sendSplit = useCallback(
-    (direction: SplitDirection) => {
+    (direction: SplitDirection, place: SplitPlace) => {
       // Arm the focus-new-pane signal before sending. The daemon's
       // tab_updated will arrive with one more pane than the snapshot;
       // App diffs and focuses the new one.
@@ -240,7 +241,7 @@ function PaneChrome(props: PaneChromeProps) {
         tab_id: tabId,
         pane_id: node.pane_id,
         direction,
-        place: "second",
+        place,
         new_session_id: null,
       });
     },
@@ -349,18 +350,22 @@ function PaneChrome(props: PaneChromeProps) {
         <button
           type="button"
           className="grid-pane-btn"
-          title="Split right"
-          aria-label="Split pane horizontally"
-          onClick={() => sendSplit("horizontal")}
+          title="Split right (Shift+click: split left)"
+          aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+          onClick={(e) =>
+            sendSplit("horizontal", e.shiftKey ? "first" : "second")
+          }
         >
           ▶|
         </button>
         <button
           type="button"
           className="grid-pane-btn"
-          title="Split down"
-          aria-label="Split pane vertically"
-          onClick={() => sendSplit("vertical")}
+          title="Split down (Shift+click: split up)"
+          aria-label="Split pane vertically; hold Shift to place the new pane on top"
+          onClick={(e) =>
+            sendSplit("vertical", e.shiftKey ? "first" : "second")
+          }
         >
           ▼=
         </button>
