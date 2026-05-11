@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { TabEntry } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
-import { tabHasBoundSessions } from "../utils/grid";
+import { firstLeafPane, tabHasBoundSessions, tabPaneCount } from "../utils/grid";
 
 interface Props {
   tabs: TabEntry[];
@@ -77,10 +77,17 @@ export default function TabBar({
     (tabId: string, e?: React.MouseEvent) => {
       e?.stopPropagation();
       const tab = tabs.find((t) => t.id === tabId);
-      const requiresConfirm = tab !== undefined && tabHasBoundSessions(tab);
+      // Confirm when closing would destroy something non-trivial:
+      //   - bound sessions (user might lose the visible session pane and
+      //     not realise the session itself is still alive in Detached),
+      //   - or 2+ panes of grid layout (the layout is persisted per-tab
+      //     and re-creating an identical split tree by hand is tedious).
+      const requiresConfirm =
+        tab !== undefined &&
+        (tabHasBoundSessions(tab) || tabPaneCount(tab) >= 2);
       if (requiresConfirm && confirmingCloseId !== tabId) {
-        // First click on a tab that holds bound sessions — arm the confirm.
-        // Resets any other tab's arm to enforce one-at-a-time.
+        // First click on a non-trivial tab — arm the confirm. Resets any
+        // other tab's arm to enforce one-at-a-time.
         setConfirmingCloseId(tabId);
         return;
       }
@@ -223,6 +230,39 @@ export default function TabBar({
   const onDrop = useCallback(
     (tabId: string, e: React.DragEvent) => {
       e.preventDefault();
+      // Pane drop on a tab pill: route through `move_pane` with the
+      // target tab's first leaf pane as the destination + edge=right
+      // so the source becomes a new sibling pane on the right side.
+      // Pre-iter-45 the pill activated the target tab on dragenter but
+      // silently dropped the gesture — users had to drag through the
+      // pill to a pane in the activated tab, which was awkward when
+      // the target tab was crowded or had no visible drop edge.
+      const panePayload = e.dataTransfer.getData("text/x-rt-pane");
+      if (panePayload) {
+        setDragState(null);
+        const sep = panePayload.indexOf(":");
+        if (sep === -1) return;
+        const srcTab = panePayload.slice(0, sep);
+        const srcPane = panePayload.slice(sep + 1);
+        const targetTab = tabs.find((t) => t.id === tabId);
+        if (!targetTab) return;
+        const dst = firstLeafPane(targetTab);
+        // Diff tabs (and any future non-grid kinds) have no leaf panes.
+        if (!dst) return;
+        // Pane-into-self-target no-op (the same pane is already the
+        // destination's first leaf — moving it to its own right edge
+        // would just collapse-and-re-create the parent split).
+        if (srcTab === tabId && srcPane === dst.pane_id) return;
+        client.send({
+          type: "move_pane",
+          src_tab_id: srcTab,
+          src_pane_id: srcPane,
+          dst_tab_id: tabId,
+          dst_pane_id: dst.pane_id,
+          edge: "right",
+        });
+        return;
+      }
       const src = e.dataTransfer.getData("text/x-rt-tab");
       const local = dragState;
       setDragState(null);

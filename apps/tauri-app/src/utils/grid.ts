@@ -36,6 +36,18 @@ export function tabHasBoundSessions(tab: TabEntry): boolean {
 }
 
 /**
+ * Pane count for the tab. Used by the close-confirm gate: a tab with 2+
+ * panes carries grid layout that disappears on close, so users get the
+ * same two-state confirm pattern even when none of the panes are bound
+ * to a live session.
+ */
+export function tabPaneCount(tab: TabEntry): number {
+  const grid = tabGrid(tab);
+  if (!grid) return 0;
+  return collectPanes(grid).length;
+}
+
+/**
  * Find the first tab whose grid contains a pane bound to `sessionId`. Returns
  * the tab id and the pane id, or `null` if no tab references the session.
  * Used to route a sidebar click back to an already-open tab instead of
