@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 fn default_true() -> bool {
     true
@@ -220,6 +220,12 @@ pub struct SpawnRequest {
     /// override values like `ANTHROPIC_API_KEY`.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Optional scripted PTY input fed to the child after the PTY comes up.
+    /// When set on `SessionMode::Interactive`, the daemon omits the `-p
+    /// <prompt>` CLI arg (the injector is expected to deliver the prompt
+    /// instead). Ignored entirely for headless and plain-shell sessions.
+    #[serde(default)]
+    pub prompt_injector: Option<PromptInjector>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,6 +318,231 @@ pub struct TabEntry {
     pub name: String,
     pub grid: GridNode,
     pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Presets and prompt injection
+// ---------------------------------------------------------------------------
+
+/// One step in a [`PromptInjector`] script. Steps run in declaration order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InjectorStep {
+    /// Wait `ms` milliseconds before the next step.
+    Delay { ms: u32 },
+    /// Write raw bytes to the PTY master. Base64 to keep the JSON wire safe
+    /// for control sequences (e.g. Shift+Tab is `\x1b[Z` → `"G1ta"`).
+    Write { data_b64: String },
+    /// Write UTF-8 text to the PTY master. When `newline` is true, a single
+    /// `\r` (carriage return) is appended — that's what TUIs expect for the
+    /// Enter key.
+    Text { content: String, newline: bool },
+}
+
+/// Scripted PTY input fed to a freshly spawned interactive session after the
+/// PTY comes up. Used by the preset launcher to enter Claude's plan mode and
+/// submit a prompt without relying on the `-p` CLI arg (which submits
+/// immediately and disables plan mode). Standalone outside presets: any
+/// `SpawnRequest` can carry one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptInjector {
+    pub steps: Vec<InjectorStep>,
+}
+
+/// Template form of [`PromptInjector`] used inside a [`PresetEntry`]. The
+/// daemon composes a per-session `PromptInjector` by prefixing a
+/// `Delay { ms: startup_delay_ms }`, then `pre_input`, then a `Text` step
+/// holding the rendered prompt, then `post_input`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InjectorTemplate {
+    /// Time to wait after the PTY spawns before sending any keystrokes.
+    /// Lets the `claude` TUI finish painting its first frame.
+    pub startup_delay_ms: u32,
+    /// Steps sent before the prompt text. Typical use: keystrokes to enter
+    /// plan mode (Shift+Tab × 4 for Claude).
+    pub pre_input: Vec<InjectorStep>,
+    /// Steps sent after the prompt text. Typical use: a small delay then
+    /// `{ kind: "text", content: "", newline: true }` to submit.
+    pub post_input: Vec<InjectorStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresetTarget {
+    Repo { repo_id: String },
+    Workspace { workspace_id: String },
+}
+
+/// Where the launcher draws its list of prompts from for a single run.
+/// Declared on the preset to constrain what the launch dialog offers, and
+/// echoed back as [`LaunchPresetSource`] with concrete values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresetPromptSource {
+    /// User picks a `.txt`/`.md` file at launch.
+    File,
+    /// Scan a repo-relative directory; one prompt per `.md` file found.
+    /// Prompts are file references (e.g. `@docs/plans/open-issues/foo.md`)
+    /// so the templated message can ask Claude to read them.
+    Folder { relative_path: String },
+    /// User types prompts directly into a textarea. Same bullet/paragraph
+    /// parsing as `File`.
+    Inline,
+}
+
+/// Concrete prompt-source picked at launch time. Mirrors
+/// [`PresetPromptSource`] but with the chosen paths/text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchPresetSource {
+    File { path: String },
+    Folder { path: String },
+    Inline { prompts: Vec<String> },
+}
+
+/// Where the variable's value comes from. Pure data shape — the daemon
+/// resolves these at launch time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PresetVariableKind {
+    /// Free-form text. Source: launch dialog (when `prompt_at_launch` is
+    /// true) or `default` (otherwise).
+    Text,
+    /// File path picker in the launch dialog; the value is the chosen path.
+    FilePath {
+        #[serde(default)]
+        extensions: Vec<String>,
+    },
+    /// Folder path picker in the launch dialog.
+    FolderPath,
+    /// Read the named environment variable from the daemon's process env.
+    /// Empty if the env var is missing.
+    EnvVar { name: String },
+    /// A fixed path string with `${ENV_VAR}` / `%ENV_VAR%` env expansion and
+    /// `{repo_root}` substitution applied. Useful for "the log file always
+    /// lives at this OS-conventional spot" cases.
+    LiteralPath { path: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PresetVariable {
+    /// Referenced in templates as `{name}`.
+    pub name: String,
+    /// Human label used by the launch dialog when prompting.
+    pub label: String,
+    pub kind: PresetVariableKind,
+    /// When true, the launch dialog asks the user for this value. When
+    /// false, the daemon resolves it silently (typical for `EnvVar` and
+    /// `LiteralPath`).
+    #[serde(default)]
+    pub prompt_at_launch: bool,
+    /// Optional pre-fill / fallback. For `prompt_at_launch = false`
+    /// variables, used as the value when the kind doesn't otherwise resolve.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// When true, an empty/missing value is acceptable and the variable
+    /// renders as empty (and is skipped in `context_footer_lines`).
+    #[serde(default)]
+    pub optional: bool,
+}
+
+/// One line of the optional context footer appended to each rendered prompt.
+/// Emitted as `"<label>: <value>"`; omitted entirely if `variable` resolves
+/// to an empty string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FooterLine {
+    pub label: String,
+    pub variable: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TabLayout {
+    /// One row of N panes, joined by horizontal splits at every level.
+    TileHorizontal,
+    /// One column of N panes.
+    TileVertical,
+    /// Balanced binary tree with a horizontal primary direction — produces a
+    /// 2D layout that's roughly square for `N >= 3`.
+    BalancedHorizontal,
+    /// Balanced binary tree, vertical primary direction.
+    BalancedVertical,
+}
+
+/// How a preset launch arranges its N spawned sessions in the tab bar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TabGroupingConfig {
+    /// No grouping. Sessions land in the sidebar only.
+    None,
+    /// Pack sessions into one or more new tabs. When the per-tab cap is hit,
+    /// a fresh tab is allocated with `" 2"`, `" 3"`, ... suffixed to the
+    /// base name.
+    NewTab {
+        layout: TabLayout,
+        /// Optional cap. `None` = unlimited (one tab for the whole batch).
+        #[serde(default)]
+        max_panes_per_tab: Option<u32>,
+        /// Optional override for the tab's base name. When `None`, daemon
+        /// uses the preset's `name`. Same template placeholders as
+        /// `session_label_template` (no `{prompt}`).
+        #[serde(default)]
+        tab_name_template: Option<String>,
+    },
+}
+
+/// Preset definition. Lives on disk in a repo's `.rustling-tulip/presets.json`
+/// (as a JSON array of these); the daemon parses + ships to clients via the
+/// [`DaemonMessage::Presets`] response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PresetEntry {
+    /// Stable id within a repo (author-chosen). Used by `LaunchPreset` to
+    /// reference this preset.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Repo this preset was loaded from. Set by the daemon at load time;
+    /// users do not write this in the preset file. For workspace listings,
+    /// this is the member repo that contributed the preset.
+    #[serde(default)]
+    pub source_repo_id: String,
+    pub prompt_sources: Vec<PresetPromptSource>,
+    /// Template applied to each raw prompt. `{prompt}` is substituted with
+    /// the raw prompt; other placeholders are also supported (see
+    /// daemon-side renderer).
+    pub prompt_template: String,
+    #[serde(default)]
+    pub context_footer_lines: Vec<FooterLine>,
+    #[serde(default)]
+    pub variables: Vec<PresetVariable>,
+    /// Template for branch names. Placeholders: `{date}`, `{datetime}`,
+    /// `{index}` (1-based), `{slug}`, `{stem}`, `{repo}`, plus custom vars.
+    pub branch_template: String,
+    /// Template for session labels in the sidebar. Defaults to a generic
+    /// `"<preset name> {index}"` when omitted.
+    #[serde(default)]
+    pub session_label_template: Option<String>,
+    /// When `None`, the daemon falls back to the source repo's
+    /// [`RepoEntry::default_use_worktree`] at launch time.
+    #[serde(default)]
+    pub default_use_worktree: Option<bool>,
+    #[serde(default)]
+    pub dangerously_skip_permissions: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
+    pub tab_grouping: TabGroupingConfig,
+    pub injector: InjectorTemplate,
+    /// Pause between successive session spawns. Default 3000ms matches
+    /// yaat's pacing; the value avoids overlapping git worktree adds.
+    #[serde(default = "default_stagger_ms")]
+    pub stagger_ms: u32,
+}
+
+fn default_stagger_ms() -> u32 {
+    3000
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +749,33 @@ pub enum ClientMessage {
         pane_ids: Vec<String>,
         name: Option<String>,
     },
+    /// Request the list of presets available for a repo or workspace. The
+    /// daemon reads `.rustling-tulip/presets.json` from the target repo (or
+    /// from each member repo of a workspace) and replies with
+    /// [`DaemonMessage::Presets`].
+    ListPresets { target: PresetTarget },
+    /// Batch-spawn N sessions from a preset. The daemon expands the prompt
+    /// source into raw prompts, renders templates with `variable_values`,
+    /// and spawns sessions sequentially with `preset.stagger_ms` between
+    /// them. Progress streams back as [`DaemonMessage::PresetLaunchProgress`].
+    LaunchPreset {
+        target: PresetTarget,
+        preset_id: String,
+        source: LaunchPresetSource,
+        /// Name → value pairs for every `prompt_at_launch` variable the
+        /// preset declares (plus any user-supplied overrides for the
+        /// silently-resolved ones).
+        #[serde(default)]
+        variable_values: Vec<(String, String)>,
+        /// Override `preset.default_use_worktree` (and the repo fallback)
+        /// for this launch.
+        #[serde(default)]
+        use_worktree_override: Option<bool>,
+        /// Override `preset.tab_grouping.max_panes_per_tab` for this launch
+        /// only. `None` = keep the preset's value.
+        #[serde(default)]
+        max_panes_per_tab_override: Option<u32>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +877,35 @@ pub enum DaemonMessage {
     /// payloads.
     TabsReordered {
         ordered_ids: Vec<String>,
+    },
+    /// Response to [`ClientMessage::ListPresets`].
+    Presets {
+        target: PresetTarget,
+        entries: Vec<PresetEntry>,
+    },
+    /// Streamed updates while a `LaunchPreset` batch runs. UI uses
+    /// `current_tab_id` to auto-switch into the freshly populated tab.
+    PresetLaunchProgress {
+        preset_id: String,
+        total: u32,
+        launched: u32,
+        /// Most-recent tab the launcher is filling. `None` when the preset's
+        /// `tab_grouping` is `None` (sessions go to sidebar only).
+        #[serde(default)]
+        current_tab_id: Option<String>,
+        /// All tabs created during this launch so far, in creation order.
+        #[serde(default)]
+        tab_ids: Vec<String>,
+    },
+    /// Emitted when a batch fails partway. Sessions and tabs already
+    /// created are kept; the user can decide what to do with them.
+    PresetLaunchFailed {
+        preset_id: String,
+        error: String,
+        #[serde(default)]
+        partial_session_ids: Vec<String>,
+        #[serde(default)]
+        partial_tab_ids: Vec<String>,
     },
     Error {
         message: String,
@@ -784,5 +1071,153 @@ mod tests {
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, format!("\"{expected}\""));
         }
+    }
+
+    fn sample_preset() -> PresetEntry {
+        PresetEntry {
+            id: "bug-triage".to_string(),
+            name: "Bug triage".to_string(),
+            description: Some("Free-form bug prompts".to_string()),
+            source_repo_id: "repo-1".to_string(),
+            prompt_sources: vec![
+                PresetPromptSource::File,
+                PresetPromptSource::Folder {
+                    relative_path: "docs/plans/open-issues".to_string(),
+                },
+                PresetPromptSource::Inline,
+            ],
+            prompt_template: "{prompt}\n\nInvestigate.".to_string(),
+            context_footer_lines: vec![FooterLine {
+                label: "Client log".to_string(),
+                variable: "client_log".to_string(),
+            }],
+            variables: vec![PresetVariable {
+                name: "client_log".to_string(),
+                label: "Client log".to_string(),
+                kind: PresetVariableKind::LiteralPath {
+                    path: "${LOCALAPPDATA}/yaat/yaat-client.log".to_string(),
+                },
+                prompt_at_launch: false,
+                default: None,
+                optional: true,
+            }],
+            branch_template: "bug/{date}/{index}".to_string(),
+            session_label_template: Some("bug-{index}: {slug}".to_string()),
+            default_use_worktree: Some(true),
+            dangerously_skip_permissions: true,
+            model: None,
+            permission_mode: None,
+            tab_grouping: TabGroupingConfig::NewTab {
+                layout: TabLayout::BalancedHorizontal,
+                max_panes_per_tab: Some(6),
+                tab_name_template: Some("bugs {date}".to_string()),
+            },
+            injector: InjectorTemplate {
+                startup_delay_ms: 6000,
+                pre_input: vec![
+                    InjectorStep::Write {
+                        data_b64: "G1ta".to_string(),
+                    },
+                    InjectorStep::Delay { ms: 200 },
+                ],
+                post_input: vec![InjectorStep::Text {
+                    content: String::new(),
+                    newline: true,
+                }],
+            },
+            stagger_ms: 3000,
+        }
+    }
+
+    #[test]
+    fn preset_entry_round_trip() {
+        let original = sample_preset();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: PresetEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn injector_step_variants_tagged() {
+        let steps = vec![
+            InjectorStep::Delay { ms: 200 },
+            InjectorStep::Write {
+                data_b64: "G1ta".to_string(),
+            },
+            InjectorStep::Text {
+                content: "hello".to_string(),
+                newline: true,
+            },
+        ];
+        let json = serde_json::to_string(&steps).expect("serialize");
+        assert!(json.contains(r#""kind":"delay""#));
+        assert!(json.contains(r#""kind":"write""#));
+        assert!(json.contains(r#""kind":"text""#));
+        let decoded: Vec<InjectorStep> = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(steps, decoded);
+    }
+
+    #[test]
+    fn preset_target_tagged() {
+        let repo = PresetTarget::Repo {
+            repo_id: "r1".to_string(),
+        };
+        let json = serde_json::to_string(&repo).expect("serialize");
+        assert!(json.contains(r#""kind":"repo""#));
+        assert!(json.contains(r#""repo_id":"r1""#));
+    }
+
+    #[test]
+    fn preset_entry_omits_optional_fields_when_default() {
+        let minimal = r#"{
+            "id": "smoke",
+            "name": "Smoke",
+            "prompt_sources": [{"kind":"inline"}],
+            "prompt_template": "{prompt}",
+            "branch_template": "tmp/{index}",
+            "tab_grouping": {"kind":"none"},
+            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
+        }"#;
+        let preset: PresetEntry = serde_json::from_str(minimal).expect("parse minimal preset");
+        assert_eq!(preset.id, "smoke");
+        assert_eq!(preset.stagger_ms, 3000);
+        assert!(!preset.dangerously_skip_permissions);
+        assert!(preset.variables.is_empty());
+        assert!(preset.context_footer_lines.is_empty());
+        assert_eq!(preset.default_use_worktree, None);
+    }
+
+    #[test]
+    fn spawn_request_round_trip_with_injector() {
+        let req = SpawnRequest {
+            label: Some("test".to_string()),
+            target: SpawnTarget::Single {
+                repo_id: "r1".to_string(),
+                branch_name: "bug/1".to_string(),
+                base_branch: None,
+                use_worktree: true,
+            },
+            mode: SessionMode::Interactive,
+            initial_prompt: None,
+            dangerously_skip_permissions: true,
+            model: None,
+            permission_mode: None,
+            extra_env: vec![],
+            prompt_injector: Some(PromptInjector {
+                steps: vec![
+                    InjectorStep::Delay { ms: 6000 },
+                    InjectorStep::Write {
+                        data_b64: "G1ta".to_string(),
+                    },
+                    InjectorStep::Text {
+                        content: "investigate".to_string(),
+                        newline: false,
+                    },
+                ],
+            }),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, decoded);
     }
 }

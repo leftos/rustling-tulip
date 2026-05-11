@@ -13,7 +13,7 @@ use crate::session::{
 };
 use crate::state::AppState;
 use crate::tabs;
-use crate::{git, git_inspect, headless, osc_title, pty_state, vscode, workspace as ws};
+use crate::{git, git_inspect, headless, inject, osc_title, pty_state, vscode, workspace as ws};
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
@@ -55,6 +55,10 @@ pub struct Hub {
     /// to its WebSocket sender. Buffered to keep up with bursty drag-reorder
     /// or split-pane sequences.
     pub tab_events: broadcast::Sender<TabEvent>,
+    /// Broadcast for preset-launch progress/failure events. Every connected
+    /// client subscribes and forwards. Lets the launching client auto-switch
+    /// tabs while the batch runs, and lets other clients see new tabs appear.
+    pub preset_events: broadcast::Sender<PresetEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +68,31 @@ pub enum TabEvent {
     Reordered(Vec<String>),
 }
 
+#[derive(Debug, Clone)]
+pub enum PresetEvent {
+    // The current `presets::launch` stub only emits `Failed`. Progress is
+    // wired in alongside the real orchestrator implementation.
+    #[expect(
+        dead_code,
+        reason = "real preset::launch emits this once the orchestrator lands"
+    )]
+    Progress {
+        preset_id: String,
+        total: u32,
+        launched: u32,
+        current_tab_id: Option<String>,
+        tab_ids: Vec<String>,
+    },
+    Failed {
+        preset_id: String,
+        error: String,
+        partial_session_ids: Vec<String>,
+        partial_tab_ids: Vec<String>,
+    },
+}
+
 const TAB_EVENT_CAPACITY: usize = 256;
+const PRESET_EVENT_CAPACITY: usize = 64;
 
 pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
@@ -94,6 +122,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
+    let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
 
     let hub = Hub {
         state,
@@ -103,6 +132,7 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
         dirs: dirs.clone(),
         shutdown_tx,
         tab_events,
+        preset_events,
     };
 
     let app = Router::new()
@@ -232,29 +262,11 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         }
     });
 
-    // Subscribe to tab-layout events; forwarded unconditionally (all clients
-    // see structural changes).
-    let mut tab_events_rx = hub.tab_events.subscribe();
-    let out_for_tabs = out_tx.clone();
-    let tab_event_task = tokio::spawn(async move {
-        loop {
-            match tab_events_rx.recv().await {
-                Ok(TabEvent::Updated(tab)) => {
-                    let _ = out_for_tabs.send(DaemonMessage::TabUpdated { tab });
-                }
-                Ok(TabEvent::Removed(tab_id)) => {
-                    let _ = out_for_tabs.send(DaemonMessage::TabRemoved { tab_id });
-                }
-                Ok(TabEvent::Reordered(ids)) => {
-                    let _ = out_for_tabs.send(DaemonMessage::TabsReordered { ordered_ids: ids });
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "client tab event stream lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
+    // Subscribe to tab-layout and preset-launch events; both forwarded
+    // unconditionally to every connected client.
+    let tab_event_task = spawn_tab_forwarder(hub.tab_events.subscribe(), out_tx.clone());
+    let preset_event_task =
+        spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
 
     // Send initial state snapshots.
     push_initial_state(&hub, &out_tx);
@@ -265,8 +277,78 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     drop(out_tx);
     event_task.abort();
     tab_event_task.abort();
+    preset_event_task.abort();
     let _ = send_task.await;
     info!("client_session: returning");
+}
+
+fn spawn_tab_forwarder(
+    mut rx: broadcast::Receiver<TabEvent>,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(TabEvent::Updated(tab)) => {
+                    let _ = out_tx.send(DaemonMessage::TabUpdated { tab });
+                }
+                Ok(TabEvent::Removed(tab_id)) => {
+                    let _ = out_tx.send(DaemonMessage::TabRemoved { tab_id });
+                }
+                Ok(TabEvent::Reordered(ids)) => {
+                    let _ = out_tx.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "client tab event stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+fn spawn_preset_forwarder(
+    mut rx: broadcast::Receiver<PresetEvent>,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(PresetEvent::Progress {
+                    preset_id,
+                    total,
+                    launched,
+                    current_tab_id,
+                    tab_ids,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::PresetLaunchProgress {
+                        preset_id,
+                        total,
+                        launched,
+                        current_tab_id,
+                        tab_ids,
+                    });
+                }
+                Ok(PresetEvent::Failed {
+                    preset_id,
+                    error,
+                    partial_session_ids,
+                    partial_tab_ids,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::PresetLaunchFailed {
+                        preset_id,
+                        error,
+                        partial_session_ids,
+                        partial_tab_ids,
+                    });
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "client preset event stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Run the WebSocket receive loop until the peer closes or the daemon-wide
@@ -756,6 +838,36 @@ async fn dispatch(
             }
             let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
         }
+        ClientMessage::ListPresets { target } => {
+            let entries = crate::presets::list(hub, &target).await?;
+            let _ = out_tx.send(DaemonMessage::Presets { target, entries });
+        }
+        ClientMessage::LaunchPreset {
+            target,
+            preset_id,
+            source,
+            variable_values,
+            use_worktree_override,
+            max_panes_per_tab_override,
+        } => {
+            // Run the batch in a background task so the dispatcher returns
+            // immediately and the connection stays responsive while sessions
+            // spawn. Progress/failed messages stream back via the daemon-wide
+            // preset_events broadcast that every connected client forwards.
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                crate::presets::launch(
+                    hub,
+                    target,
+                    preset_id,
+                    source,
+                    variable_values,
+                    use_worktree_override,
+                    max_panes_per_tab_override,
+                )
+                .await;
+            });
+        }
     }
     Ok(())
 }
@@ -839,7 +951,10 @@ fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
 }
 
-async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol::SessionSnapshot> {
+pub(crate) async fn spawn_session(
+    hub: &Hub,
+    req: SpawnRequest,
+) -> anyhow::Result<protocol::SessionSnapshot> {
     let SpawnRequest {
         label,
         target,
@@ -849,6 +964,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         model,
         permission_mode,
         extra_env,
+        prompt_injector,
     } = req;
 
     let (kind, members, primary_cwd, default_label, workspace_id) = match target {
@@ -873,6 +989,7 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         model,
         permission_mode,
         extra_env,
+        prompt_injector,
     };
 
     match mode {
@@ -929,6 +1046,11 @@ struct SpawnConfig {
     model: Option<String>,
     permission_mode: Option<PermissionMode>,
     extra_env: Vec<(String, String)>,
+    /// Scripted PTY input driven post-spawn for interactive sessions. When
+    /// `Some`, the interactive spawn path omits the `-p <prompt>` CLI flag
+    /// — the injector is responsible for delivering the prompt. Ignored by
+    /// the headless and plain-shell paths.
+    prompt_injector: Option<protocol::PromptInjector>,
 }
 
 impl SpawnConfig {
@@ -971,7 +1093,12 @@ fn spawn_interactive_session(
         args.push(extra.worktree_path.clone());
     }
     cfg.extend_args(&mut args);
-    if let Some(prompt) = initial_prompt {
+    // When a prompt injector is attached, it carries the prompt as scripted
+    // PTY input — passing `-p` would race the injector and disable plan
+    // mode. The injector path takes over.
+    if cfg.prompt_injector.is_none()
+        && let Some(prompt) = initial_prompt
+    {
         args.push("-p".to_string());
         args.push(prompt);
     }
@@ -1041,6 +1168,9 @@ fn spawn_interactive_session(
         pty.output.subscribe(),
         hub.dirs.clone(),
     );
+    if let Some(injector) = cfg.prompt_injector.clone() {
+        inject::run(session_id.clone(), Arc::clone(&pty), injector);
+    }
     attach_lifecycle(&hub.sessions, session_id, &pty, Some(hub.dirs.clone()));
     Ok(snap)
 }

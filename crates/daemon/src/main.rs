@@ -3,9 +3,11 @@
 mod git;
 mod git_inspect;
 mod headless;
+mod inject;
 mod orphan;
 mod osc_title;
 mod paths;
+mod presets;
 mod pty;
 mod pty_state;
 mod registry;
