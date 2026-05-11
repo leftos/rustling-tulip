@@ -1,3 +1,6 @@
+import { useRef } from "react";
+import { useAutoFocus, useEscape } from "../utils/a11y";
+
 interface Props {
   activeSessionCount: number;
   busy: boolean;
@@ -17,9 +20,24 @@ export default function ExitConfirmDialog({
   onQuitLeaveRunning,
   onCancel,
 }: Props) {
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  // Escape dismisses while not busy. Land focus on Cancel so a stray Enter
+  // doesn't pick the destructive option.
+  useEscape(onCancel, !busy);
+  useAutoFocus(cancelRef);
   return (
-    <div className="modal-backdrop" onClick={busy ? undefined : onCancel}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      onClick={busy ? undefined : onCancel}
+      data-testid="exit-confirm-dialog"
+    >
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Quit rustling-tulip"
+      >
         <header className="modal-header">
           <h2>Quit rustling-tulip?</h2>
         </header>
@@ -39,7 +57,12 @@ export default function ExitConfirmDialog({
           )}
         </div>
         <footer className="modal-footer">
-          <button type="button" onClick={onCancel} disabled={busy}>
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+          >
             Cancel
           </button>
           <button

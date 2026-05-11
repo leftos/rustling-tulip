@@ -1,5 +1,6 @@
 import type { DaemonClient } from "../api";
 import type { VscodeWorkspaceSuggestion } from "../types";
+import { useEscape } from "../utils/a11y";
 
 interface Props {
   suggestion: VscodeWorkspaceSuggestion;
@@ -12,6 +13,7 @@ export default function VscodeSuggestionToast({
   client,
   onDismiss,
 }: Props) {
+  useEscape(onDismiss);
   const accept = (watch: boolean) => {
     client.send({
       type: "accept_vscode_workspace_suggestion",
@@ -22,11 +24,26 @@ export default function VscodeSuggestionToast({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onDismiss}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      onClick={onDismiss}
+      data-testid="vscode-suggestion-toast"
+    >
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="VS Code workspace detected"
+      >
         <header className="modal-header">
           <h2>VS Code workspace detected</h2>
-          <button type="button" className="link" onClick={onDismiss}>
+          <button
+            type="button"
+            className="link"
+            onClick={onDismiss}
+            aria-label="Dismiss suggestion"
+          >
             ✕
           </button>
         </header>

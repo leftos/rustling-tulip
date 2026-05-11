@@ -210,9 +210,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Three buttons of similar visual weight, ambiguous priority order.** Cancel · Quit, leave running · Stop sessions & quit. The "danger" red on "Stop sessions & quit" is the visual focal point, but it's the most aggressive option. A user who wants the daemon to keep running might mis-click the red button.
   - File: `apps/tauri-app/src/components/ExitConfirmDialog.tsx:41-62`.
   - Suggested direction: visually demote the destructive button (less saturated), make "Quit, leave running" the primary (since that matches the design goal of long-lived daemon).
-- **No Escape key to cancel.** The dialog has no global key handler. Pressing Escape does nothing.
-  - File: `apps/tauri-app/src/components/ExitConfirmDialog.tsx` (no `onKeyDown`).
-  - Suggested direction: global keydown listener that dispatches Cancel on Escape (when `!busy`).
+- ~~**No Escape key to cancel.**~~ **Resolved (iter 20).** `useEscape(onCancel, !busy)` — Escape dismisses while idle, no-ops during in-flight shutdown.
 - **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** The pop-out only listens for `onCloseRequested` in `App.tsx:354-370`, which is gated on `if (popoutSessionId || popoutTabId) return;`. So pop-out close is unhandled; the OS closes the window immediately. That's actually probably correct, but worth flagging.
 
 ### Global: keyboard, focus, accessibility, theming, error surfacing
@@ -220,12 +218,8 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No global keyboard shortcuts at all.** No Ctrl+Tab to cycle tabs, no Ctrl+W to close a tab, no Ctrl+N to spawn, no F2 to rename, no Ctrl+1..9, no Cmd+T. `grep -r 'addEventListener.*keydown\|onKeyDown'` only finds the rename input's Enter/Escape.
   - File: codebase-wide; only `apps/tauri-app/src/components/TabBar.tsx:336-344` has any key handling.
   - Suggested direction: add a small `KeyboardShortcuts` provider for at least the most-used actions, and document them.
-- **No Escape to dismiss modals.** Only the tab-rename input handles Escape. SpawnDialog, PresetLaunchDialog, WorkspaceCreator, VscodeSuggestionToast, ExitConfirmDialog all rely on backdrop click or the × button.
-  - Files: every component in `apps/tauri-app/src/components/*Dialog.tsx`, `WorkspaceCreator.tsx`, `VscodeSuggestionToast.tsx`, `ExitConfirmDialog.tsx`.
-  - Suggested direction: a tiny `useEscape(onClose)` hook used by every modal.
-- **No autofocus on modals (except WorkspaceCreator).** Opening the SpawnDialog dumps focus to whatever was previously focused. Users must click before typing.
-  - Files: `SpawnDialog.tsx`, `PresetLaunchDialog.tsx`, `ExitConfirmDialog.tsx`.
-  - Suggested direction: autofocus the first meaningful input on mount; consider focus-trap inside the modal.
+- ~~**No Escape to dismiss modals.**~~ **Resolved across iters 6 + 20.** `useEscape` hook now wired into SpawnDialog, PresetLaunchDialog, RepoRemoveDialog, DiscardConfirmDialog (iter 6 + 13), and WorkspaceCreator, VscodeSuggestionToast, ExitConfirmDialog (iter 20). ExitConfirmDialog gates the binding on `!busy` so a mid-shutdown Escape doesn't fight the in-flight quit.
+- **No autofocus on modals (except WorkspaceCreator).** *Partially resolved.* RepoRemoveDialog + DiscardConfirmDialog (iter 6 + 13) and ExitConfirmDialog (iter 20) autofocus Cancel (least-destructive default). SpawnDialog and PresetLaunchDialog still leak focus to the previously focused element when opened — both are large forms where "first meaningful input" is non-trivial (which field?) so left for follow-up.
 - **No focus return after modal close.** Once a modal closes, focus is on `<body>`; keyboard users have to Tab back to where they were.
 - **Sidebar tree leaves are `role="button"` but have no `tabIndex` or keyboard handler.** Screen reader announces "button" but Enter / Space do nothing.
   - File: `apps/tauri-app/src/components/Sidebar.tsx:262-263`, `328-329`.
@@ -233,8 +227,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **No `aria-label` on close × buttons.** The literal `×` is non-descriptive for screen readers.
   - Files: `Sidebar.tsx:285`, `SpawnDialog.tsx:115`, `WorkspaceCreator.tsx:45`, `VscodeSuggestionToast.tsx:30`, `PresetLaunchDialog.tsx:129`, `TabBar.tsx:262-270`.
   - Suggested direction: `aria-label="Close dialog"` / `"Remove repo"` / `"Close tab"` on each.
-- **No `role="dialog"` / `aria-modal` on modals.** Screen readers can't tell that the rest of the page is inert.
-  - Files: every component using `.modal-backdrop`.
+- ~~**No `role="dialog"` / `aria-modal` on modals.**~~ **Resolved across iters 6 + 13 + 20.** Every component using `.modal-backdrop` now adds `role="dialog"` + `aria-modal="true"` + a descriptive `aria-label` on the inner `.modal`. Pure-toast surfaces (`ErrorToast`) are intentionally NOT marked as dialogs — they don't take focus or block input.
 - ~~**Status dot uses colour as the only differentiator.**~~ **Resolved (iter 16).** Status dots in `Sidebar` and `SessionPane` gained `title="status: <state>"` + `aria-label="status <state>"` + `role="img"` so screen-reader users and hover-tooltip users get the underlying state.
 - **Modal stacking order is render-order, all at `z-index: 100`.** Spawn dialog, preset launch, workspace creator, vscode toast, exit confirm — if two are open at once, the later-rendered one (in JSX order) sits on top. Clicking the backdrop of the top one dismisses it (its handler), but the lower one stays. The visual "front" cue is just opacity.
   - File: `apps/tauri-app/src/styles.css:368-372`, `apps/tauri-app/src/App.tsx:577-618`.

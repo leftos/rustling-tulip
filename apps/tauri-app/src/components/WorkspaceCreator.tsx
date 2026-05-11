@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { DaemonClient } from "../api";
 import type { RepoEntry } from "../types";
+import { useEscape } from "../utils/a11y";
 
 interface Props {
   repos: RepoEntry[];
@@ -11,6 +12,7 @@ interface Props {
 export default function WorkspaceCreator({ repos, client, onClose }: Props) {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  useEscape(onClose);
 
   const toggle = (id: string) => {
     setSelected((s) => {
@@ -36,11 +38,26 @@ export default function WorkspaceCreator({ repos, client, onClose }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop"
+      onClick={onClose}
+      data-testid="workspace-creator"
+    >
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Create workspace"
+      >
         <header className="modal-header">
           <h2>New workspace</h2>
-          <button type="button" className="link" onClick={onClose}>
+          <button
+            type="button"
+            className="link"
+            onClick={onClose}
+            aria-label="Close dialog"
+          >
             ✕
           </button>
         </header>
