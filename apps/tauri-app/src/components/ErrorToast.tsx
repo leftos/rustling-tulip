@@ -1,12 +1,26 @@
 import { useEffect } from "react";
 
-export type ToastSeverity = "error" | "warning";
+export type ToastSeverity = "error" | "warning" | "info";
 
 export interface ToastEntry {
   id: string;
+  /// Optional dedup key used by `upsertToast` to update a toast in place
+  /// instead of pushing a new one. Same key → replace fields; absent →
+  /// always push. Distinct from `id` so React's stable element key
+  /// doesn't change across updates (no remount, no animation reset).
+  key?: string;
+  /// Bumped by `upsertToast` on every update. The Toast component keys
+  /// its auto-dismiss `useEffect` on this so an in-place update restarts
+  /// the dismiss timer — a streaming progress toast doesn't vanish mid-flight.
+  generation?: number;
   severity: ToastSeverity;
   message: string;
   detail?: string;
+  /// When `true`, the toast doesn't auto-dismiss. Useful for in-flight
+  /// progress that needs to stay until explicitly resolved (e.g.
+  /// preset launch progress, where the final `done` update flips this
+  /// back to false so the toast fades naturally).
+  sticky?: boolean;
 }
 
 interface Props {
@@ -51,10 +65,16 @@ function Toast({
   autoDismissMs: number;
   onDismiss: (id: string) => void;
 }) {
+  // Skip the auto-dismiss timer when the toast is sticky (in-flight
+  // progress). When sticky is flipped off (e.g. preset launch completes
+  // with a final `done` upsert), the effect's deps change and a fresh
+  // timer fires. Generation also retriggers so in-place content updates
+  // reset the dismiss clock.
   useEffect(() => {
+    if (toast.sticky) return;
     const timer = window.setTimeout(() => onDismiss(toast.id), autoDismissMs);
     return () => window.clearTimeout(timer);
-  }, [toast.id, autoDismissMs, onDismiss]);
+  }, [toast.id, toast.generation, toast.sticky, autoDismissMs, onDismiss]);
 
   return (
     <div

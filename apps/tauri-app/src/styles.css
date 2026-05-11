@@ -1273,6 +1273,10 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   border-color: var(--warn);
   background: linear-gradient(180deg, rgba(245, 165, 36, 0.12), var(--bg-elev));
 }
+.error-toast-info {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(102, 153, 255, 0.10), var(--bg-elev));
+}
 .error-toast-body {
   flex: 1 1 auto;
   min-width: 0;

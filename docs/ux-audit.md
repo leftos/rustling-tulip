@@ -164,15 +164,11 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **File and folder prompt sources cannot be launched from the UI.** `computePreview` only parses `inline`; for `file`/`folder` it returns `[]` (comment: "would require a daemon round-trip; for v1, show a placeholder count via the source picker stage"). `canSubmit` requires `previewPrompts.length > 0`. Result: any preset declaring `file` or `folder` in `prompt_sources` has a broken launch path — the preview stage shows "0 prompts" with disabled "Launch 0 sessions" button.
   - Files: `apps/tauri-app/src/components/PresetLaunchDialog.tsx:83-87`, `544-554`, `467-477`.
   - Suggested direction: either send a preview-only request to the daemon (it already parses files in `presets.rs`) and populate `previewPrompts`, or drop `canSubmit > 0` when source is file/folder (treat as "trust the daemon").
-- **Preset launch has no progress UI.** Daemon emits `preset_launch_progress` with `launched / total`, but the only consumer is `App.tsx` auto-activating the current tab. No toast, no banner, no count, no cancel.
-  - File: `apps/tauri-app/src/App.tsx:834-847`.
-  - Suggested direction: persistent toast/banner "Preset X: 5/50 launched" while in flight; clear on completion.
+- ~~**Preset launch has no progress UI.**~~ **Resolved (iter 26).** A sticky info-severity toast `Launching preset 'X' — N / total sessions` updates in place via the new `pushToast` dedup-key path. When `launched >= total`, the toast flips to `Preset 'X' launched` and unsticks so it auto-dismisses naturally.
 - **Preset launch failure is `console.error` only.** `preset_launch_failed` carries `error`, `partial_session_ids[]`, `partial_tab_ids[]`. The UI logs to console and nothing else — leaving the user with N partial sessions and no idea why the launch stopped.
   - File: `apps/tauri-app/src/App.tsx:822-833`.
   - Suggested direction: modal/toast describing what failed and offering "Open partial tab", "Stop partial sessions", "Dismiss".
-- **Auto-activate-tab during preset launch hijacks user focus.** While a 50-prompt preset runs in the background, every `preset_launch_progress` with a new `current_tab_id` switches the active tab — even if the user is busy in another tab.
-  - File: `apps/tauri-app/src/App.tsx:835-843`.
-  - Suggested direction: only activate the first tab in the launch (kicks off context), then let the user choose.
+- ~~**Auto-activate-tab during preset launch hijacks user focus.**~~ **Resolved (iter 26).** Auto-activate now only fires on the FIRST tab created during a launch (`msg.tab_ids.length === 1`) — kicks off context for the user, then the launch runs silently with the progress toast keeping them informed.
 - **No way to cancel a launch in progress.** The protocol has no cancel message, so the UI couldn't expose one anyway — but at minimum, surface that "launching is irreversible from the UI; will run all N".
 - **Folder-source picker pre-fills with `repo.path + relative_path` regardless of file separator.** `joinPath` tries to match base separator style but falls back to `/` on mixed input. Windows users with mixed `\` / `/` paths could see ugly results, though the daemon will normalize.
   - File: `apps/tauri-app/src/components/PresetLaunchDialog.tsx:503-508`.

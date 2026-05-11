@@ -1053,9 +1053,15 @@ function handleMessage(
         });
       }
       return;
-    case "preset_launch_progress":
-      // Auto-activate the tab being filled so the user sees panes appear.
-      if (msg.current_tab_id !== null) {
+    case "preset_launch_progress": {
+      // Only auto-activate on the FIRST tab created during this launch.
+      // Previously every progress tick switched the active tab as new
+      // tabs were created — which hijacked the user's focus mid-launch
+      // (audit: "Auto-activate-tab during preset launch hijacks user
+      // focus"). The first tab gives the user a useful "here's what's
+      // happening" view; after that, the launch runs silently with the
+      // progress toast keeping them informed.
+      if (msg.current_tab_id !== null && msg.tab_ids.length === 1) {
         const targetTabId = msg.current_tab_id;
         setState((s) =>
           s.tabs.some((t) => t.id === targetTabId) && s.activeTabId !== targetTabId
@@ -1063,10 +1069,21 @@ function handleMessage(
             : s,
         );
       }
+      const done = msg.launched >= msg.total;
+      pushToast(setState, {
+        key: `preset:${msg.preset_id}`,
+        severity: "info",
+        message: done
+          ? `Preset '${msg.preset_id}' launched`
+          : `Launching preset '${msg.preset_id}'`,
+        detail: `${msg.launched} / ${msg.total} session${msg.total === 1 ? "" : "s"}`,
+        sticky: !done,
+      });
       window.dispatchEvent(
         new CustomEvent("rt:preset_launch_progress", { detail: msg }),
       );
       return;
+    }
     case "error":
       // Surface to the user via toast AND disarm any pending spawn intent.
       // Without the second step a daemon-rejected spawn would leave the
@@ -1087,7 +1104,27 @@ function pushToast(
   toast: Omit<ToastEntry, "id">,
 ) {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  setState((s) => ({ ...s, toasts: [...s.toasts, { id, ...toast }] }));
+  setState((s) => {
+    // Honor the optional dedup key: when a toast with the same key already
+    // exists, REPLACE it in place (preserving its React id so there's no
+    // remount / animation reset) and bump `generation` so the auto-dismiss
+    // timer restarts. Otherwise append.
+    if (toast.key) {
+      const existingIdx = s.toasts.findIndex((t) => t.key === toast.key);
+      if (existingIdx >= 0) {
+        const existing = s.toasts[existingIdx]!;
+        const next = s.toasts.slice();
+        next[existingIdx] = {
+          ...existing,
+          ...toast,
+          id: existing.id,
+          generation: (existing.generation ?? 0) + 1,
+        };
+        return { ...s, toasts: next };
+      }
+    }
+    return { ...s, toasts: [...s.toasts, { id, ...toast, generation: 1 }] };
+  });
 }
 
 function findSession(
