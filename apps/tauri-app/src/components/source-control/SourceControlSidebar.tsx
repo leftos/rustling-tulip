@@ -21,6 +21,7 @@ import type {
   RepoEntry,
 } from "../../types";
 import ResizableSplit from "../ResizableSplit";
+import ChangesTree from "./ChangesTree";
 
 type Tab = "changes" | "history";
 
@@ -215,25 +216,11 @@ function ChangesView({ activeRepoId, activeRepoName, client }: ChangesViewProps)
         ) : changes.length === 0 ? (
           <p className="empty">working tree clean</p>
         ) : (
-          <ul className="list">
-            {changes.map((c) => (
-              <li
-                key={c.path}
-                className={
-                  c.path === selected ? "list-item selected" : "list-item"
-                }
-                onClick={() => setSelected(c.path)}
-                data-testid="source-control-changes-row"
-              >
-                <span className={`file-status status-${c.status}`}>
-                  {c.status}
-                </span>
-                <span className="list-item-label" title={c.path}>
-                  {c.path}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <ChangesTree
+            changes={changes}
+            selectedPath={selected}
+            onSelect={setSelected}
+          />
         )}
         <div className="git-meta">
           {activeRepoName}
