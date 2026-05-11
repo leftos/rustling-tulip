@@ -1547,6 +1547,46 @@ impl SpawnConfig {
     }
 }
 
+/// Build a workspace-context note for the agent. Returns `Some` only when
+/// the session has 2+ members (i.e. it's a workspace spawn). The note maps
+/// each member's repo name to the actual worktree path used for THIS
+/// session, so the agent doesn't try to navigate to original-repo paths
+/// referenced in `CLAUDE.md` / `AGENTS.md` that no longer match where the
+/// session is rooted.
+///
+/// Delivered as `--append-system-prompt` to claude (invisible to the user)
+/// and prepended to the positional prompt for codex (codex doesn't have a
+/// system-prompt flag, so the trade-off is one extra user turn).
+fn build_workspace_prelude(members: &[SessionMember]) -> Option<String> {
+    if members.len() < 2 {
+        return None;
+    }
+    let mut out = String::from(
+        "Workspace member paths for this session (use these for cross-repo \
+         file access — they override any absolute paths referenced in \
+         CLAUDE.md / AGENTS.md):\n",
+    );
+    let name_width = members
+        .iter()
+        .map(|m| m.repo_name.len())
+        .max()
+        .unwrap_or(0);
+    for m in members {
+        use std::fmt::Write as _;
+        // Width-padded for visual alignment in the agent's view; failure
+        // here would mean OOM during string formatting, which we treat as
+        // unreachable for a few dozen members at most.
+        let _ = writeln!(
+            out,
+            "  {name:<width$}  ->  {path}",
+            name = m.repo_name,
+            width = name_width,
+            path = m.worktree_path,
+        );
+    }
+    Some(out)
+}
+
 /// Build the codex CLI argv for an interactive session. Factored out of
 /// [`spawn_interactive_session`] so it can be unit-tested without spawning.
 ///
@@ -1555,8 +1595,11 @@ impl SpawnConfig {
 /// - `--model <id>` when [`SpawnConfig::model`] is set
 /// - permission/sandbox: `--yolo` overrides everything; otherwise
 ///   `--sandbox <value>` when [`SpawnConfig::codex_sandbox`] is set
-/// - trailing positional `<prompt>` when both `initial_prompt` is set and no
-///   `prompt_injector` is attached (injector delivers the prompt instead)
+/// - trailing positional `<prompt>` when no `prompt_injector` is attached;
+///   carries `<workspace_prelude>\n\n<initial_prompt>` for workspace spawns,
+///   or just `<initial_prompt>`, or just `<workspace_prelude>`, depending
+///   on which are present. Codex doesn't expose a system-prompt flag so
+///   the prelude rides along on the user's first message slot.
 fn build_codex_args(
     cfg: &SpawnConfig,
     members: &[SessionMember],
@@ -1577,10 +1620,17 @@ fn build_codex_args(
         args.push("--sandbox".to_string());
         args.push(sandbox.as_cli_arg().to_string());
     }
-    if cfg.prompt_injector.is_none()
-        && let Some(prompt) = initial_prompt
-    {
-        args.push(prompt.to_string());
+    if cfg.prompt_injector.is_none() {
+        let prelude = build_workspace_prelude(members);
+        let combined = match (prelude, initial_prompt) {
+            (Some(pre), Some(user)) => Some(format!("{pre}\n{user}")),
+            (Some(pre), None) => Some(pre),
+            (None, Some(user)) => Some(user.to_string()),
+            (None, None) => None,
+        };
+        if let Some(text) = combined {
+            args.push(text);
+        }
     }
     args
 }
@@ -1607,6 +1657,14 @@ fn spawn_interactive_session(
             for extra in members.iter().skip(1) {
                 args.push("--add-dir".to_string());
                 args.push(extra.worktree_path.clone());
+            }
+            // Workspace-context prelude rides on --append-system-prompt
+            // so it's invisible to the user but the model sees it. Only
+            // emitted for 2+ member sessions (where the worktree-vs-
+            // original-path mismatch actually matters).
+            if let Some(prelude) = build_workspace_prelude(&members) {
+                args.push("--append-system-prompt".to_string());
+                args.push(prelude);
             }
             cfg.extend_claude_args(&mut args);
             // When a prompt injector is attached, it carries the prompt as
@@ -1837,6 +1895,10 @@ fn spawn_headless_session(
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
+    }
+    if let Some(prelude) = build_workspace_prelude(&members) {
+        args.push("--append-system-prompt".to_string());
+        args.push(prelude);
     }
     cfg.extend_claude_args(&mut args);
     args.push("-p".to_string());
@@ -2304,15 +2366,54 @@ mod tests {
         ];
         let c = cfg(Agent::Codex);
         let args = build_codex_args(&c, &members, None);
-        assert_eq!(
-            args,
-            vec![
-                "--add-dir",
-                "X:/wt/yaat-server",
-                "--add-dir",
-                "X:/wt/yaat-shared",
-            ]
-        );
+        // No user prompt + 3 members → positional is the workspace
+        // prelude alone.
+        assert_eq!(args[0], "--add-dir");
+        assert_eq!(args[1], "X:/wt/yaat-server");
+        assert_eq!(args[2], "--add-dir");
+        assert_eq!(args[3], "X:/wt/yaat-shared");
+        assert_eq!(args.len(), 5, "expected 4 add-dir args + 1 prelude positional");
+        let prelude = &args[4];
+        assert!(prelude.contains("Workspace member paths"));
+        assert!(prelude.contains("r1"));
+        assert!(prelude.contains("X:/wt/yaat-server"));
+    }
+
+    #[test]
+    fn build_workspace_prelude_skips_single_member() {
+        let members = vec![member("r1", "X:/wt/r1")];
+        assert!(build_workspace_prelude(&members).is_none());
+    }
+
+    #[test]
+    fn build_workspace_prelude_lists_each_member() {
+        let members = vec![
+            member("yaat", "X:/wt/yaat"),
+            member("yaat-server", "X:/wt/yaat-server"),
+        ];
+        let prelude = build_workspace_prelude(&members).unwrap_or_default();
+        assert!(!prelude.is_empty(), "prelude should be present for 2 members");
+        // Each member name maps to its worktree path on its own line.
+        // Width padding aligns them — assert on the parts, not the exact
+        // column count, so this test won't churn if formatting evolves.
+        assert!(prelude.contains("yaat"));
+        assert!(prelude.contains("X:/wt/yaat\n"));
+        assert!(prelude.contains("yaat-server"));
+        assert!(prelude.contains("X:/wt/yaat-server\n"));
+        assert!(prelude.contains("->"));
+    }
+
+    #[test]
+    fn codex_workspace_with_user_prompt_concatenates() {
+        let members = vec![
+            member("r1", "X:/wt/r1"),
+            member("r2", "X:/wt/r2"),
+        ];
+        let c = cfg(Agent::Codex);
+        let args = build_codex_args(&c, &members, Some("do the thing"));
+        let positional = args.last().cloned().unwrap_or_default();
+        assert!(positional.starts_with("Workspace member paths"));
+        assert!(positional.ends_with("do the thing"));
     }
 
     #[test]
