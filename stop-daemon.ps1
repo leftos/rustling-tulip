@@ -54,3 +54,4 @@ if (Test-Path $HandshakeFile) {
     Remove-Item $HandshakeFile -Force
 }
 Write-Host "==> Daemon(s) stopped." -ForegroundColor Green
+exit 0
