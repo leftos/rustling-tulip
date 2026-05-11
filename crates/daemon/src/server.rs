@@ -2029,11 +2029,36 @@ async fn stop_session(
             guard.headless.clone(),
         )
     };
+    let had_live_handle = pty.is_some() || headless_handle.is_some();
     if let Some(pty) = pty {
         pty.kill();
     }
     if let Some(h) = headless_handle {
         h.kill().await;
+    }
+    if !had_live_handle {
+        // Orphan session — neither PTY nor headless handle survived the
+        // daemon restart. Read the sidecar to recover the pid and try a
+        // best-effort kill. Without this, `stop_session` on an orphan
+        // would prune daemon state but leave the underlying claude /
+        // shell process running forever (audit: "Orphan banner instructs
+        // to Stop ... but Stop does nothing to the underlying process").
+        match orphan::load_meta(&hub.dirs, session_id) {
+            Ok(meta) => {
+                if orphan::kill_pid(&meta) {
+                    tracing::info!(%session_id, pid = meta.pid, "killed orphan process");
+                } else {
+                    tracing::warn!(
+                        %session_id,
+                        pid = meta.pid,
+                        "orphan kill returned false (pid gone, name mismatch, or signal denied)",
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(?err, %session_id, "no orphan sidecar to drive kill");
+            }
+        }
     }
     for action in cleanup {
         if !action.remove_worktree {

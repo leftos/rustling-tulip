@@ -34,6 +34,10 @@ interface Props {
   /// Receives the tab id + the pane ids already present at split time —
   /// the new pane id is whichever isn't in the set.
   onArmFocusNewPane: (tabId: string, knownPaneIds: Set<string>) => void;
+  /// True when this GridRenderer is mounted inside a pop-out window
+  /// (TabWindow). Threads through to EmptyPane so the "Spawn one here"
+  /// button is replaced by a hint, since the pop-out has no SpawnDialog.
+  inPopout?: boolean;
 }
 
 export default function GridRenderer({
@@ -47,6 +51,7 @@ export default function GridRenderer({
   hasRepos,
   onArmNextNewTab,
   onArmFocusNewPane,
+  inPopout,
 }: Props) {
   const grid = tabGrid(tab);
   if (!grid) {
@@ -78,6 +83,7 @@ export default function GridRenderer({
         onArmNextNewTab={onArmNextNewTab}
         onArmFocusNewPane={onArmFocusNewPane}
         knownPaneIds={knownPaneIds}
+        inPopout={inPopout ?? false}
       />
     </div>
   );
@@ -97,6 +103,7 @@ interface NodeProps {
   onArmNextNewTab: () => void;
   onArmFocusNewPane: (tabId: string, knownPaneIds: Set<string>) => void;
   knownPaneIds: Set<string>;
+  inPopout: boolean;
 }
 
 function NodeRenderer(props: NodeProps) {
@@ -377,6 +384,7 @@ function PaneChrome(props: PaneChromeProps) {
         ) : (
           <EmptyPane
             hasRepos={props.hasRepos}
+            inPopout={props.inPopout}
             onSpawn={() => props.onSpawnInPane(node.pane_id)}
           />
         )}

@@ -68,6 +68,17 @@ pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read a single session's meta sidecar. Used by `stop_session` to recover
+/// the pid for orphan kills. Returns `Err` if the file is missing or
+/// malformed — callers should treat both as "no usable sidecar".
+pub fn load_meta(dirs: &Dirs, session_id: &str) -> anyhow::Result<OrphanMeta> {
+    let path = meta_path(dirs, session_id);
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    let meta: OrphanMeta =
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(meta)
+}
+
 pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(&dirs.sessions_dir) {
@@ -156,6 +167,33 @@ pub fn is_session_alive(meta: &OrphanMeta) -> bool {
         // either.
         None => name.contains("claude") || name.contains("node"),
     }
+}
+
+/// Send SIGKILL / `TerminateProcess` to the recorded pid, but only if it still
+/// matches the recorded program name. The name-match check guards against
+/// PID reuse (we don't want to kill an unrelated process that happens to
+/// have the same id). Used by `stop_session` when the in-memory PTY/headless
+/// handles are absent (i.e. orphan sessions reattached after daemon restart).
+///
+/// Returns `true` when the process existed and was signalled; `false` when
+/// the pid is gone, the name no longer matches, or the kill call itself
+/// failed (e.g. permission denied).
+pub fn kill_pid(meta: &OrphanMeta) -> bool {
+    if !is_session_alive(meta) {
+        return false;
+    }
+    let mut sys =
+        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let pid = sysinfo::Pid::from_u32(meta.pid);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::new(),
+    );
+    let Some(process) = sys.process(pid) else {
+        return false;
+    };
+    process.kill()
 }
 
 /// Filter a list of metas down to those whose pid is still a live process

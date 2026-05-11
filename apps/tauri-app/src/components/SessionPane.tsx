@@ -147,8 +147,8 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
         <div className="orphan-banner">
           PTY stream lost across daemon restart. The underlying{" "}
           {isPlainShell ? "shell" : "claude"} process is still running, but
-          live input/output is not available. Stop the session and spawn a
-          new one to resume.
+          live input/output is not available. Use Stop to kill the recorded
+          PID and clean up, then spawn a new session.
         </div>
       )}
 
