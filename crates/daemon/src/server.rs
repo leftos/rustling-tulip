@@ -150,6 +150,13 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
     let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
     let (state_events, _) = broadcast::channel(STATE_EVENT_CAPACITY);
 
+    // Per-repo filesystem watchers that keep the source-control sidebar
+    // live without user-triggered refreshes. The supervisor task owns the
+    // per-repo debouncer handles and listens on `state_events` for repo
+    // add/remove broadcasts, so adding a repo at runtime spawns a watcher
+    // and removing one stops it. See `crates/daemon/src/git_watch.rs`.
+    crate::git_watch::start(&state, &state_events);
+
     let hub = Hub {
         state,
         sessions,
