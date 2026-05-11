@@ -527,6 +527,18 @@ export default function App() {
         .length,
     [state.sessions],
   );
+  // Orphans are non-stopped sessions whose PTY handle was lost across a
+  // daemon restart. Counted separately so the exit-confirm dialog can
+  // explain why "Stop sessions & quit" is a no-op for them (the daemon's
+  // stop_session early-returns when the pty handle is None — there's
+  // nothing to send the kill signal to). See ux-audit "No active
+  // sessions message hides orphan sessions".
+  const orphanSessionCount = useMemo(
+    () =>
+      state.sessions.filter((s) => s.status !== "stopped" && s.is_orphan)
+        .length,
+    [state.sessions],
+  );
 
   const subscribePty = useCallback(
     (sessionId: string, cb: (b64: string) => void) => {
@@ -762,6 +774,7 @@ export default function App() {
       {state.exitConfirmOpen && (
         <ExitConfirmDialog
           activeSessionCount={activeSessionCount}
+          orphanSessionCount={orphanSessionCount}
           busy={state.exitInFlight}
           onStopAndQuit={onStopAndQuit}
           onQuitLeaveRunning={onQuitLeaveRunning}

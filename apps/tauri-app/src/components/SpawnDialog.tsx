@@ -391,7 +391,9 @@ function AdvancedSection({
           </select>
           {skipPerms && (
             <span className="muted small">
-              Disabled because {skipPermsLabel} is on
+              Ignored while {skipPermsLabel} is on — claude will run without
+              --permission-mode. The dropdown value is preserved for when you
+              toggle {skipPermsLabel} off.
             </span>
           )}
         </label>
@@ -418,7 +420,9 @@ function AdvancedSection({
           </select>
           {skipPerms && (
             <span className="muted small">
-              Disabled because {skipPermsLabel} is on
+              Ignored while {skipPermsLabel} is on — codex will run with
+              --yolo overriding the sandbox. The dropdown value is preserved
+              for when you toggle {skipPermsLabel} off.
             </span>
           )}
         </label>

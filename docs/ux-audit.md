@@ -65,9 +65,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:388-431` (`useBranchField`, regenerates on mount via `useState(defaultBranch)` + `defaultBranch` change effect; mount alone seeds `randomWorktreeBranchName()`).
   - Suggested direction: persist last-suggested name per-target in component state at the App level, or accept this as a freshness feature with a "regenerate" button.
 - ~~**`Spawn → Spawn` double-click submits twice.**~~ **Resolved (iter 18).** Both `SingleForm.submit` and `WorkspaceForm.submit` guard via a `submittedRef = useRef(false)` flip that survives synchronous double-clicks before the dialog unmounts.
-- **Permission-mode dropdown silently retains a value while disabled.** When `skipPerms` is on, the dropdown is disabled but its current value is still sent through `advancedToWire` (which clamps to `null` because `skipPerms`). If the user toggles `skipPerms` off, the previously chosen value re-emerges — which the user may have forgotten about.
-  - File: `apps/tauri-app/src/components/SpawnDialog.tsx:43-64` (`advancedToWire` masks but `cfg` retains), `293-318` (disabled but value preserved).
-  - Suggested direction: visible read-only display of what mode will be used at the bottom of the dialog ("Will run: `--permission-mode default`"); or reset on toggle.
+- ~~**Permission-mode dropdown silently retains a value while disabled.**~~ **Resolved (iter 24).** Inline hint is now explicit: "Ignored while {skip-permissions|yolo} is on — claude will run without --permission-mode. The dropdown value is preserved for when you toggle it off." So the user knows both what will happen (no flag sent) and that the value is intentionally remembered for later. Same pattern for the codex sandbox dropdown.
 - **Env var rows have no key-uniqueness or `KEY=value` syntax check.** Duplicate keys silently win the last-write, malformed keys are sent to the daemon and either rejected with the unhelpful `error` console log (above) or accepted into the child env.
   - File: `apps/tauri-app/src/components/SpawnDialog.tsx:320-373`.
   - Suggested direction: inline validation (`/^[A-Za-z_][A-Za-z0-9_]*$/`) and a dedup warning.
@@ -190,18 +188,14 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 
 ### Exit flow
 
-- **"No active sessions" message hides orphan sessions.** `activeSessionCount` filters out `!s.is_orphan`. Orphans are dead-handle but the underlying claude process IS still running on the machine. The exit dialog tells the user there's nothing to lose when in fact "Stop sessions & quit" will be a no-op for the orphans (since their PTYs are gone) and leave them as zombie processes.
-  - File: `apps/tauri-app/src/App.tsx:424-429`.
-  - Suggested direction: count orphans separately, e.g. "0 active, 3 orphan (will not be terminated)".
+- ~~**"No active sessions" message hides orphan sessions.**~~ **Resolved (iter 24).** Exit dialog now receives a separate `orphanSessionCount` and appends "(N orphans — daemon can't stop these; they'll stay running)" to the session-count line so the user knows `Stop sessions & quit` won't kill them.
 - **Backdrop click closes the dialog only when `!busy`.** Good; but during `busy` the user is stuck — no way to abort the shutdown attempt if the daemon hangs.
   - File: `apps/tauri-app/src/components/ExitConfirmDialog.tsx:21`.
   - Suggested direction: after 2 s of `busy`, surface a "Daemon not responding — force quit" button.
 - **`onStopAndQuit` resolves the shutdown promise on `closed`-or-`disconnected` connection state, NOT on the daemon actually quitting.** The 2 s timeout falls back to force-closing the window. If shutdown was slow but successful, fine. If shutdown is silently stuck, the daemon is left running — and on next launch, the user will see daemon-supervisor errors.
   - File: `apps/tauri-app/src/App.tsx:392-422`.
   - Suggested direction: probe `daemon.json` pid liveness during the 2 s window; if the daemon is still up after timeout, warn explicitly.
-- **Three buttons of similar visual weight, ambiguous priority order.** Cancel · Quit, leave running · Stop sessions & quit. The "danger" red on "Stop sessions & quit" is the visual focal point, but it's the most aggressive option. A user who wants the daemon to keep running might mis-click the red button.
-  - File: `apps/tauri-app/src/components/ExitConfirmDialog.tsx:41-62`.
-  - Suggested direction: visually demote the destructive button (less saturated), make "Quit, leave running" the primary (since that matches the design goal of long-lived daemon).
+- ~~**Three buttons of similar visual weight, ambiguous priority order.**~~ **Resolved (iter 24).** Button order is now Cancel · Stop sessions & quit · **Quit, leave running** (primary, accent-coloured, autofocused). The destructive option keeps its `danger` class but is no longer the visual focal point. Matches the design goal of "long-lived daemon by default".
 - ~~**No Escape key to cancel.**~~ **Resolved (iter 20).** `useEscape(onCancel, !busy)` — Escape dismisses while idle, no-ops during in-flight shutdown.
 - **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** The pop-out only listens for `onCloseRequested` in `App.tsx:354-370`, which is gated on `if (popoutSessionId || popoutTabId) return;`. So pop-out close is unhandled; the OS closes the window immediately. That's actually probably correct, but worth flagging.
 
