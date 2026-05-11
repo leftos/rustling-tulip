@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 export type Agent = "claude" | "codex";
 
@@ -404,6 +404,14 @@ export type ClientMessage =
       variable_values: Array<[string, string]>;
       use_worktree_override: boolean | null;
       max_panes_per_tab_override: number | null;
+    }
+  | {
+      type: "preview_preset";
+      id: string;
+      target: PresetTarget;
+      preset_id: string;
+      source: LaunchPresetSource;
+      variable_values: Array<[string, string]>;
     };
 
 export type DaemonMessage =
@@ -471,4 +479,6 @@ export type DaemonMessage =
       partial_session_ids: string[];
       partial_tab_ids: string[];
     }
+  | { type: "preset_preview"; id: string; prompts: string[] }
+  | { type: "preset_preview_error"; id: string; error: string }
   | { type: "error"; message: string };

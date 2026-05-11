@@ -30,6 +30,18 @@ body {
   -webkit-user-select: none;
 }
 
+/* Re-enable text selection on content surfaces so users can copy diffs, event
+   logs, and session labels. Chrome (sidebar, tab bar, modals) stays unselectable
+   to keep drag UX clean. */
+.diff-pane,
+.headless-log,
+.preset-preview-list,
+.terminal-host,
+.session-title h2 {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 button {
   background: var(--bg-elev2);
   color: var(--fg);

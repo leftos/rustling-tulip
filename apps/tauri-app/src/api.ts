@@ -225,6 +225,59 @@ export function launchPreset(client: DaemonClient, opts: LaunchPresetOpts) {
   client.send({ type: "launch_preset", ...opts });
 }
 
+export interface PreviewPresetOpts {
+  target: PresetTarget;
+  preset_id: string;
+  source: LaunchPresetSource;
+  variable_values: Array<[string, string]>;
+}
+
+export type PreviewPresetResult =
+  | { ok: true; prompts: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Request the daemon to resolve a preset's prompt source into raw prompt
+ * texts without spawning anything. Used by the launch dialog so file/folder
+ * sources can show the prompt count before the user commits.
+ *
+ * Correlation: the caller passes a fresh request id; the daemon echoes it on
+ * the response so the dialog can drop stale replies from rapid Back/Next.
+ * Times out after 5 s with `{ ok: false, error: "timed out" }`.
+ */
+export function previewPreset(
+  client: DaemonClient,
+  opts: PreviewPresetOpts,
+): Promise<PreviewPresetResult> {
+  const id = `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    const onPreview = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "preset_preview" || detail.id !== id) return;
+      cleanup();
+      resolve({ ok: true, prompts: detail.prompts });
+    };
+    const onError = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "preset_preview_error" || detail.id !== id) return;
+      cleanup();
+      resolve({ ok: false, error: detail.error });
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve({ ok: false, error: "preview timed out" });
+    }, 5000);
+    const cleanup = () => {
+      window.removeEventListener("rt:preset_preview", onPreview);
+      window.removeEventListener("rt:preset_preview_error", onError);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:preset_preview", onPreview);
+    window.addEventListener("rt:preset_preview_error", onError);
+    client.send({ type: "preview_preset", id, ...opts });
+  });
+}
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.byteLength; i++) {

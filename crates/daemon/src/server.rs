@@ -861,6 +861,28 @@ async fn dispatch(
                 crate::presets::launch(hub, args).await;
             });
         }
+        ClientMessage::PreviewPreset {
+            id,
+            target,
+            preset_id,
+            source,
+            variable_values: _,
+        } => {
+            // Variable values aren't applied during preview — we return raw
+            // prompt texts (the same shape the inline-source client-side
+            // preview produces). Reserved on the wire for forward use.
+            match crate::presets::preview_prompts(hub, &target, &preset_id, &source).await {
+                Ok(prompts) => {
+                    let _ = out_tx.send(DaemonMessage::PresetPreview { id, prompts });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::PresetPreviewError {
+                        id,
+                        error: format!("{err:#}"),
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }

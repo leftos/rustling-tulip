@@ -128,6 +128,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             type="button"
             className={view === "terminal" ? "tab active" : "tab"}
             onClick={() => setView("terminal")}
+            data-testid="session-view-terminal"
           >
             {isHeadless ? "Events" : "Terminal"}
           </button>
@@ -135,6 +136,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
             type="button"
             className={view === "git" ? "tab active" : "tab"}
             onClick={() => setView("git")}
+            data-testid="session-view-git"
           >
             Git
           </button>

@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 fn default_true() -> bool {
     true
@@ -845,6 +845,22 @@ pub enum ClientMessage {
         #[serde(default)]
         max_panes_per_tab_override: Option<u32>,
     },
+    /// Resolve a preset's prompt source into the list of prompts that would
+    /// be launched, without spawning anything. Used by the launch dialog to
+    /// preview file/folder sources before the user commits. Daemon replies
+    /// with [`DaemonMessage::PresetPreview`] on success or
+    /// [`DaemonMessage::PresetPreviewError`] on failure (e.g. folder does
+    /// not exist).
+    PreviewPreset {
+        /// Client-assigned request id, echoed back on the response so the
+        /// caller can drop stale replies from rapid stage navigation.
+        id: String,
+        target: PresetTarget,
+        preset_id: String,
+        source: LaunchPresetSource,
+        #[serde(default)]
+        variable_values: Vec<(String, String)>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +991,19 @@ pub enum DaemonMessage {
         partial_session_ids: Vec<String>,
         #[serde(default)]
         partial_tab_ids: Vec<String>,
+    },
+    /// Response to [`ClientMessage::PreviewPreset`]. Echoes the request `id`
+    /// so the caller can correlate; carries the resolved prompts list.
+    PresetPreview {
+        id: String,
+        prompts: Vec<String>,
+    },
+    /// Failure response to [`ClientMessage::PreviewPreset`]. The dialog
+    /// surfaces `error` to the user; `id` correlates against the in-flight
+    /// request so stale responses can be dropped.
+    PresetPreviewError {
+        id: String,
+        error: String,
     },
     Error {
         message: String,

@@ -820,6 +820,8 @@ function handleMessage(
     case "scrollback":
     case "presets":
     case "preset_launch_failed":
+    case "preset_preview":
+    case "preset_preview_error":
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );

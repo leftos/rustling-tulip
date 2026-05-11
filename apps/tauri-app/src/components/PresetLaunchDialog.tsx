@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   type DaemonClient,
   launchPreset,
   pickDirectory,
   pickFile,
+  previewPreset,
 } from "../api";
 import type {
   LaunchPresetSource,
@@ -60,16 +61,68 @@ export default function PresetLaunchDialog({
     () => initialVariableValues(preset.variables),
   );
 
-  // Preview state
+  // Preview state. For inline sources the client parses synchronously;
+  // for file/folder sources the daemon resolves and we track loading/error
+  // states. `previewRequestRef` is the latest in-flight request id; older
+  // responses are dropped so rapid Back/Next can't race in a stale list.
   const [previewPrompts, setPreviewPrompts] = useState<string[]>([]);
+  const [previewLoading, setPreviewLoading] = useState<boolean>(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewRequestRef = useRef<number>(0);
   const [maxPerTab, setMaxPerTab] = useState<string>(() =>
     defaultMaxPerTabString(preset),
   );
 
   useEffect(() => {
     if (stage !== "preview") return;
-    setPreviewPrompts(computePreview({ sourceKind, inlineText }));
-  }, [stage, sourceKind, inlineText]);
+    if (sourceKind === "inline") {
+      setPreviewPrompts(parsePrompts(inlineText));
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+    const source = buildLaunchSource(sourceKind, {
+      filePath,
+      folderPath,
+      inlineText,
+    });
+    if (!source) {
+      setPreviewPrompts([]);
+      setPreviewLoading(false);
+      setPreviewError("source not ready");
+      return;
+    }
+    const ticket = ++previewRequestRef.current;
+    setPreviewPrompts([]);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    void previewPreset(client, {
+      target,
+      preset_id: preset.id,
+      source,
+      variable_values: Object.entries(variableValues),
+    }).then((result) => {
+      if (ticket !== previewRequestRef.current) return;
+      setPreviewLoading(false);
+      if (result.ok) {
+        setPreviewPrompts(result.prompts);
+        setPreviewError(null);
+      } else {
+        setPreviewPrompts([]);
+        setPreviewError(result.error);
+      }
+    });
+  }, [
+    stage,
+    sourceKind,
+    inlineText,
+    filePath,
+    folderPath,
+    client,
+    target,
+    preset.id,
+    variableValues,
+  ]);
 
   const promptedVariables = preset.variables.filter((v) => v.prompt_at_launch);
 
@@ -82,6 +135,8 @@ export default function PresetLaunchDialog({
 
   const canSubmit =
     stage === "preview" &&
+    !previewLoading &&
+    previewError === null &&
     previewPrompts.length > 0 &&
     validMaxPerTab(maxPerTab);
 
@@ -121,7 +176,7 @@ export default function PresetLaunchDialog({
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} data-testid="preset-launch-dialog">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <h2>
@@ -133,7 +188,12 @@ export default function PresetLaunchDialog({
               {preset.agent}
             </span>
           </h2>
-          <button type="button" className="link" onClick={onClose}>
+          <button
+            type="button"
+            className="link"
+            onClick={onClose}
+            data-testid="preset-launch-close"
+          >
             ✕
           </button>
         </header>
@@ -166,6 +226,8 @@ export default function PresetLaunchDialog({
           {stage === "preview" && (
             <PreviewStage
               prompts={previewPrompts}
+              loading={previewLoading}
+              error={previewError}
               maxPerTab={maxPerTab}
               onMaxPerTabChange={setMaxPerTab}
               defaultCap={defaultCap(preset)}
@@ -173,11 +235,11 @@ export default function PresetLaunchDialog({
           )}
         </div>
         <footer className="modal-footer">
-          <button type="button" onClick={onClose}>
+          <button type="button" onClick={onClose} data-testid="preset-launch-cancel">
             Cancel
           </button>
           {stage !== "source" && (
-            <button type="button" onClick={onBack}>
+            <button type="button" onClick={onBack} data-testid="preset-launch-back">
               Back
             </button>
           )}
@@ -187,6 +249,7 @@ export default function PresetLaunchDialog({
               className="primary"
               onClick={onAdvance}
               disabled={!canAdvanceFromSource}
+              data-testid="preset-launch-next"
             >
               Next
             </button>
@@ -196,6 +259,7 @@ export default function PresetLaunchDialog({
               className="primary"
               onClick={onLaunch}
               disabled={!canSubmit}
+              data-testid="preset-launch-submit"
             >
               Launch {previewPrompts.length}{" "}
               {previewPrompts.length === 1 ? "session" : "sessions"}
@@ -231,7 +295,7 @@ function SourceStage({
   const folderSource = allowed.find((s) => s.kind === "folder");
   return (
     <>
-      <fieldset className="field">
+      <fieldset className="field" data-testid="preset-source-stage">
         <legend>Prompt source</legend>
         {allowed.map((src) => (
           <label className="radio" key={src.kind}>
@@ -239,6 +303,7 @@ function SourceStage({
               type="radio"
               checked={sourceKind === src.kind}
               onChange={() => onSourceKindChange(src.kind)}
+              data-testid={`preset-source-kind-${src.kind}`}
             />
             {sourceLabel(src)}
           </label>
@@ -253,6 +318,7 @@ function SourceStage({
               readOnly
               value={filePath ?? ""}
               placeholder="Pick a .txt or .md file…"
+              data-testid="preset-source-file-path"
             />
             <button
               type="button"
@@ -262,6 +328,7 @@ function SourceStage({
                   filterName: "Prompts",
                 }).then((p) => p && onFilePathChange(p))
               }
+              data-testid="preset-source-file-pick"
             >
               Pick…
             </button>
@@ -285,6 +352,7 @@ function SourceStage({
               readOnly
               value={folderPath ?? ""}
               placeholder="Pick a folder of .md files…"
+              data-testid="preset-source-folder-path"
             />
             <button
               type="button"
@@ -293,6 +361,7 @@ function SourceStage({
                   (p) => p && onFolderPathChange(p),
                 )
               }
+              data-testid="preset-source-folder-pick"
             >
               Pick…
             </button>
@@ -310,6 +379,7 @@ function SourceStage({
               "- first prompt\n- second prompt\n\n" +
               "or paragraph-separated:\n\nfirst prompt\nstill first\n\nsecond prompt"
             }
+            data-testid="preset-source-inline-text"
           />
         </label>
       )}
@@ -372,6 +442,7 @@ function VariableInput({
               ? `Pick a ${kind.extensions.join(" / ")} file…`
               : "Pick a file…"
           }
+          data-testid={`preset-variable-${variable.name}`}
         />
         <button
           type="button"
@@ -381,11 +452,16 @@ function VariableInput({
               filterName: variable.label,
             }).then((p) => p && onChange(p))
           }
+          data-testid={`preset-variable-${variable.name}-pick`}
         >
           Pick…
         </button>
         {value !== "" && (
-          <button type="button" onClick={() => onChange("")}>
+          <button
+            type="button"
+            onClick={() => onChange("")}
+            data-testid={`preset-variable-${variable.name}-clear`}
+          >
             Clear
           </button>
         )}
@@ -400,6 +476,7 @@ function VariableInput({
           readOnly
           value={value}
           placeholder="Pick a folder…"
+          data-testid={`preset-variable-${variable.name}`}
         />
         <button
           type="button"
@@ -408,11 +485,16 @@ function VariableInput({
               (p) => p && onChange(p),
             )
           }
+          data-testid={`preset-variable-${variable.name}-pick`}
         >
           Pick…
         </button>
         {value !== "" && (
-          <button type="button" onClick={() => onChange("")}>
+          <button
+            type="button"
+            onClick={() => onChange("")}
+            data-testid={`preset-variable-${variable.name}-clear`}
+          >
             Clear
           </button>
         )}
@@ -427,17 +509,22 @@ function VariableInput({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={variable.default ?? ""}
+      data-testid={`preset-variable-${variable.name}`}
     />
   );
 }
 
 function PreviewStage({
   prompts,
+  loading,
+  error,
   maxPerTab,
   onMaxPerTabChange,
   defaultCap,
 }: {
   prompts: string[];
+  loading: boolean;
+  error: string | null;
   maxPerTab: string;
   onMaxPerTabChange: (v: string) => void;
   defaultCap: number | null;
@@ -445,16 +532,26 @@ function PreviewStage({
   const tabCount = computeTabCount(prompts.length, maxPerTab);
   return (
     <>
-      <p className="muted">
-        {prompts.length} {prompts.length === 1 ? "prompt" : "prompts"} ready to
-        spawn.
-        {tabCount !== null && (
-          <>
-            {" "}
-            → {tabCount} {tabCount === 1 ? "tab" : "tabs"}.
-          </>
-        )}
-      </p>
+      {loading ? (
+        <p className="muted" data-testid="preset-preview-loading">
+          Resolving prompts…
+        </p>
+      ) : error !== null ? (
+        <p className="error" data-testid="preset-preview-error">
+          Could not resolve prompts: {error}
+        </p>
+      ) : (
+        <p className="muted">
+          {prompts.length} {prompts.length === 1 ? "prompt" : "prompts"} ready
+          to spawn.
+          {tabCount !== null && (
+            <>
+              {" "}
+              → {tabCount} {tabCount === 1 ? "tab" : "tabs"}.
+            </>
+          )}
+        </p>
+      )}
       <label className="field">
         <span>
           Max panes per tab
@@ -470,14 +567,15 @@ function PreviewStage({
           value={maxPerTab}
           onChange={(e) => onMaxPerTabChange(e.target.value)}
           placeholder="(leave blank for the preset default)"
+          data-testid="preset-max-per-tab"
         />
       </label>
-      <div className="preset-preview-list">
-        {prompts.length === 0 ? (
+      <div className="preset-preview-list" data-testid="preset-preview-list">
+        {loading || error !== null ? null : prompts.length === 0 ? (
           <p className="muted">No prompts found in the chosen source.</p>
         ) : (
           prompts.map((p, i) => (
-            <div key={i} className="preset-preview-row">
+            <div key={i} className="preset-preview-row" data-testid="preset-preview-row">
               <span className="preset-preview-index">[{i + 1}]</span>{" "}
               <span>{firstLinePreview(p)}</span>
             </div>
@@ -547,18 +645,6 @@ function buildLaunchSource(
     return args.folderPath ? { kind: "folder", path: args.folderPath } : null;
   }
   return { kind: "inline", prompts: parsePrompts(args.inlineText) };
-}
-
-function computePreview(args: {
-  sourceKind: SourceKind;
-  inlineText: string;
-}): string[] {
-  if (args.sourceKind === "inline") return parsePrompts(args.inlineText);
-  // File/folder previews would require a daemon round-trip; for v1, show
-  // a placeholder count via the source picker stage and let the daemon
-  // run the real parse. The launch will fail visibly if the source is
-  // empty.
-  return [];
 }
 
 function firstLinePreview(prompt: string): string {

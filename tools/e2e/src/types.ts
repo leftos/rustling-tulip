@@ -54,6 +54,15 @@ export interface SessionSnapshot {
 
 // --- Client → Daemon ---------------------------------------------------------
 
+export type PresetTarget =
+  | { kind: "repo"; repo_id: string }
+  | { kind: "workspace"; workspace_id: string };
+
+export type LaunchPresetSource =
+  | { kind: "file"; path: string }
+  | { kind: "folder"; path: string }
+  | { kind: "inline"; prompts: string[] };
+
 export type ClientMessage =
   | { type: "hello"; protocol_version: number; auth_token: string }
   | { type: "list_repos" }
@@ -66,6 +75,15 @@ export type ClientMessage =
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "list_tabs" }
+  | { type: "list_presets"; target: PresetTarget }
+  | {
+      type: "preview_preset";
+      id: string;
+      target: PresetTarget;
+      preset_id: string;
+      source: LaunchPresetSource;
+      variable_values: Array<[string, string]>;
+    }
   | { type: "shutdown" };
 
 // --- Daemon → Client ---------------------------------------------------------
@@ -78,6 +96,8 @@ export type DaemonMessage =
   | { type: "session_updated"; session: SessionSnapshot }
   | { type: "session_removed"; session_id: string }
   | { type: "pty_output"; session_id: string; data_b64: string }
+  | { type: "preset_preview"; id: string; prompts: string[] }
+  | { type: "preset_preview_error"; id: string; error: string }
   | { type: "error"; message: string }
   // Catch-all for messages we don't model — keeps the union exhaustive
   // without forcing us to track every variant.

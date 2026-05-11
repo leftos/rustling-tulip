@@ -26,12 +26,13 @@ export default function GitPanel({ members, client }: Props) {
   );
 
   return (
-    <div className="git-panel">
+    <div className="git-panel" data-testid="git-panel">
       <header className="git-tabs">
         <button
           type="button"
           className={tab === "changes" ? "tab active" : "tab"}
           onClick={() => setTab("changes")}
+          data-testid="git-tab-changes"
         >
           Changes
         </button>
@@ -39,6 +40,7 @@ export default function GitPanel({ members, client }: Props) {
           type="button"
           className={tab === "history" ? "tab active" : "tab"}
           onClick={() => setTab("history")}
+          data-testid="git-tab-history"
         >
           History
         </button>
@@ -47,6 +49,7 @@ export default function GitPanel({ members, client }: Props) {
             value={activeRepoId}
             onChange={(e) => setActiveRepoId(e.target.value)}
             className="repo-picker"
+            data-testid="git-repo-picker"
           >
             {members.map((m) => (
               <option key={m.repo_id} value={m.repo_id}>
@@ -135,7 +138,7 @@ function ChangesView({
       minSize={200}
       direction="horizontal"
     >
-      <div className="git-list git-pane-content">
+      <div className="git-list git-pane-content" data-testid="git-changes-list">
         {!changes ? (
           <p className="empty">loading…</p>
         ) : changes.length === 0 ? (
@@ -149,6 +152,7 @@ function ChangesView({
                   c.path === selected ? "list-item selected" : "list-item"
                 }
                 onClick={() => setSelected(c.path)}
+                data-testid="git-changes-row"
               >
                 <span className={`file-status status-${c.status}`}>
                   {c.status}
@@ -167,13 +171,14 @@ function ChangesView({
               type="button"
               className="link"
               onClick={() => openInForge(client, activeRepoId, member.branch)}
+              data-testid="git-open-in-forge"
             >
               open in forge ↗
             </button>
           </div>
         )}
       </div>
-      <DiffView diff={diff} />
+      <DiffView diff={diff} testId="git-changes-diff" />
     </ResizableSplit>
   );
 }
@@ -252,7 +257,7 @@ function HistoryView({
       minSize={200}
       direction="horizontal"
     >
-      <div className="git-list git-pane-content">
+      <div className="git-list git-pane-content" data-testid="git-history-list">
         {!commits ? (
           <p className="empty">loading…</p>
         ) : commits.length === 0 ? (
@@ -266,6 +271,7 @@ function HistoryView({
                   c.sha === selected ? "list-item selected" : "list-item"
                 }
                 onClick={() => setSelected(c.sha)}
+                data-testid="git-history-row"
               >
                 <span className="commit-sha">{c.short_sha}</span>
                 <span className="list-item-label" title={c.subject}>
@@ -280,20 +286,28 @@ function HistoryView({
           </ul>
         )}
       </div>
-      <DiffView diff={detailDiff} />
+      <DiffView diff={detailDiff} testId="git-history-diff" />
     </ResizableSplit>
   );
 }
 
-function DiffView({ diff }: { diff: string | null }) {
+function DiffView({ diff, testId }: { diff: string | null; testId?: string }) {
   if (diff === null) {
-    return <div className="diff-pane empty">select an item</div>;
+    return (
+      <div className="diff-pane empty" data-testid={testId}>
+        select an item
+      </div>
+    );
   }
   if (diff.length === 0) {
-    return <div className="diff-pane empty">(empty diff)</div>;
+    return (
+      <div className="diff-pane empty" data-testid={testId}>
+        (empty diff)
+      </div>
+    );
   }
   return (
-    <pre className="diff-pane">
+    <pre className="diff-pane" data-testid={testId}>
       {diff.split("\n").map((line, i) => (
         // eslint-disable-next-line react/no-array-index-key
         <span key={i} className={diffLineClass(line)}>

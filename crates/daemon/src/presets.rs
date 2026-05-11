@@ -65,6 +65,34 @@ pub async fn launch(hub: Hub, args: LaunchArgs) {
     }
 }
 
+/// Resolve a preset's prompt source into raw prompt texts without spawning
+/// anything. Used by the launch-dialog preview round-trip so file/folder
+/// sources can show the prompt count before the user commits.
+///
+/// Returns the raw prompt text (e.g. `@docs/foo.md` for a folder source,
+/// parsed lines for a file source, or the supplied strings for inline).
+/// Templates and footers are *not* applied — the dialog mirrors the
+/// inline-preview semantics, which also show raw text.
+pub async fn preview_prompts(
+    hub: &Hub,
+    target: &PresetTarget,
+    preset_id: &str,
+    source: &LaunchPresetSource,
+) -> anyhow::Result<Vec<String>> {
+    let presets = list(hub, target).await?;
+    let preset = presets
+        .into_iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| anyhow!("preset not found: {preset_id}"))?;
+    let repo = find_repo(hub, &preset.source_repo_id)
+        .with_context(|| format!("preset's source repo missing: {}", preset.source_repo_id))?;
+    let repo_path = PathBuf::from(&repo.path);
+    let raw = resolve_prompts(&repo_path, source)
+        .await
+        .map_err(|f| anyhow!(f.error))?;
+    Ok(raw.into_iter().map(|p| p.text).collect())
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------

@@ -133,11 +133,16 @@ export default function SpawnDialog({
     initialTarget?.kind === "workspace" ? initialTarget.workspace_id : null;
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={onClose} data-testid="spawn-dialog">
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <header className="modal-header">
           <h2>Spawn session</h2>
-          <button type="button" className="link" onClick={onClose}>
+          <button
+            type="button"
+            className="link"
+            onClick={onClose}
+            data-testid="spawn-close"
+          >
             ✕
           </button>
         </header>
@@ -149,6 +154,7 @@ export default function SpawnDialog({
                 type="radio"
                 checked={mode === "single"}
                 onChange={() => setMode("single")}
+                data-testid="spawn-mode-single"
               />
               Single repo
             </label>
@@ -158,6 +164,7 @@ export default function SpawnDialog({
                 checked={mode === "workspace"}
                 onChange={() => setMode("workspace")}
                 disabled={workspaces.length === 0}
+                data-testid="spawn-mode-workspace"
               />
               Workspace
             </label>
@@ -239,6 +246,7 @@ function Footer({
             type="radio"
             checked={runMode === "interactive"}
             onChange={() => onRunModeChange("interactive")}
+            data-testid="spawn-runmode-interactive"
           />
           Interactive
         </label>
@@ -251,6 +259,7 @@ function Footer({
             checked={runMode === "headless"}
             disabled={isCodex}
             onChange={() => onRunModeChange("headless")}
+            data-testid="spawn-runmode-headless"
           />
           Headless (one-shot prompt, no terminal)
         </label>
@@ -259,6 +268,7 @@ function Footer({
             type="radio"
             checked={runMode === "plain_shell"}
             onChange={() => onRunModeChange("plain_shell")}
+            data-testid="spawn-runmode-plain_shell"
           />
           Plain shell (no agent)
         </label>
@@ -271,6 +281,7 @@ function Footer({
             value={headlessPrompt}
             onChange={(e) => onHeadlessPromptChange(e.target.value)}
             placeholder="What should claude do?"
+            data-testid="spawn-headless-prompt"
           />
         </label>
       )}
@@ -280,6 +291,7 @@ function Footer({
             type="checkbox"
             checked={skipPerms}
             onChange={(e) => onSkipPermsChange(e.target.checked)}
+            data-testid="spawn-skip-perms"
           />
           <span>{skipPermsLabel}</span>
         </label>
@@ -320,7 +332,7 @@ function AdvancedSection({
   const skipPermsLabel = isCodex ? "yolo" : "skip-permissions";
 
   return (
-    <details className="field advanced-config">
+    <details className="field advanced-config" data-testid="spawn-advanced">
       <summary>Advanced</summary>
       {!isPlainShell && (
         <label className="field">
@@ -473,6 +485,7 @@ function AgentPicker({
           type="radio"
           checked={agent === "claude"}
           onChange={() => onChange("claude")}
+          data-testid="spawn-agent-claude"
         />
         claude
       </label>
@@ -481,6 +494,7 @@ function AgentPicker({
           type="radio"
           checked={agent === "codex"}
           onChange={() => onChange("codex")}
+          data-testid="spawn-agent-codex"
         />
         codex
       </label>
@@ -663,7 +677,11 @@ function SingleForm({
       <AgentPicker agent={agent} onChange={onAgentChange} />
       <label className="field">
         <span>Repo</span>
-        <select value={repoId} onChange={(e) => setRepoId(e.target.value)}>
+        <select
+          value={repoId}
+          onChange={(e) => setRepoId(e.target.value)}
+          data-testid="spawn-single-repo"
+        >
           {repos.map((r) => (
             <option key={r.id} value={r.id}>
               {r.name}
@@ -680,6 +698,7 @@ function SingleForm({
           value={branch.value}
           onChange={(e) => branch.setValue(e.target.value)}
           placeholder={defaultBranch}
+          data-testid="spawn-single-branch"
         />
         <datalist id={datalistId}>
           {knownBranches.map((b) => (
@@ -695,6 +714,7 @@ function SingleForm({
           value={baseBranch}
           onChange={(e) => setBaseBranch(e.target.value)}
           placeholder={defaultBranch}
+          data-testid="spawn-single-base-branch"
         />
       </label>
 
@@ -703,6 +723,7 @@ function SingleForm({
           type="checkbox"
           checked={useWorktree}
           onChange={(e) => toggleUseWorktree(e.target.checked)}
+          data-testid="spawn-single-worktree"
         />
         <span>
           Create a worktree
@@ -714,7 +735,7 @@ function SingleForm({
 
       {header}
       <div className="modal-footer-inline">
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={onClose} data-testid="spawn-single-cancel">
           Cancel
         </button>
         <button
@@ -722,6 +743,7 @@ function SingleForm({
           className="primary"
           disabled={!canSubmit}
           onClick={submit}
+          data-testid="spawn-single-submit"
         >
           Spawn
         </button>
@@ -882,6 +904,7 @@ function WorkspaceForm({
         <select
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
+          data-testid="spawn-workspace-select"
         >
           {workspaces.map((w) => (
             <option key={w.id} value={w.id}>
@@ -898,6 +921,7 @@ function WorkspaceForm({
           value={branch.value}
           onChange={(e) => branch.setValue(e.target.value)}
           placeholder={defaultBranch}
+          data-testid="spawn-workspace-branch"
         />
       </label>
 
@@ -908,6 +932,7 @@ function WorkspaceForm({
           value={baseBranch}
           onChange={(e) => setBaseBranch(e.target.value)}
           placeholder={defaultBranch}
+          data-testid="spawn-workspace-base-branch"
         />
       </label>
 
@@ -916,6 +941,7 @@ function WorkspaceForm({
           type="checkbox"
           checked={useWorktree}
           onChange={(e) => toggleUseWorktree(e.target.checked)}
+          data-testid="spawn-workspace-worktree"
         />
         <span>
           Create worktrees
@@ -930,13 +956,14 @@ function WorkspaceForm({
           type="button"
           onClick={requestPreview}
           disabled={!branch.value}
+          data-testid="spawn-workspace-preview"
         >
           Preview
         </button>
       </div>
 
       {preview && (
-        <div className="preview-table">
+        <div className="preview-table" data-testid="spawn-workspace-preview-table">
           <table>
             <thead>
               <tr>
@@ -970,7 +997,7 @@ function WorkspaceForm({
 
       {header}
       <div className="modal-footer-inline">
-        <button type="button" onClick={onClose}>
+        <button type="button" onClick={onClose} data-testid="spawn-workspace-cancel">
           Cancel
         </button>
         <button
@@ -978,6 +1005,7 @@ function WorkspaceForm({
           className="primary"
           disabled={!canSpawn}
           onClick={submit}
+          data-testid="spawn-workspace-submit"
         >
           Spawn
         </button>

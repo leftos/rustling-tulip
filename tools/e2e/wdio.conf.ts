@@ -52,7 +52,7 @@ let exited = false;
 
 export const config: WebdriverIO.Config = {
   runner: "local",
-  specs: [join(here, "tests", "e2e", "specs", "webview.spec.ts")],
+  specs: [join(here, "tests", "e2e", "specs", "*.spec.ts")],
   exclude: [],
   maxInstances: 1,
 
