@@ -46,6 +46,7 @@ function advancedToWire(
   model: string | null;
   permission_mode: PermissionMode | null;
   extra_env: Array<[string, string]>;
+  prompt_injector: null;
 } {
   const isPlainShell = runMode === "plain_shell";
   return {
@@ -57,6 +58,8 @@ function advancedToWire(
     extra_env: cfg.envRows
       .filter((r) => r.key.trim().length > 0)
       .map<[string, string]>((r) => [r.key.trim(), r.value]),
+    // Preset launches set this; manual spawns from this dialog do not.
+    prompt_injector: null,
   };
 }
 

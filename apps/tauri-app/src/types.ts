@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export interface RepoEntry {
   id: string;
@@ -90,6 +90,94 @@ export interface SpawnRequest {
   model: string | null;
   permission_mode: PermissionMode | null;
   extra_env: Array<[string, string]>;
+  prompt_injector: PromptInjector | null;
+}
+
+// ------- Prompt injection & presets -------
+
+export type InjectorStep =
+  | { kind: "delay"; ms: number }
+  | { kind: "write"; data_b64: string }
+  | { kind: "text"; content: string; newline: boolean };
+
+export interface PromptInjector {
+  steps: InjectorStep[];
+}
+
+export interface InjectorTemplate {
+  startup_delay_ms: number;
+  pre_input: InjectorStep[];
+  post_input: InjectorStep[];
+}
+
+export type PresetTarget =
+  | { kind: "repo"; repo_id: string }
+  | { kind: "workspace"; workspace_id: string };
+
+export type PresetPromptSource =
+  | { kind: "file" }
+  | { kind: "folder"; relative_path: string }
+  | { kind: "inline" };
+
+export type LaunchPresetSource =
+  | { kind: "file"; path: string }
+  | { kind: "folder"; path: string }
+  | { kind: "inline"; prompts: string[] };
+
+export type PresetVariableKind =
+  | { kind: "text" }
+  | { kind: "file_path"; extensions: string[] }
+  | { kind: "folder_path" }
+  | { kind: "env_var"; name: string }
+  | { kind: "literal_path"; path: string };
+
+export interface PresetVariable {
+  name: string;
+  label: string;
+  kind: PresetVariableKind;
+  prompt_at_launch: boolean;
+  default: string | null;
+  optional: boolean;
+}
+
+export interface FooterLine {
+  label: string;
+  variable: string;
+}
+
+export type TabLayout =
+  | "tile_horizontal"
+  | "tile_vertical"
+  | "balanced_horizontal"
+  | "balanced_vertical";
+
+export type TabGroupingConfig =
+  | { kind: "none" }
+  | {
+      kind: "new_tab";
+      layout: TabLayout;
+      max_panes_per_tab: number | null;
+      tab_name_template: string | null;
+    };
+
+export interface PresetEntry {
+  id: string;
+  name: string;
+  description: string | null;
+  source_repo_id: string;
+  prompt_sources: PresetPromptSource[];
+  prompt_template: string;
+  context_footer_lines: FooterLine[];
+  variables: PresetVariable[];
+  branch_template: string;
+  session_label_template: string | null;
+  default_use_worktree: boolean | null;
+  dangerously_skip_permissions: boolean;
+  model: string | null;
+  permission_mode: PermissionMode | null;
+  tab_grouping: TabGroupingConfig;
+  injector: InjectorTemplate;
+  stagger_ms: number;
 }
 
 export interface CleanupAction {
@@ -285,6 +373,16 @@ export type ClientMessage =
       source_tab_id: string;
       pane_ids: string[];
       name: string | null;
+    }
+  | { type: "list_presets"; target: PresetTarget }
+  | {
+      type: "launch_preset";
+      target: PresetTarget;
+      preset_id: string;
+      source: LaunchPresetSource;
+      variable_values: Array<[string, string]>;
+      use_worktree_override: boolean | null;
+      max_panes_per_tab_override: number | null;
     };
 
 export type DaemonMessage =
@@ -336,4 +434,20 @@ export type DaemonMessage =
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }
+  | { type: "presets"; target: PresetTarget; entries: PresetEntry[] }
+  | {
+      type: "preset_launch_progress";
+      preset_id: string;
+      total: number;
+      launched: number;
+      current_tab_id: string | null;
+      tab_ids: string[];
+    }
+  | {
+      type: "preset_launch_failed";
+      preset_id: string;
+      error: string;
+      partial_session_ids: string[];
+      partial_tab_ids: string[];
+    }
   | { type: "error"; message: string };

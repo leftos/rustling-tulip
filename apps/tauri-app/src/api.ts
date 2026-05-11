@@ -3,6 +3,9 @@ import {
   PROTOCOL_VERSION,
   type ClientMessage,
   type DaemonMessage,
+  type LaunchPresetSource,
+  type PresetEntry,
+  type PresetTarget,
 } from "./types";
 
 interface DaemonHandshake {
@@ -150,6 +153,62 @@ export function loadScrollback(
     window.addEventListener("rt:scrollback", handler);
     client.send({ type: "load_scrollback", session_id: sessionId });
   });
+}
+
+/**
+ * Request the preset list for a repo or workspace and resolve with the
+ * response. Times out after 2 s. Mirrors loadScrollback's pattern: relies
+ * on App.tsx re-dispatching `rt:presets` so any caller can subscribe.
+ */
+export function listPresets(
+  client: DaemonClient,
+  target: PresetTarget,
+): Promise<PresetEntry[]> {
+  return new Promise((resolve) => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "presets") return;
+      if (!targetsMatch(detail.target, target)) return;
+      cleanup();
+      resolve(detail.entries);
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve([]);
+    }, 2000);
+    const cleanup = () => {
+      window.removeEventListener("rt:presets", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:presets", handler);
+    client.send({ type: "list_presets", target });
+  });
+}
+
+function targetsMatch(a: PresetTarget, b: PresetTarget): boolean {
+  if (a.kind === "repo" && b.kind === "repo") return a.repo_id === b.repo_id;
+  if (a.kind === "workspace" && b.kind === "workspace") {
+    return a.workspace_id === b.workspace_id;
+  }
+  return false;
+}
+
+export interface LaunchPresetOpts {
+  target: PresetTarget;
+  preset_id: string;
+  source: LaunchPresetSource;
+  variable_values: Array<[string, string]>;
+  use_worktree_override: boolean | null;
+  max_panes_per_tab_override: number | null;
+}
+
+/**
+ * Fire-and-forget preset launch. Progress and completion stream back via
+ * `rt:preset_launch_progress` / `rt:preset_launch_failed` window events
+ * dispatched by App.tsx.
+ */
+export function launchPreset(client: DaemonClient, opts: LaunchPresetOpts) {
+  client.send({ type: "launch_preset", ...opts });
 }
 
 export function bytesToBase64(bytes: Uint8Array): string {

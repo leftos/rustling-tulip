@@ -663,8 +663,31 @@ function handleMessage(
     case "remote_url":
     case "repo_status":
     case "scrollback":
+    case "presets":
+    case "preset_launch_failed":
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
+      );
+      if (msg.type === "preset_launch_failed") {
+        console.error(
+          `preset launch failed (${msg.preset_id}): ${msg.error}`,
+          `${msg.partial_session_ids.length} sessions and ` +
+            `${msg.partial_tab_ids.length} tabs were created before failure`,
+        );
+      }
+      return;
+    case "preset_launch_progress":
+      // Auto-activate the tab being filled so the user sees panes appear.
+      if (msg.current_tab_id !== null) {
+        const targetTabId = msg.current_tab_id;
+        setState((s) =>
+          s.tabs.some((t) => t.id === targetTabId) && s.activeTabId !== targetTabId
+            ? { ...s, activeTabId: targetTabId }
+            : s,
+        );
+      }
+      window.dispatchEvent(
+        new CustomEvent("rt:preset_launch_progress", { detail: msg }),
       );
       return;
     case "error":
