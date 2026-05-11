@@ -105,9 +105,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
   - File: `apps/tauri-app/src/components/Terminal.tsx:25-40`.
   - Suggested direction: bind explicit keymap or surface a "right-click to copy selection" hint.
 - ~~**Headless `recent_actions` list grows unbounded in the UI.**~~ **Resolved (iter 36).** `HeadlessView` now slices to the last `HEADLESS_RECENT_ACTIONS_TAIL = 200` entries by default, with a "Show all N entries (earlier M hidden)" button that opts into the full list. Composed `<li>` keys (`sliceStart + idx`) keep React reconciliation stable across slice changes. Avoids the renderer freeze on long-running headless sessions while preserving access to earlier events when the user actually needs them.
-- **PTY input is sent on every keystroke even when the session is stopped.** `Terminal` is unmounted when `session.status === "stopped"` (line 142 SessionPane), but the `onData` handler in xterm fires after dispose — fine. However, between the daemon emitting Stopped and the UI receiving `session_updated`, keystrokes are forwarded to a dying PTY, the daemon may log warnings.
-  - File: `apps/tauri-app/src/components/Terminal.tsx:76-84`.
-  - Suggested direction: guard `send_input` on the latest known session status (low priority).
+- ~~**PTY input is sent on every keystroke even when the session is stopped.**~~ **Resolved (iter 40).** `Terminal` now takes a `status` prop, mirrors it into `statusRef`, and the `onData` handler skips `send_input` when the latest known status is `stopped` or `error`. The window between the daemon broadcasting Stopped and React unmounting the Terminal no longer leaks keystrokes to a dying PTY.
 
 ### Git panel
 
@@ -127,9 +125,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Changes / History views re-issue their request on every `activeRepoId` change but don't cancel previous in-flight handlers.** Two rapid switches register two `rt:repo_status` listeners; the second remains until cleanup. Subsequent responses for the stale repo will be dropped via the id check but listener registration accumulates briefly.
   - File: `apps/tauri-app/src/components/GitPanel.tsx:92-129`, `196-246`.
   - Suggested direction: probably OK in practice; tighten if you see lag.
-- **`select an item` placeholder is the same for both Changes and History.** When the user switches from Changes (with a selected file diff visible) to History, the right pane shows "select an item" with no hint that they're now in History.
-  - File: `apps/tauri-app/src/components/GitPanel.tsx:289-294`.
-  - Suggested direction: contextual placeholder ("Select a file to view the working-tree diff" / "Select a commit to view its changes").
+- ~~**`select an item` placeholder is the same for both Changes and History.**~~ **Resolved (iter 40 retroactively for the survived path).** `GitPanel.tsx` is gone since iter 7 (replaced by the Source Control sidebar). The Changes view now opens Monaco diff tabs instead of an inline pane, so the "select an item" placeholder isn't shown there at all. The remaining shared `DiffView` (history detail) now accepts an optional `placeholder` prop; the history call site passes "Select a commit to view its diff." Default placeholder unchanged.
 - **`ResizableSplit` storage key `git.list` is shared across every git panel mount.** Resizing the file list in tab A persists for every git panel in every tab/pop-out. May be desirable, but not configurable.
   - File: `apps/tauri-app/src/components/GitPanel.tsx:132-138`, `249-254`.
 
@@ -170,9 +166,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - **Sidebar tree leaves are `role="button"` but have no `tabIndex` or keyboard handler.** Screen reader announces "button" but Enter / Space do nothing.
   - File: `apps/tauri-app/src/components/Sidebar.tsx:262-263`, `328-329`.
   - Suggested direction: add `tabIndex={0}` and an `onKeyDown` that maps Enter/Space to `onSelect`.
-- **No `aria-label` on close × buttons.** The literal `×` is non-descriptive for screen readers.
-  - Files: `Sidebar.tsx:285`, `SpawnDialog.tsx:115`, `WorkspaceCreator.tsx:45`, `VscodeSuggestionToast.tsx:30`, `PresetLaunchDialog.tsx:129`, `TabBar.tsx:262-270`.
-  - Suggested direction: `aria-label="Close dialog"` / `"Remove repo"` / `"Close tab"` on each.
+- ~~**No `aria-label` on close × buttons.**~~ **Resolved across iters 6 + 39.** Every modal close ✕ now carries `aria-label="Close dialog"` (or `"Dismiss notification"` / `"Dismiss suggestion"` for toast-like modals). Sidebar inline remove × already had `aria-label`. TabBar tab-pill-close labels with the tab name. The audit's last open close-× was `PresetLaunchDialog`, closed in iter 39.
 - ~~**No `role="dialog"` / `aria-modal` on modals.**~~ **Resolved across iters 6 + 13 + 20.** Every component using `.modal-backdrop` now adds `role="dialog"` + `aria-modal="true"` + a descriptive `aria-label` on the inner `.modal`. Pure-toast surfaces (`ErrorToast`) are intentionally NOT marked as dialogs — they don't take focus or block input.
 - ~~**Status dot uses colour as the only differentiator.**~~ **Resolved (iter 16).** Status dots in `Sidebar` and `SessionPane` gained `title="status: <state>"` + `aria-label="status <state>"` + `role="img"` so screen-reader users and hover-tooltip users get the underlying state.
 - ~~**Modal stacking order is render-order, all at `z-index: 100`.**~~ **Resolved (iter 33).** Three new modifier classes layered on top of `.modal-backdrop`: `modal-backdrop-destructive` (z 120, used by RepoRemoveDialog + DiscardConfirmDialog), `modal-backdrop-vscode` (z 130, VscodeSuggestionToast), `modal-backdrop-exit` (z 140, ExitConfirmDialog). Ordinary forms (SpawnDialog, PresetLaunchDialog, WorkspaceCreator) keep the base z 100. The ordering reflects intent: exit (system-level quit) wins over everything; daemon-pushed events outrank confirms; destructive confirms outrank ordinary forms.

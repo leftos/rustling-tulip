@@ -619,18 +619,34 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
           </>
         )}
       </div>
-      <DiffView diff={detailDiff} testId="source-control-history-diff" />
+      <DiffView
+        diff={detailDiff}
+        testId="source-control-history-diff"
+        placeholder="Select a commit to view its diff."
+      />
     </ResizableSplit>
   );
 }
 
 // ---------- DiffView (shared) ----------
 
-function DiffView({ diff, testId }: { diff: string | null; testId?: string }) {
+function DiffView({
+  diff,
+  testId,
+  placeholder,
+}: {
+  diff: string | null;
+  testId?: string;
+  /// Contextual placeholder for the empty (nothing-selected) state.
+  /// Defaults to a generic message; the Changes and History views
+  /// override this so the user knows which view they're in even when
+  /// nothing is selected.
+  placeholder?: string;
+}) {
   if (diff === null) {
     return (
       <div className="diff-pane empty" data-testid={testId}>
-        select an item
+        {placeholder ?? "select an item"}
       </div>
     );
   }

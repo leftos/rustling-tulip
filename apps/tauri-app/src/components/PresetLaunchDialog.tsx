@@ -212,6 +212,7 @@ export default function PresetLaunchDialog({
             type="button"
             className="link"
             onClick={onClose}
+            aria-label="Close dialog"
             data-testid="preset-launch-close"
           >
             ✕

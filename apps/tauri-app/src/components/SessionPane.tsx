@@ -161,6 +161,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
               sessionId={session.id}
               client={client}
               subscribePty={subscribePty}
+              status={session.status}
             />
           ) : (
             <div className="terminal-placeholder">

@@ -12,9 +12,18 @@ interface Props {
   sessionId: string;
   client: DaemonClient;
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
+  /// Latest known status. Threaded through so the input handler can
+  /// skip `send_input` after the daemon has already reported the
+  /// session as stopped/errored — between the Stopped broadcast
+  /// arriving and React unmounting this component there's a small
+  /// window where keystrokes would otherwise be forwarded to a dying
+  /// PTY (and trigger daemon warnings).
+  status: string;
 }
 
-export default function Terminal({ sessionId, client, subscribePty }: Props) {
+export default function Terminal({ sessionId, client, subscribePty, status }: Props) {
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -86,6 +95,13 @@ export default function Terminal({ sessionId, client, subscribePty }: Props) {
     });
 
     const onDataHandler = term.onData((data) => {
+      // Skip when the latest known status is terminal — there's a small
+      // race window between the daemon's Stopped/Error broadcast and
+      // React unmounting this component, and we don't want to send
+      // keystrokes to a dying PTY.
+      if (statusRef.current === "stopped" || statusRef.current === "error") {
+        return;
+      }
       const enc = new TextEncoder();
       client.send({
         type: "send_input",
