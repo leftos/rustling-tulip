@@ -248,6 +248,21 @@ pub fn run() {
         .compact()
         .try_init();
 
+    // Mutate the bundled context BEFORE handing it to Builder::run so that
+    // any e2e-mode window adjustments (offscreen position, taskbar opt-out)
+    // are baked into the initial WindowConfig and the window is created at
+    // the right place. Setting position post-hoc in `setup` left a frame
+    // visible on screen during boot — by the time setup ran the window had
+    // already painted at its config default. See task #56.
+    let mut context = tauri::generate_context!();
+    if env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW") {
+        for window in &mut context.config_mut().app.windows {
+            window.x = Some(-32_000.0);
+            window.y = Some(-32_000.0);
+            window.skip_taskbar = true;
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -262,7 +277,7 @@ pub fn run() {
             log_message,
             quit_app
         ])
-        .setup(|app| {
+        .setup(|_app| {
             info!("rustling-tulip Tauri app starting");
             if let Err(err) = truncate_app_log() {
                 tracing::warn!(err, "failed to truncate app.log on boot");
@@ -279,19 +294,8 @@ pub fn run() {
             ) {
                 tracing::warn!(err, "failed to write env status to app.log");
             }
-            // E2E harness opt-in: move the main window offscreen so test runs
-            // don't pop the app over the user's workspace. WebDriver controls
-            // the WebView via DOM/JS, which works regardless of where the
-            // window lives on screen. Done in setup so the move happens
-            // before the window's first paint.
-            if env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW")
-                && let Some(win) = app.get_webview_window("main")
-            {
-                let _ = win.set_position(tauri::PhysicalPosition::new(-32_000, -32_000));
-                let _ = win.set_skip_taskbar(true);
-            }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
