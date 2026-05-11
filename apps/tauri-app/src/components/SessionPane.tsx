@@ -41,18 +41,32 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
   }, [session.id]);
 
   const isHeadless = session.mode === "headless";
+  const isPlainShell = session.mode === "plain_shell";
+  const modeSuffix = isHeadless
+    ? " · headless"
+    : isPlainShell
+      ? " · shell"
+      : "";
 
   return (
     <div className="session-pane">
       <header className="session-header">
         <div className="session-title">
-          <span className={`status-dot status-${session.status}`} />
+          {/* Shell sessions sit at Idle forever — a green dot would be
+              misleading. Show a terminal glyph in its place instead. */}
+          {isPlainShell ? (
+            <span className="status-glyph" aria-hidden="true">
+              {">_"}
+            </span>
+          ) : (
+            <span className={`status-dot status-${session.status}`} />
+          )}
           <h2>{session.label}</h2>
           <span className="session-meta">
             {session.kind === "workspace"
               ? `${session.members.length} repos`
               : session.members[0]?.repo_name ?? ""}
-            {isHeadless ? " · headless" : ""}
+            {modeSuffix}
           </span>
         </div>
         <div className="session-actions">
@@ -112,9 +126,10 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
       </div>
       {session.is_orphan && (
         <div className="orphan-banner">
-          PTY stream lost across daemon restart. The underlying claude process
-          is still running, but live input/output is not available. Stop the
-          session and spawn a new one to resume.
+          PTY stream lost across daemon restart. The underlying{" "}
+          {isPlainShell ? "shell" : "claude"} process is still running, but
+          live input/output is not available. Stop the session and spawn a
+          new one to resume.
         </div>
       )}
 

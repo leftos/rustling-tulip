@@ -275,19 +275,31 @@ interface SessionLeafProps {
 
 function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
+  const isPlainShell = s.mode === "plain_shell";
   const classes = [
     "tree-row",
     "tree-leaf",
     p.selected ? "selected" : "",
     p.needsAttention ? "needs-attention" : "",
     s.is_orphan ? "is-orphan" : "",
+    isPlainShell ? "is-shell" : "",
   ]
     .filter(Boolean)
     .join(" ");
   return (
     <li>
       <div className={classes} onClick={() => p.onSelect(s.id)} role="button">
-        <span className={`status-dot status-${s.status}`} />
+        {isPlainShell ? (
+          <span
+            className="status-glyph"
+            aria-hidden="true"
+            title="Plain shell session"
+          >
+            {">_"}
+          </span>
+        ) : (
+          <span className={`status-dot status-${s.status}`} />
+        )}
         <span className="tree-label" title={s.label}>
           {s.label}
         </span>

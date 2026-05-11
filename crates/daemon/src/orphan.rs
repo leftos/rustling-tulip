@@ -32,6 +32,14 @@ pub struct OrphanMeta {
     /// and for metas written by earlier daemon versions.
     #[serde(default)]
     pub workspace_id: Option<String>,
+    /// Process name substring to match against during orphan-recovery's
+    /// liveness check (case-insensitive). `claude` sessions store the
+    /// program-name token (e.g. `"claude"`); `plain_shell` sessions store the
+    /// shell label (e.g. `"pwsh"`, `"cmd"`, `"bash"`). `None` for metas
+    /// written by earlier daemon versions: the check falls back to the
+    /// legacy `claude`/`node` heuristic.
+    #[serde(default)]
+    pub program_name: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -109,13 +117,18 @@ pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Returns true iff `pid` exists *and* its executable name suggests it is a
-/// `claude` process. The name check guards against PID reuse: if the pid was
+/// Returns true iff `pid` exists *and* its executable name matches what we
+/// expected to spawn. The name check guards against PID reuse: if the pid was
 /// recycled to an unrelated process, the meta is stale and should be dropped.
-pub fn is_claude_alive(pid: u32) -> bool {
+///
+/// When `meta.program_name` is set (post-upgrade metas) the match is
+/// case-insensitive substring against that token. When it is `None` (legacy
+/// metas written before plain-shell support landed) we fall back to the
+/// original `claude`/`node` heuristic so existing sidecars keep working.
+pub fn is_session_alive(meta: &OrphanMeta) -> bool {
     let mut sys =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    let pid = sysinfo::Pid::from_u32(pid);
+    let pid = sysinfo::Pid::from_u32(meta.pid);
     sys.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         false,
@@ -125,18 +138,23 @@ pub fn is_claude_alive(pid: u32) -> bool {
         return false;
     };
     let name = process.name().to_string_lossy().to_lowercase();
-    // `claude` (Unix) or `claude.exe` / `node.exe` shim on Windows. The TUI is
-    // a Node script invoked via a shim; allow either.
-    name.contains("claude") || name.contains("node")
+    match meta.program_name.as_deref() {
+        Some(token) => name.contains(&token.to_lowercase()),
+        // Legacy fallback: `claude` (Unix) or `claude.exe` / `node.exe` shim
+        // on Windows. The TUI is a Node script invoked via a shim; allow
+        // either.
+        None => name.contains("claude") || name.contains("node"),
+    }
 }
 
-/// Filter a list of metas down to those whose pid is still a live claude-ish
-/// process. Returns `(live, dead)` so callers can clean up dead entries.
+/// Filter a list of metas down to those whose pid is still a live process
+/// matching the recorded program name. Returns `(live, dead)` so callers can
+/// clean up dead entries.
 pub fn partition_live(metas: Vec<OrphanMeta>) -> (Vec<OrphanMeta>, Vec<OrphanMeta>) {
     let mut live = Vec::new();
     let mut dead = Vec::new();
     for m in metas {
-        if is_claude_alive(m.pid) {
+        if is_session_alive(&m) {
             live.push(m);
         } else {
             dead.push(m);
@@ -180,6 +198,7 @@ pub fn meta_from_record(
     members: Vec<SessionMember>,
     started_at: DateTime<Utc>,
     workspace_id: Option<String>,
+    program_name: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -193,6 +212,7 @@ pub fn meta_from_record(
         members,
         started_at,
         workspace_id,
+        program_name,
     })
 }
 

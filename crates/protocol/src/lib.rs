@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 fn default_true() -> bool {
     true
@@ -102,6 +102,10 @@ pub enum SessionStatus {
 pub enum SessionMode {
     Interactive,
     Headless,
+    /// Non-agentic shell (pwsh/powershell/cmd on Windows, $SHELL/bash/sh on
+    /// Unix) running in the session's primary cwd. Bypasses the `claude` CLI
+    /// entirely; no model/permission/prompt fields apply.
+    PlainShell,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

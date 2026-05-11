@@ -21,7 +21,7 @@ interface Props {
 }
 
 type Mode = "single" | "workspace";
-type RunMode = "interactive" | "headless";
+type RunMode = "interactive" | "headless" | "plain_shell";
 
 interface EnvRow {
   key: string;
@@ -41,14 +41,19 @@ function emptyAdvanced(): AdvancedConfig {
 function advancedToWire(
   cfg: AdvancedConfig,
   skipPerms: boolean,
+  runMode: RunMode,
 ): {
   model: string | null;
   permission_mode: PermissionMode | null;
   extra_env: Array<[string, string]>;
 } {
+  const isPlainShell = runMode === "plain_shell";
   return {
-    model: cfg.model,
-    permission_mode: skipPerms ? null : cfg.permissionMode,
+    // Plain shell ignores claude-only fields; the daemon fail-fast checks
+    // that they are unset, so force them to null on the wire even if the
+    // user left stale state from a previous run mode.
+    model: isPlainShell ? null : cfg.model,
+    permission_mode: isPlainShell || skipPerms ? null : cfg.permissionMode,
     extra_env: cfg.envRows
       .filter((r) => r.key.trim().length > 0)
       .map<[string, string]>((r) => [r.key.trim(), r.value]),
@@ -182,6 +187,7 @@ function Footer({
   advanced: AdvancedConfig;
   onAdvancedChange: (cfg: AdvancedConfig) => void;
 }) {
+  const isPlainShell = runMode === "plain_shell";
   return (
     <>
       <fieldset className="field">
@@ -202,6 +208,14 @@ function Footer({
           />
           Headless (one-shot prompt, no terminal)
         </label>
+        <label className="radio">
+          <input
+            type="radio"
+            checked={runMode === "plain_shell"}
+            onChange={() => onRunModeChange("plain_shell")}
+          />
+          Plain shell (no claude)
+        </label>
       </fieldset>
       {runMode === "headless" && (
         <label className="field">
@@ -214,18 +228,21 @@ function Footer({
           />
         </label>
       )}
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={skipPerms}
-          onChange={(e) => onSkipPermsChange(e.target.checked)}
-        />
-        <span>Pass --dangerously-skip-permissions</span>
-      </label>
+      {!isPlainShell && (
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={skipPerms}
+            onChange={(e) => onSkipPermsChange(e.target.checked)}
+          />
+          <span>Pass --dangerously-skip-permissions</span>
+        </label>
+      )}
       <AdvancedSection
         skipPerms={skipPerms}
         advanced={advanced}
         onAdvancedChange={onAdvancedChange}
+        isPlainShell={isPlainShell}
       />
     </>
   );
@@ -235,10 +252,12 @@ function AdvancedSection({
   skipPerms,
   advanced,
   onAdvancedChange,
+  isPlainShell,
 }: {
   skipPerms: boolean;
   advanced: AdvancedConfig;
   onAdvancedChange: (cfg: AdvancedConfig) => void;
+  isPlainShell: boolean;
 }) {
   const setModel = (model: string | null) =>
     onAdvancedChange({ ...advanced, model });
@@ -250,44 +269,50 @@ function AdvancedSection({
   return (
     <details className="field advanced-config">
       <summary>Advanced</summary>
-      <label className="field">
-        <span>Model</span>
-        <select
-          value={advanced.model ?? ""}
-          onChange={(e) => setModel(e.target.value || null)}
-        >
-          <option value="">Use CLI default</option>
-          {CLAUDE_MODELS.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      {!isPlainShell && (
+        <label className="field">
+          <span>Model</span>
+          <select
+            value={advanced.model ?? ""}
+            onChange={(e) => setModel(e.target.value || null)}
+          >
+            <option value="">Use CLI default</option>
+            {CLAUDE_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
-      <label className="field">
-        <span>Permission mode</span>
-        <select
-          value={advanced.permissionMode ?? ""}
-          onChange={(e) =>
-            setPermissionMode(
-              e.target.value === "" ? null : (e.target.value as PermissionMode),
-            )
-          }
-          disabled={skipPerms}
-        >
-          <option value="">CLI default</option>
-          <option value="default">default</option>
-          <option value="accept_edits">acceptEdits</option>
-          <option value="bypass_permissions">bypassPermissions</option>
-          <option value="plan">plan</option>
-        </select>
-        {skipPerms && (
-          <span className="muted small">
-            Disabled because skip-permissions is on
-          </span>
-        )}
-      </label>
+      {!isPlainShell && (
+        <label className="field">
+          <span>Permission mode</span>
+          <select
+            value={advanced.permissionMode ?? ""}
+            onChange={(e) =>
+              setPermissionMode(
+                e.target.value === ""
+                  ? null
+                  : (e.target.value as PermissionMode),
+              )
+            }
+            disabled={skipPerms}
+          >
+            <option value="">CLI default</option>
+            <option value="default">default</option>
+            <option value="accept_edits">acceptEdits</option>
+            <option value="bypass_permissions">bypassPermissions</option>
+            <option value="plan">plan</option>
+          </select>
+          {skipPerms && (
+            <span className="muted small">
+              Disabled because skip-permissions is on
+            </span>
+          )}
+        </label>
+      )}
 
       <fieldset className="field">
         <legend>Extra environment variables</legend>
@@ -494,8 +519,9 @@ function SingleForm({
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
-      dangerously_skip_permissions: skipPerms,
-      ...advancedToWire(advanced, skipPerms),
+      dangerously_skip_permissions:
+        runMode === "plain_shell" ? false : skipPerms,
+      ...advancedToWire(advanced, skipPerms, runMode),
     });
     onSpawned();
     onClose();
@@ -697,8 +723,9 @@ function WorkspaceForm({
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
-      dangerously_skip_permissions: skipPerms,
-      ...advancedToWire(advanced, skipPerms),
+      dangerously_skip_permissions:
+        runMode === "plain_shell" ? false : skipPerms,
+      ...advancedToWire(advanced, skipPerms, runMode),
     });
     onSpawned();
     onClose();

@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export interface RepoEntry {
   id: string;
@@ -26,7 +26,7 @@ export type SessionStatus =
   | "awaiting_input"
   | "stopped"
   | "error";
-export type SessionMode = "interactive" | "headless";
+export type SessionMode = "interactive" | "headless" | "plain_shell";
 
 export interface SessionMember {
   repo_id: string;

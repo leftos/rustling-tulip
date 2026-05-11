@@ -875,11 +875,41 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
         extra_env,
     };
 
-    if mode == SessionMode::Headless {
-        let prompt = initial_prompt
-            .clone()
-            .ok_or_else(|| anyhow!("headless sessions require an initial_prompt"))?;
-        return spawn_headless_session(
+    match mode {
+        SessionMode::Headless => {
+            let prompt = initial_prompt
+                .clone()
+                .ok_or_else(|| anyhow!("headless sessions require an initial_prompt"))?;
+            spawn_headless_session(
+                hub,
+                session_id,
+                label,
+                kind,
+                members,
+                workspace_id,
+                primary_cwd,
+                prompt,
+                &cfg,
+            )
+        }
+        SessionMode::PlainShell => {
+            if initial_prompt.is_some() {
+                return Err(anyhow!(
+                    "plain shell sessions do not accept an initial_prompt"
+                ));
+            }
+            spawn_plain_shell_session(
+                hub,
+                session_id,
+                label,
+                kind,
+                members,
+                workspace_id,
+                primary_cwd,
+                &cfg,
+            )
+        }
+        SessionMode::Interactive => spawn_interactive_session(
             hub,
             session_id,
             label,
@@ -887,22 +917,10 @@ async fn spawn_session(hub: &Hub, req: SpawnRequest) -> anyhow::Result<protocol:
             members,
             workspace_id,
             primary_cwd,
-            prompt,
+            initial_prompt,
             &cfg,
-        );
+        ),
     }
-
-    spawn_interactive_session(
-        hub,
-        session_id,
-        label,
-        kind,
-        members,
-        workspace_id,
-        primary_cwd,
-        initial_prompt,
-        &cfg,
-    )
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
@@ -1003,6 +1021,9 @@ fn spawn_interactive_session(
             members,
             started_at,
             workspace_id,
+            // Claude's PTY child is a node shim on Windows; let the legacy
+            // claude|node fallback in `is_session_alive` handle it.
+            None,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1014,6 +1035,106 @@ fn spawn_interactive_session(
         pty.output.subscribe(),
         hub.attention_tx.clone(),
     );
+    osc_title::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        hub.dirs.clone(),
+    );
+    attach_lifecycle(&hub.sessions, session_id, &pty, Some(hub.dirs.clone()));
+    Ok(snap)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
+)]
+fn spawn_plain_shell_session(
+    hub: &Hub,
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    workspace_id: Option<String>,
+    primary_cwd: PathBuf,
+    cfg: &SpawnConfig,
+) -> anyhow::Result<protocol::SessionSnapshot> {
+    // Fail-fast: the dialog should clear these for shell spawns, but a
+    // client could send a malformed request. Reject rather than silently
+    // ignore so the bug surfaces.
+    if cfg.model.is_some() {
+        return Err(anyhow!("plain shell sessions do not accept a model"));
+    }
+    if cfg.permission_mode.is_some() {
+        return Err(anyhow!(
+            "plain shell sessions do not accept a permission_mode"
+        ));
+    }
+    if cfg.dangerously_skip_permissions {
+        return Err(anyhow!(
+            "plain shell sessions do not accept dangerously_skip_permissions"
+        ));
+    }
+
+    let (program, shell_label) = resolve_shell_program()?;
+    let spec = PtySpawnSpec {
+        program,
+        args: Vec::new(),
+        cwd: primary_cwd,
+        env: merged_env(&cfg.extra_env),
+        cols: 120,
+        rows: 32,
+    };
+    let pty = pty::spawn(spec).context("spawning plain shell pty")?;
+    let pid = pty.pid();
+
+    let started_at = Utc::now();
+    let mut record = SessionRecord {
+        id: session_id.clone(),
+        label: label.clone(),
+        kind: kind.clone(),
+        members: members.clone(),
+        mode: SessionMode::PlainShell,
+        started_at,
+        // Shell sessions never transition status — they sit at Idle for their
+        // whole lifetime, then `attach_lifecycle`'s exit watcher flips to
+        // Stopped on exit.
+        status: SessionStatus::Idle,
+        exit_code: None,
+        metrics: SessionMetrics::default(),
+        recent_actions: Vec::new(),
+        pty: Some(Arc::clone(&pty)),
+        headless: None,
+        workspace_id: workspace_id.clone(),
+    };
+    push_recent_action(&mut record, format!("session started: {shell_label}"));
+    hub.sessions.insert(record);
+    let snap = hub
+        .sessions
+        .get(&session_id)
+        .map(|rec| crate::sync::lock(&rec).snapshot())
+        .ok_or_else(|| anyhow!("session vanished"))?;
+
+    if let Some(pid) = pid
+        && let Ok(meta) = orphan::meta_from_record(
+            session_id.clone(),
+            pid,
+            label,
+            kind,
+            SessionMode::PlainShell,
+            members,
+            started_at,
+            workspace_id,
+            Some(shell_label),
+        )
+    {
+        orphan::try_write_meta(&hub.dirs, &meta);
+    }
+
+    // Deliberately skip `pty_state::watch` — its Claude TUI prompt heuristic
+    // would mis-classify a normal shell prompt as `AwaitingInput`. Keep
+    // `osc_title::watch` so window-title escape sequences (which pwsh emits
+    // by default) still update the session label.
     osc_title::watch(
         &hub.sessions,
         session_id.clone(),
@@ -1094,6 +1215,8 @@ fn spawn_headless_session(
             members,
             started_at,
             workspace_id,
+            // Same as interactive: the child is a node shim on Windows.
+            None,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1310,6 +1433,55 @@ async fn compute_session_diff(hub: &Hub, session_id: &str) -> anyhow::Result<Vec
 
 fn claude_program() -> String {
     std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "claude".to_string())
+}
+
+/// Pick a shell executable for [`SessionMode::PlainShell`] spawns. Returns
+/// `(program, label)` where `program` is what we pass to `CommandBuilder`
+/// (resolved on PATH if it has no separator) and `label` is the short token
+/// used for `recent_actions` text and for the orphan-recovery name match.
+///
+/// Resolution order:
+/// - `RUSTLING_TULIP_SHELL` env override (any platform);
+/// - Windows: `pwsh.exe` → `powershell.exe` → `cmd.exe`;
+/// - Unix: `$SHELL` → `bash` → `sh`.
+fn resolve_shell_program() -> anyhow::Result<(String, String)> {
+    if let Ok(p) = std::env::var("RUSTLING_TULIP_SHELL") {
+        let label = shell_label_from_path(&p);
+        return Ok((p, label));
+    }
+    #[cfg(windows)]
+    {
+        for (candidate, label) in [
+            ("pwsh.exe", "pwsh"),
+            ("powershell.exe", "powershell"),
+            ("cmd.exe", "cmd"),
+        ] {
+            if which::which(candidate).is_ok() {
+                return Ok((candidate.to_string(), label.to_string()));
+            }
+        }
+        anyhow::bail!("no shell on PATH (tried pwsh.exe, powershell.exe, cmd.exe)")
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(p) = std::env::var("SHELL") {
+            let label = shell_label_from_path(&p);
+            return Ok((p, label));
+        }
+        for (candidate, label) in [("bash", "bash"), ("sh", "sh")] {
+            if which::which(candidate).is_ok() {
+                return Ok((candidate.to_string(), label.to_string()));
+            }
+        }
+        anyhow::bail!("no shell on PATH (tried bash, sh)")
+    }
+}
+
+fn shell_label_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map_or_else(|| "shell".to_string(), str::to_lowercase)
 }
 
 fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
