@@ -790,6 +790,21 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   flex: 1; min-height: 0;
 }
 .git-list .list { flex: 1; }
+.history-load-more {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 6px 8px 8px;
+  padding: 6px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+.history-load-more:hover:not(:disabled) { color: var(--fg); border-style: solid; }
+.history-load-more:disabled { opacity: 0.5; cursor: progress; }
 .git-meta {
   border-top: 1px solid var(--border);
   padding: 6px; font-size: 11px; color: var(--fg-muted);

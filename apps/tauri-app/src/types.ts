@@ -1,6 +1,6 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
 
 export type Agent = "claude" | "codex";
 
@@ -362,6 +362,8 @@ export type ClientMessage =
       repo_id: string;
       branch: string | null;
       limit: number;
+      // Maps to `git log --skip`. Defaults to 0 server-side.
+      offset?: number;
     }
   | { type: "get_commit"; repo_id: string; sha: string }
   | {
@@ -500,7 +502,13 @@ export type DaemonMessage =
       repo_id: string;
       suggestion: VscodeWorkspaceSuggestion;
     }
-  | { type: "commits"; repo_id: string; commits: GitCommit[] }
+  | {
+      type: "commits";
+      repo_id: string;
+      commits: GitCommit[];
+      // Echoed from the request: 0 = fresh listing, >0 = append batch.
+      offset: number;
+    }
   | { type: "commit_detail"; repo_id: string; detail: GitCommitDetail }
   | {
       type: "file_diff";

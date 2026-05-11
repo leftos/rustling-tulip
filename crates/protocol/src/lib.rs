@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 fn default_true() -> bool {
     true
@@ -778,11 +778,15 @@ pub enum ClientMessage {
     ListBranches {
         repo_id: String,
     },
-    /// Recent commits for a repo. `branch` defaults to current.
+    /// Recent commits for a repo. `branch` defaults to current. `offset`
+    /// (default 0) maps to `git log --skip`, so the source-control sidebar
+    /// can request successive batches for "load more" pagination.
     ListCommits {
         repo_id: String,
         branch: Option<String>,
         limit: u32,
+        #[serde(default)]
+        offset: u32,
     },
     /// Full detail (subject, body, parents, file list) for one commit.
     GetCommit {
@@ -1099,6 +1103,12 @@ pub enum DaemonMessage {
     Commits {
         repo_id: String,
         commits: Vec<GitCommit>,
+        /// Echoed from the request so the client can tell whether this is
+        /// a fresh listing (`offset == 0`, replace local state) or an
+        /// append for "load more" (`offset > 0`, push onto the existing
+        /// list).
+        #[serde(default)]
+        offset: u32,
     },
     CommitDetail {
         repo_id: String,

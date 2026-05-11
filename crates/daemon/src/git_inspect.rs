@@ -36,10 +36,17 @@ pub async fn list_commits(
     repo: &Path,
     branch: Option<&str>,
     limit: u32,
+    offset: u32,
 ) -> anyhow::Result<Vec<GitCommit>> {
     let limit_arg = format!("-n{limit}");
+    let skip_arg = format!("--skip={offset}");
     let format_arg = format!("--format={COMMIT_FORMAT}");
-    let mut args = vec!["log", limit_arg.as_str(), format_arg.as_str()];
+    let mut args = vec![
+        "log",
+        limit_arg.as_str(),
+        skip_arg.as_str(),
+        format_arg.as_str(),
+    ];
     if let Some(b) = branch {
         args.push(b);
     }

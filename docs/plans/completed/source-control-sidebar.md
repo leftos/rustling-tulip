@@ -137,9 +137,10 @@ not a pane inside a grid (user pref). Pane-level operations are unchanged.
 
 ### Phase E — Graph pagination
 
-- [ ] Extend `ListCommits` with `offset: u32` (default 0). Daemon adds `--skip` to the `git log` invocation.
-- [ ] `GraphList.tsx` keeps an accumulating commit list. "Load more" button at the bottom requests the next batch. No hard cap.
-- [ ] Clicking a commit opens a multi-file diff tab (Phase B path with `against: Some(sha)`). New pane content variant or a sibling tab content for "commit-diff" — defer until Phase E lands; for the first cut, clicking a commit can keep the existing flat-text detail view inside the sidebar.
+- [x] Extend `ListCommits` with `offset: u32` (default 0). Daemon `list_commits` adds `--skip=<offset>` to the `git log` invocation; the `Commits` reply echoes `offset` so the client can tell "fresh listing" (offset=0, replace state) from "load more append" (offset>0). `PROTOCOL_VERSION` 9 → 10.
+- [x] `HistoryView` in `SourceControlSidebar.tsx` keeps an accumulating commit list. "Load more" button at the bottom requests the next batch with `offset = current.length`; exhaustion is detected when the daemon's batch came back shorter than the requested page size, which removes the button. Defensive sha-based de-dup guards against an in-flight refresh overlapping a load-more.
+
+**Not in scope for Phase E** (move to a follow-up plan if/when the user asks): clicking a commit opens a multi-file Monaco diff tab (Phase B path with `against: Some(sha)`). The flat-text detail view in `HistoryView` still ships in the sidebar.
 
 ## Critical files (touched across phases)
 

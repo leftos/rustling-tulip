@@ -695,10 +695,16 @@ async fn dispatch(
             repo_id,
             branch,
             limit,
+            offset,
         } => {
             let path = repo_path_or_err(hub, &repo_id)?;
-            let commits = git_inspect::list_commits(&path, branch.as_deref(), limit).await?;
-            let _ = out_tx.send(DaemonMessage::Commits { repo_id, commits });
+            let commits =
+                git_inspect::list_commits(&path, branch.as_deref(), limit, offset).await?;
+            let _ = out_tx.send(DaemonMessage::Commits {
+                repo_id,
+                commits,
+                offset,
+            });
         }
         ClientMessage::GetCommit { repo_id, sha } => {
             let path = repo_path_or_err(hub, &repo_id)?;

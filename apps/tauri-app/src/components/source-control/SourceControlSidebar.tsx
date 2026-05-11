@@ -22,7 +22,7 @@ import StashesSection from "./StashesSection";
 
 type Tab = "changes" | "history";
 
-const COMMIT_LIMIT = 50;
+const COMMIT_PAGE_SIZE = 50;
 const STORAGE_KEY = "rt.sourceControl.repoOverride";
 
 interface Props {
@@ -481,25 +481,63 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detailDiff, setDetailDiff] = useState<string | null>(null);
+  // `true` once the last batch came back shorter than the requested page —
+  // means the daemon's `git log` is exhausted, no Load more button.
+  const [exhausted, setExhausted] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     setCommits(null);
     setSelected(null);
     setDetailDiff(null);
+    setExhausted(false);
+    setLoadingMore(false);
     client.send({
       type: "list_commits",
       repo_id: activeRepoId,
       branch: null,
-      limit: COMMIT_LIMIT,
+      limit: COMMIT_PAGE_SIZE,
+      offset: 0,
     });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "commits" || detail.repo_id !== activeRepoId) return;
-      setCommits(detail.commits);
+      setExhausted(detail.commits.length < COMMIT_PAGE_SIZE);
+      setLoadingMore(false);
+      if (detail.offset === 0) {
+        setCommits(detail.commits);
+      } else {
+        setCommits((existing) => {
+          if (existing === null) return detail.commits;
+          // Defensive de-dup by sha — a daemon refresh during pagination
+          // could overlap. Preserve append order.
+          const seen = new Set(existing.map((c) => c.sha));
+          const next = [...existing];
+          for (const c of detail.commits) {
+            if (!seen.has(c.sha)) {
+              next.push(c);
+              seen.add(c.sha);
+            }
+          }
+          return next;
+        });
+      }
     };
     window.addEventListener("rt:commits", handler);
     return () => window.removeEventListener("rt:commits", handler);
   }, [activeRepoId, client]);
+
+  const loadMore = () => {
+    if (!commits || loadingMore || exhausted) return;
+    setLoadingMore(true);
+    client.send({
+      type: "list_commits",
+      repo_id: activeRepoId,
+      branch: null,
+      limit: COMMIT_PAGE_SIZE,
+      offset: commits.length,
+    });
+  };
 
   useEffect(() => {
     if (!selected) return;
@@ -545,27 +583,40 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
         ) : commits.length === 0 ? (
           <p className="empty">no commits</p>
         ) : (
-          <ul className="list">
-            {commits.map((c) => (
-              <li
-                key={c.sha}
-                className={
-                  c.sha === selected ? "list-item selected" : "list-item"
-                }
-                onClick={() => setSelected(c.sha)}
-                data-testid="source-control-history-row"
+          <>
+            <ul className="list">
+              {commits.map((c) => (
+                <li
+                  key={c.sha}
+                  className={
+                    c.sha === selected ? "list-item selected" : "list-item"
+                  }
+                  onClick={() => setSelected(c.sha)}
+                  data-testid="source-control-history-row"
+                >
+                  <span className="commit-sha">{c.short_sha}</span>
+                  <span className="list-item-label" title={c.subject}>
+                    {c.subject}
+                  </span>
+                  <span className="list-item-meta small">
+                    {c.author_name.split(" ")[0]} ·{" "}
+                    {c.authored_at.slice(0, 10)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {!exhausted && (
+              <button
+                type="button"
+                className="history-load-more"
+                onClick={loadMore}
+                disabled={loadingMore}
+                data-testid="source-control-history-load-more"
               >
-                <span className="commit-sha">{c.short_sha}</span>
-                <span className="list-item-label" title={c.subject}>
-                  {c.subject}
-                </span>
-                <span className="list-item-meta small">
-                  {c.author_name.split(" ")[0]} ·{" "}
-                  {c.authored_at.slice(0, 10)}
-                </span>
-              </li>
-            ))}
-          </ul>
+                {loadingMore ? "loading…" : "load more"}
+              </button>
+            )}
+          </>
         )}
       </div>
       <DiffView diff={detailDiff} testId="source-control-history-diff" />
