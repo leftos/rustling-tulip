@@ -141,13 +141,16 @@ export const config: WebdriverIO.Config = {
     // only way to feed env to the app under tauri-driver 2.0.6 (the
     // `tauri:options.env` field is unsupported). `process.env` already
     // carries RUSTLING_TULIP_CONFIG_DIR from module load; making it
-    // explicit here documents the contract.
+    // explicit here documents the contract. RUSTLING_TULIP_OFFSCREEN_WINDOW
+    // tells the Tauri setup hook to move the main window offscreen so test
+    // runs don't keep popping the app over the user's workspace.
     tauriDriver = spawn(tdPath, [], {
       stdio: ["ignore", "inherit", "inherit"],
       env: {
         ...process.env,
         RUSTLING_TULIP_CLAUDE: fakeClaudePath,
         RUSTLING_TULIP_CONFIG_DIR: testConfigDir,
+        RUSTLING_TULIP_OFFSCREEN_WINDOW: "1",
       },
     });
     tauriDriver.on("error", (err) => {

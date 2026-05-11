@@ -16,6 +16,13 @@ pub struct DaemonHandshake {
     pub pid: u32,
 }
 
+/// Parse a boolean-ish env var. Set + non-empty + not literally "0" counts as
+/// true; everything else is false. Used for opt-in harness toggles where the
+/// presence of any meaningful value should enable the flag.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Resolve the per-user config directory. Mirrors
 /// `daemon::paths::Dirs::ensure`'s resolution: honors
 /// `RUSTLING_TULIP_CONFIG_DIR` if set (used by the e2e harness to isolate
@@ -255,7 +262,7 @@ pub fn run() {
             log_message,
             quit_app
         ])
-        .setup(|_app| {
+        .setup(|app| {
             info!("rustling-tulip Tauri app starting");
             if let Err(err) = truncate_app_log() {
                 tracing::warn!(err, "failed to truncate app.log on boot");
@@ -271,6 +278,17 @@ pub fn run() {
                 ),
             ) {
                 tracing::warn!(err, "failed to write env status to app.log");
+            }
+            // E2E harness opt-in: move the main window offscreen so test runs
+            // don't pop the app over the user's workspace. WebDriver controls
+            // the WebView via DOM/JS, which works regardless of where the
+            // window lives on screen. Done in setup so the move happens
+            // before the window's first paint.
+            if env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW")
+                && let Some(win) = app.get_webview_window("main")
+            {
+                let _ = win.set_position(tauri::PhysicalPosition::new(-32_000, -32_000));
+                let _ = win.set_skip_taskbar(true);
             }
             Ok(())
         })
