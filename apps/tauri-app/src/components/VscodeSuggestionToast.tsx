@@ -1,6 +1,6 @@
 import type { DaemonClient } from "../api";
 import type { VscodeWorkspaceSuggestion } from "../types";
-import { useEscape } from "../utils/a11y";
+import { useEscape, useFocusReturn } from "../utils/a11y";
 
 interface Props {
   suggestion: VscodeWorkspaceSuggestion;
@@ -14,6 +14,7 @@ export default function VscodeSuggestionToast({
   onDismiss,
 }: Props) {
   useEscape(onDismiss);
+  useFocusReturn();
   const accept = (watch: boolean) => {
     client.send({
       type: "accept_vscode_workspace_suggestion",
@@ -25,7 +26,7 @@ export default function VscodeSuggestionToast({
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop modal-backdrop-vscode"
       onClick={onDismiss}
       data-testid="vscode-suggestion-toast"
     >

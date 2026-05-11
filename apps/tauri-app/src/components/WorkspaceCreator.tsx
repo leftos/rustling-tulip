@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { DaemonClient } from "../api";
 import type { RepoEntry } from "../types";
-import { useEscape } from "../utils/a11y";
+import { useEscape, useFocusReturn } from "../utils/a11y";
 
 interface Props {
   repos: RepoEntry[];
@@ -13,6 +13,7 @@ export default function WorkspaceCreator({ repos, client, onClose }: Props) {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   useEscape(onClose);
+  useFocusReturn();
 
   const toggle = (id: string) => {
     setSelected((s) => {

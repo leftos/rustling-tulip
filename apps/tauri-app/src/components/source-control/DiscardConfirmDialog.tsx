@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { useAutoFocus, useEscape } from "../../utils/a11y";
+import { useAutoFocus, useEscape, useFocusReturn } from "../../utils/a11y";
 
 interface Props {
   paths: string[];
@@ -22,10 +22,11 @@ export default function DiscardConfirmDialog({
   const cancelRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onCancel);
   useAutoFocus(cancelRef);
+  useFocusReturn();
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop modal-backdrop-destructive"
       onClick={onCancel}
       data-testid="discard-confirm-dialog"
     >

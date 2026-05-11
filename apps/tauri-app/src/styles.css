@@ -898,6 +898,14 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   display: flex; align-items: center; justify-content: center;
   z-index: 100;
 }
+/* Stacking layers. Higher numbers paint on top. Intent: destructive
+ * confirms outrank ordinary forms; the vscode-workspace suggestion
+ * outranks confirms (it's a daemon-pushed event that arrived during
+ * other work and should be visible); the exit-confirm dialog is the
+ * top-most layer (system-level intent — quitting wins). */
+.modal-backdrop-destructive { z-index: 120; }
+.modal-backdrop-vscode { z-index: 130; }
+.modal-backdrop-exit { z-index: 140; }
 .modal {
   background: var(--bg-elev);
   border: 1px solid var(--border);

@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { useAutoFocus, useEscape } from "../utils/a11y";
+import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 
 interface Props {
   activeSessionCount: number;
@@ -34,9 +34,10 @@ export default function ExitConfirmDialog({
   // three (sessions keep running, nothing is destroyed).
   useEscape(onCancel, !busy);
   useAutoFocus(quitLeaveRef);
+  useFocusReturn();
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop modal-backdrop-exit"
       onClick={busy ? undefined : onCancel}
       data-testid="exit-confirm-dialog"
     >

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
-import { useEscape } from "../utils/a11y";
+import { useEscape, useFocusReturn } from "../utils/a11y";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import type {
   Agent,
@@ -147,6 +147,7 @@ export default function SpawnDialog({
   // dense form (custom branch, env vars, headless prompt), and a stray
   // click silently discarding it was the most-reported papercut.
   useEscape(onClose);
+  useFocusReturn();
 
   return (
     <div className="modal-backdrop" data-testid="spawn-dialog">

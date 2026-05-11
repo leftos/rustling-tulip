@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { SessionSnapshot } from "../types";
-import { useAutoFocus, useEscape } from "../utils/a11y";
+import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 
 interface Props {
   repoName: string;
@@ -32,9 +32,10 @@ export default function RepoRemoveDialog({
   // Enter doesn't destroy state.
   useEscape(onCancel);
   useAutoFocus(cancelRef);
+  useFocusReturn();
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop modal-backdrop-destructive"
       onClick={onCancel}
       data-testid="repo-remove-dialog"
     >

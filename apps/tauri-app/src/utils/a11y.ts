@@ -59,6 +59,30 @@ export function useAutoFocus(
   }, [enabled, ref]);
 }
 
+/**
+ * Capture the element that had focus when this component mounted, and
+ * restore focus to it on unmount. Keyboard users opening a modal land on
+ * a controlled focus target, do their thing, dismiss, and resume from
+ * where they were rather than landing on `<body>` with no path back.
+ *
+ * Skips the restore if the captured element has been removed from the
+ * document by the time the modal unmounts (rare — e.g. modal-open
+ * dropped the source button).
+ */
+export function useFocusReturn(): void {
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    return () => {
+      if (!previouslyFocused || !document.body.contains(previouslyFocused)) {
+        return;
+      }
+      // Defer to the next tick so React's unmount-phase DOM teardown
+      // doesn't clobber focus the same frame.
+      window.setTimeout(() => previouslyFocused.focus(), 0);
+    };
+  }, []);
+}
+
 export interface KeyboardShortcut {
   /// Key name as reported by KeyboardEvent.key (e.g. "t", "Tab", "1").
   /// Compared case-insensitively for letters.

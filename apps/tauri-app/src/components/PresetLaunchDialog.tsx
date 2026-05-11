@@ -14,7 +14,7 @@ import type {
   PresetVariable,
   RepoEntry,
 } from "../types";
-import { useEscape } from "../utils/a11y";
+import { useEscape, useFocusReturn } from "../utils/a11y";
 import { parsePrompts } from "../utils/parsePrompts";
 
 interface Props {
@@ -187,6 +187,7 @@ export default function PresetLaunchDialog({
   };
 
   useEscape(onClose);
+  useFocusReturn();
 
   return (
     <div className="modal-backdrop" onClick={onClose} data-testid="preset-launch-dialog">
