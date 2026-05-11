@@ -182,8 +182,12 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let client: DaemonClient | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
 
-    (async () => {
+    /// Connect (or reconnect) and wire all subscriptions. Called on mount
+    /// and from the close handler with exponential backoff.
+    const connect = async () => {
       try {
         const handshake = await ensureDaemonStarted();
         if (cancelled) return;
@@ -191,6 +195,24 @@ export default function App() {
         clientRef.current = client;
         client.onConnectionChange((next) => {
           setState((s) => ({ ...s, status: next }));
+          // Schedule a reconnect when the socket drops unexpectedly.
+          // auth_failed is terminal (config issue, retrying won't help).
+          // Reset the backoff counter when we successfully reach `open`.
+          if (next.kind === "open") {
+            reconnectAttempt = 0;
+            logToFile("info", "daemon websocket connected");
+          } else if (next.kind === "closed" && !cancelled) {
+            const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt);
+            reconnectAttempt += 1;
+            logToFile(
+              "warn",
+              `daemon websocket closed (${next.reason}); reconnecting in ${delay}ms (attempt ${reconnectAttempt})`,
+            );
+            reconnectTimer = window.setTimeout(() => {
+              reconnectTimer = null;
+              if (!cancelled) void connect();
+            }, delay);
+          }
         });
         client.onMessage((msg) =>
           handleMessage(
@@ -212,15 +234,31 @@ export default function App() {
         }
         setState((s) => ({ ...s, client }));
       } catch (err) {
-        setState((s) => ({
-          ...s,
-          status: { kind: "error", reason: String(err) },
-        }));
+        // ensureDaemonStarted failure (e.g. supervisor can't spawn the
+        // daemon) — record the error AND schedule a retry. The supervisor
+        // may need a moment to clean up a stale daemon.json.
+        const reason = String(err);
+        setState((s) => ({ ...s, status: { kind: "error", reason } }));
+        if (!cancelled) {
+          const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt);
+          reconnectAttempt += 1;
+          logToFile(
+            "warn",
+            `daemon supervisor failed (${reason}); retrying in ${delay}ms (attempt ${reconnectAttempt})`,
+          );
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            if (!cancelled) void connect();
+          }, delay);
+        }
       }
-    })();
+    };
+
+    void connect();
 
     return () => {
       cancelled = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       client?.close();
       clientRef.current = null;
     };
