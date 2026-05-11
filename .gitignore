@@ -7,6 +7,7 @@ node_modules/
 .pnpm-store/
 dist/
 dist-ssr/
+*.tsbuildinfo
 
 # Tauri
 apps/tauri-app/src-tauri/gen/
