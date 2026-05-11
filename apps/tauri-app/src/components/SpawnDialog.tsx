@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
-import { useEscape, useFocusReturn } from "../utils/a11y";
+import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import type {
   Agent,
@@ -695,6 +695,11 @@ function SingleForm({
 }) {
   const defaultRepoId = initialRepoId ?? repos[0]?.id ?? "";
   const [repoId, setRepoId] = useState<string>(defaultRepoId);
+  // Autofocus the branch name input — it's the field most likely to be
+  // edited, and the random worktree name is preselected so a keyboard
+  // user can just type to overwrite.
+  const branchInputRef = useRef<HTMLInputElement | null>(null);
+  useAutoFocus(branchInputRef);
 
   const repo = useMemo(
     () => repos.find((r) => r.id === repoId) ?? null,
@@ -807,6 +812,7 @@ function SingleForm({
       <label className="field">
         <span>Branch name</span>
         <input
+          ref={branchInputRef}
           type="text"
           list={datalistId}
           value={branch.value}
@@ -899,6 +905,11 @@ function WorkspaceForm({
 }) {
   const defaultWorkspaceId = initialWorkspaceId ?? workspaces[0]?.id ?? "";
   const [workspaceId, setWorkspaceId] = useState<string>(defaultWorkspaceId);
+  // Autofocus the branch input — same rationale as SingleForm: it's the
+  // field the user most likely wants to edit; the random worktree name
+  // is preselected for easy overwrite.
+  const branchInputRef = useRef<HTMLInputElement | null>(null);
+  useAutoFocus(branchInputRef);
 
   const workspace = useMemo(
     () => workspaces.find((w) => w.id === workspaceId) ?? null,
@@ -1041,6 +1052,7 @@ function WorkspaceForm({
       <label className="field">
         <span>Branch name (same across all members)</span>
         <input
+          ref={branchInputRef}
           type="text"
           value={branch.value}
           onChange={(e) => branch.setValue(e.target.value)}

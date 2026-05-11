@@ -197,8 +197,13 @@ export default function Sidebar(props: Props) {
 
   // Presets are fetched on demand when the context menu opens. Per-target
   // cache keeps subsequent opens snappy; null means "not fetched yet",
-  // empty array means "fetched, none available".
-  const [presetCache, setPresetCache] = useState<Map<string, PresetEntry[]>>(
+  // Discriminated cache so the submenu can distinguish "fetched empty"
+  // from "fetched failed / timed out" — previously both fell through to
+  // `[]` and the menu was stuck on "(loading)" forever.
+  type PresetCacheEntry =
+    | { ok: true; entries: PresetEntry[] }
+    | { ok: false; reason: string };
+  const [presetCache, setPresetCache] = useState<Map<string, PresetCacheEntry>>(
     () => new Map(),
   );
   const currentTarget = contextMenu ? menuTarget(contextMenu.container) : null;
@@ -209,10 +214,10 @@ export default function Sidebar(props: Props) {
   useEffect(() => {
     if (!currentTarget || currentTargetKey === null) return;
     if (presetCache.has(currentTargetKey)) return;
-    void listPresets(props.client, currentTarget).then((entries) => {
+    void listPresets(props.client, currentTarget).then((result) => {
       setPresetCache((prev) => {
         const next = new Map(prev);
-        next.set(currentTargetKey, entries);
+        next.set(currentTargetKey, result);
         return next;
       });
     });
@@ -796,7 +801,10 @@ function TabPill(p: TabPillProps) {
 
 interface ContextMenuProps {
   state: ContextMenuState;
-  presets: PresetEntry[] | null;
+  presets:
+    | { ok: true; entries: PresetEntry[] }
+    | { ok: false; reason: string }
+    | null;
   onClose: () => void;
   onSpawn: () => void;
   onRemove: () => void;
@@ -867,7 +875,10 @@ function PresetSubmenu({
   presets,
   onLaunch,
 }: {
-  presets: PresetEntry[] | null;
+  presets:
+    | { ok: true; entries: PresetEntry[] }
+    | { ok: false; reason: string }
+    | null;
   onLaunch: (preset: PresetEntry) => void;
 }) {
   if (presets === null) {
@@ -879,7 +890,16 @@ function PresetSubmenu({
       </li>
     );
   }
-  if (presets.length === 0) {
+  if (!presets.ok) {
+    return (
+      <li>
+        <button type="button" disabled title={presets.reason}>
+          Launch preset… (failed to load)
+        </button>
+      </li>
+    );
+  }
+  if (presets.entries.length === 0) {
     return (
       <li>
         <button type="button" disabled title="No .rustling-tulip/presets.json in this repo">
@@ -890,7 +910,7 @@ function PresetSubmenu({
   }
   return (
     <>
-      {presets.map((preset) => (
+      {presets.entries.map((preset) => (
         <li key={`${preset.source_repo_id}:${preset.id}`}>
           <button type="button" onClick={() => onLaunch(preset)}>
             Launch preset · {preset.name}

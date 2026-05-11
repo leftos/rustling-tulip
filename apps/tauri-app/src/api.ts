@@ -171,26 +171,36 @@ export function loadScrollback(
   });
 }
 
+export type ListPresetsResult =
+  | { ok: true; entries: PresetEntry[] }
+  | { ok: false; reason: string };
+
 /**
  * Request the preset list for a repo or workspace and resolve with the
  * response. Times out after 2 s. Mirrors loadScrollback's pattern: relies
  * on App.tsx re-dispatching `rt:presets` so any caller can subscribe.
+ *
+ * Returns a discriminated `{ ok: true } | { ok: false }` so the caller
+ * can distinguish "fetched, none defined" (`ok: true, entries: []`) from
+ * "request failed / timed out" (`ok: false`). Previously both fell
+ * through to `entries: []`, which left the context menu stuck on
+ * "(loading)" when the daemon was disconnected mid-request.
  */
 export function listPresets(
   client: DaemonClient,
   target: PresetTarget,
-): Promise<PresetEntry[]> {
+): Promise<ListPresetsResult> {
   return new Promise((resolve) => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "presets") return;
       if (!targetsMatch(detail.target, target)) return;
       cleanup();
-      resolve(detail.entries);
+      resolve({ ok: true, entries: detail.entries });
     };
     const timer = window.setTimeout(() => {
       cleanup();
-      resolve([]);
+      resolve({ ok: false, reason: "timed out (daemon not responding)" });
     }, 2000);
     const cleanup = () => {
       window.removeEventListener("rt:presets", handler);
