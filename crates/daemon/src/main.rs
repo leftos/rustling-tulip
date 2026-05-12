@@ -48,26 +48,41 @@ async fn main() -> anyhow::Result<()> {
     let (live, dead) = orphan::partition_live(metas);
     info!(
         live = live.len(),
-        dead = dead.len(),
+        abandoned = dead.len(),
         "orphan recovery scan complete"
     );
-    for meta in &dead {
-        orphan::try_delete_meta(&dirs, &meta.session_id);
-    }
+    // Pre-B.2: dead sidecars were unconditionally deleted, losing recovery
+    // context. Now we keep them — they become "abandoned" sessions the user
+    // can Resume (replay spawn config + last_prompt against a fresh process)
+    // or Discard from the sidebar. The sidecar stays on disk until one of
+    // those handlers consumes it.
 
     // Persisted tabs reference session ids that may no longer be valid. After
     // orphan recovery, clear panes that point at dead sessions and drop tabs
     // with no surviving session bindings — otherwise a killed-daemon restart
     // resurrects an empty layout the user has to clear by hand.
-    prune_stale_tabs(&state, &live);
+    //
+    // Abandoned sessions are not pruned: they still appear in the sidebar
+    // (as `is_abandoned = true`) and need their tab/pane bindings intact so
+    // a Resume swaps the abandoned session out for the freshly-spawned one
+    // without the user losing their layout.
+    prune_stale_tabs(&state, &live, &dead);
 
-    let result = server::run(state, dirs, live).await;
+    let result = server::run(state, dirs, live, dead).await;
     info!(?result, "rustling-tulipd main returning");
     result
 }
 
-fn prune_stale_tabs(state: &Arc<state::AppState>, live_orphans: &[orphan::OrphanMeta]) {
-    let live_ids: HashSet<String> = live_orphans.iter().map(|m| m.session_id.clone()).collect();
+fn prune_stale_tabs(
+    state: &Arc<state::AppState>,
+    live_orphans: &[orphan::OrphanMeta],
+    abandoned: &[orphan::OrphanMeta],
+) {
+    let live_ids: HashSet<String> = live_orphans
+        .iter()
+        .map(|m| m.session_id.clone())
+        .chain(abandoned.iter().map(|m| m.session_id.clone()))
+        .collect();
     let result = state.mutate(|s| {
         let prev_tab_count = s.tabs.len();
         let mut panes_cleared = 0usize;

@@ -119,7 +119,12 @@ const TAB_EVENT_CAPACITY: usize = 256;
 const PRESET_EVENT_CAPACITY: usize = 64;
 const STATE_EVENT_CAPACITY: usize = 64;
 
-pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> anyhow::Result<()> {
+pub async fn run(
+    state: Arc<AppState>,
+    dirs: Dirs,
+    orphans: Vec<OrphanMeta>,
+    abandoned: Vec<OrphanMeta>,
+) -> anyhow::Result<()> {
     let auth_token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(48)
@@ -129,10 +134,15 @@ pub async fn run(state: Arc<AppState>, dirs: Dirs, orphans: Vec<OrphanMeta>) -> 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new();
 
-    // Reattach orphan sessions before any clients connect so the initial
-    // state snapshot already includes them.
+    // Reattach orphan sessions (alive but detached) and abandoned sessions
+    // (dead, daemon crashed mid-run) before any clients connect so the
+    // initial state snapshot already includes them. Abandoned sessions
+    // surface with `is_abandoned = true` and offer Resume in the UI.
     for meta in orphans {
         sessions.insert_orphan(&meta);
+    }
+    for meta in abandoned {
+        sessions.insert_abandoned(&meta);
     }
 
     // Forward attention events through the registry's broadcast so all
@@ -282,7 +292,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         loop {
             match events_rx.recv().await {
                 Ok(SessionEvent::Updated(snap)) => {
-                    let _ = out_for_events.send(DaemonMessage::SessionUpdated { session: snap });
+                    let _ = out_for_events.send(DaemonMessage::SessionUpdated { session: *snap });
                 }
                 Ok(SessionEvent::Removed(id)) => {
                     let _ = out_for_events.send(DaemonMessage::SessionRemoved { session_id: id });
@@ -731,6 +741,12 @@ async fn dispatch(
                 session_id,
                 reason: AttentionReason::Stopped,
             });
+        }
+        ClientMessage::ResumeAbandoned { session_id } => {
+            resume_abandoned(hub, &session_id, out_tx).await?;
+        }
+        ClientMessage::DiscardAbandoned { session_id } => {
+            discard_abandoned(hub, &session_id, out_tx);
         }
         ClientMessage::ListBranches { repo_id } => {
             let repo_path = hub
@@ -1751,6 +1767,7 @@ fn build_codex_args(
 
 #[expect(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
 )]
 fn spawn_interactive_session(
@@ -1826,6 +1843,8 @@ fn spawn_interactive_session(
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
         spawn_config: Some(stored_config.clone()),
+        is_abandoned: false,
+        last_prompt: last_prompt.clone(),
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -1948,6 +1967,9 @@ fn spawn_plain_shell_session(
         terminal_title: None,
         program_name: Some(shell_label.clone()),
         spawn_config: Some(stored_config.clone()),
+        is_abandoned: false,
+        // Plain shells never carry a kickoff prompt.
+        last_prompt: None,
     };
     push_recent_action(&mut record, format!("session started: {shell_label}"));
     hub.sessions.insert(record);
@@ -2058,6 +2080,8 @@ fn spawn_headless_session(
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
         spawn_config: Some(stored_config.clone()),
+        is_abandoned: false,
+        last_prompt: last_prompt.clone(),
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
@@ -2204,6 +2228,68 @@ async fn spawn_workspace(
         label,
         Some(workspace.id.clone()),
     ))
+}
+
+/// Resume an abandoned session: read its sidecar (spawn config +
+/// `last_prompt`), spawn a fresh session with the same config and the
+/// captured prompt, then remove the abandoned placeholder from the
+/// registry + delete the on-disk sidecar.
+///
+/// The new session gets a new id (`spawn_session` generates one), so
+/// the old abandoned record's UI bindings are NOT automatically
+/// transferred. The frontend can listen for the `SessionUpdated`
+/// message and decide whether to swap it into the same tab/pane.
+async fn resume_abandoned(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<()> {
+    let rec = hub
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+    let (is_abandoned, spawn_config, last_prompt) = {
+        let guard = crate::sync::lock(&rec);
+        (
+            guard.is_abandoned,
+            guard.spawn_config.clone(),
+            guard.last_prompt.clone(),
+        )
+    };
+    if !is_abandoned {
+        return Err(anyhow!(
+            "session {session_id} is not abandoned; refusing to resume"
+        ));
+    }
+    let Some(stored) = spawn_config else {
+        return Err(anyhow!(
+            "session {session_id} has no stored spawn config; cannot resume"
+        ));
+    };
+    let mut req = stored.to_clone_request();
+    req.initial_prompt = last_prompt;
+    let snap = spawn_session(hub, req).await?;
+
+    // Remove the abandoned placeholder and delete the sidecar atomically
+    // after the spawn succeeds. If spawn failed, the placeholder stays
+    // so the user can try again.
+    discard_abandoned(hub, session_id, out_tx);
+
+    let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+    Ok(())
+}
+
+/// Remove an abandoned session from the registry + delete its sidecar.
+/// Used both as the cleanup step after a successful Resume and as the
+/// user-initiated "Dismiss" action for sessions they don't want to
+/// recover.
+fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    orphan::try_delete_meta(&hub.dirs, session_id);
+    orphan::try_delete_session_dir(&hub.dirs, session_id);
+    hub.sessions.remove(session_id);
+    let _ = out_tx.send(DaemonMessage::SessionRemoved {
+        session_id: session_id.to_string(),
+    });
 }
 
 async fn stop_session(

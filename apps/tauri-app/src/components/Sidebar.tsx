@@ -819,6 +819,46 @@ function SessionLeaf(p: SessionLeafProps) {
             orphan
           </span>
         )}
+        {s.is_abandoned && (
+          <span
+            className="list-item-meta"
+            title={
+              s.last_prompt
+                ? `Daemon crashed mid-run. Last prompt:\n${s.last_prompt}`
+                : "Daemon crashed mid-run"
+            }
+          >
+            abandoned
+          </span>
+        )}
+        {s.is_abandoned && (
+          <button
+            type="button"
+            className="btn-inline"
+            onClick={(e) => {
+              e.stopPropagation();
+              p.client.send({ type: "resume_abandoned", session_id: s.id });
+            }}
+            title="Spawn a fresh session from the captured config and replay the prompt"
+            data-testid="sidebar-session-resume"
+          >
+            Resume
+          </button>
+        )}
+        {s.is_abandoned && (
+          <button
+            type="button"
+            className="btn-inline btn-quiet"
+            onClick={(e) => {
+              e.stopPropagation();
+              p.client.send({ type: "discard_abandoned", session_id: s.id });
+            }}
+            title="Dismiss this abandoned session without resuming"
+            data-testid="sidebar-session-discard"
+          >
+            Dismiss
+          </button>
+        )}
         <TabPill
           bindings={bindings}
           sessionId={s.id}

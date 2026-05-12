@@ -189,6 +189,20 @@ pub struct SessionSnapshot {
     /// UI shows the session in read-only mode (scrollback only).
     #[serde(default)]
     pub is_orphan: bool,
+    /// True when this session was abandoned mid-run: the previous daemon
+    /// crashed (or was killed) and the `claude` process is gone. The UI
+    /// shows a "Resume" affordance that replays the captured spawn config
+    /// + `last_prompt` against a fresh session. Different from `is_orphan`
+    ///   (which is "still running, just detached") and from a normal
+    ///   `Stopped` session (which exited gracefully).
+    #[serde(default)]
+    pub is_abandoned: bool,
+    /// The user's initial prompt at spawn time, surfaced on the snapshot
+    /// so the abandoned-bucket UI can display "what this session was
+    /// trying to do". `None` for sessions spawned without a prompt and
+    /// for sidecars written before Phase B.1.
+    #[serde(default)]
+    pub last_prompt: Option<String>,
     /// For `kind == Workspace`, the id of the workspace this session belongs
     /// to. `None` for single-repo sessions. Clients use this to group sessions
     /// under their workspace node in the sidebar tree.
@@ -936,6 +950,19 @@ pub enum ClientMessage {
         session_id: String,
         cleanup: Vec<CleanupAction>,
     },
+    /// Replay an abandoned session: read its stored [`SpawnConfig`] and
+    /// `last_prompt` from the sidecar, spawn a fresh session, and delete
+    /// the abandoned sidecar atomically. Surfaces an error if the
+    /// sidecar is missing, has no spawn config (pre-B.1 sidecars), or
+    /// the spawn itself fails.
+    ResumeAbandoned {
+        session_id: String,
+    },
+    /// User dismisses an abandoned session without resuming. The sidecar
+    /// and session record are removed.
+    DiscardAbandoned {
+        session_id: String,
+    },
     /// List branches in a registered repo.
     ListBranches {
         repo_id: String,
@@ -1519,7 +1546,10 @@ impl InboundClientMessage {
 /// its message dispatch.
 #[derive(Debug, Clone)]
 pub enum InboundDaemonMessage {
-    Known(DaemonMessage),
+    /// Boxed because `DaemonMessage` is a wide tagged enum (~264 bytes,
+    /// dominated by `SessionUpdated`); keeping it in-line would force
+    /// the wrapper to be that size for every Unknown frame too.
+    Known(Box<DaemonMessage>),
     Unknown {
         type_tag: String,
         raw: serde_json::Value,
@@ -1530,7 +1560,7 @@ impl InboundDaemonMessage {
     pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
         let value: serde_json::Value = serde_json::from_str(s)?;
         if let Ok(known) = serde_json::from_value::<DaemonMessage>(value.clone()) {
-            return Ok(Self::Known(known));
+            return Ok(Self::Known(Box::new(known)));
         }
         let type_tag = value
             .get("type")

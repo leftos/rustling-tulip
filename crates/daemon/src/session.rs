@@ -22,7 +22,9 @@ const EVENT_BROADCAST_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    Updated(SessionSnapshot),
+    /// Boxed because `SessionSnapshot` is wide; keeping it inline makes
+    /// every other variant of this enum that big too.
+    Updated(Box<SessionSnapshot>),
     Removed(String),
     PtyOutput {
         session_id: String,
@@ -73,6 +75,16 @@ pub struct SessionRecord {
     /// `None` case and the `GetSpawnConfig` reply surfaces `None` so the
     /// UI can fall back to opening the spawn dialog with defaults.
     pub spawn_config: Option<SpawnConfig>,
+    /// True iff this record was reattached as an abandoned session: the
+    /// previous daemon crashed mid-run and the `claude` process is gone.
+    /// Surfaced to clients via `SessionSnapshot::is_abandoned`. Distinct
+    /// from a normal stopped session (which exited gracefully) and from
+    /// an orphan (whose process is still running, just detached).
+    pub is_abandoned: bool,
+    /// User's initial prompt at spawn, retained on the record so it can
+    /// be surfaced via `SessionSnapshot::last_prompt` and replayed by the
+    /// abandoned-resume handler.
+    pub last_prompt: Option<String>,
 }
 
 impl SessionRecord {
@@ -107,6 +119,8 @@ impl SessionRecord {
             metrics: self.metrics.clone(),
             recent_actions: self.recent_actions.clone(),
             is_orphan,
+            is_abandoned: self.is_abandoned,
+            last_prompt: self.last_prompt.clone(),
             workspace_id: self.workspace_id.clone(),
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
@@ -152,7 +166,7 @@ impl SessionRegistry {
             guard.insert(id, arc.clone());
         }
         let snap = lock(&arc).snapshot();
-        let _ = self.events.send(SessionEvent::Updated(snap));
+        let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
     }
 
     pub fn remove(&self, id: &str) {
@@ -172,7 +186,7 @@ impl SessionRegistry {
             f(&mut guard);
             guard.snapshot()
         };
-        let _ = self.events.send(SessionEvent::Updated(snap));
+        let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
     }
 
     pub fn fan_out_pty(&self, session_id: &str, data: Vec<u8>) {
@@ -284,8 +298,42 @@ impl SessionRegistry {
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
             spawn_config: meta.spawn_config.clone(),
+            is_abandoned: false,
+            last_prompt: meta.last_prompt.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
+        self.insert(record);
+    }
+
+    /// Reattach a sidecar whose recorded pid is no longer alive: the previous
+    /// daemon crashed mid-session. Surfaced to clients with
+    /// `is_abandoned = true` so the sidebar can offer Resume.
+    pub fn insert_abandoned(&self, meta: &OrphanMeta) {
+        let mut record = SessionRecord {
+            id: meta.session_id.clone(),
+            label: meta.label.clone(),
+            kind: meta.kind.clone(),
+            members: meta.members.clone(),
+            mode: meta.mode,
+            started_at: meta.started_at,
+            status: SessionStatus::Stopped,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+            workspace_id: meta.workspace_id.clone(),
+            agent: meta.agent.unwrap_or_default(),
+            terminal_title: meta.terminal_title.clone(),
+            program_name: meta.program_name.clone(),
+            spawn_config: meta.spawn_config.clone(),
+            is_abandoned: true,
+            last_prompt: meta.last_prompt.clone(),
+        };
+        push_recent_action(
+            &mut record,
+            "abandoned: daemon crashed before this session finished".to_string(),
+        );
         self.insert(record);
     }
 }

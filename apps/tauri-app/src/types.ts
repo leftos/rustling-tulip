@@ -64,6 +64,14 @@ export interface SessionSnapshot {
   metrics: SessionMetrics;
   recent_actions: string[];
   is_orphan: boolean;
+  // True when this session was abandoned mid-run: the previous daemon
+  // crashed (or was killed) and the underlying `claude` process is gone.
+  // Drives the "Resume" affordance in the sidebar.
+  is_abandoned: boolean;
+  // User's initial prompt at spawn, surfaced so the abandoned-bucket UI
+  // can show "what this session was trying to do". null when no prompt
+  // was supplied or for sidecars written before Phase B.1.
+  last_prompt: string | null;
   // For workspace-kind sessions: the workspace this session belongs to.
   // null for single-repo sessions.
   workspace_id: string | null;
@@ -400,6 +408,8 @@ export type ClientMessage =
   | { type: "send_input"; session_id: string; data_b64: string }
   | { type: "resize"; session_id: string; cols: number; rows: number }
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
+  | { type: "resume_abandoned"; session_id: string }
+  | { type: "discard_abandoned"; session_id: string }
   | { type: "list_branches"; repo_id: string }
   | {
       type: "preview_workspace_spawn";
