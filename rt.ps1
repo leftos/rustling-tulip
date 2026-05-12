@@ -88,18 +88,31 @@ $ErrorActionPreference = 'Stop'
 # Constants
 # ---------------------------------------------------------------------------
 
-$ScriptDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AppDir        = Join-Path $ScriptDir 'apps\tauri-app'
-$ManifestPath  = Join-Path $ScriptDir 'Cargo.toml'
-$ImageName     = 'rustling-tulipd'
-$AppImageName  = 'rustling-tulip-app'
-$HandshakeFile = Join-Path $env:APPDATA 'leftos\rustling-tulip\config\daemon.json'
+$ScriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AppDir          = Join-Path $ScriptDir 'apps\tauri-app'
+$ManifestPath    = Join-Path $ScriptDir 'Cargo.toml'
+$ImageName       = 'rustling-tulipd'
+$TracerImageName = 'rt-tracer'
+$AppImageName    = 'rustling-tulip-app'
+$HandshakeFile   = Join-Path $env:APPDATA 'leftos\rustling-tulip\config\daemon.json'
+$SidecarStageDir = Join-Path $AppDir 'src-tauri\binaries'
+
+# Cached host triple from `rustc -vV`. Tauri's build script appends this
+# suffix to every externalBin entry and refuses to build when the
+# resulting path is missing -- so we stage binaries with the same suffix
+# whether we're in debug, release, or installer mode.
+$script:HostTriple = $null
 
 function Get-DaemonBin {
     # `$Profile` is a PowerShell automatic variable for the user's profile
     # path; use `$BuildProfile` here to avoid the collision.
     param([string]$BuildProfile)
     Join-Path $ScriptDir "target\$BuildProfile\$ImageName.exe"
+}
+
+function Get-TracerBin {
+    param([string]$BuildProfile)
+    Join-Path $ScriptDir "target\$BuildProfile\$TracerImageName.exe"
 }
 
 function Get-AppExe {
@@ -195,9 +208,67 @@ function Test-CargoRecompiled {
     param($Lines)
     if ($null -eq $Lines) { return $false }
     foreach ($line in $Lines) {
-        if ($line -match '^\s*Compiling\s+(daemon|protocol)\b') { return $true }
+        # `tracer` and `tracer-protocol` are included so a tracer-only
+        # change still triggers a daemon restart -- the running daemon
+        # caches the tracer binary path at startup, and ABI drift between
+        # an old daemon and a fresh tracer build will surface as cryptic
+        # pipe-handshake errors. Easier to just bounce the daemon.
+        if ($line -match '^\s*Compiling\s+(daemon|protocol|tracer(-protocol)?)\b') {
+            return $true
+        }
     }
     return $false
+}
+
+# Resolve the host target triple via `rustc -vV`. Cached for the script's
+# lifetime since the result only changes when the host toolchain changes.
+function Get-HostTriple {
+    if ($script:HostTriple) { return $script:HostTriple }
+    $hostLine = rustc -vV | Select-String '^host:'
+    if (-not $hostLine) { throw 'Could not parse host triple from `rustc -vV`.' }
+    $script:HostTriple = ($hostLine.ToString() -replace '^host:\s*', '').Trim()
+    return $script:HostTriple
+}
+
+# Stage daemon + tracer sidecars into apps/tauri-app/src-tauri/binaries/
+# with the target-triple suffix Tauri's externalBin contract demands.
+# Idempotent: only copies when the source is newer or the dest is missing.
+# Required for both `tauri dev` and `tauri build` -- the latter's build
+# script fails fast otherwise, which is what users hit when running
+# `rt.ps1` after `cargo clean` or a fresh clone.
+function Sync-SidecarBinaries {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
+        Justification = 'Syncs the full set of sidecars; plural noun is accurate.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Dev script: the calling subcommand is the user gesture.')]
+    param([string]$BuildProfile)
+
+    $triple = Get-HostTriple
+    $ext    = if ($IsWindows) { '.exe' } else { '' }
+    New-Item -ItemType Directory -Path $SidecarStageDir -Force | Out-Null
+
+    $sidecars = @(
+        @{ Name = $ImageName;       Source = Get-DaemonBin -BuildProfile $BuildProfile },
+        @{ Name = $TracerImageName; Source = Get-TracerBin -BuildProfile $BuildProfile }
+    )
+
+    foreach ($s in $sidecars) {
+        if (-not (Test-Path $s.Source)) {
+            throw "Sidecar source missing: $($s.Source). Did the cargo build step run?"
+        }
+        $dest    = Join-Path $SidecarStageDir "$($s.Name)-$triple$ext"
+        $sourceT = (Get-Item $s.Source).LastWriteTimeUtc
+        $needsCopy = $true
+        if (Test-Path $dest) {
+            $destT = (Get-Item $dest).LastWriteTimeUtc
+            if ($destT -ge $sourceT) { $needsCopy = $false }
+        }
+        if ($needsCopy) {
+            Copy-Item -Path $s.Source -Destination $dest -Force
+            Write-Host "    staged $($s.Name) -> $dest" -ForegroundColor DarkGray
+        }
+    }
 }
 
 function Initialize-FrontendDeps {
@@ -221,12 +292,15 @@ function Initialize-FrontendDeps {
 # Builders
 # ---------------------------------------------------------------------------
 
-# Debug daemon-only build with the smart "locked binary" retry from the old
-# launch.ps1. Sets $script:DaemonAlreadyStopped when the running daemon was
-# killed to break the lock, so the caller knows not to redundantly stop it.
+# Debug daemon + tracer build with the smart "locked binary" retry from
+# the old launch.ps1. Sets $script:DaemonAlreadyStopped when the running
+# daemon was killed to break the lock, so the caller knows not to
+# redundantly stop it. The tracer is bundled in the same cargo invocation
+# because Tauri's externalBin contract (tauri.conf.json) requires both
+# sidecars to exist before `tauri dev` will even start.
 function Invoke-DebugBuild {
-    Write-Host '==> Building daemon (debug)...' -ForegroundColor Cyan
-    $cargoArgs = @('build', '-p', 'daemon')
+    Write-Host '==> Building daemon + tracer (debug)...' -ForegroundColor Cyan
+    $cargoArgs = @('build', '-p', 'daemon', '-p', 'tracer')
 
     $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
     $output = $script:CargoLines
@@ -234,16 +308,23 @@ function Invoke-DebugBuild {
 
     if ($exit -ne 0 -and -not (Test-DaemonBinaryWritable (Get-DaemonBin -BuildProfile 'debug'))) {
         [void](Stop-DaemonProcesses -Reason 'daemon binary locked, retrying build')
-        Write-Host '==> Retrying daemon build...' -ForegroundColor Cyan
+        Write-Host '==> Retrying daemon + tracer build...' -ForegroundColor Cyan
         $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
         $output = $script:CargoLines
         $script:DaemonAlreadyStopped = $true
     }
 
     Test-CargoExitOk 'cargo build'
-    if (-not (Test-Path (Get-DaemonBin -BuildProfile 'debug'))) {
-        throw "Daemon binary missing after build: $(Get-DaemonBin -BuildProfile 'debug')"
-    }
+
+    $daemonBin = Get-DaemonBin -BuildProfile 'debug'
+    $tracerBin = Get-TracerBin -BuildProfile 'debug'
+    if (-not (Test-Path $daemonBin)) { throw "Daemon binary missing after build: $daemonBin" }
+    if (-not (Test-Path $tracerBin)) { throw "Tracer binary missing after build: $tracerBin" }
+
+    # Stage sidecars for Tauri's externalBin build-time check. Idempotent
+    # -- no-op when the staged copies are already up to date.
+    Sync-SidecarBinaries -BuildProfile 'debug'
+
     $script:CargoRecompiledDaemon = Test-CargoRecompiled -Lines $output
 }
 
@@ -278,14 +359,22 @@ function Invoke-ReleaseBuild {
         Pop-Location
     }
 
-    Write-Host '==> Building daemon + tauri app (release)...' -ForegroundColor Cyan
-    & cargo build --release --manifest-path $ManifestPath -p daemon -p rustling-tulip-app --features rustling-tulip-app/custom-protocol
+    Write-Host '==> Building daemon + tracer + tauri app (release)...' -ForegroundColor Cyan
+    & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer -p rustling-tulip-app --features rustling-tulip-app/custom-protocol
     Test-CargoExitOk 'cargo build --release'
 
     $appExe    = Get-AppExe
     $daemonExe = Get-DaemonBin -BuildProfile 'release'
+    $tracerExe = Get-TracerBin -BuildProfile 'release'
     if (-not (Test-Path $appExe))    { throw "Release app exe missing: $appExe" }
     if (-not (Test-Path $daemonExe)) { throw "Release daemon exe missing: $daemonExe" }
+    if (-not (Test-Path $tracerExe)) { throw "Release tracer exe missing: $tracerExe" }
+
+    # Stage sidecars even in the build path -- the release flow runs the
+    # standalone .exe directly (no Tauri build script involvement), but
+    # keeping the binaries/ folder consistent means subsequent `installer`
+    # runs are pure no-ops on the staging step.
+    Sync-SidecarBinaries -BuildProfile 'release'
 }
 
 # ---------------------------------------------------------------------------
@@ -371,27 +460,10 @@ function Invoke-Installer {
     & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer
     Test-CargoExitOk 'cargo build --release (daemon + tracer)'
 
-    # Step 2: stage the sidecar binaries with the target-triple suffix Tauri
-    # expects. The triple comes from `rustc -vV` so the script works on any
-    # host (x86_64-pc-windows-msvc, aarch64-apple-darwin, etc.).
-    $hostLine = rustc -vV | Select-String '^host:'
-    if (-not $hostLine) { throw 'Could not parse host triple from `rustc -vV`.' }
-    $triple = ($hostLine.ToString() -replace '^host:\s*', '').Trim()
-
-    $binariesDir = Join-Path $AppDir 'src-tauri\binaries'
-    New-Item -ItemType Directory -Path $binariesDir -Force | Out-Null
-
-    $ext = if ($IsWindows) { '.exe' } else { '' }
-    $sidecars = @(
-        @{ Name = 'rustling-tulipd'; Source = Join-Path $ScriptDir "target\release\rustling-tulipd$ext" },
-        @{ Name = 'rt-tracer';       Source = Join-Path $ScriptDir "target\release\rt-tracer$ext" }
-    )
-    foreach ($s in $sidecars) {
-        if (-not (Test-Path $s.Source)) { throw "Sidecar source missing: $($s.Source)" }
-        $dest = Join-Path $binariesDir "$($s.Name)-$triple$ext"
-        Copy-Item -Path $s.Source -Destination $dest -Force
-        Write-Host "    staged $($s.Name) -> $dest" -ForegroundColor DarkGray
-    }
+    # Step 2: stage the sidecar binaries with the target-triple suffix
+    # Tauri expects. Shared helper -- same logic the debug/release builds
+    # use, so the binaries/ folder stays consistent across modes.
+    Sync-SidecarBinaries -BuildProfile 'release'
 
     # Step 3: run `pnpm tauri build`. Tauri builds the app exe + frontend
     # bundle and produces the installer per `tauri.conf.json` (NSIS).
