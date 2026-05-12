@@ -998,6 +998,16 @@ pub enum ClientMessage {
     GetSpawnConfig {
         session_id: String,
     },
+    /// Set or clear the user-provided label override for a session.
+    /// `label = Some(text)` pins a custom name; `label = None` (or an
+    /// empty string after trim) restores the daemon-generated default
+    /// (`<repo>:<branch>` for single, `<workspace>:<branch>` for
+    /// workspace). Persisted on the orphan sidecar so the override
+    /// survives reattach.
+    RenameSession {
+        session_id: String,
+        label: Option<String>,
+    },
     Attach {
         session_id: String,
     },

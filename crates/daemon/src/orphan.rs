@@ -46,7 +46,21 @@ pub struct OrphanMeta {
     pub on_disk_version: u32,
     pub session_id: String,
     pub pid: u32,
+    /// Effective label = `user_label.clone().unwrap_or(default_label)`.
+    /// Kept on disk for legacy single-field readers (and as a paper trail
+    /// of what the user actually saw at write time). Reattach prefers
+    /// `default_label` + `user_label` when present; falls back to this
+    /// field when reading sidecars written before the rename feature.
     pub label: String,
+    /// Daemon-generated default label captured at spawn time. `None` only
+    /// for sidecars written before the rename feature — reattach falls
+    /// back to treating `label` as the default in that case.
+    #[serde(default)]
+    pub default_label: Option<String>,
+    /// User-provided rename override. `None` when the user has never
+    /// renamed (or has cleared) this session.
+    #[serde(default)]
+    pub user_label: Option<String>,
     pub kind: SessionKind,
     pub mode: SessionMode,
     pub members: Vec<SessionMember>,
@@ -349,6 +363,11 @@ pub fn meta_from_record(
         on_disk_version: CURRENT_SIDECAR_VERSION,
         session_id,
         pid,
+        // At spawn time, the effective label IS the daemon-generated
+        // default. Subsequent renames write through via `update_labels`
+        // (which reads + mutates + writes back the sidecar).
+        default_label: Some(label.clone()),
+        user_label: None,
         label,
         kind,
         mode,
@@ -364,6 +383,49 @@ pub fn meta_from_record(
         tracer_pid,
         tracer_pipe,
     })
+}
+
+/// Best-effort sync of the rename fields into the sidecar. Mirrors the
+/// `update_terminal_title` / `update_recent_actions_tail` pattern:
+/// read the sidecar, mutate three fields, write back. Silently no-ops
+/// for sessions whose sidecar doesn't exist yet (the next spawn-time
+/// write will pick the latest values up).
+pub fn update_labels(
+    dirs: &Dirs,
+    session_id: &str,
+    default_label: &str,
+    user_label: Option<&str>,
+    effective_label: &str,
+) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("reading meta for rename update"),
+    };
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for rename update")?;
+    let already_synced = meta.default_label.as_deref() == Some(default_label)
+        && meta.user_label.as_deref() == user_label
+        && meta.label == effective_label;
+    if already_synced {
+        return Ok(());
+    }
+    meta.default_label = Some(default_label.to_string());
+    meta.user_label = user_label.map(str::to_string);
+    meta.label = effective_label.to_string();
+    write_meta(dirs, &meta)
+}
+
+pub fn try_update_labels(
+    dirs: &Dirs,
+    session_id: &str,
+    default_label: &str,
+    user_label: Option<&str>,
+    effective_label: &str,
+) {
+    if let Err(err) = update_labels(dirs, session_id, default_label, user_label, effective_label) {
+        warn!(?err, %session_id, "failed to update orphan meta labels");
+    }
 }
 
 /// Best-effort: read the meta sidecar, mutate `terminal_title`, write it back.
@@ -485,6 +547,8 @@ mod tests {
             session_id: "s1".to_string(),
             pid: 1234,
             label: "test".to_string(),
+            default_label: Some("test".to_string()),
+            user_label: None,
             kind: SessionKind::Single,
             mode: SessionMode::Interactive,
             members: vec![],

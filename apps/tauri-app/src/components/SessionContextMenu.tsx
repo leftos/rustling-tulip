@@ -43,6 +43,12 @@ interface Props {
 
 type CloseMode = "idle" | "confirming";
 
+/// Inline rename mode for the session context menu. `null` while the
+/// menu shows its usual items; a string captures the in-progress edit
+/// value when the user clicks "Rename". Empty + Enter clears the user
+/// override and restores the daemon-generated default label.
+type RenameMode = null | { value: string };
+
 export default function SessionContextMenu({
   state,
   tabs,
@@ -84,6 +90,18 @@ export default function SessionContextMenu({
   const isStopped =
     !isInactive && (s.status === "stopped" || s.status === "error");
   const [closeMode, setCloseMode] = useState<CloseMode>("idle");
+  const [renameMode, setRenameMode] = useState<RenameMode>(null);
+
+  const sendRename = (raw: string) => {
+    const trimmed = raw.trim();
+    client.send({
+      type: "rename_session",
+      session_id: s.id,
+      label: trimmed.length > 0 ? trimmed : null,
+    });
+    setRenameMode(null);
+    onClose();
+  };
   /// Re-read on every menu render — the source-of-truth lives in
   /// localStorage and the menu is short-lived. Memoizing would just
   /// require an extra subscription for no benefit.
@@ -200,8 +218,25 @@ export default function SessionContextMenu({
             onCloseKeep={() => sendStop(false)}
             onCloseRemove={() => sendStop(true)}
           />
+        ) : renameMode !== null ? (
+          <RenameForm
+            value={renameMode.value}
+            onChange={(next) => setRenameMode({ value: next })}
+            onSubmit={() => sendRename(renameMode.value)}
+            onCancel={() => setRenameMode(null)}
+          />
         ) : (
           <>
+            <li>
+              <button
+                type="button"
+                onClick={() => setRenameMode({ value: s.label })}
+                title="Custom name for this session. Submit blank to restore the auto-generated default."
+                data-testid="session-context-rename"
+              >
+                Rename…
+              </button>
+            </li>
             <li>
               <button
                 type="button"
@@ -472,6 +507,61 @@ function CloseConfirm({
           }
         >
           {hasWorktree ? "Close and keep worktree" : "Confirm close"}
+        </button>
+      </li>
+      <li>
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      </li>
+    </>
+  );
+}
+
+interface RenameFormProps {
+  value: string;
+  onChange: (next: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}
+
+function RenameForm({ value, onChange, onSubmit, onCancel }: RenameFormProps) {
+  return (
+    <>
+      <li className="context-menu-label">
+        Rename session{" "}
+        <span className="muted small inline-note">(blank = default)</span>
+      </li>
+      <li>
+        {/* Inputs inside a <li> stay clickable; the parent <ul>'s
+            click-stops-propagation guard keeps the backdrop from
+            closing the menu when the user clicks the field. */}
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          placeholder="Use default"
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onSubmit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancel();
+            }
+          }}
+          data-testid="session-context-rename-input"
+        />
+      </li>
+      <li>
+        <button
+          type="button"
+          className="primary"
+          onClick={onSubmit}
+          data-testid="session-context-rename-submit"
+        >
+          Save
         </button>
       </li>
       <li>

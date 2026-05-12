@@ -444,6 +444,7 @@ export type ClientMessage =
   | ({ type: "spawn_session" } & SpawnRequest)
   | { type: "duplicate_session"; session_id: string }
   | { type: "get_spawn_config"; session_id: string }
+  | { type: "rename_session"; session_id: string; label: string | null }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "send_input"; session_id: string; data_b64: string }

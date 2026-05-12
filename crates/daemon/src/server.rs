@@ -871,6 +871,47 @@ async fn dispatch(
                 .and_then(|rec| crate::sync::lock(&rec).spawn_config.clone());
             let _ = out_tx.send(DaemonMessage::SpawnConfigReply { session_id, config });
         }
+        ClientMessage::RenameSession { session_id, label } => {
+            // Empty / whitespace-only labels clear the user override and
+            // restore the daemon-generated default. The user sees their
+            // typed value drop straight to None — no surprise reuse of an
+            // accidental space-padded name.
+            let normalized = label.and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+            let snap = if let Some(rec) = hub.sessions.get(&session_id) {
+                let (default_label, user_label, effective) = {
+                    let mut guard = crate::sync::lock(&rec);
+                    guard.user_label.clone_from(&normalized);
+                    guard.label = normalized
+                        .clone()
+                        .unwrap_or_else(|| guard.default_label.clone());
+                    (
+                        guard.default_label.clone(),
+                        guard.user_label.clone(),
+                        guard.label.clone(),
+                    )
+                };
+                orphan::try_update_labels(
+                    &hub.dirs,
+                    &session_id,
+                    &default_label,
+                    user_label.as_deref(),
+                    &effective,
+                );
+                Some(crate::sync::lock(&rec).snapshot())
+            } else {
+                None
+            };
+            if let Some(session) = snap {
+                let _ = out_tx.send(DaemonMessage::SessionUpdated { session });
+            }
+        }
         ClientMessage::Attach { session_id } => {
             attached.lock().await.insert(session_id);
         }
@@ -2148,6 +2189,8 @@ async fn spawn_interactive_session(
     let mut record = SessionRecord {
         id: session_id.clone(),
         label: label.clone(),
+        default_label: label.clone(),
+        user_label: None,
         kind: kind.clone(),
         members: members.clone(),
         mode: SessionMode::Interactive,
@@ -2274,6 +2317,8 @@ async fn spawn_plain_shell_session(
     let mut record = SessionRecord {
         id: session_id.clone(),
         label: label.clone(),
+        default_label: label.clone(),
+        user_label: None,
         kind: kind.clone(),
         members: members.clone(),
         mode: SessionMode::PlainShell,
@@ -2400,6 +2445,8 @@ fn spawn_headless_session(
     let mut record = SessionRecord {
         id: session_id.clone(),
         label: label.clone(),
+        default_label: label.clone(),
+        user_label: None,
         kind: kind.clone(),
         members: members.clone(),
         mode: SessionMode::Headless,

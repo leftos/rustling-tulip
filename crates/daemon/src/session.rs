@@ -48,7 +48,19 @@ pub enum SessionEvent {
 
 pub struct SessionRecord {
     pub id: String,
+    /// Effective label surfaced to clients. Equals `user_label` when set,
+    /// otherwise `default_label`. Kept eagerly synchronized so callers
+    /// don't have to recompute on every snapshot.
     pub label: String,
+    /// Daemon-generated default label (`<repo>:<branch>` for single,
+    /// `<workspace>:<branch>` for workspace). Stable for the lifetime of
+    /// the session record — re-applied when the user clears their rename
+    /// override.
+    pub default_label: String,
+    /// Optional user-provided rename override. `None` means "use the
+    /// default". Persisted to the orphan sidecar so the override survives
+    /// daemon restarts and reattaches.
+    pub user_label: Option<String>,
     pub kind: SessionKind,
     pub members: Vec<SessionMember>,
     pub mode: SessionMode,
@@ -330,11 +342,28 @@ pub fn attach_lifecycle(
 /// moment — the underlying `claude` is still running but its stdio is detached
 /// from us. Status is set conservatively to `Idle` until something proves
 /// otherwise.
+/// Resolve `(default_label, user_label, effective_label)` from an
+/// on-disk sidecar. Legacy sidecars (pre-rename) carry only `label`;
+/// treat that as the default with no user override. Newer sidecars
+/// carry `default_label` + `user_label` explicitly.
+fn resolve_labels_from_meta(meta: &OrphanMeta) -> (String, Option<String>, String) {
+    let default_label = meta
+        .default_label
+        .clone()
+        .unwrap_or_else(|| meta.label.clone());
+    let user_label = meta.user_label.clone();
+    let effective = user_label.clone().unwrap_or_else(|| default_label.clone());
+    (default_label, user_label, effective)
+}
+
 impl SessionRegistry {
     pub fn insert_orphan(&self, meta: &OrphanMeta) {
+        let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
-            label: meta.label.clone(),
+            label,
+            default_label,
+            user_label,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
@@ -365,9 +394,12 @@ impl SessionRegistry {
     /// daemon had spawned it directly. Surfaced with `is_abandoned = false`
     /// and the same overall shape as a fresh spawn.
     pub fn insert_reattached(&self, meta: &OrphanMeta, pty: Arc<PtyHandle>) {
+        let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
-            label: meta.label.clone(),
+            label,
+            default_label,
+            user_label,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
@@ -399,9 +431,12 @@ impl SessionRegistry {
     /// daemon crashed mid-session. Surfaced to clients with
     /// `is_abandoned = true` so the sidebar can offer Resume.
     pub fn insert_abandoned(&self, meta: &OrphanMeta) {
+        let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
-            label: meta.label.clone(),
+            label,
+            default_label,
+            user_label,
             kind: meta.kind.clone(),
             members: meta.members.clone(),
             mode: meta.mode,
