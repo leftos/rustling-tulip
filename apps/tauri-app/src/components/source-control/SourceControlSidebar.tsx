@@ -66,7 +66,15 @@ export default function SourceControlSidebar({
     return repos[0]?.id ?? null;
   }, [override, focusedRepoId, repos]);
   const activeRepo = repos.find((r) => r.id === activeRepoId) ?? null;
-  const followingFocus = override === null && focusedRepoId !== null;
+  const isAuto = override === null;
+  const followingFocus = isAuto && focusedRepoId !== null;
+  // Auto mode has two sub-states: actively following a focused pane,
+  // or sitting on the fallback (first repo) because no pane is focused.
+  // The user complaint was that "Follow focused pane" reads as if there
+  // is always a focused pane to follow — surface the fallback state too.
+  // Only meaningful when 2+ repos exist; in the single-repo case the
+  // picker is hidden anyway and there's nothing to fall back from.
+  const autoNoActive = isAuto && focusedRepoId === null && repos.length > 1;
 
   if (repos.length === 0) {
     return (
@@ -94,7 +102,7 @@ export default function SourceControlSidebar({
               aria-label="Pin source-control sidebar to a specific repo"
               data-testid="source-control-repo-picker"
             >
-              <option value="">Follow focused pane</option>
+              <option value="">Auto · follow active pane</option>
               {repos.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.name}
@@ -108,7 +116,16 @@ export default function SourceControlSidebar({
             <strong>{activeRepo.name}</strong>
             {followingFocus && (
               <span className="muted small" style={{ marginLeft: 6 }}>
-                · following focus
+                · following active pane
+              </span>
+            )}
+            {autoNoActive && (
+              <span
+                className="muted small"
+                style={{ marginLeft: 6 }}
+                title="No pane is focused right now — falling back to the first registered repo. Pick a session in the sidebar to follow it, or pin a repo from the picker above."
+              >
+                · no active pane
               </span>
             )}
           </div>
