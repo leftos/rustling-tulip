@@ -933,20 +933,27 @@ export default function App() {
         return;
       }
       // Two timers gate the shutdown UX:
-      //   - At 2 s with the WS still open, flip `exitStuck` so the dialog
+      //   - At 5 s with the WS still open, flip `exitStuck` so the dialog
       //     swaps to a warning + Force-quit affordance instead of pretending
       //     to still be making progress.
-      //   - When the WS actually closes (graceful daemon shutdown), close
-      //     the OS window normally.
+      //   - When the WS actually closes, close the OS window normally.
+      //
+      // We close the WS ourselves immediately after sending the Shutdown
+      // frame: WebSocket close() flushes pending writes before sending the
+      // Close frame, so the daemon still receives Shutdown and runs its own
+      // teardown. Waiting for the daemon-initiated close was flaky on
+      // Windows — even with a clean handler-return on the daemon side, the
+      // OS-level FIN propagation to the WebView2 client took several seconds
+      // in some runs, which surfaced as a spurious "daemon stuck" warning.
       let resolved = false;
       const stuckTimer = window.setTimeout(() => {
         if (resolved) return;
         logToFile(
           "warn",
-          `${tag}: 2 s elapsed without WS close; surfacing force-quit option`,
+          `${tag}: 5 s elapsed without WS close; surfacing force-quit option`,
         );
         setState((s) => ({ ...s, exitStuck: true }));
-      }, 2000);
+      }, 5000);
       const unsubscribe = client.onConnectionChange((next) => {
         logToFile("info", `${tag}: connection state -> ${next.kind}`);
         if (next.kind === "open" || next.kind === "connecting") return;
@@ -959,6 +966,9 @@ export default function App() {
       });
       logToFile("info", `${tag}: sending shutdown message (drain=${drain})`);
       client.send({ type: "shutdown", drain });
+      // Initiate the close locally so we don't depend on the daemon's TCP
+      // FIN reaching us in a timely way.
+      client.close();
     },
     [closeMainWindow, state.client],
   );
