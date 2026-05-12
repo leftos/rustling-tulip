@@ -41,6 +41,15 @@ export type SpawnInitialTarget =
   | { kind: "repo"; repo_id: string }
   | { kind: "workspace"; workspace_id: string };
 
+/// Where "Launch last again" sends the relaunched session.
+/// `current_tab` resolves to the active tab when it can host panes;
+/// otherwise it falls through to a fresh tab (handled in App.tsx).
+/// `tab` pins the placement to a specific existing tab id.
+export type LaunchLastPlacement =
+  | { kind: "current_tab" }
+  | { kind: "new_tab" }
+  | { kind: "tab"; tabId: string };
+
 export interface RepoRemoveIntent {
   repoId: string;
   repoName: string;
@@ -116,6 +125,19 @@ interface Props {
   /// to an empty pane in the target tab (or, when full, a fresh
   /// split on the right).
   onOpenSpawnIntoTab: (tabId: string) => void;
+  /// Replay the last spawn config for a repo or workspace. App.tsx looks
+  /// up `last_spawn_config` and either re-sends `spawn_session` (config
+  /// present) or opens the spawn dialog pre-targeted to the container
+  /// (config absent). The submenu in the container context menu surfaces
+  /// the three placements (current / new / per-tab); double-click on a
+  /// container row passes `current_tab`.
+  onLaunchLast: (
+    target: SpawnInitialTarget,
+    placement: LaunchLastPlacement,
+  ) => void;
+  /// Active main-window tab. Threaded down so the "Launch last in current
+  /// tab" submenu entry can be disabled when no tab is selected.
+  activeTabId: string | null;
   /// Instant duplicate from the session context menu. App-level handler
   /// arms a pending spawn intent (`newTab` or `addToTab` depending on
   /// `target`) before sending DuplicateSession, so the freshly spawned
@@ -613,6 +635,7 @@ export default function Sidebar(props: Props) {
                 onRemoveRepo={props.onRemoveRepo}
                 onRemoveRepoWithLiveSessions={props.onRemoveRepoWithLiveSessions}
                 onRemoveWorkspace={props.onRemoveWorkspace}
+                onLaunchLast={props.onLaunchLast}
                 onContextMenu={(x, y) =>
                   setContextMenu({ x, y, container: c })
                 }
@@ -645,6 +668,18 @@ export default function Sidebar(props: Props) {
         <ContainerContextMenu
           state={contextMenu}
           presets={currentPresets}
+          tabs={props.tabs}
+          activeTabId={props.activeTabId}
+          hasLastConfig={hasLastConfig(
+            contextMenu.container,
+            props.repos,
+            props.workspaces,
+          )}
+          onLaunchLast={(placement) => {
+            const target = containerLaunchTarget(contextMenu.container);
+            if (target) props.onLaunchLast(target, placement);
+            closeMenu();
+          }}
           onClose={closeMenu}
           onSpawn={() => {
             const c = contextMenu.container;
@@ -740,6 +775,13 @@ interface ContainerNodeProps {
   onRemoveRepo: (id: string) => void;
   onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
   onRemoveWorkspace: (id: string) => void;
+  /// Double-click on a repo/workspace row replays its `last_spawn_config`
+  /// in the active tab. Threaded down so the container row's onDoubleClick
+  /// can fire it without touching parent state.
+  onLaunchLast: (
+    target: SpawnInitialTarget,
+    placement: LaunchLastPlacement,
+  ) => void;
   onContextMenu: (x: number, y: number) => void;
   /// Threads through to each SessionLeaf so a right-click on a session
   /// opens the per-session context menu (Duplicate, …).
@@ -897,6 +939,16 @@ function ContainerNode(p: ContainerNodeProps) {
     p.onContextMenu(e.clientX, e.clientY);
   };
 
+  /// Double-click on a repo or workspace row replays its last spawn
+  /// config in the current tab. Falls through to the spawn dialog when
+  /// the container has never been launched — App.tsx owns that branch.
+  /// Tab/detached/unbound containers ignore double-click.
+  const onDoubleClick = () => {
+    const target = launchLastTargetFor(c);
+    if (!target) return;
+    p.onLaunchLast(target, { kind: "current_tab" });
+  };
+
   // Tab + repo/workspace containers participate in drag-to-reorder
   // (different MIMEs, but same `dragHandlers` shape). Detached/unbound
   // pass undefined handlers and stay non-draggable.
@@ -907,6 +959,7 @@ function ContainerNode(p: ContainerNodeProps) {
       <div
         className={headerClasses}
         onClick={hasChildren ? p.onToggle : undefined}
+        onDoubleClick={onDoubleClick}
         onContextMenu={onContext}
         role={hasChildren ? "button" : undefined}
         tabIndex={hasChildren ? 0 : undefined}
@@ -1376,6 +1429,10 @@ interface ContextMenuProps {
     | { ok: true; entries: PresetEntry[] }
     | { ok: false; reason: string }
     | null;
+  tabs: TabEntry[];
+  activeTabId: string | null;
+  hasLastConfig: boolean;
+  onLaunchLast: (placement: LaunchLastPlacement) => void;
   onClose: () => void;
   onSpawn: () => void;
   onRemove: () => void;
@@ -1388,9 +1445,16 @@ function ContainerContextMenu(p: ContextMenuProps) {
   const c = p.state.container;
   const canReveal = c.fsPath !== null;
   const canLaunchPreset = c.kind === "repo" || c.kind === "workspace";
+  const canLaunchLast = c.kind === "repo" || c.kind === "workspace";
   const isTab = c.kind === "tab";
   const removeLabel =
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
+  const activeTab = p.activeTabId
+    ? p.tabs.find((t) => t.id === p.activeTabId)
+    : null;
+  const lastConfigDisabledTitle = p.hasLastConfig
+    ? undefined
+    : "No saved spawn config — launch the spawn dialog at least once first.";
   useEscape(p.onClose);
 
   // Clamp the menu against the window so a right-click near the
@@ -1399,7 +1463,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   // — overlap-safe, viewport-stable beats pixel-perfect). The 12px margin
   // keeps the menu off the edge.
   const clampedLeft = clampMenuCoord(p.state.x, 200);
-  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 300, "height");
+  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 360, "height");
   return (
     <div
       className="context-menu-backdrop"
@@ -1419,10 +1483,69 @@ function ContainerContextMenu(p: ContextMenuProps) {
             {isTab ? "Spawn session here" : "Spawn new session"}
           </button>
         </li>
+        {canLaunchLast && (
+          <>
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li className="context-menu-label">Launch last again</li>
+            <li>
+              <button
+                type="button"
+                disabled={!p.hasLastConfig || !activeTab}
+                onClick={() => p.onLaunchLast({ kind: "current_tab" })}
+                title={
+                  lastConfigDisabledTitle ??
+                  (!activeTab
+                    ? "No active tab — nothing to launch into."
+                    : `Replay last spawn into "${activeTab.name}"`)
+                }
+                data-testid="container-launch-last-current"
+              >
+                &nbsp;&nbsp;In current tab
+                {activeTab && (
+                  <span className="context-menu-hint">{activeTab.name}</span>
+                )}
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                disabled={!p.hasLastConfig}
+                onClick={() => p.onLaunchLast({ kind: "new_tab" })}
+                title={lastConfigDisabledTitle ?? "Replay last spawn in a fresh tab"}
+                data-testid="container-launch-last-new"
+              >
+                &nbsp;&nbsp;In new tab
+              </button>
+            </li>
+            {p.tabs.length > 0 && (
+              <>
+                <li className="context-menu-label">In tab</li>
+                {p.tabs.map((t) => (
+                  <li key={`launch-last:${t.id}`}>
+                    <button
+                      type="button"
+                      disabled={!p.hasLastConfig}
+                      onClick={() =>
+                        p.onLaunchLast({ kind: "tab", tabId: t.id })
+                      }
+                      title={
+                        lastConfigDisabledTitle ??
+                        `Replay last spawn into "${t.name}"`
+                      }
+                    >
+                      &nbsp;&nbsp;{t.name}
+                    </button>
+                  </li>
+                ))}
+              </>
+            )}
+          </>
+        )}
         {/* Tab containers don't expose preset / reveal / remove — they're
             view groupings, not resources to manage. Keep the menu small. */}
         {!isTab && (
           <>
+            <li className="context-menu-separator" aria-hidden="true" />
             {canLaunchPreset && (
               <PresetSubmenu
                 presets={p.presets}
@@ -1506,6 +1629,43 @@ function menuTarget(c: TreeContainer): PresetTarget | null {
   if (c.kind === "repo") return { kind: "repo", repo_id: c.id };
   if (c.kind === "workspace") return { kind: "workspace", workspace_id: c.id };
   return null;
+}
+
+/// Build a `SpawnInitialTarget` from a sidebar container that can host
+/// a launch. Returns `null` for tab/detached/unbound rows — those aren't
+/// launch sources. Shared by the double-click handler and the context-
+/// menu's submenu.
+function launchLastTargetFor(c: TreeContainer): SpawnInitialTarget | null {
+  if (c.kind === "repo") return { kind: "repo", repo_id: c.id };
+  if (c.kind === "workspace")
+    return { kind: "workspace", workspace_id: c.id };
+  return null;
+}
+
+/// Sidebar-render alias for `launchLastTargetFor`. Kept under a distinct
+/// name at the menu call site to make the intent explicit (we're building
+/// the relaunch target for the *currently right-clicked* container).
+function containerLaunchTarget(c: TreeContainer): SpawnInitialTarget | null {
+  return launchLastTargetFor(c);
+}
+
+/// Does the targeted container have a saved spawn config to relaunch?
+/// Drives the disabled state of the "Launch last again" submenu items
+/// when the user hasn't launched this repo/workspace yet.
+function hasLastConfig(
+  c: TreeContainer,
+  repos: RepoEntry[],
+  workspaces: WorkspaceEntry[],
+): boolean {
+  if (c.kind === "repo") {
+    return repos.find((r) => r.id === c.id)?.last_spawn_config != null;
+  }
+  if (c.kind === "workspace") {
+    return (
+      workspaces.find((w) => w.id === c.id)?.last_spawn_config != null
+    );
+  }
+  return false;
 }
 
 function targetCacheKey(target: PresetTarget): string {

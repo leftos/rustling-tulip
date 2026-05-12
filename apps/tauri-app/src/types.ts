@@ -18,6 +18,10 @@ export interface RepoEntry {
   // Last agent spawned against this repo. Drives the spawn-dialog default.
   // null for repos that have never been launched.
   last_agent: Agent | null;
+  // Full spawn config captured from the last successful single-repo spawn.
+  // Drives "Launch last again" (double-click + context-menu submenu). null
+  // until the user has launched at least once.
+  last_spawn_config: SpawnConfig | null;
 }
 
 export interface WorkspaceEntry {
@@ -26,6 +30,10 @@ export interface WorkspaceEntry {
   member_repo_ids: string[];
   linked_vscode_workspace: string | null;
   default_use_worktree: boolean;
+  // Full spawn config captured from the last successful workspace spawn.
+  // Drives "Launch last again" on the workspace row. null until the user
+  // has launched the workspace at least once.
+  last_spawn_config: SpawnConfig | null;
 }
 
 /// Tagged reference to either a repo or a workspace by id. Mirrors the

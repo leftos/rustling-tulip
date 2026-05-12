@@ -4,7 +4,8 @@ use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
-    add_repo, persist_last_agent, remove_repo, remove_workspace, reorder_containers,
+    add_repo, persist_last_agent, persist_repo_last_spawn_config,
+    persist_workspace_last_spawn_config, remove_repo, remove_workspace, reorder_containers,
     set_repo_worktree_default, set_session_order, set_workspace_worktree_default, upsert_workspace,
 };
 use crate::scrollback;
@@ -1852,6 +1853,29 @@ pub(crate) async fn spawn_session(
     for member in &members {
         if let Err(err) = persist_last_agent(&hub.state, &member.repo_id, agent) {
             warn!(?err, repo_id = %member.repo_id, agent = agent.as_label(), "persist_last_agent failed");
+        }
+    }
+
+    // Record the full spawn config on the targeted container so "Launch last
+    // again" (sidebar double-click / context-menu submenu) can replay it.
+    // Workspace spawns persist to the workspace only — single-repo "launch
+    // last" intentionally stays decoupled from workspace launches.
+    match &stored_config.target {
+        SpawnTarget::Single { repo_id, .. } => {
+            if let Err(err) =
+                persist_repo_last_spawn_config(&hub.state, repo_id, stored_config.clone())
+            {
+                warn!(?err, %repo_id, "persist_repo_last_spawn_config failed");
+            }
+        }
+        SpawnTarget::Workspace { workspace_id, .. } => {
+            if let Err(err) = persist_workspace_last_spawn_config(
+                &hub.state,
+                workspace_id,
+                stored_config.clone(),
+            ) {
+                warn!(?err, %workspace_id, "persist_workspace_last_spawn_config failed");
+            }
         }
     }
 

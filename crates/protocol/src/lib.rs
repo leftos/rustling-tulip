@@ -86,6 +86,12 @@ pub struct RepoEntry {
     /// existed, hence the serde default).
     #[serde(default)]
     pub last_agent: Option<Agent>,
+    /// Full spawn config captured from the last successful single-repo spawn
+    /// against this repo. Drives "Launch last again" (double-click on the
+    /// sidebar row, or the matching context-menu submenu). `None` for repos
+    /// that have never been launched.
+    #[serde(default)]
+    pub last_spawn_config: Option<SpawnConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,6 +107,11 @@ pub struct WorkspaceEntry {
     /// Persistent UI preference; see [`RepoEntry::default_use_worktree`].
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
+    /// Full spawn config captured from the last successful workspace spawn.
+    /// Drives "Launch last again" for the workspace row. `None` for
+    /// workspaces that have never been launched.
+    #[serde(default)]
+    pub last_spawn_config: Option<SpawnConfig>,
 }
 
 /// Tagged reference to either a repo or a workspace by id. Used by the
@@ -2222,6 +2233,22 @@ mod tests {
         let repo: RepoEntry = serde_json::from_str(legacy).expect("parse legacy repo");
         assert_eq!(repo.last_agent, None);
         assert!(repo.default_use_worktree, "default_use_worktree default");
+        assert!(repo.last_spawn_config.is_none());
+    }
+
+    #[test]
+    fn workspace_entry_decodes_without_last_spawn_config() {
+        // Existing state.json workspace entries lack `last_spawn_config`;
+        // serde default must produce `None` so legacy state files still load.
+        let legacy = r#"{
+            "id": "ws1",
+            "name": "fullstack",
+            "member_repo_ids": ["r1","r2"]
+        }"#;
+        let ws: WorkspaceEntry = serde_json::from_str(legacy).expect("parse legacy workspace");
+        assert!(ws.last_spawn_config.is_none());
+        assert!(ws.linked_vscode_workspace.is_none());
+        assert!(ws.default_use_worktree);
     }
 
     #[test]

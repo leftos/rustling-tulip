@@ -12,6 +12,7 @@ import type {
   PermissionMode,
   RepoEntry,
   SpawnConfig,
+  TabEntry,
   WorkspaceEntry,
   WorktreeInfo,
 } from "../types";
@@ -30,6 +31,14 @@ interface Props {
   spawnPrefill?: SpawnConfig | undefined;
   canUseCurrentTab: boolean;
   currentTabName: string | null;
+  /// All existing tabs, surfaced as per-tab radios in the placement
+  /// picker so the user can land a fresh spawn in any tab without
+  /// switching focus first. Tabs that can't host panes (e.g. diff tabs)
+  /// are filtered out by the caller.
+  tabs: TabEntry[];
+  /// Active main-window tab id; used to label "Current tab" with the
+  /// active tab's name and to hide the duplicate per-tab radio entry.
+  activeTabId: string | null;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
   /// Closes the dialog and opens the directory picker so a fresh user
@@ -42,9 +51,30 @@ interface Props {
 /// are intentionally allowed (the row is treated as "not yet started").
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-type Mode = "single" | "workspace";
 type RunMode = "interactive" | "headless" | "plain_shell";
-export type SpawnPlacement = "current_tab" | "new_tab";
+
+/// Identifier for whatever the user picked in the unified Target picker.
+/// `kind` discriminates which form renders; `id` is the corresponding
+/// repo_id or workspace_id.
+type TargetSelection =
+  | { kind: "repo"; id: string }
+  | { kind: "workspace"; id: string };
+
+/// Serialize a target for use as a React `key`. Remounting the form on
+/// every target switch — cheap state reset, no manual sync needed.
+function targetKey(t: TargetSelection): string {
+  return `${t.kind}:${t.id}`;
+}
+
+/// Where the spawned session lands. `current_tab` resolves to whichever
+/// tab is active at submit time (App.tsx then defers to any pane/tab
+/// target the user opened the dialog from). `tab` pins placement to a
+/// specific tab id — surfaced as one radio per existing tab in the
+/// placement picker.
+export type SpawnPlacement =
+  | { kind: "current_tab" }
+  | { kind: "new_tab" }
+  | { kind: "tab"; tabId: string };
 
 interface EnvRow {
   key: string;
@@ -119,13 +149,27 @@ function advancedToWire(
   };
 }
 
-function pickInitialMode(
+/// Pick the initial selection for the unified Target picker. Priority:
+///   1. Honor an explicit `initialTarget` (sidebar context menu).
+///   2. Fall back to the first registered workspace when one exists —
+///      preserves the legacy default where workspaces sort before repos
+///      in the list.
+///   3. Otherwise the first repo.
+/// Returns `null` only when there is genuinely nothing to spawn into;
+/// the caller renders the empty-state CTA in that case.
+function pickInitialTarget(
   initial: SpawnInitialTarget | undefined,
+  repos: RepoEntry[],
   workspaces: WorkspaceEntry[],
-): Mode {
-  if (initial?.kind === "repo") return "single";
-  if (initial?.kind === "workspace") return "workspace";
-  return workspaces.length > 0 ? "workspace" : "single";
+): TargetSelection | null {
+  if (initial?.kind === "repo") return { kind: "repo", id: initial.repo_id };
+  if (initial?.kind === "workspace")
+    return { kind: "workspace", id: initial.workspace_id };
+  const firstWorkspace = workspaces[0];
+  if (firstWorkspace) return { kind: "workspace", id: firstWorkspace.id };
+  const firstRepo = repos[0];
+  if (firstRepo) return { kind: "repo", id: firstRepo.id };
+  return null;
 }
 
 export default function SpawnDialog({
@@ -136,13 +180,30 @@ export default function SpawnDialog({
   spawnPrefill,
   canUseCurrentTab,
   currentTabName,
+  tabs,
+  activeTabId,
   onClose,
   onSpawned,
   onAddRepo,
 }: Props) {
-  const [mode, setMode] = useState<Mode>(() =>
-    pickInitialMode(initialTarget, workspaces),
+  const [target, setTarget] = useState<TargetSelection | null>(() =>
+    pickInitialTarget(initialTarget, repos, workspaces),
   );
+
+  // If the selected target disappears mid-dialog (repo removed elsewhere),
+  // snap back to the first available container. Avoids a render-cycle
+  // where `target` references a non-existent entry.
+  useEffect(() => {
+    if (!target) return;
+    const stillExists =
+      target.kind === "repo"
+        ? repos.some((r) => r.id === target.id)
+        : workspaces.some((w) => w.id === target.id);
+    if (!stillExists) {
+      setTarget(pickInitialTarget(undefined, repos, workspaces));
+    }
+  }, [target, repos, workspaces]);
+
   const [runMode, setRunMode] = useState<RunMode>(
     () => spawnPrefill?.mode ?? "interactive",
   );
@@ -159,7 +220,7 @@ export default function SpawnDialog({
     spawnPrefill ? advancedFromConfig(spawnPrefill) : emptyAdvanced(),
   );
   const [spawnPlacement, setSpawnPlacement] = useState<SpawnPlacement>(() =>
-    canUseCurrentTab ? "current_tab" : "new_tab",
+    canUseCurrentTab ? { kind: "current_tab" } : { kind: "new_tab" },
   );
 
   // Headless mode isn't supported for codex yet — snap back to interactive
@@ -171,10 +232,20 @@ export default function SpawnDialog({
   }, [agent, runMode]);
 
   useEffect(() => {
-    if (!canUseCurrentTab && spawnPlacement === "current_tab") {
-      setSpawnPlacement("new_tab");
+    if (!canUseCurrentTab && spawnPlacement.kind === "current_tab") {
+      setSpawnPlacement({ kind: "new_tab" });
     }
   }, [canUseCurrentTab, spawnPlacement]);
+
+  // If the user picked a specific tab and that tab disappears (closed
+  // while the dialog is open), fall back to current_tab / new_tab.
+  useEffect(() => {
+    if (spawnPlacement.kind !== "tab") return;
+    if (tabs.some((t) => t.id === spawnPlacement.tabId)) return;
+    setSpawnPlacement(
+      canUseCurrentTab ? { kind: "current_tab" } : { kind: "new_tab" },
+    );
+  }, [tabs, spawnPlacement, canUseCurrentTab]);
 
   const sharedFooter = (
     <Footer
@@ -190,10 +261,6 @@ export default function SpawnDialog({
     />
   );
 
-  const initialRepoId =
-    initialTarget?.kind === "repo" ? initialTarget.repo_id : null;
-  const initialWorkspaceId =
-    initialTarget?.kind === "workspace" ? initialTarget.workspace_id : null;
 
   // Escape closes the dialog (still the keyboard escape hatch). Backdrop
   // click is intentionally NOT a close trigger — the dialog can hold a
@@ -237,33 +304,21 @@ export default function SpawnDialog({
                 value={spawnPlacement}
                 canUseCurrentTab={canUseCurrentTab}
                 currentTabName={currentTabName}
+                tabs={tabs}
+                activeTabId={activeTabId}
                 onChange={setSpawnPlacement}
               />
-              <fieldset className="field">
-                <legend>Type</legend>
-                <label className="radio">
-                  <input
-                    type="radio"
-                    checked={mode === "single"}
-                    onChange={() => setMode("single")}
-                    data-testid="spawn-mode-single"
-                  />
-                  Single repo
-                </label>
-                <label className="radio">
-                  <input
-                    type="radio"
-                    checked={mode === "workspace"}
-                    onChange={() => setMode("workspace")}
-                    disabled={workspaces.length === 0}
-                    data-testid="spawn-mode-workspace"
-                  />
-                  Workspace
-                </label>
-              </fieldset>
+              <TargetPicker
+                value={target}
+                repos={repos}
+                workspaces={workspaces}
+                onChange={setTarget}
+              />
 
-              {mode === "single" ? (
+              {target?.kind === "repo" ? (
                 <SingleForm
+                  key={targetKey(target)}
+                  repoId={target.id}
                   repos={repos}
                   client={client}
                   skipPerms={skipPerms}
@@ -273,13 +328,14 @@ export default function SpawnDialog({
                   agent={agent}
                   onAgentChange={setAgent}
                   spawnPlacement={spawnPlacement}
-                  initialRepoId={initialRepoId}
                   onClose={onClose}
                   onSpawned={onSpawned}
                   header={sharedFooter}
                 />
-              ) : (
+              ) : target?.kind === "workspace" ? (
                 <WorkspaceForm
+                  key={targetKey(target)}
+                  workspaceId={target.id}
                   repos={repos}
                   workspaces={workspaces}
                   client={client}
@@ -290,12 +346,11 @@ export default function SpawnDialog({
                   agent={agent}
                   onAgentChange={setAgent}
                   spawnPlacement={spawnPlacement}
-                  initialWorkspaceId={initialWorkspaceId}
                   onClose={onClose}
                   onSpawned={onSpawned}
                   header={sharedFooter}
                 />
-              )}
+              ) : null}
             </>
           )}
         </div>
@@ -690,17 +745,80 @@ function AgentPicker({
   );
 }
 
+function TargetPicker({
+  value,
+  repos,
+  workspaces,
+  onChange,
+}: {
+  value: TargetSelection | null;
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
+  onChange: (next: TargetSelection) => void;
+}) {
+  // The picker is a single <select> listing repos and workspaces with
+  // bracketed kind tags. We encode each option's value as
+  // `repo:<id>` / `workspace:<id>` so the change handler can decode
+  // without a second lookup.
+  const currentValue = value ? targetKey(value) : "";
+  const handleChange = (raw: string) => {
+    const sep = raw.indexOf(":");
+    if (sep === -1) return;
+    const kind = raw.slice(0, sep);
+    const id = raw.slice(sep + 1);
+    if (kind === "repo") onChange({ kind: "repo", id });
+    else if (kind === "workspace") onChange({ kind: "workspace", id });
+  };
+  return (
+    <label className="field">
+      <span>Target</span>
+      <select
+        value={currentValue}
+        onChange={(e) => handleChange(e.target.value)}
+        data-testid="spawn-target-select"
+      >
+        {repos.map((r) => (
+          <option
+            key={`repo:${r.id}`}
+            value={`repo:${r.id}`}
+            data-testid={`spawn-target-option-repo-${r.id}`}
+          >
+            [REPO]  {r.name}
+          </option>
+        ))}
+        {workspaces.map((w) => (
+          <option
+            key={`workspace:${w.id}`}
+            value={`workspace:${w.id}`}
+            data-testid={`spawn-target-option-workspace-${w.id}`}
+          >
+            [WS]    {w.name} ({w.member_repo_ids.length} repos)
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function SpawnPlacementPicker({
   value,
   canUseCurrentTab,
   currentTabName,
+  tabs,
+  activeTabId,
   onChange,
 }: {
   value: SpawnPlacement;
   canUseCurrentTab: boolean;
   currentTabName: string | null;
+  tabs: TabEntry[];
+  activeTabId: string | null;
   onChange: (placement: SpawnPlacement) => void;
 }) {
+  // The active tab is already represented by "Current tab" — hide its
+  // explicit per-tab radio to avoid two identical-effect choices side by
+  // side. The non-active tabs each get their own radio.
+  const otherTabs = tabs.filter((t) => t.id !== activeTabId);
   return (
     <fieldset className="field">
       <legend>Open in</legend>
@@ -714,9 +832,9 @@ function SpawnPlacementPicker({
       >
         <input
           type="radio"
-          checked={value === "current_tab"}
+          checked={value.kind === "current_tab"}
           disabled={!canUseCurrentTab}
-          onChange={() => onChange("current_tab")}
+          onChange={() => onChange({ kind: "current_tab" })}
           data-testid="spawn-placement-current-tab"
         />
         Current tab
@@ -727,12 +845,23 @@ function SpawnPlacementPicker({
       <label className="radio">
         <input
           type="radio"
-          checked={value === "new_tab"}
-          onChange={() => onChange("new_tab")}
+          checked={value.kind === "new_tab"}
+          onChange={() => onChange({ kind: "new_tab" })}
           data-testid="spawn-placement-new-tab"
         />
         New tab
       </label>
+      {otherTabs.map((t) => (
+        <label key={`placement:${t.id}`} className="radio">
+          <input
+            type="radio"
+            checked={value.kind === "tab" && value.tabId === t.id}
+            onChange={() => onChange({ kind: "tab", tabId: t.id })}
+            data-testid={`spawn-placement-tab-${t.id}`}
+          />
+          {t.name}
+        </label>
+      ))}
     </fieldset>
   );
 }
@@ -821,6 +950,7 @@ function useBranchField(
 // ---------- single-repo form ----------
 
 function SingleForm({
+  repoId,
   repos,
   client,
   skipPerms,
@@ -830,11 +960,14 @@ function SingleForm({
   agent,
   onAgentChange,
   spawnPlacement,
-  initialRepoId,
   onClose,
   onSpawned,
   header,
 }: {
+  /// Selected repo id — owned by the dialog's unified Target picker.
+  /// The form remounts (via `key`) whenever this changes, so internal
+  /// state resets cleanly without effects to sync.
+  repoId: string;
   repos: RepoEntry[];
   client: DaemonClient;
   skipPerms: boolean;
@@ -844,13 +977,10 @@ function SingleForm({
   agent: Agent;
   onAgentChange: (a: Agent) => void;
   spawnPlacement: SpawnPlacement;
-  initialRepoId: string | null;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
   header: React.ReactNode;
 }) {
-  const defaultRepoId = initialRepoId ?? repos[0]?.id ?? "";
-  const [repoId, setRepoId] = useState<string>(defaultRepoId);
   // Autofocus the branch name input — it's the field most likely to be
   // edited, and the random worktree name is preselected so a keyboard
   // user can just type to overwrite.
@@ -1006,21 +1136,6 @@ function SingleForm({
 
   return (
     <>
-      <label className="field">
-        <span>Repo</span>
-        <select
-          value={repoId}
-          onChange={(e) => setRepoId(e.target.value)}
-          data-testid="spawn-single-repo"
-        >
-          {repos.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
       <label className="checkbox">
         <input
           type="checkbox"
@@ -1143,6 +1258,7 @@ function SingleForm({
 // ---------- workspace form ----------
 
 function WorkspaceForm({
+  workspaceId,
   repos,
   workspaces,
   client,
@@ -1153,11 +1269,12 @@ function WorkspaceForm({
   agent,
   onAgentChange,
   spawnPlacement,
-  initialWorkspaceId,
   onClose,
   onSpawned,
   header,
 }: {
+  /// Selected workspace id — owned by the dialog's unified Target picker.
+  workspaceId: string;
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
@@ -1168,13 +1285,10 @@ function WorkspaceForm({
   agent: Agent;
   onAgentChange: (a: Agent) => void;
   spawnPlacement: SpawnPlacement;
-  initialWorkspaceId: string | null;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
   header: React.ReactNode;
 }) {
-  const defaultWorkspaceId = initialWorkspaceId ?? workspaces[0]?.id ?? "";
-  const [workspaceId, setWorkspaceId] = useState<string>(defaultWorkspaceId);
   // Autofocus the branch input — same rationale as SingleForm: it's the
   // field the user most likely wants to edit; the random worktree name
   // is preselected for easy overwrite.
@@ -1312,21 +1426,6 @@ function WorkspaceForm({
 
   return (
     <>
-      <label className="field">
-        <span>Workspace</span>
-        <select
-          value={workspaceId}
-          onChange={(e) => setWorkspaceId(e.target.value)}
-          data-testid="spawn-workspace-select"
-        >
-          {workspaces.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name} ({w.member_repo_ids.length} repos)
-            </option>
-          ))}
-        </select>
-      </label>
-
       <label className="field">
         <span>Branch name (same across all members)</span>
         <input

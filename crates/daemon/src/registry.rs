@@ -4,7 +4,7 @@ use crate::git;
 use crate::paths::simplify_path;
 use crate::state::{AppState, PersistedState};
 use anyhow::{Context as _, anyhow};
-use protocol::{Agent, ContainerRef, RepoEntry, WorkspaceEntry};
+use protocol::{Agent, ContainerRef, RepoEntry, SpawnConfig, WorkspaceEntry};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -66,6 +66,7 @@ pub async fn add_repo(
         default_branch,
         default_use_worktree: true,
         last_agent: None,
+        last_spawn_config: None,
     };
 
     state.mutate(|s| {
@@ -94,6 +95,37 @@ pub fn persist_last_agent(state: &AppState, repo_id: &str, agent: Agent) -> anyh
     state.mutate(|s| {
         if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
             repo.last_agent = Some(agent);
+        }
+    })
+}
+
+/// Capture the full spawn config from the latest single-repo launch so that
+/// "Launch last again" (double-click on the sidebar row, context-menu submenu)
+/// can replay it without re-prompting the user. Silently no-ops if `repo_id`
+/// does not match any registered repo.
+pub fn persist_repo_last_spawn_config(
+    state: &AppState,
+    repo_id: &str,
+    config: SpawnConfig,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.last_spawn_config = Some(config);
+        }
+    })
+}
+
+/// Workspace-level equivalent of [`persist_repo_last_spawn_config`]. Captures
+/// the spawn config from the latest workspace launch on the workspace itself
+/// (not on any member repo — that branch is reserved for single-repo spawns).
+pub fn persist_workspace_last_spawn_config(
+    state: &AppState,
+    workspace_id: &str,
+    config: SpawnConfig,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            ws.last_spawn_config = Some(config);
         }
     })
 }
@@ -147,13 +179,15 @@ pub fn upsert_workspace(
             "another workspace already uses the name {trimmed_name:?}"
         ));
     }
-    // Preserve the existing worktree-default when updating; only first-time
-    // upserts start at the `true` default.
-    let prior_default_use_worktree = state.with_persisted(|s| {
+    // Preserve the existing worktree-default and the last-spawn-config when
+    // updating an existing workspace; only first-time upserts start fresh.
+    let (prior_default_use_worktree, prior_last_spawn_config) = state.with_persisted(|s| {
         s.workspaces
             .iter()
             .find(|w| w.id == id)
-            .map(|w| w.default_use_worktree)
+            .map_or((None, None), |w| {
+                (Some(w.default_use_worktree), w.last_spawn_config.clone())
+            })
     });
     let entry = WorkspaceEntry {
         id: id.clone(),
@@ -161,6 +195,7 @@ pub fn upsert_workspace(
         member_repo_ids,
         linked_vscode_workspace,
         default_use_worktree: prior_default_use_worktree.unwrap_or(true),
+        last_spawn_config: prior_last_spawn_config,
     };
     state.mutate(|s| {
         if let Some(slot) = s.workspaces.iter_mut().find(|w| w.id == id) {

@@ -35,7 +35,10 @@ import ActivityBar, {
   readActivitySection,
   writeActivitySection,
 } from "./components/ActivityBar";
-import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
+import Sidebar, {
+  type LaunchLastPlacement,
+  type SpawnInitialTarget,
+} from "./components/Sidebar";
 import type { DuplicateTarget } from "./components/SessionContextMenu";
 import SourceControlSidebar from "./components/source-control/SourceControlSidebar";
 import PaneWindow from "./components/PaneWindow";
@@ -56,6 +59,7 @@ import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
 import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
+import { randomWorktreeBranchName } from "./utils/randomName";
 import {
   collectPanes,
   findPaneBinding,
@@ -626,6 +630,77 @@ export default function App() {
     [],
   );
 
+  /// "Launch last again" from the sidebar (double-click on a container or
+  /// the matching context-menu submenu). Reads the targeted repo/workspace's
+  /// `last_spawn_config` and replays it. When no config is saved yet, falls
+  /// back to opening the spawn dialog pre-targeted to the container.
+  ///
+  /// Branch policy: for `use_worktree === true` we regenerate `branch_name`
+  /// with a fresh `wt/<adjective>-<noun>` so each relaunch lands on its own
+  /// branch instead of colliding with the still-running prior session.
+  /// `use_worktree === false` reuses the saved branch verbatim — that mode
+  /// targets a real branch (e.g. `main`, `feature/x`) by the user's choice.
+  const onLaunchLast = useCallback(
+    (target: SpawnInitialTarget, placement: LaunchLastPlacement) => {
+      const s = latestStateRef.current;
+      const client = s?.client;
+      if (!s || !client) return;
+      const config: SpawnConfig | null =
+        target.kind === "repo"
+          ? (s.repos.find((r) => r.id === target.repo_id)?.last_spawn_config ??
+            null)
+          : (s.workspaces.find((w) => w.id === target.workspace_id)
+              ?.last_spawn_config ?? null);
+      if (!config) {
+        onOpenSpawn(target);
+        return;
+      }
+      const nextTarget = {
+        ...config.target,
+        branch_name: config.target.use_worktree
+          ? randomWorktreeBranchName()
+          : config.target.branch_name,
+      };
+      const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
+      const activeTabCanHost = activeTab ? tabGrid(activeTab) !== null : false;
+      let intent: PendingSpawnIntent;
+      if (placement.kind === "new_tab") {
+        intent = { kind: "newTab" };
+      } else if (placement.kind === "tab") {
+        const targetTab = s.tabs.find((t) => t.id === placement.tabId);
+        const canHost = targetTab ? tabGrid(targetTab) !== null : false;
+        intent = canHost
+          ? { kind: "addToTab", tabId: placement.tabId }
+          : { kind: "newTab" };
+      } else if (activeTab && activeTabCanHost) {
+        intent = { kind: "addToTab", tabId: activeTab.id };
+      } else {
+        intent = { kind: "newTab" };
+      }
+      pendingSpawnIntentRef.current = intent;
+      client.send({
+        type: "spawn_session",
+        label: null,
+        target: nextTarget,
+        mode: config.mode,
+        initial_prompt: null,
+        dangerously_skip_permissions: config.dangerously_skip_permissions,
+        agent: config.agent,
+        model: config.model,
+        permission_mode: config.permission_mode,
+        codex_sandbox: config.codex_sandbox,
+        extra_env: config.extra_env,
+        prompt_injector: null,
+      });
+      pushToast(setState, {
+        severity: "info",
+        message: "Spawning session…",
+        detail: "Worktree creation may take a few seconds.",
+      });
+    },
+    [onOpenSpawn],
+  );
+
   /// Shift-click on a session's "Duplicate" context-menu entry. Fetches
   /// the source's persisted SpawnConfig and opens the spawn dialog with
   /// every field pre-filled. If the daemon replies with `null` (the
@@ -745,14 +820,16 @@ export default function App() {
 
   const onSpawned = useCallback((placement: SpawnPlacement) => {
     // Arm the one-shot follow-up for the next new session. Priority:
-    // 1. Explicit new-tab placement → open a fresh tab.
-    // 2. Pane target (user opened dialog from an empty pane's "+ spawn"
+    // 1. `new_tab` placement → open a fresh tab.
+    // 2. `tab` placement → land in that specific tab (overrides pane/
+    //    tab targets — explicit user choice wins).
+    // 3. Pane target (user opened dialog from an empty pane's "+ spawn"
     //    button) → drop session into that pane.
-    // 3. Tab target (user opened dialog from a tab container's right-
+    // 4. Tab target (user opened dialog from a tab container's right-
     //    click "Spawn session here") → add a pane bound to the session
     //    in that tab.
-    // 4. Default → add a pane to the active tab, with a new-tab fallback
-    //    when the current tab cannot host terminal panes.
+    // 5. Default `current_tab` → add a pane to the active tab, with a
+    //    new-tab fallback when the current tab cannot host panes.
     const paneTarget = spawnTargetPaneRef.current;
     const tabTarget = spawnTargetTabRef.current;
     const currentState = latestStateRef.current;
@@ -760,8 +837,14 @@ export default function App() {
       (t) => t.id === currentState.activeTabId,
     );
     const activeTabCanHost = activeTab ? tabGrid(activeTab) !== null : false;
-    if (placement === "new_tab") {
+    if (placement.kind === "new_tab") {
       pendingSpawnIntentRef.current = { kind: "newTab" };
+    } else if (placement.kind === "tab") {
+      const targetTab = currentState?.tabs.find((t) => t.id === placement.tabId);
+      const canHost = targetTab ? tabGrid(targetTab) !== null : false;
+      pendingSpawnIntentRef.current = canHost
+        ? { kind: "addToTab", tabId: placement.tabId }
+        : { kind: "newTab" };
     } else if (paneTarget) {
       pendingSpawnIntentRef.current = {
         kind: "replacePane",
@@ -1126,6 +1209,15 @@ export default function App() {
   const canUseSpawnCurrentTab =
     spawnCurrentTab !== null && tabGrid(spawnCurrentTab) !== null;
 
+  /// Tabs eligible for the placement picker's per-tab radios. Excludes
+  /// non-grid tabs (e.g. diff tabs) since those can't host terminal
+  /// panes — picking one would silently fall back to a fresh tab and
+  /// confuse the user about why their explicit choice was ignored.
+  const spawnPlacementTabs = useMemo(
+    () => state.tabs.filter((t) => tabGrid(t) !== null),
+    [state.tabs],
+  );
+
   // Set of session ids referenced by the active tab — used by the sidebar for
   // visual selection state.
   const sessionIdsInActiveTab = useMemo(() => {
@@ -1476,6 +1568,8 @@ export default function App() {
             onSelectSession={onSelectSession}
             onOpenSpawn={onOpenSpawn}
             onOpenSpawnIntoTab={onOpenSpawnIntoTab}
+            onLaunchLast={onLaunchLast}
+            activeTabId={state.activeTabId}
             onDuplicateSession={onDuplicateSession}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
@@ -1544,6 +1638,8 @@ export default function App() {
           currentTabName={
             canUseSpawnCurrentTab ? (spawnCurrentTab?.name ?? null) : null
           }
+          tabs={spawnPlacementTabs}
+          activeTabId={spawnCurrentTab?.id ?? null}
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
           onAddRepo={onAddRepo}
