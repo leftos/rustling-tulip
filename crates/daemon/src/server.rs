@@ -2816,16 +2816,36 @@ fn agent_program(agent: Agent) -> String {
 /// portable-pty can actually launch. Returns `(program, prepended_args)`.
 ///
 /// On Windows, agent CLIs distributed via npm (e.g. codex from
-/// `@openai/codex`) land on PATH as `.cmd` shims. `CreateProcess` does
-/// NOT execute `.cmd` or `.bat` directly — `which` resolves them via
-/// `PATHEXT` but the resulting path still needs `cmd.exe /c` to run.
-/// `claude.exe` and other native binaries fall through with their full
-/// resolved path so the tracer doesn't re-scan PATH later.
+/// `@openai/codex`) land on PATH as `.cmd` shims. Two layers of fixup
+/// matter here:
 ///
-/// When `which` can't find the program (custom env-var override that
-/// hasn't been deployed yet, etc.) the input string is returned as-is
-/// and we let the tracer surface whatever error `CreateProcess`
-/// produces — that's more useful diagnostics than guessing.
+/// 1. `CreateProcess` does NOT execute `.cmd` or `.bat` directly, so
+///    a raw `.cmd` path passed to portable-pty silently fails (the
+///    tracer's pipe never opens; daemon times out after 10s).
+/// 2. Even wrapping with `cmd.exe /d /c <shim>.cmd` is enough for the
+///    process to launch — but inside portable-pty's pseudo-console
+///    that chain (cmd.exe → npm shim → node.exe → real binary) ends
+///    up swallowing the child's stdout: codex.exe never renders. The
+///    same `cmd.exe /d /c codex.cmd …` argv works fine in a real
+///    Windows console and from `PowerShell`, so it's specific to the
+///    portable-pty + cmd.exe boundary.
+///
+/// We dodge both by, when the `.cmd` is an npm-style shim, finding
+/// the underlying `node_modules/.../bin/<name>.js` entry and spawning
+/// `node.exe <entry> <args>` directly. That removes cmd.exe from the
+/// chain entirely and the JS launcher still does its
+/// platform-detection / PATH-augmentation work as usual.
+///
+/// Order of preference for a `.cmd` shim:
+///   1. npm shim → `(node.exe, [<js-entry>, ...])`.
+///   2. Fallback → `(cmd.exe, ["/d", "/c", <shim-path>, ...])`.
+///
+/// Native `.exe`s and anything else flow through with the resolved
+/// path unchanged. When `which` can't find the program at all (custom
+/// env-var override that hasn't been deployed yet, etc.) the input
+/// string is returned as-is and we let the tracer surface whatever
+/// error `CreateProcess` produces — that's more useful diagnostics
+/// than guessing.
 fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
     let Ok(path) = which::which(name) else {
         return (name.to_string(), Vec::new());
@@ -2837,11 +2857,15 @@ fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
             .extension()
             .and_then(|s| s.to_str())
             .map(str::to_ascii_lowercase);
+        if matches!(ext.as_deref(), Some("cmd" | "bat"))
+            && let Some((node, js)) = npm_shim_to_node_entry(&path)
+        {
+            return (
+                node.to_string_lossy().into_owned(),
+                vec![js.to_string_lossy().into_owned()],
+            );
+        }
         if matches!(ext.as_deref(), Some("cmd" | "bat")) {
-            // `/d` skips AutoRun reg keys; `/s` + outer quoting around
-            // the whole tail keeps cmd.exe's quote-stripping from
-            // mangling our argv. portable-pty passes argv straight to
-            // CreateProcess so we don't need to re-quote each arg.
             return (
                 "cmd.exe".to_string(),
                 vec!["/d".to_string(), "/c".to_string(), path_str],
@@ -2849,6 +2873,60 @@ fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
         }
     }
     (path_str, Vec::new())
+}
+
+/// For a `.cmd` path that looks like an npm-generated shim, locate
+/// the JS entrypoint it ultimately invokes (`<dir>/node_modules/<pkg>/
+/// bin/<stem>.js`, where `<pkg>` may be scoped as `@org/name`). Also
+/// resolves a `node.exe` to run it with: prefers a sibling next to
+/// the shim (nvm-style install layout) over a PATH-resolved one, so
+/// node-version managers stay self-consistent.
+///
+/// Returns `None` if the shim doesn't match the npm pattern (custom
+/// wrapper `.cmd`, non-Node CLI, etc.) — caller falls back to
+/// `cmd.exe /d /c <shim>`.
+#[cfg(windows)]
+fn npm_shim_to_node_entry(shim: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = shim.parent()?;
+    let stem = shim.file_stem()?.to_str()?;
+    let nm = dir.join("node_modules");
+    if !nm.is_dir() {
+        return None;
+    }
+    let target_filename = format!("{stem}.js");
+
+    let entries = std::fs::read_dir(&nm).ok()?;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_str()?;
+        if name_str.starts_with('@') {
+            // Scoped: walk one more level (e.g. node_modules/@openai/codex/bin/codex.js).
+            if let Ok(inner) = std::fs::read_dir(&p) {
+                for sub in inner.flatten() {
+                    candidates.push(sub.path().join("bin").join(&target_filename));
+                }
+            }
+        } else {
+            // Unscoped: node_modules/<pkg>/bin/<stem>.js.
+            candidates.push(p.join("bin").join(&target_filename));
+        }
+    }
+
+    let js = candidates.into_iter().find(|c| c.is_file())?;
+
+    let sibling_node = dir.join("node.exe");
+    let node = if sibling_node.is_file() {
+        sibling_node
+    } else {
+        which::which("node").ok()?
+    };
+
+    Some((node, js))
 }
 
 /// Pick a shell executable for [`SessionMode::PlainShell`] spawns. Returns
