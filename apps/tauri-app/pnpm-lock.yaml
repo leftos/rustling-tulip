@@ -21,11 +21,17 @@ importers:
         specifier: ^2.3.5
         version: 2.3.5
       '@xterm/addon-fit':
-        specifier: ^0.11.0
-        version: 0.11.0
+        specifier: 0.12.0-beta.219
+        version: 0.12.0-beta.219(@xterm/xterm@6.1.0-beta.219)
+      '@xterm/addon-web-fonts':
+        specifier: 0.2.0-beta.133
+        version: 0.2.0-beta.133(@xterm/xterm@6.1.0-beta.219)
+      '@xterm/addon-webgl':
+        specifier: 0.20.0-beta.218
+        version: 0.20.0-beta.218(@xterm/xterm@6.1.0-beta.219)
       '@xterm/xterm':
-        specifier: ^6.0.0
-        version: 6.0.0
+        specifier: 6.1.0-beta.219
+        version: 6.1.0-beta.219
       monaco-editor:
         specifier: ^0.55.1
         version: 0.55.1
@@ -678,11 +684,23 @@ packages:
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
 
-  '@xterm/addon-fit@0.11.0':
-    resolution: {integrity: sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==}
+  '@xterm/addon-fit@0.12.0-beta.219':
+    resolution: {integrity: sha512-ve9MP+xSfkcFG+l4GoWHurO+r97vh2U52J392Is246Cd2/EWkE9Q/KwpLqEdILTBQl7XVwTuuJzNv9IfndfnfQ==}
+    peerDependencies:
+      '@xterm/xterm': ^6.1.0-beta.219
 
-  '@xterm/xterm@6.0.0':
-    resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
+  '@xterm/addon-web-fonts@0.2.0-beta.133':
+    resolution: {integrity: sha512-Pudof2vybzcboCIjBmLB4PY7yywgXkQtVu98J6pIwomztFniG7peI/WeXe8T6WUGF9GRPTZI5MDy5fL5d3yNSw==}
+    peerDependencies:
+      '@xterm/xterm': ^6.1.0-beta.219
+
+  '@xterm/addon-webgl@0.20.0-beta.218':
+    resolution: {integrity: sha512-TihrC07cUULEcmLQ0Wsj8f9a6vikrWKUx7JWrFFG/Ip31uYohcHY0X46JP+WdAIzPhnE2iVr6OpJG3G5uSKE+w==}
+    peerDependencies:
+      '@xterm/xterm': ^6.1.0-beta.219
+
+  '@xterm/xterm@6.1.0-beta.219':
+    resolution: {integrity: sha512-cQDv5UMEooIqjlybDPfNO0uI0sB0SWaaOxubHcFNXah8umLHR8SfKQbj5BPaa5gqoTKGYFkVdpowyhZlV+xywQ==}
 
   baseline-browser-mapping@2.10.29:
     resolution: {integrity: sha512-Asa2krT+XTPZINCS+2QcyS8WTkObE77RwkydwF7h6DmnKqbvlalz93m/dnphUyCa6SWSP51VgtEUf2FN+gelFQ==}
@@ -1347,9 +1365,19 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@xterm/addon-fit@0.11.0': {}
+  '@xterm/addon-fit@0.12.0-beta.219(@xterm/xterm@6.1.0-beta.219)':
+    dependencies:
+      '@xterm/xterm': 6.1.0-beta.219
 
-  '@xterm/xterm@6.0.0': {}
+  '@xterm/addon-web-fonts@0.2.0-beta.133(@xterm/xterm@6.1.0-beta.219)':
+    dependencies:
+      '@xterm/xterm': 6.1.0-beta.219
+
+  '@xterm/addon-webgl@0.20.0-beta.218(@xterm/xterm@6.1.0-beta.219)':
+    dependencies:
+      '@xterm/xterm': 6.1.0-beta.219
+
+  '@xterm/xterm@6.1.0-beta.219': {}
 
   baseline-browser-mapping@2.10.29: {}
 
