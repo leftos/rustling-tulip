@@ -65,12 +65,44 @@ export default function Terminal({
 
     const term = new XTerm({
       cursorBlink: true,
+      // Geist Mono first (vendored as /public/fonts/GeistMono-Variable.woff2,
+      // pulled in via @font-face in styles.css). Cascadia/Consolas fall back
+      // when the variable woff2 hasn't finished loading yet so the very
+      // first paint isn't blank.
       fontFamily:
-        "Cascadia Mono, Consolas, 'Courier New', monospace",
+        "'Geist Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace",
       fontSize,
       theme: {
-        background: "#0e1116",
-        foreground: "#d6d6d6",
+        // Mirrors the design-token palette in styles.css :root. Keeping
+        // these in sync means the terminal feels flush with the pane
+        // chrome instead of floating on a slightly different shade. If
+        // the tokens change, change these too.
+        background: "#08090b",
+        foreground: "#e5e6e8",
+        cursor: "#5b9bff",
+        cursorAccent: "#08090b",
+        selectionBackground: "rgba(91, 155, 255, 0.30)",
+        selectionForeground: "#f5f6f8",
+        // ANSI 16-color palette — tuned for the cool-neutral near-black
+        // background. Normal slots stay calm; bright slots add lightness
+        // for visible contrast without the saturation jump that makes
+        // default xterm palettes feel '90s.
+        black: "#16181d",
+        red: "#ef5c5c",
+        green: "#3fb96a",
+        yellow: "#e8a531",
+        blue: "#5b9bff",
+        magenta: "#b787f0",
+        cyan: "#5dd5e3",
+        white: "#e5e6e8",
+        brightBlack: "#656872",
+        brightRed: "#ff8585",
+        brightGreen: "#62d18a",
+        brightYellow: "#f5c267",
+        brightBlue: "#7eb4ff",
+        brightMagenta: "#d4abff",
+        brightCyan: "#8feaf3",
+        brightWhite: "#f5f6f8",
       },
       scrollback: 5000,
       convertEol: false,
