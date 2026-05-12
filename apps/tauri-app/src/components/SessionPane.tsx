@@ -30,6 +30,11 @@ interface Props {
   /// App.tsx. Empty arrays are fine; the menu just omits the entry.
   tabs: TabEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
+  /// Wired from GridRenderer so the entire session-header strip acts as
+  /// the pane drag handle, not just the small ⠿ icon in the corner.
+  /// Omitted when SessionPane is rendered outside a grid (e.g. inside
+  /// the single-session pop-out window, where there is nowhere to drop).
+  onHeaderDragStart?: (e: React.DragEvent) => void;
 }
 
 export default function SessionPane({
@@ -37,6 +42,7 @@ export default function SessionPane({
   client,
   tabs,
   subscribePty,
+  onHeaderDragStart,
 }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [sessionMenu, setSessionMenu] =
@@ -79,7 +85,16 @@ export default function SessionPane({
       data-session-status={session.status}
       data-session-mode={session.mode}
     >
-      <header className="session-header" onContextMenu={onHeaderContextMenu}>
+      <header
+        className={
+          onHeaderDragStart
+            ? "session-header session-header-draggable"
+            : "session-header"
+        }
+        draggable={onHeaderDragStart !== undefined}
+        onDragStart={onHeaderDragStart}
+        onContextMenu={onHeaderContextMenu}
+      >
         <div className="session-title">
           {/* Shell sessions sit at Idle forever — a green dot would be
               misleading. Show a terminal glyph in its place instead. */}

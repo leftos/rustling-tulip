@@ -228,10 +228,34 @@ function PaneChrome(props: PaneChromeProps) {
     : null;
   const isFocused = focusedPaneId === node.pane_id;
   const [dropEdge, setDropEdge] = useState<PaneDropEdge | null>(null);
+  // Mirror of dropEdge for use inside onDrop — React state updates from
+  // the last onDragOver may not have flushed by the time drop fires, and
+  // we want the drop edge to exactly match the previewed overlay rather
+  // than re-deriving from cursor coords (which can jitter across the
+  // dx/dy boundary between the dragover and drop events).
+  const dropEdgeRef = useRef<PaneDropEdge | null>(null);
   const [contextMenu, setContextMenu] = useState<PaneContextMenuState | null>(
     null,
   );
   const paneRef = useRef<HTMLDivElement | null>(null);
+
+  // Safety net: any drag ending anywhere in the window (successful drop,
+  // ESC cancel, or release outside any droppable) must clear this pane's
+  // overlay. Without this, the source pane's overlay — set when the
+  // cursor briefly hovered itself before moving to the real destination —
+  // stays stuck because onDragLeave's child-target heuristic missed it.
+  useEffect(() => {
+    const clear = () => {
+      dropEdgeRef.current = null;
+      setDropEdge(null);
+    };
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, []);
 
   const onClick = useCallback(() => {
     props.onFocusPane(node.pane_id);
@@ -288,32 +312,48 @@ function PaneChrome(props: PaneChromeProps) {
       const x = (e.clientX - rect.left) / Math.max(1, rect.width);
       const y = (e.clientY - rect.top) / Math.max(1, rect.height);
       const next = computeEdge(x, y);
+      dropEdgeRef.current = next;
       setDropEdge((prev) => (prev === next ? prev : next));
     },
     [],
   );
 
   const onDragLeave = useCallback((e: React.DragEvent) => {
-    // Only clear when leaving the pane root, not when crossing into children.
-    if (e.currentTarget === e.target) setDropEdge(null);
+    // Use cursor bounds rather than currentTarget==target — the previous
+    // heuristic kept the overlay stuck when the user dragged out of a
+    // pane while the cursor was over a child element (the terminal,
+    // chips, header text), because dragleave's target is the child.
+    const rect = paneRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const { clientX, clientY } = e;
+    if (
+      clientX < rect.left ||
+      clientX >= rect.right ||
+      clientY < rect.top ||
+      clientY >= rect.bottom
+    ) {
+      dropEdgeRef.current = null;
+      setDropEdge(null);
+    }
   }, []);
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       const payload = e.dataTransfer.getData(DRAG_MIME);
+      // Use the edge captured by the last dragover so the actual drop
+      // matches the overlay the user saw. Recomputing from cursor coords
+      // here can flip across the dx/dy boundary between events and
+      // produce a vertical split when the preview promised horizontal.
+      const edge = dropEdgeRef.current;
+      dropEdgeRef.current = null;
       setDropEdge(null);
-      if (!payload) return;
+      if (!payload || !edge) return;
       e.preventDefault();
       const sep = payload.indexOf(":");
       if (sep === -1) return;
       const srcTab = payload.slice(0, sep);
       const srcPane = payload.slice(sep + 1);
       if (srcTab === tabId && srcPane === node.pane_id) return; // self-drop
-      const rect = paneRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const x = (e.clientX - rect.left) / Math.max(1, rect.width);
-      const y = (e.clientY - rect.top) / Math.max(1, rect.height);
-      const edge = computeEdge(x, y);
       client.send({
         type: "move_pane",
         src_tab_id: srcTab,
@@ -393,6 +433,7 @@ function PaneChrome(props: PaneChromeProps) {
             client={client}
             tabs={props.tabs}
             subscribePty={subscribePty}
+            onHeaderDragStart={onDragStart}
           />
         ) : (
           <EmptyPane
