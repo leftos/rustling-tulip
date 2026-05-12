@@ -40,7 +40,7 @@ import type { DuplicateTarget } from "./components/SessionContextMenu";
 import SourceControlSidebar from "./components/source-control/SourceControlSidebar";
 import PaneWindow from "./components/PaneWindow";
 import SessionWindow from "./components/SessionWindow";
-import SpawnDialog from "./components/SpawnDialog";
+import SpawnDialog, { type SpawnPlacement } from "./components/SpawnDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
@@ -227,6 +227,7 @@ export default function App() {
   ///   - `replacePane`: drop the session into a specific empty pane (set when
   ///                    the user opened the spawn dialog from that pane's
   ///                    "+ spawn" button).
+  ///   - `addToTab`   : add the session to an existing tab.
   /// Consumed by the `session_updated` handler the first time it sees an
   /// unseen session id.
   const pendingSpawnIntentRef = useRef<
@@ -237,9 +238,9 @@ export default function App() {
   >(null);
 
   /// Captured when the spawn dialog is opened from an empty pane's "+ spawn"
-  /// button. Read at `onSpawned` to upgrade the pending intent from `newTab`
-  /// (the default) to `replacePane`. Cleared on dialog close so a manual reopen
-  /// from the toolbar doesn't inherit a stale target.
+  /// button. Read at `onSpawned` to route current-tab placement into that pane.
+  /// Cleared on dialog close so a manual reopen from the toolbar doesn't
+  /// inherit a stale target.
   const spawnTargetPaneRef = useRef<{ tabId: string; paneId: string } | null>(
     null,
   );
@@ -643,6 +644,7 @@ export default function App() {
             : { kind: "workspace", workspace_id: config.target.workspace_id };
       }
       spawnTargetPaneRef.current = null;
+      spawnTargetTabRef.current = null;
       setState((s) => ({
         ...s,
         spawnOpen: true,
@@ -741,17 +743,26 @@ export default function App() {
     setState((s) => ({ ...s, presetLaunch: null }));
   }, []);
 
-  const onSpawned = useCallback(() => {
+  const onSpawned = useCallback((placement: SpawnPlacement) => {
     // Arm the one-shot follow-up for the next new session. Priority:
-    // 1. Pane target (user opened dialog from an empty pane's "+ spawn"
+    // 1. Explicit new-tab placement → open a fresh tab.
+    // 2. Pane target (user opened dialog from an empty pane's "+ spawn"
     //    button) → drop session into that pane.
-    // 2. Tab target (user opened dialog from a tab container's right-
+    // 3. Tab target (user opened dialog from a tab container's right-
     //    click "Spawn session here") → add a pane bound to the session
     //    in that tab.
-    // 3. Default → open a fresh tab containing the session.
+    // 4. Default → add a pane to the active tab, with a new-tab fallback
+    //    when the current tab cannot host terminal panes.
     const paneTarget = spawnTargetPaneRef.current;
     const tabTarget = spawnTargetTabRef.current;
-    if (paneTarget) {
+    const currentState = latestStateRef.current;
+    const activeTab = currentState?.tabs.find(
+      (t) => t.id === currentState.activeTabId,
+    );
+    const activeTabCanHost = activeTab ? tabGrid(activeTab) !== null : false;
+    if (placement === "new_tab") {
+      pendingSpawnIntentRef.current = { kind: "newTab" };
+    } else if (paneTarget) {
       pendingSpawnIntentRef.current = {
         kind: "replacePane",
         tabId: paneTarget.tabId,
@@ -759,6 +770,11 @@ export default function App() {
       };
     } else if (tabTarget) {
       pendingSpawnIntentRef.current = { kind: "addToTab", tabId: tabTarget };
+    } else if (activeTab && activeTabCanHost) {
+      pendingSpawnIntentRef.current = {
+        kind: "addToTab",
+        tabId: activeTab.id,
+      };
     } else {
       pendingSpawnIntentRef.current = { kind: "newTab" };
     }
@@ -1097,6 +1113,18 @@ export default function App() {
     () => state.tabs.find((t) => t.id === state.activeTabId) ?? null,
     [state.tabs, state.activeTabId],
   );
+
+  const spawnCurrentTab = useMemo(() => {
+    const targetTabId =
+      spawnTargetPaneRef.current?.tabId ??
+      spawnTargetTabRef.current ??
+      activeTab?.id ??
+      null;
+    return state.tabs.find((t) => t.id === targetTabId) ?? null;
+  }, [state.spawnOpen, state.tabs, activeTab]);
+
+  const canUseSpawnCurrentTab =
+    spawnCurrentTab !== null && tabGrid(spawnCurrentTab) !== null;
 
   // Set of session ids referenced by the active tab — used by the sidebar for
   // visual selection state.
@@ -1512,6 +1540,10 @@ export default function App() {
           client={state.client}
           initialTarget={state.spawnInitial}
           spawnPrefill={state.spawnPrefill}
+          canUseCurrentTab={canUseSpawnCurrentTab}
+          currentTabName={
+            canUseSpawnCurrentTab ? (spawnCurrentTab?.name ?? null) : null
+          }
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
           onAddRepo={onAddRepo}

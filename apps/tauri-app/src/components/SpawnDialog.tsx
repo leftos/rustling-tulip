@@ -28,8 +28,10 @@ interface Props {
   /// codex sandbox, and extra env vars from this config — overriding
   /// the usual Settings defaults. `undefined` for normal spawns.
   spawnPrefill?: SpawnConfig | undefined;
+  canUseCurrentTab: boolean;
+  currentTabName: string | null;
   onClose: () => void;
-  onSpawned: () => void;
+  onSpawned: (placement: SpawnPlacement) => void;
   /// Closes the dialog and opens the directory picker so a fresh user
   /// can register a repo when they hit the empty-state CTA.
   onAddRepo: () => void;
@@ -42,6 +44,7 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 type Mode = "single" | "workspace";
 type RunMode = "interactive" | "headless" | "plain_shell";
+export type SpawnPlacement = "current_tab" | "new_tab";
 
 interface EnvRow {
   key: string;
@@ -131,6 +134,8 @@ export default function SpawnDialog({
   client,
   initialTarget,
   spawnPrefill,
+  canUseCurrentTab,
+  currentTabName,
   onClose,
   onSpawned,
   onAddRepo,
@@ -153,6 +158,9 @@ export default function SpawnDialog({
   const [advanced, setAdvanced] = useState<AdvancedConfig>(() =>
     spawnPrefill ? advancedFromConfig(spawnPrefill) : emptyAdvanced(),
   );
+  const [spawnPlacement, setSpawnPlacement] = useState<SpawnPlacement>(() =>
+    canUseCurrentTab ? "current_tab" : "new_tab",
+  );
 
   // Headless mode isn't supported for codex yet — snap back to interactive
   // when the user picks codex while headless was selected.
@@ -161,6 +169,12 @@ export default function SpawnDialog({
       setRunMode("interactive");
     }
   }, [agent, runMode]);
+
+  useEffect(() => {
+    if (!canUseCurrentTab && spawnPlacement === "current_tab") {
+      setSpawnPlacement("new_tab");
+    }
+  }, [canUseCurrentTab, spawnPlacement]);
 
   const sharedFooter = (
     <Footer
@@ -213,61 +227,75 @@ export default function SpawnDialog({
             <EmptyRepoState onAddRepo={onAddRepo} onClose={onClose} />
           ) : (
             <>
-          <fieldset className="field">
-            <legend>Type</legend>
-            <label className="radio">
-              <input
-                type="radio"
-                checked={mode === "single"}
-                onChange={() => setMode("single")}
-                data-testid="spawn-mode-single"
+              <AgentPicker
+                agent={agent}
+                runMode={runMode}
+                onAgentChange={setAgent}
+                onRunModeChange={setRunMode}
               />
-              Single repo
-            </label>
-            <label className="radio">
-              <input
-                type="radio"
-                checked={mode === "workspace"}
-                onChange={() => setMode("workspace")}
-                disabled={workspaces.length === 0}
-                data-testid="spawn-mode-workspace"
+              <SpawnPlacementPicker
+                value={spawnPlacement}
+                canUseCurrentTab={canUseCurrentTab}
+                currentTabName={currentTabName}
+                onChange={setSpawnPlacement}
               />
-              Workspace
-            </label>
-          </fieldset>
+              <fieldset className="field">
+                <legend>Type</legend>
+                <label className="radio">
+                  <input
+                    type="radio"
+                    checked={mode === "single"}
+                    onChange={() => setMode("single")}
+                    data-testid="spawn-mode-single"
+                  />
+                  Single repo
+                </label>
+                <label className="radio">
+                  <input
+                    type="radio"
+                    checked={mode === "workspace"}
+                    onChange={() => setMode("workspace")}
+                    disabled={workspaces.length === 0}
+                    data-testid="spawn-mode-workspace"
+                  />
+                  Workspace
+                </label>
+              </fieldset>
 
-          {mode === "single" ? (
-            <SingleForm
-              repos={repos}
-              client={client}
-              skipPerms={skipPerms}
-              runMode={runMode}
-              headlessPrompt={headlessPrompt}
-              advanced={advanced}
-              agent={agent}
-              onAgentChange={setAgent}
-              initialRepoId={initialRepoId}
-              onClose={onClose}
-              onSpawned={onSpawned}
-              header={sharedFooter}
-            />
-          ) : (
-            <WorkspaceForm
-              repos={repos}
-              workspaces={workspaces}
-              client={client}
-              skipPerms={skipPerms}
-              runMode={runMode}
-              headlessPrompt={headlessPrompt}
-              advanced={advanced}
-              agent={agent}
-              onAgentChange={setAgent}
-              initialWorkspaceId={initialWorkspaceId}
-              onClose={onClose}
-              onSpawned={onSpawned}
-              header={sharedFooter}
-            />
-          )}
+              {mode === "single" ? (
+                <SingleForm
+                  repos={repos}
+                  client={client}
+                  skipPerms={skipPerms}
+                  runMode={runMode}
+                  headlessPrompt={headlessPrompt}
+                  advanced={advanced}
+                  agent={agent}
+                  onAgentChange={setAgent}
+                  spawnPlacement={spawnPlacement}
+                  initialRepoId={initialRepoId}
+                  onClose={onClose}
+                  onSpawned={onSpawned}
+                  header={sharedFooter}
+                />
+              ) : (
+                <WorkspaceForm
+                  repos={repos}
+                  workspaces={workspaces}
+                  client={client}
+                  skipPerms={skipPerms}
+                  runMode={runMode}
+                  headlessPrompt={headlessPrompt}
+                  advanced={advanced}
+                  agent={agent}
+                  onAgentChange={setAgent}
+                  spawnPlacement={spawnPlacement}
+                  initialWorkspaceId={initialWorkspaceId}
+                  onClose={onClose}
+                  onSpawned={onSpawned}
+                  header={sharedFooter}
+                />
+              )}
             </>
           )}
         </div>
@@ -346,40 +374,33 @@ function Footer({
     : "Pass --dangerously-skip-permissions";
   return (
     <>
-      <fieldset className="field">
-        <legend>Run mode</legend>
-        <label className="radio">
-          <input
-            type="radio"
-            checked={runMode === "interactive"}
-            onChange={() => onRunModeChange("interactive")}
-            data-testid="spawn-runmode-interactive"
-          />
-          Interactive
-        </label>
-        <label
-          className={`radio${isCodex ? " radio-disabled" : ""}`}
-          title={headlessDisabledReason}
-        >
-          <input
-            type="radio"
-            checked={runMode === "headless"}
-            disabled={isCodex}
-            onChange={() => onRunModeChange("headless")}
-            data-testid="spawn-runmode-headless"
-          />
-          Headless (one-shot prompt, no terminal)
-        </label>
-        <label className="radio">
-          <input
-            type="radio"
-            checked={runMode === "plain_shell"}
-            onChange={() => onRunModeChange("plain_shell")}
-            data-testid="spawn-runmode-plain_shell"
-          />
-          Plain shell (no agent)
-        </label>
-      </fieldset>
+      {!isPlainShell && (
+        <fieldset className="field">
+          <legend>Run mode</legend>
+          <label className="radio">
+            <input
+              type="radio"
+              checked={runMode === "interactive"}
+              onChange={() => onRunModeChange("interactive")}
+              data-testid="spawn-runmode-interactive"
+            />
+            Interactive
+          </label>
+          <label
+            className={`radio${isCodex ? " radio-disabled" : ""}`}
+            title={headlessDisabledReason}
+          >
+            <input
+              type="radio"
+              checked={runMode === "headless"}
+              disabled={isCodex}
+              onChange={() => onRunModeChange("headless")}
+              data-testid="spawn-runmode-headless"
+            />
+            Headless (one-shot prompt, no terminal)
+          </label>
+        </fieldset>
+      )}
       {runMode === "headless" && (
         <label className="field">
           <span>Prompt</span>
@@ -618,19 +639,31 @@ function envRowsAreValid(rows: EnvRow[]): boolean {
 
 function AgentPicker({
   agent,
-  onChange,
+  runMode,
+  onAgentChange,
+  onRunModeChange,
 }: {
   agent: Agent;
-  onChange: (a: Agent) => void;
+  runMode: RunMode;
+  onAgentChange: (a: Agent) => void;
+  onRunModeChange: (m: RunMode) => void;
 }) {
+  const isPlainShell = runMode === "plain_shell";
+  const selectAgent = (next: Agent) => {
+    onAgentChange(next);
+    if (isPlainShell) {
+      onRunModeChange("interactive");
+    }
+  };
+
   return (
     <fieldset className="field">
-      <legend>Agent</legend>
+      <legend>Runtime</legend>
       <label className="radio">
         <input
           type="radio"
-          checked={agent === "claude"}
-          onChange={() => onChange("claude")}
+          checked={!isPlainShell && agent === "claude"}
+          onChange={() => selectAgent("claude")}
           data-testid="spawn-agent-claude"
         />
         claude
@@ -638,11 +671,67 @@ function AgentPicker({
       <label className="radio">
         <input
           type="radio"
-          checked={agent === "codex"}
-          onChange={() => onChange("codex")}
+          checked={!isPlainShell && agent === "codex"}
+          onChange={() => selectAgent("codex")}
           data-testid="spawn-agent-codex"
         />
         codex
+      </label>
+      <label className="radio">
+        <input
+          type="radio"
+          checked={isPlainShell}
+          onChange={() => onRunModeChange("plain_shell")}
+          data-testid="spawn-agent-plain-shell"
+        />
+        Plain shell
+      </label>
+    </fieldset>
+  );
+}
+
+function SpawnPlacementPicker({
+  value,
+  canUseCurrentTab,
+  currentTabName,
+  onChange,
+}: {
+  value: SpawnPlacement;
+  canUseCurrentTab: boolean;
+  currentTabName: string | null;
+  onChange: (placement: SpawnPlacement) => void;
+}) {
+  return (
+    <fieldset className="field">
+      <legend>Open in</legend>
+      <label
+        className={`radio${canUseCurrentTab ? "" : " radio-disabled"}`}
+        title={
+          canUseCurrentTab
+            ? undefined
+            : "The current tab cannot host terminal panes"
+        }
+      >
+        <input
+          type="radio"
+          checked={value === "current_tab"}
+          disabled={!canUseCurrentTab}
+          onChange={() => onChange("current_tab")}
+          data-testid="spawn-placement-current-tab"
+        />
+        Current tab
+        {currentTabName && (
+          <span className="muted small inline-note">{currentTabName}</span>
+        )}
+      </label>
+      <label className="radio">
+        <input
+          type="radio"
+          checked={value === "new_tab"}
+          onChange={() => onChange("new_tab")}
+          data-testid="spawn-placement-new-tab"
+        />
+        New tab
       </label>
     </fieldset>
   );
@@ -740,6 +829,7 @@ function SingleForm({
   advanced,
   agent,
   onAgentChange,
+  spawnPlacement,
   initialRepoId,
   onClose,
   onSpawned,
@@ -753,9 +843,10 @@ function SingleForm({
   advanced: AdvancedConfig;
   agent: Agent;
   onAgentChange: (a: Agent) => void;
+  spawnPlacement: SpawnPlacement;
   initialRepoId: string | null;
   onClose: () => void;
-  onSpawned: () => void;
+  onSpawned: (placement: SpawnPlacement) => void;
   header: React.ReactNode;
 }) {
   const defaultRepoId = initialRepoId ?? repos[0]?.id ?? "";
@@ -907,7 +998,7 @@ function SingleForm({
       agent,
       ...advancedToWire(advanced, skipPerms, runMode, agent),
     });
-    onSpawned();
+    onSpawned(spawnPlacement);
     onClose();
   };
 
@@ -915,7 +1006,6 @@ function SingleForm({
 
   return (
     <>
-      <AgentPicker agent={agent} onChange={onAgentChange} />
       <label className="field">
         <span>Repo</span>
         <select
@@ -1062,6 +1152,7 @@ function WorkspaceForm({
   advanced,
   agent,
   onAgentChange,
+  spawnPlacement,
   initialWorkspaceId,
   onClose,
   onSpawned,
@@ -1076,9 +1167,10 @@ function WorkspaceForm({
   advanced: AdvancedConfig;
   agent: Agent;
   onAgentChange: (a: Agent) => void;
+  spawnPlacement: SpawnPlacement;
   initialWorkspaceId: string | null;
   onClose: () => void;
-  onSpawned: () => void;
+  onSpawned: (placement: SpawnPlacement) => void;
   header: React.ReactNode;
 }) {
   const defaultWorkspaceId = initialWorkspaceId ?? workspaces[0]?.id ?? "";
@@ -1214,13 +1306,12 @@ function WorkspaceForm({
       agent,
       ...advancedToWire(advanced, skipPerms, runMode, agent),
     });
-    onSpawned();
+    onSpawned(spawnPlacement);
     onClose();
   };
 
   return (
     <>
-      <AgentPicker agent={agent} onChange={onAgentChange} />
       <label className="field">
         <span>Workspace</span>
         <select
