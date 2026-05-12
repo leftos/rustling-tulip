@@ -39,6 +39,12 @@ interface Props {
   /// per-tab font-size overrides resolve correctly. `null` for the
   /// single-session pop-out window (no enclosing tab).
   tabId?: string | null;
+  /// Grid pane id this session is bound to. Used by Restart so the new
+  /// clone takes the SAME pane the stopped session was in, instead of
+  /// appearing as a new pane appended to the tab. `undefined` outside
+  /// grid contexts (e.g. pop-out windows) — Restart falls back to the
+  /// addToTab / newTab behavior in that case.
+  paneId?: string;
   /// Pane-chrome callbacks. When provided, the pane-level controls
   /// (split right, split down, extract to new tab, close pane) render
   /// inline in the session header alongside the session-specific
@@ -61,6 +67,7 @@ export default function SessionPane({
   subscribePty,
   onHeaderDragStart,
   tabId,
+  paneId,
   onSplitRight,
   onSplitDown,
   onExtractToTab,
@@ -103,13 +110,20 @@ export default function SessionPane({
     // App.tsx owns pane-slot routing via pendingSpawnIntentRef + sends
     // duplicate_session / discard_session in the right order. Dispatch a
     // window event so we don't have to prop-drill those handlers through
-    // the GridRenderer tree.
+    // the GridRenderer tree. When `paneId` is known (grid-rendered pane,
+    // i.e. NOT a pop-out), include it so App.tsx can use the replacePane
+    // intent and the new clone takes over the dead session's slot rather
+    // than appending a fresh pane to the tab.
     window.dispatchEvent(
       new CustomEvent("rt:pane_session_restart", {
-        detail: { sessionId: session.id, tabId: tabId ?? null },
+        detail: {
+          sessionId: session.id,
+          tabId: tabId ?? null,
+          paneId: paneId ?? null,
+        },
       }),
     );
-  }, [session.id, tabId]);
+  }, [session.id, tabId, paneId]);
 
   const onDiscardWithWorktree = useCallback(() => {
     if (!client) return;

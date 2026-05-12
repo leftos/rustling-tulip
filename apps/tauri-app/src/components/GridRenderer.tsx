@@ -475,6 +475,7 @@ function PaneChrome(props: PaneChromeProps) {
             subscribePty={subscribePty}
             onHeaderDragStart={onDragStart}
             tabId={tabId}
+            paneId={node.pane_id}
             onSplitRight={(e) =>
               sendSplit("horizontal", e.shiftKey ? "first" : "second")
             }

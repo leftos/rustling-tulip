@@ -674,20 +674,39 @@ export default function App() {
   // Restart-in-place from a stopped session's pane. Sequence matters: the
   // daemon processes WS messages in order, so duplicate_session reads the
   // stopped session's spawn_config BEFORE discard_session removes it. The
-  // pendingSpawnIntentRef routes the new clone into the same tab so the
-  // operation feels like a swap rather than "pane disappears + new one
-  // appears somewhere else".
+  // pendingSpawnIntentRef routes the new clone:
+  //   - replacePane when tabId+paneId are known (grid-rendered pane): the
+  //     new clone takes over the dead session's slot via
+  //     replace_pane_session, so the restart looks like an in-place swap.
+  //   - addToTab when only tabId is known (sidebar / context menu): the
+  //     new clone appends to the tab.
+  //   - newTab when neither (orphans, single-session pop-out).
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (
-        ev as CustomEvent<{ sessionId: string; tabId: string | null }>
+        ev as CustomEvent<{
+          sessionId: string;
+          tabId: string | null;
+          paneId?: string | null;
+        }>
       ).detail;
       if (!detail || typeof detail.sessionId !== "string") return;
       const client = latestStateRef.current?.client;
       if (!client) return;
-      pendingSpawnIntentRef.current = detail.tabId
-        ? { kind: "addToTab", tabId: detail.tabId }
-        : { kind: "newTab" };
+      if (detail.tabId && detail.paneId) {
+        pendingSpawnIntentRef.current = {
+          kind: "replacePane",
+          tabId: detail.tabId,
+          paneId: detail.paneId,
+        };
+      } else if (detail.tabId) {
+        pendingSpawnIntentRef.current = {
+          kind: "addToTab",
+          tabId: detail.tabId,
+        };
+      } else {
+        pendingSpawnIntentRef.current = { kind: "newTab" };
+      }
       client.send({ type: "duplicate_session", session_id: detail.sessionId });
       client.send({
         type: "discard_session",
