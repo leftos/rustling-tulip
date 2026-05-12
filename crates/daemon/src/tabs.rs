@@ -567,15 +567,25 @@ fn stack_balanced(mut nodes: Vec<GridNode>, direction: SplitDirection) -> GridNo
     }
 }
 
-/// Rebuild a tab's grid using `layout`, preserving every pane id (and its
-/// `session_id` binding). Pane order is left-to-right as walked by
-/// [`collect_panes`]. Returns the new grid; caller is responsible for
-/// writing it back to the tab and broadcasting `TabUpdated`.
+/// Rebuild a tab's grid using `layout`, dropping any panes that aren't
+/// bound to a session — rearrange is user-triggered and "tidy up" intent
+/// implies the empty placeholders should go. Pane order is left-to-right
+/// as walked by [`collect_panes`]. If every pane is unbound, the grid is
+/// kept as-is and only rearranged (collapsing to zero panes would leave
+/// the tab in an invalid state). Returns the new grid; caller is
+/// responsible for writing it back to the tab and broadcasting
+/// `TabUpdated`.
 pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Result<GridNode> {
-    let panes = collect_panes(grid);
-    if panes.is_empty() {
+    let all_panes = collect_panes(grid);
+    if all_panes.is_empty() {
         return Err(anyhow!("cannot rearrange an empty grid"));
     }
+    let bound: Vec<(String, Option<String>)> = all_panes
+        .iter()
+        .filter(|(_, session_id)| session_id.is_some())
+        .cloned()
+        .collect();
+    let panes = if bound.is_empty() { all_panes } else { bound };
     let new = match layout {
         RearrangeLayout::Horizontal | RearrangeLayout::Balanced => {
             build_balanced(&panes, SplitDirection::Horizontal)
@@ -1237,7 +1247,10 @@ mod tests {
     }
 
     #[test]
-    fn rearrange_grid_preserves_pane_ids() {
+    fn rearrange_grid_drops_unbound_panes() {
+        // Mixed grid: two session-bound panes and one empty placeholder.
+        // Rearrange is user-triggered "tidy up", so the empty pane should
+        // be dropped and only the bound panes survive.
         let original = split(
             Horizontal,
             0.5,
@@ -1247,19 +1260,30 @@ mod tests {
         let rearranged =
             rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
         let panes_after: Vec<(String, Option<String>)> = collect_panes(&rearranged);
-        // ceil(sqrt(3)) = 2 cols.
-        assert_eq!(panes_after.len(), 3);
-        assert_eq!(
-            panes_after
-                .iter()
-                .map(|(p, _)| p.as_str())
-                .collect::<Vec<_>>(),
-            vec!["p1", "p2", "p3"]
-        );
-        // Sessions still attached to the right panes.
+        assert_eq!(panes_after.len(), 2);
+        assert_eq!(panes_after[0].0, "p1");
         assert_eq!(panes_after[0].1.as_deref(), Some("s1"));
+        assert_eq!(panes_after[1].0, "p2");
         assert_eq!(panes_after[1].1.as_deref(), Some("s2"));
-        assert_eq!(panes_after[2].1, None);
+    }
+
+    #[test]
+    fn rearrange_grid_keeps_all_when_no_panes_bound() {
+        // Edge case: every pane is empty. Dropping them all would leave the
+        // tab with zero panes (no valid representation), so we fall back to
+        // rearranging the original set in place.
+        let original = split(
+            Horizontal,
+            0.5,
+            pane("p1", None),
+            pane("p2", None),
+        );
+        let rearranged =
+            rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
+        let panes_after = collect_panes(&rearranged);
+        assert_eq!(panes_after.len(), 2);
+        assert_eq!(panes_after[0].0, "p1");
+        assert_eq!(panes_after[1].0, "p2");
     }
 
     #[test]
