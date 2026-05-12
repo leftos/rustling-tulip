@@ -8,6 +8,10 @@ import { installConsoleCapture } from "./utils/consoleCapture";
 import "./utils/monacoSetup";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
+// Side-effect: pulls bundled coding fonts (Fira Code, JetBrains Mono,
+// Cascadia Code) through Vite so they're registered with the browser
+// before any Terminal mounts. See utils/bundledFonts.ts.
+import "./utils/bundledFonts";
 
 // E2E diagnostics: `vite build --mode development` keeps this; the
 // production build's tree-shaker drops both the call and the import.

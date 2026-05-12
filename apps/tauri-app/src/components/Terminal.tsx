@@ -13,7 +13,24 @@ import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
 import { useFontSize } from "../utils/fontSize";
-import { loadSettings } from "../utils/settings";
+import { loadSettings, useSettings } from "../utils/settings";
+
+/// Historical cascade — preserved as the fallback when the user hasn't
+/// picked a specific family in Settings. Geist Mono is the bundled
+/// default; Cascadia / Consolas / Courier cover the half-second window
+/// before Geist Mono finishes loading on a cold cache.
+const DEFAULT_FONT_FAMILY =
+  "'Geist Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace";
+
+/// Compose the family string handed to xterm. A user-picked family wins
+/// the primary slot; the default cascade is appended so the renderer
+/// has a fallback while the chosen font's webfont is still loading
+/// (or, for system fonts, if the family resolves to nothing).
+function buildFontFamily(picked: string | null): string {
+  if (!picked) return DEFAULT_FONT_FAMILY;
+  // Quote the picked family in case it contains spaces (most do).
+  return `'${picked.replace(/'/g, "")}', ${DEFAULT_FONT_FAMILY}`;
+}
 
 // Module-scope singleton: kicks off the Geist Mono woff2 download on
 // first import. WebGL bakes its glyph atlas at renderer-activate time,
@@ -78,6 +95,9 @@ export default function Terminal({
   const fitRef = useRef<FitAddon | null>(null);
 
   const fontSize = useFontSize(sessionId, tabId ?? null);
+  const [settings] = useSettings();
+  const fontFamily = settings.terminal.font_family;
+  const fontBold = settings.terminal.font_bold;
 
   /// Apply font-size changes to the live XTerm without remounting it —
   /// rebuilding the terminal on every size change would clear scrollback
@@ -97,6 +117,35 @@ export default function Terminal({
       rows: term.rows,
     });
   }, [fontSize, client, sessionId]);
+
+  /// Apply font-family / font-weight changes the same way. WebGL bakes
+  /// the glyph atlas against the current family, so we also nudge the
+  /// addon to relayout once the new face is in `document.fonts`. xterm
+  /// re-measures its char dimensions when fontFamily / fontWeight
+  /// change, so a `fit()` follow-up is required to keep cols/rows in
+  /// sync with the new metrics.
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    // Preload the picked family so the atlas measurement that follows
+    // sees the right metrics. Failure is non-fatal — the fallback
+    // cascade still renders correctly.
+    if (fontFamily) {
+      void loadFonts([fontFamily]).catch((err: unknown) => {
+        console.warn("font preload failed for", fontFamily, err);
+      });
+    }
+    term.options.fontFamily = buildFontFamily(fontFamily);
+    term.options.fontWeight = fontBold ? "bold" : "normal";
+    fit.fit();
+    client.send({
+      type: "resize",
+      session_id: sessionId,
+      cols: term.cols,
+      rows: term.rows,
+    });
+  }, [fontFamily, fontBold, client, sessionId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -123,9 +172,11 @@ export default function Terminal({
         // when the variable woff2 hasn't finished loading yet so the very
         // first paint isn't blank. The module-level `geistMonoReady` above
         // guarantees the woff2 is in `document.fonts` before this point so
-        // WebGL's glyph-atlas measurement uses the correct metrics.
-        fontFamily:
-          "'Geist Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace",
+        // WebGL's glyph-atlas measurement uses the correct metrics. A
+        // user-picked family (Settings → Terminal → Font family) is
+        // prepended to this cascade by buildFontFamily.
+        fontFamily: buildFontFamily(fontFamily),
+        fontWeight: fontBold ? "bold" : "normal",
         fontSize,
         theme: {
           // Mirrors the design-token palette in styles.css :root. Keeping

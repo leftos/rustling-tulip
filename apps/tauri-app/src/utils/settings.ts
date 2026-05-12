@@ -45,6 +45,17 @@ export interface Settings {
     /// `utils/fontSize.ts`) because they're keyed by ephemeral ids.
     /// Clamped to [8, 32] by the UI.
     font_size: number;
+    /// App-wide terminal font family. `null` keeps the historical
+    /// `'Geist Mono', 'Cascadia Mono', Consolas, …` cascade defined in
+    /// Terminal.tsx. Bundled families (Fira Code, JetBrains Mono,
+    /// Cascadia Code) and system-picked families both stash a plain
+    /// family-name string here; xterm resolves it against
+    /// `document.fonts`.
+    font_family: string | null;
+    /// Render normal-weight text at the bold weight. xterm's
+    /// `fontWeight` option — independent from selection / ANSI bold,
+    /// which always use `fontWeightBold`.
+    font_bold: boolean;
     /// Auto-copy any non-empty terminal selection to the system
     /// clipboard. Opt-out — defaults to `true` because most users
     /// expect PuTTY / GNOME-terminal style selection-copy. Bare Ctrl+C
@@ -71,6 +82,8 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   terminal: {
     font_size: 13,
+    font_family: null,
+    font_bold: false,
     copy_on_selection: true,
   },
 };
