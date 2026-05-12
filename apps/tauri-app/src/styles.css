@@ -1510,13 +1510,42 @@ button.tree-tab-pill:hover {
   font-size: var(--text-small);
   font-family: var(--font-mono);
 }
-.session-actions { display: flex; gap: 4px; }
+.session-actions { display: flex; align-items: center; gap: 4px; }
 /* Action buttons live in the pane header chrome; tighter than the
  * global button baseline so they don't overwhelm the 38px header. */
 .session-actions button {
   padding: 3px 9px;
   font-size: var(--text-small);
   font-weight: 500;
+}
+/* Pane-chrome buttons sit in the same row as session ops but render
+ * as compact icon buttons. Same height as the text buttons so the row
+ * doesn't gain a baseline jog, narrower padding so a row of four
+ * icons reads as one visual group. The divider before them separates
+ * session-scoped actions (Pop out / Stop) from pane-scoped actions
+ * (split / extract / close). */
+.session-actions-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--border);
+}
+.session-actions .session-action-icon {
+  min-width: 26px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--fg-muted);
+  letter-spacing: -0.5px;
+}
+.session-actions .session-action-icon:hover {
+  color: var(--fg);
+}
+.session-actions .session-action-close:hover {
+  background: rgba(244, 78, 78, 0.18);
+  border-color: var(--err);
+  color: var(--err);
 }
 
 .chip {
@@ -2159,6 +2188,10 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   flex-direction: column;
   overflow: hidden;
 }
+/* Floating chrome bar — only rendered for empty panes now. Sessions
+   render the equivalent controls inline inside .session-actions, which
+   eliminates the old hover-overlap between the floating "× ▼= ▶|"
+   group and the session header's Pop-out / Stop buttons. */
 .grid-pane-controls {
   position: absolute;
   top: 4px;
@@ -2166,17 +2199,6 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   display: flex;
   gap: 2px;
   z-index: 2;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-/* Controls fade in on hover or focus-within only. Previously a focused pane
-   showed them at 0.45 baseline, but on narrow panes that overlaps the
-   session header's Pop-out/Stop buttons (audit: "Pane controls overlay
-   covers the session header on small panes"). Keyboard users still reach
-   the controls via Tab — focus-within reveals them at full opacity. */
-.grid-pane:hover .grid-pane-controls,
-.grid-pane:focus-within .grid-pane-controls {
-  opacity: 1;
 }
 .grid-pane-btn {
   background: var(--bg-elev2);

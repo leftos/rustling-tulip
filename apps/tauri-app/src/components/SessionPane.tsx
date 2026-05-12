@@ -39,6 +39,19 @@ interface Props {
   /// per-tab font-size overrides resolve correctly. `null` for the
   /// single-session pop-out window (no enclosing tab).
   tabId?: string | null;
+  /// Pane-chrome callbacks. When provided, the pane-level controls
+  /// (split right, split down, extract to new tab, close pane) render
+  /// inline in the session header alongside the session-specific
+  /// actions. Omitted for the pop-out SessionWindow, which has no
+  /// enclosing grid.
+  ///
+  /// `Shift+click` flips the split direction (left instead of right,
+  /// up instead of down) — wiring the raw event lets each click target
+  /// read `shiftKey` rather than threading a second boolean.
+  onSplitRight?: (e: React.MouseEvent) => void;
+  onSplitDown?: (e: React.MouseEvent) => void;
+  onExtractToTab?: () => void;
+  onClosePane?: () => void;
 }
 
 export default function SessionPane({
@@ -48,7 +61,16 @@ export default function SessionPane({
   subscribePty,
   onHeaderDragStart,
   tabId,
+  onSplitRight,
+  onSplitDown,
+  onExtractToTab,
+  onClosePane,
 }: Props) {
+  const showPaneControls =
+    onSplitRight !== undefined ||
+    onSplitDown !== undefined ||
+    onExtractToTab !== undefined ||
+    onClosePane !== undefined;
   const [confirming, setConfirming] = useState(false);
   const [sessionMenu, setSessionMenu] =
     useState<SessionContextMenuState | null>(null);
@@ -219,6 +241,62 @@ export default function SessionPane({
                 exit code {session.exit_code ?? "?"}
               </span>
             ))}
+          {showPaneControls && (
+            <>
+              <span
+                className="session-actions-divider"
+                aria-hidden="true"
+              />
+              {onSplitRight && (
+                <button
+                  type="button"
+                  className="session-action-icon"
+                  onClick={onSplitRight}
+                  title="Split right (Shift+click: split left)"
+                  aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+                  data-testid="pane-split-right"
+                >
+                  {"▶|"}
+                </button>
+              )}
+              {onSplitDown && (
+                <button
+                  type="button"
+                  className="session-action-icon"
+                  onClick={onSplitDown}
+                  title="Split down (Shift+click: split up)"
+                  aria-label="Split pane vertically; hold Shift to place the new pane on top"
+                  data-testid="pane-split-down"
+                >
+                  {"▼="}
+                </button>
+              )}
+              {onExtractToTab && (
+                <button
+                  type="button"
+                  className="session-action-icon"
+                  onClick={onExtractToTab}
+                  title="Move this pane to a new tab"
+                  aria-label="Move pane to a new tab"
+                  data-testid="pane-extract"
+                >
+                  ↗
+                </button>
+              )}
+              {onClosePane && (
+                <button
+                  type="button"
+                  className="session-action-icon session-action-close"
+                  onClick={onClosePane}
+                  title="Close pane"
+                  aria-label="Close pane"
+                  data-testid="pane-close"
+                >
+                  ×
+                </button>
+              )}
+            </>
+          )}
         </div>
       </header>
       {session.is_orphan && (

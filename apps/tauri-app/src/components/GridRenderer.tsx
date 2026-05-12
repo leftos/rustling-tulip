@@ -418,48 +418,54 @@ function PaneChrome(props: PaneChromeProps) {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <div className="grid-pane-controls" onContextMenu={onContextMenu}>
-        <span
-          className="grid-pane-drag"
-          draggable
-          onDragStart={onDragStart}
-          title="Drag pane to move"
-          aria-hidden="true"
-        >
-          ⠿
-        </span>
-        <button
-          type="button"
-          className="grid-pane-btn"
-          title="Split right (Shift+click: split left)"
-          aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
-          onClick={(e) =>
-            sendSplit("horizontal", e.shiftKey ? "first" : "second")
-          }
-        >
-          ▶|
-        </button>
-        <button
-          type="button"
-          className="grid-pane-btn"
-          title="Split down (Shift+click: split up)"
-          aria-label="Split pane vertically; hold Shift to place the new pane on top"
-          onClick={(e) =>
-            sendSplit("vertical", e.shiftKey ? "first" : "second")
-          }
-        >
-          ▼=
-        </button>
-        <button
-          type="button"
-          className="grid-pane-btn grid-pane-btn-close"
-          title="Close pane"
-          aria-label="Close pane"
-          onClick={onClose}
-        >
-          ×
-        </button>
-      </div>
+      {/* Floating pane chrome — rendered only for empty panes, which
+          have no inner header to host the buttons. Live sessions render
+          the same controls inline inside the session header instead, so
+          they no longer overlap the Pop-out/Stop buttons. */}
+      {!session && (
+        <div className="grid-pane-controls" onContextMenu={onContextMenu}>
+          <span
+            className="grid-pane-drag"
+            draggable
+            onDragStart={onDragStart}
+            title="Drag pane to move"
+            aria-hidden="true"
+          >
+            ⠿
+          </span>
+          <button
+            type="button"
+            className="grid-pane-btn"
+            title="Split right (Shift+click: split left)"
+            aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+            onClick={(e) =>
+              sendSplit("horizontal", e.shiftKey ? "first" : "second")
+            }
+          >
+            ▶|
+          </button>
+          <button
+            type="button"
+            className="grid-pane-btn"
+            title="Split down (Shift+click: split up)"
+            aria-label="Split pane vertically; hold Shift to place the new pane on top"
+            onClick={(e) =>
+              sendSplit("vertical", e.shiftKey ? "first" : "second")
+            }
+          >
+            ▼=
+          </button>
+          <button
+            type="button"
+            className="grid-pane-btn grid-pane-btn-close"
+            title="Close pane"
+            aria-label="Close pane"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div className="grid-pane-body">
         {session ? (
           <SessionPane
@@ -469,6 +475,14 @@ function PaneChrome(props: PaneChromeProps) {
             subscribePty={subscribePty}
             onHeaderDragStart={onDragStart}
             tabId={tabId}
+            onSplitRight={(e) =>
+              sendSplit("horizontal", e.shiftKey ? "first" : "second")
+            }
+            onSplitDown={(e) =>
+              sendSplit("vertical", e.shiftKey ? "first" : "second")
+            }
+            onExtractToTab={onExtract}
+            onClosePane={onClose}
           />
         ) : (
           <EmptyPane
