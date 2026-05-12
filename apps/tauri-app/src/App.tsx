@@ -315,7 +315,7 @@ export default function App() {
   }, [state.activeTabId]);
 
   const onAddRepo = useCallback(async () => {
-    const path = await pickDirectory();
+    const path = await pickDirectory(undefined, { lastDirKey: "addRepo" });
     if (!path) return;
     state.client?.send({ type: "add_repo", path, name: null });
   }, [state.client]);
