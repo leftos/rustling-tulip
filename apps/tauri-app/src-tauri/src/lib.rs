@@ -23,9 +23,9 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
-fn apply_e2e_window_options<'a, R, M>(
-    builder: WebviewWindowBuilder<'a, R, M>,
-) -> WebviewWindowBuilder<'a, R, M>
+fn apply_e2e_window_options<R, M>(
+    builder: WebviewWindowBuilder<'_, R, M>,
+) -> WebviewWindowBuilder<'_, R, M>
 where
     R: Runtime,
     M: Manager<R>,
