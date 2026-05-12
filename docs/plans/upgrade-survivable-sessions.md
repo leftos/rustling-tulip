@@ -218,14 +218,31 @@ here is a forced re-spawn for affected sessions, which we want to avoid.
       config, no preset machinery.
 - [x] Documented as a public stability contract in `docs/tracer-abi.md`.
 
-### C.3 — Implementation (DEFERRED to spike-gated iter)
+### C.1 spike findings ✅ partial
+
+Three of five empirical questions resolved via spike harnesses in
+`crates/tracer/examples/`. Full report at `docs/spikes/c1-tracer-spike.md`.
+
+- [ ] Q1: ConPTY EOF mid-prompt — needs claude installed; test plan in
+      spike report.
+- [x] Q2: ConPTY usable from a rust binary — yes (`spike_pty_no_console`).
+- [x] Q3: pipe reconnect on same name — yes
+      (`spike_pipes server` + `spike_client_driver`). Validates the
+      core "tracer survives daemon restart" assumption.
+- [ ] Q4: ring sizing under load — needs claude installed; default 4 MB
+      retained based on rough estimates.
+- [x] Q5: two-daemon race — loser gets OS error 231 ("All pipe
+      instances are busy"). Use `max_instances(1)`.
+
+The architecture is viable. Q1 and Q4 are runtime measurements that
+refine defaults, not gate the design.
+
+### C.3 — Implementation (still deferred to a dedicated iter)
 
 The skeleton (C.2b) shipped: `crates/tracer/` builds a working
 `rt-tracer.exe` that spawns a PTY child and reads its output into a
 bounded ring. The named-pipe server and daemon-integration changes
-below are explicitly gated on the C.1 spike answering the open
-questions about ConPTY behavior, console-less binary safety, and pipe
-reconnect semantics.
+below are work for the next iter:
 
 - [x] New crate `crates/tracer` with binary `rt-tracer`. CLI surface,
       PTY spawn, output ring buffer all in place.
