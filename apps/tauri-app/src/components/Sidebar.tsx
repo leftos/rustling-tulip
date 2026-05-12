@@ -90,6 +90,14 @@ interface Props {
   /// Optimistic container-reorder hook — mirrors `onLocalReorderTabs`
   /// but applied wholesale to `containerOrder` in App state.
   onLocalReorderContainers: (ordered: ContainerRef[]) => void;
+  /// Per-container session display order from App state (daemon-backed).
+  /// Key is workspace id, repo id, or tab id. Sessions not in the list
+  /// are appended in their incoming order.
+  sessionOrder: Map<string, string[]>;
+  /// Optimistic session-order update — mirrors `onLocalReorderTabs` but
+  /// keyed by container id. Called from ContainerNode on drop before the
+  /// WS confirmation arrives.
+  onLocalReorderSessions: (containerId: string, orderedIds: string[]) => void;
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
   /// Called when the user clicks × on a repo that has live sessions.
@@ -612,6 +620,19 @@ export default function Sidebar(props: Props) {
                 dropSide={dropSide}
                 isDragging={isDragging}
                 dragHandlers={dragHandlers}
+                sessionOrder={props.sessionOrder.get(c.id)}
+                onReorderSessions={(ids) => {
+                  // Only workspace/repo/tab containers have a stable id
+                  // worth persisting; detached/unbound use id="".
+                  if (c.id) {
+                    props.onLocalReorderSessions(c.id, ids);
+                    props.client.send({
+                      type: "reorder_sessions",
+                      container_id: c.id,
+                      ordered_ids: ids,
+                    });
+                  }
+                }}
               />
             );
           })}
@@ -743,6 +764,12 @@ interface ContainerNodeProps {
         onDrop: (e: React.DragEvent) => void;
       }
     | undefined;
+  /// Local-UI session order override for this container. `undefined`
+  /// means "not set yet, use incoming alpha order". The array contains
+  /// session IDs in the user-dragged sequence; sessions not in the list
+  /// (newly spawned) are appended in their original incoming order.
+  sessionOrder: string[] | undefined;
+  onReorderSessions: (orderedIds: string[]) => void;
 }
 
 function ContainerNode(p: ContainerNodeProps) {
@@ -764,6 +791,54 @@ function ContainerNode(p: ContainerNodeProps) {
   /// opens a modal directly, since the user needs the 3-way choice
   /// (cancel / remove anyway / stop sessions and remove).
   const [confirming, setConfirming] = useState(false);
+
+  const [leafDragState, setLeafDragState] = useState<{
+    draggingId: string;
+    overId: string | null;
+    side: "before" | "after";
+  } | null>(null);
+
+  const displayedSessions = useMemo(
+    () => applySessionOrder(c.sessions, p.sessionOrder),
+    [c.sessions, p.sessionOrder],
+  );
+
+  const onLeafDragStart = (sessionId: string) => {
+    setLeafDragState({ draggingId: sessionId, overId: null, side: "before" });
+  };
+
+  const onLeafDragOver = (sessionId: string, e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("text/x-rt-session")) return;
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const side: "before" | "after" =
+      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setLeafDragState((prev) =>
+      prev && (prev.overId !== sessionId || prev.side !== side)
+        ? { ...prev, overId: sessionId, side }
+        : prev,
+    );
+  };
+
+  const onLeafDragEnd = () => setLeafDragState(null);
+
+  const onLeafDrop = (targetId: string, e: React.DragEvent) => {
+    e.preventDefault();
+    const draggingId = e.dataTransfer.getData("text/x-rt-session");
+    const local = leafDragState;
+    setLeafDragState(null);
+    if (!draggingId || draggingId === targetId) return;
+    const side = local?.overId === targetId ? local.side : "after";
+    const currentIds = displayedSessions.map((s) => s.id);
+    const fromIdx = currentIds.indexOf(draggingId);
+    if (fromIdx === -1) return;
+    currentIds.splice(fromIdx, 1);
+    const toIdxBase = currentIds.indexOf(targetId);
+    if (toIdxBase === -1) return;
+    const toIdx = side === "before" ? toIdxBase : toIdxBase + 1;
+    currentIds.splice(toIdx, 0, draggingId);
+    p.onReorderSessions(currentIds);
+  };
 
   const onRemoveClick = () => {
     if (c.kind === "repo") {
@@ -926,7 +1001,7 @@ function ContainerNode(p: ContainerNodeProps) {
               {" "}pill on a session to open it in a new tab.
             </li>
           )}
-          {c.sessions.map((s) => (
+          {displayedSessions.map((s) => (
             <SessionLeaf
               key={s.id}
               session={s}
@@ -936,6 +1011,14 @@ function ContainerNode(p: ContainerNodeProps) {
               needsAttention={p.attentionSessions.has(s.id)}
               onSelect={p.onSelectSession}
               onContextMenu={p.onSessionContextMenu}
+              isDraggingForReorder={leafDragState?.draggingId === s.id}
+              reorderDropSide={
+                leafDragState?.overId === s.id ? leafDragState.side : null
+              }
+              onReorderDragStart={() => onLeafDragStart(s.id)}
+              onReorderDragOver={(e) => onLeafDragOver(s.id, e)}
+              onReorderDragEnd={onLeafDragEnd}
+              onReorderDrop={(e) => onLeafDrop(s.id, e)}
             />
           ))}
         </ul>
@@ -955,6 +1038,15 @@ interface SessionLeafProps {
   /// for now; more entries will land here). State is lifted to the
   /// Sidebar component so only one menu is open at a time.
   onContextMenu: (x: number, y: number, session: SessionSnapshot) => void;
+  /// True while this leaf is the active drag source for list reorder
+  /// (reduces opacity so the original row "lifts").
+  isDraggingForReorder: boolean;
+  /// Drop-side hint when this leaf is the current reorder drop target.
+  reorderDropSide: "before" | "after" | null;
+  onReorderDragStart: () => void;
+  onReorderDragOver: (e: React.DragEvent) => void;
+  onReorderDragEnd: () => void;
+  onReorderDrop: (e: React.DragEvent) => void;
 }
 
 function SessionLeaf(p: SessionLeafProps) {
@@ -965,15 +1057,21 @@ function SessionLeaf(p: SessionLeafProps) {
     () => sessionTabBindings(s.id, p.tabs),
     [s.id, p.tabs],
   );
-  const draggable = bindings.length > 0 && !s.is_orphan;
+  // Pane-drop drag: only when the session is bound to a tab pane.
+  const paneDraggable = bindings.length > 0 && !s.is_orphan;
   const primaryBinding = bindings[0] ?? null;
   const onDragStart = (e: React.DragEvent) => {
-    if (!primaryBinding) return;
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData(
-      DRAG_MIME,
-      `${primaryBinding.tab_id}:${primaryBinding.pane_id}`,
-    );
+    // Always set the session-reorder MIME (list reorder works for any session).
+    e.dataTransfer.setData("text/x-rt-session", s.id);
+    // Also set the pane-drop MIME when bound to a tab pane.
+    if (primaryBinding) {
+      e.dataTransfer.setData(
+        DRAG_MIME,
+        `${primaryBinding.tab_id}:${primaryBinding.pane_id}`,
+      );
+    }
+    p.onReorderDragStart();
   };
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -995,7 +1093,10 @@ function SessionLeaf(p: SessionLeafProps) {
     s.is_orphan ? "is-orphan" : "",
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
-    draggable ? "is-draggable" : "",
+    paneDraggable ? "is-draggable" : "",
+    p.isDraggingForReorder ? "is-dragging" : "",
+    p.reorderDropSide === "before" ? "drop-before" : "",
+    p.reorderDropSide === "after" ? "drop-after" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -1013,8 +1114,11 @@ function SessionLeaf(p: SessionLeafProps) {
             p.onSelect(s.id);
           }
         }}
-        draggable={draggable}
+        draggable={true}
         onDragStart={onDragStart}
+        onDragOver={p.onReorderDragOver}
+        onDragEnd={p.onReorderDragEnd}
+        onDrop={p.onReorderDrop}
         onContextMenu={onContextMenu}
         data-testid="sidebar-session"
         data-session-id={s.id}
@@ -1307,6 +1411,31 @@ function targetCacheKey(target: PresetTarget): string {
   return target.kind === "repo"
     ? `repo:${target.repo_id}`
     : `workspace:${target.workspace_id}`;
+}
+
+/// Merge `sessions` with `order` (an array of session IDs). Sessions present
+/// in `order` come first in that sequence; any session not in `order`
+/// (e.g. newly spawned since the last drag) is appended in its original
+/// position. Stale ids in `order` (removed sessions) are silently dropped.
+function applySessionOrder(
+  sessions: SessionSnapshot[],
+  order: string[] | undefined,
+): SessionSnapshot[] {
+  if (!order || order.length === 0) return sessions;
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const result: SessionSnapshot[] = [];
+  const seen = new Set<string>();
+  for (const id of order) {
+    const s = byId.get(id);
+    if (s) {
+      result.push(s);
+      seen.add(id);
+    }
+  }
+  for (const s of sessions) {
+    if (!seen.has(s.id)) result.push(s);
+  }
+  return result;
 }
 
 function containerRefMatches(ref: ContainerRef, c: TreeContainer): boolean {

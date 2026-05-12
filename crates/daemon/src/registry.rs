@@ -208,6 +208,21 @@ pub fn reorder_containers(
     Ok(ordered)
 }
 
+/// Persist the user-chosen display order of sessions within a sidebar
+/// container. `container_id` is the workspace id, repo id, or tab id.
+/// Stale ids (sessions already removed) are kept in storage and silently
+/// ignored at merge time — no cleanup is required here.
+pub fn set_session_order(
+    state: &AppState,
+    container_id: &str,
+    ordered_ids: Vec<String>,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        s.session_order
+            .insert(container_id.to_string(), ordered_ids);
+    })
+}
+
 fn paths_eq(a: &str, b: &str) -> bool {
     let a = a.replace('\\', "/").to_lowercase();
     let b = b.replace('\\', "/").to_lowercase();

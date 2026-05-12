@@ -139,6 +139,10 @@ interface AppState {
   /// alphabetical". Synced from the daemon's `containers_reordered`
   /// broadcasts.
   containerOrder: ContainerRef[];
+  /// Per-container session display order. Key is workspace id, repo id,
+  /// or tab id. Synced from `sessions_reordered` broadcasts; also
+  /// updated optimistically on drag so the drop position sticks.
+  sessionOrder: Map<string, string[]>;
 }
 
 export default function App() {
@@ -169,6 +173,7 @@ export default function App() {
     handshake: null,
     daemonStopRequested: false,
     containerOrder: [],
+    sessionOrder: new Map(),
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -442,6 +447,20 @@ export default function App() {
   const onLocalReorderContainers = useCallback(
     (ordered: ContainerRef[]) => {
       setState((s) => ({ ...s, containerOrder: ordered }));
+    },
+    [],
+  );
+
+  /// Optimistic session-list reorder: applied immediately so the drop
+  /// position sticks while the daemon's `sessions_reordered` broadcast
+  /// is in flight.
+  const onLocalReorderSessions = useCallback(
+    (containerId: string, orderedIds: string[]) => {
+      setState((s) => {
+        const next = new Map(s.sessionOrder);
+        next.set(containerId, orderedIds);
+        return { ...s, sessionOrder: next };
+      });
     },
     [],
   );
@@ -1281,6 +1300,8 @@ export default function App() {
             onLocalReorderTabs={onLocalReorder}
             containerOrder={state.containerOrder}
             onLocalReorderContainers={onLocalReorderContainers}
+            sessionOrder={state.sessionOrder}
+            onLocalReorderSessions={onLocalReorderSessions}
             tabs={state.tabs}
             onAddRepo={onAddRepo}
             onRemoveRepo={(id) =>
@@ -1729,6 +1750,15 @@ function handleMessage(
     case "containers_reordered":
       setState((s) => ({ ...s, containerOrder: msg.ordered }));
       return;
+    case "sessions_reordered": {
+      const { container_id, ordered_ids } = msg;
+      setState((s) => {
+        const next = new Map(s.sessionOrder);
+        next.set(container_id, ordered_ids);
+        return { ...s, sessionOrder: next };
+      });
+      return;
+    }
     case "pty_output": {
       const set = ptyListeners.get(msg.session_id);
       if (set) for (const cb of set) cb(msg.data_b64);

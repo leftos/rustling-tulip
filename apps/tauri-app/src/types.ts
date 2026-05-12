@@ -505,6 +505,11 @@ export type ClientMessage =
   | { type: "reorder_tabs"; ordered_ids: string[] }
   | { type: "reorder_containers"; ordered: ContainerRef[] }
   | {
+      type: "reorder_sessions";
+      container_id: string;
+      ordered_ids: string[];
+    }
+  | {
       type: "split_pane";
       tab_id: string;
       pane_id: string;
@@ -680,6 +685,11 @@ export type DaemonMessage =
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }
   | { type: "containers_reordered"; ordered: ContainerRef[] }
+  | {
+      type: "sessions_reordered";
+      container_id: string;
+      ordered_ids: string[];
+    }
   | { type: "presets"; target: PresetTarget; entries: PresetEntry[] }
   | {
       type: "preset_launch_progress";

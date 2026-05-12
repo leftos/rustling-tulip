@@ -1193,6 +1193,15 @@ pub enum ClientMessage {
     ReorderContainers {
         ordered: Vec<ContainerRef>,
     },
+    /// Set the display order of sessions within a single sidebar container.
+    /// `container_id` is the workspace id, repo id, or tab id whose session
+    /// list the user reordered. Stale ids in `ordered_ids` (e.g. from a
+    /// session that was stopped since the drag) are silently ignored on
+    /// merge. Falls back to incoming order for any session not in the list.
+    ReorderSessions {
+        container_id: String,
+        ordered_ids: Vec<String>,
+    },
     /// Split an existing pane in two along `direction`. The newly allocated
     /// pane occupies `place`; the existing pane occupies the other side.
     SplitPane {
@@ -1500,6 +1509,12 @@ pub enum DaemonMessage {
     /// order is set; client should fall back to alphabetical".
     ContainersReordered {
         ordered: Vec<ContainerRef>,
+    },
+    /// Broadcast after a successful `ReorderSessions` and replayed on
+    /// initial connect for every container that has a stored order.
+    SessionsReordered {
+        container_id: String,
+        ordered_ids: Vec<String>,
     },
     /// Response to [`ClientMessage::ListPresets`].
     Presets {

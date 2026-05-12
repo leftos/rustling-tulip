@@ -5,7 +5,7 @@ use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
     add_repo, persist_last_agent, remove_repo, remove_workspace, reorder_containers,
-    set_repo_worktree_default, set_workspace_worktree_default, upsert_workspace,
+    set_repo_worktree_default, set_session_order, set_workspace_worktree_default, upsert_workspace,
 };
 use crate::scrollback;
 use crate::session::{
@@ -80,6 +80,12 @@ pub enum StateEvent {
     /// mutation that might affect the persisted order (add/remove/
     /// reorder) so connected clients stay in sync.
     ContainersReordered(Vec<protocol::ContainerRef>),
+    /// Per-container session display order. Broadcast after a successful
+    /// `ReorderSessions` so all connected windows stay in sync.
+    SessionsReordered {
+        container_id: String,
+        ordered_ids: Vec<String>,
+    },
     /// Broadcast after a successful stage/unstage/commit/discard so every
     /// connected source-control sidebar refreshes without each window having
     /// to re-request explicitly.
@@ -445,6 +451,15 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::ContainersReordered(ordered)) => {
                     let _ = out_tx.send(DaemonMessage::ContainersReordered { ordered });
                 }
+                Ok(StateEvent::SessionsReordered {
+                    container_id,
+                    ordered_ids,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::SessionsReordered {
+                        container_id,
+                        ordered_ids,
+                    });
+                }
                 Ok(StateEvent::RepoStatus {
                     repo_id,
                     index_changes,
@@ -634,19 +649,29 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
 }
 
 fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces, tabs, container_order) = hub.state.with_persisted(|s| {
-        (
-            s.repos.clone(),
-            s.workspaces.clone(),
-            s.tabs.clone(),
-            s.container_order.clone(),
-        )
-    });
+    let (repos, workspaces, tabs, container_order, session_order) =
+        hub.state.with_persisted(|s| {
+            (
+                s.repos.clone(),
+                s.workspaces.clone(),
+                s.tabs.clone(),
+                s.container_order.clone(),
+                s.session_order.clone(),
+            )
+        });
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
     let _ = out_tx.send(DaemonMessage::ContainersReordered {
         ordered: container_order,
     });
+    for (container_id, ordered_ids) in session_order {
+        if !ordered_ids.is_empty() {
+            let _ = out_tx.send(DaemonMessage::SessionsReordered {
+                container_id,
+                ordered_ids,
+            });
+        }
+    }
     let _ = out_tx.send(DaemonMessage::Sessions {
         sessions: hub.sessions.snapshots(),
     });
@@ -1131,6 +1156,16 @@ async fn dispatch(
             let _ = hub
                 .state_events
                 .send(StateEvent::ContainersReordered(applied));
+        }
+        ClientMessage::ReorderSessions {
+            container_id,
+            ordered_ids,
+        } => {
+            set_session_order(&hub.state, &container_id, ordered_ids.clone())?;
+            let _ = hub.state_events.send(StateEvent::SessionsReordered {
+                container_id,
+                ordered_ids,
+            });
         }
         ClientMessage::SplitPane {
             tab_id,

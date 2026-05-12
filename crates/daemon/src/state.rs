@@ -7,6 +7,7 @@ use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
 use protocol::{ContainerRef, RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -25,6 +26,11 @@ pub struct PersistedState {
     /// installations and old state.json files default to empty.
     #[serde(default)]
     pub container_order: Vec<ContainerRef>,
+    /// Per-container session display order in the sidebar. Key is the
+    /// workspace id, repo id, or tab id. Stale session ids are harmless
+    /// and ignored on merge. Old state.json files default to empty.
+    #[serde(default)]
+    pub session_order: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug)]
