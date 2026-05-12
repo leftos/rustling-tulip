@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
-import type { TabEntry } from "../types";
+import type { RearrangeLayout, TabEntry } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
 import {
   collectPanes,
@@ -168,6 +168,13 @@ export default function TabBar({
       setSelectedTabIds(new Set());
     },
     [tabs, client],
+  );
+
+  const onRearrangeTab = useCallback(
+    (tabId: string, layout: RearrangeLayout) => {
+      client.send({ type: "rearrange_tab", tab_id: tabId, layout });
+    },
+    [client],
   );
 
   const onCommitRename = useCallback(
@@ -422,6 +429,10 @@ export default function TabBar({
           selectedCount={selectedTabIds.size}
           otherTabsCount={Math.max(0, tabs.length - 1)}
           confirmingCloseOthers={confirmingCloseOthers}
+          targetPaneCount={(() => {
+            const t = tabs.find((tt) => tt.id === contextMenu.tabId);
+            return t ? tabPaneCount(t) : 0;
+          })()}
           onClose={() => {
             setConfirmingCloseOthers(false);
             closeMenu();
@@ -442,6 +453,11 @@ export default function TabBar({
               return;
             }
             onCloseOthers(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
+            closeMenu();
+          }}
+          onRearrange={(layout) => {
+            onRearrangeTab(contextMenu.tabId, layout);
             setConfirmingCloseOthers(false);
             closeMenu();
           }}
@@ -502,10 +518,15 @@ interface ContextMenuProps {
   selectedCount: number;
   otherTabsCount: number;
   confirmingCloseOthers: boolean;
+  /// Pane count of the right-clicked tab. The Rearrange submenu only
+  /// makes sense when there are 2+ panes — a single pane has nothing
+  /// to rearrange, so the entire section is omitted.
+  targetPaneCount: number;
   onClose: () => void;
   onRename: () => void;
   onCloseTab: () => void;
   onCloseOthers: () => void;
+  onRearrange: (layout: RearrangeLayout) => void;
   onMergeSelected: (layout: "tile_horizontal" | "tile_vertical") => void;
   onPopOut: () => void;
 }
@@ -524,8 +545,8 @@ function TabContextMenu(p: ContextMenuProps) {
       <ul
         className="context-menu"
         style={{
-          left: clampMenuCoord(p.state.x, 200),
-          top: clampMenuCoord(p.state.y, 250, "height"),
+          left: clampMenuCoord(p.state.x, 220),
+          top: clampMenuCoord(p.state.y, 320, "height"),
         }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -539,6 +560,39 @@ function TabContextMenu(p: ContextMenuProps) {
             Pop out tab
           </button>
         </li>
+        {p.targetPaneCount >= 2 && (
+          <>
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li className="context-menu-label">Rearrange panes</li>
+            <li>
+              <button
+                type="button"
+                onClick={() => p.onRearrange({ kind: "grid", cols: 0 })}
+                data-testid="tab-context-rearrange-grid"
+              >
+                &nbsp;&nbsp;Grid (auto)
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => p.onRearrange({ kind: "horizontal" })}
+                data-testid="tab-context-rearrange-horizontal"
+              >
+                &nbsp;&nbsp;Side by side
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => p.onRearrange({ kind: "vertical" })}
+                data-testid="tab-context-rearrange-vertical"
+              >
+                &nbsp;&nbsp;Stacked
+              </button>
+            </li>
+          </>
+        )}
         <li className="context-menu-separator" aria-hidden="true" />
         <li>
           <button type="button" onClick={p.onCloseTab}>

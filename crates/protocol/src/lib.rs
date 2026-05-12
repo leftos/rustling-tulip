@@ -459,6 +459,29 @@ pub enum MergeLayout {
     TileVertical,
 }
 
+/// Target layout for [`ClientMessage::RearrangeTab`]. Pane identities are
+/// preserved (so sessions stay bound to the same pane id); only the
+/// surrounding split tree is rebuilt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RearrangeLayout {
+    /// One row of N columns.
+    Horizontal,
+    /// One column of N rows.
+    Vertical,
+    /// Balanced binary split tree (rough square for N >= 3, but every
+    /// split shares the same direction so the layout reads as a single
+    /// strip with sub-strips).
+    Balanced,
+    /// True 2D grid. `cols` is the number of columns per row; the daemon
+    /// computes rows from `ceil(N/cols)`. When `cols == 0`, the daemon
+    /// auto-picks `ceil(sqrt(N))` so callers that just want "make this
+    /// look like a grid" don't have to do the math.
+    Grid {
+        cols: u32,
+    },
+}
+
 /// What a tab is rendering. Most tabs hold a grid of panes/splits
 /// (`Grid`); future variants (e.g. `Diff` for Monaco-backed file diffs)
 /// hang off this enum without reshaping the tab list or invalidating
@@ -728,11 +751,18 @@ pub enum TabLayout {
     TileHorizontal,
     /// One column of N panes.
     TileVertical,
-    /// Balanced binary tree with a horizontal primary direction — produces a
-    /// 2D layout that's roughly square for `N >= 3`.
+    /// Balanced binary tree with a horizontal primary direction. Every
+    /// split shares the same direction so the result is a horizontal
+    /// strip with uneven column widths — not a true 2D grid.
     BalancedHorizontal,
-    /// Balanced binary tree, vertical primary direction.
+    /// Balanced binary tree, vertical primary direction. Same caveat
+    /// as `BalancedHorizontal`.
     BalancedVertical,
+    /// True 2D grid. Daemon auto-picks `ceil(sqrt(N))` columns and lays
+    /// panes out row-major; the result is a rows-of-columns split tree
+    /// that actually looks like a grid in the UI. Recommended for
+    /// preset launches with `N >= 3`.
+    AutoGrid,
 }
 
 /// How a preset launch arranges its N spawned sessions in the tab bar.
@@ -1110,6 +1140,15 @@ pub enum ClientMessage {
         tab_id: String,
         pane_id: String,
         session_id: Option<String>,
+    },
+    /// Rebuild a tab's grid using `layout`. Pane identities (and their
+    /// `session_id` bindings) are preserved — only the surrounding split
+    /// tree changes. Used by the "Rearrange panes" UI to flip a tab's
+    /// layout between horizontal / vertical / balanced / grid without
+    /// re-spawning anything.
+    RearrangeTab {
+        tab_id: String,
+        layout: RearrangeLayout,
     },
     /// Combine multiple existing tabs into a single new tab, removing the
     /// originals. Panes are collected in the order `tab_ids` is given.

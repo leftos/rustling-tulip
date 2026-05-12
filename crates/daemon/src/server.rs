@@ -1046,6 +1046,16 @@ async fn dispatch(
                 }
             }
         }
+        ClientMessage::RearrangeTab { tab_id, layout } => {
+            let updated = hub.state.mutate(|s| {
+                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+                let grid = tabs::grid_or_err_mut(tab)?;
+                let new_grid = tabs::rearrange_grid(grid, layout)?;
+                *grid = new_grid;
+                Ok::<_, anyhow::Error>(tab.clone())
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+        }
         ClientMessage::MergeTabs {
             tab_ids,
             name,

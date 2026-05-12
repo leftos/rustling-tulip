@@ -714,12 +714,25 @@ fn build_injector(template: &InjectorTemplate, prompt_text: &str) -> PromptInjec
 // Tab state
 // ---------------------------------------------------------------------------
 
+/// Layout strategy for a preset's resulting tab(s). Distinguishes single-
+/// direction balanced/tile layouts from the true 2D auto-grid.
+#[derive(Debug, Clone, Copy)]
+enum TabBuildLayout {
+    /// `tabs::build_balanced` with this direction. Used for tile and
+    /// balanced `TabLayout` variants — every split shares the same axis so
+    /// the result is a 1D strip.
+    Linear(SplitDirection),
+    /// `tabs::build_grid` with auto-picked column count. Produces a true
+    /// 2D grid of `ceil(sqrt(N))` columns by however-many rows needed.
+    AutoGrid,
+}
+
 struct TabState {
-    /// `None` when `tab_grouping = none`. Otherwise the primary split
-    /// direction for `tabs::build_balanced`.
-    dir: Option<SplitDirection>,
+    /// `None` when `tab_grouping = none`. Otherwise the layout strategy
+    /// used by `attach_to_tab` to rebuild the grid on each spawn.
+    layout: Option<TabBuildLayout>,
     /// Rendered base name (already interpolated with the first prompt's
-    /// context). Only meaningful when `dir.is_some()`.
+    /// context). Only meaningful when `layout.is_some()`.
     base_name: String,
     cap: Option<u32>,
     tab_ids: Vec<String>,
@@ -730,7 +743,7 @@ struct TabState {
 
 impl TabState {
     fn is_active(&self) -> bool {
-        self.dir.is_some()
+        self.layout.is_some()
     }
 
     fn needs_new_tab(&self) -> bool {
@@ -916,7 +929,7 @@ fn build_tab_state(
 ) -> Result<TabState, LaunchFailure> {
     match &preset.tab_grouping {
         TabGroupingConfig::None => Ok(TabState {
-            dir: None,
+            layout: None,
             base_name: String::new(),
             cap: None,
             tab_ids: Vec::new(),
@@ -929,11 +942,14 @@ fn build_tab_state(
             max_panes_per_tab,
             tab_name_template,
         } => {
-            let dir = match layout {
+            let build_layout = match layout {
                 TabLayout::TileHorizontal | TabLayout::BalancedHorizontal => {
-                    SplitDirection::Horizontal
+                    TabBuildLayout::Linear(SplitDirection::Horizontal)
                 }
-                TabLayout::TileVertical | TabLayout::BalancedVertical => SplitDirection::Vertical,
+                TabLayout::TileVertical | TabLayout::BalancedVertical => {
+                    TabBuildLayout::Linear(SplitDirection::Vertical)
+                }
+                TabLayout::AutoGrid => TabBuildLayout::AutoGrid,
             };
             let cap = args.max_panes_per_tab_override.or(*max_panes_per_tab);
             let name_template = tab_name_template.as_deref().unwrap_or(&preset.name);
@@ -952,7 +968,7 @@ fn build_tab_state(
             };
             let base_name = render_template(name_template, &ctx)?;
             Ok(TabState {
-                dir: Some(dir),
+                layout: Some(build_layout),
                 base_name,
                 cap,
                 tab_ids: Vec::new(),
@@ -1062,7 +1078,7 @@ fn attach_to_tab(
     session_id: &str,
     session_ids: &[String],
 ) -> Result<(), LaunchFailure> {
-    let Some(dir) = state.dir else {
+    let Some(build_layout) = state.layout else {
         return Ok(());
     };
     if state.needs_new_tab() {
@@ -1072,8 +1088,12 @@ fn attach_to_tab(
     state
         .current_panes
         .push((pane_id, Some(session_id.to_string())));
-    let new_grid = tabs::build_balanced(&state.current_panes, dir).ok_or_else(|| {
-        LaunchFailure::new("build_balanced returned None for non-empty input")
+    let new_grid = match build_layout {
+        TabBuildLayout::Linear(dir) => tabs::build_balanced(&state.current_panes, dir),
+        TabBuildLayout::AutoGrid => tabs::build_grid(&state.current_panes, 0),
+    }
+    .ok_or_else(|| {
+        LaunchFailure::new("layout builder returned None for non-empty input")
             .with_partials(session_ids, &state.tab_ids)
     })?;
     let tab_id = state.current_tab_id.clone().ok_or_else(|| {

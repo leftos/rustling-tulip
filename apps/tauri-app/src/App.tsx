@@ -941,6 +941,28 @@ export default function App() {
         handler: () => onActivateTab(target.id),
       });
     }
+    // Ctrl+Shift+G: rearrange the active tab into an auto-grid. Only
+    // bound when the active tab has 2+ panes — a single pane has
+    // nothing to rearrange.
+    const activeForRearrange = state.tabs.find(
+      (t) => t.id === state.activeTabId,
+    );
+    if (activeForRearrange && state.client) {
+      const grid = tabGrid(activeForRearrange);
+      const paneCount = grid ? collectPanes(grid).length : 0;
+      if (paneCount >= 2) {
+        list.push({
+          key: "g",
+          shift: true,
+          handler: () =>
+            state.client?.send({
+              type: "rearrange_tab",
+              tab_id: activeForRearrange.id,
+              layout: { kind: "grid", cols: 0 },
+            }),
+        });
+      }
+    }
     return list;
   }, [
     anyModalOpen,

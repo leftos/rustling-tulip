@@ -219,7 +219,15 @@ export type TabLayout =
   | "tile_horizontal"
   | "tile_vertical"
   | "balanced_horizontal"
-  | "balanced_vertical";
+  | "balanced_vertical"
+  | "auto_grid";
+
+export type RearrangeLayout =
+  | { kind: "horizontal" }
+  | { kind: "vertical" }
+  | { kind: "balanced" }
+  // cols=0 → daemon auto-picks ceil(sqrt(N)).
+  | { kind: "grid"; cols: number };
 
 export type TabGroupingConfig =
   | { kind: "none" }
@@ -483,6 +491,11 @@ export type ClientMessage =
       tab_id: string;
       pane_id: string;
       session_id: string | null;
+    }
+  | {
+      type: "rearrange_tab";
+      tab_id: string;
+      layout: RearrangeLayout;
     }
   | {
       type: "merge_tabs";

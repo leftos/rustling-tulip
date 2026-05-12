@@ -7,7 +7,8 @@
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
-    GridNode, MergeLayout, PaneDropEdge, SplitDirection, SplitPlace, TabContent, TabEntry,
+    GridNode, MergeLayout, PaneDropEdge, RearrangeLayout, SplitDirection, SplitPlace, TabContent,
+    TabEntry,
 };
 use uuid::Uuid;
 
@@ -496,6 +497,93 @@ fn build_balanced_inner(panes: &[(String, Option<String>)], direction: SplitDire
         first: Box::new(first),
         second: Box::new(second),
     }
+}
+
+/// Pick a sensible column count for an auto-grid of `n` panes. Returns
+/// `ceil(sqrt(n))` so the result is the smallest grid wider than (or as
+/// wide as) it is tall. `n == 0` returns 1 so callers can divide without
+/// guarding.
+#[must_use]
+pub fn auto_grid_cols(n: usize) -> u32 {
+    if n == 0 {
+        return 1;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "pane counts are tiny; precision loss is irrelevant for sqrt"
+    )]
+    let cols = (n as f64).sqrt().ceil() as u32;
+    cols.max(1)
+}
+
+/// Build a true 2D grid: `cols` columns per row, rows stacked vertically.
+/// The last row may be short. Returns `None` for an empty input.
+///
+/// `cols == 0` is rewritten to `auto_grid_cols(panes.len())` so callers
+/// can pass the daemon's autopick straight through.
+pub fn build_grid(panes: &[(String, Option<String>)], cols: u32) -> Option<GridNode> {
+    if panes.is_empty() {
+        return None;
+    }
+    let cols = if cols == 0 {
+        auto_grid_cols(panes.len())
+    } else {
+        cols
+    };
+    let cols_usize = cols as usize;
+    let mut row_nodes: Vec<GridNode> = Vec::with_capacity(panes.len().div_ceil(cols_usize));
+    for chunk in panes.chunks(cols_usize) {
+        let row = build_balanced(chunk, SplitDirection::Horizontal)?;
+        row_nodes.push(row);
+    }
+    Some(stack_balanced(row_nodes, SplitDirection::Vertical))
+}
+
+/// Build a balanced split tree over a list of pre-built `GridNode` children
+/// joined by `direction`. Differs from [`build_balanced`] in that the
+/// leaves are already arbitrary nodes (not pane tuples).
+fn stack_balanced(mut nodes: Vec<GridNode>, direction: SplitDirection) -> GridNode {
+    debug_assert!(!nodes.is_empty(), "caller guards against empty input");
+    if nodes.len() == 1 {
+        return nodes.remove(0);
+    }
+    let n = nodes.len();
+    let mid = n / 2;
+    let second_half = nodes.split_off(mid);
+    let first = stack_balanced(nodes, direction);
+    let second = stack_balanced(second_half, direction);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "row counts are tiny; precision loss is irrelevant for ratios"
+    )]
+    let ratio = (mid as f32) / (n as f32);
+    GridNode::Split {
+        direction,
+        ratio: clamp_ratio(ratio),
+        first: Box::new(first),
+        second: Box::new(second),
+    }
+}
+
+/// Rebuild a tab's grid using `layout`, preserving every pane id (and its
+/// `session_id` binding). Pane order is left-to-right as walked by
+/// [`collect_panes`]. Returns the new grid; caller is responsible for
+/// writing it back to the tab and broadcasting `TabUpdated`.
+pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Result<GridNode> {
+    let panes = collect_panes(grid);
+    if panes.is_empty() {
+        return Err(anyhow!("cannot rearrange an empty grid"));
+    }
+    let new = match layout {
+        RearrangeLayout::Horizontal | RearrangeLayout::Balanced => {
+            build_balanced(&panes, SplitDirection::Horizontal)
+        }
+        RearrangeLayout::Vertical => build_balanced(&panes, SplitDirection::Vertical),
+        RearrangeLayout::Grid { cols } => build_grid(&panes, cols),
+    };
+    new.ok_or_else(|| anyhow!("rearrange produced empty tab (unreachable)"))
 }
 
 /// Merge multiple tabs into a single new tab. Removes the source tabs from
@@ -1050,6 +1138,151 @@ mod tests {
             tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             vec!["c", "a", "b"]
         );
+    }
+
+    #[test]
+    fn auto_grid_cols_matches_ceil_sqrt() {
+        assert_eq!(auto_grid_cols(0), 1);
+        assert_eq!(auto_grid_cols(1), 1);
+        assert_eq!(auto_grid_cols(2), 2);
+        assert_eq!(auto_grid_cols(3), 2);
+        assert_eq!(auto_grid_cols(4), 2);
+        assert_eq!(auto_grid_cols(5), 3);
+        assert_eq!(auto_grid_cols(6), 3);
+        assert_eq!(auto_grid_cols(9), 3);
+        assert_eq!(auto_grid_cols(10), 4);
+    }
+
+    #[test]
+    fn build_grid_six_panes_three_cols_two_rows() {
+        let panes: Vec<(String, Option<String>)> = (0..6)
+            .map(|i| (format!("p{i}"), Some(format!("s{i}"))))
+            .collect();
+        let tree = build_grid(&panes, 3).expect("non-empty");
+        // Top-level: vertical split between row1 and row2.
+        let GridNode::Split {
+            direction,
+            first,
+            second,
+            ..
+        } = tree
+        else {
+            panic!("expected vertical Split at root");
+        };
+        assert_eq!(direction, Vertical);
+        // Each row is a balanced horizontal split of three panes.
+        let row_panes = collect_panes(&first);
+        assert_eq!(
+            row_panes.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            vec!["p0", "p1", "p2"]
+        );
+        let row2_panes = collect_panes(&second);
+        assert_eq!(
+            row2_panes
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p3", "p4", "p5"]
+        );
+        // First row's top-level split is horizontal.
+        let GridNode::Split {
+            direction: row_dir, ..
+        } = &*first
+        else {
+            panic!("expected row to be a Split");
+        };
+        assert_eq!(*row_dir, Horizontal);
+    }
+
+    #[test]
+    fn build_grid_short_last_row() {
+        let panes: Vec<(String, Option<String>)> = (0..5)
+            .map(|i| (format!("p{i}"), None))
+            .collect();
+        let tree = build_grid(&panes, 3).expect("non-empty");
+        // 5 panes / 3 cols = 2 rows; row 1 = [p0,p1,p2], row 2 = [p3,p4].
+        let all: Vec<String> = collect_panes(&tree)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(all, vec!["p0", "p1", "p2", "p3", "p4"]);
+    }
+
+    #[test]
+    fn build_grid_auto_picks_cols_when_zero() {
+        let panes: Vec<(String, Option<String>)> = (0..9)
+            .map(|i| (format!("p{i}"), None))
+            .collect();
+        let tree = build_grid(&panes, 0).expect("non-empty");
+        // ceil(sqrt(9)) = 3 → 3 rows of 3.
+        let GridNode::Split { first, .. } = &tree else {
+            panic!("expected Split at root");
+        };
+        let row1 = collect_panes(first);
+        assert_eq!(row1.len(), 3);
+    }
+
+    #[test]
+    fn build_grid_single_pane_returns_leaf() {
+        let panes = vec![("only".to_string(), Some("s".to_string()))];
+        let tree = build_grid(&panes, 0).expect("non-empty");
+        assert!(matches!(tree, GridNode::Pane { pane_id, .. } if pane_id == "only"));
+    }
+
+    #[test]
+    fn rearrange_grid_preserves_pane_ids() {
+        let original = split(
+            Horizontal,
+            0.5,
+            pane("p1", Some("s1")),
+            split(Vertical, 0.5, pane("p2", Some("s2")), pane("p3", None)),
+        );
+        let rearranged =
+            rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
+        let panes_after: Vec<(String, Option<String>)> = collect_panes(&rearranged);
+        // ceil(sqrt(3)) = 2 cols.
+        assert_eq!(panes_after.len(), 3);
+        assert_eq!(
+            panes_after
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
+            vec!["p1", "p2", "p3"]
+        );
+        // Sessions still attached to the right panes.
+        assert_eq!(panes_after[0].1.as_deref(), Some("s1"));
+        assert_eq!(panes_after[1].1.as_deref(), Some("s2"));
+        assert_eq!(panes_after[2].1, None);
+    }
+
+    #[test]
+    fn rearrange_grid_horizontal_makes_single_row() {
+        let original = split(
+            Vertical,
+            0.5,
+            pane("p1", None),
+            pane("p2", None),
+        );
+        let new = rearrange_grid(&original, RearrangeLayout::Horizontal).expect("rearrange");
+        let GridNode::Split { direction, .. } = &new else {
+            panic!("expected Split");
+        };
+        assert_eq!(*direction, Horizontal);
+    }
+
+    #[test]
+    fn rearrange_grid_vertical_makes_single_column() {
+        let original = split(
+            Horizontal,
+            0.5,
+            pane("p1", None),
+            pane("p2", None),
+        );
+        let new = rearrange_grid(&original, RearrangeLayout::Vertical).expect("rearrange");
+        let GridNode::Split { direction, .. } = &new else {
+            panic!("expected Split");
+        };
+        assert_eq!(*direction, Vertical);
     }
 
     #[test]
