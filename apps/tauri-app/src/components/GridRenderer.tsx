@@ -13,6 +13,7 @@ import {
 import { collectPanes } from "../utils/grid";
 import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
+import PaneCloseDialog from "./PaneCloseDialog";
 
 const DRAG_MIME = "text/x-rt-pane";
 
@@ -279,9 +280,42 @@ function PaneChrome(props: PaneChromeProps) {
     [client, tabId, node.pane_id, props],
   );
 
-  const onClose = useCallback(() => {
+  const closePaneOnly = useCallback(() => {
     client.send({ type: "close_pane", tab_id: tabId, pane_id: node.pane_id });
   }, [client, tabId, node.pane_id]);
+
+  const stopSessionAndClosePane = useCallback(
+    (removeWorktree: boolean) => {
+      if (!session) return;
+      client.send({
+        type: "stop_session",
+        session_id: session.id,
+        cleanup: session.members.map((m) => ({
+          repo_id: m.repo_id,
+          remove_worktree: removeWorktree,
+        })),
+      });
+      client.send({
+        type: "close_pane",
+        tab_id: tabId,
+        pane_id: node.pane_id,
+      });
+    },
+    [client, session, tabId, node.pane_id],
+  );
+
+  // Pane × button: empty pane closes immediately (nothing to protect);
+  // bound pane opens the 4-option confirm dialog. Previously × sent
+  // close_pane outright — the pane disappeared from the layout and the
+  // session orphaned into the sidebar with no prompt about its worktree.
+  const [closeConfirm, setCloseConfirm] = useState(false);
+  const onClose = useCallback(() => {
+    if (!session) {
+      closePaneOnly();
+      return;
+    }
+    setCloseConfirm(true);
+  }, [session, closePaneOnly]);
 
   const onExtract = useCallback(() => {
     props.onArmNextNewTab();
@@ -444,6 +478,24 @@ function PaneChrome(props: PaneChromeProps) {
         )}
       </div>
       {dropEdge && <DropOverlay edge={dropEdge} />}
+      {closeConfirm && session && (
+        <PaneCloseDialog
+          session={session}
+          onCancel={() => setCloseConfirm(false)}
+          onClosePaneKeepSession={() => {
+            closePaneOnly();
+            setCloseConfirm(false);
+          }}
+          onCloseAndStopKeepWorktree={() => {
+            stopSessionAndClosePane(false);
+            setCloseConfirm(false);
+          }}
+          onCloseAndStopRemoveWorktree={() => {
+            stopSessionAndClosePane(true);
+            setCloseConfirm(false);
+          }}
+        />
+      )}
       {contextMenu && (
         <PaneContextMenu
           state={contextMenu}

@@ -747,6 +747,10 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   word-break: break-all;
   color: var(--fg-muted);
 }
+.pane-close-dialog-footer {
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
 .modal-warning {
   margin: 0.75rem 0 0;
   padding: 0.6rem 0.8rem;
