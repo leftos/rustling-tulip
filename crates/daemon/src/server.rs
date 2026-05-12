@@ -1765,6 +1765,7 @@ fn spawn_interactive_session(
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
+    let last_prompt = initial_prompt.clone();
     let args = match cfg.agent {
         Agent::Codex => build_codex_args(cfg, &members, initial_prompt.as_deref()),
         Agent::Claude => {
@@ -1854,6 +1855,7 @@ fn spawn_interactive_session(
             program_name,
             cfg.agent,
             Some(stored_config),
+            last_prompt,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1968,6 +1970,8 @@ fn spawn_plain_shell_session(
             Some(shell_label),
             Agent::Claude,
             Some(stored_config),
+            // Plain shells never carry a kickoff prompt.
+            None,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -2009,6 +2013,7 @@ fn spawn_headless_session(
     // The dispatcher already rejects `agent == Codex` for headless mode; if
     // we got here, claude is the only valid agent.
     debug_assert!(matches!(cfg.agent, Agent::Claude));
+    let last_prompt = Some(prompt.clone());
     let mut args: Vec<String> = vec![
         "--print".to_string(),
         "--output-format".to_string(),
@@ -2074,6 +2079,7 @@ fn spawn_headless_session(
             None,
             cfg.agent,
             Some(stored_config),
+            last_prompt,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);

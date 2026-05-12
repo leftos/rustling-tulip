@@ -80,6 +80,12 @@ pub struct OrphanMeta {
     /// to opening the spawn dialog with defaults.
     #[serde(default)]
     pub spawn_config: Option<SpawnConfig>,
+    /// The user's initial prompt at spawn time. Captured so the
+    /// "Resume abandoned" UX can replay it after a daemon crash. `None`
+    /// for sessions spawned without a prompt (interactive, no prefill)
+    /// and for sidecars written before this field existed.
+    #[serde(default)]
+    pub last_prompt: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -302,6 +308,7 @@ pub fn meta_from_record(
     program_name: Option<String>,
     agent: Agent,
     spawn_config: Option<SpawnConfig>,
+    last_prompt: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -320,6 +327,7 @@ pub fn meta_from_record(
         agent: Some(agent),
         terminal_title: None,
         spawn_config,
+        last_prompt,
     })
 }
 
@@ -415,6 +423,7 @@ mod tests {
             agent: Some(Agent::Claude),
             terminal_title: None,
             spawn_config: None,
+            last_prompt: None,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
