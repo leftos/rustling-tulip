@@ -11,8 +11,10 @@ import {
   ensureDaemonStarted,
   pickDirectory,
   requestSpawnConfig,
+  stopDaemon,
   type ConnectionState,
   type DaemonClient,
+  type DaemonHandshake,
 } from "./api";
 import {
   tabGrid,
@@ -122,6 +124,15 @@ interface AppState {
   /// (filesystem watcher) plus an initial request fired when a repo first
   /// appears in `repos`.
   repoChangeCounts: Record<string, number>;
+  /// Latest handshake from `ensureDaemonStarted`. Surfaced into the
+  /// DaemonFooter flyout so users can see the daemon's port / pid /
+  /// protocol-version without leaving the app. `null` before the first
+  /// supervisor call succeeds, and after the user hits "Stop daemon".
+  handshake: DaemonHandshake | null;
+  /// True iff the user explicitly hit the DaemonFooter's Stop button.
+  /// Suppresses the auto-reconnect cycle below so we don't immediately
+  /// respawn the daemon they just stopped. Cleared by Restart.
+  daemonStopRequested: boolean;
 }
 
 export default function App() {
@@ -149,7 +160,17 @@ export default function App() {
     toasts: [],
     repoRemove: null,
     repoChangeCounts: {},
+    handshake: null,
+    daemonStopRequested: false,
   });
+  // Bumped to force the connection useEffect to re-run (e.g. when the
+  // user clicks Restart from the DaemonFooter while the daemon is in
+  // the "stopped" state and the auto-reconnect cycle has been suppressed).
+  const [connectionVersion, setConnectionVersion] = useState(0);
+  // Mirror of `state.daemonStopRequested` for use inside the connection
+  // effect's closure (which captures values at mount time).
+  const stopRequestedRef = useRef(false);
+  stopRequestedRef.current = state.daemonStopRequested;
 
   // App-wide user preferences (localStorage-backed). `useSettings` returns
   // a live tuple — any other component that calls `useSettings` will
@@ -263,6 +284,16 @@ export default function App() {
             reconnectAttempt = 0;
             logToFile("info", "daemon websocket connected");
           } else if (next.kind === "closed" && !cancelled) {
+            // Honor the user's explicit Stop request from the DaemonFooter
+            // — don't immediately respawn the daemon they just killed.
+            // Cleared by clicking Restart, which bumps connectionVersion.
+            if (stopRequestedRef.current) {
+              logToFile(
+                "info",
+                "daemon websocket closed but stop was user-requested; not reconnecting",
+              );
+              return;
+            }
             const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt);
             reconnectAttempt += 1;
             logToFile(
@@ -294,14 +325,16 @@ export default function App() {
         if (import.meta.env.DEV) {
           (globalThis as unknown as { __rt_daemon_client?: DaemonClient }).__rt_daemon_client = client;
         }
-        setState((s) => ({ ...s, client }));
+        setState((s) => ({ ...s, client, handshake }));
       } catch (err) {
         // ensureDaemonStarted failure (e.g. supervisor can't spawn the
         // daemon) — record the error AND schedule a retry. The supervisor
-        // may need a moment to clean up a stale daemon.json.
+        // may need a moment to clean up a stale daemon.json. Exception:
+        // when the user has just hit Stop, don't retry — they asked for
+        // the daemon to be down.
         const reason = String(err);
         setState((s) => ({ ...s, status: { kind: "error", reason } }));
-        if (!cancelled) {
+        if (!cancelled && !stopRequestedRef.current) {
           const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt);
           reconnectAttempt += 1;
           logToFile(
@@ -324,7 +357,11 @@ export default function App() {
       client?.close();
       clientRef.current = null;
     };
-  }, []);
+    // `connectionVersion` is bumped by the DaemonFooter's Restart action
+    // to force this effect to tear down + reconnect from scratch — the
+    // simplest way to recover from a user-Stopped state without
+    // refactoring the entire connection lifecycle.
+  }, [connectionVersion]);
 
   useEffect(() => {
     if (state.activeTabId) {
@@ -847,6 +884,44 @@ export default function App() {
     [sendShutdown],
   );
 
+  /// DaemonFooter — force-stop the daemon and suppress auto-reconnect.
+  /// The Tauri-side `stop_daemon` kills the pid + removes the handshake;
+  /// flipping `daemonStopRequested` BEFORE the kill ensures the connection
+  /// effect's `closed`-handler skips its retry schedule when the WS drops.
+  const onStopDaemon = useCallback(() => {
+    setState((s) => ({ ...s, daemonStopRequested: true, handshake: null }));
+    logToFile("info", "DaemonFooter: Stop daemon clicked");
+    void stopDaemon().catch((err) => {
+      logToFile("warn", `stopDaemon invoke failed: ${String(err)}`);
+    });
+  }, []);
+
+  /// DaemonFooter — bring the daemon back. Two paths depending on the
+  /// current state:
+  ///   - Currently open / connecting / closed (transient): send a
+  ///     graceful `shutdown` over the WS so the daemon persists state
+  ///     before exiting; the existing auto-reconnect cycle then spawns a
+  ///     fresh one.
+  ///   - Currently stopped (user-Stopped): the auto-reconnect cycle has
+  ///     been suppressed and there's no live WS to send to. Clear the
+  ///     stop flag and bump `connectionVersion` to force the connection
+  ///     useEffect to tear down + re-run `connect()` from scratch.
+  const onRestartDaemon = useCallback(() => {
+    logToFile("info", "DaemonFooter: Restart daemon clicked");
+    const client = clientRef.current;
+    const wasStopRequested = stopRequestedRef.current;
+    if (wasStopRequested || !client) {
+      // No live WS — kick the connection effect.
+      setState((s) => ({ ...s, daemonStopRequested: false }));
+      setConnectionVersion((v) => v + 1);
+      return;
+    }
+    // WS is up (or transient) — graceful shutdown + let the auto-
+    // reconnect respawn the daemon.
+    setState((s) => ({ ...s, daemonStopRequested: false }));
+    client.send({ type: "shutdown", drain: false });
+  }, []);
+
   const activeSessionCount = useMemo(
     () =>
       state.sessions.filter((s) => s.status !== "stopped" && !s.is_orphan)
@@ -1181,6 +1256,10 @@ export default function App() {
             highlightedSessionIds={sessionIdsInActiveTab}
             attentionSessions={state.attentionSessions}
             connection={state.status}
+            handshake={state.handshake}
+            daemonStopRequested={state.daemonStopRequested}
+            onRestartDaemon={onRestartDaemon}
+            onStopDaemon={onStopDaemon}
             tabs={state.tabs}
             onAddRepo={onAddRepo}
             onRemoveRepo={(id) =>
@@ -1242,7 +1321,6 @@ export default function App() {
             )
           ) : (
             <EmptyState
-              connection={state.status}
               onOpenSpawn={() => onOpenSpawn()}
               onAddRepo={onAddRepo}
               hasRepos={state.repos.length > 0}
@@ -1820,25 +1898,40 @@ function findSession(
   return found;
 }
 
+/// Used only by the pop-out tab/session "not found" error states (which
+/// render outside of the main sidebar layout, so they have no
+/// DaemonFooter to defer to). The main-window EmptyState delegates
+/// daemon-status display entirely to the footer.
+function ConnectionBadge({ state }: { state: AppState["status"] }) {
+  if (state.kind === "init") return <span className="badge badge-warn">starting</span>;
+  if (state.kind === "open") return <span className="badge badge-ok">connected</span>;
+  if (state.kind === "connecting") return <span className="badge badge-warn">connecting</span>;
+  if (state.kind === "auth_failed")
+    return <span className="badge badge-err" title={state.reason}>auth failed</span>;
+  if (state.kind === "error")
+    return <span className="badge badge-err" title={state.reason}>error</span>;
+  return <span className="badge badge-warn" title={state.reason}>disconnected</span>;
+}
+
 function EmptyState({
-  connection,
   onOpenSpawn,
   onAddRepo,
   hasRepos,
   hasTabs,
 }: {
-  connection: AppState["status"];
   onOpenSpawn: () => void;
   onAddRepo: () => void;
   hasRepos: boolean;
   hasTabs: boolean;
 }) {
+  // Daemon connection state used to render here as a `<ConnectionBadge>`,
+  // but the DaemonFooter at the bottom of the sidebar now owns that
+  // surface (single source of truth). When the daemon is unhealthy the
+  // user gets the same dot + reason in the persistent footer, and the
+  // empty pane stays focused on "what should I do next?".
   return (
     <div className="empty-state" data-testid="empty-state">
       <h1>rustling-tulip</h1>
-      <p className="status-line">
-        Daemon: <ConnectionBadge state={connection} />
-      </p>
       {hasTabs ? (
         <p className="hint">Select a tab above.</p>
       ) : hasRepos ? (
@@ -1868,15 +1961,4 @@ function EmptyState({
       )}
     </div>
   );
-}
-
-function ConnectionBadge({ state }: { state: AppState["status"] }) {
-  if (state.kind === "init") return <span className="badge badge-warn">starting</span>;
-  if (state.kind === "open") return <span className="badge badge-ok">connected</span>;
-  if (state.kind === "connecting") return <span className="badge badge-warn">connecting</span>;
-  if (state.kind === "auth_failed")
-    return <span className="badge badge-err" title={state.reason}>auth failed</span>;
-  if (state.kind === "error")
-    return <span className="badge badge-err" title={state.reason}>error</span>;
-  return <span className="badge badge-warn" title={state.reason}>disconnected</span>;
 }

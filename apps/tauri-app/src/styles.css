@@ -722,9 +722,10 @@ button:focus-visible {
   color: var(--fg);
   white-space: nowrap;
 }
-/* Compact connection badge surfaced in the sidebar header when the
-   daemon connection is anything but open. Hidden by default; only the
-   non-`open` states render. */
+/* Daemon-status badge in the sidebar header — superseded by the
+   persistent DaemonFooter at the bottom of the sidebar. Kept as a
+   defensive selector in case any test asserts on the old class; render
+   path no longer emits it. */
 .sidebar-connection-badge {
   padding: 1px 6px;
   font-size: var(--text-micro);
@@ -1084,6 +1085,271 @@ button.tree-tab-pill:hover {
   color: var(--fg-dim);
   border-color: var(--border-strong);
   background: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+ * DaemonFooter — persistent status row + troubleshooting flyout at the
+ * bottom of the sidebar. Replaces the header connection badge + the
+ * empty-pane daemon-status line; one surface owns daemon status.
+ * --------------------------------------------------------------------------- */
+
+.daemon-footer-host {
+  /* Stick to the bottom of the scrolling sidebar so it stays visible
+   * regardless of how deep the tree scrolls. Own background means it
+   * paints over content scrolling behind it. */
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  background: var(--bg-elev);
+  border-top: 1px solid var(--border);
+  z-index: 5;
+}
+
+.daemon-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  color: var(--fg);
+  font-size: var(--text-small);
+  font-family: var(--font-sans);
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.daemon-footer:hover { background: var(--bg-elev2); }
+.daemon-footer.is-open {
+  background: var(--bg-elev2);
+  box-shadow: inset 0 1px 0 var(--border);
+}
+.daemon-footer:focus-visible {
+  outline: none;
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 1px 0 var(--border);
+}
+.daemon-footer-name {
+  font-weight: 600;
+  color: var(--fg);
+}
+.daemon-footer-sep {
+  color: var(--fg-dim);
+  font-weight: 400;
+}
+.daemon-footer-state {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.daemon-footer-port {
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+}
+.daemon-footer-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+  /* Halo box-shadow follows --status-* conventions: tinted halo on
+   * states the user should notice, none on the quiet defaults. */
+  transition: box-shadow var(--dur-base) var(--ease-out),
+              background var(--dur-fast) var(--ease-out);
+}
+.daemon-footer-dot-open {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+}
+.daemon-footer-dot-connecting,
+.daemon-footer-dot-init {
+  background: var(--warn);
+  /* Pulse to telegraph "in-flight, not stuck". Same cadence as the
+   * status-working dot animation. */
+  animation: status-pulse 1.6s var(--ease-out) infinite;
+}
+.daemon-footer-dot-closed { background: var(--fg-dim); }
+.daemon-footer-dot-stopped { background: var(--fg-dim); opacity: 0.55; }
+.daemon-footer-dot-auth_failed,
+.daemon-footer-dot-error {
+  background: var(--err);
+  box-shadow: 0 0 0 3px var(--err-soft);
+}
+
+/* Backdrop catches outside clicks. Transparent so the footer + sidebar
+ * stay visible while the flyout is up. */
+.daemon-footer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: transparent;
+}
+
+.daemon-footer-flyout {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  right: 8px;
+  z-index: 90;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-3);
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 4px;
+  max-height: min(70vh, 480px);
+  overflow-y: auto;
+  /* Subtle entrance — slide up + fade in from the footer. Matches the
+   * ease tokens used by the tree row hover transitions. */
+  animation: daemon-footer-rise 140ms var(--ease-out);
+}
+@keyframes daemon-footer-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.daemon-footer-flyout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.daemon-footer-flyout-header h3 {
+  margin: 0;
+  font-size: var(--text-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.daemon-footer-flyout-header .link {
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.daemon-footer-flyout-header .link:hover { color: var(--fg); }
+
+.daemon-footer-details {
+  list-style: none;
+  margin: 0;
+  padding: 4px 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.daemon-footer-details li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-small);
+  min-height: 20px;
+}
+.daemon-footer-detail-label {
+  flex: 0 0 64px;
+  color: var(--fg-muted);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.daemon-footer-detail-value {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+.daemon-footer-detail-reason {
+  font-family: var(--font-sans);
+  color: var(--err);
+  font-style: italic;
+}
+.daemon-footer-path-copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+}
+.daemon-footer-path-copy:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.daemon-footer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 4px 4px;
+  border-top: 1px solid var(--border);
+}
+.daemon-footer-section:first-of-type { border-top: 0; }
+.daemon-footer-section-label {
+  padding: 0 6px 4px;
+  color: var(--fg-muted);
+  font-size: var(--text-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.daemon-footer-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--fg);
+  font-size: var(--text-small);
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.daemon-footer-action:hover:not(:disabled) { background: var(--bg-elev2); }
+.daemon-footer-action:disabled {
+  color: var(--fg-dim);
+  cursor: not-allowed;
+}
+.daemon-footer-action:focus-visible {
+  outline: none;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.daemon-footer-action-hint {
+  font-size: var(--text-micro);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+.daemon-footer-action.danger:hover:not(:disabled) {
+  background: var(--err-soft);
+  color: var(--err);
+}
+.daemon-footer-action.danger.is-confirming {
+  background: var(--err-soft);
+  color: var(--err);
+  /* Pulse so the user can tell the next click commits — same loop
+   * cadence as status-working for visual consistency. */
+  animation: daemon-footer-danger-pulse 1.4s var(--ease-out) infinite;
+}
+@keyframes daemon-footer-danger-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 1px transparent; }
+  50%      { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 60%, transparent); }
 }
 
 .main-pane {

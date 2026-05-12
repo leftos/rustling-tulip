@@ -137,6 +137,87 @@ fn log_message(level: String, message: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Paths the daemon-status footer + troubleshooting flyout exposes to the
+/// user (open log, reveal config dir, copy handshake path, etc). All four
+/// derive from the same `config_dir()` so we return them as one struct
+/// rather than minting four invoke commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonPaths {
+    pub config_dir: String,
+    pub daemon_log: String,
+    pub app_log: String,
+    pub handshake_file: String,
+}
+
+#[tauri::command]
+fn daemon_paths() -> Result<DaemonPaths, String> {
+    let cfg = config_dir()?;
+    let logs = cfg.join("logs");
+    Ok(DaemonPaths {
+        config_dir: cfg.to_string_lossy().into_owned(),
+        daemon_log: logs.join("daemon.log").to_string_lossy().into_owned(),
+        app_log: logs.join("app.log").to_string_lossy().into_owned(),
+        handshake_file: cfg.join("daemon.json").to_string_lossy().into_owned(),
+    })
+}
+
+/// Force-stop the running daemon by reading its pid from `daemon.json` and
+/// killing the process. Used by the footer's "Stop daemon" action. We kill
+/// by pid rather than send a `Shutdown` WS message because the WS may
+/// already be closed (e.g. when the footer surfaced "connecting…" and the
+/// user gave up waiting), and pid-kill works in both states. The daemon's
+/// drop guard would normally remove `daemon.json` on graceful exit; we
+/// remove it here too so a subsequent `ensure_daemon_started` doesn't
+/// mistake a stale handshake for a live daemon.
+#[tauri::command]
+async fn stop_daemon() -> Result<(), String> {
+    let path = handshake_file()?;
+    if !path.exists() {
+        return Err("no daemon handshake on disk — daemon may not be running".to_string());
+    }
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let parsed: DaemonHandshake =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse handshake: {e}"))?;
+    kill_pid(parsed.pid).await?;
+    // Best-effort cleanup; absence will be detected on next ensure_running
+    // regardless. Don't error if the daemon's drop guard beat us to it.
+    let _ = tokio::fs::remove_file(&path).await;
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn kill_pid(pid: u32) -> Result<(), String> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let status = tokio::process::Command::new("taskkill")
+        .arg("/PID")
+        .arg(pid.to_string())
+        .arg("/F")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .await
+        .map_err(|e| format!("taskkill: {e}"))?;
+    if !status.success() {
+        return Err(format!("taskkill exited with {status}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+async fn kill_pid(pid: u32) -> Result<(), String> {
+    let status = tokio::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .await
+        .map_err(|e| format!("kill: {e}"))?;
+    if !status.success() {
+        return Err(format!("kill exited with {status}"));
+    }
+    Ok(())
+}
+
 /// Reveal a directory in the OS file manager (Explorer on Windows, Finder on
 /// macOS, xdg-open on Linux). The path is validated to exist before any
 /// shell process is spawned so we don't dispatch on attacker-controlled
@@ -291,6 +372,8 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
+            daemon_paths,
+            stop_daemon,
             pick_directory,
             pick_file,
             open_session_window,

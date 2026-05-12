@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { type ConnectionState, type DaemonClient, listPresets } from "../api";
+import {
+  listPresets,
+  type ConnectionState,
+  type DaemonClient,
+  type DaemonHandshake,
+} from "../api";
 import {
   tabGrid,
   type PresetEntry,
@@ -17,6 +22,7 @@ import {
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
 import { saveSettings, useSettings } from "../utils/settings";
+import DaemonFooter from "./DaemonFooter";
 import SessionContextMenu, {
   type DuplicateTarget,
   type SessionContextMenuState,
@@ -54,6 +60,21 @@ interface Props {
   highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   connection: ConnectionState | { kind: "init" } | { kind: "error"; reason: string };
+  /// Handshake captured by App after `ensureDaemonStarted` succeeds.
+  /// Threaded down to the DaemonFooter so the flyout can render port +
+  /// pid + protocol-version chips. `null` until the first successful
+  /// supervisor call (boot, or after an intentional Stop).
+  handshake: DaemonHandshake | null;
+  /// True iff the user explicitly hit Stop from the footer. Suppresses
+  /// the auto-reconnect cycle in App.tsx and changes the footer text
+  /// from the transient "disconnected" to the intentional "stopped".
+  daemonStopRequested: boolean;
+  /// Footer "Restart daemon" — sends graceful shutdown via WS (auto-
+  /// reconnect respawns) or bumps the connection version when stopped.
+  onRestartDaemon: () => void;
+  /// Footer "Stop daemon" — pid-kill via Tauri command + set the
+  /// stop-requested flag so auto-reconnect doesn't immediately respawn.
+  onStopDaemon: () => void;
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
   /// Called when the user clicks × on a repo that has live sessions.
@@ -94,71 +115,6 @@ type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
 /// (matches the daemon's registry view); "tab" groups by which tab each
 /// session is currently open in. User-toggled, persisted to localStorage.
 type SidebarView = "container" | "tab";
-/// Render a small connection-state badge for the sidebar header. Returns
-/// `null` when the connection is `open` so the happy path stays uncluttered;
-/// any other state surfaces as a coloured chip with a tooltip carrying the
-/// reason. Closes the audit's "Connection badge is only visible in the
-/// EmptyState" finding for non-EmptyState views.
-function renderConnectionBadge(
-  state:
-    | ConnectionState
-    | { kind: "init" }
-    | { kind: "error"; reason: string },
-): React.ReactNode {
-  if (state.kind === "open") return null;
-  if (state.kind === "init") {
-    return (
-      <span
-        className="badge badge-warn sidebar-connection-badge"
-        data-testid="sidebar-connection-badge"
-      >
-        starting
-      </span>
-    );
-  }
-  if (state.kind === "connecting") {
-    return (
-      <span
-        className="badge badge-warn sidebar-connection-badge"
-        data-testid="sidebar-connection-badge"
-      >
-        connecting
-      </span>
-    );
-  }
-  if (state.kind === "auth_failed") {
-    return (
-      <span
-        className="badge badge-err sidebar-connection-badge"
-        title={state.reason}
-        data-testid="sidebar-connection-badge"
-      >
-        auth failed
-      </span>
-    );
-  }
-  if (state.kind === "error") {
-    return (
-      <span
-        className="badge badge-err sidebar-connection-badge"
-        title={state.reason}
-        data-testid="sidebar-connection-badge"
-      >
-        error
-      </span>
-    );
-  }
-  return (
-    <span
-      className="badge badge-warn sidebar-connection-badge"
-      title={state.reason}
-      data-testid="sidebar-connection-badge"
-    >
-      disconnected
-    </span>
-  );
-}
-
 
 interface TreeContainer {
   key: string;
@@ -294,13 +250,10 @@ export default function Sidebar(props: Props) {
     return out;
   }, [containers, props.attentionSessions]);
 
-  const connectionBadge = renderConnectionBadge(props.connection);
-
   return (
     <aside className="sidebar" data-testid="sidebar">
       <header className="sidebar-header">
         <span className="brand">rustling-tulip</span>
-        {connectionBadge}
         <button
           type="button"
           className="sidebar-settings-btn"
@@ -502,6 +455,15 @@ export default function Sidebar(props: Props) {
           }}
         />
       )}
+
+      <DaemonFooter
+        connection={props.connection}
+        handshake={props.handshake}
+        sessionCount={props.sessions.length}
+        stopRequested={props.daemonStopRequested}
+        onRestart={props.onRestartDaemon}
+        onStop={props.onStopDaemon}
+      />
     </aside>
   );
 }

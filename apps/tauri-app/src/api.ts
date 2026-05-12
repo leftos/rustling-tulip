@@ -13,7 +13,7 @@ import {
   type SpawnConfig,
 } from "./types";
 
-interface DaemonHandshake {
+export interface DaemonHandshake {
   protocol_version: number;
   port: number;
   auth_token: string;
@@ -38,6 +38,29 @@ export type ConnectionState =
 
 export async function ensureDaemonStarted(): Promise<DaemonHandshake> {
   return await invoke<DaemonHandshake>("ensure_daemon_started");
+}
+
+/// Paths the daemon-footer troubleshooting flyout exposes for "open log",
+/// "reveal config dir", and "copy handshake path". Mirrors the Rust
+/// `DaemonPaths` struct in `apps/tauri-app/src-tauri/src/lib.rs`.
+export interface DaemonPaths {
+  config_dir: string;
+  daemon_log: string;
+  app_log: string;
+  handshake_file: string;
+}
+
+export async function fetchDaemonPaths(): Promise<DaemonPaths> {
+  return await invoke<DaemonPaths>("daemon_paths");
+}
+
+/// Force-stop the running daemon (pid-kill + remove handshake). Bypasses
+/// the WS-level `shutdown` message because the WS may not be in a state to
+/// accept one (e.g. mid-reconnect). Caller should set the stop-requested
+/// flag BEFORE calling so the auto-reconnect cycle doesn't immediately
+/// respawn it.
+export async function stopDaemon(): Promise<void> {
+  await invoke<void>("stop_daemon");
 }
 
 // Picker memory: store the parent directory of the last successful pick
