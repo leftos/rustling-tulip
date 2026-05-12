@@ -120,7 +120,8 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
     use std::os::windows::process::CommandExt;
     /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
     /// flash for the tracer process. The tracer's tracing output goes to
-    /// stderr which we redirect to NUL; no terminal interaction is needed.
+    /// stderr; with `RUSTLING_TULIP_TRACER_LOG` set the tracer routes its
+    /// `tracing_subscriber` output to a file instead.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let mut cmd = std::process::Command::new(tracer);
@@ -134,6 +135,14 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
         .arg(spec.rows.to_string());
     for (k, v) in &spec.env {
         cmd.env(k, v);
+    }
+    // Per-session tracer log so we can debug spawn issues for things like
+    // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
+    // Best-effort: if the log dir can't be resolved (no APPDATA on a weird
+    // host, locked filesystem, etc.) we silently skip — losing logs is not
+    // a reason to fail a session spawn.
+    if let Some(log_path) = tracer_log_path(&spec.session_id) {
+        cmd.env("RUSTLING_TULIP_TRACER_LOG", &log_path);
     }
     // Trailing program-and-args: program first, then its args. portable-pty
     // expects this shape on the tracer side.
@@ -152,6 +161,18 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
     Ok(child.id())
 }
 
+/// Build the per-session tracer log path under `<config>/logs/`. Uses the
+/// same `directories` resolution as `paths::Dirs` so both processes see
+/// the same root.
+fn tracer_log_path(session_id: &str) -> Option<PathBuf> {
+    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")?;
+    let dir = pd.config_dir().join("logs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+    Some(dir.join(format!("tracer-{session_id}.log")))
+}
+
 #[cfg(not(windows))]
 fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u32> {
     let mut cmd = std::process::Command::new(tracer);
@@ -165,6 +186,9 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
         .arg(spec.rows.to_string());
     for (k, v) in &spec.env {
         cmd.env(k, v);
+    }
+    if let Some(log_path) = tracer_log_path(&spec.session_id) {
+        cmd.env("RUSTLING_TULIP_TRACER_LOG", &log_path);
     }
     cmd.arg(&spec.program);
     for arg in &spec.args {

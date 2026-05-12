@@ -86,9 +86,23 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
+    // If the daemon set `RUSTLING_TULIP_TRACER_LOG`, mirror tracing output
+    // to that file (truncated on each start). Otherwise fall back to
+    // stderr — useful in `cargo run -p tracer` / e2e harness contexts but
+    // pointless under the daemon (which routes our stderr to NUL).
+    let builder = tracing_subscriber::fmt()
         .with_target(true)
         .with_ansi(false)
-        .compact()
-        .init();
+        .compact();
+    if let Some(path) = std::env::var_os("RUSTLING_TULIP_TRACER_LOG")
+        && let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+    {
+        builder.with_writer(std::sync::Mutex::new(file)).init();
+    } else {
+        builder.init();
+    }
 }

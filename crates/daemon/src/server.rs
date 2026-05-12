@@ -2077,10 +2077,23 @@ async fn spawn_interactive_session(
         }
     };
 
+    let raw_program = agent_program(cfg.agent);
+    let (program, prepend_args) = resolve_agent_program(&raw_program);
+    let mut final_args = prepend_args;
+    final_args.extend(args);
+    info!(
+        agent = cfg.agent.as_label(),
+        raw = %raw_program,
+        program = %program,
+        argc = final_args.len(),
+        args = ?final_args,
+        "spawn_interactive_session: resolved program"
+    );
+
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
-        program: agent_program(cfg.agent),
-        args,
+        program,
+        args: final_args,
         cwd: primary_cwd,
         env: merged_env(&cfg.extra_env),
         cols: 120,
@@ -2797,6 +2810,45 @@ fn agent_program(agent: Agent) -> String {
             std::env::var("RUSTLING_TULIP_CODEX").unwrap_or_else(|_| "codex".to_string())
         }
     }
+}
+
+/// Resolve an agent-program name into something `CreateProcess` /
+/// portable-pty can actually launch. Returns `(program, prepended_args)`.
+///
+/// On Windows, agent CLIs distributed via npm (e.g. codex from
+/// `@openai/codex`) land on PATH as `.cmd` shims. `CreateProcess` does
+/// NOT execute `.cmd` or `.bat` directly — `which` resolves them via
+/// `PATHEXT` but the resulting path still needs `cmd.exe /c` to run.
+/// `claude.exe` and other native binaries fall through with their full
+/// resolved path so the tracer doesn't re-scan PATH later.
+///
+/// When `which` can't find the program (custom env-var override that
+/// hasn't been deployed yet, etc.) the input string is returned as-is
+/// and we let the tracer surface whatever error `CreateProcess`
+/// produces — that's more useful diagnostics than guessing.
+fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
+    let Ok(path) = which::which(name) else {
+        return (name.to_string(), Vec::new());
+    };
+    let path_str = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_lowercase);
+        if matches!(ext.as_deref(), Some("cmd" | "bat")) {
+            // `/d` skips AutoRun reg keys; `/s` + outer quoting around
+            // the whole tail keeps cmd.exe's quote-stripping from
+            // mangling our argv. portable-pty passes argv straight to
+            // CreateProcess so we don't need to re-quote each arg.
+            return (
+                "cmd.exe".to_string(),
+                vec!["/d".to_string(), "/c".to_string(), path_str],
+            );
+        }
+    }
+    (path_str, Vec::new())
 }
 
 /// Pick a shell executable for [`SessionMode::PlainShell`] spawns. Returns

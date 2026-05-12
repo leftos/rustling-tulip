@@ -84,13 +84,35 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         })
         .context("opening PTY")?;
 
+    info!(
+        program = %cfg.program,
+        argc = cfg.args.len(),
+        args = ?cfg.args,
+        cwd = %cfg.cwd.display(),
+        "supervisor: about to spawn child"
+    );
+
     let mut cmd = CommandBuilder::new(&cfg.program);
     for arg in &cfg.args {
         cmd.arg(arg);
     }
     cmd.cwd(cfg.cwd.as_path());
 
-    let mut child = cmd_spawn(pair.slave.as_ref(), cmd)?;
+    let mut child = match cmd_spawn(pair.slave.as_ref(), cmd) {
+        Ok(c) => c,
+        Err(err) => {
+            // Logged here in addition to the `?` propagation so the
+            // tracer log captures the actual program/arg shape that
+            // failed — the daemon only sees the pipe-connect timeout.
+            tracing::error!(
+                ?err,
+                program = %cfg.program,
+                args = ?cfg.args,
+                "supervisor: child spawn failed"
+            );
+            return Err(err);
+        }
+    };
     drop(pair.slave);
     let child_pid = child.process_id();
     info!(?child_pid, "supervisor: child spawned");
