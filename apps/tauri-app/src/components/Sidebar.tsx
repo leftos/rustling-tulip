@@ -18,6 +18,7 @@ import {
 } from "../utils/sessionLabel";
 import { saveSettings, useSettings } from "../utils/settings";
 import SessionContextMenu, {
+  type DuplicateTarget,
   type SessionContextMenuState,
 } from "./SessionContextMenu";
 
@@ -69,11 +70,15 @@ interface Props {
   /// to an empty pane in the target tab (or, when full, a fresh
   /// split on the right).
   onOpenSpawnIntoTab: (tabId: string) => void;
+  /// Instant duplicate from the session context menu. App-level handler
+  /// arms a pending spawn intent (`newTab` or `addToTab` depending on
+  /// `target`) before sending DuplicateSession, so the freshly spawned
+  /// clone auto-focuses into the chosen destination instead of landing
+  /// in the Unbound container.
+  onDuplicateSession: (sessionId: string, target: DuplicateTarget) => void;
   /// Shift-click on a session's "Duplicate" context-menu entry. App-level
   /// handler fetches the source's SpawnConfig and opens the spawn dialog
-  /// pre-filled with it. Plain click is handled inside Sidebar via
-  /// `client.send({ type: "duplicate_session", ... })` and doesn't need
-  /// a callback.
+  /// pre-filled with it.
   onDuplicateSessionWithDialog: (sessionId: string) => void;
   onOpenWorkspaceCreator: () => void;
   onRevealInExplorer: (path: string) => void;
@@ -470,15 +475,12 @@ export default function Sidebar(props: Props) {
           tabs={props.tabs}
           client={props.client}
           onClose={closeSessionMenu}
-          onDuplicate={(withDialog) => {
+          onDuplicate={(withDialog, target) => {
             const sid = sessionMenu.session.id;
             if (withDialog) {
               props.onDuplicateSessionWithDialog(sid);
             } else {
-              props.client.send({
-                type: "duplicate_session",
-                session_id: sid,
-              });
+              props.onDuplicateSession(sid, target);
             }
             closeSessionMenu();
           }}

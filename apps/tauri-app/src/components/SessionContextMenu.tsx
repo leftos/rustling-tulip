@@ -11,13 +11,21 @@ export interface SessionContextMenuState {
   session: SessionSnapshot;
 }
 
+/// Destination tab for a duplicate action.
+/// - `new_tab`  — fresh tab containing the duplicate (the default).
+/// - `{ tabId }` — drop the duplicate into an existing tab (replacing an
+///   empty pane if one exists, else splitting on the right).
+export type DuplicateTarget = "new_tab" | { tabId: string };
+
 interface Props {
   state: SessionContextMenuState;
   tabs: TabEntry[];
   client: DaemonClient;
   onClose: () => void;
-  /** `withDialog` = true when the click was modified with Shift. */
-  onDuplicate: (withDialog: boolean) => void;
+  /** `withDialog` = true when the click was modified with Shift. When
+   *  `withDialog` is false, `target` specifies where the duplicate
+   *  lands; defaults to a fresh new tab. */
+  onDuplicate: (withDialog: boolean, target: DuplicateTarget) => void;
 }
 
 type CloseMode = "idle" | "confirming";
@@ -68,7 +76,12 @@ export default function SessionContextMenu({
   const onMoveTo = (dstTab: TabEntry) => {
     if (!sourceBinding) return;
     const dstGrid = tabGrid(dstTab);
-    const dstPane = dstGrid ? collectPanes(dstGrid)[0] : null;
+    const dstPanes = dstGrid ? collectPanes(dstGrid) : [];
+    // Prefer absorbing an empty placeholder pane over splitting next to
+    // it — otherwise "Move to Tab 2" on a fresh Tab 2 leaves the empty
+    // pane visible alongside the moved session, which feels broken.
+    const emptyPane = dstPanes.find((p) => p.session_id === null);
+    const dstPane = emptyPane ?? dstPanes[0];
     if (!dstPane) return;
     client.send({
       type: "move_pane",
@@ -76,7 +89,7 @@ export default function SessionContextMenu({
       src_pane_id: sourceBinding.pane_id,
       dst_tab_id: dstTab.id,
       dst_pane_id: dstPane.pane_id,
-      edge: "right",
+      edge: emptyPane ? "replace" : "right",
     });
     onClose();
   };
@@ -113,28 +126,45 @@ export default function SessionContextMenu({
                 disabled={!canDuplicate}
                 onClick={(e) => {
                   if (!canDuplicate) return;
-                  onDuplicate(e.shiftKey);
+                  onDuplicate(e.shiftKey, "new_tab");
                 }}
                 title={
                   canDuplicate
-                    ? "Click to spawn a clone immediately. Shift-click to open the spawn dialog pre-filled."
+                    ? "Click to clone into a fresh tab. Shift-click to open the spawn dialog pre-filled."
                     : "Headless sessions can't be duplicated — they're one-shot kickoffs."
                 }
                 data-testid="session-context-duplicate"
               >
-                Duplicate
+                Duplicate (new tab)
                 {canDuplicate && (
                   <span className="context-menu-hint">⇧ to edit</span>
                 )}
               </button>
             </li>
 
+            {canDuplicate && tabs.length > 0 && (
+              <>
+                <li className="context-menu-label">Duplicate into</li>
+                {tabs.map((t) => (
+                  <li key={`dup:${t.id}`}>
+                    <button
+                      type="button"
+                      onClick={() => onDuplicate(false, { tabId: t.id })}
+                      title={`Spawn a clone of this session into "${t.name}"`}
+                    >
+                      {t.name}
+                    </button>
+                  </li>
+                ))}
+              </>
+            )}
+
             {moveTargets.length > 0 && (
               <>
                 <li className="context-menu-separator" aria-hidden="true" />
                 <li className="context-menu-label">Move to</li>
                 {moveTargets.map((t) => (
-                  <li key={t.id}>
+                  <li key={`mv:${t.id}`}>
                     <button
                       type="button"
                       onClick={() => onMoveTo(t)}

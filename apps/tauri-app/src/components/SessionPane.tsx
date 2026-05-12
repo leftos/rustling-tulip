@@ -186,7 +186,7 @@ export default function SessionPane({
           tabs={tabs}
           client={client}
           onClose={() => setSessionMenu(null)}
-          onDuplicate={(withDialog) => {
+          onDuplicate={(withDialog, target) => {
             const sid = sessionMenu.session.id;
             if (withDialog) {
               // App.tsx listens for this event; it fetches the source's
@@ -197,7 +197,14 @@ export default function SessionPane({
                 }),
               );
             } else {
-              client.send({ type: "duplicate_session", session_id: sid });
+              // App.tsx listens for this event; arms a pending spawn
+              // intent so the clone auto-focuses into the chosen tab
+              // instead of landing unbound.
+              window.dispatchEvent(
+                new CustomEvent("rt:duplicate_session", {
+                  detail: { sessionId: sid, target },
+                }),
+              );
             }
             setSessionMenu(null);
           }}

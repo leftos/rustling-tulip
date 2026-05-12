@@ -3,7 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { TabEntry } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
-import { firstLeafPane, tabHasBoundSessions, tabPaneCount } from "../utils/grid";
+import {
+  collectPanes,
+  tabHasBoundSessions,
+  tabPaneCount,
+} from "../utils/grid";
+import { tabGrid } from "../types";
 
 interface Props {
   tabs: TabEntry[];
@@ -246,8 +251,15 @@ export default function TabBar({
         const srcPane = panePayload.slice(sep + 1);
         const targetTab = tabs.find((t) => t.id === tabId);
         if (!targetTab) return;
-        const dst = firstLeafPane(targetTab);
+        const targetGrid = tabGrid(targetTab);
+        const targetPanes = targetGrid ? collectPanes(targetGrid) : [];
         // Diff tabs (and any future non-grid kinds) have no leaf panes.
+        if (targetPanes.length === 0) return;
+        // Prefer absorbing an empty placeholder pane over splitting next
+        // to it — otherwise dropping a session onto an empty Tab 2's pill
+        // leaves the placeholder visible alongside the dropped session.
+        const emptyPane = targetPanes.find((p) => p.session_id === null);
+        const dst = emptyPane ?? targetPanes[0];
         if (!dst) return;
         // Pane-into-self-target no-op (the same pane is already the
         // destination's first leaf — moving it to its own right edge
@@ -259,7 +271,7 @@ export default function TabBar({
           src_pane_id: srcPane,
           dst_tab_id: tabId,
           dst_pane_id: dst.pane_id,
-          edge: "right",
+          edge: emptyPane ? "replace" : "right",
         });
         return;
       }

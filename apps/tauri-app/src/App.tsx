@@ -33,6 +33,7 @@ import ActivityBar, {
   writeActivitySection,
 } from "./components/ActivityBar";
 import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
+import type { DuplicateTarget } from "./components/SessionContextMenu";
 import SourceControlSidebar from "./components/source-control/SourceControlSidebar";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
@@ -501,6 +502,24 @@ export default function App() {
     }));
   }, []);
 
+  /// Instant duplicate from a session context menu. Arms a pending
+  /// spawn intent BEFORE sending DuplicateSession so the daemon-broadcast
+  /// `session_updated` for the new clone auto-attaches to the chosen
+  /// destination (a fresh tab or an existing one) instead of landing
+  /// in the Unbound container.
+  const onDuplicateSession = useCallback(
+    (sessionId: string, target: DuplicateTarget) => {
+      const client = latestStateRef.current?.client;
+      if (!client) return;
+      pendingSpawnIntentRef.current =
+        target === "new_tab"
+          ? { kind: "newTab" }
+          : { kind: "addToTab", tabId: target.tabId };
+      client.send({ type: "duplicate_session", session_id: sessionId });
+    },
+    [],
+  );
+
   /// Shift-click on a session's "Duplicate" context-menu entry. Fetches
   /// the source's persisted SpawnConfig and opens the spawn dialog with
   /// every field pre-filled. If the daemon replies with `null` (the
@@ -542,6 +561,21 @@ export default function App() {
     return () =>
       window.removeEventListener("rt:duplicate_session_with_dialog", handler);
   }, [onDuplicateSessionWithDialog]);
+
+  // Same pattern for the plain-click duplicate path. SessionPane sits
+  // deep in the GridRenderer tree and dispatches a window event so we
+  // don't have to prop-drill through every intermediate component.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ sessionId: string; target: DuplicateTarget }>)
+        .detail;
+      if (detail && typeof detail.sessionId === "string") {
+        onDuplicateSession(detail.sessionId, detail.target);
+      }
+    };
+    window.addEventListener("rt:duplicate_session", handler);
+    return () => window.removeEventListener("rt:duplicate_session", handler);
+  }, [onDuplicateSession]);
 
   const onLaunchPreset = useCallback(
     (preset: PresetEntry, target: PresetTarget) => {
@@ -1004,6 +1038,7 @@ export default function App() {
             onSelectSession={onSelectSession}
             onOpenSpawn={onOpenSpawn}
             onOpenSpawnIntoTab={onOpenSpawnIntoTab}
+            onDuplicateSession={onDuplicateSession}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
             onRevealInExplorer={onRevealInExplorer}
