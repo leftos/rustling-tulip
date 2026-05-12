@@ -46,12 +46,23 @@
     Applies to `launch`/`restart`. Stops any running daemon before
     building, regardless of whether cargo decides a rebuild is needed.
 
+.PARAMETER Fast
+    Applies to `installer`. Three independent speedups: (1) overrides
+    `[profile.release]` tuning via CARGO_PROFILE_RELEASE_* env vars
+    (lto=false, codegen-units=16, strip=none), (2) skips frontend
+    type-checking (vite-only bundle), (3) disables NSIS LZMA compression
+    on the installer payload. Output still lands under
+    `target\release\bundle\` -- flipping between -Fast and normal
+    release forces a cargo rebuild (different fingerprints). Installer
+    .exe is larger; not for shippable artifacts.
+
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
     .\rt.ps1 build -Release
     .\rt.ps1 launch -NoBuild
     .\rt.ps1 launch -Release
     .\rt.ps1 installer
+    .\rt.ps1 installer -Fast
     .\rt.ps1 stop
     .\rt.ps1 restart
     .\rt.ps1 clippy
@@ -75,6 +86,7 @@ param(
     [switch]$Release,
     [switch]$NoBuild,
     [switch]$ForceStopDaemon,
+    [switch]$Fast,
 
     # Extra arguments forwarded to the underlying tool (e.g. `cargo test --
     # mytest`). Only meaningful for `launch`, `test`, `clippy`, `fmt`.
@@ -453,31 +465,102 @@ function Invoke-Installer {
     Assert-Tooling
     Initialize-FrontendDeps
 
-    # Step 1: build the release daemon + tracer. Tauri bundles them as
-    # `externalBin` siblings next to the main app exe so daemon_supervisor's
-    # `current_exe().parent()` discovery works in the installed layout.
-    Write-Host '==> Building release daemon + tracer...' -ForegroundColor Cyan
-    & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer
-    Test-CargoExitOk 'cargo build --release (daemon + tracer)'
-
-    # Step 2: stage the sidecar binaries with the target-triple suffix
-    # Tauri expects. Shared helper -- same logic the debug/release builds
-    # use, so the binaries/ folder stays consistent across modes.
-    Sync-SidecarBinaries -BuildProfile 'release'
-
-    # Step 3: run `pnpm tauri build`. Tauri builds the app exe + frontend
-    # bundle and produces the installer per `tauri.conf.json` (NSIS).
-    Write-Host '==> Building installer bundles (pnpm tauri build)...' -ForegroundColor Cyan
-    Push-Location $AppDir
-    try {
-        & pnpm tauri build @Rest
-        Test-CargoExitOk 'pnpm tauri build'
-    } finally {
-        Pop-Location
+    # -Fast bundles three independent speedups via a tauri.conf.json
+    # merge-patch (written to a file because PowerShell's `Windows`
+    # native-command arg passing strips inner double-quotes from `-c
+    # <json>`):
+    #   1. CARGO_PROFILE_RELEASE_* env vars below cut LTO/codegen-units/
+    #      strip on both the explicit cargo build and the one Tauri
+    #      kicks off internally. Tauri's CLI has no `--profile`, so env
+    #      vars are the only handle.
+    #   2. `build.beforeBuildCommand = "pnpm build:fast"` skips `tsc -b`
+    #      -- vite alone produces the bundle.
+    #   3. `bundle.windows.nsis.compression = "none"` disables LZMA on
+    #      the installer payload. The installer .exe gets larger, but
+    #      avoiding the LZMA pass saves the most wall time of the three.
+    # NOTE: -Fast and normal release share `target/release/`, so
+    # flipping between modes invalidates the cargo fingerprint and
+    # forces a rebuild. Expected; not for shippable artifacts either way.
+    $tauriOverrideFile = $null
+    $tauriExtraArgs = @()
+    if ($Fast) {
+        $tmpDir = Join-Path $ScriptDir '.tmp'
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $tauriOverrideFile = Join-Path $tmpDir 'tauri-fast-override.json'
+        $overrideJson = '{"build":{"beforeBuildCommand":"pnpm build:fast"},"bundle":{"windows":{"nsis":{"compression":"none"}}}}'
+        $overrideJson | Set-Content -Path $tauriOverrideFile -Encoding utf8 -NoNewline
+        $tauriExtraArgs = @('-c', $tauriOverrideFile)
     }
-    $bundleDir = Join-Path $ScriptDir 'target\release\bundle'
-    if (Test-Path $bundleDir) {
-        Write-Host "==> Bundles written under $bundleDir" -ForegroundColor Green
+    $modeLabel = if ($Fast) { 'release (fast)' } else { 'release' }
+
+    $cargoFastOverrides = @{
+        CARGO_PROFILE_RELEASE_LTO            = 'false'
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS  = '16'
+        CARGO_PROFILE_RELEASE_STRIP          = 'none'
+    }
+    $cargoFastSaved = @{}
+    if ($Fast) {
+        foreach ($k in $cargoFastOverrides.Keys) {
+            $cargoFastSaved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
+            [Environment]::SetEnvironmentVariable($k, $cargoFastOverrides[$k], 'Process')
+        }
+    }
+
+    try {
+        # Step 1: build the release daemon + tracer. Tauri bundles them
+        # as `externalBin` siblings next to the main app exe so
+        # daemon_supervisor's `current_exe().parent()` discovery works in
+        # the installed layout.
+        Write-Host "==> Building $modeLabel daemon + tracer..." -ForegroundColor Cyan
+        & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer
+        Test-CargoExitOk "cargo build $modeLabel (daemon + tracer)"
+
+        # Step 2: stage the sidecar binaries with the target-triple
+        # suffix Tauri expects. Shared helper -- same logic the
+        # debug/release builds use, so the binaries/ folder stays
+        # consistent across modes.
+        Sync-SidecarBinaries -BuildProfile 'release'
+
+        # Step 3: run `pnpm tauri build`. Tauri builds the app exe +
+        # frontend bundle and produces the installer per
+        # `tauri.conf.json` (NSIS).
+        Write-Host "==> Building installer bundles (pnpm tauri build, $modeLabel)..." -ForegroundColor Cyan
+        Push-Location $AppDir
+        try {
+            & pnpm tauri build @tauriExtraArgs @Rest
+            Test-CargoExitOk 'pnpm tauri build'
+        } finally {
+            Pop-Location
+        }
+        $bundleDir = Join-Path $ScriptDir 'target\release\bundle'
+        if (Test-Path $bundleDir) {
+            Write-Host "==> Bundles written under $bundleDir" -ForegroundColor Green
+        }
+    } finally {
+        if ($Fast) {
+            foreach ($k in $cargoFastOverrides.Keys) {
+                $saved = $cargoFastSaved[$k]
+                if ($null -eq $saved) {
+                    # Original was unset, so the correct restoration is
+                    # "remove the variable" -- NOT
+                    # SetEnvironmentVariable($k, $null, 'Process'). In
+                    # practice that .NET call has been observed to
+                    # leave an empty-string value behind in the
+                    # PowerShell session, which then poisons every
+                    # subsequent cargo invocation (cargo parses
+                    # CARGO_PROFILE_RELEASE_CODEGEN_UNITS unconditionally
+                    # and rejects an empty integer, breaking even debug
+                    # builds). Remove-Item is explicit and survives
+                    # PowerShell-version drift.
+                    Remove-Item -Path "Env:$k" -ErrorAction SilentlyContinue
+                } else {
+                    [Environment]::SetEnvironmentVariable($k, $saved, 'Process')
+                }
+            }
+            if ($tauriOverrideFile -and (Test-Path $tauriOverrideFile)) {
+                Remove-Item -Path $tauriOverrideFile -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -533,7 +616,7 @@ function Show-Help {
 rt.ps1 -- rustling-tulip dev helper
 
 Usage:
-  .\rt.ps1 [<command>] [-Release] [-NoBuild] [-ForceStopDaemon] [-- <extra>]
+  .\rt.ps1 [<command>] [-Release] [-NoBuild] [-ForceStopDaemon] [-Fast] [-- <extra>]
 
 Commands:
   launch     Build the daemon then `pnpm tauri dev` (default if omitted).
@@ -556,13 +639,22 @@ Flags:
   -NoBuild           Skip the cargo build step (launch/restart).
   -ForceStopDaemon   Stop the daemon up-front (launch/restart) even when
                      cargo says no rebuild is needed.
+  -Fast              Installer-only: (1) override `[profile.release]`
+                     via CARGO_PROFILE_RELEASE_* env vars (lto=false,
+                     codegen-units=16, strip=none), (2) skip `tsc -b`
+                     type-check, (3) disable NSIS LZMA compression.
+                     Output still lands in target\release\bundle\.
+                     Installer .exe is larger; not for shippable
+                     artifacts. Switching between -Fast and normal
+                     release forces a cargo rebuild.
 
 Examples:
   .\rt.ps1                       # build + launch dev
   .\rt.ps1 build -Release        # release artifacts, no launch
   .\rt.ps1 launch -NoBuild       # launch existing debug binaries
   .\rt.ps1 launch -Release       # build + launch release exe
-  .\rt.ps1 installer             # build installer bundle
+  .\rt.ps1 installer             # build installer bundle (shippable)
+  .\rt.ps1 installer -Fast       # local installer iteration (faster)
   .\rt.ps1 restart               # kill daemon + relaunch dev
   .\rt.ps1 clippy
 '@
