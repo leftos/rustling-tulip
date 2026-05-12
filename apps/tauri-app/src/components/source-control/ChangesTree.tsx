@@ -108,7 +108,7 @@ function FolderRow({
     <li>
       <div
         className="tree-row changes-tree-folder"
-        style={{ paddingLeft: 4 + depth * 12 }}
+        style={{ "--tree-depth": depth } as React.CSSProperties}
         onClick={() => onToggle(node.fullPath)}
         role="button"
         tabIndex={0}
@@ -183,7 +183,7 @@ function FileRow({ change, depth, selected, onSelect, rowActions }: FileRowProps
     <li>
       <div
         className={classes}
-        style={{ paddingLeft: 4 + depth * 12 }}
+        style={{ "--tree-depth": depth } as React.CSSProperties}
         onClick={() => onSelect(change.path)}
         role="button"
         tabIndex={0}

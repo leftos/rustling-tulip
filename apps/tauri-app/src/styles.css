@@ -356,6 +356,7 @@ button:focus-visible {
   border-bottom-color: var(--accent);
 }
 .source-control-list { padding: 4px 0; }
+.source-control > .empty { padding: 12px 14px; }
 .changes-tree { list-style: none; margin: 0; padding: 0; }
 .changes-tree ul { list-style: none; margin: 0; padding: 0; }
 .changes-tree .tree-row {
@@ -363,6 +364,7 @@ button:focus-visible {
   min-height: 20px;
   padding-top: 2px;
   padding-bottom: 2px;
+  padding-left: calc(4px + var(--tree-depth, 0) * 12px);
 }
 .changes-tree-folder .tree-label { color: var(--fg); }
 .changes-tree-file .tree-label { color: var(--fg-muted); }
@@ -380,7 +382,7 @@ button:focus-visible {
 }
 .changes-tree-file .file-status.status-M { color: #d4a72c; }
 .changes-tree-file .file-status.status-A { color: #4ec9b0; }
-.changes-tree-file .file-status.status-D { color: #f48771; }
+.changes-tree-file .file-status.status-D { color: var(--err); }
 .changes-tree-file .file-status.status-U { color: #999; }
 .changes-tree-file .file-status.status-R { color: #569cd6; }
 .changes-tree-file .file-status.status-\? { color: #6a9955; }
@@ -590,6 +592,7 @@ button:focus-visible {
   background: var(--bg);
   position: relative;
 }
+.diff-pane-host .empty { padding: 16px 18px; color: var(--err); }
 .diff-pane-header {
   display: flex;
   align-items: center;
@@ -651,9 +654,9 @@ button:focus-visible {
   gap: 8px;
   margin: 6px 10px;
   padding: 6px 8px;
-  background: rgba(244, 135, 113, 0.12);
-  border: 1px solid rgba(244, 135, 113, 0.4);
-  color: #f48771;
+  background: var(--err-soft);
+  border: 1px solid rgba(239, 92, 92, 0.4);
+  color: var(--err);
   font-size: 12px;
   border-radius: 3px;
   word-break: break-word;
@@ -691,6 +694,7 @@ button:focus-visible {
   flex-direction: column;
   overflow-y: auto;
 }
+.sidebar > .empty { padding: 12px 14px; }
 /* Sidebar scrollbar — quiet, near-invisible until hovered. */
 .sidebar::-webkit-scrollbar { width: 8px; }
 .sidebar::-webkit-scrollbar-track { background: transparent; }
@@ -1694,6 +1698,8 @@ button.tree-tab-pill:hover {
 }
 
 .muted { color: var(--fg-muted); }
+.inline-note { margin-left: 6px; }
+.preset-description { margin-top: 0; }
 
 .modal-backdrop {
   position: fixed; inset: 0;
@@ -2060,6 +2066,7 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   min-width: 0;
   overflow: hidden;
 }
+.grid-root-non-grid .empty { padding: 16px 18px; }
 .grid-root > * {
   flex: 1;
   min-height: 0;

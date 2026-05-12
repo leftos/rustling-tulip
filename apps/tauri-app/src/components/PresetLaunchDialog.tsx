@@ -279,7 +279,7 @@ export default function PresetLaunchDialog({
         </header>
         <div className="modal-body">
           {preset.description && (
-            <p className="muted" style={{ marginTop: 0 }}>
+            <p className="muted preset-description">
               {preset.description}
             </p>
           )}

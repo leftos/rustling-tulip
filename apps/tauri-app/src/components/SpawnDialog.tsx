@@ -924,7 +924,7 @@ function SingleForm({
         />
         <span>
           Create a worktree
-          <span className="muted small" style={{ marginLeft: 6 }}>
+          <span className="muted small inline-note">
             (unchecked: run claude in the repo's main directory)
           </span>
         </span>
@@ -1167,7 +1167,7 @@ function WorkspaceForm({
         />
         <span>
           Create worktrees
-          <span className="muted small" style={{ marginLeft: 6 }}>
+          <span className="muted small inline-note">
             (unchecked: check out the branch in each member's main directory)
           </span>
         </span>

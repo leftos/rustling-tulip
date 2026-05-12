@@ -123,7 +123,7 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
   if (error) {
     return (
       <div className="diff-pane-host" data-testid="diff-pane-error">
-        <p className="empty" style={{ padding: "16px 18px", color: "#f48771" }}>
+        <p className="empty">
           Could not load diff: {error}
         </p>
       </div>

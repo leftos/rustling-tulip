@@ -80,7 +80,7 @@ export default function SourceControlSidebar({
     return (
       <aside className="source-control" data-testid="source-control-sidebar">
         <header className="source-control-header">Source control</header>
-        <p className="empty" style={{ padding: "12px 14px" }}>
+        <p className="empty">
           Register a repo from the Sessions sidebar to inspect changes here.
         </p>
       </aside>
@@ -115,14 +115,13 @@ export default function SourceControlSidebar({
           <div className="source-control-active-repo" title={activeRepo.path}>
             <strong>{activeRepo.name}</strong>
             {followingFocus && (
-              <span className="muted small" style={{ marginLeft: 6 }}>
+              <span className="muted small inline-note">
                 · following active pane
               </span>
             )}
             {autoNoActive && (
               <span
-                className="muted small"
-                style={{ marginLeft: 6 }}
+                className="muted small inline-note"
                 title="No pane is focused right now — falling back to the first registered repo. Pick a session in the sidebar to follow it, or pin a repo from the picker above."
               >
                 · no active pane

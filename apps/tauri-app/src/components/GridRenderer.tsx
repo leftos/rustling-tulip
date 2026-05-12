@@ -64,7 +64,7 @@ export default function GridRenderer({
   if (!grid) {
     return (
       <div className="grid-root grid-root-non-grid" data-testid="grid-root-non-grid">
-        <p className="empty" style={{ padding: "16px 18px" }}>
+        <p className="empty">
           This tab has no pane layout.
         </p>
       </div>

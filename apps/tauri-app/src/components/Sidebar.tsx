@@ -534,7 +534,7 @@ export default function Sidebar(props: Props) {
       </div>
 
       {containers.length === 0 ? (
-        <p className="empty" style={{ padding: "12px 14px" }}>
+        <p className="empty">
           No repos or workspaces yet — start with{" "}
           <button type="button" className="link inline" onClick={props.onAddRepo}>
             + Repo
