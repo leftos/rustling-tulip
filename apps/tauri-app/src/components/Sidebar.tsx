@@ -207,6 +207,11 @@ export default function Sidebar(props: Props) {
     [view, props.tabs, props.repos, props.workspaces, props.sessions],
   );
 
+  const abandonedCount = useMemo(
+    () => props.sessions.filter((s) => s.is_abandoned).length,
+    [props.sessions],
+  );
+
   // Containers default to expanded. Local UI state; not persisted.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const toggle = (key: string) =>
@@ -378,6 +383,17 @@ export default function Sidebar(props: Props) {
         >
           + Workspace
         </button>
+        {abandonedCount >= 2 && (
+          <button
+            type="button"
+            className="link"
+            onClick={() => props.client.send({ type: "resume_all_abandoned" })}
+            title={`Resume all ${abandonedCount} abandoned sessions`}
+            data-testid="sidebar-resume-all-abandoned"
+          >
+            Resume all ({abandonedCount})
+          </button>
+        )}
       </div>
 
       {containers.length === 0 ? (

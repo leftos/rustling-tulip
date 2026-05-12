@@ -748,6 +748,9 @@ async fn dispatch(
         ClientMessage::DiscardAbandoned { session_id } => {
             discard_abandoned(hub, &session_id, out_tx);
         }
+        ClientMessage::ResumeAllAbandoned => {
+            resume_all_abandoned(hub, out_tx).await;
+        }
         ClientMessage::ListBranches { repo_id } => {
             let repo_path = hub
                 .state
@@ -2286,6 +2289,34 @@ async fn resume_abandoned(
 
     let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
     Ok(())
+}
+
+/// Resume every session currently flagged as abandoned. Iterates the
+/// registry snapshot (taken upfront to avoid mutating it while iterating),
+/// calls `resume_abandoned` for each, and emits an `Error` message per
+/// failure so the user can see which ones didn't make it. Successful
+/// resumes are handled by `resume_abandoned` itself (it emits
+/// `SessionUpdated` and consumes the sidecar).
+async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let abandoned_ids: Vec<String> = hub
+        .sessions
+        .snapshots()
+        .into_iter()
+        .filter(|s| s.is_abandoned)
+        .map(|s| s.id)
+        .collect();
+    info!(
+        count = abandoned_ids.len(),
+        "resume_all_abandoned: starting bulk resume"
+    );
+    for id in abandoned_ids {
+        if let Err(err) = resume_abandoned(hub, &id, out_tx).await {
+            warn!(session_id = %id, ?err, "bulk resume: per-session failure");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: format!("resume {id}: {err}"),
+            });
+        }
+    }
 }
 
 /// Remove an abandoned session from the registry + delete its sidecar.

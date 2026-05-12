@@ -410,6 +410,7 @@ export type ClientMessage =
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
   | { type: "resume_abandoned"; session_id: string }
   | { type: "discard_abandoned"; session_id: string }
+  | { type: "resume_all_abandoned" }
   | { type: "list_branches"; repo_id: string }
   | {
       type: "preview_workspace_spawn";

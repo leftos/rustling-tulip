@@ -963,6 +963,11 @@ pub enum ClientMessage {
     DiscardAbandoned {
         session_id: String,
     },
+    /// Resume every session currently in the abandoned bucket. The daemon
+    /// iterates and re-spawns each one; per-session failures (missing
+    /// spawn config, spawn error) are surfaced as `Error` messages but
+    /// don't abort the bulk operation.
+    ResumeAllAbandoned,
     /// List branches in a registered repo.
     ListBranches {
         repo_id: String,
