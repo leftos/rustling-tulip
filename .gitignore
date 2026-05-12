@@ -11,6 +11,7 @@ dist-ssr/
 
 # Tauri
 apps/tauri-app/src-tauri/gen/
+apps/tauri-app/src-tauri/binaries/
 
 # Editor
 .vs/

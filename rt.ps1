@@ -363,6 +363,38 @@ function Invoke-Launch {
 function Invoke-Installer {
     Assert-Tooling
     Initialize-FrontendDeps
+
+    # Step 1: build the release daemon + tracer. Tauri bundles them as
+    # `externalBin` siblings next to the main app exe so daemon_supervisor's
+    # `current_exe().parent()` discovery works in the installed layout.
+    Write-Host '==> Building release daemon + tracer...' -ForegroundColor Cyan
+    & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer
+    Test-CargoExitOk 'cargo build --release (daemon + tracer)'
+
+    # Step 2: stage the sidecar binaries with the target-triple suffix Tauri
+    # expects. The triple comes from `rustc -vV` so the script works on any
+    # host (x86_64-pc-windows-msvc, aarch64-apple-darwin, etc.).
+    $hostLine = rustc -vV | Select-String '^host:'
+    if (-not $hostLine) { throw 'Could not parse host triple from `rustc -vV`.' }
+    $triple = ($hostLine.ToString() -replace '^host:\s*', '').Trim()
+
+    $binariesDir = Join-Path $AppDir 'src-tauri\binaries'
+    New-Item -ItemType Directory -Path $binariesDir -Force | Out-Null
+
+    $ext = if ($IsWindows) { '.exe' } else { '' }
+    $sidecars = @(
+        @{ Name = 'rustling-tulipd'; Source = Join-Path $ScriptDir "target\release\rustling-tulipd$ext" },
+        @{ Name = 'rt-tracer';       Source = Join-Path $ScriptDir "target\release\rt-tracer$ext" }
+    )
+    foreach ($s in $sidecars) {
+        if (-not (Test-Path $s.Source)) { throw "Sidecar source missing: $($s.Source)" }
+        $dest = Join-Path $binariesDir "$($s.Name)-$triple$ext"
+        Copy-Item -Path $s.Source -Destination $dest -Force
+        Write-Host "    staged $($s.Name) -> $dest" -ForegroundColor DarkGray
+    }
+
+    # Step 3: run `pnpm tauri build`. Tauri builds the app exe + frontend
+    # bundle and produces the installer per `tauri.conf.json` (NSIS).
     Write-Host '==> Building installer bundles (pnpm tauri build)...' -ForegroundColor Cyan
     Push-Location $AppDir
     try {

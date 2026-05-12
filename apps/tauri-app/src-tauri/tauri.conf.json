@@ -27,13 +27,22 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["nsis"],
     "icon": [
       "icons/icon.png"
     ],
     "category": "DeveloperTool",
     "shortDescription": "Multi-repo Claude Code wrapper",
-    "longDescription": "Tauri desktop app + Rust daemon that orchestrates parallel Claude Code sessions across single repos and multi-repo workspaces."
+    "longDescription": "Tauri desktop app + Rust daemon that orchestrates parallel Claude Code sessions across single repos and multi-repo workspaces.",
+    "externalBin": [
+      "binaries/rustling-tulipd",
+      "binaries/rt-tracer"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
