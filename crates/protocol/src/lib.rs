@@ -1409,6 +1409,16 @@ pub enum DaemonMessage {
     AuthFailed {
         reason: String,
     },
+    /// Acknowledgement that the daemon has finished its
+    /// [`ClientMessage::Shutdown`] teardown (`shutdown_all` complete; the
+    /// daemon will exit imminently). Clients listening for this can close
+    /// their window without waiting for the WebSocket itself to close —
+    /// the daemon-side WS Close is wedged by the time the handler returns
+    /// because of how axum drops the upgraded socket, and on Windows the
+    /// TCP FIN can take several seconds to surface in `WebView2`.
+    /// Additive on top of protocol v15 (no version bump): older clients
+    /// route this through `InboundDaemonMessage::Unknown` and ignore it.
+    ShutdownAck {},
     Repos {
         repos: Vec<RepoEntry>,
     },

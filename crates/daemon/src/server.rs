@@ -1186,6 +1186,19 @@ async fn dispatch(
                 // sidecar-preservation half of the round-trip.
                 info!("dispatch: shutdown without drain; sidecars retained for resume");
             }
+            // Hand the client an explicit ack BEFORE we flip the shutdown
+            // signal. The ack rides the existing out_tx → send_task → WS
+            // sink path, so it's serialized after every Updated/Removed
+            // event we just emitted as part of shutdown_all. With the ack
+            // received, the client can close its window without waiting on
+            // the WS Close (axum drops the upgraded socket without
+            // sending a Close frame, and the OS-level TCP FIN can take
+            // several seconds to reach WebView2 on Windows).
+            let ack_result = out_tx.send(DaemonMessage::ShutdownAck {});
+            info!(
+                ack_result_ok = ack_result.is_ok(),
+                "dispatch: ShutdownAck queued",
+            );
             // Signal the accept loop to exit. The send may fail if a previous
             // Shutdown already flipped it; either way the daemon is on its
             // way out.

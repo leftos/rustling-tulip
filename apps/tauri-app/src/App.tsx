@@ -932,43 +932,43 @@ export default function App() {
         void closeMainWindow();
         return;
       }
-      // Two timers gate the shutdown UX:
-      //   - At 5 s with the WS still open, flip `exitStuck` so the dialog
-      //     swaps to a warning + Force-quit affordance instead of pretending
-      //     to still be making progress.
-      //   - When the WS actually closes, close the OS window normally.
-      //
-      // We close the WS ourselves immediately after sending the Shutdown
-      // frame: WebSocket close() flushes pending writes before sending the
-      // Close frame, so the daemon still receives Shutdown and runs its own
-      // teardown. Waiting for the daemon-initiated close was flaky on
-      // Windows — even with a clean handler-return on the daemon side, the
-      // OS-level FIN propagation to the WebView2 client took several seconds
-      // in some runs, which surfaced as a spurious "daemon stuck" warning.
+      // The daemon answers Shutdown with an explicit `ShutdownAck`
+      // message after `shutdown_all` completes (typically <5 ms). We
+      // treat that ack as the green light to close the window — we do
+      // NOT wait for the WebSocket itself to close, because axum drops
+      // the upgraded socket without sending a proper Close frame and
+      // the OS-level TCP FIN can take seconds to surface in WebView2.
+      // The WS-close fallback below still fires if the daemon dies
+      // before acking; the 5 s stuck timer covers the genuinely-wedged
+      // case where neither path completes.
       let resolved = false;
       const stuckTimer = window.setTimeout(() => {
         if (resolved) return;
         logToFile(
           "warn",
-          `${tag}: 5 s elapsed without WS close; surfacing force-quit option`,
+          `${tag}: 5 s elapsed without ack or WS close; surfacing force-quit option`,
         );
         setState((s) => ({ ...s, exitStuck: true }));
       }, 5000);
-      const unsubscribe = client.onConnectionChange((next) => {
-        logToFile("info", `${tag}: connection state -> ${next.kind}`);
-        if (next.kind === "open" || next.kind === "connecting") return;
+      const finish = (reason: string) => {
         if (resolved) return;
         resolved = true;
         window.clearTimeout(stuckTimer);
-        unsubscribe();
-        logToFile("info", `${tag}: WS closed (${next.kind}); closing window`);
+        unsubAck();
+        unsubConn();
+        logToFile("info", `${tag}: ${reason}; closing window`);
         void closeMainWindow();
+      };
+      const unsubAck = client.onMessage((msg) => {
+        if (msg.type === "shutdown_ack") finish("daemon acked shutdown");
+      });
+      const unsubConn = client.onConnectionChange((next) => {
+        logToFile("info", `${tag}: connection state -> ${next.kind}`);
+        if (next.kind === "open" || next.kind === "connecting") return;
+        finish(`WS ${next.kind}`);
       });
       logToFile("info", `${tag}: sending shutdown message (drain=${drain})`);
       client.send({ type: "shutdown", drain });
-      // Initiate the close locally so we don't depend on the daemon's TCP
-      // FIN reaching us in a timely way.
-      client.close();
     },
     [closeMainWindow, state.client],
   );

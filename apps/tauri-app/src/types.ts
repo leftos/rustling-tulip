@@ -606,6 +606,7 @@ export type DaemonMessage =
       supported_versions: number[];
     }
   | { type: "auth_failed"; reason: string }
+  | { type: "shutdown_ack" }
   | { type: "repos"; repos: RepoEntry[] }
   | { type: "workspaces"; workspaces: WorkspaceEntry[] }
   | {
