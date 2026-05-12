@@ -7,6 +7,7 @@ import {
   loadScrollback,
   type DaemonClient,
 } from "../api";
+import { consumeAutoFocus } from "../utils/autofocus";
 import { useFontSize } from "../utils/fontSize";
 
 interface Props {
@@ -80,6 +81,19 @@ export default function Terminal({
 
     termRef.current = term;
     fitRef.current = fit;
+
+    // Spawn flow and pop-out windows mark the session id so the xterm
+    // helper textarea grabs OS keyboard focus on mount — without this the
+    // user has to click into the terminal before they can type. Deferred
+    // by one frame so the focus call happens after React commits and the
+    // browser has painted the container; calling synchronously here works
+    // too, but the rAF tick avoids a flash where focus briefly lands on
+    // an element about to be re-laid-out by `fit.fit()`.
+    if (consumeAutoFocus(sessionId)) {
+      requestAnimationFrame(() => {
+        if (termRef.current === term) term.focus();
+      });
+    }
 
     // Expose XTerm instances on `window.__rt_terms` so the e2e harness (and
     // anyone poking around in devtools) can read the scrollback buffer.

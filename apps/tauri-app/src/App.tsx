@@ -50,6 +50,7 @@ import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
 import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
+import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
 import { collectPanes, findTabContainingSession } from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
@@ -1445,7 +1446,17 @@ function handleMessage(
       const isNew = !seenSessionIdsRef.current.has(session.id);
       if (isNew) seenSessionIdsRef.current.add(session.id);
       const intent = isNew ? pendingSpawnIntentRef.current : null;
-      if (intent) pendingSpawnIntentRef.current = null;
+      if (intent) {
+        pendingSpawnIntentRef.current = null;
+        // The Terminal mount for this session id is several React
+        // re-renders away (we still need a `create_tab` / `tab_updated`
+        // round-trip for newTab+addToTab, and a `replace_pane_session`
+        // round-trip for replacePane). Stash the id in the autofocus
+        // queue so when its Terminal finally mounts, the xterm helper
+        // textarea grabs OS keyboard focus and the user can type
+        // immediately instead of having to click into the pane.
+        markForAutoFocus(session.id);
+      }
       setState((s) => {
         const idx = s.sessions.findIndex((sn) => sn.id === session.id);
         const next = s.sessions.slice();

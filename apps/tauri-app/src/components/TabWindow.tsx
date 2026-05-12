@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
+import { markForAutoFocus } from "../utils/autofocus";
 import { collectPanes } from "../utils/grid";
 import GridRenderer from "./GridRenderer";
 import DiffPane from "./DiffPane";
@@ -21,7 +22,25 @@ export default function TabWindow({
   subscribePty,
   hasRepos,
 }: Props) {
-  const [focusedPaneId, setFocusedPaneId] = useState<string | null>(null);
+  // First-render init: pick the leftmost/topmost pane with a session as
+  // the initial focused pane AND mark its session for xterm autofocus so
+  // the user can type immediately on window open. Mirrors the SessionWindow
+  // behavior; multi-pane TabWindows necessarily pick one, and pane order
+  // matches the rendered grid so "first with a session" is a stable
+  // choice. Pop-out windows have a separate JS context, so the autofocus
+  // queue is naturally per-window.
+  const [focusedPaneId, setFocusedPaneId] = useState<string | null>(() => {
+    const grid = tabGrid(tab);
+    if (!grid) return null;
+    const firstWithSession = collectPanes(grid).find(
+      (p) => p.session_id !== null,
+    );
+    if (firstWithSession?.session_id) {
+      markForAutoFocus(firstWithSession.session_id);
+      return firstWithSession.pane_id;
+    }
+    return null;
+  });
 
   // Mirror App's pendingPaneFocusRef: capture pre-split pane ids, then
   // diff against the next tab prop change to focus the freshly created

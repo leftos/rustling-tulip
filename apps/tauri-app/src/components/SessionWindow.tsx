@@ -1,7 +1,8 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot } from "../types";
+import { markForAutoFocus } from "../utils/autofocus";
 import {
   sessionDisplayLabel,
   sessionLabelTooltip,
@@ -24,6 +25,19 @@ export default function SessionWindow({
   client,
   subscribePty,
 }: Props) {
+  // Mark this session for autofocus on the first render. SessionWindow is
+  // only rendered once we already have the session in state, so the
+  // child Terminal mounts on the very next React commit — and child
+  // effects run before parent effects, which means a useEffect here
+  // would mark *after* Terminal's mount effect has already consumed.
+  // The ref-in-render init pattern runs synchronously before the JSX is
+  // returned, so the mark is in the queue by the time Terminal mounts.
+  const markedRef = useRef(false);
+  if (!markedRef.current) {
+    markedRef.current = true;
+    markForAutoFocus(session.id);
+  }
+
   const onStop = useCallback(() => {
     client.send({
       type: "stop_session",
