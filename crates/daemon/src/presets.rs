@@ -9,16 +9,19 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
     FooterLine, GridNode, InjectorStep, InjectorTemplate, LaunchPresetSource, PresetEntry,
-    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry, SessionMode,
-    SpawnRequest, SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
+    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry, ScriptCommandPreview,
+    SessionMode, SpawnRequest, SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
 };
-use tokio::time::sleep;
+use regex::Regex;
+use tokio::process::Command;
+use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -73,6 +76,38 @@ pub async fn launch(hub: Hub, args: LaunchArgs) {
 /// parsed lines for a file source, or the supplied strings for inline).
 /// Templates and footers are *not* applied — the dialog mirrors the
 /// inline-preview semantics, which also show raw text.
+/// Pre-resolve every variable in a preset, running any `Script` kinds.
+/// Used by the launch dialog's "Run script(s) and launch" path so the
+/// user sees the captured output (and any failure) before sessions spawn.
+///
+/// `partial_values` carries the user's inputs from the variables stage.
+/// The returned tuple is `(full_resolved_map, executed_commands)`:
+/// - `full_resolved_map` includes *both* the user inputs and the script
+///   outputs, ready to be forwarded to [`ClientMessage::LaunchPreset`].
+/// - `executed_commands` lists every script that actually ran so the
+///   dialog can render a "scripts that executed" confirmation strip.
+pub async fn resolve_scripts(
+    hub: &Hub,
+    target: &PresetTarget,
+    preset_id: &str,
+    partial_values: &[(String, String)],
+) -> anyhow::Result<(Vec<(String, String)>, Vec<ScriptCommandPreview>)> {
+    let presets = list(hub, target).await?;
+    let preset = presets
+        .into_iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| anyhow!("preset not found: {preset_id}"))?;
+    let repo = find_repo(hub, &preset.source_repo_id)
+        .with_context(|| format!("preset's source repo missing: {}", preset.source_repo_id))?;
+    let repo_path = PathBuf::from(&repo.path);
+    let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+    let resolved = resolve_variables(&preset.variables, partial_values, &repo_path, &mut executed)
+        .await
+        .map_err(|f| anyhow!(f.error))?;
+    let pairs: Vec<(String, String)> = resolved.into_iter().collect();
+    Ok((pairs, executed))
+}
+
 pub async fn preview_prompts(
     hub: &Hub,
     target: &PresetTarget,
@@ -294,10 +329,23 @@ async fn resolve_folder_prompts(
 // Variable resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_variables(
+/// Resolve every preset variable into its final string value. Static kinds
+/// (Text/FilePath/FolderPath/EnvVar/LiteralPath) resolve synchronously; the
+/// `Script` kind spawns a child process whose stdout (optionally regex-
+/// extracted) becomes the value.
+///
+/// Resolution is *ordered*: each variable sees the values of every variable
+/// declared above it in the preset. This is what lets a `Script` reference
+/// an earlier `Text` input (e.g. `-Minutes {minutes}`).
+///
+/// If a `Script` variable already has a value in `supplied` (because the
+/// dialog ran [`resolve_scripts`] before `LaunchPreset`), the supplied
+/// value is used verbatim and the child process is not re-spawned.
+async fn resolve_variables(
     preset_vars: &[PresetVariable],
     values: &[(String, String)],
     repo_root: &Path,
+    executed: &mut Vec<ScriptCommandPreview>,
 ) -> Result<HashMap<String, String>, LaunchFailure> {
     let supplied: HashMap<&str, &str> = values
         .iter()
@@ -305,7 +353,7 @@ fn resolve_variables(
         .collect();
     let mut out: HashMap<String, String> = HashMap::new();
     for var in preset_vars {
-        let value = resolve_one_variable(var, &supplied, repo_root);
+        let value = resolve_one_variable(var, &supplied, repo_root, &out, executed).await?;
         if value.is_empty() && !var.optional {
             return Err(LaunchFailure::new(format!(
                 "variable '{}' is required but no value was supplied",
@@ -317,21 +365,61 @@ fn resolve_variables(
     Ok(out)
 }
 
-fn resolve_one_variable(
+async fn resolve_one_variable(
     var: &PresetVariable,
     supplied: &HashMap<&str, &str>,
     repo_root: &Path,
-) -> String {
+    earlier: &HashMap<String, String>,
+    executed: &mut Vec<ScriptCommandPreview>,
+) -> Result<String, LaunchFailure> {
     match &var.kind {
         PresetVariableKind::Text
         | PresetVariableKind::FilePath { .. }
-        | PresetVariableKind::FolderPath => supplied
+        | PresetVariableKind::FolderPath => Ok(supplied
             .get(var.name.as_str())
             .map(|s| (*s).to_string())
             .or_else(|| var.default.clone())
-            .unwrap_or_default(),
-        PresetVariableKind::EnvVar { name } => std::env::var(name).unwrap_or_default(),
-        PresetVariableKind::LiteralPath { path } => expand_literal_path(path, repo_root),
+            .unwrap_or_default()),
+        PresetVariableKind::EnvVar { name } => Ok(std::env::var(name).unwrap_or_default()),
+        PresetVariableKind::LiteralPath { path } => Ok(expand_literal_path(path, repo_root)),
+        PresetVariableKind::Script {
+            cmd,
+            args,
+            extract_pattern,
+            timeout_ms,
+            skip_if_empty,
+        } => {
+            if let Some(pre) = supplied.get(var.name.as_str()) {
+                // Dialog pre-resolved this; trust the value as-is.
+                return Ok((*pre).to_string());
+            }
+            if let Some(guard_name) = skip_if_empty {
+                let guard_value = earlier
+                    .get(guard_name.as_str())
+                    .map_or("", String::as_str);
+                if guard_value.is_empty() {
+                    return Ok(String::new());
+                }
+            }
+            let rendered_args: Vec<String> = args
+                .iter()
+                .map(|a| expand_script_token(a, repo_root, earlier, &var.name))
+                .collect::<Result<_, _>>()?;
+            executed.push(ScriptCommandPreview {
+                variable_name: var.name.clone(),
+                cmd: cmd.clone(),
+                args: rendered_args.clone(),
+            });
+            run_script(
+                &var.name,
+                cmd,
+                &rendered_args,
+                extract_pattern.as_deref(),
+                *timeout_ms,
+                repo_root,
+            )
+            .await
+        }
     }
 }
 
@@ -339,6 +427,43 @@ fn expand_literal_path(raw: &str, repo_root: &Path) -> String {
     let with_repo = raw.replace("{repo_root}", &repo_root.to_string_lossy());
     let after_dollar = expand_env_pattern(&with_repo, "${", "}");
     expand_env_pattern(&after_dollar, "%", "%")
+}
+
+/// Render a single Script-arg token. Supports the same env expansion as
+/// `LiteralPath` (`${VAR}` / `%VAR%`) plus `{name}` substitution against
+/// `{repo_root}` and earlier-resolved variables. An unknown `{name}` is a
+/// hard error — most likely a typo in the preset.
+fn expand_script_token(
+    raw: &str,
+    repo_root: &Path,
+    earlier: &HashMap<String, String>,
+    script_var_name: &str,
+) -> Result<String, LaunchFailure> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            // No closing brace — copy the remainder verbatim and stop.
+            out.push_str(&rest[start..]);
+            return Ok(out);
+        };
+        let name = &after[..end];
+        if name == "repo_root" {
+            out.push_str(&repo_root.to_string_lossy());
+        } else if let Some(value) = earlier.get(name) {
+            out.push_str(value);
+        } else {
+            return Err(LaunchFailure::new(format!(
+                "script variable '{script_var_name}' references unknown earlier variable '{{{name}}}'"
+            )));
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    let after_dollar = expand_env_pattern(&out, "${", "}");
+    Ok(expand_env_pattern(&after_dollar, "%", "%"))
 }
 
 fn expand_env_pattern(s: &str, open: &str, close: &str) -> String {
@@ -358,6 +483,110 @@ fn expand_env_pattern(s: &str, open: &str, close: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Spawn a child process and capture its trimmed stdout (optionally regex-
+/// extracted). The child runs with `cwd = repo_root`; the daemon's
+/// environment is inherited verbatim. Stderr is captured too so it can be
+/// surfaced on non-zero exit.
+async fn run_script(
+    var_name: &str,
+    cmd: &str,
+    args: &[String],
+    extract_pattern: Option<&str>,
+    timeout_ms: u32,
+    repo_root: &Path,
+) -> Result<String, LaunchFailure> {
+    let compiled = match extract_pattern {
+        Some(pat) => Some(Regex::new(pat).map_err(|e| {
+            LaunchFailure::new(format!(
+                "script variable '{var_name}' has invalid extract_pattern: {e}"
+            ))
+        })?),
+        None => None,
+    };
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    info!(
+        var = %var_name,
+        cmd = %cmd,
+        argc = args.len(),
+        cwd = %repo_root.display(),
+        "running script for preset variable"
+    );
+    let child_fut = async { command.output().await };
+    let dur = Duration::from_millis(u64::from(timeout_ms));
+    let output = match timeout(dur, child_fut).await {
+        Err(_) => {
+            return Err(LaunchFailure::new(format!(
+                "script variable '{var_name}' timed out after {timeout_ms}ms"
+            )));
+        }
+        Ok(Err(io_err)) => {
+            return Err(LaunchFailure::new(format!(
+                "script variable '{var_name}' failed to spawn '{cmd}': {io_err}"
+            )));
+        }
+        Ok(Ok(out)) => out,
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let snippet = pick_error_snippet(&stderr, &stdout);
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_string(), |c| c.to_string());
+        return Err(LaunchFailure::new(format!(
+            "script variable '{var_name}' exited with code {code}: {snippet}"
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = stdout.trim();
+    let value = if let Some(re) = compiled {
+        let caps = re.captures(trimmed).ok_or_else(|| {
+            LaunchFailure::new(format!(
+                "script variable '{var_name}' extract_pattern did not match stdout"
+            ))
+        })?;
+        caps.get(1)
+            .ok_or_else(|| {
+                LaunchFailure::new(format!(
+                    "script variable '{var_name}' extract_pattern has no capture group"
+                ))
+            })?
+            .as_str()
+            .trim()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+    Ok(value)
+}
+
+fn pick_error_snippet(stderr: &str, stdout: &str) -> String {
+    let chosen = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let trimmed = chosen.trim();
+    if trimmed.len() <= 200 {
+        trimmed.to_string()
+    } else {
+        // Walk back from the end so we never split mid-codepoint; `…` is
+        // ASCII-safe ("...") to keep the byte budget predictable.
+        let mut start = trimmed.len().saturating_sub(200);
+        while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", &trimmed[start..])
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +791,14 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
     if raw_prompts.is_empty() {
         return Err(LaunchFailure::new("no prompts to launch"));
     }
-    let vars = resolve_variables(&preset.variables, &args.variable_values, &repo_path)?;
+    let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+    let vars = resolve_variables(
+        &preset.variables,
+        &args.variable_values,
+        &repo_path,
+        &mut executed,
+    )
+    .await?;
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
     let datetime_str = Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let branch_names = render_branch_names(
@@ -1073,8 +1309,8 @@ mod tests {
         assert!(matches!(injector.steps[0], InjectorStep::Text { .. }));
     }
 
-    #[test]
-    fn resolve_variables_requires_non_optional() {
+    #[tokio::test]
+    async fn resolve_variables_requires_non_optional() {
         let vars = vec![PresetVariable {
             name: "required".to_string(),
             label: "Required".to_string(),
@@ -1083,8 +1319,63 @@ mod tests {
             default: None,
             optional: false,
         }];
-        let err = resolve_variables(&vars, &[], Path::new("/")).expect_err("required missing");
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let err = resolve_variables(&vars, &[], Path::new("/"), &mut executed)
+            .await
+            .expect_err("required missing");
         assert!(err.error.contains("required"));
+    }
+
+    #[test]
+    fn expand_script_token_substitutes_earlier_vars() {
+        let mut earlier: HashMap<String, String> = HashMap::new();
+        earlier.insert("minutes".to_string(), "60".to_string());
+        let out = expand_script_token("-Minutes={minutes}", Path::new("/repo"), &earlier, "log")
+            .expect("ok");
+        assert_eq!(out, "-Minutes=60");
+    }
+
+    #[test]
+    fn expand_script_token_substitutes_repo_root() {
+        let earlier = HashMap::new();
+        let out = expand_script_token(
+            "{repo_root}/tools/fetch.ps1",
+            Path::new("X:/dev/yaat"),
+            &earlier,
+            "log",
+        )
+        .expect("ok");
+        assert_eq!(out, "X:/dev/yaat/tools/fetch.ps1");
+    }
+
+    #[test]
+    fn expand_script_token_rejects_unknown_var() {
+        let earlier = HashMap::new();
+        let err = expand_script_token("-X {unknown}", Path::new("/r"), &earlier, "scr")
+            .expect_err("should fail on unknown var");
+        assert!(err.error.contains("unknown earlier variable"));
+        assert!(err.error.contains("{unknown}"));
+    }
+
+    #[test]
+    fn pick_error_snippet_prefers_stderr_when_present() {
+        let snip = pick_error_snippet("bad happened", "ok output");
+        assert_eq!(snip, "bad happened");
+    }
+
+    #[test]
+    fn pick_error_snippet_falls_back_to_stdout_when_stderr_empty() {
+        let snip = pick_error_snippet("   ", "fallback");
+        assert_eq!(snip, "fallback");
+    }
+
+    #[test]
+    fn pick_error_snippet_truncates_long_input() {
+        let long: String = "x".repeat(500);
+        let snip = pick_error_snippet(&long, "");
+        assert!(snip.starts_with("..."));
+        // 3 leading dots + at most 200 chars of tail.
+        assert!(snip.len() <= 203);
     }
 
     /// Parses the smoke-test preset that lives at the root of this repo
@@ -1124,8 +1415,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolve_variables_uses_default_when_missing() {
+    #[tokio::test]
+    async fn resolve_variables_uses_default_when_missing() {
         let vars = vec![PresetVariable {
             name: "x".to_string(),
             label: "X".to_string(),
@@ -1134,7 +1425,151 @@ mod tests {
             default: Some("fallback".to_string()),
             optional: false,
         }];
-        let resolved = resolve_variables(&vars, &[], Path::new("/")).expect("ok");
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let resolved = resolve_variables(&vars, &[], Path::new("/"), &mut executed)
+            .await
+            .expect("ok");
         assert_eq!(resolved.get("x").map(String::as_str), Some("fallback"));
+    }
+
+    #[tokio::test]
+    async fn script_variable_skips_when_guard_empty() {
+        // `minutes` left empty → the prod-log script should silently skip
+        // (variable resolves to empty), never spawn the missing binary.
+        let vars = vec![
+            PresetVariable {
+                name: "minutes".to_string(),
+                label: "Minutes".to_string(),
+                kind: PresetVariableKind::Text,
+                prompt_at_launch: true,
+                default: None,
+                optional: true,
+            },
+            PresetVariable {
+                name: "prod_log".to_string(),
+                label: "Production log".to_string(),
+                kind: PresetVariableKind::Script {
+                    cmd: "this-binary-definitely-does-not-exist-xyz".to_string(),
+                    args: vec!["{minutes}".to_string()],
+                    extract_pattern: None,
+                    timeout_ms: 5_000,
+                    skip_if_empty: Some("minutes".to_string()),
+                },
+                prompt_at_launch: false,
+                default: None,
+                optional: true,
+            },
+        ];
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let resolved = resolve_variables(&vars, &[], Path::new("/"), &mut executed)
+            .await
+            .expect("ok");
+        assert_eq!(resolved.get("minutes").map(String::as_str), Some(""));
+        assert_eq!(resolved.get("prod_log").map(String::as_str), Some(""));
+        assert!(executed.is_empty(), "skip_if_empty must prevent spawn");
+    }
+
+    #[tokio::test]
+    async fn script_variable_uses_supplied_value_without_spawning() {
+        // A `cmd` that doesn't exist on disk — if the resolver tried to
+        // spawn, this would error. Supplying the value upfront skips that.
+        let vars = vec![PresetVariable {
+            name: "log".to_string(),
+            label: "Log".to_string(),
+            kind: PresetVariableKind::Script {
+                cmd: "this-binary-definitely-does-not-exist-xyz".to_string(),
+                args: vec![],
+                extract_pattern: None,
+                timeout_ms: 5000,
+                skip_if_empty: None,
+            },
+            prompt_at_launch: false,
+            default: None,
+            optional: true,
+        }];
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let resolved = resolve_variables(
+            &vars,
+            &[("log".to_string(), "C:/already/resolved.log".to_string())],
+            Path::new("/"),
+            &mut executed,
+        )
+        .await
+        .expect("ok");
+        assert_eq!(
+            resolved.get("log").map(String::as_str),
+            Some("C:/already/resolved.log")
+        );
+        assert!(
+            executed.is_empty(),
+            "supplied script value should skip spawning"
+        );
+    }
+
+    #[tokio::test]
+    async fn script_variable_rejects_invalid_regex() {
+        let err = run_script(
+            "log",
+            "rustc",
+            &["--version".to_string()],
+            Some("("),
+            5000,
+            Path::new("."),
+        )
+        .await
+        .expect_err("invalid regex must fail");
+        assert!(err.error.contains("invalid extract_pattern"));
+    }
+
+    #[tokio::test]
+    async fn script_variable_captures_stdout() {
+        // rustc is universally present in this crate's build environment;
+        // its --version is stable enough to regex against. We pin a capture
+        // group around the version triple ("1.85.0" / "1.92.0" / etc.) so
+        // this test stays meaningful as Rust evolves.
+        let value = run_script(
+            "rustc_version",
+            "rustc",
+            &["--version".to_string()],
+            Some(r"rustc (\S+)"),
+            10_000,
+            Path::new("."),
+        )
+        .await
+        .expect("rustc --version should succeed");
+        assert!(
+            !value.is_empty() && value.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "captured value should look like a semver-ish prefix: {value:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn script_variable_no_pattern_returns_full_stdout() {
+        let value = run_script(
+            "rustc_version",
+            "rustc",
+            &["--version".to_string()],
+            None,
+            10_000,
+            Path::new("."),
+        )
+        .await
+        .expect("ok");
+        assert!(value.starts_with("rustc "));
+    }
+
+    #[tokio::test]
+    async fn script_variable_unmatched_regex_errors() {
+        let err = run_script(
+            "log",
+            "rustc",
+            &["--version".to_string()],
+            Some("ZZZ_NOT_IN_OUTPUT_ZZZ"),
+            10_000,
+            Path::new("."),
+        )
+        .await
+        .expect_err("non-matching pattern must fail");
+        assert!(err.error.contains("did not match"));
     }
 }

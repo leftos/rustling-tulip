@@ -1132,6 +1132,44 @@ async fn dispatch(
                 }
             }
         }
+        ClientMessage::ResolvePresetScripts {
+            id,
+            target,
+            preset_id,
+            variable_values,
+        } => {
+            // Run script-kind variables in a background task so the WS
+            // connection stays responsive while a slow fetch script (e.g.
+            // pulling docker logs) is in flight. Reply goes back through
+            // the same per-connection out_tx the dispatcher uses.
+            let hub = hub.clone();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                match crate::presets::resolve_scripts(
+                    &hub,
+                    &target,
+                    &preset_id,
+                    &variable_values,
+                )
+                .await
+                {
+                    Ok((values, executed_commands)) => {
+                        let _ = out_tx.send(DaemonMessage::PresetScriptsResolved {
+                            id,
+                            values,
+                            executed_commands,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(DaemonMessage::PresetScriptsError {
+                            id,
+                            error: format!("{err:#}"),
+                            variable_name: None,
+                        });
+                    }
+                }
+            });
+        }
     }
     Ok(())
 }
@@ -2074,6 +2112,12 @@ async fn spawn_workspace(
     String,
     Option<String>,
 )> {
+    info!(
+        workspace_id,
+        branch_name,
+        use_worktree,
+        "spawn_workspace: begin"
+    );
     let (workspace, resolved) = ws::resolve_workspace(
         &hub.state,
         workspace_id,

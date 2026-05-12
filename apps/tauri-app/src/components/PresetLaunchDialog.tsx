@@ -5,6 +5,7 @@ import {
   pickDirectory,
   pickFile,
   previewPreset,
+  resolvePresetScripts,
 } from "../api";
 import type {
   LaunchPresetSource,
@@ -13,6 +14,7 @@ import type {
   PresetTarget,
   PresetVariable,
   RepoEntry,
+  ScriptCommandPreview,
 } from "../types";
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { parsePrompts } from "../utils/parsePrompts";
@@ -126,6 +128,31 @@ export default function PresetLaunchDialog({
   ]);
 
   const promptedVariables = preset.variables.filter((v) => v.prompt_at_launch);
+  // Script-kind variables produce a process-spawn step gated behind the
+  // user clicking Launch. The preview stage renders the rendered commands
+  // inline so the user can confirm what executes.
+  const scriptVariables = preset.variables.filter(
+    (v) => v.kind.kind === "script",
+  );
+  const sourceRepoPath = sourceRepo?.path ?? null;
+  const renderedScriptCommands = useMemo<RenderedScriptCommand[]>(
+    () =>
+      scriptVariables.map((v) =>
+        renderScriptCommand(v, variableValues, sourceRepoPath),
+      ),
+    [scriptVariables, variableValues, sourceRepoPath],
+  );
+
+  // Script-resolution state. When the user clicks Launch (and the preset
+  // has script variables), we transition `scriptStage` from "idle" →
+  // "running" → "done" / "failed". A failed run lets the user retry from
+  // the same Preview stage without losing their inputs.
+  type ScriptStage =
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "failed"; error: string; variableName: string | null }
+    | { kind: "done" };
+  const [scriptStage, setScriptStage] = useState<ScriptStage>({ kind: "idle" });
 
   const canAdvanceFromSource = isSourceReady({
     sourceKind,
@@ -149,7 +176,8 @@ export default function PresetLaunchDialog({
     !previewLoading &&
     previewError === null &&
     previewPrompts.length > 0 &&
-    validMaxPerTab(maxPerTab);
+    validMaxPerTab(maxPerTab) &&
+    scriptStage.kind !== "running";
 
   const onAdvance = () => {
     if (stage === "source") {
@@ -175,22 +203,53 @@ export default function PresetLaunchDialog({
     });
     if (!source) return;
     const cap = parseMaxPerTab(maxPerTab);
-    launchPreset(client, {
+    // No scripts → fire-and-forget the launch directly.
+    if (scriptVariables.length === 0) {
+      launchPreset(client, {
+        target,
+        preset_id: preset.id,
+        source,
+        variable_values: Object.entries(variableValues),
+        use_worktree_override: null,
+        max_panes_per_tab_override: cap,
+      });
+      onClose();
+      return;
+    }
+    // Scripts present → resolve first, then launch with the resolved
+    // values pre-filled so the daemon doesn't re-spawn.
+    setScriptStage({ kind: "running" });
+    void resolvePresetScripts(client, {
       target,
       preset_id: preset.id,
-      source,
       variable_values: Object.entries(variableValues),
-      use_worktree_override: null,
-      max_panes_per_tab_override: cap,
+    }).then((result) => {
+      if (!result.ok) {
+        setScriptStage({
+          kind: "failed",
+          error: result.error,
+          variableName: result.variable_name,
+        });
+        return;
+      }
+      setScriptStage({ kind: "done" });
+      launchPreset(client, {
+        target,
+        preset_id: preset.id,
+        source,
+        variable_values: result.values,
+        use_worktree_override: null,
+        max_panes_per_tab_override: cap,
+      });
+      onClose();
     });
-    onClose();
   };
 
   useEscape(onClose);
   useFocusReturn();
 
   return (
-    <div className="modal-backdrop" onClick={onClose} data-testid="preset-launch-dialog">
+    <div className="modal-backdrop" data-testid="preset-launch-dialog">
       <div
         className="modal"
         onClick={(e) => e.stopPropagation()}
@@ -253,15 +312,27 @@ export default function PresetLaunchDialog({
               maxPerTab={maxPerTab}
               onMaxPerTabChange={setMaxPerTab}
               defaultCap={defaultCap(preset)}
+              scriptCommands={renderedScriptCommands}
+              scriptStage={scriptStage}
             />
           )}
         </div>
         <footer className="modal-footer">
-          <button type="button" onClick={onClose} data-testid="preset-launch-cancel">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={scriptStage.kind === "running"}
+            data-testid="preset-launch-cancel"
+          >
             Cancel
           </button>
           {stage !== "source" && (
-            <button type="button" onClick={onBack} data-testid="preset-launch-back">
+            <button
+              type="button"
+              onClick={onBack}
+              disabled={scriptStage.kind === "running"}
+              data-testid="preset-launch-back"
+            >
               Back
             </button>
           )}
@@ -292,8 +363,11 @@ export default function PresetLaunchDialog({
               disabled={!canSubmit}
               data-testid="preset-launch-submit"
             >
-              Launch {previewPrompts.length}{" "}
-              {previewPrompts.length === 1 ? "session" : "sessions"}
+              {launchButtonLabel(
+                scriptStage.kind,
+                scriptVariables.length,
+                previewPrompts.length,
+              )}
             </button>
           )}
         </footer>
@@ -357,6 +431,7 @@ function SourceStage({
                 void pickFile({
                   extensions: ["txt", "md"],
                   filterName: "Prompts",
+                  lastDirKey: "presetSourceFile",
                 }).then((p) => p && onFilePathChange(p))
               }
               data-testid="preset-source-file-pick"
@@ -388,9 +463,9 @@ function SourceStage({
             <button
               type="button"
               onClick={() =>
-                void pickDirectory(folderPath ?? undefined).then(
-                  (p) => p && onFolderPathChange(p),
-                )
+                void pickDirectory(folderPath ?? undefined, {
+                  lastDirKey: "presetSourceFolder",
+                }).then((p) => p && onFolderPathChange(p))
               }
               data-testid="preset-source-folder-pick"
             >
@@ -497,6 +572,7 @@ function VariableInput({
             void pickFile({
               extensions: kind.extensions,
               filterName: variable.label,
+              lastDirKey: `presetVar:${variable.name}`,
             }).then((p) => p && onChange(p))
           }
           data-testid={`preset-variable-${variable.name}-pick`}
@@ -530,9 +606,9 @@ function VariableInput({
         <button
           type="button"
           onClick={() =>
-            void pickDirectory(value || undefined).then(
-              (p) => p && onChange(p),
-            )
+            void pickDirectory(value || undefined, {
+              lastDirKey: `presetVar:${variable.name}`,
+            }).then((p) => p && onChange(p))
           }
           data-testid={`preset-variable-${variable.name}-pick`}
         >
@@ -565,6 +641,20 @@ function VariableInput({
   );
 }
 
+type RenderedScriptCommand = {
+  variable: PresetVariable;
+} & (
+  | { state: "ready"; command: ScriptCommandPreview }
+  | { state: "skipped"; guard: string }
+  | { state: "unresolved" }
+);
+
+type ScriptStage =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "failed"; error: string; variableName: string | null }
+  | { kind: "done" };
+
 function PreviewStage({
   prompts,
   loading,
@@ -572,6 +662,8 @@ function PreviewStage({
   maxPerTab,
   onMaxPerTabChange,
   defaultCap,
+  scriptCommands,
+  scriptStage,
 }: {
   prompts: string[];
   loading: boolean;
@@ -579,6 +671,8 @@ function PreviewStage({
   maxPerTab: string;
   onMaxPerTabChange: (v: string) => void;
   defaultCap: number | null;
+  scriptCommands: RenderedScriptCommand[];
+  scriptStage: ScriptStage;
 }) {
   const tabCount = computeTabCount(prompts.length, maxPerTab);
   return (
@@ -602,6 +696,12 @@ function PreviewStage({
             </>
           )}
         </p>
+      )}
+      {scriptCommands.length > 0 && (
+        <ScriptCommandsSection
+          commands={scriptCommands}
+          stage={scriptStage}
+        />
       )}
       <label className="field">
         <span>
@@ -706,6 +806,66 @@ function PreviewPromptList({
         </div>
       ))}
     </>
+  );
+}
+
+function ScriptCommandsSection({
+  commands,
+  stage,
+}: {
+  commands: RenderedScriptCommand[];
+  stage: ScriptStage;
+}) {
+  const failedVar =
+    stage.kind === "failed" ? stage.variableName : null;
+  return (
+    <fieldset
+      className="field preset-script-section"
+      data-testid="preset-script-section"
+    >
+      <legend>
+        Scripts to run
+        {stage.kind === "running" && (
+          <span className="muted"> · running…</span>
+        )}
+        {stage.kind === "done" && <span className="muted"> · done</span>}
+      </legend>
+      <p className="muted small">
+        These commands run on the daemon before any session spawns. They
+        execute with the repo as their working directory.
+      </p>
+      {commands.map((entry) => (
+        <div
+          key={entry.variable.name}
+          className={`preset-script-row${failedVar === entry.variable.name ? " preset-script-row-failed" : ""}`}
+          data-testid={`preset-script-row-${entry.variable.name}`}
+        >
+          <div className="preset-script-label">
+            {entry.variable.label}
+            {entry.state === "skipped" && (
+              <span className="muted"> · skipped ({entry.guard} empty)</span>
+            )}
+          </div>
+          {entry.state === "ready" ? (
+            <code className="preset-script-cmd">
+              {[entry.command.cmd, ...entry.command.args].join(" ")}
+            </code>
+          ) : entry.state === "unresolved" ? (
+            <span className="error small">
+              Unable to render command — fix earlier variable inputs.
+            </span>
+          ) : null}
+        </div>
+      ))}
+      {stage.kind === "failed" && (
+        <p
+          className="error small"
+          data-testid="preset-script-error"
+        >
+          Script resolution failed: {stage.error}
+        </p>
+      )}
+    </fieldset>
   );
 }
 
@@ -815,4 +975,93 @@ function computeTabCount(promptCount: number, maxPerTab: string): number | null 
   const cap = parseMaxPerTab(maxPerTab);
   if (cap === null) return 1;
   return Math.ceil(promptCount / cap);
+}
+
+/// Render a Script variable's `cmd` + `args` against the user's current
+/// variable inputs. Returns a `skipped` marker when `skip_if_empty`'s
+/// guard is empty, an `unresolved` marker when interpolation hits an
+/// undefined `{var_name}`, and `ready` with the rendered command
+/// otherwise. The dialog renders all three states so the user sees what
+/// would (or wouldn't) run.
+function renderScriptCommand(
+  v: PresetVariable,
+  values: Record<string, string>,
+  repoRoot: string | null,
+): RenderedScriptCommand {
+  if (v.kind.kind !== "script") {
+    return { variable: v, state: "unresolved" };
+  }
+  if (v.kind.skip_if_empty !== null) {
+    const guard = v.kind.skip_if_empty;
+    const guardVal = (values[guard] ?? "").trim();
+    if (guardVal === "") {
+      return { variable: v, state: "skipped", guard };
+    }
+  }
+  const rendered: string[] = [];
+  for (const a of v.kind.args) {
+    const out = interpolateScriptToken(a, values, repoRoot);
+    if (out === null) {
+      return { variable: v, state: "unresolved" };
+    }
+    rendered.push(out);
+  }
+  return {
+    variable: v,
+    state: "ready",
+    command: { variable_name: v.name, cmd: v.kind.cmd, args: rendered },
+  };
+}
+
+function interpolateScriptToken(
+  raw: string,
+  values: Record<string, string>,
+  repoRoot: string | null,
+): string | null {
+  let out = "";
+  let rest = raw;
+  while (true) {
+    const start = rest.indexOf("{");
+    if (start < 0) {
+      out += rest;
+      return out;
+    }
+    out += rest.slice(0, start);
+    const after = rest.slice(start + 1);
+    const end = after.indexOf("}");
+    if (end < 0) {
+      out += rest.slice(start);
+      return out;
+    }
+    const name = after.slice(0, end);
+    if (name === "repo_root") {
+      if (repoRoot === null) return null;
+      out += repoRoot;
+    } else if (Object.prototype.hasOwnProperty.call(values, name)) {
+      out += values[name] ?? "";
+    } else {
+      // Unknown placeholder — daemon would reject it; flag here so the
+      // preview accurately mirrors what would execute.
+      return null;
+    }
+    rest = after.slice(end + 1);
+  }
+}
+
+function launchButtonLabel(
+  scriptStage: ScriptStage["kind"],
+  scriptCount: number,
+  promptCount: number,
+): string {
+  const sessions = `${promptCount} ${promptCount === 1 ? "session" : "sessions"}`;
+  if (scriptStage === "running") return "Running scripts…";
+  if (scriptStage === "failed") {
+    return scriptCount === 1
+      ? `Retry script & launch ${sessions}`
+      : `Retry scripts & launch ${sessions}`;
+  }
+  if (scriptCount === 0) return `Launch ${sessions}`;
+  return scriptCount === 1
+    ? `Run script & launch ${sessions}`
+    : `Run scripts & launch ${sessions}`;
 }

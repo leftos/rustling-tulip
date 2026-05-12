@@ -1503,6 +1503,8 @@ function handleMessage(
     case "preset_launch_failed":
     case "preset_preview":
     case "preset_preview_error":
+    case "preset_scripts_resolved":
+    case "preset_scripts_error":
     case "commit_ok":
     case "git_write_error":
     case "diff_tab_opened":

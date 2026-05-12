@@ -652,6 +652,42 @@ pub enum PresetVariableKind {
     /// `{repo_root}` substitution applied. Useful for "the log file always
     /// lives at this OS-conventional spot" cases.
     LiteralPath { path: String },
+    /// Run a child process (cwd = repo root) and capture its output as the
+    /// variable's value. `args` support `{var_name}` substitution from
+    /// earlier-resolved variables, plus the same `${ENV}` / `%ENV%` /
+    /// `{repo_root}` expansions as `LiteralPath`. When `extract_pattern` is
+    /// set, the trimmed stdout is matched against it and the first capture
+    /// group is used; otherwise the value is the trimmed stdout.
+    ///
+    /// Always runs via the daemon's [`ClientMessage::ResolvePresetScripts`]
+    /// round-trip, *after* the user reviews the rendered command + args on
+    /// the launch dialog's preview stage. The daemon never auto-runs a
+    /// script as a side effect of plain variable resolution — that's the
+    /// security gate.
+    Script {
+        cmd: String,
+        #[serde(default)]
+        args: Vec<String>,
+        /// Regex applied to trimmed stdout; first capture group becomes the
+        /// value. On compile error or no match → resolution fails. `None`
+        /// means "use trimmed stdout verbatim".
+        #[serde(default)]
+        extract_pattern: Option<String>,
+        /// Process timeout. Default `60_000` ms.
+        #[serde(default = "default_script_timeout_ms")]
+        timeout_ms: u32,
+        /// When `Some(name)`, the script is silently skipped (variable
+        /// resolves to empty) if the earlier-declared variable `name`
+        /// resolved to an empty string. Lets a preset gate an optional
+        /// fetch on a user-typed input (e.g. "only fetch prod logs when
+        /// the user fills in the minutes window").
+        #[serde(default)]
+        skip_if_empty: Option<String>,
+    },
+}
+
+fn default_script_timeout_ms() -> u32 {
+    60_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1134,6 +1170,23 @@ pub enum ClientMessage {
         #[serde(default)]
         variable_values: Vec<(String, String)>,
     },
+    /// Resolve any `Script`-kind variables in a preset by running them and
+    /// capturing their output. The dialog calls this after the user reviews
+    /// the rendered commands and clicks Launch; the resolved values are
+    /// then forwarded to [`ClientMessage::LaunchPreset`] as plain
+    /// `variable_values` entries so the daemon doesn't re-spawn the
+    /// scripts. Daemon replies with [`DaemonMessage::PresetScriptsResolved`]
+    /// or [`DaemonMessage::PresetScriptsError`].
+    ResolvePresetScripts {
+        /// Client-assigned request id, echoed back on the response.
+        id: String,
+        target: PresetTarget,
+        preset_id: String,
+        /// User-supplied values for non-script variables. These feed into
+        /// `{var_name}` substitution in the scripts' args.
+        #[serde(default)]
+        variable_values: Vec<(String, String)>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1344,9 +1397,39 @@ pub enum DaemonMessage {
         id: String,
         error: String,
     },
+    /// Successful response to [`ClientMessage::ResolvePresetScripts`].
+    /// `values` carries the *full* resolved variable map (user inputs +
+    /// script outputs), ready to be passed to `LaunchPreset` as-is.
+    /// `executed_commands` lets the dialog confirm to the user which
+    /// commands actually ran, even if their `args` contained env or var
+    /// substitution that wasn't obvious in the unresolved form.
+    PresetScriptsResolved {
+        id: String,
+        values: Vec<(String, String)>,
+        executed_commands: Vec<ScriptCommandPreview>,
+    },
+    /// Failure response to [`ClientMessage::ResolvePresetScripts`].
+    /// `variable_name` (if known) identifies the script variable that
+    /// failed so the dialog can highlight it inline.
+    PresetScriptsError {
+        id: String,
+        error: String,
+        #[serde(default)]
+        variable_name: Option<String>,
+    },
     Error {
         message: String,
     },
+}
+
+/// A single resolved script invocation. The dialog renders these in the
+/// "Scripts to run" preview list and as a confirmation strip in the
+/// post-resolution toast.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScriptCommandPreview {
+    pub variable_name: String,
+    pub cmd: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1536,16 +1619,48 @@ mod tests {
                 label: "Client log".to_string(),
                 variable: "client_log".to_string(),
             }],
-            variables: vec![PresetVariable {
-                name: "client_log".to_string(),
-                label: "Client log".to_string(),
-                kind: PresetVariableKind::LiteralPath {
-                    path: "${LOCALAPPDATA}/yaat/yaat-client.log".to_string(),
+            variables: vec![
+                PresetVariable {
+                    name: "client_log".to_string(),
+                    label: "Client log".to_string(),
+                    kind: PresetVariableKind::LiteralPath {
+                        path: "${LOCALAPPDATA}/yaat/yaat-client.log".to_string(),
+                    },
+                    prompt_at_launch: false,
+                    default: None,
+                    optional: true,
                 },
-                prompt_at_launch: false,
-                default: None,
-                optional: true,
-            }],
+                PresetVariable {
+                    name: "minutes".to_string(),
+                    label: "Minutes".to_string(),
+                    kind: PresetVariableKind::Text,
+                    prompt_at_launch: true,
+                    default: Some("60".to_string()),
+                    optional: true,
+                },
+                PresetVariable {
+                    name: "prod_log".to_string(),
+                    label: "Production server log".to_string(),
+                    kind: PresetVariableKind::Script {
+                        cmd: "pwsh".to_string(),
+                        args: vec![
+                            "-NoProfile".to_string(),
+                            "-File".to_string(),
+                            "{repo_root}/tools/fetch-server-logs.ps1".to_string(),
+                            "-Minutes".to_string(),
+                            "{minutes}".to_string(),
+                        ],
+                        extract_pattern: Some(
+                            r"Saved \d+ lines to (.+?)\s*$".to_string(),
+                        ),
+                        timeout_ms: 60_000,
+                        skip_if_empty: Some("minutes".to_string()),
+                    },
+                    prompt_at_launch: false,
+                    default: None,
+                    optional: true,
+                },
+            ],
             branch_template: "bug/{date}/{index}".to_string(),
             session_label_template: Some("bug-{index}: {slug}".to_string()),
             default_use_worktree: Some(true),
@@ -1582,6 +1697,93 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let decoded: PresetEntry = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn script_variable_kind_tagged() {
+        let kind = PresetVariableKind::Script {
+            cmd: "pwsh".to_string(),
+            args: vec!["-File".to_string(), "x.ps1".to_string()],
+            extract_pattern: Some("(\\S+)".to_string()),
+            timeout_ms: 30_000,
+            skip_if_empty: Some("minutes".to_string()),
+        };
+        let json = serde_json::to_string(&kind).expect("serialize");
+        assert!(json.contains(r#""kind":"script""#));
+        let decoded: PresetVariableKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, kind);
+    }
+
+    #[test]
+    fn script_variable_kind_defaults() {
+        let json = r#"{"kind":"script","cmd":"echo","args":["hi"]}"#;
+        let decoded: PresetVariableKind = serde_json::from_str(json).expect("parse");
+        match decoded {
+            PresetVariableKind::Script {
+                cmd,
+                args,
+                extract_pattern,
+                timeout_ms,
+                skip_if_empty,
+            } => {
+                assert_eq!(cmd, "echo");
+                assert_eq!(args, vec!["hi"]);
+                assert_eq!(extract_pattern, None);
+                assert_eq!(timeout_ms, 60_000);
+                assert_eq!(skip_if_empty, None);
+            }
+            other => panic!("expected Script kind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_preset_scripts_message_tagged() {
+        let msg = ClientMessage::ResolvePresetScripts {
+            id: "r1".to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            preset_id: "bug-triage".to_string(),
+            variable_values: vec![("minutes".to_string(), "30".to_string())],
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"resolve_preset_scripts""#));
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        let ClientMessage::ResolvePresetScripts {
+            id, preset_id, ..
+        } = decoded
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(id, "r1");
+        assert_eq!(preset_id, "bug-triage");
+    }
+
+    #[test]
+    fn preset_scripts_resolved_message_tagged() {
+        let msg = DaemonMessage::PresetScriptsResolved {
+            id: "r1".to_string(),
+            values: vec![("prod_log".to_string(), "C:/logs/p.log".to_string())],
+            executed_commands: vec![ScriptCommandPreview {
+                variable_name: "prod_log".to_string(),
+                cmd: "pwsh".to_string(),
+                args: vec!["-Minutes".to_string(), "30".to_string()],
+            }],
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"preset_scripts_resolved""#));
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        let DaemonMessage::PresetScriptsResolved {
+            values,
+            executed_commands,
+            ..
+        } = decoded
+        else {
+            panic!("wrong variant");
+        };
+        assert_eq!(values.len(), 1);
+        assert_eq!(executed_commands.len(), 1);
+        assert_eq!(executed_commands[0].variable_name, "prod_log");
     }
 
     #[test]

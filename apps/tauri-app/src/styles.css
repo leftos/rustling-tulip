@@ -733,6 +733,20 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
 .env-row-error { margin-top: 2px; color: var(--warn); }
 .input-invalid { border-color: var(--warn); }
 .preset-launch-caveat { font-style: italic; margin: 0.5rem 0; }
+.preset-script-section { display: flex; flex-direction: column; gap: 6px; }
+.preset-script-row {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.preset-script-row-failed { border-color: var(--warn); }
+.preset-script-label { font-weight: 600; font-size: 12px; }
+.preset-script-cmd {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--fg-muted);
+}
 .modal-warning {
   margin: 0.75rem 0 0;
   padding: 0.6rem 0.8rem;
@@ -773,6 +787,10 @@ button.tree-tab-pill:hover { background: var(--bg-elev3); color: var(--fg); }
   padding: 10px 14px; border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
 }
+.session-header-draggable { cursor: grab; }
+.session-header-draggable:active { cursor: grabbing; }
+.session-header-draggable button,
+.session-header-draggable .link { cursor: pointer; }
 .session-title {
   display: flex; align-items: center; gap: 10px;
   min-width: 0;

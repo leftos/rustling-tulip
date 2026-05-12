@@ -8,6 +8,7 @@ import {
   type LaunchPresetSource,
   type PresetEntry,
   type PresetTarget,
+  type ScriptCommandPreview,
   type SpawnConfig,
 } from "./types";
 
@@ -36,26 +37,85 @@ export async function ensureDaemonStarted(): Promise<DaemonHandshake> {
   return await invoke<DaemonHandshake>("ensure_daemon_started");
 }
 
+// Picker memory: store the parent directory of the last successful pick
+// keyed by a caller-supplied purpose tag, so the next time the same picker
+// opens (across reloads / app restarts) it lands the user where they were.
+//
+// Scoping is by tag, not by absolute global state — so the "Add repo"
+// picker doesn't fight the "pick a bug bundle" picker over which dir to
+// open at. Tags are arbitrary strings; pick what makes sense per call site
+// (e.g. "addRepo", "presetSourceFile", `presetVar:${name}`).
+const PICKER_LAST_DIR_PREFIX = "rt.picker.lastDir:";
+
+function loadLastDir(key: string): string | undefined {
+  try {
+    return localStorage.getItem(PICKER_LAST_DIR_PREFIX + key) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function saveLastDir(key: string, dir: string): void {
+  try {
+    localStorage.setItem(PICKER_LAST_DIR_PREFIX + key, dir);
+  } catch {
+    /* localStorage unavailable — best-effort, drop silently */
+  }
+}
+
+function parentDir(p: string): string {
+  // Cross-platform parent extraction: handle both `\` and `/` separators
+  // because file pickers on Windows return native back-slash paths and
+  // hand-typed defaults could use either.
+  const trimmed = p.replace(/[\\/]+$/, "");
+  const lastSep = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+  return lastSep > 0 ? trimmed.slice(0, lastSep) : trimmed;
+}
+
+export interface PickDirectoryOpts {
+  /// If set and `defaultPath` isn't supplied, opens the picker at the
+  /// directory the user last picked from with this key. On a successful
+  /// pick, the parent of the chosen folder is stored back under the key.
+  lastDirKey?: string;
+}
+
 export async function pickDirectory(
   defaultPath?: string,
+  opts: PickDirectoryOpts = {},
 ): Promise<string | null> {
-  return await invoke<string | null>("pick_directory", {
-    defaultPath: defaultPath ?? null,
+  const effective =
+    defaultPath ?? (opts.lastDirKey ? loadLastDir(opts.lastDirKey) : undefined);
+  const result = await invoke<string | null>("pick_directory", {
+    defaultPath: effective ?? null,
   });
+  if (result !== null && opts.lastDirKey) {
+    saveLastDir(opts.lastDirKey, parentDir(result));
+  }
+  return result;
 }
 
 export interface PickFileOpts {
   defaultPath?: string;
   extensions?: string[];
   filterName?: string;
+  /// See [`PickDirectoryOpts.lastDirKey`]. On a successful file pick the
+  /// parent directory of the chosen file is stored back under the key, so
+  /// the next prompt opens in the same folder.
+  lastDirKey?: string;
 }
 
 export async function pickFile(opts: PickFileOpts = {}): Promise<string | null> {
-  return await invoke<string | null>("pick_file", {
-    defaultPath: opts.defaultPath ?? null,
+  const effective =
+    opts.defaultPath ?? (opts.lastDirKey ? loadLastDir(opts.lastDirKey) : undefined);
+  const result = await invoke<string | null>("pick_file", {
+    defaultPath: effective ?? null,
     extensions: opts.extensions ?? null,
     filterName: opts.filterName ?? null,
   });
+  if (result !== null && opts.lastDirKey) {
+    saveLastDir(opts.lastDirKey, parentDir(result));
+  }
+  return result;
 }
 
 export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
@@ -393,6 +453,74 @@ export function openDiffTab(
       path: args.path,
       against: args.against,
     });
+  });
+}
+
+export interface ResolvePresetScriptsOpts {
+  target: PresetTarget;
+  preset_id: string;
+  variable_values: Array<[string, string]>;
+}
+
+export type ResolvePresetScriptsResult =
+  | {
+      ok: true;
+      values: Array<[string, string]>;
+      executed_commands: ScriptCommandPreview[];
+    }
+  | { ok: false; error: string; variable_name: string | null };
+
+/**
+ * Resolve every Script-kind variable in a preset by running its command on
+ * the daemon. Returns the full variable map (user inputs + script outputs)
+ * which the caller passes verbatim to `launchPreset`. The daemon never
+ * auto-runs scripts as a side effect — this round-trip is the security gate.
+ *
+ * Times out after 90 s (longer than the daemon's per-script default of 60 s
+ * so the daemon's own timeout wins on slow fetches).
+ */
+export function resolvePresetScripts(
+  client: DaemonClient,
+  opts: ResolvePresetScriptsOpts,
+): Promise<ResolvePresetScriptsResult> {
+  const id = `scripts-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return new Promise((resolve) => {
+    const onResolved = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "preset_scripts_resolved" || detail.id !== id) return;
+      cleanup();
+      resolve({
+        ok: true,
+        values: detail.values,
+        executed_commands: detail.executed_commands,
+      });
+    };
+    const onError = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "preset_scripts_error" || detail.id !== id) return;
+      cleanup();
+      resolve({
+        ok: false,
+        error: detail.error,
+        variable_name: detail.variable_name,
+      });
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve({
+        ok: false,
+        error: "script resolution timed out",
+        variable_name: null,
+      });
+    }, 90_000);
+    const cleanup = () => {
+      window.removeEventListener("rt:preset_scripts_resolved", onResolved);
+      window.removeEventListener("rt:preset_scripts_error", onError);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:preset_scripts_resolved", onResolved);
+    window.addEventListener("rt:preset_scripts_error", onError);
+    client.send({ type: "resolve_preset_scripts", id, ...opts });
   });
 }
 

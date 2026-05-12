@@ -180,7 +180,26 @@ export type PresetVariableKind =
   | { kind: "file_path"; extensions: string[] }
   | { kind: "folder_path" }
   | { kind: "env_var"; name: string }
-  | { kind: "literal_path"; path: string };
+  | { kind: "literal_path"; path: string }
+  | {
+      kind: "script";
+      cmd: string;
+      args: string[];
+      // Regex applied to trimmed stdout; first capture group becomes the
+      // value. null → use the trimmed stdout verbatim.
+      extract_pattern: string | null;
+      timeout_ms: number;
+      // When set, the script is skipped (variable resolves to empty) if the
+      // earlier-declared variable named here resolved to empty. Lets a
+      // preset gate an optional fetch on user input.
+      skip_if_empty: string | null;
+    };
+
+export interface ScriptCommandPreview {
+  variable_name: string;
+  cmd: string;
+  args: string[];
+}
 
 export interface PresetVariable {
   name: string;
@@ -494,6 +513,13 @@ export type ClientMessage =
       preset_id: string;
       source: LaunchPresetSource;
       variable_values: Array<[string, string]>;
+    }
+  | {
+      type: "resolve_preset_scripts";
+      id: string;
+      target: PresetTarget;
+      preset_id: string;
+      variable_values: Array<[string, string]>;
     };
 
 export type DaemonMessage =
@@ -613,4 +639,16 @@ export type DaemonMessage =
     }
   | { type: "preset_preview"; id: string; prompts: string[] }
   | { type: "preset_preview_error"; id: string; error: string }
+  | {
+      type: "preset_scripts_resolved";
+      id: string;
+      values: Array<[string, string]>;
+      executed_commands: ScriptCommandPreview[];
+    }
+  | {
+      type: "preset_scripts_error";
+      id: string;
+      error: string;
+      variable_name: string | null;
+    }
   | { type: "error"; message: string };
