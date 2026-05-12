@@ -17,6 +17,11 @@ interface Props {
   /// warning + explicit Force-quit affordance instead.
   stuck: boolean;
   onStopAndQuit: () => void;
+  /// Quit the daemon but retain session sidecars so the next launch
+  /// surfaces them in the Abandoned bucket where the user can Resume.
+  /// Pre-Phase-C the children still die (their ConPTY master goes away
+  /// with the daemon); abandon-mode preserves the recovery context.
+  onAbandonAndQuit: () => void;
   onQuitLeaveRunning: () => void;
   /// Bypass the daemon round-trip and close the OS window immediately.
   /// Only reachable when `stuck` is true.
@@ -35,6 +40,7 @@ export default function ExitConfirmDialog({
   busy,
   stuck,
   onStopAndQuit,
+  onAbandonAndQuit,
   onQuitLeaveRunning,
   onForceQuit,
   onCancel,
@@ -121,6 +127,21 @@ export default function ExitConfirmDialog({
               >
                 {busy ? "Stopping…" : "Stop sessions & quit"}
               </button>
+              {activeSessionCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onAbandonAndQuit}
+                  disabled={busy}
+                  data-testid="exit-abandon-quit"
+                  title={
+                    "Stop the daemon but keep session metadata. " +
+                    "Next launch will show these sessions as Abandoned " +
+                    "with a Resume button that replays their config + prompt."
+                  }
+                >
+                  Abandon & quit
+                </button>
+              )}
               <button
                 ref={quitLeaveRef}
                 type="button"

@@ -951,10 +951,19 @@ async fn dispatch(
                 truncated,
             });
         }
-        ClientMessage::Shutdown => {
-            info!("dispatch: ClientMessage::Shutdown received");
-            shutdown_all(hub).await;
-            info!("dispatch: shutdown_all returned; flipping watch");
+        ClientMessage::Shutdown { drain } => {
+            info!(drain, "dispatch: ClientMessage::Shutdown received");
+            if drain {
+                shutdown_all(hub).await;
+                info!("dispatch: shutdown_all returned; flipping watch");
+            } else {
+                // Don't drain — leave sidecars on disk so the next daemon
+                // start surfaces these sessions in the Abandoned bucket.
+                // Pre-Phase-C the children die anyway (their ConPTY master
+                // goes away with the daemon); B.3's contribution is the
+                // sidecar-preservation half of the round-trip.
+                info!("dispatch: shutdown without drain; sidecars retained for resume");
+            }
             // Signal the accept loop to exit. The send may fail if a previous
             // Shutdown already flipped it; either way the daemon is on its
             // way out.

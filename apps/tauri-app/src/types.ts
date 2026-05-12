@@ -463,7 +463,11 @@ export type ClientMessage =
       against: string | null;
     }
   | { type: "load_scrollback"; session_id: string }
-  | { type: "shutdown" }
+  // `drain` defaults to true server-side. Pass `drain: false` to retain
+  // session sidecars so the next daemon start surfaces them as
+  // Abandoned (B.3). Pre-Phase-C the children still die — sidecar
+  // preservation is the half that exists today.
+  | { type: "shutdown"; drain?: boolean }
   | { type: "set_repo_worktree_default"; repo_id: string; value: boolean }
   | {
       type: "set_workspace_worktree_default";

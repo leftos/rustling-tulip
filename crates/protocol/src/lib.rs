@@ -1097,7 +1097,24 @@ pub enum ClientMessage {
     /// expected to wait for the WebSocket to close as the shutdown signal —
     /// no explicit response is sent. Issued by the desktop app's exit
     /// confirmation when the user opts to terminate everything.
-    Shutdown,
+    /// Graceful daemon shutdown.
+    ///
+    /// `drain = true` (default, current behaviour): every live session is
+    /// stopped cleanly via `stop_session` and its sidecar deleted. Used
+    /// for "quit and stop everything".
+    ///
+    /// `drain = false`: sessions are NOT stopped; their sidecars are
+    /// flipped to abandoned-on-next-startup state and the daemon exits
+    /// without firing the worktree-remove cleanup. Today (pre-Phase-C)
+    /// the children still die when the daemon's `ConPTY` master handle
+    /// closes — but the next daemon start will surface them in the
+    /// "Abandoned" bucket where the user can Resume. Once Phase C lands
+    /// (per-session tracer) `drain = false` will actually preserve the
+    /// live processes.
+    Shutdown {
+        #[serde(default = "default_true")]
+        drain: bool,
+    },
     /// Update [`RepoEntry::default_use_worktree`]. Daemon replies with the
     /// fresh `Repos` snapshot so every connected client refreshes its UI.
     SetRepoWorktreeDefault {
