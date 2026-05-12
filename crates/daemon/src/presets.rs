@@ -420,6 +420,11 @@ async fn resolve_one_variable(
             )
             .await
         }
+        PresetVariableKind::Unknown => Err(LaunchFailure::new(format!(
+            "variable kind for '{}' is unknown to this daemon \
+             (the preset file may have been written for a newer version)",
+            var.name
+        ))),
     }
 }
 
@@ -950,6 +955,16 @@ fn build_tab_state(
                     TabBuildLayout::Linear(SplitDirection::Vertical)
                 }
                 TabLayout::AutoGrid => TabBuildLayout::AutoGrid,
+                TabLayout::Unknown => {
+                    // Preset specifies a layout this build doesn't know.
+                    // Fall back to BalancedHorizontal — fans the panes out
+                    // without strong orientation claims, matches what the
+                    // design doc prescribes for unrenderable layouts.
+                    tracing::warn!(
+                        "preset specifies unknown tab layout; falling back to balanced_horizontal"
+                    );
+                    TabBuildLayout::Linear(SplitDirection::Horizontal)
+                }
             };
             let cap = args.max_panes_per_tab_override.or(*max_panes_per_tab);
             let name_template = tab_name_template.as_deref().unwrap_or(&preset.name);

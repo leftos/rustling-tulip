@@ -582,6 +582,13 @@ pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Resul
         }
         RearrangeLayout::Vertical => build_balanced(&panes, SplitDirection::Vertical),
         RearrangeLayout::Grid { cols } => build_grid(&panes, cols),
+        RearrangeLayout::Unknown => {
+            // Forward-compat: client requested a layout this daemon doesn't
+            // know. Fall back to Balanced (the safest known shape — keeps
+            // every pane visible without strong orientation claims).
+            tracing::warn!("rearrange: unknown layout from client; falling back to balanced");
+            build_balanced(&panes, SplitDirection::Horizontal)
+        }
     };
     new.ok_or_else(|| anyhow!("rearrange produced empty tab (unreachable)"))
 }

@@ -158,7 +158,10 @@ export interface SpawnConfig {
 export type InjectorStep =
   | { kind: "delay"; ms: number }
   | { kind: "write"; data_b64: string }
-  | { kind: "text"; content: string; newline: boolean };
+  | { kind: "text"; content: string; newline: boolean }
+  // Forward-compat: a daemon newer than this client may declare step kinds
+  // we don't know. Injector runner skips them with a warn.
+  | { kind: "unknown" };
 
 export interface PromptInjector {
   steps: InjectorStep[];
@@ -202,7 +205,10 @@ export type PresetVariableKind =
       // earlier-declared variable named here resolved to empty. Lets a
       // preset gate an optional fetch on user input.
       skip_if_empty: string | null;
-    };
+    }
+  // Forward-compat: presets from a newer daemon may declare variable
+  // kinds this client can't render. Launch dialog skips them.
+  | { kind: "unknown" };
 
 export interface ScriptCommandPreview {
   variable_name: string;
@@ -229,14 +235,20 @@ export type TabLayout =
   | "tile_vertical"
   | "balanced_horizontal"
   | "balanced_vertical"
-  | "auto_grid";
+  | "auto_grid"
+  // Forward-compat fallback. A daemon newer than this client may emit
+  // layouts the client doesn't render natively; rather than crash the
+  // sidebar, the union carries the unknown string and the renderer
+  // picks a sensible fallback (BalancedHorizontal).
+  | "unknown";
 
 export type RearrangeLayout =
   | { kind: "horizontal" }
   | { kind: "vertical" }
   | { kind: "balanced" }
   // cols=0 → daemon auto-picks ceil(sqrt(N)).
-  | { kind: "grid"; cols: number };
+  | { kind: "grid"; cols: number }
+  | { kind: "unknown" };
 
 export type TabGroupingConfig =
   | { kind: "none" }

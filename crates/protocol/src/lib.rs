@@ -494,6 +494,12 @@ pub enum RearrangeLayout {
     Grid {
         cols: u32,
     },
+    /// Forward-compat fallback: a layout variant the current build doesn't
+    /// know. Daemon dispatch falls back to `Balanced`. Serializes as
+    /// `{"kind":"unknown"}` if ever round-tripped — daemon never
+    /// constructs this directly, so the wire shouldn't see it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a tab is rendering. Most tabs hold a grid of panes/splits
@@ -604,6 +610,11 @@ pub enum InjectorStep {
     /// `\r` (carriage return) is appended — that's what TUIs expect for the
     /// Enter key.
     Text { content: String, newline: bool },
+    /// Forward-compat fallback: a step kind the current build doesn't know.
+    /// The injector runtime skips Unknown steps with a warn log. Daemon
+    /// never constructs this directly.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Scripted PTY input fed to a freshly spawned interactive session after the
@@ -721,6 +732,11 @@ pub enum PresetVariableKind {
         #[serde(default)]
         skip_if_empty: Option<String>,
     },
+    /// Forward-compat fallback: a variable kind the current build doesn't
+    /// know. Preset resolution treats this as a hard error since we can't
+    /// compute the value. Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
 }
 
 fn default_script_timeout_ms() -> u32 {
@@ -777,6 +793,12 @@ pub enum TabLayout {
     /// that actually looks like a grid in the UI. Recommended for
     /// preset launches with `N >= 3`.
     AutoGrid,
+    /// Forward-compat fallback: a layout the current build doesn't know.
+    /// Preset rendering falls back to `BalancedHorizontal` (the safest
+    /// known shape — fans the panes out without making strong claims
+    /// about orientation). Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a preset launch arranges its N spawned sessions in the tab bar.
@@ -2265,6 +2287,46 @@ mod tests {
             }
             _ => panic!("expected Welcome"),
         }
+    }
+
+    #[test]
+    fn rearrange_layout_unknown_variant_decodes() {
+        // A v(N+1) daemon sends a kind this client doesn't know. Older
+        // clients route it to Unknown instead of failing the whole
+        // containing message.
+        let future = r#"{"kind":"future_only_layout"}"#;
+        let parsed: RearrangeLayout = serde_json::from_str(future).expect("decode");
+        assert!(matches!(parsed, RearrangeLayout::Unknown));
+    }
+
+    #[test]
+    fn tab_layout_unknown_variant_decodes() {
+        let future = r#""future_only_layout""#;
+        let parsed: TabLayout = serde_json::from_str(future).expect("decode");
+        assert!(matches!(parsed, TabLayout::Unknown));
+    }
+
+    #[test]
+    fn injector_step_unknown_variant_decodes() {
+        let future = r#"{"kind":"future_step"}"#;
+        let parsed: InjectorStep = serde_json::from_str(future).expect("decode");
+        assert!(matches!(parsed, InjectorStep::Unknown));
+    }
+
+    #[test]
+    fn preset_variable_kind_unknown_variant_decodes() {
+        let future = r#"{"kind":"future_var"}"#;
+        let parsed: PresetVariableKind = serde_json::from_str(future).expect("decode");
+        assert!(matches!(parsed, PresetVariableKind::Unknown));
+    }
+
+    #[test]
+    fn known_rearrange_variant_still_decodes() {
+        // Regression: make sure adding Unknown didn't break the existing
+        // happy path.
+        let json = r#"{"kind":"grid","cols":3}"#;
+        let parsed: RearrangeLayout = serde_json::from_str(json).expect("decode");
+        assert!(matches!(parsed, RearrangeLayout::Grid { cols: 3 }));
     }
 
     #[test]

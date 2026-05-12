@@ -91,11 +91,12 @@ currently error. We need a graceful fallback.
       unknown types log + drop instead of crashing.
 - [x] TS side: tail-of-switch `logToFile("warn", ...)` in
       `App.tsx::handleMessage` for the symmetric direction.
-- [ ] DEFERRED: per-enum `Unknown` fallback for nested enums
-      (`RearrangeLayout`, `TabLayout`, `PresetVariableKind`, `InjectorStep`).
-      Today, a new nested-enum variant drops the entire containing message
-      to the top-level `Unknown` handler — lossy, but the connection stays
-      alive. CLAUDE.md notes this caveat.
+- [x] Per-enum `Unknown` fallback for nested enums (`RearrangeLayout`,
+      `TabLayout`, `PresetVariableKind`, `InjectorStep`). Each carries a
+      `#[serde(other)] Unknown` unit variant; the containing message keeps
+      decoding when a new variant appears. Match sites handle Unknown
+      with a sensible fallback (e.g. `TabLayout::Unknown` →
+      `BalancedHorizontal`).
 - [x] Decision rule recorded in CLAUDE.md: "Adding a new variant or
       `#[serde(default)]` field is not a protocol bump. Renaming,
       removing, or changing semantics is. When in doubt, ask before

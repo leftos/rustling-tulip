@@ -100,6 +100,13 @@ pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector) {
                     );
                     pty.write_input(bytes);
                 }
+                InjectorStep::Unknown => {
+                    warn!(
+                        session_id = %session_id,
+                        step = idx,
+                        "injector skipping unknown step kind (preset newer than daemon)"
+                    );
+                }
             }
         }
         debug!(session_id = %session_id, "injector finished");
