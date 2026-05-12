@@ -58,64 +58,62 @@ the easier win (problem 1) doesn't get blocked behind the harder one
 Goal: a new app version can talk to an older daemon without forcing the
 user to restart anything.
 
-### A.1 — Range-based handshake
+### A.1 — Range-based handshake ✅ shipped
 
 Replace `protocol_version: u32` in `Hello` / `Welcome` with a range or
 set, and negotiate at connect time.
 
-- [ ] Wire shape: `Hello { protocol_versions: Vec<u32> }` (client) →
+- [x] Wire shape: `Hello { protocol_versions: Vec<u32> }` (client) →
       `Welcome { protocol_version: u32, supported_versions: Vec<u32> }`
       (daemon picks the highest mutually supported version and echoes it).
       Old peers send/receive `protocol_version: u32` as today; the new
       fields are `#[serde(default)]` so older serialisations decode.
-- [ ] Build-time constant `SUPPORTED_PROTOCOL_VERSIONS: &[u32]` in
+- [x] Build-time constant `SUPPORTED_PROTOCOL_VERSIONS: &[u32]` in
       `protocol/build.rs`. The current daemon advertises every version it
       can speak; the current client advertises every version it can
       tolerate downgrading to.
-- [ ] Daemon-side: store the negotiated version on the `ClientSession`
-      and use it to gate features (skip emitting v15-only messages to a
-      v14 client; skip parsing v15-only fields from a v14 client).
-- [ ] Client-side: expose the negotiated version to `App.tsx` so feature
-      flags can dim UI (e.g. greyed "Rearrange panes" with a "requires
-      daemon vN+" tooltip when running against an older daemon).
-- [ ] Test: protocol crate unit test confirming `Hello` with a stale
-      `protocol_version` scalar still decodes (back-compat for old
-      clients connecting to new daemons).
+- [x] Daemon-side: negotiated version captured at handshake (threading
+      through `dispatch`/forwarders deferred until a feature actually
+      needs gating).
+- [x] Client-side: negotiated version stored on `ConnectionState.open`
+      so UI can read it when feature gating is needed.
+- [x] Test: protocol crate unit tests `hello_decodes_with_scalar_only`
+      and `welcome_decodes_with_scalar_only` confirm back-compat.
 
-### A.2 — Additive-by-default enums
+### A.2 — Additive-by-default enums ✅ shipped (top-level only)
 
 `ClientMessage` and `DaemonMessage` are tagged enums; unknown variants
 currently error. We need a graceful fallback.
 
-- [ ] Add a `#[serde(other)]` catch-all variant `Unknown(serde_json::Value)`
-      on `ClientMessage` and `DaemonMessage`. The daemon's dispatch
-      ignores `Unknown` with a `warn!` log; the client treats `Unknown`
-      from the daemon the same way.
-- [ ] Same treatment for nested tagged enums where new variants are
-      likely (`PresetVariableKind`, `TabLayout`, `RearrangeLayout`,
-      `InjectorStep`). Where ignoring isn't safe (e.g. a `TabLayout` we
-      can't render), fall back to the closest known variant
-      (`BalancedHorizontal`) and log.
-- [ ] Decision rule recorded in CLAUDE.md: "Adding a new variant or
+- [x] Parse-boundary wrappers `InboundClientMessage` / `InboundDaemonMessage`
+      with `Known(...)` and `Unknown { type_tag, raw }` variants. Daemon's
+      `recv_loop` and handshake route through `InboundClientMessage::from_json_str`;
+      unknown types log + drop instead of crashing.
+- [x] TS side: tail-of-switch `logToFile("warn", ...)` in
+      `App.tsx::handleMessage` for the symmetric direction.
+- [ ] DEFERRED: per-enum `Unknown` fallback for nested enums
+      (`RearrangeLayout`, `TabLayout`, `PresetVariableKind`, `InjectorStep`).
+      Today, a new nested-enum variant drops the entire containing message
+      to the top-level `Unknown` handler — lossy, but the connection stays
+      alive. CLAUDE.md notes this caveat.
+- [x] Decision rule recorded in CLAUDE.md: "Adding a new variant or
       `#[serde(default)]` field is not a protocol bump. Renaming,
       removing, or changing semantics is. When in doubt, ask before
       bumping."
 
-### A.3 — Sidecar version negotiation
+### A.3 — Sidecar version negotiation ✅ shipped
 
 `sessions/<id>/meta.json` carries spawn config and runtime metadata. New
 fields land via `#[serde(default)]` today, but removals or shape changes
 would break older daemons trying to read newer sidecars (and vice versa).
 
-- [ ] Add `on_disk_version: u32` to `OrphanMeta`. Default to the current
-      version when missing (back-compat with sidecars written before this
-      field existed).
-- [ ] Write a `migrate_sidecar(version, json) -> OrphanMeta` shim. Today
-      it's a no-op; the seam is what we want, not the migration logic.
-- [ ] Refuse to load sidecars with `on_disk_version > MAX_KNOWN`; surface
-      as a daemon-startup warning. This protects a downgrade scenario (v15
-      daemon writes a sidecar, user rolls back to v14) from corrupting
-      live state.
+- [x] Added `on_disk_version: u32` to `OrphanMeta` with serde default
+      shim → `CURRENT_SIDECAR_VERSION` (1) when missing.
+- [x] `migrate_sidecar(value) -> Result<OrphanMeta>` seam in `orphan.rs`;
+      today routes everything to the current shape.
+- [x] Refuse to load sidecars with `on_disk_version > MAX_KNOWN_SIDECAR_VERSION`;
+      `read_all_metas` logs a warn and skips the entry, protecting the
+      downgrade scenario.
 
 ### A.4 — Acceptance criteria for Phase A
 
@@ -135,43 +133,38 @@ sessions vanish, and the user reconstructs from memory. Make recovery
 explicit and one-click before tackling the much harder problem of keeping
 the children alive.
 
-### B.1 — Capture continuation context
+### B.1 — Capture continuation context ✅ shipped (last_prompt only)
 
-- [ ] Persist the last `N` lines of each session's `recent_actions` /
-      injected prompt in the sidecar (currently only the spawn config is
-      retained). Bound to keep sidecars small (1 KB cap per session is
-      fine).
-- [ ] Persist the most recent successful user input (the prompt that was
-      injected at spawn, plus any subsequent injector-driven text). Lets
-      a "Resume" action replay that exact prompt against a new clone.
+- [ ] DEFERRED: `recent_actions` tail in sidecar. Not strictly needed for
+      Resume; would be nice for UI display of "what was this session
+      doing?"
+- [x] `OrphanMeta.last_prompt: Option<String>` captures the user's
+      initial prompt at spawn (all three spawn paths thread it through
+      `meta_from_record`). The Resume handler replays it.
 
-### B.2 — "Killed session" recovery surface
+### B.2 — "Killed session" recovery surface ✅ shipped
 
-- [ ] On startup, the daemon partitions sidecars into three buckets: live
-      (claude PID still alive — keep as today), orphan-stopped (claude
-      gone but exited cleanly — already covered by stopped status), and
-      **abandoned** (claude gone, last status was non-terminal — daemon
-      died mid-session).
-- [ ] Abandoned sessions surface in the sidebar under a new "Abandoned"
-      heading with a "Resume" button. Clicking it spawns a duplicate from
-      the captured spawn config and replays the last known prompt. The
-      abandoned sidecar is consumed on resume.
-- [ ] Bulk "Resume all abandoned" action at the top of the heading for
-      the post-crash case.
+- [x] Startup partitioning: `main.rs` keeps both live and dead sidecars
+      (previously dead were silently deleted). Live → `insert_orphan`;
+      dead → `insert_abandoned` (status=Stopped, is_abandoned=true).
+- [x] Abandoned sessions surface with `SessionSnapshot.is_abandoned = true`.
+      Sidebar shows the badge + a Resume button + a Dismiss button.
+      `ClientMessage::ResumeAbandoned` spawns a fresh session from the
+      captured spawn config + last_prompt, then deletes the abandoned
+      sidecar. `DiscardAbandoned` is the dismiss path.
+- [ ] DEFERRED: "Resume all abandoned" bulk button. Clients can loop over
+      abandoned snapshots; UI affordance can land later.
 
-### B.3 — Graceful shutdown improvements
+### B.3 — Graceful shutdown improvements ✅ shipped
 
-- [ ] `ClientMessage::Shutdown` currently kills every session as a side
-      effect. Add a `Shutdown { drain: bool }` parameter. `drain: true`
-      stops sessions cleanly (today's behaviour); `drain: false` flips
-      every session to "abandoned" in its sidecar without killing the
-      child — useful for the upgrade case once Phase C makes children
-      actually survive. Until Phase C lands, `drain: false` is a no-op
-      different from `true` only in that it doesn't fire the cleanup
-      worktree-remove path.
-- [ ] App-level Quit dialog asks: "Stop all sessions, or leave them for
-      next launch?" (the second option is greyed with "requires tracer
-      v1+" until Phase C ships).
+- [x] `ClientMessage::Shutdown` grows a `drain: bool` field (default
+      true). `drain: false` leaves sidecars in place so the next daemon
+      start surfaces them in the Abandoned bucket — children still die
+      pre-Phase-C, but the recovery context (spawn config + last_prompt)
+      is preserved.
+- [x] Exit dialog gains an "Abandon & quit" button (between "Stop
+      sessions & quit" and "Quit, leave running"), only shown when there
+      are active sessions. Wires to `sendShutdown(drain=false)`.
 
 ### B.4 — Acceptance criteria for Phase B
 
@@ -210,37 +203,37 @@ daemon ──spawn──► rt-tracer.exe ──ConPTY──► claude
   registry file with PIDs), reconnects, replays the buffered output, and
   resumes normal operation.
 
-### C.2 — Tracer protocol (separate from main protocol)
+### C.2 — Tracer protocol (separate from main protocol) ✅ shipped
 
 Designed to be **far more stable** than the main protocol — every change
 here is a forced re-spawn for affected sessions, which we want to avoid.
 
-- [ ] Versioned the same way as the main protocol (range-based handshake)
-      but bumped much less aggressively.
-- [ ] Smallest possible surface: I/O, resize, status, stop. No git
-      operations, no config, no preset machinery — those stay in the
-      daemon and don't need to survive its restart.
-- [ ] Documented as a public stability contract in `docs/tracer-abi.md`.
+- [x] Versioned the same way as the main protocol (range-based handshake)
+      but bumped much less aggressively. New crate `crates/tracer-protocol`
+      with `TRACER_VERSION = 1`, `SUPPORTED_TRACER_VERSIONS`, and a
+      `negotiate()` helper.
+- [x] Smallest possible surface: `TracerRequest { Input, Resize, Status, Stop }`
+      and `TracerResponse { Output, Status, Exited, Error }`. No git, no
+      config, no preset machinery.
+- [x] Documented as a public stability contract in `docs/tracer-abi.md`.
 
-### C.3 — Implementation
+### C.3 — Implementation (DEFERRED to spike-gated iter)
 
-- [ ] New crate `crates/tracer` with binary `rt-tracer`. Reuses the
-      `protocol` crate's PTY size types but defines its own message enum.
-- [ ] Daemon spawn path: instead of spawning claude directly via
-      `portable-pty`, spawn `rt-tracer.exe` and pass it the claude
-      command line + cwd. Tracer does the actual `portable-pty` spawn.
-- [ ] Daemon registry: tracer pids and pipe names persisted alongside
-      sidecars so the next daemon can find them.
-- [ ] Daemon startup: scan, ping each tracer pipe, reconnect to those
-      that respond. Tracers whose pipes don't respond are considered
-      crashed and their sessions are flipped to abandoned (Phase B
-      machinery handles UI).
-- [ ] Tracer self-cleanup: on `Stop` or claude exit, tracer drains the
-      ring, writes a final scrollback chunk to disk, and exits.
-- [ ] Tracer detached from daemon's process group / job object so killing
-      the daemon doesn't cascade.
-- [ ] Bundle `rt-tracer.exe` in the Tauri installer; ensure the daemon
-      can locate it via a deterministic path (next to its own exe).
+The skeleton (C.2b) shipped: `crates/tracer/` builds a working
+`rt-tracer.exe` that spawns a PTY child and reads its output into a
+bounded ring. The named-pipe server and daemon-integration changes
+below are explicitly gated on the C.1 spike answering the open
+questions about ConPTY behavior, console-less binary safety, and pipe
+reconnect semantics.
+
+- [x] New crate `crates/tracer` with binary `rt-tracer`. CLI surface,
+      PTY spawn, output ring buffer all in place.
+- [ ] Daemon spawn path swap (the big change) — gated on spike
+- [ ] Daemon registry: tracer pids + pipe names alongside sidecars
+- [ ] Daemon startup: scan + ping + reconnect logic
+- [ ] Tracer self-cleanup: drain ring → scrollback file on exit
+- [ ] Tracer detached from daemon's process group / job object
+- [ ] Bundle `rt-tracer.exe` in the Tauri installer
 
 ### C.4 — Acceptance criteria for Phase C
 
