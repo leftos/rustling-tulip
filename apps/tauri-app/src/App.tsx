@@ -1683,6 +1683,16 @@ function handleMessage(
       });
       return;
   }
+  // Forward-compat: a v(N+1) daemon may emit message types this v(N) client
+  // doesn't know about. The Rust side has InboundClientMessage::Unknown as
+  // its parse-boundary equivalent; on this side, exhaustiveness narrows msg
+  // to `never` after the switch, but at runtime an unknown discriminator
+  // simply falls through. Log it instead of silently dropping.
+  const unknown = msg as unknown as { type?: string };
+  logToFile(
+    "warn",
+    `unknown daemon message type: ${unknown.type ?? "<missing>"}`,
+  );
 }
 
 function pushToast(

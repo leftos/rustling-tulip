@@ -1474,6 +1474,75 @@ pub enum DaemonMessage {
     },
 }
 
+/// Parse-time wrapper around [`ClientMessage`] that captures unknown message
+/// types as `Unknown { type_tag, raw }` instead of failing. The daemon reads
+/// from the wire via [`Self::from_json_str`] and matches on the result:
+/// `Known(msg)` to dispatch normally, `Unknown { .. }` to log + drop.
+///
+/// This is the wire-level implementation of forward-compatible deserialization:
+/// a v(N+1) client speaking to a v(N) daemon may send message types the
+/// daemon doesn't know yet. Today those would crash decoding; with the
+/// wrapper, the daemon logs the unknown type and continues servicing the
+/// connection.
+#[derive(Debug, Clone)]
+pub enum InboundClientMessage {
+    Known(ClientMessage),
+    Unknown {
+        type_tag: String,
+        raw: serde_json::Value,
+    },
+}
+
+impl InboundClientMessage {
+    /// Parse a JSON frame received from a client. Returns `Err` only for
+    /// frames that aren't valid JSON at all; unknown message types resolve
+    /// to `Ok(Unknown { .. })`.
+    pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(s)?;
+        if let Ok(known) = serde_json::from_value::<ClientMessage>(value.clone()) {
+            return Ok(Self::Known(known));
+        }
+        let type_tag = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| "<missing-type>".to_string(), String::from);
+        Ok(Self::Unknown {
+            type_tag,
+            raw: value,
+        })
+    }
+}
+
+/// Parse-time wrapper around [`DaemonMessage`]; symmetric to
+/// [`InboundClientMessage`]. Used by Rust clients (the Tauri side, tests)
+/// that consume daemon output. The TS client mirrors the same pattern in
+/// its message dispatch.
+#[derive(Debug, Clone)]
+pub enum InboundDaemonMessage {
+    Known(DaemonMessage),
+    Unknown {
+        type_tag: String,
+        raw: serde_json::Value,
+    },
+}
+
+impl InboundDaemonMessage {
+    pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(s)?;
+        if let Ok(known) = serde_json::from_value::<DaemonMessage>(value.clone()) {
+            return Ok(Self::Known(known));
+        }
+        let type_tag = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| "<missing-type>".to_string(), String::from);
+        Ok(Self::Unknown {
+            type_tag,
+            raw: value,
+        })
+    }
+}
+
 /// A single resolved script invocation. The dialog renders these in the
 /// "Scripts to run" preview list and as a confirmation strip in the
 /// post-resolution toast.
@@ -2079,6 +2148,55 @@ mod tests {
             }
             _ => panic!("expected Welcome"),
         }
+    }
+
+    #[test]
+    fn inbound_client_message_known_passes_through() {
+        let json = r#"{"type":"list_repos"}"#;
+        let parsed = InboundClientMessage::from_json_str(json).expect("parse");
+        let InboundClientMessage::Known(ClientMessage::ListRepos) = parsed else {
+            panic!("expected Known(ListRepos), got {parsed:?}");
+        };
+    }
+
+    #[test]
+    fn inbound_client_message_unknown_tag_captures_payload() {
+        // A future v(N+1) message type that the current daemon has never
+        // seen. The wrapper preserves the type_tag and the raw JSON so
+        // diagnostics can log what got ignored.
+        let json = r#"{"type":"future_only_message","new_field":42}"#;
+        let parsed = InboundClientMessage::from_json_str(json).expect("parse");
+        let InboundClientMessage::Unknown { type_tag, raw } = parsed else {
+            panic!("expected Unknown, got {parsed:?}");
+        };
+        assert_eq!(type_tag, "future_only_message");
+        assert_eq!(raw.get("new_field").and_then(serde_json::Value::as_i64), Some(42));
+    }
+
+    #[test]
+    fn inbound_client_message_missing_type_field_captures_marker() {
+        let json = r#"{"some_field":"value"}"#;
+        let parsed = InboundClientMessage::from_json_str(json).expect("parse");
+        let InboundClientMessage::Unknown { type_tag, .. } = parsed else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(type_tag, "<missing-type>");
+    }
+
+    #[test]
+    fn inbound_client_message_invalid_json_errors() {
+        let res = InboundClientMessage::from_json_str("not json");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn inbound_daemon_message_unknown_tag_captures_payload() {
+        let json = r#"{"type":"future_only_broadcast","detail":"hi"}"#;
+        let parsed = InboundDaemonMessage::from_json_str(json).expect("parse");
+        let InboundDaemonMessage::Unknown { type_tag, .. } = parsed else {
+            panic!("expected Unknown");
+        };
+        assert_eq!(type_tag, "future_only_broadcast");
     }
 
     #[test]

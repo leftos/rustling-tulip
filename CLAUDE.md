@@ -59,7 +59,9 @@ When debugging spawn/connect/shutdown issues, both `daemon.log` and `app.log` to
 
 ## Architecture invariants
 
-**Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`). When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching match arms in `crates/daemon/src/server.rs` (handler) and `apps/tauri-app/src/api.ts` + `types.ts` (TS mirror — there's no codegen, the TS types are hand-maintained to match the Rust enums). `PROTOCOL_VERSION` is checked in the `Hello` handshake; bump it on breaking changes.
+**Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`). When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching match arms in `crates/daemon/src/server.rs` (handler) and `apps/tauri-app/src/api.ts` + `types.ts` (TS mirror — there's no codegen, the TS types are hand-maintained to match the Rust enums).
+
+**When to bump `protocol-version.json`.** *Additive* changes (new variant on a tagged enum, new `#[serde(default)]` field on a struct, new message type) are NOT a protocol bump. The range-based handshake (`SUPPORTED_PROTOCOL_VERSIONS`) + the `InboundClientMessage::Unknown` / `InboundDaemonMessage::Unknown` parse wrappers absorb unknown-type messages without crashing the connection. *Breaking* changes — renaming a field, removing a variant, changing semantics of an existing field — DO require a bump. When the daemon picks up a new version, also append it to `supported` so older clients can still negotiate. Caveat: introducing a new variant in a **nested** enum (e.g. `TabLayout`, `RearrangeLayout`) drops the entire containing message to the top-level `Unknown` handler on older peers — fine for forward-compat, but lossy. If that loss matters for the feature, plan to add a per-enum `Unknown(serde_json::Value)` fallback in the same iter (deferred from Phase A.2).
 
 **On-disk layout under `%APPDATA%\rustling-tulip\`** (see `crates/daemon/src/paths.rs`):
 - `state.json` — repo + workspace registry only (never sessions)
@@ -81,7 +83,8 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 ## Wire-protocol gotchas
 
 - All binary payloads (PTY input/output, scrollback) cross the wire as `data_b64`. Don't add raw-bytes fields.
-- The `Hello` message must be the first thing a client sends after WS upgrade; mismatched `protocol_version` or `auth_token` closes the connection.
+- The `Hello` message must be the first thing a client sends after WS upgrade. New clients send both `protocol_version` (scalar back-compat) and `protocol_versions: Vec<u32>`. The daemon picks the highest mutually supported version from its `SUPPORTED_PROTOCOL_VERSIONS` const and echoes it in `Welcome.protocol_version`. An empty intersection or token mismatch closes the connection.
+- Unknown message types (forward-compat path) hit `InboundClientMessage::Unknown` in the daemon (`crates/protocol/src/lib.rs`) and a default arm in `App.tsx::handleMessage`. Both log + drop without crashing the connection.
 - `SessionSnapshot` is the canonical session shape — daemon emits `Sessions` (list), `SessionUpdated` (single), `SessionRemoved` (id only). Don't add ad-hoc session-shaped messages elsewhere.
 
 ## Style and lints

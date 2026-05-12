@@ -27,9 +27,9 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
-    PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SUPPORTED_PROTOCOL_VERSIONS, SessionKind,
-    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
-    TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -467,12 +467,22 @@ async fn recv_loop(
                     Message::Close(_) => break,
                     Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => continue,
                 };
-                let parsed: ClientMessage = match serde_json::from_str(&text) {
+                let parsed = match InboundClientMessage::from_json_str(&text) {
                     Ok(p) => p,
                     Err(err) => {
                         let _ = out_tx.send(DaemonMessage::Error {
                             message: format!("malformed message: {err}"),
                         });
+                        continue;
+                    }
+                };
+                let parsed = match parsed {
+                    InboundClientMessage::Known(msg) => msg,
+                    InboundClientMessage::Unknown { type_tag, .. } => {
+                        warn!(
+                            %type_tag,
+                            "ignoring unknown client message type (forward-compat path)"
+                        );
                         continue;
                     }
                 };
@@ -498,12 +508,13 @@ async fn handshake(
         Message::Text(t) => t.to_string(),
         _ => return Err(anyhow!("first frame must be text Hello")),
     };
-    let parsed: ClientMessage = serde_json::from_str(&text).context("parsing handshake message")?;
-    let ClientMessage::Hello {
+    let parsed =
+        InboundClientMessage::from_json_str(&text).context("parsing handshake message")?;
+    let InboundClientMessage::Known(ClientMessage::Hello {
         protocol_version,
         protocol_versions,
         auth_token,
-    } = parsed
+    }) = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
     };
