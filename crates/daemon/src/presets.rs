@@ -753,7 +753,16 @@ impl TabState {
 
 struct LaunchPlan {
     preset: PresetEntry,
+    /// Source repo: where the presets.json lives and where prompt files
+    /// are sourced from. For workspace-target launches this is still the
+    /// member repo that contributed the preset; the actual session spawn
+    /// target is held in `spawn_kind`.
     repo: RepoEntry,
+    /// Per-session spawn target shape. `Repo` → each session spawns a
+    /// single-repo claude pointed at one repo's worktree. `Workspace` →
+    /// each session spawns a workspace claude pointed at every member's
+    /// worktree on the same branch.
+    spawn_kind: PresetSpawnKind,
     raw_prompts: Vec<RawPrompt>,
     vars: HashMap<String, String>,
     branch_names: Vec<String>,
@@ -761,6 +770,18 @@ struct LaunchPlan {
     tab_state: TabState,
     date_str: String,
     datetime_str: String,
+}
+
+/// Per-session spawn target shape, derived from the launch's [`PresetTarget`].
+enum PresetSpawnKind {
+    /// Spawn one session per prompt against a single repo. `repo_id` is
+    /// the registry id of the target repo (same as the preset's source
+    /// repo for `PresetTarget::Repo` launches).
+    Repo { repo_id: String },
+    /// Spawn one session per prompt against a workspace. Each session
+    /// creates / reuses worktrees in every member repo on the same
+    /// branch name from `LaunchPlan::branch_names`.
+    Workspace { workspace_id: String },
 }
 
 async fn run(hub: &Hub, args: LaunchArgs) -> Result<(), LaunchFailure> {
@@ -823,9 +844,18 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
         &date_str,
         &datetime_str,
     )?;
+    let spawn_kind = match &args.target {
+        PresetTarget::Repo { repo_id } => PresetSpawnKind::Repo {
+            repo_id: repo_id.clone(),
+        },
+        PresetTarget::Workspace { workspace_id } => PresetSpawnKind::Workspace {
+            workspace_id: workspace_id.clone(),
+        },
+    };
     Ok(LaunchPlan {
         preset,
         repo,
+        spawn_kind,
         raw_prompts,
         vars,
         branch_names,
@@ -992,14 +1022,23 @@ async fn spawn_one(
         None => format!("{} {}", plan.preset.name, index),
     };
     let injector = build_injector(&plan.preset.injector, &prompt_text);
-    let req = SpawnRequest {
-        label: Some(label),
-        target: SpawnTarget::Single {
-            repo_id: plan.repo.id.clone(),
+    let spawn_target = match &plan.spawn_kind {
+        PresetSpawnKind::Repo { repo_id } => SpawnTarget::Single {
+            repo_id: repo_id.clone(),
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
         },
+        PresetSpawnKind::Workspace { workspace_id } => SpawnTarget::Workspace {
+            workspace_id: workspace_id.clone(),
+            branch_name: plan.branch_names[i].clone(),
+            base_branch: None,
+            use_worktree: plan.use_worktree,
+        },
+    };
+    let req = SpawnRequest {
+        label: Some(label),
+        target: spawn_target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
