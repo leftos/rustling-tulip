@@ -179,26 +179,36 @@ function Stop-DaemonProcesses {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Dev script: the subcommand itself is the user gesture; no extra prompt needed.')]
     param([string]$Reason)
-    $processes = @(Get-Process -Name $ImageName -ErrorAction SilentlyContinue)
+    # Also kill rt-tracer.exe -- Phase C.3 deliberately lets the tracer
+    # outlive the daemon so a freshly-started daemon can reattach to
+    # live sessions, but explicit user-triggered stop/restart should
+    # tear everything down so cargo build can replace rt-tracer.exe on
+    # disk. The tracer's child (claude/codex/shell) goes with it.
+    $targetNames = @($ImageName, $TracerImageName)
+    $processes = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
     if ($processes.Count -eq 0) {
         return $false
     }
-    $msg = if ($Reason) { "==> Stopping $($processes.Count) $ImageName process(es) -- $Reason..." }
-           else        { "==> Stopping $($processes.Count) $ImageName process(es)..." }
+    $byName = $processes | Group-Object -Property ProcessName |
+        ForEach-Object { "$($_.Count) $($_.Name)" }
+    $summary = $byName -join ' + '
+    $msg = if ($Reason) { "==> Stopping $summary process(es) -- $Reason..." }
+           else        { "==> Stopping $summary process(es)..." }
     Write-Host $msg -ForegroundColor Yellow
     foreach ($p in $processes) {
-        Write-Host "    killing PID $($p.Id)"
+        Write-Host "    killing PID $($p.Id) ($($p.ProcessName))"
         Stop-Process -Id $p.Id -Force -ErrorAction Continue
     }
     # Give the OS up to 2s for handles to release.
     for ($i = 0; $i -lt 20; $i++) {
-        $remaining = @(Get-Process -Name $ImageName -ErrorAction SilentlyContinue)
+        $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
         if ($remaining.Count -eq 0) { break }
         Start-Sleep -Milliseconds 100
     }
-    $remaining = @(Get-Process -Name $ImageName -ErrorAction SilentlyContinue)
+    $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
     if ($remaining.Count -gt 0) {
-        throw "Failed to stop $($remaining.Count) $ImageName process(es) within 2s: $($remaining.Id -join ', ')"
+        $names = ($remaining | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', '
+        throw "Failed to stop $($remaining.Count) process(es) within 2s: $names"
     }
     if (Test-Path $HandshakeFile) {
         Remove-Item $HandshakeFile -Force
@@ -567,9 +577,9 @@ function Invoke-Installer {
 function Invoke-Stop {
     $stopped = Stop-DaemonProcesses
     if ($stopped) {
-        Write-Host '==> Daemon(s) stopped.' -ForegroundColor Green
+        Write-Host '==> Daemon + tracer process(es) stopped.' -ForegroundColor Green
     } else {
-        Write-Host "No $ImageName processes running." -ForegroundColor Yellow
+        Write-Host "No $ImageName or $TracerImageName processes running." -ForegroundColor Yellow
         if (Test-Path $HandshakeFile) {
             Remove-Item $HandshakeFile -Force
             Write-Host 'Removed stale handshake.' -ForegroundColor Yellow
