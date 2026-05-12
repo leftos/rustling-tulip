@@ -728,6 +728,9 @@ export default function App() {
   }, [state.sessions]);
 
   // Intercept main-window close so we can ask whether to stop the daemon.
+  // Short-circuit when no active sessions exist: nothing to lose, nothing
+  // to preserve — just close the window and let the daemon keep running
+  // for next launch.
   useEffect(() => {
     if (popoutSessionId || popoutTabId) return;
     let unlisten: (() => void) | null = null;
@@ -735,6 +738,22 @@ export default function App() {
       const win = getCurrentWindow();
       unlisten = await win.onCloseRequested((event) => {
         logToFile("info", "main window onCloseRequested fired");
+        const sessions = latestStateRef.current?.sessions ?? [];
+        const hasActive = sessions.some(
+          (s) => s.status !== "stopped" && !s.is_orphan,
+        );
+        if (!hasActive) {
+          logToFile(
+            "info",
+            "main window close: no active sessions, skipping confirmation",
+          );
+          // Same path as "Quit, leave running" — invoke `quit_app` so the
+          // teardown runs from the host side instead of the webview's
+          // event loop (see lib.rs::quit_app comment).
+          event.preventDefault();
+          void closeMainWindow();
+          return;
+        }
         event.preventDefault();
         setState((s) =>
           s.exitConfirmOpen ? s : { ...s, exitConfirmOpen: true },
