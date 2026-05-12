@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
+import { CanvasAddon } from "@xterm/addon-canvas";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -112,31 +112,26 @@ export default function Terminal({
     term.loadAddon(fit);
     term.open(containerRef.current);
 
-    // WebGL renderer dramatically reduces flicker on full-page TUI
+    // Canvas renderer drastically reduces flicker on full-page TUI
     // redraws (codex/htop/vim style). The default DOM renderer
     // updates per-cell DOM nodes -- claude's mostly-line-append
-    // output runs fine on it, but codex's full-buffer repaint
-    // every frame thrashes layout and the cursor visibly jumps
-    // around. WebGL paints the whole grid as a single texture on
-    // each frame, so updates stay coherent.
+    // output runs fine on it, but codex's full-buffer repaint every
+    // frame thrashes layout and the cursor visibly jumps around.
+    // Canvas paints the whole grid in one pass per frame so updates
+    // stay coherent.
     //
-    // WebGL needs a working WebGL2 context; on the rare hardware
-    // where context creation fails (Mesa drivers, lost context
-    // during resume-from-sleep), the addon raises a
-    // `webglcontextlost` event and we fall back to the default
-    // renderer by simply disposing it. Wrapping the construction
-    // in try/catch also covers the up-front "no WebGL2 at all"
-    // case (e.g. headless test runners running xterm in jsdom).
+    // Why Canvas and not WebGL: @xterm/addon-webgl @ 0.19 still has
+    // a teardown bug where, if WebGL activation fails *after*
+    // `loadAddon` registers it (any GPU/context hiccup), the
+    // addon's `dispose()` crashes with `Cannot read properties of
+    // undefined (reading '_isDisposed')` on Terminal unmount.
+    // CanvasAddon has no equivalent issue and is plenty fast for
+    // full-buffer TUI redraws. Revisit on xterm 6.x.
     try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        webgl.dispose();
-      });
-      term.loadAddon(webgl);
+      const canvas = new CanvasAddon();
+      term.loadAddon(canvas);
     } catch (err) {
-      // Non-fatal: keep the DOM renderer. Logged so it's visible
-      // if a user complains about flicker on otherwise-fine GPUs.
-      console.warn("xterm WebGL renderer unavailable, falling back to DOM", err);
+      console.warn("xterm Canvas renderer unavailable, falling back to DOM", err);
     }
 
     termRef.current = term;
