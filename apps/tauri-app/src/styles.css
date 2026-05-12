@@ -101,6 +101,7 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   gap: 2px;
 }
 .activity-btn {
+  position: relative;
   background: transparent;
   border: 0;
   color: var(--fg-muted);
@@ -117,6 +118,22 @@ input:focus, select:focus, button:focus { outline: 1px solid var(--accent); }
   background: var(--bg-elev2);
 }
 .activity-btn:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
+.activity-badge {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
 
 .source-control {
   background: var(--bg-elev);

@@ -115,6 +115,12 @@ interface AppState {
   /// Repo-remove modal state, set when the sidebar's × click hit a repo
   /// with at least one non-stopped session. `null` when no modal is open.
   repoRemove: RepoRemoveIntent | null;
+  /// Per-repo count of uncommitted files (staged + worktree, as reported by
+  /// the daemon's `repo_status`). Drives the badge on the source-control
+  /// activity-bar button. Populated lazily from `repo_status` broadcasts
+  /// (filesystem watcher) plus an initial request fired when a repo first
+  /// appears in `repos`.
+  repoChangeCounts: Record<string, number>;
 }
 
 export default function App() {
@@ -141,6 +147,7 @@ export default function App() {
     presetLaunch: null,
     toasts: [],
     repoRemove: null,
+    repoChangeCounts: {},
   });
 
   // App-wide user preferences (localStorage-backed). `useSettings` returns
@@ -886,6 +893,17 @@ export default function App() {
     writeActivitySection(next);
   }, []);
 
+  // Sum of uncommitted file counts across all registered repos, driving
+  // the badge on the source-control activity-bar button. Stale entries
+  // for removed repos are pruned in the `repos` handler.
+  const sourceControlBadgeTotal = useMemo(() => {
+    let total = 0;
+    for (const count of Object.values(state.repoChangeCounts)) {
+      total += count;
+    }
+    return total;
+  }, [state.repoChangeCounts]);
+
   // Derive the focused-repo id from the focused pane's session. Walks
   // active tab → focused pane → session → first member's repo_id.
   // `null` when no session is focused; the source-control sidebar falls
@@ -1123,7 +1141,11 @@ export default function App() {
 
   return (
     <div className="app-root" data-testid="app-root">
-      <ActivityBar active={activitySection} onSelect={onSelectActivity} />
+      <ActivityBar
+        active={activitySection}
+        onSelect={onSelectActivity}
+        sourceControlBadge={sourceControlBadgeTotal}
+      />
       <ResizableSplit
         storageKey="root.sidebar"
         defaultSize={280}
@@ -1362,9 +1384,28 @@ function handleMessage(
         status: { kind: "auth_failed", reason: msg.reason },
       }));
       return;
-    case "repos":
-      setState((s) => ({ ...s, repos: msg.repos }));
+    case "repos": {
+      const incoming = msg.repos;
+      // Fire-and-forget initial `repo_status` for repos we haven't seen
+      // before. The daemon's filesystem watcher only broadcasts on file
+      // changes, so without this seed the activity-bar badge would stay
+      // empty until the user makes their first change.
+      const known = latestStateRef.current?.repoChangeCounts ?? {};
+      for (const r of incoming) {
+        if (!(r.id in known)) {
+          clientRef.current?.send({ type: "repo_status", repo_id: r.id });
+        }
+      }
+      setState((s) => {
+        const incomingIds = new Set(incoming.map((r) => r.id));
+        const nextCounts: Record<string, number> = {};
+        for (const [id, count] of Object.entries(s.repoChangeCounts)) {
+          if (incomingIds.has(id)) nextCounts[id] = count;
+        }
+        return { ...s, repos: incoming, repoChangeCounts: nextCounts };
+      });
       return;
+    }
     case "workspaces":
       setState((s) => ({ ...s, workspaces: msg.workspaces }));
       return;
@@ -1634,6 +1675,15 @@ function handleMessage(
           message: `Git ${msg.operation} failed`,
           detail: msg.error,
         });
+      }
+      if (msg.type === "repo_status") {
+        const repoId = msg.repo_id;
+        const count = msg.index_changes.length + msg.worktree_changes.length;
+        setState((s) =>
+          s.repoChangeCounts[repoId] === count
+            ? s
+            : { ...s, repoChangeCounts: { ...s.repoChangeCounts, [repoId]: count } },
+        );
       }
       if (msg.type === "preset_launch_failed") {
         const partials = `${msg.partial_session_ids.length} session(s), ${msg.partial_tab_ids.length} tab(s) partial`;

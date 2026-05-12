@@ -32,9 +32,17 @@ export function writeActivitySection(section: ActivitySection): void {
 interface Props {
   active: ActivitySection;
   onSelect: (s: ActivitySection) => void;
+  /// Total uncommitted file count across all registered repos. Renders as
+  /// a VSCode-style numeric badge on the source-control button when > 0.
+  /// 99+ collapses to "99+" so the badge stays a fixed pill size.
+  sourceControlBadge: number;
 }
 
-export default function ActivityBar({ active, onSelect }: Props) {
+export default function ActivityBar({
+  active,
+  onSelect,
+  sourceControlBadge,
+}: Props) {
   return (
     <nav
       className="activity-bar"
@@ -51,6 +59,7 @@ export default function ActivityBar({ active, onSelect }: Props) {
         // List icon (three horizontal bars). Plain Unicode glyph so we don't
         // pull in an icon library for two icons.
         glyph="☰"
+        badge={0}
       />
       <ActivityButton
         section="source-control"
@@ -59,6 +68,7 @@ export default function ActivityBar({ active, onSelect }: Props) {
         label="Source control"
         // Branch glyph
         glyph="⎇"
+        badge={sourceControlBadge}
       />
     </nav>
   );
@@ -70,6 +80,7 @@ interface ActivityButtonProps {
   onSelect: (s: ActivitySection) => void;
   label: string;
   glyph: string;
+  badge: number;
 }
 
 function ActivityButton({
@@ -78,20 +89,33 @@ function ActivityButton({
   onSelect,
   label,
   glyph,
+  badge,
 }: ActivityButtonProps) {
   const isActive = section === active;
+  const hasBadge = badge > 0;
+  const badgeText = hasBadge ? (badge > 99 ? "99+" : String(badge)) : null;
+  const fullLabel = hasBadge ? `${label} (${badge} uncommitted)` : label;
   return (
     <button
       type="button"
       role="tab"
       className={isActive ? "activity-btn active" : "activity-btn"}
       aria-selected={isActive}
-      aria-label={label}
-      title={label}
+      aria-label={fullLabel}
+      title={fullLabel}
       data-testid={`activity-btn-${section}`}
       onClick={() => onSelect(section)}
     >
       <span aria-hidden="true">{glyph}</span>
+      {badgeText !== null && (
+        <span
+          className="activity-badge"
+          aria-hidden="true"
+          data-testid={`activity-badge-${section}`}
+        >
+          {badgeText}
+        </span>
+      )}
     </button>
   );
 }
