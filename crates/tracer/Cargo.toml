@@ -1,0 +1,29 @@
+[package]
+name = "tracer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "rt-tracer.exe: per-session PTY supervisor that owns the claude child and survives daemon restarts. Phase C skeleton — not yet wired into the daemon."
+
+[[bin]]
+name = "rt-tracer"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tracer-protocol = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+portable-pty = "0.9"
+clap = { version = "4", features = ["derive"] }
