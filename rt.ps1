@@ -8,21 +8,20 @@
 .DESCRIPTION
     Subcommands:
 
-      run        Build the daemon (cargo) then launch `pnpm tauri dev`. This
+      launch     Build the daemon (cargo) then launch `pnpm tauri dev`. This
                  is the default when no subcommand is given -- same flow as
-                 the old `launch.ps1`. With -Release: build the full release
-                 artifacts and launch the standalone exe detached.
+                 the old `launch.ps1`. With -NoBuild: skip the build step
+                 and just launch the existing binaries. With -Release:
+                 build the full release artifacts and launch the standalone
+                 exe detached (combine with -NoBuild to skip the build).
       build      Build only -- no app launch. Debug by default; with -Release
                  produces the standalone-app artifacts (release daemon,
                  frontend bundle, and `rustling-tulip-app.exe`).
-      launch     Launch only -- assumes binaries are already built. In debug
-                 this runs `pnpm tauri dev`; with -Release it starts the
-                 already-built `rustling-tulip-app.exe` detached.
       installer  Run `pnpm tauri build` to produce installer bundles
                  (`target\release\bundle\msi\*.msi` and `nsis\*.exe`).
       stop       Kill any running daemon process(es) and clean the stale
                  handshake file. No-op when nothing is running.
-      restart    `stop` followed by `run`. Use this for "fresh dev loop"
+      restart    `stop` followed by `launch`. Use this for "fresh dev loop"
                  after the daemon got into a bad state.
       test       Run `cargo test` across the workspace.
       clippy     Run the strict workspace clippy pass
@@ -32,20 +31,26 @@
       help       Print the subcommand summary.
 
 .PARAMETER Command
-    The subcommand to run (positional). When omitted, defaults to `run`.
+    The subcommand to run (positional). When omitted, defaults to `launch`.
 
 .PARAMETER Release
-    Applies to `build`, `launch`, `run`, and `restart`. Selects the release
+    Applies to `build`, `launch`, and `restart`. Selects the release
     profile instead of debug.
 
+.PARAMETER NoBuild
+    Applies to `launch`/`restart`. Skip the cargo build step and launch
+    the existing binaries as-is. Useful when iterating on frontend code
+    or running an already-built release artifact.
+
 .PARAMETER ForceStopDaemon
-    Applies to `run`/`restart` only. Stops any running daemon before
+    Applies to `launch`/`restart`. Stops any running daemon before
     building, regardless of whether cargo decides a rebuild is needed.
 
 .EXAMPLE
-    .\rt.ps1                  # = .\rt.ps1 run
+    .\rt.ps1                       # = .\rt.ps1 launch
     .\rt.ps1 build -Release
-    .\rt.ps1 launch
+    .\rt.ps1 launch -NoBuild
+    .\rt.ps1 launch -Release
     .\rt.ps1 installer
     .\rt.ps1 stop
     .\rt.ps1 restart
@@ -57,20 +62,22 @@
 # launch.ps1 / stop-daemon.ps1 it replaces.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
     Justification = 'Interactive dev script; colored status to console is the UX.')]
-# $Release, $ForceStopDaemon, $Rest are read by sub-functions via the script
-# scope; PSScriptAnalyzer's parameter-usage check doesn't trace that.
+# $Release, $NoBuild, $ForceStopDaemon, $Rest are read by sub-functions via
+# the script scope; PSScriptAnalyzer's parameter-usage check doesn't trace
+# that.
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '',
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'run', 'build', 'launch', 'installer', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'help')]
+    [ValidateSet('', 'build', 'launch', 'installer', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
+    [switch]$NoBuild,
     [switch]$ForceStopDaemon,
 
     # Extra arguments forwarded to the underlying tool (e.g. `cargo test --
-    # mytest`). Only meaningful for `run`, `test`, `clippy`, `fmt`.
+    # mytest`). Only meaningful for `launch`, `test`, `clippy`, `fmt`.
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -319,11 +326,14 @@ function Invoke-Build {
 
 function Invoke-Launch {
     Assert-Tooling
-    if ($Release) { Invoke-ReleaseLaunch } else { Invoke-DevLaunch }
-}
 
-function Invoke-Run {
-    Assert-Tooling
+    # Launch-only mode: skip the build step entirely.
+    if ($NoBuild) {
+        if ($Release) { Invoke-ReleaseLaunch } else { Invoke-DevLaunch }
+        return
+    }
+
+    # Build + launch mode.
     if ($Release) {
         Invoke-ReleaseBuild
         Invoke-ReleaseLaunch
@@ -383,7 +393,7 @@ function Invoke-Stop {
 function Invoke-Restart {
     [void](Stop-DaemonProcesses -Reason 'restart requested')
     $script:DaemonAlreadyStopped = $true
-    Invoke-Run
+    Invoke-Launch
 }
 
 function Invoke-Test {
@@ -419,18 +429,18 @@ function Show-Help {
 rt.ps1 -- rustling-tulip dev helper
 
 Usage:
-  .\rt.ps1 [<command>] [-Release] [-ForceStopDaemon] [-- <extra-args>]
+  .\rt.ps1 [<command>] [-Release] [-NoBuild] [-ForceStopDaemon] [-- <extra>]
 
 Commands:
-  run        Build the daemon then `pnpm tauri dev` (default if omitted).
-             With -Release: build the standalone exe and launch it detached.
+  launch     Build the daemon then `pnpm tauri dev` (default if omitted).
+             With -NoBuild: skip the build, just launch existing binaries.
+             With -Release: build + launch the standalone exe detached.
   build      Build only -- no app launch. Debug by default; -Release for
              the standalone-app release artifacts.
-  launch     Launch only -- assumes binaries are already built.
-  installer  `pnpm tauri build` -- produces MSI + NSIS installer bundles
-             under target\release\bundle\.
+  installer  `pnpm tauri build` -- produces installer bundles under
+             target\release\bundle\.
   stop       Kill any running daemon and remove the stale handshake.
-  restart    stop + run. Fresh dev loop after the daemon misbehaves.
+  restart    stop + launch. Fresh dev loop after the daemon misbehaves.
   test       `cargo test` across the workspace.
   clippy     `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
@@ -438,16 +448,18 @@ Commands:
   help       This message.
 
 Flags:
-  -Release           Use the release profile (build/launch/run/restart).
-  -ForceStopDaemon   Stop the daemon up-front (run/restart) even when cargo
-                     says no rebuild is needed.
+  -Release           Use the release profile (build/launch/restart).
+  -NoBuild           Skip the cargo build step (launch/restart).
+  -ForceStopDaemon   Stop the daemon up-front (launch/restart) even when
+                     cargo says no rebuild is needed.
 
 Examples:
-  .\rt.ps1                   # build + launch dev
-  .\rt.ps1 build -Release    # release artifacts, no launch
-  .\rt.ps1 launch            # pnpm tauri dev, no build
-  .\rt.ps1 installer         # MSI + NSIS bundles
-  .\rt.ps1 restart           # kill daemon + relaunch dev
+  .\rt.ps1                       # build + launch dev
+  .\rt.ps1 build -Release        # release artifacts, no launch
+  .\rt.ps1 launch -NoBuild       # launch existing debug binaries
+  .\rt.ps1 launch -Release       # build + launch release exe
+  .\rt.ps1 installer             # build installer bundle
+  .\rt.ps1 restart               # kill daemon + relaunch dev
   .\rt.ps1 clippy
 '@
     Write-Host $help
@@ -457,10 +469,9 @@ Examples:
 # Dispatch
 # ---------------------------------------------------------------------------
 
-$effective = if ([string]::IsNullOrEmpty($Command)) { 'run' } else { $Command }
+$effective = if ([string]::IsNullOrEmpty($Command)) { 'launch' } else { $Command }
 
 switch ($effective) {
-    'run'       { Invoke-Run }
     'build'     { Invoke-Build }
     'launch'    { Invoke-Launch }
     'installer' { Invoke-Installer }
