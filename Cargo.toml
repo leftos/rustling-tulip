@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/protocol",
+    "crates/tracer-protocol",
     "crates/daemon",
     "apps/tauri-app/src-tauri",
 ]
@@ -27,6 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 directories = "5.0"
 
 protocol = { path = "crates/protocol" }
+tracer-protocol = { path = "crates/tracer-protocol" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
