@@ -7,6 +7,7 @@ import {
   loadScrollback,
   type DaemonClient,
 } from "../api";
+import { useFontSize } from "../utils/fontSize";
 
 interface Props {
   sessionId: string;
@@ -19,14 +20,44 @@ interface Props {
   /// window where keystrokes would otherwise be forwarded to a dying
   /// PTY (and trigger daemon warnings).
   status: string;
+  /// Tab id this terminal is mounted under. Resolves the per-tab font
+  /// size override. `null` in pop-out windows.
+  tabId?: string | null;
 }
 
-export default function Terminal({ sessionId, client, subscribePty, status }: Props) {
+export default function Terminal({
+  sessionId,
+  client,
+  subscribePty,
+  status,
+  tabId,
+}: Props) {
   const statusRef = useRef(status);
   statusRef.current = status;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+
+  const fontSize = useFontSize(sessionId, tabId ?? null);
+
+  /// Apply font-size changes to the live XTerm without remounting it —
+  /// rebuilding the terminal on every size change would clear scrollback
+  /// and detach/reattach the PTY. xterm.js exposes `options.fontSize` as
+  /// a setter; we follow up with `fit()` and a daemon resize so the PTY
+  /// dims match the new render.
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    term.options.fontSize = fontSize;
+    fit.fit();
+    client.send({
+      type: "resize",
+      session_id: sessionId,
+      cols: term.cols,
+      rows: term.rows,
+    });
+  }, [fontSize, client, sessionId]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -35,7 +66,7 @@ export default function Terminal({ sessionId, client, subscribePty, status }: Pr
       cursorBlink: true,
       fontFamily:
         "Cascadia Mono, Consolas, 'Courier New', monospace",
-      fontSize: 13,
+      fontSize,
       theme: {
         background: "#0e1116",
         foreground: "#d6d6d6",

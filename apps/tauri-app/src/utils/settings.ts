@@ -39,6 +39,13 @@ export interface Settings {
     /// `--yolo` for codex).
     default_codex_sandbox: CodexSandbox | null;
   };
+  terminal: {
+    /// App-wide default font size in pixels. Per-tab and per-session
+    /// overrides live in separate localStorage keys (see
+    /// `utils/fontSize.ts`) because they're keyed by ephemeral ids.
+    /// Clamped to [8, 32] by the UI.
+    font_size: number;
+  };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -55,6 +62,9 @@ export const DEFAULT_SETTINGS: Settings = {
     skip_permissions_default: true,
     default_permission_mode: null,
     default_codex_sandbox: null,
+  },
+  terminal: {
+    font_size: 13,
   },
 };
 
@@ -144,6 +154,10 @@ function mergeWithDefaults(partial: Partial<Settings>): Settings {
     spawn: {
       ...def.spawn,
       ...partial.spawn,
+    },
+    terminal: {
+      ...def.terminal,
+      ...partial.terminal,
     },
   };
 }

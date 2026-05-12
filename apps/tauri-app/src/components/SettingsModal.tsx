@@ -7,6 +7,7 @@ import type { CodexSandbox, PermissionMode } from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { saveSettings, type Settings } from "../utils/settings";
+import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "../utils/fontSize";
 
 interface Props {
   settings: Settings;
@@ -303,6 +304,44 @@ export default function SettingsModal({ settings, onClose }: Props) {
                 <option value="danger-full-access">danger-full-access</option>
               </select>
             </div>
+          </section>
+
+          <section
+            className="settings-section"
+            data-testid="settings-section-terminal"
+          >
+            <h3>Terminal</h3>
+            <div className="settings-row">
+              <span>Font size</span>
+              <div className="settings-row-control">
+                <input
+                  type="range"
+                  min={MIN_FONT_SIZE}
+                  max={MAX_FONT_SIZE}
+                  step={1}
+                  value={settings.terminal.font_size}
+                  onChange={(e) => {
+                    const v = Number.parseInt(e.target.value, 10);
+                    if (!Number.isFinite(v)) return;
+                    update((s) => ({
+                      ...s,
+                      terminal: { ...s.terminal, font_size: v },
+                    }));
+                  }}
+                  data-testid="settings-terminal-font-size"
+                  aria-label="Terminal font size"
+                />
+                <span className="muted small">
+                  {settings.terminal.font_size}px
+                </span>
+              </div>
+            </div>
+            <p className="settings-section-hint">
+              App-wide default. Per-tab and per-session overrides are set
+              from the tab and session right-click menus, or with
+              Ctrl+= / Ctrl+- (current tab) and Ctrl+Shift+= /
+              Ctrl+Shift+- (focused session).
+            </p>
           </section>
         </div>
         <footer className="modal-footer">

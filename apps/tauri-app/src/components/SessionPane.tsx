@@ -35,6 +35,10 @@ interface Props {
   /// Omitted when SessionPane is rendered outside a grid (e.g. inside
   /// the single-session pop-out window, where there is nowhere to drop).
   onHeaderDragStart?: (e: React.DragEvent) => void;
+  /// Tab id this pane is rendered inside. Threaded down to Terminal so
+  /// per-tab font-size overrides resolve correctly. `null` for the
+  /// single-session pop-out window (no enclosing tab).
+  tabId?: string | null;
 }
 
 export default function SessionPane({
@@ -43,6 +47,7 @@ export default function SessionPane({
   tabs,
   subscribePty,
   onHeaderDragStart,
+  tabId,
 }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [sessionMenu, setSessionMenu] =
@@ -236,6 +241,7 @@ export default function SessionPane({
               client={client}
               subscribePty={subscribePty}
               status={session.status}
+              tabId={tabId ?? null}
             />
           ) : (
             <div className="terminal-placeholder">

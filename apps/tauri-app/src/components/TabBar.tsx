@@ -9,6 +9,14 @@ import {
   tabPaneCount,
 } from "../utils/grid";
 import { tabGrid } from "../types";
+import {
+  clearTabFontSize,
+  getTabFontSize,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  resolveFontSize,
+  setTabFontSize,
+} from "../utils/fontSize";
 
 interface Props {
   tabs: TabEntry[];
@@ -461,6 +469,26 @@ export default function TabBar({
             setConfirmingCloseOthers(false);
             closeMenu();
           }}
+          onFontSizeBump={(delta) => {
+            const cur =
+              getTabFontSize(contextMenu.tabId) ??
+              resolveFontSize(null, contextMenu.tabId);
+            const next = Math.max(
+              MIN_FONT_SIZE,
+              Math.min(MAX_FONT_SIZE, cur + delta),
+            );
+            setTabFontSize(contextMenu.tabId, next);
+          }}
+          onFontSizeReset={() => {
+            clearTabFontSize(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
+            closeMenu();
+          }}
+          currentTabFontSize={
+            getTabFontSize(contextMenu.tabId) ??
+            resolveFontSize(null, contextMenu.tabId)
+          }
+          hasTabFontOverride={getTabFontSize(contextMenu.tabId) !== null}
           onMergeSelected={(layout) => {
             onMergeSelected(layout);
             setConfirmingCloseOthers(false);
@@ -522,11 +550,21 @@ interface ContextMenuProps {
   /// makes sense when there are 2+ panes — a single pane has nothing
   /// to rearrange, so the entire section is omitted.
   targetPaneCount: number;
+  /// Effective font size for the right-clicked tab (override or
+  /// app-default). Rendered as a numeric chip in the menu so the user
+  /// can see what their +/- clicks are nudging.
+  currentTabFontSize: number;
+  /// True when the right-clicked tab carries a per-tab override (vs
+  /// inheriting from app-default). Drives whether the "Reset to
+  /// default" item appears.
+  hasTabFontOverride: boolean;
   onClose: () => void;
   onRename: () => void;
   onCloseTab: () => void;
   onCloseOthers: () => void;
   onRearrange: (layout: RearrangeLayout) => void;
+  onFontSizeBump: (delta: number) => void;
+  onFontSizeReset: () => void;
   onMergeSelected: (layout: "tile_horizontal" | "tile_vertical") => void;
   onPopOut: () => void;
 }
@@ -592,6 +630,55 @@ function TabContextMenu(p: ContextMenuProps) {
               </button>
             </li>
           </>
+        )}
+        <li className="context-menu-separator" aria-hidden="true" />
+        <li className="context-menu-label">
+          Tab font size{" "}
+          <span
+            className={
+              p.hasTabFontOverride
+                ? "context-menu-chip context-menu-chip-emph"
+                : "context-menu-chip"
+            }
+            title={
+              p.hasTabFontOverride
+                ? "Tab override active"
+                : "Using app default"
+            }
+          >
+            {p.currentTabFontSize}px
+          </span>
+        </li>
+        <li>
+          <button
+            type="button"
+            onClick={() => p.onFontSizeBump(1)}
+            data-testid="tab-context-font-bump"
+            disabled={p.currentTabFontSize >= MAX_FONT_SIZE}
+          >
+            &nbsp;&nbsp;Increase
+          </button>
+        </li>
+        <li>
+          <button
+            type="button"
+            onClick={() => p.onFontSizeBump(-1)}
+            data-testid="tab-context-font-shrink"
+            disabled={p.currentTabFontSize <= MIN_FONT_SIZE}
+          >
+            &nbsp;&nbsp;Decrease
+          </button>
+        </li>
+        {p.hasTabFontOverride && (
+          <li>
+            <button
+              type="button"
+              onClick={p.onFontSizeReset}
+              data-testid="tab-context-font-reset"
+            >
+              &nbsp;&nbsp;Reset to app default
+            </button>
+          </li>
         )}
         <li className="context-menu-separator" aria-hidden="true" />
         <li>

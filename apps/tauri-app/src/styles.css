@@ -1152,6 +1152,22 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--fg-muted);
   font-family: var(--font-mono);
 }
+.context-menu-chip {
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.context-menu-chip-emph {
+  color: var(--fg);
+  border-color: var(--accent);
+}
 
 /* ------- Tabs and grid renderer ------- */
 

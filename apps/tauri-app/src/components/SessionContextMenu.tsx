@@ -4,6 +4,14 @@ import type { DaemonClient } from "../api";
 import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
 import { clampMenuCoord } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
+import {
+  clearSessionFontSize,
+  getSessionFontSize,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  resolveFontSize,
+  setSessionFontSize,
+} from "../utils/fontSize";
 
 export interface SessionContextMenuState {
   x: number;
@@ -60,6 +68,20 @@ export default function SessionContextMenu({
 
   const isStopped = s.status === "stopped" || s.status === "error";
   const [closeMode, setCloseMode] = useState<CloseMode>("idle");
+  /// Re-read on every menu render — the source-of-truth lives in
+  /// localStorage and the menu is short-lived. Memoizing would just
+  /// require an extra subscription for no benefit.
+  const sessionTabId = sourceBinding?.tab_id ?? null;
+  const sessionFontSize =
+    getSessionFontSize(s.id) ?? resolveFontSize(s.id, sessionTabId);
+  const hasSessionFontOverride = getSessionFontSize(s.id) !== null;
+  const bumpFont = (delta: number) => {
+    const next = Math.max(
+      MIN_FONT_SIZE,
+      Math.min(MAX_FONT_SIZE, sessionFontSize + delta),
+    );
+    setSessionFontSize(s.id, next);
+  };
 
   const sendStop = (removeWorktree: boolean) => {
     client.send({
@@ -200,6 +222,59 @@ export default function SessionContextMenu({
                   title={worktreePath}
                 >
                   Reveal worktree in Explorer
+                </button>
+              </li>
+            )}
+
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li className="context-menu-label">
+              Font size{" "}
+              <span
+                className={
+                  hasSessionFontOverride
+                    ? "context-menu-chip context-menu-chip-emph"
+                    : "context-menu-chip"
+                }
+                title={
+                  hasSessionFontOverride
+                    ? "Session override active"
+                    : "Inheriting tab/app default"
+                }
+              >
+                {sessionFontSize}px
+              </span>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => bumpFont(1)}
+                disabled={sessionFontSize >= MAX_FONT_SIZE}
+                data-testid="session-context-font-bump"
+              >
+                &nbsp;&nbsp;Increase
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                onClick={() => bumpFont(-1)}
+                disabled={sessionFontSize <= MIN_FONT_SIZE}
+                data-testid="session-context-font-shrink"
+              >
+                &nbsp;&nbsp;Decrease
+              </button>
+            </li>
+            {hasSessionFontOverride && (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearSessionFontSize(s.id);
+                    onClose();
+                  }}
+                  data-testid="session-context-font-reset"
+                >
+                  &nbsp;&nbsp;Reset to tab/app default
                 </button>
               </li>
             )}

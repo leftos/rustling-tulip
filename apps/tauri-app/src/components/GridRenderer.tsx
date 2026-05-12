@@ -468,6 +468,7 @@ function PaneChrome(props: PaneChromeProps) {
             tabs={props.tabs}
             subscribePty={subscribePty}
             onHeaderDragStart={onDragStart}
+            tabId={tabId}
           />
         ) : (
           <EmptyPane

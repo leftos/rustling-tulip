@@ -54,6 +54,18 @@ import { logToFile } from "./utils/logger";
 import { collectPanes, findTabContainingSession } from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
 import { loadSettings, useSettings } from "./utils/settings";
+import {
+  clearSessionFontSize,
+  clearTabFontSize,
+  getSessionFontSize,
+  getTabFontSize,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  pruneOverrides,
+  resolveFontSize,
+  setSessionFontSize,
+  setTabFontSize,
+} from "./utils/fontSize";
 
 /// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
 /// `?session=<id>` (legacy single-session pop-out). The branch in App
@@ -886,6 +898,30 @@ export default function App() {
     return session?.members[0]?.repo_id ?? null;
   }, [activeTab, state.focusedPaneId, state.sessions]);
 
+  // Session id of the focused pane (or null). Reused by the font-size
+  // shortcuts to know which session's override to bump when the user
+  // presses Ctrl+Shift+= / Ctrl+Shift+-.
+  const focusedSessionId = useMemo<string | null>(() => {
+    if (!activeTab || !state.focusedPaneId) return null;
+    const grid = tabGrid(activeTab);
+    if (!grid) return null;
+    const pane = collectPanes(grid).find(
+      (p) => p.pane_id === state.focusedPaneId,
+    );
+    return pane?.session_id ?? null;
+  }, [activeTab, state.focusedPaneId]);
+
+  // Drop font-size overrides for sessions / tabs that no longer exist.
+  // Runs whenever the live id sets shift — typically once per
+  // session-close or tab-close. Keeps the localStorage maps from growing
+  // forever.
+  useEffect(() => {
+    pruneOverrides(
+      new Set(state.tabs.map((t) => t.id)),
+      new Set(state.sessions.map((s) => s.id)),
+    );
+  }, [state.tabs, state.sessions]);
+
   // App-level keyboard shortcuts. Skip when a modal is open so the
   // user's typing in a dialog input doesn't fire a tab cycle.
   const anyModalOpen =
@@ -963,6 +999,56 @@ export default function App() {
         });
       }
     }
+    // Ctrl+= / Ctrl+- adjust the focused session's font size by 1.
+    // Ctrl+Shift+= / Ctrl+Shift+- adjust the active tab's override
+    // (affects every session in the tab unless they have a per-session
+    // override of their own). Ctrl+0 resets the focused session +
+    // active tab back to the app default.
+    //
+    // We bind both "=" (the unshifted plus key on US layout) and "+"
+    // so the shortcut works regardless of whether the user holds
+    // shift to type the plus sign.
+    const bumpSessionFont = (delta: number) => {
+      if (focusedSessionId === null) return;
+      const cur =
+        getSessionFontSize(focusedSessionId) ??
+        resolveFontSize(focusedSessionId, state.activeTabId);
+      const next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, cur + delta));
+      setSessionFontSize(focusedSessionId, next);
+    };
+    const bumpTabFont = (delta: number) => {
+      if (!state.activeTabId) return;
+      const cur =
+        getTabFontSize(state.activeTabId) ??
+        resolveFontSize(null, state.activeTabId);
+      const next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, cur + delta));
+      setTabFontSize(state.activeTabId, next);
+    };
+    if (focusedSessionId !== null) {
+      list.push({ key: "=", handler: () => bumpSessionFont(1) });
+      list.push({ key: "+", handler: () => bumpSessionFont(1) });
+      list.push({ key: "-", handler: () => bumpSessionFont(-1) });
+    }
+    if (state.activeTabId) {
+      list.push({ key: "=", shift: true, handler: () => bumpTabFont(1) });
+      list.push({ key: "+", shift: true, handler: () => bumpTabFont(1) });
+      list.push({ key: "-", shift: true, handler: () => bumpTabFont(-1) });
+    }
+    // Ctrl+0: reset the focused session override AND the active tab
+    // override, falling everything back to the app default.
+    if (focusedSessionId !== null || state.activeTabId) {
+      list.push({
+        key: "0",
+        handler: () => {
+          if (focusedSessionId !== null) {
+            clearSessionFontSize(focusedSessionId);
+          }
+          if (state.activeTabId) {
+            clearTabFontSize(state.activeTabId);
+          }
+        },
+      });
+    }
     return list;
   }, [
     anyModalOpen,
@@ -970,6 +1056,7 @@ export default function App() {
     state.repos.length,
     state.tabs,
     state.activeTabId,
+    focusedSessionId,
     onActivateTab,
     onOpenSpawn,
     onOpenSettings,
