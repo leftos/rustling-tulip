@@ -9,19 +9,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 crates/protocol/        shared wire types (serde JSON over WS) — the contract between daemon and clients
 crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry, git/scrollback/orphan logic
+crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
+crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 apps/tauri-app/
   src-tauri/            Rust side: spawns the daemon, exposes Tauri commands (file picker, pop-out window)
-  src/                  React 19 + xterm.js frontend
+  src/                  React 19 + xterm.js frontend (Monaco editor for diffs)
+tools/e2e/              WebdriverIO end-to-end test suite + fake-claude CLI shim
 docs/plan.md            full architecture and phased rollout (Phase 0–6)
 docs/plans/*.md         follow-up designs (source-control sidebar, codex support, etc.)
 ```
 
 ## Common commands
 
-PowerShell on Windows is the primary dev environment.
+PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root is a convenience wrapper for the most common tasks:
 
 ```powershell
-# Workspace build (daemon + protocol + tauri rust side)
+# Convenience wrapper (recommended)
+.\rt.ps1 build            # cargo build (workspace)
+.\rt.ps1 build --release  # cargo build --release
+.\rt.ps1 clippy           # strict lint pass (-D warnings)
+.\rt.ps1 test             # cargo test (workspace)
+.\rt.ps1 restart          # stop running daemon + relaunch
+.\rt.ps1 installer        # produce NSIS bundle
+.\rt.ps1 help             # usage summary
+```
+
+Raw cargo / pnpm equivalents when you need them:
+
+```powershell
+# Workspace build
 cargo build
 cargo build --release
 
@@ -44,6 +60,38 @@ pnpm build                # tsc -b && vite build
 ```
 
 The Tauri app auto-spawns the daemon on first connect via `daemon_supervisor::ensure_running`. The daemon writes `port` + `auth_token` + `pid` to `daemon.json` in the config dir below; clients read that to connect.
+
+## E2E tests
+
+The suite lives in `tools/e2e/` and uses WebdriverIO + tauri-driver. One-time machine setup:
+
+```powershell
+cargo install tauri-driver --locked
+cargo install --git https://github.com/chippers/msedgedriver-tool
+& "$HOME/.cargo/bin/msedgedriver-tool.exe"   # downloads matching Edge WebDriver
+```
+
+Running tests:
+
+```powershell
+cd tools/e2e
+pnpm install              # one-time dep install
+pnpm doctor               # validate tauri-driver + msedgedriver are on PATH
+pnpm test                 # run all WebdriverIO specs
+pnpm host                 # start interactive test host (accepts JSON commands over stdin)
+```
+
+The `fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI during tests. It is wired in via the `RUSTLING_TULIP_CLAUDE` environment variable — the daemon path-resolves the CLI binary from that var at spawn time.
+
+## Environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `RUSTLING_TULIP_CLAUDE` | Path to `claude` binary | `claude` (PATH lookup) |
+| `RUSTLING_TULIP_CODEX` | Path to `codex` binary | `codex` (PATH lookup) |
+| `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
+| `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
+| `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |
 
 ## Where things live on disk
 
@@ -82,7 +130,7 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
 **Tracer-backed PTY sessions (Phase C.3).** Every interactive and plain-shell PTY child is spawned under a per-session `rt-tracer.exe` supervisor process; the daemon talks to it over a named pipe at `\\.\pipe\rt-tracer-<session-id>`. The tracer owns the master ConPTY handle and survives daemon restarts — when the daemon dies the tracer keeps draining child output to its internal ring buffer (4 MB cap, oldest-bytes-drop on overflow), and a freshly-started daemon reattaches via `tracer_client::reattach` and replays the ring to catch up. Spawn site: `crates/daemon/src/tracer_client.rs::spawn`. Tracer ABI: `crates/tracer-protocol/src/lib.rs` — frozen surface; additive changes (new fields with `#[serde(default)]`, new variants with `#[serde(other)] Unknown`) are not a bump. Headless (`claude --print`) does NOT go through the tracer — it's piped stdio and lives in `crates/daemon/src/headless.rs`. The tracer binary must be present next to `rustling-tulipd.exe` (cargo builds both into `target/<profile>/`; production installers must bundle both — see "Things that are deferred").
 
-**The pop-out window** is the same React bundle reloaded with `?session=<id>` — `App.tsx` branches on the query param to render `SessionWindow` instead of the full sidebar layout. The daemon already accepts multiple WS clients, so each window opens its own connection.
+**Live git watcher** (`crates/daemon/src/git_watch.rs`). Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher. `.git/objects/`, `.git/logs/HEAD`, `FETCH_HEAD`, lock files, and well-known build/cache dirs (`target/`, `node_modules/`, `dist/`, `.next/`, `.venv/`, `__pycache__/`, …) are ignored so a `cargo build` or `pnpm install` doesn't spin up `git status` forever. The refresher tracks two flags — `status` and `stash` — and only invokes `git stash list` when a stash ref actually changed. The refresher parks while `Hub.client_count` is 0 (an RAII `ClientCountGuard` in `client_session` maintains the count); the next reconnect triggers one catch-up `repo_status` + `stash_list` before resuming event-driven refresh. **The pop-out window** is the same React bundle reloaded with `?session=<id>` — `App.tsx` branches on the query param to render `SessionWindow` instead of the full sidebar layout. The daemon already accepts multiple WS clients, so each window opens its own connection.
 
 ## Wire-protocol gotchas
 
@@ -95,11 +143,13 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
 Workspace `Cargo.toml` enforces clippy pedantic + denies on `unwrap_used`, `panic`, `dbg_macro`, `todo`, `print_*`, `exit`, etc. Use `tracing::{error,warn,info,debug}` instead of `println!`. Use `expect_used = "warn"` — prefer `?` and `anyhow::Context`. The two existing `.expect()` allowances live in `apps/tauri-app/src-tauri/src/lib.rs` for Tauri builder errors with explicit `#[expect(... reason = "...")]`.
 
-Frontend uses TypeScript strict + React 19 + xterm.js (`@xterm/xterm` + `@xterm/addon-fit`). PTY output is high-volume — keep it out of React state, use a `Map<sessionId, Set<listener>>` ref pattern (see `App.tsx`).
+Rust edition 2024, pinned to 1.87 via `rust-toolchain.toml`. Profile `release` uses `lto = "thin"`, `codegen-units = 1`, `strip = true`.
+
+Frontend uses TypeScript strict + React 19 + xterm.js (`@xterm/xterm` + `@xterm/addon-fit`). PTY output is high-volume — keep it out of React state, use a `Map<sessionId, Set<listener>>` ref pattern (see `App.tsx`). Monaco editor (`monaco-editor`) is used for diff viewing in the source-control sidebar.
 
 ## Plan files
 
-`docs/plan.md` is the canonical plan with checklist-tracked phases. When completing a planned task, tick the checkbox. New designs go in `docs/plans/*.md` with `- [x]` / `- [ ]` checklists for actionable items.
+`docs/plan.md` is the canonical plan with checklist-tracked phases. When completing a planned task, tick the checkbox. New designs go in `docs/plans/*.md` with `- [x]` / `- [ ]` checklists for actionable items. Completed designs move to `docs/plans/completed/` (git-mv as part of the shipping commit).
 
 ## Things that are deferred / not implemented
 
@@ -108,5 +158,4 @@ Don't go looking for these — they're explicitly out of scope until the corresp
 - **Auto-update** for the desktop app (`tauri-plugin-updater`) — deferred until a signed release pipeline exists.
 - **Production installer bundling** (Tauri `bundle.active = true` with both `rustling-tulipd.exe` and `rt-tracer.exe` as `externalBin` / `resources`) — deferred until a signed release pipeline exists. Dev flow works out of the box: `cargo build` emits both binaries into `target/<profile>/` and the supervisor + tracer-client find them via sibling-of-current-exe lookup.
 - **Stage/unstage from the git panel** — the panel is read-only; `StageFiles` is in the protocol but not wired up.
-- **Live `.git` watcher** — git views re-fetch on user action only.
 - **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync**, **mobile app** — explicit non-goals.

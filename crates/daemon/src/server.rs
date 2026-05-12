@@ -70,6 +70,32 @@ pub struct Hub {
     /// visible to other clients until they reconnected. See ux-audit:
     /// "Daemon repo/workspace updates are NOT broadcast to all clients."
     pub state_events: broadcast::Sender<StateEvent>,
+    /// Number of currently-attached WS clients. Maintained by
+    /// [`ClientCountGuard`] in `client_session` (RAII inc/dec) and consumed
+    /// by `git_watch` to park its per-repo refreshers while no UI is
+    /// listening — the broadcasts would just be dropped on the floor and
+    /// every event would cost a couple of `git` subprocesses for nothing.
+    pub client_count: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+/// RAII guard around [`Hub::client_count`]: increments on construction,
+/// decrements on drop. Drop runs on normal return and panic alike, so the
+/// count stays consistent even if a client task unwinds.
+struct ClientCountGuard {
+    counter: Arc<tokio::sync::watch::Sender<usize>>,
+}
+
+impl ClientCountGuard {
+    fn new(counter: Arc<tokio::sync::watch::Sender<usize>>) -> Self {
+        counter.send_modify(|c| *c += 1);
+        Self { counter }
+    }
+}
+
+impl Drop for ClientCountGuard {
+    fn drop(&mut self) {
+        self.counter.send_modify(|c| *c = c.saturating_sub(1));
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -231,13 +257,16 @@ pub async fn run(
     let (tab_events, _) = broadcast::channel(TAB_EVENT_CAPACITY);
     let (preset_events, _) = broadcast::channel(PRESET_EVENT_CAPACITY);
     let (state_events, _) = broadcast::channel(STATE_EVENT_CAPACITY);
+    let (client_count_tx, client_count_rx) = tokio::sync::watch::channel(0usize);
+    let client_count = Arc::new(client_count_tx);
 
     // Per-repo filesystem watchers that keep the source-control sidebar
     // live without user-triggered refreshes. The supervisor task owns the
     // per-repo debouncer handles and listens on `state_events` for repo
     // add/remove broadcasts, so adding a repo at runtime spawns a watcher
-    // and removing one stops it. See `crates/daemon/src/git_watch.rs`.
-    crate::git_watch::start(&state, &state_events);
+    // and removing one stops it. Refreshers park while `client_count` is
+    // 0 — see `crates/daemon/src/git_watch.rs`.
+    crate::git_watch::start(&state, &state_events, client_count_rx);
 
     let hub = Hub {
         state,
@@ -249,6 +278,7 @@ pub async fn run(
         tab_events,
         preset_events,
         state_events,
+        client_count,
     };
 
     let app = Router::new()
@@ -317,6 +347,9 @@ async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
 }
 
 async fn client_session(hub: Hub, socket: WebSocket) {
+    // RAII-tracked so `git_watch` can pause its refreshers when no UI is
+    // listening. Dropped on normal return and on panic.
+    let _client_guard = ClientCountGuard::new(Arc::clone(&hub.client_count));
     let (mut sender, mut receiver) = socket.split();
 
     // Each outgoing message goes through this channel so PTY/event tasks can
