@@ -936,6 +936,13 @@ pub enum ClientMessage {
         suggestion: VscodeWorkspaceSuggestion,
         watch: bool,
     },
+    /// Parse a `.code-workspace` file at `path`, resolve folder paths, and
+    /// match against registered repos. The daemon replies with
+    /// [`DaemonMessage::VscodeWorkspaceParsed`] on success or
+    /// [`DaemonMessage::Error`] on I/O or parse failure.
+    ParseVscodeWorkspace {
+        path: String,
+    },
     RemoveWorkspace {
         workspace_id: String,
     },
@@ -1515,6 +1522,10 @@ pub enum DaemonMessage {
     SessionsReordered {
         container_id: String,
         ordered_ids: Vec<String>,
+    },
+    /// Response to [`ClientMessage::ParseVscodeWorkspace`].
+    VscodeWorkspaceParsed {
+        suggestion: VscodeWorkspaceSuggestion,
     },
     /// Response to [`ClientMessage::ListPresets`].
     Presets {

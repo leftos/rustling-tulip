@@ -1722,6 +1722,61 @@ button.tree-tab-pill:hover {
   padding: 12px 16px; border-bottom: 1px solid var(--border);
 }
 .modal-header h2 { margin: 0; font-size: 14px; font-weight: 500; }
+
+/* Two-mode tab strip inside a modal (e.g. WorkspaceCreator) */
+.modal-tabs {
+  display: flex; border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+.modal-tabs button {
+  background: none; border: none; padding: 8px 12px;
+  font-size: var(--text-small); color: var(--text-muted);
+  cursor: pointer; border-bottom: 2px solid transparent;
+  margin-bottom: -1px; transition: color var(--dur-fast);
+}
+.modal-tabs button:hover { color: var(--text); }
+.modal-tabs button.active {
+  color: var(--accent); border-bottom-color: var(--accent);
+}
+
+/* File-picker row: path label + Browse button side by side */
+.file-picker-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg-input);
+}
+.file-picker-path {
+  flex: 1; font-size: var(--text-small); color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* Inline status/error lines inside modal panels */
+.status-message {
+  font-size: var(--text-small); color: var(--text-muted);
+  margin: 0; padding: 4px 0;
+}
+.status-message.error { color: var(--err); }
+
+/* Registered / will-register badges on folder list items */
+.list-item-badge {
+  font-size: var(--text-micro); padding: 1px 6px;
+  border-radius: 20px; font-weight: 500; flex-shrink: 0;
+}
+.list-item-badge.registered {
+  background: color-mix(in srgb, var(--ok) 15%, transparent);
+  color: var(--ok);
+}
+.list-item-badge.new {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+.list-item-name {
+  flex: 1; font-size: var(--text-small);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .modal-body {
   padding: 16px; display: flex; flex-direction: column; gap: 12px;
   overflow-y: auto;

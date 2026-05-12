@@ -791,6 +791,20 @@ async fn dispatch(
         }
         ClientMessage::AcceptVscodeWorkspaceSuggestion { suggestion, watch } => {
             accept_vscode_suggestion(hub, suggestion, watch, out_tx).await?;
+            // Broadcast container order in case new repos were registered.
+            let container_order = hub.state.with_persisted(|s| s.container_order.clone());
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(container_order));
+        }
+        ClientMessage::ParseVscodeWorkspace { path } => {
+            let known_repos: Vec<(String, String)> = hub.state.with_persisted(|s| {
+                s.repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect()
+            });
+            let suggestion =
+                crate::vscode::parse_workspace_file(std::path::Path::new(&path), &known_repos)
+                    .map_err(|e| anyhow!("parse_vscode_workspace: {e}"))?;
+            let _ = out_tx.send(DaemonMessage::VscodeWorkspaceParsed { suggestion });
         }
         ClientMessage::ListSessions => {
             let _ = out_tx.send(DaemonMessage::Sessions {

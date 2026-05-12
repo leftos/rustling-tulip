@@ -504,6 +504,7 @@ export type ClientMessage =
   | { type: "rename_tab"; tab_id: string; name: string }
   | { type: "reorder_tabs"; ordered_ids: string[] }
   | { type: "reorder_containers"; ordered: ContainerRef[] }
+  | { type: "parse_vscode_workspace"; path: string }
   | {
       type: "reorder_sessions";
       container_id: string;
@@ -685,6 +686,10 @@ export type DaemonMessage =
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }
   | { type: "containers_reordered"; ordered: ContainerRef[] }
+  | {
+      type: "vscode_workspace_parsed";
+      suggestion: VscodeWorkspaceSuggestion;
+    }
   | {
       type: "sessions_reordered";
       container_id: string;
