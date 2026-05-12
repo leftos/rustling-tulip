@@ -20,7 +20,11 @@ mod ring;
 mod supervisor;
 
 #[derive(Debug, Parser)]
-#[command(name = "rt-tracer", version, about = "rustling-tulip per-session PTY supervisor")]
+#[command(
+    name = "rt-tracer",
+    version,
+    about = "rustling-tulip per-session PTY supervisor"
+)]
 struct Cli {
     /// Session id used to derive the named-pipe path
     /// (`\\.\pipe\rt-tracer-<session-id>`).

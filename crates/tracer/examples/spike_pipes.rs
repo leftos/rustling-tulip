@@ -27,15 +27,16 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::windows::named_pipe::{
-    ClientOptions, PipeMode, ServerOptions,
-};
+use tokio::net::windows::named_pipe::{ClientOptions, PipeMode, ServerOptions};
 
 const PIPE_NAME: &str = r"\\.\pipe\rt-tracer-spike-c1";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_target(false).compact().init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .compact()
+        .init();
     let subcmd = std::env::args().nth(1).unwrap_or_default();
     match subcmd.as_str() {
         "server" => run_server().await,

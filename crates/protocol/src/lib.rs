@@ -491,9 +491,7 @@ pub enum RearrangeLayout {
     /// computes rows from `ceil(N/cols)`. When `cols == 0`, the daemon
     /// auto-picks `ceil(sqrt(N))` so callers that just want "make this
     /// look like a grid" don't have to do the math.
-    Grid {
-        cols: u32,
-    },
+    Grid { cols: u32 },
     /// Forward-compat fallback: a layout variant the current build doesn't
     /// know. Daemon dispatch falls back to `Balanced`. Serializes as
     /// `{"kind":"unknown"}` if ever round-tripped — daemon never
@@ -1845,9 +1843,7 @@ mod tests {
                             "-Minutes".to_string(),
                             "{minutes}".to_string(),
                         ],
-                        extract_pattern: Some(
-                            r"Saved \d+ lines to (.+?)\s*$".to_string(),
-                        ),
+                        extract_pattern: Some(r"Saved \d+ lines to (.+?)\s*$".to_string()),
                         timeout_ms: 60_000,
                         skip_if_empty: Some("minutes".to_string()),
                     },
@@ -1944,10 +1940,7 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""type":"resolve_preset_scripts""#));
         let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
-        let ClientMessage::ResolvePresetScripts {
-            id, preset_id, ..
-        } = decoded
-        else {
+        let ClientMessage::ResolvePresetScripts { id, preset_id, .. } = decoded else {
             panic!("wrong variant");
         };
         assert_eq!(id, "r1");
@@ -2244,7 +2237,10 @@ mod tests {
             panic!("expected Unknown, got {parsed:?}");
         };
         assert_eq!(type_tag, "future_only_message");
-        assert_eq!(raw.get("new_field").and_then(serde_json::Value::as_i64), Some(42));
+        assert_eq!(
+            raw.get("new_field").and_then(serde_json::Value::as_i64),
+            Some(42)
+        );
     }
 
     #[test]

@@ -380,7 +380,8 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err).context("reading meta for terminal_title update"),
     };
-    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for terminal_title update")?;
+    let mut meta =
+        load_meta_from_bytes(&bytes).context("loading meta for terminal_title update")?;
     if meta.terminal_title.as_deref() == Some(new_title) {
         return Ok(());
     }

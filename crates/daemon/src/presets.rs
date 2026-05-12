@@ -16,8 +16,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
     FooterLine, GridNode, InjectorStep, InjectorTemplate, LaunchPresetSource, PresetEntry,
-    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry, ScriptCommandPreview,
-    SessionMode, SpawnRequest, SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
+    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry,
+    ScriptCommandPreview, SessionMode, SpawnRequest, SpawnTarget, SplitDirection, TabEntry,
+    TabGroupingConfig, TabLayout,
 };
 use regex::Regex;
 use tokio::process::Command;
@@ -394,9 +395,7 @@ async fn resolve_one_variable(
                 return Ok((*pre).to_string());
             }
             if let Some(guard_name) = skip_if_empty {
-                let guard_value = earlier
-                    .get(guard_name.as_str())
-                    .map_or("", String::as_str);
+                let guard_value = earlier.get(guard_name.as_str()).map_or("", String::as_str);
                 if guard_value.is_empty() {
                     return Ok(String::new());
                 }

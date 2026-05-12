@@ -193,7 +193,10 @@ mod tests {
 
     #[test]
     fn negotiate_picks_supported() {
-        assert_eq!(negotiate(TRACER_VERSION, &[TRACER_VERSION]), Some(TRACER_VERSION));
+        assert_eq!(
+            negotiate(TRACER_VERSION, &[TRACER_VERSION]),
+            Some(TRACER_VERSION)
+        );
         assert_eq!(negotiate(u32::MAX, &[]), None);
     }
 

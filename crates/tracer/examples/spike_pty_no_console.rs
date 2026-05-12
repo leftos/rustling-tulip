@@ -16,7 +16,10 @@ use std::time::Duration;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_target(false).compact().init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .compact()
+        .init();
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows: 24,

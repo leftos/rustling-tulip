@@ -3,7 +3,6 @@
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
-use crate::tracer_client;
 use crate::registry::{
     add_repo, persist_last_agent, remove_repo, remove_workspace, set_repo_worktree_default,
     set_workspace_worktree_default, upsert_workspace,
@@ -14,6 +13,7 @@ use crate::session::{
 };
 use crate::state::AppState;
 use crate::tabs;
+use crate::tracer_client;
 use crate::{
     git, git_inspect, git_write, headless, inject, osc_title, pty_state, vscode, workspace as ws,
 };
@@ -580,8 +580,7 @@ async fn handshake(
         Message::Text(t) => t.to_string(),
         _ => return Err(anyhow!("first frame must be text Hello")),
     };
-    let parsed =
-        InboundClientMessage::from_json_str(&text).context("parsing handshake message")?;
+    let parsed = InboundClientMessage::from_json_str(&text).context("parsing handshake message")?;
     let InboundClientMessage::Known(ClientMessage::Hello {
         protocol_version,
         protocol_versions,
@@ -593,8 +592,8 @@ async fn handshake(
     if auth_token != hub.auth_token {
         return Err(anyhow!("invalid auth token"));
     }
-    let negotiated = negotiate_protocol_version(protocol_version, &protocol_versions)
-        .ok_or_else(|| {
+    let negotiated =
+        negotiate_protocol_version(protocol_version, &protocol_versions).ok_or_else(|| {
             anyhow!(
                 "no compatible protocol version: client advertises scalar={protocol_version} \
                  + range={protocol_versions:?}, daemon supports {SUPPORTED_PROTOCOL_VERSIONS:?}"
@@ -1284,13 +1283,8 @@ async fn dispatch(
             let hub = hub.clone();
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
-                match crate::presets::resolve_scripts(
-                    &hub,
-                    &target,
-                    &preset_id,
-                    &variable_values,
-                )
-                .await
+                match crate::presets::resolve_scripts(&hub, &target, &preset_id, &variable_values)
+                    .await
                 {
                     Ok((values, executed_commands)) => {
                         let _ = out_tx.send(DaemonMessage::PresetScriptsResolved {
@@ -1535,7 +1529,10 @@ async fn handle_stash_write<F>(
                         });
                     }
                     Err(err) => {
-                        warn!(?err, repo_id, "stash_write: post-write status refresh failed");
+                        warn!(
+                            ?err,
+                            repo_id, "stash_write: post-write status refresh failed"
+                        );
                     }
                 }
                 match git_write::stash_list(&repo).await {
@@ -1775,11 +1772,7 @@ fn build_workspace_prelude(members: &[SessionMember]) -> Option<String> {
          file access — they override any absolute paths referenced in \
          CLAUDE.md / AGENTS.md):\n",
     );
-    let name_width = members
-        .iter()
-        .map(|m| m.repo_name.len())
-        .max()
-        .unwrap_or(0);
+    let name_width = members.iter().map(|m| m.repo_name.len()).max().unwrap_or(0);
     for m in members {
         use std::fmt::Write as _;
         // Width-padded for visual alignment in the agent's view; failure
@@ -2299,9 +2292,7 @@ async fn spawn_workspace(
 )> {
     info!(
         workspace_id,
-        branch_name,
-        use_worktree,
-        "spawn_workspace: begin"
+        branch_name, use_worktree, "spawn_workspace: begin"
     );
     let (workspace, resolved) = ws::resolve_workspace(
         &hub.state,
@@ -2767,7 +2758,11 @@ mod tests {
         assert_eq!(args[1], "X:/wt/yaat-server");
         assert_eq!(args[2], "--add-dir");
         assert_eq!(args[3], "X:/wt/yaat-shared");
-        assert_eq!(args.len(), 5, "expected 4 add-dir args + 1 prelude positional");
+        assert_eq!(
+            args.len(),
+            5,
+            "expected 4 add-dir args + 1 prelude positional"
+        );
         let prelude = &args[4];
         assert!(prelude.contains("Workspace member paths"));
         assert!(prelude.contains("r1"));
@@ -2787,7 +2782,10 @@ mod tests {
             member("yaat-server", "X:/wt/yaat-server"),
         ];
         let prelude = build_workspace_prelude(&members).unwrap_or_default();
-        assert!(!prelude.is_empty(), "prelude should be present for 2 members");
+        assert!(
+            !prelude.is_empty(),
+            "prelude should be present for 2 members"
+        );
         // Each member name maps to its worktree path on its own line.
         // Width padding aligns them — assert on the parts, not the exact
         // column count, so this test won't churn if formatting evolves.
@@ -2800,10 +2798,7 @@ mod tests {
 
     #[test]
     fn codex_workspace_with_user_prompt_concatenates() {
-        let members = vec![
-            member("r1", "X:/wt/r1"),
-            member("r2", "X:/wt/r2"),
-        ];
+        let members = vec![member("r1", "X:/wt/r1"), member("r2", "X:/wt/r2")];
         let c = cfg(Agent::Codex);
         let args = build_codex_args(&c, &members, Some("do the thing"));
         let positional = args.last().cloned().unwrap_or_default();

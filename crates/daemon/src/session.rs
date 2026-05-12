@@ -110,13 +110,13 @@ impl SessionRecord {
         // close-context-menu can offer worktree cleanup. Computed from
         // the persisted spawn config; orphans with no stored config
         // conservatively report `false`.
-        let has_per_session_worktree = self
-            .spawn_config
-            .as_ref()
-            .is_some_and(|cfg| match &cfg.target {
-                protocol::SpawnTarget::Single { use_worktree, .. }
-                | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
-            });
+        let has_per_session_worktree =
+            self.spawn_config
+                .as_ref()
+                .is_some_and(|cfg| match &cfg.target {
+                    protocol::SpawnTarget::Single { use_worktree, .. }
+                    | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                });
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),

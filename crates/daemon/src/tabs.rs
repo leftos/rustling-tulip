@@ -1190,7 +1190,10 @@ mod tests {
         // Each row is a balanced horizontal split of three panes.
         let row_panes = collect_panes(&first);
         assert_eq!(
-            row_panes.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            row_panes
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>(),
             vec!["p0", "p1", "p2"]
         );
         let row2_panes = collect_panes(&second);
@@ -1213,23 +1216,18 @@ mod tests {
 
     #[test]
     fn build_grid_short_last_row() {
-        let panes: Vec<(String, Option<String>)> = (0..5)
-            .map(|i| (format!("p{i}"), None))
-            .collect();
+        let panes: Vec<(String, Option<String>)> =
+            (0..5).map(|i| (format!("p{i}"), None)).collect();
         let tree = build_grid(&panes, 3).expect("non-empty");
         // 5 panes / 3 cols = 2 rows; row 1 = [p0,p1,p2], row 2 = [p3,p4].
-        let all: Vec<String> = collect_panes(&tree)
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
+        let all: Vec<String> = collect_panes(&tree).into_iter().map(|(p, _)| p).collect();
         assert_eq!(all, vec!["p0", "p1", "p2", "p3", "p4"]);
     }
 
     #[test]
     fn build_grid_auto_picks_cols_when_zero() {
-        let panes: Vec<(String, Option<String>)> = (0..9)
-            .map(|i| (format!("p{i}"), None))
-            .collect();
+        let panes: Vec<(String, Option<String>)> =
+            (0..9).map(|i| (format!("p{i}"), None)).collect();
         let tree = build_grid(&panes, 0).expect("non-empty");
         // ceil(sqrt(9)) = 3 → 3 rows of 3.
         let GridNode::Split { first, .. } = &tree else {
@@ -1272,12 +1270,7 @@ mod tests {
         // Edge case: every pane is empty. Dropping them all would leave the
         // tab with zero panes (no valid representation), so we fall back to
         // rearranging the original set in place.
-        let original = split(
-            Horizontal,
-            0.5,
-            pane("p1", None),
-            pane("p2", None),
-        );
+        let original = split(Horizontal, 0.5, pane("p1", None), pane("p2", None));
         let rearranged =
             rearrange_grid(&original, RearrangeLayout::Grid { cols: 0 }).expect("rearrange");
         let panes_after = collect_panes(&rearranged);
@@ -1288,12 +1281,7 @@ mod tests {
 
     #[test]
     fn rearrange_grid_horizontal_makes_single_row() {
-        let original = split(
-            Vertical,
-            0.5,
-            pane("p1", None),
-            pane("p2", None),
-        );
+        let original = split(Vertical, 0.5, pane("p1", None), pane("p2", None));
         let new = rearrange_grid(&original, RearrangeLayout::Horizontal).expect("rearrange");
         let GridNode::Split { direction, .. } = &new else {
             panic!("expected Split");
@@ -1303,12 +1291,7 @@ mod tests {
 
     #[test]
     fn rearrange_grid_vertical_makes_single_column() {
-        let original = split(
-            Horizontal,
-            0.5,
-            pane("p1", None),
-            pane("p2", None),
-        );
+        let original = split(Horizontal, 0.5, pane("p1", None), pane("p2", None));
         let new = rearrange_grid(&original, RearrangeLayout::Vertical).expect("rearrange");
         let GridNode::Split { direction, .. } = &new else {
             panic!("expected Split");

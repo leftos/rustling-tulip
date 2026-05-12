@@ -146,9 +146,9 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW);
 
-    let child = cmd.spawn().with_context(|| {
-        format!("spawning tracer process {}", tracer.display())
-    })?;
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawning tracer process {}", tracer.display()))?;
     Ok(child.id())
 }
 
@@ -322,9 +322,7 @@ async fn read_loop(
             }) => {
                 debug!(
                     ?child_pid,
-                    child_alive,
-                    ring_bytes,
-                    "tracer_client: status frame"
+                    child_alive, ring_bytes, "tracer_client: status frame"
                 );
             }
             InboundTracerResponse::Known(TracerResponse::Exited { code }) => {

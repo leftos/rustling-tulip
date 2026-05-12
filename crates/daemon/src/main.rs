@@ -12,7 +12,6 @@ mod paths;
 mod presets;
 mod pty;
 mod pty_state;
-mod tracer_client;
 mod registry;
 mod scrollback;
 mod server;
@@ -20,6 +19,7 @@ mod session;
 mod state;
 mod sync;
 mod tabs;
+mod tracer_client;
 mod vscode;
 mod workspace;
 

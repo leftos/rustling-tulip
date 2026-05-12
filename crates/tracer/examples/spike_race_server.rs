@@ -11,7 +11,10 @@ const PIPE_NAME: &str = r"\\.\pipe\rt-tracer-spike-c1";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_target(false).compact().init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .compact()
+        .init();
 
     let server = ServerOptions::new()
         .first_pipe_instance(true)

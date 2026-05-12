@@ -43,9 +43,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         })?;
     let mut supported: Vec<u32> = Vec::with_capacity(supported_array.len());
     for entry in supported_array {
-        let n = entry
-            .as_u64()
-            .ok_or_else(|| format!("non-integer entry in `supported` in {}", json_path.display()))?;
+        let n = entry.as_u64().ok_or_else(|| {
+            format!(
+                "non-integer entry in `supported` in {}",
+                json_path.display()
+            )
+        })?;
         let v: u32 = n
             .try_into()
             .map_err(|_| format!("`supported` entry {n} doesn't fit in u32"))?;

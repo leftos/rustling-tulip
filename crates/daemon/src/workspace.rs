@@ -30,9 +30,7 @@ pub async fn resolve_workspace(
 ) -> anyhow::Result<(WorkspaceEntry, Vec<ResolvedMember>)> {
     info!(
         workspace_id,
-        branch_name,
-        use_worktree,
-        "resolve_workspace: begin"
+        branch_name, use_worktree, "resolve_workspace: begin"
     );
     let (workspace, repos) = state.with_persisted(|s| {
         let ws = s.workspaces.iter().find(|w| w.id == workspace_id).cloned();
@@ -121,8 +119,7 @@ pub fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
 pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> anyhow::Result<()> {
     info!(
         members = resolved.len(),
-        branch_name,
-        "ensure_branches: begin"
+        branch_name, "ensure_branches: begin"
     );
     for (i, member) in resolved.iter().enumerate() {
         info!(

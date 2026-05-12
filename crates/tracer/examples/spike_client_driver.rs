@@ -11,7 +11,10 @@ const PIPE_NAME: &str = r"\\.\pipe\rt-tracer-spike-c1";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_target(false).compact().init();
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .compact()
+        .init();
     // Give the server time to start.
     tokio::time::sleep(Duration::from_millis(300)).await;
 

@@ -154,11 +154,7 @@ pub async fn stash_push(repo: &Path, message: &str) -> anyhow::Result<()> {
 /// (matching `git stash list`'s native order — `stash@{0}` is the most
 /// recent push).
 pub async fn stash_list(repo: &Path) -> anyhow::Result<Vec<GitStash>> {
-    let stdout = run_git(
-        repo,
-        &["stash", "list", "--format=%gd%x1f%gs%x1f%aI"],
-    )
-    .await?;
+    let stdout = run_git(repo, &["stash", "list", "--format=%gd%x1f%gs%x1f%aI"]).await?;
     Ok(stdout.lines().filter_map(parse_stash_line).collect())
 }
 
