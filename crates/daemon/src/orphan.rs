@@ -86,6 +86,13 @@ pub struct OrphanMeta {
     /// and for sidecars written before this field existed.
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// Most recent `recent_actions` from the live session, bounded to a
+    /// small set that fits in ~1 KB. Synced on every registry update so
+    /// the abandoned-bucket UI can show "what was this session doing
+    /// right before the daemon crashed?". Empty for sidecars written
+    /// before B.1.
+    #[serde(default)]
+    pub recent_actions_tail: Vec<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -328,6 +335,7 @@ pub fn meta_from_record(
         terminal_title: None,
         spawn_config,
         last_prompt,
+        recent_actions_tail: Vec::new(),
     })
 }
 
@@ -356,6 +364,41 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
 pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
     if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
         warn!(?err, %session_id, "failed to update orphan meta terminal_title");
+    }
+}
+
+/// Best-effort sync of `recent_actions_tail` into the sidecar. Called by
+/// the registry after every `update()` so abandoned sessions retain the
+/// most recent operational context. Silently no-ops if the sidecar
+/// doesn't exist (e.g. for a brand-new session whose spawn pipeline
+/// hasn't called `try_write_meta` yet, or a session that never had a
+/// sidecar — plain shells in some configurations).
+///
+/// Returns `Ok(())` for both "meta did not exist" and "meta updated";
+/// real I/O errors surface as `Err` and the caller logs them.
+pub fn update_recent_actions_tail(
+    dirs: &Dirs,
+    session_id: &str,
+    new_tail: &[String],
+) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("reading meta for recent_actions update"),
+    };
+    let mut meta =
+        load_meta_from_bytes(&bytes).context("loading meta for recent_actions update")?;
+    if meta.recent_actions_tail == new_tail {
+        return Ok(());
+    }
+    meta.recent_actions_tail = new_tail.to_vec();
+    write_meta(dirs, &meta)
+}
+
+pub fn try_update_recent_actions_tail(dirs: &Dirs, session_id: &str, new_tail: &[String]) {
+    if let Err(err) = update_recent_actions_tail(dirs, session_id, new_tail) {
+        warn!(?err, %session_id, "failed to update orphan meta recent_actions_tail");
     }
 }
 
@@ -424,6 +467,7 @@ mod tests {
             terminal_title: None,
             spawn_config: None,
             last_prompt: None,
+            recent_actions_tail: Vec::new(),
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");

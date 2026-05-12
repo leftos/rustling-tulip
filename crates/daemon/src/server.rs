@@ -132,7 +132,7 @@ pub async fn run(
         .collect();
 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
-    let sessions = SessionRegistry::new();
+    let sessions = SessionRegistry::new(dirs.clone());
 
     // Reattach orphan sessions (alive but detached) and abandoned sessions
     // (dead, daemon crashed mid-run) before any clients connect so the

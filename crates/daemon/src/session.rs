@@ -18,6 +18,16 @@ use tracing::warn;
 use uuid::Uuid;
 
 const RECENT_ACTIONS_CAP: usize = 32;
+
+/// On-disk cap for the persisted `recent_actions` tail. Smaller than the
+/// in-memory cap because the sidecar is read on every daemon startup and
+/// we don't want it ballooning. Trimmed to fit under [`RECENT_ACTIONS_TAIL_BYTE_CAP`].
+const RECENT_ACTIONS_TAIL_ENTRIES: usize = 10;
+
+/// Soft byte cap on the persisted `recent_actions` tail. Roughly 1 KB —
+/// keeps sidecars compact. Entries are dropped from the front until the
+/// remaining set fits.
+const RECENT_ACTIONS_TAIL_BYTE_CAP: usize = 1024;
 const EVENT_BROADCAST_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone)]
@@ -133,14 +143,19 @@ impl SessionRecord {
 pub struct SessionRegistry {
     by_id: RwLock<HashMap<String, Arc<Mutex<SessionRecord>>>>,
     events: broadcast::Sender<SessionEvent>,
+    /// `Dirs` is `Some` once `run()` initializes the registry. Without it
+    /// the registry can't sync `recent_actions` back to disk — callers
+    /// that construct registries in tests (none today) would pass `None`.
+    dirs: Option<Dirs>,
 }
 
 impl SessionRegistry {
-    pub fn new() -> Arc<Self> {
+    pub fn new(dirs: Dirs) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Arc::new(Self {
             by_id: RwLock::new(HashMap::new()),
             events,
+            dirs: Some(dirs),
         })
     }
 
@@ -181,11 +196,20 @@ impl SessionRegistry {
         F: FnOnce(&mut SessionRecord),
     {
         let Some(arc) = self.get(id) else { return };
-        let snap = {
+        let (snap, recent_tail) = {
             let mut guard = lock(&arc);
             f(&mut guard);
-            guard.snapshot()
+            let tail = trim_recent_tail(&guard.recent_actions);
+            (guard.snapshot(), tail)
         };
+        // Sync the persisted recent_actions tail so an abandoned session
+        // can show "what was this doing right before the daemon died?".
+        // Skipped if the sidecar doesn't exist (e.g. for brand-new sessions
+        // where the spawn pipeline hasn't called try_write_meta yet, or
+        // for sessions that never had a sidecar in the first place).
+        if let Some(dirs) = &self.dirs {
+            orphan::try_update_recent_actions_tail(dirs, id, &recent_tail);
+        }
         let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
     }
 
@@ -205,6 +229,22 @@ impl SessionRegistry {
 
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Build the persistence-bound tail from the in-memory `recent_actions`
+/// list. Caps at `RECENT_ACTIONS_TAIL_ENTRIES` newest entries, then
+/// further drops from the front until the total UTF-8 byte size fits in
+/// `RECENT_ACTIONS_TAIL_BYTE_CAP`. Always returns the most recent
+/// entries (FIFO eviction).
+pub fn trim_recent_tail(actions: &[String]) -> Vec<String> {
+    let start = actions.len().saturating_sub(RECENT_ACTIONS_TAIL_ENTRIES);
+    let mut tail: Vec<String> = actions[start..].to_vec();
+    while !tail.is_empty()
+        && tail.iter().map(String::len).sum::<usize>() > RECENT_ACTIONS_TAIL_BYTE_CAP
+    {
+        tail.remove(0);
+    }
+    tail
 }
 
 pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
@@ -290,7 +330,7 @@ impl SessionRegistry {
             status: SessionStatus::Idle,
             exit_code: None,
             metrics: SessionMetrics::default(),
-            recent_actions: Vec::new(),
+            recent_actions: meta.recent_actions_tail.clone(),
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
@@ -319,7 +359,7 @@ impl SessionRegistry {
             status: SessionStatus::Stopped,
             exit_code: None,
             metrics: SessionMetrics::default(),
-            recent_actions: Vec::new(),
+            recent_actions: meta.recent_actions_tail.clone(),
             pty: None,
             headless: None,
             workspace_id: meta.workspace_id.clone(),
@@ -335,5 +375,35 @@ impl SessionRegistry {
             "abandoned: daemon crashed before this session finished".to_string(),
         );
         self.insert(record);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_recent_tail_keeps_last_n_entries() {
+        let actions: Vec<String> = (0..20).map(|i| format!("action {i}")).collect();
+        let tail = trim_recent_tail(&actions);
+        assert_eq!(tail.len(), RECENT_ACTIONS_TAIL_ENTRIES);
+        // The newest entries should survive.
+        assert_eq!(tail.last().map(String::as_str), Some("action 19"));
+    }
+
+    #[test]
+    fn trim_recent_tail_drops_under_byte_cap() {
+        // Single huge entry: must exceed the cap on its own.
+        let huge = "x".repeat(RECENT_ACTIONS_TAIL_BYTE_CAP * 2);
+        let actions = vec![huge.clone(), "small".to_string()];
+        let tail = trim_recent_tail(&actions);
+        // The huge one gets dropped to fit under the byte cap.
+        assert_eq!(tail, vec!["small".to_string()]);
+    }
+
+    #[test]
+    fn trim_recent_tail_empty_input_empty_output() {
+        let tail = trim_recent_tail(&[]);
+        assert!(tail.is_empty());
     }
 }
