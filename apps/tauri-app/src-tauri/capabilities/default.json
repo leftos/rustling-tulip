@@ -8,6 +8,7 @@
     "dialog:default",
     "notification:default",
     "shell:default",
+    "window-state:default",
     {
       "identifier": "shell:allow-open",
       "allow": [

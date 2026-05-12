@@ -265,7 +265,8 @@ pub fn run() {
     // visible on screen during boot — by the time setup ran the window had
     // already painted at its config default. See task #56.
     let mut context = tauri::generate_context!();
-    if env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW") {
+    let offscreen = env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW");
+    if offscreen {
         for window in &mut context.config_mut().app.windows {
             window.x = Some(-32_000.0);
             window.y = Some(-32_000.0);
@@ -273,10 +274,21 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_shell::init());
+    // Skip window-state restoration in offscreen e2e mode. The plugin
+    // auto-restores from disk on window creation, which would override the
+    // -32_000 offscreen coords we just baked into the context; worse, it
+    // would also persist those offscreen coords back to the real user
+    // state file at shutdown and strand the production app off-screen on
+    // the next launch. Production runs get the plugin; tests run without.
+    if !offscreen {
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+
+    builder
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
             pick_directory,
