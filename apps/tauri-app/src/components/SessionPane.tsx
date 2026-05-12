@@ -1,12 +1,15 @@
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot } from "../types";
+import type { SessionSnapshot, TabEntry } from "../types";
 import {
   sessionDisplayLabel,
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
+import SessionContextMenu, {
+  type SessionContextMenuState,
+} from "./SessionContextMenu";
 import Terminal from "./Terminal";
 
 /// True when running inside any pop-out window (single-session
@@ -22,11 +25,29 @@ const isPopoutWindow = (() => {
 interface Props {
   session: SessionSnapshot;
   client: DaemonClient | null;
+  /// Full tab list — used by the session context menu to render the
+  /// "Move to → <tab>" submenu. Threaded through GridRenderer from
+  /// App.tsx. Empty arrays are fine; the menu just omits the entry.
+  tabs: TabEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
 
-export default function SessionPane({ session, client, subscribePty }: Props) {
+export default function SessionPane({
+  session,
+  client,
+  tabs,
+  subscribePty,
+}: Props) {
   const [confirming, setConfirming] = useState(false);
+  const [sessionMenu, setSessionMenu] =
+    useState<SessionContextMenuState | null>(null);
+  const onHeaderContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setSessionMenu({ x: e.clientX, y: e.clientY, session });
+    },
+    [session],
+  );
 
   const onStop = useCallback(() => {
     if (!client) return;
@@ -58,7 +79,7 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
       data-session-status={session.status}
       data-session-mode={session.mode}
     >
-      <header className="session-header">
+      <header className="session-header" onContextMenu={onHeaderContextMenu}>
         <div className="session-title">
           {/* Shell sessions sit at Idle forever — a green dot would be
               misleading. Show a terminal glyph in its place instead. */}
@@ -157,6 +178,30 @@ export default function SessionPane({ session, client, subscribePty }: Props) {
           live input/output is not available. Use Stop to kill the recorded
           PID and clean up, then spawn a new session.
         </div>
+      )}
+
+      {sessionMenu && client && (
+        <SessionContextMenu
+          state={sessionMenu}
+          tabs={tabs}
+          client={client}
+          onClose={() => setSessionMenu(null)}
+          onDuplicate={(withDialog) => {
+            const sid = sessionMenu.session.id;
+            if (withDialog) {
+              // App.tsx listens for this event; it fetches the source's
+              // SpawnConfig and opens the spawn dialog pre-filled.
+              window.dispatchEvent(
+                new CustomEvent("rt:duplicate_session_with_dialog", {
+                  detail: sid,
+                }),
+              );
+            } else {
+              client.send({ type: "duplicate_session", session_id: sid });
+            }
+            setSessionMenu(null);
+          }}
+        />
       )}
 
       {isHeadless ? (

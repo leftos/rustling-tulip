@@ -11,6 +11,7 @@ import type {
   MemberSpawnPreview,
   PermissionMode,
   RepoEntry,
+  SpawnConfig,
   WorkspaceEntry,
 } from "../types";
 import type { SpawnInitialTarget } from "./Sidebar";
@@ -20,6 +21,12 @@ interface Props {
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
   initialTarget?: SpawnInitialTarget | undefined;
+  /// Full SpawnConfig used to seed the dialog when invoked as
+  /// "Duplicate session → Shift-click → open dialog pre-filled". When
+  /// set, hydrates agent, run mode, skip-perms, model, permission mode,
+  /// codex sandbox, and extra env vars from this config — overriding
+  /// the usual Settings defaults. `undefined` for normal spawns.
+  spawnPrefill?: SpawnConfig | undefined;
   onClose: () => void;
   onSpawned: () => void;
   /// Closes the dialog and opens the directory picker so a fresh user
@@ -59,6 +66,19 @@ function emptyAdvanced(): AdvancedConfig {
     permissionMode: settings.spawn.default_permission_mode,
     codexSandbox: settings.spawn.default_codex_sandbox,
     envRows: [],
+  };
+}
+
+/// Hydrate the advanced-section state from a duplicate's SpawnConfig.
+/// Mirrors the wire-vs-form translation in advancedToWire (above) but
+/// in the reverse direction — env vars come back as a row list so the
+/// add/remove controls work without special-casing.
+function advancedFromConfig(cfg: SpawnConfig): AdvancedConfig {
+  return {
+    model: cfg.model,
+    permissionMode: cfg.permission_mode,
+    codexSandbox: cfg.codex_sandbox,
+    envRows: cfg.extra_env.map(([key, value]) => ({ key, value })),
   };
 }
 
@@ -109,6 +129,7 @@ export default function SpawnDialog({
   workspaces,
   client,
   initialTarget,
+  spawnPrefill,
   onClose,
   onSpawned,
   onAddRepo,
@@ -116,13 +137,21 @@ export default function SpawnDialog({
   const [mode, setMode] = useState<Mode>(() =>
     pickInitialMode(initialTarget, workspaces),
   );
-  const [runMode, setRunMode] = useState<RunMode>("interactive");
+  const [runMode, setRunMode] = useState<RunMode>(
+    () => spawnPrefill?.mode ?? "interactive",
+  );
   const [headlessPrompt, setHeadlessPrompt] = useState("");
   const [skipPerms, setSkipPerms] = useState(
-    () => loadSettings().spawn.skip_permissions_default,
+    () =>
+      spawnPrefill?.dangerously_skip_permissions ??
+      loadSettings().spawn.skip_permissions_default,
   );
-  const [agent, setAgent] = useState<Agent>("claude");
-  const [advanced, setAdvanced] = useState<AdvancedConfig>(emptyAdvanced);
+  const [agent, setAgent] = useState<Agent>(
+    () => spawnPrefill?.agent ?? "claude",
+  );
+  const [advanced, setAdvanced] = useState<AdvancedConfig>(() =>
+    spawnPrefill ? advancedFromConfig(spawnPrefill) : emptyAdvanced(),
+  );
 
   // Headless mode isn't supported for codex yet — snap back to interactive
   // when the user picks codex while headless was selected.

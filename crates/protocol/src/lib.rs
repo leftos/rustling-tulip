@@ -213,6 +213,16 @@ pub struct SessionSnapshot {
     /// claude / codex) in that case.
     #[serde(default)]
     pub program_name: Option<String>,
+    /// True when the session was spawned with `use_worktree = true`, i.e.
+    /// the daemon created (or reused) a per-session git worktree under
+    /// `<repo>.wt/<branch>`. Drives the close-context-menu's "remove
+    /// worktree" choice: only when this is true does the menu offer
+    /// "Close and remove worktree" vs "Close and keep worktree". For
+    /// orphans with no stored spawn config we conservatively default to
+    /// `false` (the cleanup choice is hidden, but the worktree is still
+    /// on disk for the user to clean up manually).
+    #[serde(default)]
+    pub has_per_session_worktree: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -302,6 +312,67 @@ pub struct SpawnRequest {
     /// Ignored entirely for headless and plain-shell sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
+}
+
+/// Subset of [`SpawnRequest`] that fully describes "what kind of session
+/// this was launched as", minus identifiers and one-shot kickoff fields.
+/// Daemon persists this on each session record + orphan sidecar so a
+/// session can be duplicated without re-prompting the user for every option.
+///
+/// Excluded fields versus `SpawnRequest`:
+/// - `label`: a duplicate auto-generates a fresh `<repo>:<branch>` label.
+/// - `initial_prompt`: kickoff messages are one-shot, not part of identity.
+/// - `prompt_injector`: same — injectors deliver kickoff content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpawnConfig {
+    pub target: SpawnTarget,
+    pub mode: SessionMode,
+    pub dangerously_skip_permissions: bool,
+    pub agent: Agent,
+    pub model: Option<String>,
+    pub permission_mode: Option<PermissionMode>,
+    pub codex_sandbox: Option<CodexSandbox>,
+    #[serde(default)]
+    pub extra_env: Vec<(String, String)>,
+}
+
+impl SpawnConfig {
+    /// Capture the spawn-time config from a [`SpawnRequest`], dropping the
+    /// fields a duplicate doesn't want to inherit.
+    #[must_use]
+    pub fn from_request(req: &SpawnRequest) -> Self {
+        Self {
+            target: req.target.clone(),
+            mode: req.mode,
+            dangerously_skip_permissions: req.dangerously_skip_permissions,
+            agent: req.agent,
+            model: req.model.clone(),
+            permission_mode: req.permission_mode,
+            codex_sandbox: req.codex_sandbox,
+            extra_env: req.extra_env.clone(),
+        }
+    }
+
+    /// Build a fresh [`SpawnRequest`] for cloning this session. The new
+    /// request gets no label override (daemon picks `<repo>:<branch>`),
+    /// no kickoff prompt, and no injector — every other spawn-time field
+    /// is preserved verbatim.
+    #[must_use]
+    pub fn to_clone_request(&self) -> SpawnRequest {
+        SpawnRequest {
+            label: None,
+            target: self.target.clone(),
+            mode: self.mode,
+            initial_prompt: None,
+            dangerously_skip_permissions: self.dangerously_skip_permissions,
+            agent: self.agent,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode,
+            codex_sandbox: self.codex_sandbox,
+            extra_env: self.extra_env.clone(),
+            prompt_injector: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -760,6 +831,20 @@ pub enum ClientMessage {
     },
     ListSessions,
     SpawnSession(SpawnRequest),
+    /// Clone an existing session: daemon reads its stored [`SpawnConfig`]
+    /// and spawns a new session with the same agent, mode, target, model,
+    /// permission mode, sandbox, skip-perms flag, and extra env vars. The
+    /// new session gets a freshly generated label and no initial prompt —
+    /// it's a fresh process with the same config, not a continuation.
+    DuplicateSession {
+        session_id: String,
+    },
+    /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
+    /// dialog can pre-fill all fields with the source's values. Replied
+    /// with [`DaemonMessage::SpawnConfigReply`].
+    GetSpawnConfig {
+        session_id: String,
+    },
     Attach {
         session_id: String,
     },
@@ -1087,6 +1172,14 @@ pub enum DaemonMessage {
     },
     SessionRemoved {
         session_id: String,
+    },
+    /// Reply to [`ClientMessage::GetSpawnConfig`]. `config` is `None` when
+    /// the session no longer exists or pre-dates spawn-config persistence
+    /// (orphan sidecars written before v13). UIs that prefilled a dialog
+    /// optimistically should fall back to Settings defaults in that case.
+    SpawnConfigReply {
+        session_id: String,
+        config: Option<SpawnConfig>,
     },
     PtyOutput {
         session_id: String,

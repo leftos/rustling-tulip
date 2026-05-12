@@ -18,6 +18,10 @@ const DRAG_MIME = "text/x-rt-pane";
 
 interface Props {
   tab: TabEntry;
+  /// Full tab list — threaded down to SessionPane so the session
+  /// context menu's "Move to → <tab>" submenu can enumerate
+  /// destinations. The active tab is implicitly the source.
+  tabs: TabEntry[];
   client: DaemonClient;
   sessions: SessionSnapshot[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
@@ -43,6 +47,7 @@ interface Props {
 
 export default function GridRenderer({
   tab,
+  tabs,
   client,
   sessions,
   subscribePty,
@@ -74,6 +79,7 @@ export default function GridRenderer({
         node={grid}
         path={[]}
         tabId={tab.id}
+        tabs={tabs}
         client={client}
         sessions={sessions}
         subscribePty={subscribePty}
@@ -94,6 +100,7 @@ interface NodeProps {
   node: GridNode;
   path: number[];
   tabId: string;
+  tabs: TabEntry[];
   client: DaemonClient;
   sessions: SessionSnapshot[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
@@ -384,6 +391,7 @@ function PaneChrome(props: PaneChromeProps) {
           <SessionPane
             session={session}
             client={client}
+            tabs={props.tabs}
             subscribePty={subscribePty}
           />
         ) : (

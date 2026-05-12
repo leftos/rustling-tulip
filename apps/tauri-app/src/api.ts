@@ -8,6 +8,7 @@ import {
   type LaunchPresetSource,
   type PresetEntry,
   type PresetTarget,
+  type SpawnConfig,
 } from "./types";
 
 interface DaemonHandshake {
@@ -168,6 +169,44 @@ export function loadScrollback(
     };
     window.addEventListener("rt:scrollback", handler);
     client.send({ type: "load_scrollback", session_id: sessionId });
+  });
+}
+
+/**
+ * Fetch the persisted SpawnConfig for a session so the spawn dialog can
+ * pre-fill all fields with the source's values. Resolves with `null` when
+ * the session is unknown, its sidecar pre-dates spawn-config persistence,
+ * or the daemon doesn't reply within 2s.
+ *
+ * Listens on the `rt:spawn_config_reply` window event (dispatched by
+ * App.tsx's message router) so this works from any component.
+ */
+export function requestSpawnConfig(
+  client: DaemonClient,
+  sessionId: string,
+): Promise<SpawnConfig | null> {
+  return new Promise((resolve) => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (
+        detail.type !== "spawn_config_reply" ||
+        detail.session_id !== sessionId
+      ) {
+        return;
+      }
+      cleanup();
+      resolve(detail.config);
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 2000);
+    const cleanup = () => {
+      window.removeEventListener("rt:spawn_config_reply", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:spawn_config_reply", handler);
+    client.send({ type: "get_spawn_config", session_id: sessionId });
   });
 }
 

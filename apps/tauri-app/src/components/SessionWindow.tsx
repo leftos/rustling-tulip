@@ -91,6 +91,7 @@ export default function SessionWindow({
         <SessionPane
           session={session}
           client={client}
+          tabs={[]}
           subscribePty={subscribePty}
         />
       </div>

@@ -10,6 +10,7 @@ import {
   connectDaemon,
   ensureDaemonStarted,
   pickDirectory,
+  requestSpawnConfig,
   type ConnectionState,
   type DaemonClient,
 } from "./api";
@@ -20,6 +21,7 @@ import {
   type PresetTarget,
   type RepoEntry,
   type SessionSnapshot,
+  type SpawnConfig,
   type TabEntry,
   type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
@@ -71,6 +73,12 @@ interface AppState {
   focusedPaneId: string | null;
   spawnOpen: boolean;
   spawnInitial: SpawnInitialTarget | undefined;
+  /// Full SpawnConfig to seed the spawn dialog from (used by "Duplicate
+  /// session → Shift-click → open dialog pre-filled"). When set, the
+  /// dialog hydrates agent, run mode, skip-perms, model, permission mode,
+  /// codex sandbox, and extra env vars from this config — overriding the
+  /// usual Settings defaults. `undefined` for normal spawns.
+  spawnPrefill: SpawnConfig | undefined;
   /// Counter incremented every time we arm a "next new tab becomes
   /// active" intent (e.g. user spawns a session, merges tabs, extracts a
   /// pane to a new tab). Each subsequent `tab_updated` for an unseen tab
@@ -107,6 +115,7 @@ export default function App() {
     focusedPaneId: null,
     spawnOpen: false,
     spawnInitial: undefined,
+    spawnPrefill: undefined,
     pendingTabActivate: 0,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
@@ -436,6 +445,7 @@ export default function App() {
         ...s,
         spawnOpen: true,
         spawnInitial: undefined,
+        spawnPrefill: undefined,
         focusedPaneId: paneId,
       }));
     },
@@ -446,13 +456,65 @@ export default function App() {
     // Toolbar/sidebar spawn — explicitly clear any prior pane intent so a
     // leftover from a cancelled "spawn in this pane" doesn't re-target.
     spawnTargetPaneRef.current = null;
-    setState((s) => ({ ...s, spawnOpen: true, spawnInitial: initial }));
+    setState((s) => ({
+      ...s,
+      spawnOpen: true,
+      spawnInitial: initial,
+      spawnPrefill: undefined,
+    }));
   }, []);
 
   const onCloseSpawn = useCallback(() => {
     spawnTargetPaneRef.current = null;
-    setState((s) => ({ ...s, spawnOpen: false, spawnInitial: undefined }));
+    setState((s) => ({
+      ...s,
+      spawnOpen: false,
+      spawnInitial: undefined,
+      spawnPrefill: undefined,
+    }));
   }, []);
+
+  /// Shift-click on a session's "Duplicate" context-menu entry. Fetches
+  /// the source's persisted SpawnConfig and opens the spawn dialog with
+  /// every field pre-filled. If the daemon replies with `null` (the
+  /// session is unknown or its sidecar pre-dates spawn-config persistence)
+  /// we fall back to opening the dialog with Settings defaults — the user
+  /// can still tweak fields manually.
+  const onDuplicateSessionWithDialog = useCallback((sessionId: string) => {
+    const client = latestStateRef.current?.client;
+    if (!client) return;
+    void requestSpawnConfig(client, sessionId).then((config) => {
+      let initial: SpawnInitialTarget | undefined;
+      if (config) {
+        initial =
+          config.target.kind === "single"
+            ? { kind: "repo", repo_id: config.target.repo_id }
+            : { kind: "workspace", workspace_id: config.target.workspace_id };
+      }
+      spawnTargetPaneRef.current = null;
+      setState((s) => ({
+        ...s,
+        spawnOpen: true,
+        spawnInitial: initial,
+        spawnPrefill: config ?? undefined,
+      }));
+    });
+  }, []);
+
+  // Listen for "duplicate with dialog" requests dispatched by surfaces
+  // that don't have direct access to App-level callbacks (e.g. the
+  // SessionPane header context menu inside the deep GridRenderer tree).
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const sid = (ev as CustomEvent<string>).detail;
+      if (typeof sid === "string" && sid.length > 0) {
+        onDuplicateSessionWithDialog(sid);
+      }
+    };
+    window.addEventListener("rt:duplicate_session_with_dialog", handler);
+    return () =>
+      window.removeEventListener("rt:duplicate_session_with_dialog", handler);
+  }, [onDuplicateSessionWithDialog]);
 
   const onLaunchPreset = useCallback(
     (preset: PresetEntry, target: PresetTarget) => {
@@ -900,6 +962,7 @@ export default function App() {
             }
             onSelectSession={onSelectSession}
             onOpenSpawn={onOpenSpawn}
+            onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
             onRevealInExplorer={onRevealInExplorer}
             onLaunchPreset={onLaunchPreset}
@@ -933,6 +996,7 @@ export default function App() {
             ) : (
               <GridRenderer
                 tab={activeTab}
+                tabs={state.tabs}
                 client={state.client}
                 sessions={state.sessions}
                 subscribePty={subscribePty}
@@ -961,6 +1025,7 @@ export default function App() {
           workspaces={state.workspaces}
           client={state.client}
           initialTarget={state.spawnInitial}
+          spawnPrefill={state.spawnPrefill}
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
           onAddRepo={onAddRepo}
@@ -1283,6 +1348,7 @@ function handleMessage(
     case "remote_url":
     case "repo_status":
     case "scrollback":
+    case "spawn_config_reply":
     case "presets":
     case "preset_launch_failed":
     case "preset_preview":

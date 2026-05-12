@@ -1124,6 +1124,12 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.context-menu-hint {
+  margin-left: 12px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
 
 /* ------- Tabs and grid renderer ------- */
 

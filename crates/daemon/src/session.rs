@@ -9,6 +9,7 @@ use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
 use protocol::{
     Agent, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionSnapshot, SessionStatus,
+    SpawnConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -64,6 +65,14 @@ pub struct SessionRecord {
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
+    /// Persisted spawn-time configuration used to clone this session via
+    /// [`protocol::ClientMessage::DuplicateSession`]. Always `Some` for
+    /// sessions spawned by daemons that know about this field; `None`
+    /// only for orphans reattached from sidecars written by earlier
+    /// daemon versions. The duplicate handler rejects clones in the
+    /// `None` case and the `GetSpawnConfig` reply surfaces `None` so the
+    /// UI can fall back to opening the spawn dialog with defaults.
+    pub spawn_config: Option<SpawnConfig>,
 }
 
 impl SessionRecord {
@@ -75,6 +84,17 @@ impl SessionRecord {
         let is_orphan = self.pty.is_none()
             && self.headless.is_none()
             && !matches!(self.status, SessionStatus::Stopped | SessionStatus::Error);
+        // Surface "this session created a per-session worktree" so the
+        // close-context-menu can offer worktree cleanup. Computed from
+        // the persisted spawn config; orphans with no stored config
+        // conservatively report `false`.
+        let has_per_session_worktree = self
+            .spawn_config
+            .as_ref()
+            .is_some_and(|cfg| match &cfg.target {
+                protocol::SpawnTarget::Single { use_worktree, .. }
+                | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+            });
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -91,6 +111,7 @@ impl SessionRecord {
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
+            has_per_session_worktree,
         }
     }
 }
@@ -262,6 +283,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            spawn_config: meta.spawn_config.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);

@@ -629,6 +629,28 @@ async fn dispatch(
             let snap = spawn_session(hub, req).await?;
             let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
         }
+        ClientMessage::DuplicateSession { session_id } => {
+            let stored = hub
+                .sessions
+                .get(&session_id)
+                .map(|rec| crate::sync::lock(&rec).spawn_config.clone())
+                .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+            let Some(stored) = stored else {
+                return Err(anyhow!(
+                    "session {session_id} has no stored spawn config; cannot duplicate"
+                ));
+            };
+            let req = stored.to_clone_request();
+            let snap = spawn_session(hub, req).await?;
+            let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+        }
+        ClientMessage::GetSpawnConfig { session_id } => {
+            let config = hub
+                .sessions
+                .get(&session_id)
+                .and_then(|rec| crate::sync::lock(&rec).spawn_config.clone());
+            let _ = out_tx.send(DaemonMessage::SpawnConfigReply { session_id, config });
+        }
         ClientMessage::Attach { session_id } => {
             attached.lock().await.insert(session_id);
         }
@@ -1381,6 +1403,9 @@ pub(crate) async fn spawn_session(
     // or something on the registry side. Logged at info so users debugging
     // perceived slowness can read them without flipping log filters.
     let t_total = std::time::Instant::now();
+    // Capture the persist-able config before destructuring so duplicates
+    // can be reconstructed verbatim from the session record / sidecar.
+    let stored_config = protocol::SpawnConfig::from_request(&req);
     let SpawnRequest {
         label,
         target,
@@ -1433,7 +1458,7 @@ pub(crate) async fn spawn_session(
 
     let session_id = new_id();
     let label = label.unwrap_or(default_label);
-    let cfg = SpawnConfig {
+    let cfg = SpawnArgs {
         dangerously_skip_permissions,
         agent,
         model,
@@ -1467,6 +1492,7 @@ pub(crate) async fn spawn_session(
                 primary_cwd,
                 prompt,
                 &cfg,
+                stored_config,
             )
         }
         SessionMode::PlainShell => {
@@ -1484,6 +1510,7 @@ pub(crate) async fn spawn_session(
                 workspace_id,
                 primary_cwd,
                 &cfg,
+                stored_config,
             )
         }
         SessionMode::Interactive => spawn_interactive_session(
@@ -1496,6 +1523,7 @@ pub(crate) async fn spawn_session(
             primary_cwd,
             initial_prompt,
             &cfg,
+            stored_config,
         ),
     };
     let outcome = if result.is_ok() { "ok" } else { "error" };
@@ -1509,7 +1537,7 @@ pub(crate) async fn spawn_session(
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
-struct SpawnConfig {
+struct SpawnArgs {
     dangerously_skip_permissions: bool,
     /// Which CLI to spawn. Drives both [`agent_program`] resolution and the
     /// per-agent arg builder branching in [`spawn_interactive_session`].
@@ -1528,7 +1556,7 @@ struct SpawnConfig {
     prompt_injector: Option<protocol::PromptInjector>,
 }
 
-impl SpawnConfig {
+impl SpawnArgs {
     /// Append claude's `--model`, `--permission-mode`, and
     /// `--dangerously-skip-permissions` args. The claude CLI rejects
     /// `--permission-mode` together with `--dangerously-skip-permissions`, so
@@ -1592,16 +1620,16 @@ fn build_workspace_prelude(members: &[SessionMember]) -> Option<String> {
 ///
 /// Layout:
 /// - `--add-dir <path>` for every extra member after the primary cwd
-/// - `--model <id>` when [`SpawnConfig::model`] is set
+/// - `--model <id>` when [`SpawnArgs::model`] is set
 /// - permission/sandbox: `--yolo` overrides everything; otherwise
-///   `--sandbox <value>` when [`SpawnConfig::codex_sandbox`] is set
+///   `--sandbox <value>` when [`SpawnArgs::codex_sandbox`] is set
 /// - trailing positional `<prompt>` when no `prompt_injector` is attached;
 ///   carries `<workspace_prelude>\n\n<initial_prompt>` for workspace spawns,
 ///   or just `<initial_prompt>`, or just `<workspace_prelude>`, depending
 ///   on which are present. Codex doesn't expose a system-prompt flag so
 ///   the prelude rides along on the user's first message slot.
 fn build_codex_args(
-    cfg: &SpawnConfig,
+    cfg: &SpawnArgs,
     members: &[SessionMember],
     initial_prompt: Option<&str>,
 ) -> Vec<String> {
@@ -1648,7 +1676,8 @@ fn spawn_interactive_session(
     workspace_id: Option<String>,
     primary_cwd: PathBuf,
     initial_prompt: Option<String>,
-    cfg: &SpawnConfig,
+    cfg: &SpawnArgs,
+    stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let args = match cfg.agent {
         Agent::Codex => build_codex_args(cfg, &members, initial_prompt.as_deref()),
@@ -1709,6 +1738,7 @@ fn spawn_interactive_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        spawn_config: Some(stored_config.clone()),
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -1737,6 +1767,7 @@ fn spawn_interactive_session(
             workspace_id,
             program_name,
             cfg.agent,
+            Some(stored_config),
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1773,7 +1804,8 @@ fn spawn_plain_shell_session(
     members: Vec<SessionMember>,
     workspace_id: Option<String>,
     primary_cwd: PathBuf,
-    cfg: &SpawnConfig,
+    cfg: &SpawnArgs,
+    stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // Fail-fast: the dialog should clear these for shell spawns, but a
     // client could send a malformed request. Reject rather than silently
@@ -1827,6 +1859,7 @@ fn spawn_plain_shell_session(
         agent: Agent::Claude,
         terminal_title: None,
         program_name: Some(shell_label.clone()),
+        spawn_config: Some(stored_config.clone()),
     };
     push_recent_action(&mut record, format!("session started: {shell_label}"));
     hub.sessions.insert(record);
@@ -1848,6 +1881,7 @@ fn spawn_plain_shell_session(
             workspace_id,
             Some(shell_label),
             Agent::Claude,
+            Some(stored_config),
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1883,7 +1917,8 @@ fn spawn_headless_session(
     workspace_id: Option<String>,
     primary_cwd: PathBuf,
     prompt: String,
-    cfg: &SpawnConfig,
+    cfg: &SpawnArgs,
+    stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // The dispatcher already rejects `agent == Codex` for headless mode; if
     // we got here, claude is the only valid agent.
@@ -1931,6 +1966,7 @@ fn spawn_headless_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        spawn_config: Some(stored_config.clone()),
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
@@ -1951,6 +1987,7 @@ fn spawn_headless_session(
             // Same as interactive: the child is a node shim on Windows.
             None,
             cfg.agent,
+            Some(stored_config),
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -2339,8 +2376,8 @@ mod tests {
         }
     }
 
-    fn cfg(agent: Agent) -> SpawnConfig {
-        SpawnConfig {
+    fn cfg(agent: Agent) -> SpawnArgs {
+        SpawnArgs {
             dangerously_skip_permissions: false,
             agent,
             model: None,

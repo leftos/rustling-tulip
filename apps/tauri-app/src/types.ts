@@ -81,6 +81,11 @@ export interface SessionSnapshot {
   // next to the session title. null when reattached from a daemon
   // sidecar written before this field existed.
   program_name: string | null;
+  // True when the session was spawned with use_worktree=true (per-session
+  // worktree under <repo>.wt/<branch>). Drives the close-context-menu's
+  // "remove worktree" choice. false for orphans whose stored spawn config
+  // pre-dates this field — the worktree may still exist on disk.
+  has_per_session_worktree: boolean;
 }
 
 export type SpawnTarget =
@@ -122,6 +127,21 @@ export interface SpawnRequest {
   codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
   prompt_injector: PromptInjector | null;
+}
+
+// Subset of SpawnRequest persisted on each session record + orphan sidecar
+// so duplicates can be reconstructed without re-prompting. Excludes label
+// (auto-generated for clones), initial_prompt (one-shot kickoff), and
+// prompt_injector (also one-shot).
+export interface SpawnConfig {
+  target: SpawnTarget;
+  mode: SessionMode;
+  dangerously_skip_permissions: boolean;
+  agent: Agent;
+  model: string | null;
+  permission_mode: PermissionMode | null;
+  codex_sandbox: CodexSandbox | null;
+  extra_env: Array<[string, string]>;
 }
 
 // ------- Prompt injection & presets -------
@@ -340,6 +360,8 @@ export type ClientMessage =
   | { type: "remove_workspace"; workspace_id: string }
   | { type: "list_sessions" }
   | ({ type: "spawn_session" } & SpawnRequest)
+  | { type: "duplicate_session"; session_id: string }
+  | { type: "get_spawn_config"; session_id: string }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "send_input"; session_id: string; data_b64: string }
@@ -488,6 +510,14 @@ export type DaemonMessage =
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
   | { type: "session_removed"; session_id: string }
+  | {
+      type: "spawn_config_reply";
+      session_id: string;
+      // null when the session is unknown or its sidecar pre-dates the
+      // spawn-config field; the UI should fall back to Settings defaults
+      // for the spawn dialog in that case.
+      config: SpawnConfig | null;
+    }
   | { type: "pty_output"; session_id: string; data_b64: string }
   | { type: "attention"; session_id: string; reason: string }
   | {

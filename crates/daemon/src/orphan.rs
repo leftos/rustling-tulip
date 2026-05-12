@@ -13,7 +13,7 @@
 use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
-use protocol::{Agent, SessionKind, SessionMember, SessionMode};
+use protocol::{Agent, SessionKind, SessionMember, SessionMode, SpawnConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -51,6 +51,14 @@ pub struct OrphanMeta {
     /// watcher will repopulate it on the next title broadcast.
     #[serde(default)]
     pub terminal_title: Option<String>,
+    /// Spawn-time configuration used to clone this session via
+    /// [`protocol::ClientMessage::DuplicateSession`]. `None` for sidecars
+    /// written by daemon versions before this field existed; reattached
+    /// orphans in that state can't be duplicated (the daemon rejects the
+    /// request) and `GetSpawnConfig` surfaces `None` so the UI falls back
+    /// to opening the spawn dialog with defaults.
+    #[serde(default)]
+    pub spawn_config: Option<SpawnConfig>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -249,6 +257,7 @@ pub fn meta_from_record(
     workspace_id: Option<String>,
     program_name: Option<String>,
     agent: Agent,
+    spawn_config: Option<SpawnConfig>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -265,6 +274,7 @@ pub fn meta_from_record(
         program_name,
         agent: Some(agent),
         terminal_title: None,
+        spawn_config,
     })
 }
 

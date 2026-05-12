@@ -17,6 +17,9 @@ import {
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
 import { saveSettings, useSettings } from "../utils/settings";
+import SessionContextMenu, {
+  type SessionContextMenuState,
+} from "./SessionContextMenu";
 
 /// Drag MIME shared with the grid + tab bar so sidebar leaves can be dropped
 /// into existing pane drop zones. Payload is `${tabId}:${paneId}` — identical
@@ -59,6 +62,12 @@ interface Props {
   onRemoveWorkspace: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenSpawn: (initial?: SpawnInitialTarget) => void;
+  /// Shift-click on a session's "Duplicate" context-menu entry. App-level
+  /// handler fetches the source's SpawnConfig and opens the spawn dialog
+  /// pre-filled with it. Plain click is handled inside Sidebar via
+  /// `client.send({ type: "duplicate_session", ... })` and doesn't need
+  /// a callback.
+  onDuplicateSessionWithDialog: (sessionId: string) => void;
   onOpenWorkspaceCreator: () => void;
   onRevealInExplorer: (path: string) => void;
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
@@ -198,6 +207,9 @@ export default function Sidebar(props: Props) {
 
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const closeMenu = () => setContextMenu(null);
+  const [sessionMenu, setSessionMenu] =
+    useState<SessionContextMenuState | null>(null);
+  const closeSessionMenu = () => setSessionMenu(null);
 
   // Presets are fetched on demand when the context menu opens. Per-target
   // cache keeps subsequent opens snappy; null means "not fetched yet",
@@ -386,6 +398,9 @@ export default function Sidebar(props: Props) {
                 onContextMenu={(x, y) =>
                   setContextMenu({ x, y, container: c })
                 }
+                onSessionContextMenu={(x, y, session) =>
+                  setSessionMenu({ x, y, session })
+                }
               />
             );
           })}
@@ -439,6 +454,27 @@ export default function Sidebar(props: Props) {
           }}
         />
       )}
+
+      {sessionMenu && (
+        <SessionContextMenu
+          state={sessionMenu}
+          tabs={props.tabs}
+          client={props.client}
+          onClose={closeSessionMenu}
+          onDuplicate={(withDialog) => {
+            const sid = sessionMenu.session.id;
+            if (withDialog) {
+              props.onDuplicateSessionWithDialog(sid);
+            } else {
+              props.client.send({
+                type: "duplicate_session",
+                session_id: sid,
+              });
+            }
+            closeSessionMenu();
+          }}
+        />
+      )}
     </aside>
   );
 }
@@ -462,6 +498,13 @@ interface ContainerNodeProps {
   onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
   onRemoveWorkspace: (id: string) => void;
   onContextMenu: (x: number, y: number) => void;
+  /// Threads through to each SessionLeaf so a right-click on a session
+  /// opens the per-session context menu (Duplicate, …).
+  onSessionContextMenu: (
+    x: number,
+    y: number,
+    session: SessionSnapshot,
+  ) => void;
 }
 
 function ContainerNode(p: ContainerNodeProps) {
@@ -633,6 +676,7 @@ function ContainerNode(p: ContainerNodeProps) {
               selected={p.highlightedSessionIds.has(s.id)}
               needsAttention={p.attentionSessions.has(s.id)}
               onSelect={p.onSelectSession}
+              onContextMenu={p.onSessionContextMenu}
             />
           ))}
         </ul>
@@ -648,6 +692,10 @@ interface SessionLeafProps {
   selected: boolean;
   needsAttention: boolean;
   onSelect: (id: string) => void;
+  /// Right-clicking the leaf opens the session context menu (Duplicate
+  /// for now; more entries will land here). State is lifted to the
+  /// Sidebar component so only one menu is open at a time.
+  onContextMenu: (x: number, y: number, session: SessionSnapshot) => void;
 }
 
 function SessionLeaf(p: SessionLeafProps) {
@@ -667,6 +715,10 @@ function SessionLeaf(p: SessionLeafProps) {
       DRAG_MIME,
       `${primaryBinding.tab_id}:${primaryBinding.pane_id}`,
     );
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    p.onContextMenu(e.clientX, e.clientY, s);
   };
   const onBindUnbound = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -704,6 +756,7 @@ function SessionLeaf(p: SessionLeafProps) {
         }}
         draggable={draggable}
         onDragStart={onDragStart}
+        onContextMenu={onContextMenu}
         data-testid="sidebar-session"
         data-session-id={s.id}
         data-session-status={s.status}

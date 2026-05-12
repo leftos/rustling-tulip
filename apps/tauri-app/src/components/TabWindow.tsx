@@ -87,6 +87,7 @@ export default function TabWindow({
       ) : (
         <GridRenderer
           tab={tab}
+          tabs={[]}
           client={client}
           sessions={sessions}
           subscribePty={subscribePty}
