@@ -97,6 +97,21 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cmd.arg(arg);
     }
     cmd.cwd(cfg.cwd.as_path());
+    // portable-pty's CommandBuilder::as_command() calls env_clear() before
+    // applying the builder's env map, so the child receives ZERO inherited
+    // vars unless we explicitly add them. Forward this process's env (which
+    // the daemon already populated via tracer_client::spawn with the
+    // passthrough keep-list: PATH, APPDATA, USERPROFILE, etc.). Skip the
+    // tracer-internal log var so it doesn't leak into the child env.
+    let mut forwarded_env_count = 0_usize;
+    for (k, v) in std::env::vars_os() {
+        if k == "RUSTLING_TULIP_TRACER_LOG" {
+            continue;
+        }
+        cmd.env(&k, &v);
+        forwarded_env_count += 1;
+    }
+    info!(forwarded_env_count, "supervisor: forwarded process env to child");
 
     let mut child = match cmd_spawn(pair.slave.as_ref(), cmd) {
         Ok(c) => c,
@@ -137,14 +152,30 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // (and through it, the child) when the daemon is slow to drain.
     let shared_for_reader = Arc::clone(&shared);
     let reader_handle = std::thread::spawn(move || {
+        debug!("supervisor: PTY reader thread started; about to enter read loop");
         let mut buf = [0u8; 4096];
+        let mut total_bytes = 0u64;
+        let mut read_count = 0u64;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    debug!("supervisor: PTY reader EOF");
+                    debug!(
+                        total_bytes,
+                        read_count, "supervisor: PTY reader EOF; exiting"
+                    );
                     break;
                 }
                 Ok(n) => {
+                    read_count += 1;
+                    total_bytes += n as u64;
+                    if read_count == 1 {
+                        let preview_len = n.min(64);
+                        debug!(
+                            n,
+                            preview = %String::from_utf8_lossy(&buf[..preview_len]).escape_debug().to_string(),
+                            "supervisor: first PTY read"
+                        );
+                    }
                     let chunk = buf[..n].to_vec();
                     let attached = {
                         let Ok(mut state) = shared_for_reader.lock() else {
@@ -164,7 +195,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
                 Err(err) => {
-                    warn!(?err, "supervisor: PTY reader error; exiting");
+                    warn!(?err, total_bytes, read_count, "supervisor: PTY reader error; exiting");
                     break;
                 }
             }
@@ -174,6 +205,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // PTY writer thread: serializes input writes onto the master.
     let (pty_input_tx, mut pty_input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = std::thread::spawn(move || {
+        debug!("supervisor: PTY writer thread started");
         let mut writer = writer;
         while let Some(bytes) = block_on_recv(&mut pty_input_rx) {
             if let Err(err) = std::io::Write::write_all(&mut writer, &bytes) {
@@ -215,6 +247,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let exit_broadcast_for_child = exit_broadcast_tx.clone();
     let mut child_killer = child.clone_killer();
     let child_wait = tokio::task::spawn_blocking(move || {
+        debug!("supervisor: child waiter blocking on child.wait()");
         let status = child.wait();
         let code = match status {
             Ok(s) => i32::try_from(s.exit_code()).unwrap_or(-1),
@@ -223,8 +256,43 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 -1
             }
         };
+        debug!(code, "supervisor: child waiter observed exit");
         let _ = exit_broadcast_for_child.send(code);
         code
+    });
+
+    // Liveness heartbeat: surfaces "child spawned but never wrote a byte"
+    // hangs without flooding the log during normal use. Polls every 5 s for
+    // 30 s after spawn; if the ring is still empty by then, logs a single
+    // WARN and gives up. Once any byte arrives, heartbeats fall silent.
+    let shared_for_heartbeat = Arc::clone(&shared);
+    let heartbeat_session = cfg.session_id.clone();
+    let heartbeat = tokio::spawn(async move {
+        for tick in 1..=6_u32 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let Ok(guard) = shared_for_heartbeat.lock() else {
+                debug!("supervisor: heartbeat: shared state poisoned");
+                return;
+            };
+            let ring_bytes = guard.ring.len();
+            drop(guard);
+            if ring_bytes > 0 {
+                debug!(
+                    session_id = %heartbeat_session,
+                    tick,
+                    ring_bytes,
+                    "supervisor: heartbeat (child producing output, exiting heartbeat)"
+                );
+                return;
+            }
+            if tick == 6 {
+                warn!(
+                    session_id = %heartbeat_session,
+                    "supervisor: 30 s elapsed and child has not produced any output; \
+                     it may be hung on stdin (e.g. unanswered DSR query) or env-starved"
+                );
+            }
+        }
     });
 
     // Stop signal: pipe Input/Resize/Stop dispatch sends a kill request here.
@@ -262,6 +330,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     pipe_accept.abort();
     stop_handler.abort();
+    heartbeat.abort();
 
     let _ = reader_handle.join();
 

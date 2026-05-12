@@ -273,9 +273,41 @@ async fn handshake_and_wire(
 
     // Reader task: parse TracerResponse frames, route to output broadcast +
     // exit oneshot. On stream EOF or parse error, transition exit to -1.
+    //
+    // Critical: yield until at least one subscriber has called
+    // `output_tx.subscribe()` before starting the pipe read loop. Otherwise
+    // the very first Output frame (ring snapshot from the tracer with the
+    // child's startup bytes) gets sent into a broadcast with zero receivers
+    // and is dropped silently — leaving scrollback empty, no PtyOutput on
+    // the WS, and the child blocked forever waiting for an answer to its
+    // DSR-6 cursor-position query. The caller (`spawn_interactive_session`)
+    // wires up `attach_lifecycle`, `pty_state::watch`, and
+    // `osc_title::watch` immediately after `tracer_client::spawn` returns;
+    // a few yield rounds suffice to let those subscriptions register.
     let output_for_reader = output_tx.clone();
     let session_id_for_reader = session_id.clone();
     tokio::spawn(async move {
+        let mut waits = 0_u32;
+        while output_for_reader.receiver_count() == 0 {
+            tokio::task::yield_now().await;
+            waits += 1;
+            if waits >= 1_000 {
+                // ~ms-scale at most; if we hit this we're stuck and bytes
+                // would be dropped — log loudly and proceed anyway so the
+                // task doesn't deadlock the session.
+                tracing::warn!(
+                    session_id = %session_id_for_reader,
+                    "tracer_client: no subscriber after 1000 yields; starting reader anyway",
+                );
+                break;
+            }
+        }
+        tracing::debug!(
+            session_id = %session_id_for_reader,
+            waits,
+            subscriber_count = output_for_reader.receiver_count(),
+            "tracer_client: reader starting"
+        );
         let exit_code = read_loop(reader, output_for_reader, &session_id_for_reader).await;
         let _ = exit_tx.send(exit_code);
     });
