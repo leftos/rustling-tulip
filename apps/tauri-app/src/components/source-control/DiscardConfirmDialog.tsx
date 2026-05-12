@@ -27,7 +27,6 @@ export default function DiscardConfirmDialog({
   return (
     <div
       className="modal-backdrop modal-backdrop-destructive"
-      onClick={onCancel}
       data-testid="discard-confirm-dialog"
     >
       <div

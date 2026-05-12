@@ -27,7 +27,7 @@ export default function RepoRemoveDialog({
 }: Props) {
   const count = liveSessions.length;
   const cancelRef = useRef<HTMLButtonElement | null>(null);
-  // Escape dismisses the modal — same as clicking Cancel / the backdrop.
+  // Escape dismisses the modal — same as clicking Cancel.
   // Land focus on Cancel (the safest of the three actions) so a stray
   // Enter doesn't destroy state.
   useEscape(onCancel);
@@ -36,7 +36,6 @@ export default function RepoRemoveDialog({
   return (
     <div
       className="modal-backdrop modal-backdrop-destructive"
-      onClick={onCancel}
       data-testid="repo-remove-dialog"
     >
       <div

@@ -49,7 +49,6 @@ export default function ExitConfirmDialog({
   return (
     <div
       className="modal-backdrop modal-backdrop-exit"
-      onClick={busy ? undefined : onCancel}
       data-testid="exit-confirm-dialog"
     >
       <div

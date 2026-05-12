@@ -41,7 +41,6 @@ export default function WorkspaceCreator({ repos, client, onClose }: Props) {
   return (
     <div
       className="modal-backdrop"
-      onClick={onClose}
       data-testid="workspace-creator"
     >
       <div

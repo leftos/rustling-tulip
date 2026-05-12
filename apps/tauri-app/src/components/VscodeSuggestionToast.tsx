@@ -27,7 +27,6 @@ export default function VscodeSuggestionToast({
   return (
     <div
       className="modal-backdrop modal-backdrop-vscode"
-      onClick={onDismiss}
       data-testid="vscode-suggestion-toast"
     >
       <div

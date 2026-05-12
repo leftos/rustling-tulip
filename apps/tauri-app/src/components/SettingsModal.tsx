@@ -78,7 +78,6 @@ export default function SettingsModal({ settings, onClose }: Props) {
   return (
     <div
       className="modal-backdrop"
-      onClick={onClose}
       data-testid="settings-modal"
     >
       <div
