@@ -3,6 +3,7 @@
 import protocolVersion from "../../../protocol-version.json";
 
 export const PROTOCOL_VERSION: number = protocolVersion.version;
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly number[] = protocolVersion.supported;
 
 export type Agent = "claude" | "codex";
 
@@ -372,7 +373,12 @@ export function tabGrid(tab: TabEntry): GridNode | null {
 // ------- Wire envelopes -------
 
 export type ClientMessage =
-  | { type: "hello"; protocol_version: number; auth_token: string }
+  | {
+      type: "hello";
+      protocol_version: number;
+      protocol_versions: number[];
+      auth_token: string;
+    }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "remove_repo"; repo_id: string }
@@ -536,7 +542,11 @@ export type ClientMessage =
     };
 
 export type DaemonMessage =
-  | { type: "welcome"; protocol_version: number }
+  | {
+      type: "welcome";
+      protocol_version: number;
+      supported_versions: number[];
+    }
   | { type: "auth_failed"; reason: string }
   | { type: "repos"; repos: RepoEntry[] }
   | { type: "workspaces"; workspaces: WorkspaceEntry[] }

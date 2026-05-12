@@ -856,9 +856,15 @@ fn default_stagger_ms() -> u32 {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Always the first message after WS upgrade. Fails the connection if the
-    /// token does not match.
+    /// token does not match. The daemon negotiates a wire version from the
+    /// union of `protocol_version` (scalar back-compat) and `protocol_versions`
+    /// (new clients advertise every version they can speak). Sending both is
+    /// the supported pattern; older peers that only know about the scalar
+    /// still decode via `#[serde(default)]` on the vec.
     Hello {
         protocol_version: u32,
+        #[serde(default)]
+        protocol_versions: Vec<u32>,
         auth_token: String,
     },
     ListRepos,
@@ -1235,8 +1241,15 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
+    /// `protocol_version` is the negotiated wire version the daemon picked
+    /// from the intersection of its `SUPPORTED_PROTOCOL_VERSIONS` and the
+    /// client's advertised set. `supported_versions` echoes the daemon's full
+    /// support list so the client can dim feature-gated UI when running
+    /// against an older daemon.
     Welcome {
         protocol_version: u32,
+        #[serde(default)]
+        supported_versions: Vec<u32>,
     },
     AuthFailed {
         reason: String,
@@ -2001,6 +2014,87 @@ mod tests {
         let bad = r#"{"id":"x","name":"x","created_at":"2024-01-01T00:00:00Z"}"#;
         let res: Result<TabEntry, _> = serde_json::from_str(bad);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn hello_decodes_with_scalar_only() {
+        // A v15-era client predates `protocol_versions`. Its Hello carries
+        // only the scalar; `#[serde(default)]` on the new vec keeps the
+        // message decodable by post-Phase-A daemons.
+        let legacy = r#"{
+            "type": "hello",
+            "protocol_version": 15,
+            "auth_token": "abc"
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(legacy).expect("parse legacy hello");
+        match parsed {
+            ClientMessage::Hello {
+                protocol_version,
+                protocol_versions,
+                auth_token,
+            } => {
+                assert_eq!(protocol_version, 15);
+                assert!(protocol_versions.is_empty());
+                assert_eq!(auth_token, "abc");
+            }
+            _ => panic!("expected Hello"),
+        }
+    }
+
+    #[test]
+    fn hello_decodes_with_range_field() {
+        let new_shape = r#"{
+            "type": "hello",
+            "protocol_version": 16,
+            "protocol_versions": [16, 15],
+            "auth_token": "abc"
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(new_shape).expect("parse new hello");
+        match parsed {
+            ClientMessage::Hello {
+                protocol_version,
+                protocol_versions,
+                ..
+            } => {
+                assert_eq!(protocol_version, 16);
+                assert_eq!(protocol_versions, vec![16, 15]);
+            }
+            _ => panic!("expected Hello"),
+        }
+    }
+
+    #[test]
+    fn welcome_decodes_with_scalar_only() {
+        // A v15-era daemon sends Welcome without `supported_versions`. The
+        // new client still decodes it via `#[serde(default)]`.
+        let legacy = r#"{"type":"welcome","protocol_version":15}"#;
+        let parsed: DaemonMessage = serde_json::from_str(legacy).expect("parse legacy welcome");
+        match parsed {
+            DaemonMessage::Welcome {
+                protocol_version,
+                supported_versions,
+            } => {
+                assert_eq!(protocol_version, 15);
+                assert!(supported_versions.is_empty());
+            }
+            _ => panic!("expected Welcome"),
+        }
+    }
+
+    #[test]
+    fn welcome_decodes_with_range_field() {
+        let new_shape = r#"{"type":"welcome","protocol_version":15,"supported_versions":[16,15]}"#;
+        let parsed: DaemonMessage = serde_json::from_str(new_shape).expect("parse new welcome");
+        match parsed {
+            DaemonMessage::Welcome {
+                protocol_version,
+                supported_versions,
+            } => {
+                assert_eq!(protocol_version, 15);
+                assert_eq!(supported_versions, vec![16, 15]);
+            }
+            _ => panic!("expected Welcome"),
+        }
     }
 
     #[test]

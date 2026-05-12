@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   PROTOCOL_VERSION,
+  SUPPORTED_PROTOCOL_VERSIONS,
   type ClientMessage,
   type DaemonMessage,
   type GitRemoteUrl,
@@ -29,7 +30,9 @@ export interface DaemonClient {
 
 export type ConnectionState =
   | { kind: "connecting" }
-  | { kind: "open" }
+  // `negotiatedVersion` is undefined until the daemon's Welcome arrives;
+  // feature-gated UI should treat undefined as "assume oldest supported".
+  | { kind: "open"; negotiatedVersion?: number }
   | { kind: "closed"; reason: string }
   | { kind: "auth_failed"; reason: string };
 
@@ -135,6 +138,7 @@ export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
       JSON.stringify({
         type: "hello",
         protocol_version: PROTOCOL_VERSION,
+        protocol_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth_token: handshake.auth_token,
       } satisfies ClientMessage),
     );
@@ -148,6 +152,9 @@ export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
     } catch (err) {
       console.error("malformed daemon message", err);
       return;
+    }
+    if (parsed.type === "welcome") {
+      setState({ kind: "open", negotiatedVersion: parsed.protocol_version });
     }
     if (parsed.type === "auth_failed") {
       setState({ kind: "auth_failed", reason: parsed.reason });

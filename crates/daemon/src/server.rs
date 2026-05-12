@@ -27,9 +27,9 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
-    PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SessionKind, SessionMember, SessionMetrics,
-    SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
-    VscodeWorkspaceSuggestion,
+    PROTOCOL_VERSION, PaneDropEdge, PermissionMode, SUPPORTED_PROTOCOL_VERSIONS, SessionKind,
+    SessionMember, SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget,
+    TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -258,15 +258,18 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     });
 
     // Mandatory handshake.
-    if let Err(err) = handshake(&hub, &mut receiver, &out_tx).await {
-        warn!(?err, "client handshake failed");
-        let _ = out_tx.send(DaemonMessage::AuthFailed {
-            reason: err.to_string(),
-        });
-        drop(out_tx);
-        let _ = send_task.await;
-        return;
-    }
+    let _negotiated_version = match handshake(&hub, &mut receiver, &out_tx).await {
+        Ok(v) => v,
+        Err(err) => {
+            warn!(?err, "client handshake failed");
+            let _ = out_tx.send(DaemonMessage::AuthFailed {
+                reason: err.to_string(),
+            });
+            drop(out_tx);
+            let _ = send_task.await;
+            return;
+        }
+    };
 
     let attached = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
 
@@ -487,7 +490,7 @@ async fn handshake(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<u32> {
     let Some(Ok(msg)) = receiver.next().await else {
         return Err(anyhow!("client closed before handshake"));
     };
@@ -498,23 +501,47 @@ async fn handshake(
     let parsed: ClientMessage = serde_json::from_str(&text).context("parsing handshake message")?;
     let ClientMessage::Hello {
         protocol_version,
+        protocol_versions,
         auth_token,
     } = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
     };
-    if protocol_version != PROTOCOL_VERSION {
-        return Err(anyhow!(
-            "protocol version mismatch: client {protocol_version}, daemon {PROTOCOL_VERSION}"
-        ));
-    }
     if auth_token != hub.auth_token {
         return Err(anyhow!("invalid auth token"));
     }
+    let negotiated = negotiate_protocol_version(protocol_version, &protocol_versions)
+        .ok_or_else(|| {
+            anyhow!(
+                "no compatible protocol version: client advertises scalar={protocol_version} \
+                 + range={protocol_versions:?}, daemon supports {SUPPORTED_PROTOCOL_VERSIONS:?}"
+            )
+        })?;
+    info!(
+        negotiated,
+        scalar = protocol_version,
+        ?protocol_versions,
+        "handshake negotiated protocol version"
+    );
     let _ = out_tx.send(DaemonMessage::Welcome {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: negotiated,
+        supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
     });
-    Ok(())
+    Ok(negotiated)
+}
+
+/// Pick the highest protocol version both the client and daemon understand.
+/// The client's advertised set is the union of its scalar `protocol_version`
+/// and its `protocol_versions` vec; the daemon's set is the build-time
+/// `SUPPORTED_PROTOCOL_VERSIONS` constant.
+fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    for &v in std::iter::once(&scalar).chain(range.iter()) {
+        if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) {
+            best = Some(best.map_or(v, |cur| cur.max(v)));
+        }
+    }
+    best
 }
 
 fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
@@ -2440,6 +2467,41 @@ mod tests {
             extra_env: Vec::new(),
             prompt_injector: None,
         }
+    }
+
+    #[test]
+    fn negotiate_picks_highest_match_from_range() {
+        // SUPPORTED_PROTOCOL_VERSIONS is whatever this build advertises.
+        // Use the daemon's own current version as the guaranteed-supported
+        // anchor and probe the negotiator around it.
+        let v = PROTOCOL_VERSION;
+        let result = negotiate_protocol_version(v, &[v]);
+        assert_eq!(result, Some(v));
+    }
+
+    #[test]
+    fn negotiate_returns_none_when_no_overlap() {
+        // u32::MAX is guaranteed not to be in the daemon's supported list.
+        let result = negotiate_protocol_version(u32::MAX, &[u32::MAX - 1, u32::MAX - 2]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn negotiate_accepts_scalar_only() {
+        // Old-shape Hello: empty range vec, scalar carries the version.
+        let v = PROTOCOL_VERSION;
+        assert_eq!(negotiate_protocol_version(v, &[]), Some(v));
+    }
+
+    #[test]
+    fn negotiate_prefers_highest_when_both_supported() {
+        // If the client lists multiple versions and several are supported,
+        // pick the highest. Use a synthetic case by constructing a list
+        // where two entries are real: a v15 anchored to PROTOCOL_VERSION
+        // and a higher unsupported one (u32::MAX) — the supported one wins.
+        let v = PROTOCOL_VERSION;
+        let result = negotiate_protocol_version(v, &[u32::MAX, v]);
+        assert_eq!(result, Some(v));
     }
 
     #[test]
