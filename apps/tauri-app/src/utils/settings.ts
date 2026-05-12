@@ -45,6 +45,12 @@ export interface Settings {
     /// `utils/fontSize.ts`) because they're keyed by ephemeral ids.
     /// Clamped to [8, 32] by the UI.
     font_size: number;
+    /// Auto-copy any non-empty terminal selection to the system
+    /// clipboard. Opt-out — defaults to `true` because most users
+    /// expect PuTTY / GNOME-terminal style selection-copy. Bare Ctrl+C
+    /// still copies the current selection (and falls through to ^C
+    /// when nothing is selected) regardless of this setting.
+    copy_on_selection: boolean;
   };
 }
 
@@ -65,6 +71,7 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   terminal: {
     font_size: 13,
+    copy_on_selection: true,
   },
 };
 

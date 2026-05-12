@@ -342,6 +342,21 @@ export default function SettingsModal({ settings, onClose }: Props) {
               Ctrl+= / Ctrl+- (current tab) and Ctrl+Shift+= /
               Ctrl+Shift+- (focused session).
             </p>
+            <Toggle
+              testid="settings-terminal-copy-on-selection"
+              label="Copy selection to clipboard automatically"
+              checked={settings.terminal.copy_on_selection}
+              onChange={(v) =>
+                update((s) => ({
+                  ...s,
+                  terminal: { ...s.terminal, copy_on_selection: v },
+                }))
+              }
+            />
+            <p className="settings-section-hint">
+              Off: select to highlight, copy explicitly with Ctrl+C
+              (when there's a selection) or Ctrl+Shift+C.
+            </p>
           </section>
         </div>
         <footer className="modal-footer">

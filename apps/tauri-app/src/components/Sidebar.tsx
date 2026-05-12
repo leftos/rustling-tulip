@@ -22,7 +22,9 @@ import {
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
+import { copyToClipboard } from "../utils/clipboard";
 import { saveSettings, useSettings } from "../utils/settings";
+import CopyPulse from "./CopyPulse";
 import DaemonFooter from "./DaemonFooter";
 import SessionContextMenu, {
   type DuplicateTarget,
@@ -678,7 +680,7 @@ export default function Sidebar(props: Props) {
           }}
           onCopyPath={() => {
             const path = contextMenu.container.fsPath;
-            if (path) void navigator.clipboard.writeText(path);
+            if (path) void copyToClipboard(path, "path").catch(() => {});
             closeMenu();
           }}
           onLaunchPreset={(preset) => {
@@ -707,6 +709,7 @@ export default function Sidebar(props: Props) {
         />
       )}
 
+      <CopyPulse />
       <DaemonFooter
         connection={props.connection}
         handshake={props.handshake}

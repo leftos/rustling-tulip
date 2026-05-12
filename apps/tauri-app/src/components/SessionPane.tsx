@@ -386,6 +386,8 @@ export default function SessionPane({
               subscribePty={subscribePty}
               status={session.status}
               tabId={tabId ?? null}
+              agent={session.agent}
+              mode={session.mode}
             />
           ) : session.status === "stopped" ? (
             <div

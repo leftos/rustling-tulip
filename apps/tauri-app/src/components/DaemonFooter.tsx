@@ -6,6 +6,7 @@ import {
   type DaemonHandshake,
   type DaemonPaths,
 } from "../api";
+import { copyToClipboard } from "../utils/clipboard";
 
 /// Union the footer accepts. Mirrors the shape `Sidebar.tsx::renderConnectionBadge`
 /// took before this component subsumed it — App's `status` adds `init` and
@@ -118,7 +119,7 @@ export default function DaemonFooter({
     const value = paths?.[key];
     if (!value) return;
     try {
-      await navigator.clipboard.writeText(value);
+      await copyToClipboard(value, "path");
       setCopied(key);
       window.setTimeout(() => {
         setCopied((cur) => (cur === key ? null : cur));

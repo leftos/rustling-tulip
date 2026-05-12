@@ -9,8 +9,11 @@ import {
   loadScrollback,
   type DaemonClient,
 } from "../api";
+import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
+import { copyToClipboard } from "../utils/clipboard";
 import { useFontSize } from "../utils/fontSize";
+import { loadSettings } from "../utils/settings";
 
 // Module-scope singleton: kicks off the Geist Mono woff2 download on
 // first import. WebGL bakes its glyph atlas at renderer-activate time,
@@ -43,6 +46,13 @@ interface Props {
   /// Tab id this terminal is mounted under. Resolves the per-tab font
   /// size override. `null` in pop-out windows.
   tabId?: string | null;
+  /// Which agent is driving the session — selects the shift+enter
+  /// escape sequence (claude wants `\\\r`, codex wants `\n`).
+  agent: Agent;
+  /// Session mode — `plain_shell` falls back to the claude sequence
+  /// regardless of `agent` because `\\\r` is bash line-continuation;
+  /// `\n` would just submit the partial command.
+  mode: SessionMode;
 }
 
 export default function Terminal({
@@ -51,9 +61,18 @@ export default function Terminal({
   subscribePty,
   status,
   tabId,
+  agent,
+  mode,
 }: Props) {
   const statusRef = useRef(status);
   statusRef.current = status;
+  // Shift+enter and Ctrl+C handlers read these from refs so changes
+  // (e.g. a session that flipped agent — currently impossible, but
+  // mode could change in the future) don't require re-wiring xterm.
+  const agentRef = useRef(agent);
+  agentRef.current = agent;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -264,6 +283,29 @@ export default function Terminal({
         });
       });
 
+      // Auto-copy any non-empty selection to the system clipboard. Fires
+      // on every selection-change tick (mouse drag, shift+arrow, etc.) —
+      // `navigator.clipboard.writeText` is async and cheap, and even if
+      // the user is still dragging the last write wins. The .catch is a
+      // safety net for transient permission failures; we don't surface
+      // them because the user can always retry the selection.
+      //
+      // Gated behind `terminal.copy_on_selection` (opt-out, defaults
+      // on). The ref tracks the latest value so toggling the setting
+      // takes effect immediately without re-wiring xterm. Ctrl+C and
+      // Ctrl+Shift+C remain unconditional copy bindings.
+      let autoCopyEnabled = loadSettings().terminal.copy_on_selection;
+      const settingsListener = () => {
+        autoCopyEnabled = loadSettings().terminal.copy_on_selection;
+      };
+      window.addEventListener("rt:settings-changed", settingsListener);
+      const selectionHandler = term.onSelectionChange(() => {
+        if (!autoCopyEnabled) return;
+        const sel = term.getSelection();
+        if (sel.length === 0) return;
+        void copyToClipboard(sel, "selection").catch(() => {});
+      });
+
       // Custom keymap on top of xterm's default. Returning `false` from
       // this handler tells xterm to bail out *before* it processes the
       // keystroke — meaning xterm will not generate any PTY bytes AND will
@@ -279,23 +321,18 @@ export default function Terminal({
       //     (with bracketed-paste mode), and fires onData. Without this
       //     case, xterm's default keydown sends `\x16` (SYN) to the PTY
       //     and preventDefaults the event, suppressing paste entirely.
-      //     Iter 50 added a manual paste path that double-fired alongside
-      //     the native handler; iter 51 dropped it but accidentally also
-      //     broke the native path because xterm's default still ate Ctrl+V;
-      //     iter 52 fixes that by explicitly returning false.
-      //   * **Ctrl/Cmd+Shift+C** — copy the current selection. xterm has
-      //     no default binding for this; read via `term.getSelection()`
-      //     and write through `navigator.clipboard.writeText()`. Write-
-      //     clipboard does not trigger a permission prompt for user-
-      //     initiated actions.
-      //   * **Shift+Enter** — send `\` + CR. Claude and codex TUIs convert
-      //     this to "newline within input without submitting"; bash treats
-      //     it as a line continuation so plain-shell sessions don't break.
-      //     Matches the `\\\r` sequence Claude Code's `terminal-setup`
-      //     injects into VS Code's terminal keybindings.
-      //
-      // Bare Ctrl+C still reaches the PTY as ^C (SIGINT) — only the
-      // Ctrl+Shift+C combo is intercepted.
+      //   * **Ctrl/Cmd+C** — copy the current selection iff one exists,
+      //     otherwise fall through so xterm's default sends ^C (SIGINT)
+      //     to the PTY. Matches Windows Terminal / VS Code terminal
+      //     conventions. Ctrl+Shift+C remains as an always-copy variant
+      //     for users who want to copy without first selecting.
+      //   * **Shift+Enter** — insert a newline into the agent's input
+      //     buffer without submitting. The required sequence is agent-
+      //     specific: Claude treats `\` + CR as line-continuation (matches
+      //     the `\\\r` sequence Claude Code's `terminal-setup` injects
+      //     into VS Code's keybindings), while codex's TUI binds `Ctrl+J`
+      //     (`\n`) to `insert_newline`. Plain-shell sessions stay on
+      //     `\\\r` so bash line-continuation keeps working.
       term.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
         const mod = event.ctrlKey || event.metaKey;
@@ -307,16 +344,20 @@ export default function Terminal({
           // so the helper textarea doesn't *also* receive an Enter
           // (which would insert "\n" into the textarea, trigger xterm's
           // input listener, and forward a stray "\n" to the PTY after our
-          // intended "\\\r" sequence; Claude then sees CR + LF and
-          // submits anyway). Returning false alone isn't enough — xterm
-          // skips its own processing but doesn't preventDefault for us.
+          // intended sequence; Claude then sees CR + LF and submits
+          // anyway). Returning false alone isn't enough — xterm skips
+          // its own processing but doesn't preventDefault for us.
           event.preventDefault();
           if (stopped) return false;
+          const seq =
+            modeRef.current === "plain_shell" || agentRef.current === "claude"
+              ? "\\\r"
+              : "\n";
           const enc = new TextEncoder();
           client.send({
             type: "send_input",
             session_id: sessionId,
-            data_b64: bytesToBase64(enc.encode("\\\r")),
+            data_b64: bytesToBase64(enc.encode(seq)),
           });
           return false;
         }
@@ -327,10 +368,31 @@ export default function Terminal({
         // Step aside for paste — see the block comment above.
         if (key === "v") return false;
 
-        if (event.shiftKey && key === "c") {
+        // Ctrl+Shift+C: always copy the current selection if one exists.
+        // Ctrl+C: copy if there's a selection, otherwise fall through so
+        // xterm sends ^C (SIGINT) to the PTY.
+        //
+        // `event.preventDefault()` is required alongside `return false`
+        // when we're suppressing the ^C — without it, the keydown still
+        // reaches xterm's helper-textarea path and the PTY sees SIGINT
+        // anyway. Codex in particular treats the first SIGINT as
+        // "clear input buffer" and the second as "exit", so a stray
+        // ^C while copying a highlighted region would wipe whatever
+        // the user was composing. Same shape as the Shift+Enter branch
+        // above.
+        if (key === "c") {
           const sel = term.getSelection();
-          if (sel.length === 0) return true;
-          navigator.clipboard.writeText(sel).catch(() => {});
+          if (sel.length === 0) {
+            // Shift+Ctrl+C with no selection is a no-op (don't send ^C
+            // — the shift modifier signals intent to copy, not interrupt).
+            if (event.shiftKey) {
+              event.preventDefault();
+              return false;
+            }
+            return true;
+          }
+          event.preventDefault();
+          void copyToClipboard(sel, "Ctrl+C").catch(() => {});
           return false;
         }
 
@@ -357,6 +419,10 @@ export default function Terminal({
         scrollbackCancelled = true;
       });
       cleanupFns.push(() => onDataHandler.dispose());
+      cleanupFns.push(() => selectionHandler.dispose());
+      cleanupFns.push(() =>
+        window.removeEventListener("rt:settings-changed", settingsListener),
+      );
       cleanupFns.push(() => unsubPty());
       cleanupFns.push(() => resizeObserver.disconnect());
       cleanupFns.push(() =>
