@@ -1241,22 +1241,10 @@ export default function App() {
     writeActivitySection(next);
   }, []);
 
-  // Sum of uncommitted file counts across all registered repos, driving
-  // the badge on the source-control activity-bar button. Stale entries
-  // for removed repos are pruned in the `repos` handler.
-  const sourceControlBadgeTotal = useMemo(() => {
-    let total = 0;
-    for (const count of Object.values(state.repoChangeCounts)) {
-      total += count;
-    }
-    return total;
-  }, [state.repoChangeCounts]);
-
-  // Derive the focused-repo id from the focused pane's session. Walks
-  // active tab → focused pane → session → first member's repo_id.
-  // `null` when no session is focused; the source-control sidebar falls
-  // back to a manual override or the first registered repo.
-  const focusedRepoId = useMemo(() => {
+  // Resolve the focused pane's session — shared by the source-control
+  // badge scoping and the focused-repo derivation below. `null` whenever
+  // no session is focused (no active tab, an empty pane, a diff tab).
+  const focusedSession = useMemo(() => {
     if (!activeTab || !state.focusedPaneId) return null;
     const grid = tabGrid(activeTab);
     if (!grid) return null;
@@ -1264,22 +1252,45 @@ export default function App() {
       (p) => p.pane_id === state.focusedPaneId,
     );
     if (!pane?.session_id) return null;
-    const session = state.sessions.find((s) => s.id === pane.session_id);
-    return session?.members[0]?.repo_id ?? null;
+    return state.sessions.find((s) => s.id === pane.session_id) ?? null;
   }, [activeTab, state.focusedPaneId, state.sessions]);
+
+  // Source-control activity-bar badge. Scoped to whichever session is
+  // currently focused: single-repo sessions sum their one member; workspace
+  // sessions union across every member. When nothing is focused, fall back
+  // to the total across all registered repos so the badge still surfaces
+  // unflagged changes the user might want to address.
+  const sourceControlBadgeTotal = useMemo(() => {
+    if (focusedSession) {
+      let total = 0;
+      for (const m of focusedSession.members) {
+        total += state.repoChangeCounts[m.repo_id] ?? 0;
+      }
+      return total;
+    }
+    let total = 0;
+    for (const count of Object.values(state.repoChangeCounts)) {
+      total += count;
+    }
+    return total;
+  }, [focusedSession, state.repoChangeCounts]);
+
+  // Derive the focused-repo id from the focused pane's session — used by
+  // the source-control sidebar to default its repo selection. Falls back
+  // to a manual override or the first registered repo when no session is
+  // focused.
+  const focusedRepoId = useMemo(
+    () => focusedSession?.members[0]?.repo_id ?? null,
+    [focusedSession],
+  );
 
   // Session id of the focused pane (or null). Reused by the font-size
   // shortcuts to know which session's override to bump when the user
   // presses Ctrl+Shift+= / Ctrl+Shift+-.
-  const focusedSessionId = useMemo<string | null>(() => {
-    if (!activeTab || !state.focusedPaneId) return null;
-    const grid = tabGrid(activeTab);
-    if (!grid) return null;
-    const pane = collectPanes(grid).find(
-      (p) => p.pane_id === state.focusedPaneId,
-    );
-    return pane?.session_id ?? null;
-  }, [activeTab, state.focusedPaneId]);
+  const focusedSessionId = useMemo<string | null>(
+    () => focusedSession?.id ?? null,
+    [focusedSession],
+  );
 
   // Drop font-size overrides for sessions / tabs that no longer exist.
   // Runs whenever the live id sets shift — typically once per
