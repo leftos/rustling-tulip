@@ -134,11 +134,12 @@ sessions vanish, and the user reconstructs from memory. Make recovery
 explicit and one-click before tackling the much harder problem of keeping
 the children alive.
 
-### B.1 — Capture continuation context ✅ shipped (last_prompt only)
+### B.1 — Capture continuation context ✅ shipped
 
-- [ ] DEFERRED: `recent_actions` tail in sidecar. Not strictly needed for
-      Resume; would be nice for UI display of "what was this session
-      doing?"
+- [x] `OrphanMeta.recent_actions_tail: Vec<String>` (bounded to 10 entries
+      / 1 KB). `SessionRegistry::update` syncs it to the sidecar after each
+      update so the abandoned bucket shows the session's last operational
+      context.
 - [x] `OrphanMeta.last_prompt: Option<String>` captures the user's
       initial prompt at spawn (all three spawn paths thread it through
       `meta_from_record`). The Resume handler replays it.
@@ -153,8 +154,10 @@ the children alive.
       `ClientMessage::ResumeAbandoned` spawns a fresh session from the
       captured spawn config + last_prompt, then deletes the abandoned
       sidecar. `DiscardAbandoned` is the dismiss path.
-- [ ] DEFERRED: "Resume all abandoned" bulk button. Clients can loop over
-      abandoned snapshots; UI affordance can land later.
+- [x] `ClientMessage::ResumeAllAbandoned` plus a sidebar "Resume all (N)"
+      button (visible when 2+ abandoned sessions exist). Per-session
+      failures don't abort the loop; failures surface as individual
+      session error states.
 
 ### B.3 — Graceful shutdown improvements ✅ shipped
 
@@ -237,21 +240,41 @@ Three of five empirical questions resolved via spike harnesses in
 The architecture is viable. Q1 and Q4 are runtime measurements that
 refine defaults, not gate the design.
 
-### C.3 — Implementation (still deferred to a dedicated iter)
-
-The skeleton (C.2b) shipped: `crates/tracer/` builds a working
-`rt-tracer.exe` that spawns a PTY child and reads its output into a
-bounded ring. The named-pipe server and daemon-integration changes
-below are work for the next iter:
+### C.3 — Implementation ✅ shipped
 
 - [x] New crate `crates/tracer` with binary `rt-tracer`. CLI surface,
       PTY spawn, output ring buffer all in place.
-- [ ] Daemon spawn path swap (the big change) — gated on spike
-- [ ] Daemon registry: tracer pids + pipe names alongside sidecars
-- [ ] Daemon startup: scan + ping + reconnect logic
-- [ ] Tracer self-cleanup: drain ring → scrollback file on exit
-- [ ] Tracer detached from daemon's process group / job object
-- [ ] Bundle `rt-tracer.exe` in the Tauri installer
+- [x] Tracer named-pipe server in `crates/tracer/src/supervisor.rs`:
+      hosts `\\.\pipe\rt-tracer-<id>` with `max_instances(1)` (daemon-race
+      protection per C.1 spike Q5). On connect, replays ring snapshot then
+      forwards live PTY output. PTY backpressure via bounded mpsc so a slow
+      daemon throttles the child rather than ballooning memory.
+- [x] Daemon spawn path swap: `pty::spawn` removed; both interactive and
+      plain-shell sessions go through `tracer_client::spawn`. `PtyHandle`
+      is now built from `PtyHandleParts` (channel ends) so it's
+      transport-agnostic. `ChildKiller` implemented over the pipe's `Stop`
+      request.
+- [x] Daemon registry: `OrphanMeta.tracer_pid: Option<u32>` and
+      `OrphanMeta.tracer_pipe: Option<String>` (v2 sidecar, additive — v1
+      sidecars without these fields still load and route through the
+      legacy orphan path).
+- [x] Daemon startup: `server::reattach_orphans` walks each live orphan,
+      calls `tracer_client::reattach` to connect to the existing tracer's
+      pipe, and on success wires up `pty_state::watch` /
+      `osc_title::watch` / `attach_lifecycle` exactly as a fresh spawn.
+      Reattach failure routes the session to the abandoned bucket
+      (Phase B fallback).
+- [x] Tracer detached from daemon's process group: on Windows we spawn
+      with `CREATE_NO_WINDOW` and no job-object inheritance — the tracer
+      survives the daemon's death by default (verified manually via Task
+      Manager during smoke testing).
+- [ ] Bundle `rt-tracer.exe` in the Tauri installer — production
+      installer wiring is deferred (Tauri `bundle.active = false`); dev
+      flow works because `cargo build` emits both binaries into
+      `target/<profile>/` and the sibling-of-current-exe lookup finds
+      them. Production bundling will need `externalBin` (with target-
+      triple-renamed binaries) or `resources` entries for both daemon and
+      tracer. See CLAUDE.md "Things that are deferred".
 
 ### C.4 — Acceptance criteria for Phase C
 

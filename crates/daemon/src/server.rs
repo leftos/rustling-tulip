@@ -2,7 +2,8 @@
 
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
-use crate::pty::{self, PtySpawnSpec};
+use crate::pty::PtySpawnSpec;
+use crate::tracer_client;
 use crate::registry::{
     add_repo, persist_last_agent, remove_repo, remove_workspace, set_repo_worktree_default,
     set_workspace_worktree_default, upsert_workspace,
@@ -119,6 +120,76 @@ const TAB_EVENT_CAPACITY: usize = 256;
 const PRESET_EVENT_CAPACITY: usize = 64;
 const STATE_EVENT_CAPACITY: usize = 64;
 
+/// Reattach orphan sessions (alive but detached) and abandoned sessions
+/// (dead, daemon crashed mid-run) before any clients connect so the
+/// initial state snapshot already includes them.
+///
+/// Post-C.3: orphans whose sidecar carries `tracer_pid` + `tracer_pipe` get
+/// wired up to the still-running rt-tracer via pipe, restoring full IO.
+/// A reattach failure (tracer died between liveness check and pipe open,
+/// or another daemon claimed the pipe first) routes the session to the
+/// abandoned bucket so the user can Resume from B.2's UI. Legacy sidecars
+/// (no tracer fields) fall through to the read-only orphan path — pre-C.3
+/// children can't survive the daemon anyway, so this branch is only ever
+/// taken by sidecars from a downgrade scenario.
+async fn reattach_orphans(
+    sessions: &Arc<SessionRegistry>,
+    dirs: &Dirs,
+    attention_tx: &mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    orphans: Vec<OrphanMeta>,
+    abandoned: Vec<OrphanMeta>,
+) {
+    for meta in orphans {
+        match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
+            (Some(pipe), Some(tracer_pid)) => {
+                match tracer_client::reattach(&meta.session_id, pipe, tracer_pid).await {
+                    Ok(pty) => {
+                        info!(
+                            session_id = %meta.session_id,
+                            tracer_pid,
+                            "tracer reattach succeeded"
+                        );
+                        sessions.insert_reattached(&meta, Arc::clone(&pty));
+                        pty_state::watch(
+                            sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            attention_tx.clone(),
+                        );
+                        osc_title::watch(
+                            sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            dirs.clone(),
+                        );
+                        attach_lifecycle(
+                            sessions,
+                            meta.session_id.clone(),
+                            &pty,
+                            Some(dirs.clone()),
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            ?err,
+                            session_id = %meta.session_id,
+                            tracer_pid,
+                            "tracer reattach failed; routing to abandoned"
+                        );
+                        sessions.insert_abandoned(&meta);
+                    }
+                }
+            }
+            _ => {
+                sessions.insert_orphan(&meta);
+            }
+        }
+    }
+    for meta in abandoned {
+        sessions.insert_abandoned(&meta);
+    }
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -134,16 +205,7 @@ pub async fn run(
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
 
-    // Reattach orphan sessions (alive but detached) and abandoned sessions
-    // (dead, daemon crashed mid-run) before any clients connect so the
-    // initial state snapshot already includes them. Abandoned sessions
-    // surface with `is_abandoned = true` and offer Resume in the UI.
-    for meta in orphans {
-        sessions.insert_orphan(&meta);
-    }
-    for meta in abandoned {
-        sessions.insert_abandoned(&meta);
-    }
+    reattach_orphans(&sessions, &dirs, &attention_tx, orphans, abandoned).await;
 
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
@@ -1626,19 +1688,23 @@ pub(crate) async fn spawn_session(
                 &cfg,
                 stored_config,
             )
+            .await
         }
-        SessionMode::Interactive => spawn_interactive_session(
-            hub,
-            session_id,
-            label,
-            kind,
-            members,
-            workspace_id,
-            primary_cwd,
-            initial_prompt,
-            &cfg,
-            stored_config,
-        ),
+        SessionMode::Interactive => {
+            spawn_interactive_session(
+                hub,
+                session_id,
+                label,
+                kind,
+                members,
+                workspace_id,
+                primary_cwd,
+                initial_prompt,
+                &cfg,
+                stored_config,
+            )
+            .await
+        }
     };
     let outcome = if result.is_ok() { "ok" } else { "error" };
     info!(
@@ -1782,7 +1848,7 @@ fn build_codex_args(
     clippy::too_many_lines,
     reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
 )]
-fn spawn_interactive_session(
+async fn spawn_interactive_session(
     hub: &Hub,
     session_id: String,
     label: String,
@@ -1826,6 +1892,7 @@ fn spawn_interactive_session(
     };
 
     let spec = PtySpawnSpec {
+        session_id: session_id.clone(),
         program: agent_program(cfg.agent),
         args,
         cwd: primary_cwd,
@@ -1833,7 +1900,12 @@ fn spawn_interactive_session(
         cols: 120,
         rows: 32,
     };
-    let pty = pty::spawn(spec).with_context(|| format!("spawning {} pty", cfg.agent.as_label()))?;
+    let tracer_spawn = tracer_client::spawn(spec)
+        .await
+        .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
+    let pty = tracer_spawn.handle;
+    let tracer_pid = tracer_spawn.tracer_pid;
+    let tracer_pipe = tracer_spawn.pipe_name;
     let pid = pty.pid();
 
     let started_at = Utc::now();
@@ -1866,13 +1938,10 @@ fn spawn_interactive_session(
         .map(|rec| crate::sync::lock(&rec).snapshot())
         .ok_or_else(|| anyhow!("session vanished"))?;
 
-    // For claude the PTY child is a node shim on Windows — leave program_name
-    // None so the legacy claude|node fallback in `is_session_alive` handles
-    // it. For codex the child is a native rust binary; pin the match.
-    let program_name = match cfg.agent {
-        Agent::Claude => None,
-        Agent::Codex => Some("codex".to_string()),
-    };
+    // Post-C.3 the direct daemon child is rt-tracer.exe, not the agent CLI.
+    // Sidecar's `pid` + `program_name` therefore describe the tracer; the
+    // underlying agent is captured in `agent`. is_session_alive prefers
+    // `tracer_pid` + "rt-tracer" when the new fields are present.
     if let Some(pid) = pid
         && let Ok(meta) = orphan::meta_from_record(
             session_id.clone(),
@@ -1883,10 +1952,12 @@ fn spawn_interactive_session(
             members,
             started_at,
             workspace_id,
-            program_name,
+            Some("rt-tracer".to_string()),
             cfg.agent,
             Some(stored_config),
             last_prompt,
+            Some(tracer_pid),
+            Some(tracer_pipe),
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -1915,7 +1986,7 @@ fn spawn_interactive_session(
     clippy::too_many_arguments,
     reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
 )]
-fn spawn_plain_shell_session(
+async fn spawn_plain_shell_session(
     hub: &Hub,
     session_id: String,
     label: String,
@@ -1945,6 +2016,7 @@ fn spawn_plain_shell_session(
 
     let (program, shell_label) = resolve_shell_program()?;
     let spec = PtySpawnSpec {
+        session_id: session_id.clone(),
         program,
         args: Vec::new(),
         cwd: primary_cwd,
@@ -1952,7 +2024,12 @@ fn spawn_plain_shell_session(
         cols: 120,
         rows: 32,
     };
-    let pty = pty::spawn(spec).context("spawning plain shell pty")?;
+    let tracer_spawn = tracer_client::spawn(spec)
+        .await
+        .context("spawning plain shell via tracer")?;
+    let pty = tracer_spawn.handle;
+    let tracer_pid = tracer_spawn.tracer_pid;
+    let tracer_pipe = tracer_spawn.pipe_name;
     let pid = pty.pid();
 
     let started_at = Utc::now();
@@ -2001,13 +2078,19 @@ fn spawn_plain_shell_session(
             members,
             started_at,
             workspace_id,
-            Some(shell_label),
+            Some("rt-tracer".to_string()),
             Agent::Claude,
             Some(stored_config),
             // Plain shells never carry a kickoff prompt.
             None,
+            Some(tracer_pid),
+            Some(tracer_pipe),
         )
     {
+        // `shell_label` is now informational only — surfaced to the user via
+        // the SessionRecord, not the sidecar's program_name (which describes
+        // the OS process, which is rt-tracer).
+        let _ = &shell_label;
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
@@ -2116,6 +2199,10 @@ fn spawn_headless_session(
             cfg.agent,
             Some(stored_config),
             last_prompt,
+            // Headless `claude --print` doesn't use a PTY and therefore doesn't
+            // go through rt-tracer; the tracer fields stay None.
+            None,
+            None,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);

@@ -73,9 +73,13 @@ impl OutputRing {
         self.overflowed
     }
 
-    // `snapshot()`, `is_empty()`, `total_written()` will land when the
-    // pipe-server task in supervisor.rs grows the (re)connect replay and
-    // the status-reply path. Not added speculatively per project policy.
+    /// Snapshot of the currently buffered bytes. Used by the pipe handler on
+    /// (re)connect to replay everything the daemon may have missed during the
+    /// outage. Cloned because the ring keeps mutating concurrently.
+    #[must_use]
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        self.buf.clone()
+    }
 }
 
 impl Default for OutputRing {

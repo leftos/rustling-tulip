@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 protocol = { workspace = true }
+tracer-protocol = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

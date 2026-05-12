@@ -12,6 +12,7 @@ mod paths;
 mod presets;
 mod pty;
 mod pty_state;
+mod tracer_client;
 mod registry;
 mod scrollback;
 mod server;

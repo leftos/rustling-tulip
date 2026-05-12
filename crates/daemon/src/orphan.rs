@@ -23,14 +23,16 @@ use tracing::warn;
 /// in a way that older daemons can't tolerate (renames, removals, semantic
 /// changes). Adding a new `#[serde(default)]` field is NOT a bump.
 ///
-/// Always written by post-A.3 daemons; sidecars written before this field
-/// existed deserialize with the default-shim value (1).
-pub const CURRENT_SIDECAR_VERSION: u32 = 1;
+/// v1: A.3 baseline (versioned sidecar, `last_prompt`, `recent_actions_tail`).
+/// v2: C.3 — tracer-backed sessions carry `tracer_pid` and `tracer_pipe`. The
+/// load path still accepts v1 sidecars (the new fields default to `None`),
+/// but v2 daemons that see a v1 sidecar with a non-tracer pid will route the
+/// session through the legacy direct-PTY fallback on reattach (i.e. mark
+/// abandoned, since there's no direct-PTY path anymore post-C.3).
+pub const CURRENT_SIDECAR_VERSION: u32 = 2;
 
-/// Highest sidecar version the current daemon understands. Today equal to
-/// [`CURRENT_SIDECAR_VERSION`]; when a future daemon learns to load a v2
-/// sidecar this bumps to 2.
-pub const MAX_KNOWN_SIDECAR_VERSION: u32 = 1;
+/// Highest sidecar version the current daemon understands.
+pub const MAX_KNOWN_SIDECAR_VERSION: u32 = 2;
 
 fn default_sidecar_version() -> u32 {
     CURRENT_SIDECAR_VERSION
@@ -93,6 +95,19 @@ pub struct OrphanMeta {
     /// before B.1.
     #[serde(default)]
     pub recent_actions_tail: Vec<String>,
+    /// OS pid of the `rt-tracer.exe` process supervising this session's PTY.
+    /// `None` for sidecars written before C.3 (no tracer in the picture) and
+    /// for any future spawn path that doesn't go through a tracer. Liveness
+    /// checks prefer this over `pid` when set — when the tracer is alive the
+    /// session is recoverable via pipe reattach.
+    #[serde(default)]
+    pub tracer_pid: Option<u32>,
+    /// Named-pipe path the daemon reconnects to on startup. Stored alongside
+    /// `tracer_pid` so the daemon doesn't have to recompute it (and so a
+    /// future ABI shift in pipe naming doesn't break reattach for older
+    /// sidecars). `None` whenever `tracer_pid` is `None`.
+    #[serde(default)]
+    pub tracer_pipe: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -204,18 +219,26 @@ pub fn delete_session_dir(dirs: &Dirs, session_id: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Returns true iff `pid` exists *and* its executable name matches what we
-/// expected to spawn. The name check guards against PID reuse: if the pid was
-/// recycled to an unrelated process, the meta is stale and should be dropped.
+/// Returns true iff the recorded pid exists *and* its executable name matches
+/// what we expected to spawn. The name check guards against PID reuse: if the
+/// pid was recycled to an unrelated process, the meta is stale and should be
+/// dropped.
 ///
-/// When `meta.program_name` is set (post-upgrade metas) the match is
-/// case-insensitive substring against that token. When it is `None` (legacy
-/// metas written before plain-shell support landed) we fall back to the
-/// original `claude`/`node` heuristic so existing sidecars keep working.
+/// Post-C.3, tracer-backed sessions carry `tracer_pid` + `tracer_pipe`; we
+/// check the tracer for liveness in that case (the underlying agent process
+/// lives behind the tracer's PTY and isn't a direct daemon child anymore).
+/// Pre-C.3 sidecars use the legacy `pid` + `program_name` path.
 pub fn is_session_alive(meta: &OrphanMeta) -> bool {
+    if let Some(tracer_pid) = meta.tracer_pid {
+        return pid_matches(tracer_pid, Some("rt-tracer"));
+    }
+    pid_matches(meta.pid, meta.program_name.as_deref())
+}
+
+fn pid_matches(pid: u32, program_token: Option<&str>) -> bool {
     let mut sys =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    let pid = sysinfo::Pid::from_u32(meta.pid);
+    let pid = sysinfo::Pid::from_u32(pid);
     sys.refresh_processes_specifics(
         ProcessesToUpdate::Some(&[pid]),
         false,
@@ -225,11 +248,11 @@ pub fn is_session_alive(meta: &OrphanMeta) -> bool {
         return false;
     };
     let name = process.name().to_string_lossy().to_lowercase();
-    match meta.program_name.as_deref() {
+    match program_token {
         Some(token) => name.contains(&token.to_lowercase()),
-        // Legacy fallback: `claude` (Unix) or `claude.exe` / `node.exe` shim
-        // on Windows. The TUI is a Node script invoked via a shim; allow
-        // either.
+        // Legacy fallback for the very oldest sidecars (pre plain-shell
+        // support): `claude` (Unix) or `claude.exe` / `node.exe` shim on
+        // Windows. The TUI is a Node script invoked via a shim; allow either.
         None => name.contains("claude") || name.contains("node"),
     }
 }
@@ -316,6 +339,8 @@ pub fn meta_from_record(
     agent: Agent,
     spawn_config: Option<SpawnConfig>,
     last_prompt: Option<String>,
+    tracer_pid: Option<u32>,
+    tracer_pipe: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -336,6 +361,8 @@ pub fn meta_from_record(
         spawn_config,
         last_prompt,
         recent_actions_tail: Vec::new(),
+        tracer_pid,
+        tracer_pipe,
     })
 }
 
@@ -462,16 +489,45 @@ mod tests {
             members: vec![],
             started_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
             workspace_id: None,
-            program_name: Some("claude".to_string()),
+            program_name: Some("rt-tracer".to_string()),
             agent: Some(Agent::Claude),
             terminal_title: None,
             spawn_config: None,
             last_prompt: None,
             recent_actions_tail: Vec::new(),
+            tracer_pid: Some(1234),
+            tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
         assert_eq!(decoded.on_disk_version, CURRENT_SIDECAR_VERSION);
         assert_eq!(decoded.session_id, "s1");
+        assert_eq!(decoded.tracer_pid, Some(1234));
+        assert_eq!(
+            decoded.tracer_pipe.as_deref(),
+            Some(r"\\.\pipe\rt-tracer-s1")
+        );
+    }
+
+    #[test]
+    fn v1_sidecar_without_tracer_fields_loads_as_none() {
+        // A sidecar written by a v1 (pre-C.3) daemon doesn't carry tracer
+        // fields; serde defaults them to `None`. Reattach treats this as
+        // "no tracer to reconnect to" → route via legacy pid liveness.
+        let v1 = br#"{
+            "on_disk_version": 1,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "program_name": "claude"
+        }"#;
+        let meta = load_meta_from_bytes(v1).expect("parse v1");
+        assert_eq!(meta.tracer_pid, None);
+        assert_eq!(meta.tracer_pipe, None);
+        assert_eq!(meta.program_name.as_deref(), Some("claude"));
     }
 }

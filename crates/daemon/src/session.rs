@@ -345,6 +345,40 @@ impl SessionRegistry {
         self.insert(record);
     }
 
+    /// Reattach a sidecar whose tracer process is still alive. Unlike
+    /// `insert_orphan` this session has a real [`PtyHandle`] wired up to the
+    /// tracer's pipe — input, output, resize, and kill all work as if the
+    /// daemon had spawned it directly. Surfaced with `is_abandoned = false`
+    /// and the same overall shape as a fresh spawn.
+    pub fn insert_reattached(&self, meta: &OrphanMeta, pty: Arc<PtyHandle>) {
+        let mut record = SessionRecord {
+            id: meta.session_id.clone(),
+            label: meta.label.clone(),
+            kind: meta.kind.clone(),
+            members: meta.members.clone(),
+            mode: meta.mode,
+            started_at: meta.started_at,
+            status: SessionStatus::Idle,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: meta.recent_actions_tail.clone(),
+            pty: Some(pty),
+            headless: None,
+            workspace_id: meta.workspace_id.clone(),
+            agent: meta.agent.unwrap_or_default(),
+            terminal_title: meta.terminal_title.clone(),
+            program_name: meta.program_name.clone(),
+            spawn_config: meta.spawn_config.clone(),
+            is_abandoned: false,
+            last_prompt: meta.last_prompt.clone(),
+        };
+        push_recent_action(
+            &mut record,
+            "reattached to live tracer after daemon restart".to_string(),
+        );
+        self.insert(record);
+    }
+
     /// Reattach a sidecar whose recorded pid is no longer alive: the previous
     /// daemon crashed mid-session. Surfaced to clients with
     /// `is_abandoned = true` so the sidebar can offer Resume.
