@@ -4,8 +4,10 @@
 use crate::{DaemonHandshake, handshake_file};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -13,9 +15,37 @@ const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Global lock around the "check + spawn" sequence. React 18 strict-mode
+/// dev double-mounts the App component, which fires two
+/// `invoke("ensure_daemon_started")` calls in quick succession. Without
+/// serialization both calls see "no daemon" and both spawn one, leading
+/// to two daemons racing for the handshake file and port. With the lock,
+/// the second caller awaits, then either reuses the freshly-spawned
+/// daemon's handshake or (if the first call failed) retries the spawn
+/// itself. Pop-out windows also call this concurrently; same fix.
+fn spawn_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, String> {
+    // Fast path: handshake already present and the daemon is healthy.
+    // No reason to serialize concurrent readers in that case.
     if let Some(handshake) = load_existing_if_alive().await {
         info!(port = handshake.port, "reusing running daemon");
+        return Ok(handshake);
+    }
+
+    // Slow path: a spawn might be needed. Take the global lock so
+    // concurrent callers serialize. Once we hold it, re-check the
+    // handshake -- the caller ahead of us may have spawned the daemon
+    // already.
+    let _guard = spawn_lock().lock().await;
+    if let Some(handshake) = load_existing_if_alive().await {
+        info!(
+            port = handshake.port,
+            "reusing daemon spawned by concurrent caller"
+        );
         return Ok(handshake);
     }
 
