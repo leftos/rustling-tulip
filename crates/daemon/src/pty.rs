@@ -64,7 +64,17 @@ impl PtyHandle {
             && let Some(mut k) = guard.take()
             && let Err(err) = k.kill()
         {
-            warn!(?err, "failed to kill PTY child");
+            // Windows quirk: portable-pty's killer wraps TerminateProcess.
+            // When the child has already exited (race with the wait task)
+            // the OS returns ERROR_SUCCESS (0) but the kill call still
+            // surfaces an Err. The kill is effectively a no-op in that
+            // case — the child is already dead — so demote that specific
+            // shape to debug rather than warn.
+            if err.raw_os_error() == Some(0) {
+                debug!(?err, "PTY kill: child already gone");
+            } else {
+                warn!(?err, "failed to kill PTY child");
+            }
         }
     }
 }

@@ -1,9 +1,12 @@
 //! Thin wrappers around `git` invocations the daemon needs.
 
 use anyhow::{Context as _, anyhow};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
 /// On Windows, suppresses the brief console window flash that would otherwise
@@ -11,12 +14,54 @@ use tracing::debug;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Process-wide registry of per-repo async mutexes. Two `git` invocations
+/// against the same repo serialize through this; invocations against
+/// different repos still run in parallel. Without this, concurrent
+/// `git worktree add` / `worktree remove` calls (which the daemon issues
+/// e.g. when a user spawns a workspace immediately after killing a session)
+/// contend on `.git/index.lock` and can stall for tens of seconds on
+/// Windows under antivirus load. Path keys are not canonicalized — callers
+/// pass the path string from the registry which is already consistent.
+fn repo_locks() -> &'static StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>> {
+    static REGISTRY: OnceLock<StdMutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn repo_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
+    let mut guard = repo_locks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        guard
+            .entry(repo.to_path_buf())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
+    )
+}
+
 async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
     // Per-invocation timing logged at debug; bumped to info when slower than
     // 500ms so the user sees outliers without flipping log filters. Worktree
     // operations on Windows commonly hit several seconds and we want that to
     // surface during slow-spawn investigations.
+    //
+    // Pre-spawn "begin" line is also info-level: if git itself hangs (lock
+    // contention, network probe, antivirus), `output.await` never returns
+    // and the post-completion timing log never fires — leaving the operator
+    // staring at a daemon log with no trail. The begin/end pair makes the
+    // hang state visible.
     let started = std::time::Instant::now();
+    let lock = repo_lock(repo);
+    let _guard = lock.lock().await;
+    let acquired_after_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if acquired_after_ms >= 100 {
+        tracing::info!(
+            waited_ms = acquired_after_ms,
+            ?args,
+            repo = %repo.display(),
+            "git invocation: waited on per-repo lock"
+        );
+    }
+    tracing::info!(?args, repo = %repo.display(), "git invocation: begin");
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(repo)

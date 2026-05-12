@@ -6,6 +6,7 @@ use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
 use protocol::{MemberSpawnPreview, RepoEntry, WorkspaceEntry};
 use std::path::PathBuf;
+use tracing::info;
 
 pub struct ResolvedMember {
     pub repo: RepoEntry,
@@ -25,6 +26,12 @@ pub async fn resolve_workspace(
     explicit_base: Option<&str>,
     use_worktree: bool,
 ) -> anyhow::Result<(WorkspaceEntry, Vec<ResolvedMember>)> {
+    info!(
+        workspace_id,
+        branch_name,
+        use_worktree,
+        "resolve_workspace: begin"
+    );
     let (workspace, repos) = state.with_persisted(|s| {
         let ws = s.workspaces.iter().find(|w| w.id == workspace_id).cloned();
         let mut members = Vec::new();
@@ -51,6 +58,7 @@ pub async fn resolve_workspace(
 
     let mut resolved = Vec::with_capacity(repos.len());
     for repo in repos {
+        info!(repo_id = %repo.id, repo_path = %repo.path, "resolve_workspace: listing branches for member");
         let path = PathBuf::from(&repo.path);
         let exists = git::list_branches(&path)
             .await
@@ -101,9 +109,26 @@ pub fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
 /// members, this errors on a dirty working tree and then checks out (or
 /// creates) the branch in the repo's primary directory.
 pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> anyhow::Result<()> {
-    for member in resolved {
+    info!(
+        members = resolved.len(),
+        branch_name,
+        "ensure_branches: begin"
+    );
+    for (i, member) in resolved.iter().enumerate() {
+        info!(
+            idx = i,
+            repo_id = %member.repo.id,
+            repo_path = %member.repo.path,
+            use_worktree = member.use_worktree,
+            "ensure_branches: member step"
+        );
         if member.use_worktree {
             if member.working_path.exists() {
+                info!(
+                    idx = i,
+                    worktree = %member.working_path.display(),
+                    "ensure_branches: worktree dir already present, skipping add"
+                );
                 continue;
             }
             let repo_path = PathBuf::from(&member.repo.path);
@@ -132,5 +157,6 @@ pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> 
                 })?;
         }
     }
+    info!("ensure_branches: done");
     Ok(())
 }
