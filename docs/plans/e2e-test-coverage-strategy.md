@@ -90,11 +90,12 @@ The audit's top finding (file/folder presets unlaunchable) lives in `PresetLaunc
 which has no testids. Workaround possible with `eval` + structural selectors, but adding
 testids first would make specs readable and stable.
 
-- [ ] Add testids to `PresetLaunchDialog` (preview list, launch button, prompt-sources
+- [x] Add testids to `PresetLaunchDialog` (preview list, launch button, prompt-sources
       controls)
-- [ ] Add testids to `SpawnDialog` (single/workspace radio, repo select, branch input,
+- [x] Add testids to `SpawnDialog` (single/workspace radio, repo select, branch input,
       run-mode radios, spawn button)
-- [ ] Add testids to `GitPanel` (status/commits/file-diff tabs, file rows, diff pane)
+- [x] `GitPanel` — moot; component deleted in iter 7, replaced by the global Source
+      Control sidebar (`SourceControlSidebar.tsx`)
 - [ ] Spike a second-WebDriver-session helper so pop-out windows become testable
 - [x] **Config-dir isolation for the harness.** `RUSTLING_TULIP_CONFIG_DIR` is now
       honored by the daemon's `Dirs::ensure` (`crates/daemon/src/paths.rs`) and the
@@ -118,22 +119,19 @@ after sequence X?".
 
 Candidate first specs:
 
-- [ ] **File/folder preset launch enables button.** Spec preconditions a preset with a
-      `folder` source (fixture dir), opens `PresetLaunchDialog`, asserts the launch
-      button is enabled and `previewPrompts.length > 0`. Fails today
-      (`PresetLaunchDialog.tsx:83-87, 544-554`); passes after fix.
-- [ ] **Daemon error surfacing.** Spec sends a known-bad spawn over WS (e.g. unknown
-      repo_id), asserts a visible error region appears in the DOM. Requires
-      introducing the error surface — the spec defines done.
-- [ ] **Repo remove confirms before destroying live sessions.** Spec adds a repo,
-      spawns a session, clicks the × on the repo, asserts a confirmation surface (modal
-      or two-state button) and that the session is still attached until the user
-      confirms. Fails today (`Sidebar.tsx:276-287`).
-- [ ] **`user-select: none` doesn't block content selection.** Spec asserts that
-      `getComputedStyle` on a `.diff-pane`, `.headless-log`, or session-label element
-      reports `user-select: text` (or `auto`). Fails today (`styles.css:25-31`).
+- [x] **File/folder preset launch enables button.** `tools/e2e/tests/e2e/specs/preset-launch-folder.spec.ts`
+      — preconditions a folder-source preset, asserts launch button enabled and preview
+      list populated.
+- [x] **Daemon error surfacing.** `tools/e2e/tests/e2e/specs/error-toast.spec.ts` —
+      sends a bad spawn over `window.__rt_daemon_client`, asserts `ErrorToast` appears.
+- [x] **Repo remove confirms before destroying live sessions.** `tools/e2e/tests/e2e/specs/repo-remove-confirm.spec.ts`
+      — drives the 3-way `RepoRemoveDialog` modal end-to-end (cancel / remove anyway /
+      stop-and-remove).
+- [x] **`user-select: none` doesn't block content selection.** `tools/e2e/tests/e2e/specs/user-select.spec.ts`
+      — asserts `getComputedStyle` on `.diff-pane` / `.headless-log` / `.preset-preview-list`
+      / `.terminal-host` / `.session-title h2` reports `user-select: text`.
 - [ ] **Pop-out session window auto-closes on stop.** Blocked on second-WebDriver
-      session helper. Tracks the audit finding at `App.tsx:344-351`.
+      session helper. Tracks the audit finding at `App.tsx:354-370`.
 
 ## Net effect on the audit workflow
 
