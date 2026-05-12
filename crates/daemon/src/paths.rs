@@ -12,6 +12,13 @@ pub struct Dirs {
     /// Per-session sidecar directory: `<config>/sessions/<session-id>/` holds
     /// `meta.json` (orphan recovery) and `scrollback.bin` (replay on attach).
     pub sessions_dir: PathBuf,
+    /// Worktree root: `<data_local>/leftos/rustling-tulip/data/worktrees/` on
+    /// Windows (`%LOCALAPPDATA%\…`), equivalent on Linux/macOS. All session
+    /// worktrees live under this base so the daemon doesn't need write access
+    /// next to source repos; per-session worktree paths are
+    /// `<worktrees_dir>/<sanitized-anchor>/wt.<branch-slug>/<rel-to-anchor>`
+    /// (see `git::workspace_worktree_paths`).
+    pub worktrees_dir: PathBuf,
 }
 
 /// Strip the Windows verbatim (`\\?\`) prefix from a canonicalized path when
@@ -83,10 +90,14 @@ impl Dirs {
         let sessions_dir = config.join("sessions");
         std::fs::create_dir_all(&sessions_dir).context("creating sessions dir")?;
 
+        let worktrees_dir = resolve_worktrees_dir()?;
+        std::fs::create_dir_all(&worktrees_dir).context("creating worktrees dir")?;
+
         Ok(Self {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
             sessions_dir,
+            worktrees_dir,
             config,
         })
     }
@@ -106,4 +117,22 @@ fn resolve_config_dir() -> anyhow::Result<PathBuf> {
     let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve config directory"))?;
     Ok(pd.config_dir().to_path_buf())
+}
+
+/// Resolve the worktrees root, honoring `RUSTLING_TULIP_WORKTREES_DIR` when
+/// set. The override lets the e2e harness keep worktrees inside its per-run
+/// tmpdir. When unset, falls back to `ProjectDirs::data_local_dir()` joined
+/// with `worktrees` — `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\`
+/// on Windows; equivalent under `~/.local/share/...` on Linux. Worktrees are
+/// deliberately under `data_local_dir` (machine-local) rather than the
+/// roaming `config_dir` — they can be large and shouldn't sync.
+fn resolve_worktrees_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_WORKTREES_DIR")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| anyhow!("could not resolve worktrees directory"))?;
+    Ok(pd.data_local_dir().join("worktrees"))
 }

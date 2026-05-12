@@ -5,7 +5,7 @@ use crate::git;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
 use protocol::{MemberSpawnPreview, RepoEntry, WorkspaceEntry};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 pub struct ResolvedMember {
@@ -13,7 +13,8 @@ pub struct ResolvedMember {
     pub branch_exists: bool,
     pub effective_base: Option<String>,
     /// Path where claude will run for this member. When `use_worktree` is
-    /// `true` this is the worktree dir under `<repo>.wt/<slug>`; when
+    /// `true` this is the worktree dir under
+    /// `<worktrees_root>/<sanitized-anchor>/wt.<slug>/<rel-to-anchor>`; when
     /// `false` it is the repo's primary directory (an in-place checkout).
     pub working_path: PathBuf,
     pub use_worktree: bool,
@@ -21,6 +22,7 @@ pub struct ResolvedMember {
 
 pub async fn resolve_workspace(
     state: &AppState,
+    worktrees_root: &Path,
     workspace_id: &str,
     branch_name: &str,
     explicit_base: Option<&str>,
@@ -56,10 +58,23 @@ pub async fn resolve_workspace(
         ));
     }
 
+    // Compute worktree paths for *all* members in one call so they share a
+    // common `wt.<slug>/` root and preserve inter-repo relative offsets.
+    let member_paths: Vec<PathBuf> = repos.iter().map(|r| PathBuf::from(&r.path)).collect();
+    let worktrees: Vec<PathBuf> = if use_worktree {
+        let refs: Vec<&Path> = member_paths.iter().map(PathBuf::as_path).collect();
+        git::workspace_worktree_paths(worktrees_root, &refs, branch_name)
+    } else {
+        member_paths.clone()
+    };
+
     let mut resolved = Vec::with_capacity(repos.len());
-    for repo in repos {
+    for ((repo, path), worktree_path) in repos
+        .into_iter()
+        .zip(member_paths.into_iter())
+        .zip(worktrees.into_iter())
+    {
         info!(repo_id = %repo.id, repo_path = %repo.path, "resolve_workspace: listing branches for member");
-        let path = PathBuf::from(&repo.path);
         let exists = git::list_branches(&path)
             .await
             .unwrap_or_default()
@@ -75,16 +90,11 @@ pub async fn resolve_workspace(
                     .unwrap_or_else(|| "main".to_string()),
             )
         };
-        let working_path = if use_worktree {
-            git::default_worktree_path(&path, branch_name)
-        } else {
-            path.clone()
-        };
         resolved.push(ResolvedMember {
             repo,
             branch_exists: exists,
             effective_base: base,
-            working_path,
+            working_path: worktree_path,
             use_worktree,
         });
     }

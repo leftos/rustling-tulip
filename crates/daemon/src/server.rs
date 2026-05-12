@@ -715,6 +715,7 @@ async fn dispatch(
             // doesn't change preview output meaningfully.
             let (_, resolved) = ws::resolve_workspace(
                 &hub.state,
+                &hub.dirs.worktrees_dir,
                 &workspace_id,
                 &branch_name,
                 base_branch.as_deref(),
@@ -2247,7 +2248,14 @@ async fn spawn_single(
         .unwrap_or_else(|| "main".to_string());
 
     let working_path = if use_worktree {
-        let worktree_path = git::default_worktree_path(&repo_path, branch_name);
+        let mut paths = git::workspace_worktree_paths(
+            &hub.dirs.worktrees_dir,
+            &[repo_path.as_path()],
+            branch_name,
+        );
+        let worktree_path = paths
+            .pop()
+            .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?;
         if !worktree_path.exists() {
             git::worktree_add(
                 &repo_path,
@@ -2297,6 +2305,7 @@ async fn spawn_workspace(
     );
     let (workspace, resolved) = ws::resolve_workspace(
         &hub.state,
+        &hub.dirs.worktrees_dir,
         workspace_id,
         branch_name,
         base_branch.as_deref(),
