@@ -145,7 +145,13 @@ if ($Release) {
     }
 
     Write-Host '==> Building daemon + tauri app (release)...' -ForegroundColor Cyan
-    & cargo build --release --manifest-path (Join-Path $ScriptDir 'Cargo.toml') -p daemon -p rustling-tulip-app
+    # `--features rustling-tulip-app/custom-protocol` is required: Tauri's
+    # build.rs sets `cfg(dev)` to the negation of that feature, and `cfg(dev)`
+    # makes the runtime load the frontend from `devUrl` (localhost:1420)
+    # instead of the embedded `frontendDist` bundle. `tauri build` enables
+    # this automatically; raw `cargo build` does not — without it the launched
+    # release exe shows "localhost refused to connect".
+    & cargo build --release --manifest-path (Join-Path $ScriptDir 'Cargo.toml') -p daemon -p rustling-tulip-app --features rustling-tulip-app/custom-protocol
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed (exit $LASTEXITCODE)" }
 
     if (-not (Test-Path $appExe))    { throw "Release app exe missing: $appExe" }
