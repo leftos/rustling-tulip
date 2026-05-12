@@ -75,6 +75,12 @@ interface Props {
   /// Footer "Stop daemon" — pid-kill via Tauri command + set the
   /// stop-requested flag so auto-reconnect doesn't immediately respawn.
   onStopDaemon: () => void;
+  /// Optimistic tab-reorder hook from App.tsx. Mirrors the TabBar's
+  /// same-named prop: applied immediately on drop so the row doesn't
+  /// snap back while the daemon's `tabs_reordered` broadcast is in
+  /// flight. Only used in the Tabs view of the sidebar; the Repos view
+  /// has its own separate reorder pathway (task #11).
+  onLocalReorderTabs: (orderedIds: string[]) => void;
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
   /// Called when the user clicks × on a repo that has live sessions.
@@ -183,6 +189,64 @@ export default function Sidebar(props: Props) {
   const [sessionMenu, setSessionMenu] =
     useState<SessionContextMenuState | null>(null);
   const closeSessionMenu = () => setSessionMenu(null);
+
+  /// Tab-reorder drag-and-drop state, mirrored from TabBar's DragState.
+  /// `text/x-rt-tab` is the shared MIME so a pill dragged from the
+  /// TabBar can be dropped onto a sidebar row and vice versa. `null`
+  /// while no drag is in flight.
+  const [tabDragState, setTabDragState] = useState<{
+    draggingTabId: string;
+    overTabId: string | null;
+    side: "before" | "after";
+  } | null>(null);
+
+  const onTabContainerDragStart = (tabId: string, e: React.DragEvent) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/x-rt-tab", tabId);
+    setTabDragState({ draggingTabId: tabId, overTabId: null, side: "before" });
+  };
+
+  const onTabContainerDragOver = (tabId: string, e: React.DragEvent) => {
+    // Only react to in-flight tab drags (started from this sidebar OR
+    // from the TabBar). Pane drags use a different MIME and should fall
+    // through to the existing leaf-drop handlers.
+    if (!e.dataTransfer.types.includes("text/x-rt-tab")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Vertical layout — flip the before/after axis from horizontal
+    // (TabBar) to top/bottom for the sidebar.
+    const side: "before" | "after" =
+      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setTabDragState((prev) =>
+      prev && (prev.overTabId !== tabId || prev.side !== side)
+        ? { ...prev, overTabId: tabId, side }
+        : prev,
+    );
+  };
+
+  const onTabContainerDragEnd = () => setTabDragState(null);
+
+  const onTabContainerDrop = (targetTabId: string, e: React.DragEvent) => {
+    e.preventDefault();
+    const payload = e.dataTransfer.getData("text/x-rt-tab");
+    const local = tabDragState;
+    setTabDragState(null);
+    if (!payload || payload === targetTabId) return;
+    const side = local?.overTabId === targetTabId ? local.side : "after";
+    const order = props.tabs.map((t) => t.id);
+    const fromIdx = order.indexOf(payload);
+    if (fromIdx === -1) return;
+    order.splice(fromIdx, 1);
+    const toIdxBase = order.indexOf(targetTabId);
+    if (toIdxBase === -1) return;
+    const toIdx = side === "before" ? toIdxBase : toIdxBase + 1;
+    order.splice(toIdx, 0, payload);
+    // Optimistic local apply + send. Daemon broadcast reconciles on
+    // arrival; identical orders are a no-op for the reducer.
+    props.onLocalReorderTabs(order);
+    props.client.send({ type: "reorder_tabs", ordered_ids: order });
+  };
 
   // Presets are fetched on demand when the context menu opens. Per-target
   // cache keeps subsequent opens snappy; null means "not fetched yet",
@@ -361,6 +425,28 @@ export default function Sidebar(props: Props) {
         <ul className="tree">
           {containers.map((c) => {
             const isCollapsed = collapsed.has(c.key) && !forceExpand.has(c.key);
+            // Only tab containers participate in tab-reorder drag — repo
+            // and workspace ordering lives on a different protocol path
+            // (task #11). The drop-side hint is per-row so each row
+            // renders its own indicator independently.
+            const isTabKind = c.kind === "tab";
+            const tabDragSide =
+              isTabKind && tabDragState?.overTabId === c.id
+                ? tabDragState.side
+                : null;
+            const isTabDragging =
+              isTabKind && tabDragState?.draggingTabId === c.id;
+            const tabDragHandlers = isTabKind
+              ? {
+                  onDragStart: (e: React.DragEvent) =>
+                    onTabContainerDragStart(c.id, e),
+                  onDragOver: (e: React.DragEvent) =>
+                    onTabContainerDragOver(c.id, e),
+                  onDragEnd: onTabContainerDragEnd,
+                  onDrop: (e: React.DragEvent) =>
+                    onTabContainerDrop(c.id, e),
+                }
+              : undefined;
             return (
               <ContainerNode
                 key={c.key}
@@ -382,6 +468,9 @@ export default function Sidebar(props: Props) {
                 onSessionContextMenu={(x, y, session) =>
                   setSessionMenu({ x, y, session })
                 }
+                tabDragSide={tabDragSide}
+                tabDragIsDragging={isTabDragging}
+                tabDragHandlers={tabDragHandlers}
               />
             );
           })}
@@ -494,12 +583,37 @@ interface ContainerNodeProps {
     y: number,
     session: SessionSnapshot,
   ) => void;
+  /// Drop-side hint for the tab-reorder drag — non-null only when this
+  /// container is the current drop target. Drives the `.drop-before`/
+  /// `.drop-after` indicator on the row.
+  tabDragSide: "before" | "after" | null;
+  /// True iff this container is the active drag source (renders at
+  /// reduced opacity so the user sees the original row "lift").
+  tabDragIsDragging: boolean;
+  /// Drag handlers wired only for tab-kind containers. Undefined for
+  /// repo/workspace/detached/unbound kinds, which are not reorderable
+  /// via this path.
+  tabDragHandlers:
+    | {
+        onDragStart: (e: React.DragEvent) => void;
+        onDragOver: (e: React.DragEvent) => void;
+        onDragEnd: () => void;
+        onDrop: (e: React.DragEvent) => void;
+      }
+    | undefined;
 }
 
 function ContainerNode(p: ContainerNodeProps) {
   const c = p.container;
   const hasChildren = c.sessions.length > 0;
-  const headerClasses = ["tree-row", "tree-container", `tree-container-${c.kind}`]
+  const headerClasses = [
+    "tree-row",
+    "tree-container",
+    `tree-container-${c.kind}`,
+    p.tabDragSide === "before" ? "drop-before" : "",
+    p.tabDragSide === "after" ? "drop-after" : "",
+    p.tabDragIsDragging ? "is-dragging" : "",
+  ]
     .filter(Boolean)
     .join(" ");
 
@@ -542,6 +656,12 @@ function ContainerNode(p: ContainerNodeProps) {
     p.onContextMenu(e.clientX, e.clientY);
   };
 
+  // Tab containers participate in drag-to-reorder; everything else is
+  // a passive row. Wire `draggable` + the four DnD events only when the
+  // tabDragHandlers prop is set so the browser doesn't try to drag
+  // repos/workspaces (would conflict with the leaf session-drag UX).
+  const isTabDraggable = p.tabDragHandlers !== undefined;
+
   return (
     <li>
       <div
@@ -566,6 +686,11 @@ function ContainerNode(p: ContainerNodeProps) {
         data-testid={`sidebar-container-${c.kind}`}
         data-container-id={c.id}
         data-container-name={c.name}
+        draggable={isTabDraggable}
+        onDragStart={p.tabDragHandlers?.onDragStart}
+        onDragOver={p.tabDragHandlers?.onDragOver}
+        onDragEnd={p.tabDragHandlers?.onDragEnd}
+        onDrop={p.tabDragHandlers?.onDrop}
       >
         <span className="tree-caret" aria-hidden="true">
           {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}

@@ -940,6 +940,12 @@ button.link.inline { display: inline; padding: 0 2px; }
   transition: background var(--dur-fast) var(--ease-out);
 }
 .tree-row:hover { background: var(--bg-elev2); }
+/* Drag-to-reorder drop indicators on tab containers (task #12) — top/
+ * bottom edges instead of TabBar's left/right since the sidebar tree is
+ * a vertical list. */
+.tree-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.tree-row.drop-after  { box-shadow: inset 0 -2px 0 var(--accent); }
+.tree-row.is-dragging { opacity: 0.45; }
 /* Container header row — slightly heavier weight so the hierarchy reads
  * even at a glance. Section-header semantics without yelling. */
 .tree-container > .tree-label { font-weight: 600; }

@@ -1260,6 +1260,7 @@ export default function App() {
             daemonStopRequested={state.daemonStopRequested}
             onRestartDaemon={onRestartDaemon}
             onStopDaemon={onStopDaemon}
+            onLocalReorderTabs={onLocalReorder}
             tabs={state.tabs}
             onAddRepo={onAddRepo}
             onRemoveRepo={(id) =>
