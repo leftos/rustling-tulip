@@ -2,11 +2,29 @@
 
 use crate::git;
 use crate::paths::simplify_path;
-use crate::state::AppState;
+use crate::state::{AppState, PersistedState};
 use anyhow::{Context as _, anyhow};
-use protocol::{Agent, RepoEntry, WorkspaceEntry};
+use protocol::{Agent, ContainerRef, RepoEntry, WorkspaceEntry};
 use std::path::Path;
 use uuid::Uuid;
+
+/// Append `ContainerRef::Repo(id)` to the manual order iff the order
+/// list is non-empty (meaning the user has actually customized it).
+/// If the order is empty, leave it alone — that signals "fall back to
+/// alphabetical" and we don't want a fresh install to start carrying
+/// implicit order around just because someone registered a repo.
+fn append_to_container_order(state: &mut PersistedState, entry: ContainerRef) {
+    if state.container_order.is_empty() {
+        return;
+    }
+    if !state.container_order.contains(&entry) {
+        state.container_order.push(entry);
+    }
+}
+
+fn remove_from_container_order(state: &mut PersistedState, target: &ContainerRef) {
+    state.container_order.retain(|e| e != target);
+}
 
 pub async fn add_repo(
     state: &AppState,
@@ -50,7 +68,10 @@ pub async fn add_repo(
         last_agent: None,
     };
 
-    state.mutate(|s| s.repos.push(entry.clone()))?;
+    state.mutate(|s| {
+        s.repos.push(entry.clone());
+        append_to_container_order(s, ContainerRef::Repo(entry.id.clone()));
+    })?;
     Ok(entry)
 }
 
@@ -95,6 +116,7 @@ pub fn remove_repo(state: &AppState, repo_id: &str) -> anyhow::Result<()> {
         for ws in &mut s.workspaces {
             ws.member_repo_ids.retain(|id| id != repo_id);
         }
+        remove_from_container_order(s, &ContainerRef::Repo(repo_id.to_string()));
     })
 }
 
@@ -145,13 +167,45 @@ pub fn upsert_workspace(
             *slot = entry.clone();
         } else {
             s.workspaces.push(entry.clone());
+            append_to_container_order(s, ContainerRef::Workspace(entry.id.clone()));
         }
     })?;
     Ok(entry)
 }
 
 pub fn remove_workspace(state: &AppState, workspace_id: &str) -> anyhow::Result<()> {
-    state.mutate(|s| s.workspaces.retain(|w| w.id != workspace_id))
+    state.mutate(|s| {
+        s.workspaces.retain(|w| w.id != workspace_id);
+        remove_from_container_order(s, &ContainerRef::Workspace(workspace_id.to_string()));
+    })
+}
+
+/// Replace the manual container order wholesale. Validates that every
+/// ref in `ordered` matches a currently-registered repo or workspace —
+/// unknown refs are rejected so the persisted order stays consistent
+/// with the registry. Returns the post-validation order so the caller
+/// can broadcast it back to clients verbatim.
+pub fn reorder_containers(
+    state: &AppState,
+    ordered: Vec<ContainerRef>,
+) -> anyhow::Result<Vec<ContainerRef>> {
+    let (known_repos, known_workspaces) = state.with_persisted(|s| {
+        (
+            s.repos.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            s.workspaces.iter().map(|w| w.id.clone()).collect::<Vec<_>>(),
+        )
+    });
+    for entry in &ordered {
+        let ok = match entry {
+            ContainerRef::Repo(id) => known_repos.iter().any(|r| r == id),
+            ContainerRef::Workspace(id) => known_workspaces.iter().any(|w| w == id),
+        };
+        if !ok {
+            return Err(anyhow!("reorder_containers: unknown ref {entry:?}"));
+        }
+    }
+    state.mutate(|s| s.container_order.clone_from(&ordered))?;
+    Ok(ordered)
 }
 
 fn paths_eq(a: &str, b: &str) -> bool {

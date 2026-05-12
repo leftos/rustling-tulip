@@ -28,6 +28,13 @@ export interface WorkspaceEntry {
   default_use_worktree: boolean;
 }
 
+/// Tagged reference to either a repo or a workspace by id. Mirrors the
+/// Rust `protocol::ContainerRef` enum (serde tagged: `kind` + `id`).
+/// Used by the sidebar's manual flat-list container order.
+export type ContainerRef =
+  | { kind: "repo"; id: string }
+  | { kind: "workspace"; id: string };
+
 export type SessionKind = "single" | "workspace";
 export type SessionStatus =
   | "spawning"
@@ -496,6 +503,7 @@ export type ClientMessage =
   | { type: "close_tab"; tab_id: string }
   | { type: "rename_tab"; tab_id: string; name: string }
   | { type: "reorder_tabs"; ordered_ids: string[] }
+  | { type: "reorder_containers"; ordered: ContainerRef[] }
   | {
       type: "split_pane";
       tab_id: string;
@@ -671,6 +679,7 @@ export type DaemonMessage =
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }
+  | { type: "containers_reordered"; ordered: ContainerRef[] }
   | { type: "presets"; target: PresetTarget; entries: PresetEntry[] }
   | {
       type: "preset_launch_progress";

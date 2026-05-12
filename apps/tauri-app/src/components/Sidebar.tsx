@@ -7,6 +7,7 @@ import {
 } from "../api";
 import {
   tabGrid,
+  type ContainerRef,
   type PresetEntry,
   type PresetTarget,
   type RepoEntry,
@@ -81,6 +82,14 @@ interface Props {
   /// flight. Only used in the Tabs view of the sidebar; the Repos view
   /// has its own separate reorder pathway (task #11).
   onLocalReorderTabs: (orderedIds: string[]) => void;
+  /// Manual sidebar-container order from App state. Empty = fall back
+  /// to alphabetical (workspaces first, then repos). Drives both the
+  /// `buildContainers` iteration and the drag-and-drop reorder
+  /// (which sends `reorder_containers` over the WS).
+  containerOrder: ContainerRef[];
+  /// Optimistic container-reorder hook — mirrors `onLocalReorderTabs`
+  /// but applied wholesale to `containerOrder` in App state.
+  onLocalReorderContainers: (ordered: ContainerRef[]) => void;
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
   /// Called when the user clicks × on a repo that has live sessions.
@@ -165,8 +174,20 @@ export default function Sidebar(props: Props) {
     () =>
       view === "tab"
         ? buildTabContainers(props.tabs, props.sessions)
-        : buildContainers(props.repos, props.workspaces, props.sessions),
-    [view, props.tabs, props.repos, props.workspaces, props.sessions],
+        : buildContainers(
+            props.repos,
+            props.workspaces,
+            props.sessions,
+            props.containerOrder,
+          ),
+    [
+      view,
+      props.tabs,
+      props.repos,
+      props.workspaces,
+      props.sessions,
+      props.containerOrder,
+    ],
   );
 
   const abandonedCount = useMemo(
@@ -246,6 +267,97 @@ export default function Sidebar(props: Props) {
     // arrival; identical orders are a no-op for the reducer.
     props.onLocalReorderTabs(order);
     props.client.send({ type: "reorder_tabs", ordered_ids: order });
+  };
+
+  /// Repo/workspace container reorder — separate state + MIME from the
+  /// tab-reorder above. Wire payload format is `<kind>:<id>` so the
+  /// drop handler can reconstruct a `ContainerRef` without a JSON
+  /// round-trip. Drop logic mirrors the tab path: splice the dragged
+  /// ref into the current order at the target's before/after position.
+  const [containerDragState, setContainerDragState] = useState<{
+    dragging: ContainerRef;
+    over: ContainerRef | null;
+    side: "before" | "after";
+  } | null>(null);
+
+  const encodeContainerRef = (ref: ContainerRef) => `${ref.kind}:${ref.id}`;
+  const decodeContainerRef = (s: string): ContainerRef | null => {
+    const sep = s.indexOf(":");
+    if (sep === -1) return null;
+    const kind = s.slice(0, sep);
+    const id = s.slice(sep + 1);
+    if (kind === "repo") return { kind: "repo", id };
+    if (kind === "workspace") return { kind: "workspace", id };
+    return null;
+  };
+
+  const onContainerDragStart = (ref: ContainerRef, e: React.DragEvent) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/x-rt-container", encodeContainerRef(ref));
+    setContainerDragState({ dragging: ref, over: null, side: "before" });
+  };
+
+  const onContainerDragOver = (ref: ContainerRef, e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("text/x-rt-container")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const side: "before" | "after" =
+      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setContainerDragState((prev) => {
+      if (!prev) return prev;
+      if (
+        prev.over &&
+        prev.over.kind === ref.kind &&
+        prev.over.id === ref.id &&
+        prev.side === side
+      ) {
+        return prev;
+      }
+      return { ...prev, over: ref, side };
+    });
+  };
+
+  const onContainerDragEnd = () => setContainerDragState(null);
+
+  const onContainerDrop = (targetRef: ContainerRef, e: React.DragEvent) => {
+    e.preventDefault();
+    const payload = e.dataTransfer.getData("text/x-rt-container");
+    const local = containerDragState;
+    setContainerDragState(null);
+    const dragged = decodeContainerRef(payload);
+    if (!dragged) return;
+    if (dragged.kind === targetRef.kind && dragged.id === targetRef.id) return;
+    const side =
+      local?.over &&
+      local.over.kind === targetRef.kind &&
+      local.over.id === targetRef.id
+        ? local.side
+        : "after";
+    // Use the rendered iteration as the source of truth for the new
+    // ordering — covers both manual (containerOrder is non-empty) and
+    // default (alphabetical) cases. Filter to only repo/workspace kinds
+    // since those are the participants in this ordering.
+    const current: ContainerRef[] = containers
+      .filter((c) => c.kind === "repo" || c.kind === "workspace")
+      .map((c) =>
+        c.kind === "repo"
+          ? ({ kind: "repo", id: c.id } as ContainerRef)
+          : ({ kind: "workspace", id: c.id } as ContainerRef),
+      );
+    const fromIdx = current.findIndex(
+      (r) => r.kind === dragged.kind && r.id === dragged.id,
+    );
+    if (fromIdx === -1) return;
+    current.splice(fromIdx, 1);
+    const toIdxBase = current.findIndex(
+      (r) => r.kind === targetRef.kind && r.id === targetRef.id,
+    );
+    if (toIdxBase === -1) return;
+    const toIdx = side === "before" ? toIdxBase : toIdxBase + 1;
+    current.splice(toIdx, 0, dragged);
+    props.onLocalReorderContainers(current);
+    props.client.send({ type: "reorder_containers", ordered: current });
   };
 
   // Presets are fetched on demand when the context menu opens. Per-target
@@ -425,28 +537,57 @@ export default function Sidebar(props: Props) {
         <ul className="tree">
           {containers.map((c) => {
             const isCollapsed = collapsed.has(c.key) && !forceExpand.has(c.key);
-            // Only tab containers participate in tab-reorder drag — repo
-            // and workspace ordering lives on a different protocol path
-            // (task #11). The drop-side hint is per-row so each row
-            // renders its own indicator independently.
+            // Tab and repo/workspace containers participate in DIFFERENT
+            // drag-reorder paths (different MIMEs, different protocol
+            // messages, different state buckets). Compute both side and
+            // dragging flags and pass whichever applies — the row
+            // renders a single drop-indicator either way.
             const isTabKind = c.kind === "tab";
-            const tabDragSide =
-              isTabKind && tabDragState?.overTabId === c.id
-                ? tabDragState.side
-                : null;
-            const isTabDragging =
-              isTabKind && tabDragState?.draggingTabId === c.id;
-            const tabDragHandlers = isTabKind
-              ? {
-                  onDragStart: (e: React.DragEvent) =>
-                    onTabContainerDragStart(c.id, e),
-                  onDragOver: (e: React.DragEvent) =>
-                    onTabContainerDragOver(c.id, e),
-                  onDragEnd: onTabContainerDragEnd,
-                  onDrop: (e: React.DragEvent) =>
-                    onTabContainerDrop(c.id, e),
+            const isReorderableContainer =
+              c.kind === "repo" || c.kind === "workspace";
+
+            let dropSide: "before" | "after" | null = null;
+            let isDragging = false;
+            let dragHandlers:
+              | {
+                  onDragStart: (e: React.DragEvent) => void;
+                  onDragOver: (e: React.DragEvent) => void;
+                  onDragEnd: () => void;
+                  onDrop: (e: React.DragEvent) => void;
                 }
-              : undefined;
+              | undefined;
+
+            if (isTabKind) {
+              dropSide =
+                tabDragState?.overTabId === c.id ? tabDragState.side : null;
+              isDragging = tabDragState?.draggingTabId === c.id;
+              dragHandlers = {
+                onDragStart: (e) => onTabContainerDragStart(c.id, e),
+                onDragOver: (e) => onTabContainerDragOver(c.id, e),
+                onDragEnd: onTabContainerDragEnd,
+                onDrop: (e) => onTabContainerDrop(c.id, e),
+              };
+            } else if (isReorderableContainer) {
+              const ref: ContainerRef =
+                c.kind === "repo"
+                  ? { kind: "repo", id: c.id }
+                  : { kind: "workspace", id: c.id };
+              const over = containerDragState?.over;
+              dropSide =
+                over && over.kind === ref.kind && over.id === ref.id
+                  ? containerDragState.side
+                  : null;
+              isDragging =
+                containerDragState?.dragging.kind === ref.kind &&
+                containerDragState?.dragging.id === ref.id;
+              dragHandlers = {
+                onDragStart: (e) => onContainerDragStart(ref, e),
+                onDragOver: (e) => onContainerDragOver(ref, e),
+                onDragEnd: onContainerDragEnd,
+                onDrop: (e) => onContainerDrop(ref, e),
+              };
+            }
+
             return (
               <ContainerNode
                 key={c.key}
@@ -468,9 +609,9 @@ export default function Sidebar(props: Props) {
                 onSessionContextMenu={(x, y, session) =>
                   setSessionMenu({ x, y, session })
                 }
-                tabDragSide={tabDragSide}
-                tabDragIsDragging={isTabDragging}
-                tabDragHandlers={tabDragHandlers}
+                dropSide={dropSide}
+                isDragging={isDragging}
+                dragHandlers={dragHandlers}
               />
             );
           })}
@@ -583,17 +724,18 @@ interface ContainerNodeProps {
     y: number,
     session: SessionSnapshot,
   ) => void;
-  /// Drop-side hint for the tab-reorder drag — non-null only when this
-  /// container is the current drop target. Drives the `.drop-before`/
-  /// `.drop-after` indicator on the row.
-  tabDragSide: "before" | "after" | null;
-  /// True iff this container is the active drag source (renders at
-  /// reduced opacity so the user sees the original row "lift").
-  tabDragIsDragging: boolean;
-  /// Drag handlers wired only for tab-kind containers. Undefined for
-  /// repo/workspace/detached/unbound kinds, which are not reorderable
-  /// via this path.
-  tabDragHandlers:
+  /// Drop-side hint for whichever drag this row participates in (tab
+  /// reorder OR repo/workspace container reorder — they're mutually
+  /// exclusive per row). Drives the `.drop-before` / `.drop-after`
+  /// indicator. `null` when this row isn't the current drop target.
+  dropSide: "before" | "after" | null;
+  /// True iff this row is the active drag source (renders at reduced
+  /// opacity so the user sees the original row "lift").
+  isDragging: boolean;
+  /// Drag handlers wired only for reorderable kinds (tab, repo,
+  /// workspace). `undefined` for detached/unbound rows — those are
+  /// passive groupings, not reorderable resources.
+  dragHandlers:
     | {
         onDragStart: (e: React.DragEvent) => void;
         onDragOver: (e: React.DragEvent) => void;
@@ -610,9 +752,9 @@ function ContainerNode(p: ContainerNodeProps) {
     "tree-row",
     "tree-container",
     `tree-container-${c.kind}`,
-    p.tabDragSide === "before" ? "drop-before" : "",
-    p.tabDragSide === "after" ? "drop-after" : "",
-    p.tabDragIsDragging ? "is-dragging" : "",
+    p.dropSide === "before" ? "drop-before" : "",
+    p.dropSide === "after" ? "drop-after" : "",
+    p.isDragging ? "is-dragging" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -656,11 +798,10 @@ function ContainerNode(p: ContainerNodeProps) {
     p.onContextMenu(e.clientX, e.clientY);
   };
 
-  // Tab containers participate in drag-to-reorder; everything else is
-  // a passive row. Wire `draggable` + the four DnD events only when the
-  // tabDragHandlers prop is set so the browser doesn't try to drag
-  // repos/workspaces (would conflict with the leaf session-drag UX).
-  const isTabDraggable = p.tabDragHandlers !== undefined;
+  // Tab + repo/workspace containers participate in drag-to-reorder
+  // (different MIMEs, but same `dragHandlers` shape). Detached/unbound
+  // pass undefined handlers and stay non-draggable.
+  const isDraggable = p.dragHandlers !== undefined;
 
   return (
     <li>
@@ -686,11 +827,11 @@ function ContainerNode(p: ContainerNodeProps) {
         data-testid={`sidebar-container-${c.kind}`}
         data-container-id={c.id}
         data-container-name={c.name}
-        draggable={isTabDraggable}
-        onDragStart={p.tabDragHandlers?.onDragStart}
-        onDragOver={p.tabDragHandlers?.onDragOver}
-        onDragEnd={p.tabDragHandlers?.onDragEnd}
-        onDrop={p.tabDragHandlers?.onDrop}
+        draggable={isDraggable}
+        onDragStart={p.dragHandlers?.onDragStart}
+        onDragOver={p.dragHandlers?.onDragOver}
+        onDragEnd={p.dragHandlers?.onDragEnd}
+        onDrop={p.dragHandlers?.onDrop}
       >
         <span className="tree-caret" aria-hidden="true">
           {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
@@ -1168,10 +1309,52 @@ function targetCacheKey(target: PresetTarget): string {
     : `workspace:${target.workspace_id}`;
 }
 
+function containerRefMatches(ref: ContainerRef, c: TreeContainer): boolean {
+  if (ref.kind === "repo") return c.kind === "repo" && c.id === ref.id;
+  return c.kind === "workspace" && c.id === ref.id;
+}
+
+function applyContainerOrder(
+  workspaces: TreeContainer[],
+  repos: TreeContainer[],
+  order: ContainerRef[],
+): TreeContainer[] {
+  if (order.length === 0) {
+    // No manual order set: default to workspaces (alpha) then repos
+    // (alpha) — matches the pre-task-#11 behavior so a fresh install
+    // doesn't look any different until the user actively reorders.
+    return [...workspaces, ...repos];
+  }
+  // Build the output in two passes: known ordering first, then anything
+  // the order list doesn't mention (e.g., a repo registered after the
+  // last reorder — keeps it visible without forcing the user to
+  // re-drag).
+  const seen = new Set<string>();
+  const out: TreeContainer[] = [];
+  for (const ref of order) {
+    const key = `${ref.kind}:${ref.id}`;
+    if (seen.has(key)) continue;
+    const all = ref.kind === "repo" ? repos : workspaces;
+    const found = all.find((c) => containerRefMatches(ref, c));
+    if (found) {
+      seen.add(key);
+      out.push(found);
+    }
+  }
+  for (const w of workspaces) {
+    if (!seen.has(`workspace:${w.id}`)) out.push(w);
+  }
+  for (const r of repos) {
+    if (!seen.has(`repo:${r.id}`)) out.push(r);
+  }
+  return out;
+}
+
 function buildContainers(
   repos: RepoEntry[],
   workspaces: WorkspaceEntry[],
   sessions: SessionSnapshot[],
+  containerOrder: ContainerRef[],
 ): TreeContainer[] {
   const workspaceById = new Map(workspaces.map((w) => [w.id, w] as const));
   const repoById = new Map(repos.map((r) => [r.id, r] as const));
@@ -1216,39 +1399,42 @@ function buildContainers(
   const sortSessions = (arr: SessionSnapshot[]) =>
     [...arr].sort((a, b) => a.label.localeCompare(b.label));
 
-  const out: TreeContainer[] = [];
-
-  // Workspaces first (typically fewer, and they're the differentiating concept).
+  // Build the workspace + repo container pools separately so the manual
+  // ordering pass can weave them however the user has dragged. Both
+  // pools start in alphabetical order so the "no manual order" path
+  // matches the pre-task-#11 layout exactly.
   const sortedWorkspaces = [...workspaces].sort((a, b) =>
     a.name.localeCompare(b.name),
   );
-  for (const w of sortedWorkspaces) {
-    out.push({
-      key: `ws:${w.id}`,
-      kind: "workspace",
-      id: w.id,
-      name: w.name,
-      fsPath: null,
-      sessions: sortSessions(wsSessions.get(w.id) ?? []),
-      removable: true,
-    });
-  }
+  const workspaceContainers: TreeContainer[] = sortedWorkspaces.map((w) => ({
+    key: `ws:${w.id}`,
+    kind: "workspace",
+    id: w.id,
+    name: w.name,
+    fsPath: null,
+    sessions: sortSessions(wsSessions.get(w.id) ?? []),
+    removable: true,
+  }));
 
   const sortedRepos = [...repos]
     .filter((r) => !memberRepoIds.has(r.id))
     .sort((a, b) => a.name.localeCompare(b.name));
-  for (const r of sortedRepos) {
-    out.push({
-      key: `repo:${r.id}`,
-      kind: "repo",
-      id: r.id,
-      name: r.name,
-      hoverTitle: r.path,
-      fsPath: r.path,
-      sessions: sortSessions(repoSessions.get(r.id) ?? []),
-      removable: true,
-    });
-  }
+  const repoContainers: TreeContainer[] = sortedRepos.map((r) => ({
+    key: `repo:${r.id}`,
+    kind: "repo",
+    id: r.id,
+    name: r.name,
+    hoverTitle: r.path,
+    fsPath: r.path,
+    sessions: sortSessions(repoSessions.get(r.id) ?? []),
+    removable: true,
+  }));
+
+  const out: TreeContainer[] = applyContainerOrder(
+    workspaceContainers,
+    repoContainers,
+    containerOrder,
+  );
 
   if (detached.length > 0) {
     out.push({

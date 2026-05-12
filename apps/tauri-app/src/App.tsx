@@ -18,6 +18,7 @@ import {
 } from "./api";
 import {
   tabGrid,
+  type ContainerRef,
   type DaemonMessage,
   type GridNode,
   type PresetEntry,
@@ -133,6 +134,11 @@ interface AppState {
   /// Suppresses the auto-reconnect cycle below so we don't immediately
   /// respawn the daemon they just stopped. Cleared by Restart.
   daemonStopRequested: boolean;
+  /// Manual sidebar-container order (workspaces + repos as one flat
+  /// list). Empty array means "no manual order; fall back to
+  /// alphabetical". Synced from the daemon's `containers_reordered`
+  /// broadcasts.
+  containerOrder: ContainerRef[];
 }
 
 export default function App() {
@@ -162,6 +168,7 @@ export default function App() {
     repoChangeCounts: {},
     handshake: null,
     daemonStopRequested: false,
+    containerOrder: [],
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -427,6 +434,17 @@ export default function App() {
       return { ...s, tabs: next };
     });
   }, []);
+
+  /// Sibling of `onLocalReorder` for the sidebar's container drag-and-
+  /// drop. Applied wholesale to `containerOrder` so the drop position
+  /// sticks while the daemon's `containers_reordered` broadcast is in
+  /// flight. The daemon-confirmed order replaces this on arrival.
+  const onLocalReorderContainers = useCallback(
+    (ordered: ContainerRef[]) => {
+      setState((s) => ({ ...s, containerOrder: ordered }));
+    },
+    [],
+  );
 
   const onSelectSession = useCallback((sessionId: string) => {
     // Decide the side-effect from the latest committed state (read via ref so
@@ -1261,6 +1279,8 @@ export default function App() {
             onRestartDaemon={onRestartDaemon}
             onStopDaemon={onStopDaemon}
             onLocalReorderTabs={onLocalReorder}
+            containerOrder={state.containerOrder}
+            onLocalReorderContainers={onLocalReorderContainers}
             tabs={state.tabs}
             onAddRepo={onAddRepo}
             onRemoveRepo={(id) =>
@@ -1705,6 +1725,9 @@ function handleMessage(
           .filter((t): t is TabEntry => t !== undefined);
         return { ...s, tabs: next };
       });
+      return;
+    case "containers_reordered":
+      setState((s) => ({ ...s, containerOrder: msg.ordered }));
       return;
     case "pty_output": {
       const set = ptyListeners.get(msg.session_id);

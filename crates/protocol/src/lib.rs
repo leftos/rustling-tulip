@@ -103,6 +103,17 @@ pub struct WorkspaceEntry {
     pub default_use_worktree: bool,
 }
 
+/// Tagged reference to either a repo or a workspace by id. Used by the
+/// sidebar's manual container order (a single flat list mixing both
+/// kinds — see [`ClientMessage::ReorderContainers`]). The `kind` tag is
+/// `snake_case` to match the rest of the wire vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ContainerRef {
+    Repo(String),
+    Workspace(String),
+}
+
 /// Detected VS Code workspace alongside a registered repo that we may want to
 /// mirror as a rustling-tulip [`WorkspaceEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1175,6 +1186,13 @@ pub enum ClientMessage {
     ReorderTabs {
         ordered_ids: Vec<String>,
     },
+    /// Manual ordering of the sidebar's top-level containers as a single
+    /// flat list mixing workspaces and repos. Anything not present in the
+    /// list falls back to alphabetical at the end (defensive — handles new
+    /// items registered after the order was last persisted).
+    ReorderContainers {
+        ordered: Vec<ContainerRef>,
+    },
     /// Split an existing pane in two along `direction`. The newly allocated
     /// pane occupies `place`; the existing pane occupies the other side.
     SplitPane {
@@ -1475,6 +1493,13 @@ pub enum DaemonMessage {
     /// payloads.
     TabsReordered {
         ordered_ids: Vec<String>,
+    },
+    /// Manual sidebar-container order. Broadcast on initial connect (so
+    /// new clients render in the persisted order) and after every
+    /// successful `ReorderContainers`. An empty vec means "no manual
+    /// order is set; client should fall back to alphabetical".
+    ContainersReordered {
+        ordered: Vec<ContainerRef>,
     },
     /// Response to [`ClientMessage::ListPresets`].
     Presets {

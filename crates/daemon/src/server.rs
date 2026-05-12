@@ -4,8 +4,8 @@ use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
-    add_repo, persist_last_agent, remove_repo, remove_workspace, set_repo_worktree_default,
-    set_workspace_worktree_default, upsert_workspace,
+    add_repo, persist_last_agent, remove_repo, remove_workspace, reorder_containers,
+    set_repo_worktree_default, set_workspace_worktree_default, upsert_workspace,
 };
 use crate::scrollback;
 use crate::session::{
@@ -76,6 +76,10 @@ pub struct Hub {
 pub enum StateEvent {
     Repos(Vec<protocol::RepoEntry>),
     Workspaces(Vec<protocol::WorkspaceEntry>),
+    /// Manual sidebar container order. Broadcast on every registry
+    /// mutation that might affect the persisted order (add/remove/
+    /// reorder) so connected clients stay in sync.
+    ContainersReordered(Vec<protocol::ContainerRef>),
     /// Broadcast after a successful stage/unstage/commit/discard so every
     /// connected source-control sidebar refreshes without each window having
     /// to re-request explicitly.
@@ -438,6 +442,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::Workspaces(workspaces)) => {
                     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
                 }
+                Ok(StateEvent::ContainersReordered(ordered)) => {
+                    let _ = out_tx.send(DaemonMessage::ContainersReordered { ordered });
+                }
                 Ok(StateEvent::RepoStatus {
                     repo_id,
                     index_changes,
@@ -627,11 +634,19 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
 }
 
 fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces, tabs) = hub
-        .state
-        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone(), s.tabs.clone()));
+    let (repos, workspaces, tabs, container_order) = hub.state.with_persisted(|s| {
+        (
+            s.repos.clone(),
+            s.workspaces.clone(),
+            s.tabs.clone(),
+            s.container_order.clone(),
+        )
+    });
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
+    let _ = out_tx.send(DaemonMessage::ContainersReordered {
+        ordered: container_order,
+    });
     let _ = out_tx.send(DaemonMessage::Sessions {
         sessions: hub.sessions.snapshots(),
     });
@@ -659,8 +674,13 @@ async fn dispatch(
         }
         ClientMessage::AddRepo { path, name } => {
             let entry = add_repo(&hub.state, &path, name).await?;
-            let repos = hub.state.with_persisted(|s| s.repos.clone());
+            let (repos, container_order) = hub
+                .state
+                .with_persisted(|s| (s.repos.clone(), s.container_order.clone()));
             let _ = hub.state_events.send(StateEvent::Repos(repos));
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(container_order));
             for suggestion in scan_vscode_workspaces(hub, &entry.path) {
                 // VSCode workspace suggestions are per-client (only the
                 // adder gets prompted), so this stays on out_tx.
@@ -673,11 +693,18 @@ async fn dispatch(
         }
         ClientMessage::RemoveRepo { repo_id } => {
             remove_repo(&hub.state, &repo_id)?;
-            let (repos, workspaces) = hub
-                .state
-                .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+            let (repos, workspaces, container_order) = hub.state.with_persisted(|s| {
+                (
+                    s.repos.clone(),
+                    s.workspaces.clone(),
+                    s.container_order.clone(),
+                )
+            });
             let _ = hub.state_events.send(StateEvent::Repos(repos));
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(container_order));
         }
         ClientMessage::ListWorkspaces => {
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
@@ -696,13 +723,23 @@ async fn dispatch(
                 member_repo_ids,
                 linked_vscode_workspace,
             )?;
-            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+            let (workspaces, container_order) = hub
+                .state
+                .with_persisted(|s| (s.workspaces.clone(), s.container_order.clone()));
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(container_order));
         }
         ClientMessage::RemoveWorkspace { workspace_id } => {
             remove_workspace(&hub.state, &workspace_id)?;
-            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+            let (workspaces, container_order) = hub
+                .state
+                .with_persisted(|s| (s.workspaces.clone(), s.container_order.clone()));
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(container_order));
         }
         ClientMessage::PreviewWorkspaceSpawn {
             workspace_id,
@@ -1088,6 +1125,12 @@ async fn dispatch(
             hub.state
                 .mutate(|s| tabs::reorder_tabs(&mut s.tabs, &ordered_ids))??;
             let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+        }
+        ClientMessage::ReorderContainers { ordered } => {
+            let applied = reorder_containers(&hub.state, ordered)?;
+            let _ = hub
+                .state_events
+                .send(StateEvent::ContainersReordered(applied));
         }
         ClientMessage::SplitPane {
             tab_id,

@@ -5,7 +5,7 @@
 
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
-use protocol::{RepoEntry, TabEntry, WorkspaceEntry};
+use protocol::{ContainerRef, RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
@@ -18,6 +18,13 @@ pub struct PersistedState {
     /// order. Older state.json files without this field deserialize cleanly.
     #[serde(default)]
     pub tabs: Vec<TabEntry>,
+    /// Manual sidebar-container order (workspaces + repos as a single
+    /// flat list). Empty vec means "no manual order; clients fall back
+    /// to alphabetical". Maintained by the registry helpers on every
+    /// add/remove + replaced wholesale on `ReorderContainers`. New
+    /// installations and old state.json files default to empty.
+    #[serde(default)]
+    pub container_order: Vec<ContainerRef>,
 }
 
 #[derive(Debug)]
