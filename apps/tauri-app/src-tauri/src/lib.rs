@@ -208,6 +208,13 @@ async fn open_session_window(app: tauri::AppHandle, session_id: String) -> Resul
         .title(format!("Session — {session_id}"))
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
+        // Tauri 2 defaults to true, which makes the OS file-drop layer
+        // intercept HTML5 drag-and-drop events inside the WebView — every
+        // intra-app drag gesture (session leaves between tabs, the pane
+        // ⠿ handle between panes) immediately shows the "forbidden" cursor
+        // because the OS thinks no drop target accepts it. We don't use
+        // OS file drops anywhere, so flip it off everywhere.
+        .disable_drag_drop_handler()
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -229,6 +236,9 @@ async fn open_tab_window(app: tauri::AppHandle, tab_id: String) -> Result<(), St
         .title(format!("Tab — {tab_id}"))
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
+        // See open_session_window for the rationale on disabling OS-level
+        // file-drop interception.
+        .disable_drag_drop_handler()
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
