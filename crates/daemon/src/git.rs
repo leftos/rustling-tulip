@@ -117,17 +117,28 @@ pub async fn is_clean(repo: &Path) -> anyhow::Result<bool> {
     Ok(changed_files(repo).await?.is_empty())
 }
 
-/// Check out `branch` directly in `repo`'s working tree (no worktree). If the
-/// branch doesn't exist, create it from `create_from_base`. The working tree
-/// must be clean — callers should surface the returned error to the user.
+/// Check out `branch` directly in `repo`'s working tree (no worktree). If
+/// the branch doesn't exist, create it from `create_from_base`. The working
+/// tree must be clean when an actual switch is required — callers should
+/// surface the returned error to the user.
+///
+/// Same-branch fast path: when the repo's current branch already equals
+/// `branch`, this is a no-op and the function returns Ok without running
+/// any git command and without checking cleanliness. Spawning a session
+/// against the branch you're already on must never touch the working
+/// tree, even if it has uncommitted changes — that's the whole point of
+/// "spawn in-place" on the current branch.
 pub async fn checkout_in_place(
     repo: &Path,
     branch: &str,
     create_from_base: Option<&str>,
 ) -> anyhow::Result<()> {
+    if current_branch(repo).await.ok().flatten().as_deref() == Some(branch) {
+        return Ok(());
+    }
     if !is_clean(repo).await? {
         return Err(anyhow!(
-            "{} has uncommitted changes; commit or stash before spawning in-place",
+            "{} has uncommitted changes; switching to '{branch}' would touch them — commit or stash first, or use a worktree",
             repo.display()
         ));
     }
