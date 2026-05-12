@@ -671,6 +671,35 @@ export default function App() {
     return () => window.removeEventListener("rt:duplicate_session", handler);
   }, [onDuplicateSession]);
 
+  // Restart-in-place from a stopped session's pane. Sequence matters: the
+  // daemon processes WS messages in order, so duplicate_session reads the
+  // stopped session's spawn_config BEFORE discard_session removes it. The
+  // pendingSpawnIntentRef routes the new clone into the same tab so the
+  // operation feels like a swap rather than "pane disappears + new one
+  // appears somewhere else".
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{ sessionId: string; tabId: string | null }>
+      ).detail;
+      if (!detail || typeof detail.sessionId !== "string") return;
+      const client = latestStateRef.current?.client;
+      if (!client) return;
+      pendingSpawnIntentRef.current = detail.tabId
+        ? { kind: "addToTab", tabId: detail.tabId }
+        : { kind: "newTab" };
+      client.send({ type: "duplicate_session", session_id: detail.sessionId });
+      client.send({
+        type: "discard_session",
+        session_id: detail.sessionId,
+        cleanup: [],
+      });
+    };
+    window.addEventListener("rt:pane_session_restart", handler);
+    return () =>
+      window.removeEventListener("rt:pane_session_restart", handler);
+  }, []);
+
   const onLaunchPreset = useCallback(
     (preset: PresetEntry, target: PresetTarget) => {
       setState((s) => ({ ...s, presetLaunch: { preset, target } }));
@@ -1566,6 +1595,20 @@ function handleMessage(
       const isNew = !seenSessionIdsRef.current.has(session.id);
       if (isNew) seenSessionIdsRef.current.add(session.id);
       const intent = isNew ? pendingSpawnIntentRef.current : null;
+      // Detect self-exit: status just transitioned to "stopped" from an
+      // active state (NOT user-initiated, which fires SessionRemoved instead),
+      // AND the session is not already parked (is_inactive covers the
+      // park_session feedback loop).
+      const prevSession = latestStateRef.current?.sessions.find(
+        (sn) => sn.id === session.id,
+      );
+      const justSelfExited =
+        !isNew &&
+        session.status === "stopped" &&
+        !session.is_inactive &&
+        prevSession !== undefined &&
+        prevSession.status !== "stopped" &&
+        prevSession.status !== "error";
       if (intent) {
         pendingSpawnIntentRef.current = null;
         // The Terminal mount for this session id is several React
@@ -1629,6 +1672,14 @@ function handleMessage(
         }
         return { ...s, sessions: next, attentionSessions: attention };
       });
+      // Auto-discard sessions that exited without a worktree (nothing to keep).
+      if (justSelfExited && !session.has_per_session_worktree) {
+        clientRef.current?.send({
+          type: "discard_session",
+          session_id: session.id,
+          cleanup: [],
+        });
+      }
       if (intent?.kind === "newTab") {
         clientRef.current?.send({
           type: "create_tab",
@@ -1808,6 +1859,7 @@ function handleMessage(
       return;
     }
     case "branches":
+    case "worktrees":
     case "workspace_spawn_preview":
     case "commits":
     case "commit_detail":

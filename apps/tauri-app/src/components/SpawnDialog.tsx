@@ -13,6 +13,7 @@ import type {
   RepoEntry,
   SpawnConfig,
   WorkspaceEntry,
+  WorktreeInfo,
 } from "../types";
 import type { SpawnInitialTarget } from "./Sidebar";
 
@@ -794,11 +795,36 @@ function SingleForm({
 
   const defaultBranch = repo?.default_branch ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(true);
+  /// "new" creates a fresh worktree (auto-named or user-typed branch).
+  /// "existing" picks an already-checked-out worktree from this repo —
+  /// useful for returning to a parked session's worktree, or one created
+  /// by another session that has since been removed.
+  const [worktreeMode, setWorktreeMode] = useState<"new" | "existing">("new");
+  const [worktreeList, setWorktreeList] = useState<WorktreeInfo[]>([]);
 
   // Reset the persistent-preference seed when the chosen repo changes.
   useEffect(() => {
     setUseWorktree(repo?.default_use_worktree ?? true);
+    // Flip back to "new" on repo change — the existing worktree list
+    // belongs to the previous repo and would be misleading.
+    setWorktreeMode("new");
+    setWorktreeList([]);
   }, [repo]);
+
+  // Fetch the worktree list when entering "existing" mode for the current
+  // repo. Mirrors the list_branches pattern above.
+  useEffect(() => {
+    if (!repoId || !useWorktree || worktreeMode !== "existing") return;
+    setWorktreeList([]);
+    client.send({ type: "list_worktrees", repo_id: repoId });
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "worktrees" || detail.repo_id !== repoId) return;
+      setWorktreeList(detail.worktrees);
+    };
+    window.addEventListener("rt:worktrees", handler);
+    return () => window.removeEventListener("rt:worktrees", handler);
+  }, [repoId, useWorktree, worktreeMode, client]);
 
   const branch = useBranchField(defaultBranch, useWorktree, `repo:${repoId}`);
 
@@ -806,6 +832,14 @@ function SingleForm({
   useEffect(() => {
     setBaseBranch(defaultBranch);
   }, [defaultBranch]);
+
+  /// Worktrees a user can still pick — entries already bound to a live
+  /// session are shown disabled (greyed) below, so we keep them in the
+  /// list rather than hiding (clarifies *why* a branch is unavailable).
+  const availableWorktreeCount = useMemo(
+    () => worktreeList.filter((w) => !w.is_active).length,
+    [worktreeList],
+  );
 
   // Local-only until submit. Previously this fired
   // `set_repo_worktree_default` immediately on toggle, which left the
@@ -821,9 +855,20 @@ function SingleForm({
   // fire two spawn_session messages before React unmounts the dialog.
   const submittedRef = useRef(false);
 
+  /// In "existing" mode the branch must match one of the worktrees the
+  /// daemon reported, AND that worktree must not be in active use. This
+  /// blocks the placeholder-not-yet-picked state from submitting silently.
+  const existingWorktreeOk =
+    !useWorktree ||
+    worktreeMode === "new" ||
+    worktreeList.some(
+      (w) => w.branch === branch.value.trim() && !w.is_active,
+    );
+
   const canSubmit =
     !!repoId &&
     branch.value.trim().length > 0 &&
+    existingWorktreeOk &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
     envRowsAreValid(advanced.envRows);
 
@@ -886,35 +931,6 @@ function SingleForm({
         </select>
       </label>
 
-      <label className="field">
-        <span>Branch name</span>
-        <input
-          ref={branchInputRef}
-          type="text"
-          list={datalistId}
-          value={branch.value}
-          onChange={(e) => branch.setValue(e.target.value)}
-          placeholder={defaultBranch}
-          data-testid="spawn-single-branch"
-        />
-        <datalist id={datalistId}>
-          {knownBranches.map((b) => (
-            <option key={b} value={b} />
-          ))}
-        </datalist>
-      </label>
-
-      <label className="field">
-        <span>Base when creating new (optional)</span>
-        <input
-          type="text"
-          value={baseBranch}
-          onChange={(e) => setBaseBranch(e.target.value)}
-          placeholder={defaultBranch}
-          data-testid="spawn-single-base-branch"
-        />
-      </label>
-
       <label className="checkbox">
         <input
           type="checkbox"
@@ -929,6 +945,91 @@ function SingleForm({
           </span>
         </span>
       </label>
+
+      {useWorktree && (
+        <div className="field" role="radiogroup" aria-label="Worktree mode">
+          <span>Worktree</span>
+          <div className="segmented">
+            <button
+              type="button"
+              className={worktreeMode === "new" ? "active" : ""}
+              onClick={() => setWorktreeMode("new")}
+              data-testid="spawn-single-worktree-mode-new"
+            >
+              New worktree
+            </button>
+            <button
+              type="button"
+              className={worktreeMode === "existing" ? "active" : ""}
+              onClick={() => setWorktreeMode("existing")}
+              data-testid="spawn-single-worktree-mode-existing"
+            >
+              Use existing
+            </button>
+          </div>
+        </div>
+      )}
+
+      {useWorktree && worktreeMode === "existing" ? (
+        <label className="field">
+          <span>Existing worktree</span>
+          <select
+            value={branch.value}
+            onChange={(e) => branch.setValue(e.target.value)}
+            data-testid="spawn-single-worktree-picker"
+          >
+            <option value="" disabled>
+              {worktreeList.length === 0
+                ? "Loading…"
+                : availableWorktreeCount === 0
+                  ? "(no available worktrees)"
+                  : "Choose a worktree…"}
+            </option>
+            {worktreeList.map((w) => (
+              <option
+                key={w.path}
+                value={w.branch}
+                disabled={w.is_active}
+                title={w.path}
+              >
+                {w.branch}
+                {w.is_active ? " (in use)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <>
+          <label className="field">
+            <span>Branch name</span>
+            <input
+              ref={branchInputRef}
+              type="text"
+              list={datalistId}
+              value={branch.value}
+              onChange={(e) => branch.setValue(e.target.value)}
+              placeholder={defaultBranch}
+              data-testid="spawn-single-branch"
+            />
+            <datalist id={datalistId}>
+              {knownBranches.map((b) => (
+                <option key={b} value={b} />
+              ))}
+            </datalist>
+          </label>
+
+          <label className="field">
+            <span>Base when creating new (optional)</span>
+            <input
+              type="text"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+              placeholder={defaultBranch}
+              data-testid="spawn-single-base-branch"
+            />
+          </label>
+        </>
+      )}
 
       {header}
       <div className="modal-footer-inline">

@@ -1026,6 +1026,13 @@ button.link.inline { display: inline; padding: 0 2px; }
   color: var(--fg-dim);
   font-style: italic;
 }
+.tree-leaf.is-inactive .tree-label {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+.tree-leaf.is-inactive .status-dot {
+  opacity: 0.5;
+}
 .tree-tab-pill {
   flex: none;
   font-size: 10px;
@@ -1695,6 +1702,45 @@ button.tree-tab-pill:hover {
 }
 .terminal-placeholder {
   color: var(--fg-muted); padding: 32px; font-style: italic;
+}
+.session-exited-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  font-style: normal;
+}
+.session-exited-message {
+  color: var(--fg-muted);
+}
+.session-exited-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.segmented {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  width: fit-content;
+}
+.segmented > button {
+  border: none;
+  border-radius: 0;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: inherit;
+}
+.segmented > button + button {
+  border-left: 1px solid var(--border);
+}
+.segmented > button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .muted { color: var(--fg-muted); }

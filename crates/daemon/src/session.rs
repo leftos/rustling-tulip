@@ -91,6 +91,16 @@ pub struct SessionRecord {
     /// from a normal stopped session (which exited gracefully) and from
     /// an orphan (whose process is still running, just detached).
     pub is_abandoned: bool,
+    /// True when the session is parked: process stopped, worktree retained,
+    /// session kept in the registry so the user can resume it. Set by the
+    /// `ParkSession` handler; cleared by `DiscardSession`.
+    pub is_inactive: bool,
+    /// Absolute paths of the per-session worktrees created (or reused) at
+    /// spawn time. Populated by the spawn pipeline; empty for in-place
+    /// sessions (`use_worktree = false`) and for reattached orphans that
+    /// pre-date this field. Used by `ListWorktrees` to cross-reference which
+    /// worktrees are currently in active use.
+    pub worktree_paths: Vec<String>,
     /// User's initial prompt at spawn, retained on the record so it can
     /// be surfaced via `SessionSnapshot::last_prompt` and replayed by the
     /// abandoned-resume handler.
@@ -136,6 +146,8 @@ impl SessionRecord {
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
             has_per_session_worktree,
+            is_inactive: self.is_inactive,
+            worktree_paths: self.worktree_paths.clone(),
         }
     }
 }
@@ -339,6 +351,8 @@ impl SessionRegistry {
             program_name: meta.program_name.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -370,6 +384,8 @@ impl SessionRegistry {
             program_name: meta.program_name.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
         };
         push_recent_action(
@@ -402,6 +418,8 @@ impl SessionRegistry {
             program_name: meta.program_name.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: true,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
         };
         push_recent_action(

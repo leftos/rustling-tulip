@@ -1158,6 +1158,7 @@ function SessionLeaf(p: SessionLeafProps) {
     p.selected ? "selected" : "",
     p.needsAttention ? "needs-attention" : "",
     s.is_orphan ? "is-orphan" : "",
+    s.is_inactive ? "is-inactive" : "",
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
     paneDraggable ? "is-draggable" : "",
@@ -1272,6 +1273,36 @@ function SessionLeaf(p: SessionLeafProps) {
             data-testid="sidebar-session-discard"
           >
             Dismiss
+          </button>
+        )}
+        {s.is_inactive && (
+          <span
+            className="list-item-meta"
+            title={
+              s.has_per_session_worktree
+                ? `Parked. Worktree kept on disk:\n${s.worktree_paths.join("\n")}`
+                : "Parked"
+            }
+          >
+            inactive
+          </span>
+        )}
+        {s.is_inactive && (
+          <button
+            type="button"
+            className="btn-inline"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.dispatchEvent(
+                new CustomEvent("rt:pane_session_restart", {
+                  detail: { sessionId: s.id, tabId: null },
+                }),
+              );
+            }}
+            title="Spawn a fresh session that reuses this worktree"
+            data-testid="sidebar-session-resume-inactive"
+          >
+            Resume
           </button>
         )}
         <TabPill

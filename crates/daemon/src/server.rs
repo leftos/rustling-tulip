@@ -886,6 +886,15 @@ async fn dispatch(
         ClientMessage::DiscardAbandoned { session_id } => {
             discard_abandoned(hub, &session_id, out_tx);
         }
+        ClientMessage::ParkSession { session_id } => {
+            park_session(hub, &session_id).await;
+        }
+        ClientMessage::DiscardSession {
+            session_id,
+            cleanup,
+        } => {
+            discard_session(hub, &session_id, &cleanup).await;
+        }
         ClientMessage::ResumeAllAbandoned => {
             resume_all_abandoned(hub, out_tx).await;
         }
@@ -907,6 +916,45 @@ async fn dispatch(
                 branches,
                 current,
             });
+        }
+        ClientMessage::ListWorktrees { repo_id } => {
+            let repo_path = hub
+                .state
+                .with_persisted(|s| {
+                    s.repos
+                        .iter()
+                        .find(|r| r.id == repo_id)
+                        .map(|r| r.path.clone())
+                })
+                .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
+            let path = PathBuf::from(&repo_path);
+            let raw = git::list_worktrees(&path).await.unwrap_or_default();
+            // Mark worktrees currently in use by active (non-stopped, non-parked) sessions.
+            let active_paths: std::collections::HashSet<String> = hub
+                .sessions
+                .snapshots()
+                .into_iter()
+                .filter(|s| {
+                    !matches!(
+                        s.status,
+                        protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
+                    ) && !s.is_inactive
+                })
+                .flat_map(|s| s.worktree_paths)
+                .collect();
+            let worktrees = raw
+                .into_iter()
+                .map(|(branch, path)| {
+                    let path_str = path.to_string_lossy().into_owned();
+                    let is_active = active_paths.contains(&path_str);
+                    protocol::WorktreeInfo {
+                        branch,
+                        path: path_str,
+                        is_active,
+                    }
+                })
+                .collect();
+            let _ = out_tx.send(DaemonMessage::Worktrees { repo_id, worktrees });
         }
         ClientMessage::ListCommits {
             repo_id,
@@ -1535,6 +1583,25 @@ fn short_rev(rev: &str) -> &str {
     if rev.len() > 7 { &rev[..7] } else { rev }
 }
 
+/// Derive the on-disk worktree paths from a `SpawnConfig` + the session's
+/// `SessionMember` list. Returns the per-member `worktree_path` strings when
+/// the config used `use_worktree = true`, or an empty vec for in-place
+/// sessions. Used to populate `SessionRecord::worktree_paths` at spawn time.
+fn worktree_paths_for_config(
+    config: &protocol::SpawnConfig,
+    members: &[protocol::SessionMember],
+) -> Vec<String> {
+    let use_worktree = match &config.target {
+        protocol::SpawnTarget::Single { use_worktree, .. }
+        | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+    };
+    if use_worktree {
+        members.iter().map(|m| m.worktree_path.clone()).collect()
+    } else {
+        Vec::new()
+    }
+}
+
 fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
     hub.state
         .with_persisted(|s| {
@@ -2014,6 +2081,8 @@ async fn spawn_interactive_session(
         program_name: Some(cfg.agent.as_label().to_string()),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
+        is_inactive: false,
+        worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -2143,6 +2212,8 @@ async fn spawn_plain_shell_session(
         program_name: Some(shell_label.clone()),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
+        is_inactive: false,
+        worktree_paths: worktree_paths_for_config(&stored_config, &members),
         // Plain shells never carry a kickoff prompt.
         last_prompt: None,
     };
@@ -2262,6 +2333,8 @@ fn spawn_headless_session(
         program_name: Some(cfg.agent.as_label().to_string()),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
+        is_inactive: false,
+        worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
     };
     push_recent_action(&mut record, "headless session started".to_string());
@@ -2509,6 +2582,76 @@ fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender
     let _ = out_tx.send(DaemonMessage::SessionRemoved {
         session_id: session_id.to_string(),
     });
+}
+
+/// Kill the session's process if still alive, then mark it `is_inactive =
+/// true` in the registry so the sidebar shows it as parked. The session
+/// record stays in the registry — the user can Resume it later.
+async fn park_session(hub: &Hub, session_id: &str) {
+    let Some(rec) = hub.sessions.get(session_id) else {
+        return;
+    };
+    let (pty, headless_handle) = {
+        let guard = crate::sync::lock(&rec);
+        (guard.pty.clone(), guard.headless.clone())
+    };
+    if let Some(pty) = pty {
+        pty.kill();
+    }
+    if let Some(h) = headless_handle {
+        h.kill().await;
+    }
+    hub.sessions.update(session_id, |r| {
+        r.is_inactive = true;
+        r.pty = None;
+        r.headless = None;
+        if !matches!(
+            r.status,
+            protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
+        ) {
+            r.status = protocol::SessionStatus::Stopped;
+        }
+        push_recent_action(r, "parked — worktree retained".to_string());
+    });
+    // Detach from panes so the grid shows an empty slot; the session record
+    // itself lives on in the registry for the sidebar's Resume button.
+    prune_session_from_tabs(hub, session_id);
+}
+
+/// Remove a stopped or inactive session from the registry. Optionally removes
+/// per-member worktrees from disk. Does not kill a running session.
+async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::CleanupAction]) {
+    let members = hub
+        .sessions
+        .get(session_id)
+        .map(|rec| crate::sync::lock(&rec).members.clone())
+        .unwrap_or_default();
+
+    for action in cleanup {
+        if !action.remove_worktree {
+            continue;
+        }
+        let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
+            continue;
+        };
+        let repo_path = hub.state.with_persisted(|s| {
+            s.repos
+                .iter()
+                .find(|r| r.id == member.repo_id)
+                .map(|r| r.path.clone())
+        });
+        let Some(repo_path) = repo_path else {
+            continue;
+        };
+        let worktree_path = PathBuf::from(&member.worktree_path);
+        if let Err(err) = git::worktree_remove(Path::new(&repo_path), &worktree_path).await {
+            warn!(?err, "discard_session: worktree remove failed");
+        }
+    }
+    orphan::try_delete_meta(&hub.dirs, session_id);
+    orphan::try_delete_session_dir(&hub.dirs, session_id);
+    hub.sessions.remove(session_id);
+    prune_session_from_tabs(hub, session_id);
 }
 
 async fn stop_session(

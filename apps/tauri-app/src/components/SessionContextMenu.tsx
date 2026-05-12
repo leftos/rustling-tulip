@@ -66,7 +66,17 @@ export default function SessionContextMenu({
   // sidebar; the menu offers the primary one as a fast-path.
   const worktreePath = s.members[0]?.worktree_path ?? null;
 
-  const isStopped = s.status === "stopped" || s.status === "error";
+  /// Action-bucket detection. Mutually exclusive:
+  /// - `inactive`: parked by the user; no pane, sits in the sidebar
+  ///   waiting to be resumed.
+  /// - `stopped`: process exited self-or-by-user, still bound to a
+  ///   pane (waiting for the user to restart / discard / park).
+  /// - `running`: anything else (spawning / idle / working / awaiting_input).
+  /// Orphans + abandoned have their own inline affordances in the sidebar
+  /// and fall under `running` here for the close-confirm path.
+  const isInactive = s.is_inactive;
+  const isStopped =
+    !isInactive && (s.status === "stopped" || s.status === "error");
   const [closeMode, setCloseMode] = useState<CloseMode>("idle");
   /// Re-read on every menu render — the source-of-truth lives in
   /// localStorage and the menu is short-lived. Memoizing would just
@@ -92,6 +102,35 @@ export default function SessionContextMenu({
         remove_worktree: removeWorktree,
       })),
     });
+    onClose();
+  };
+
+  const sendDiscard = (removeWorktree: boolean) => {
+    client.send({
+      type: "discard_session",
+      session_id: s.id,
+      cleanup: s.members.map((m) => ({
+        repo_id: m.repo_id,
+        remove_worktree: removeWorktree,
+      })),
+    });
+    onClose();
+  };
+
+  const sendPark = () => {
+    client.send({ type: "park_session", session_id: s.id });
+    onClose();
+  };
+
+  /// Restart routes through App.tsx so the new clone lands in the same
+  /// tab the stopped session is pinned to. Inactive sessions have no
+  /// pane to anchor against — they get a fresh tab.
+  const sendRestart = () => {
+    window.dispatchEvent(
+      new CustomEvent("rt:pane_session_restart", {
+        detail: { sessionId: s.id, tabId: sessionTabId },
+      }),
+    );
     onClose();
   };
 
@@ -280,22 +319,97 @@ export default function SessionContextMenu({
             )}
 
             <li className="context-menu-separator" aria-hidden="true" />
-            <li>
-              <button
-                type="button"
-                className="danger"
-                disabled={isStopped}
-                onClick={() => setCloseMode("confirming")}
-                title={
-                  isStopped
-                    ? "Session already stopped"
-                    : "Stop this session (asks before removing worktrees)"
-                }
-                data-testid="session-context-close"
-              >
-                Close…
-              </button>
-            </li>
+            {isInactive ? (
+              <>
+                <li>
+                  <button
+                    type="button"
+                    onClick={sendRestart}
+                    data-testid="session-context-resume"
+                    title="Spawn a fresh session that reuses this worktree"
+                  >
+                    Resume
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => sendDiscard(false)}
+                    data-testid="session-context-remove-keep-worktree"
+                    title="Remove this entry from the sidebar; keep the worktree on disk"
+                  >
+                    Remove from sidebar
+                  </button>
+                </li>
+                {s.has_per_session_worktree && (
+                  <li>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => sendDiscard(true)}
+                      data-testid="session-context-remove-with-worktree"
+                      title="Remove this entry and delete the worktree from disk"
+                    >
+                      Remove from sidebar and worktree
+                    </button>
+                  </li>
+                )}
+              </>
+            ) : isStopped ? (
+              <>
+                <li>
+                  <button
+                    type="button"
+                    onClick={sendRestart}
+                    data-testid="session-context-restart"
+                    title="Spawn a fresh session with the same configuration"
+                  >
+                    Restart
+                  </button>
+                </li>
+                {s.has_per_session_worktree && (
+                  <li>
+                    <button
+                      type="button"
+                      onClick={sendPark}
+                      data-testid="session-context-park"
+                      title="Move to inactive in the sidebar; keep the worktree on disk"
+                    >
+                      Remove pane, keep worktree
+                    </button>
+                  </li>
+                )}
+                <li>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => sendDiscard(s.has_per_session_worktree)}
+                    data-testid="session-context-remove-pane"
+                    title={
+                      s.has_per_session_worktree
+                        ? "Remove the pane and delete the worktree from disk"
+                        : "Remove the pane"
+                    }
+                  >
+                    {s.has_per_session_worktree
+                      ? "Remove pane and worktree"
+                      : "Remove pane"}
+                  </button>
+                </li>
+              </>
+            ) : (
+              <li>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => setCloseMode("confirming")}
+                  title="Terminate this session (asks before removing worktrees)"
+                  data-testid="session-context-close"
+                >
+                  Terminate shell…
+                </button>
+              </li>
+            )}
           </>
         )}
       </ul>

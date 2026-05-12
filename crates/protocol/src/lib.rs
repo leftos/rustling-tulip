@@ -183,6 +183,12 @@ pub struct SessionMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "SessionSnapshot is the canonical session shape on the wire — \
+              each bool maps to an orthogonal lifecycle state (orphan, abandoned, \
+              parked, has-worktree) the UI surfaces independently."
+)]
 pub struct SessionSnapshot {
     pub id: String,
     pub label: String,
@@ -248,6 +254,18 @@ pub struct SessionSnapshot {
     /// on disk for the user to clean up manually).
     #[serde(default)]
     pub has_per_session_worktree: bool,
+    /// True when the session is parked: its process has stopped but the
+    /// worktree is retained and the session remains in the sidebar so the
+    /// user can resume it later. Set via `ParkSession`; cleared implicitly
+    /// when the session is discarded or a new session is spawned from it.
+    #[serde(default)]
+    pub is_inactive: bool,
+    /// Absolute on-disk paths of the per-session worktrees used by this
+    /// session. Empty when `has_per_session_worktree` is false. Populated at
+    /// spawn time; carried on the snapshot so `ListWorktrees` can mark which
+    /// worktrees are currently in active use.
+    #[serde(default)]
+    pub worktree_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1001,6 +1019,27 @@ pub enum ClientMessage {
     DiscardAbandoned {
         session_id: String,
     },
+    /// Park a stopped session in the sidebar: keep the session record in the
+    /// registry (marked `is_inactive = true`) and retain its worktrees on
+    /// disk so the user can resume work later. If the session is still
+    /// running, kills it first. No-op if the session does not exist.
+    ParkSession {
+        session_id: String,
+    },
+    /// Remove a stopped or inactive session from the registry. Optionally
+    /// removes its per-member worktrees from disk. Does not kill a running
+    /// session — use `StopSession` for that. Covers the same surface as
+    /// `DiscardAbandoned` but applies to any terminal-state session.
+    DiscardSession {
+        session_id: String,
+        cleanup: Vec<CleanupAction>,
+    },
+    /// List all non-main git worktrees for a registered repo. Returns a
+    /// `Worktrees` reply keyed on `repo_id`. Each entry is marked with
+    /// whether an active (non-stopped) session is currently using it.
+    ListWorktrees {
+        repo_id: String,
+    },
     /// Resume every session currently in the abandoned bucket. The daemon
     /// iterates and re-spawns each one; per-session failures (missing
     /// spawn config, spawn error) are surfaced as `Error` messages but
@@ -1341,6 +1380,19 @@ pub enum ClientMessage {
 // Daemon -> Client
 // ---------------------------------------------------------------------------
 
+/// One entry in the `Worktrees` reply: a non-main git worktree for a repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    /// Short branch name (e.g. `wt/brave-fox`, `feature/foo`).
+    pub branch: String,
+    /// Absolute path to the worktree directory on disk.
+    pub path: String,
+    /// True if a non-stopped, non-inactive session is currently using this
+    /// worktree path. Such worktrees should be shown as unavailable in the
+    /// spawn dialog's "use existing" picker.
+    pub is_active: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
@@ -1371,6 +1423,13 @@ pub enum DaemonMessage {
         repo_id: String,
         branches: Vec<String>,
         current: Option<String>,
+    },
+    /// Reply to [`ClientMessage::ListWorktrees`]. Lists all non-main
+    /// worktrees for the given repo, each annotated with whether an active
+    /// session is currently using it.
+    Worktrees {
+        repo_id: String,
+        worktrees: Vec<WorktreeInfo>,
     },
     Sessions {
         sessions: Vec<SessionSnapshot>,

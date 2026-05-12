@@ -122,6 +122,39 @@ pub async fn list_branches(repo: &Path) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+/// Return all non-main worktrees for `repo` as `(branch, path)` pairs.
+///
+/// The main worktree (first entry from `git worktree list --porcelain`) is
+/// always omitted — callers only want additional worktrees created via
+/// `git worktree add`. Worktrees in a detached-HEAD state (no `branch` line
+/// in the porcelain output) are included with an empty branch string.
+pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let stdout = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
+    let mut all_blocks: Vec<(String, PathBuf)> = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch = String::new();
+
+    for line in stdout.lines() {
+        if line.starts_with("worktree ") {
+            if let Some(path) = current_path.take() {
+                all_blocks.push((std::mem::take(&mut current_branch), path));
+            }
+            current_path = Some(PathBuf::from(line.trim_start_matches("worktree ")));
+            current_branch = String::new();
+        } else if let Some(branch_ref) = line.strip_prefix("branch ") {
+            current_branch = branch_ref
+                .trim_start_matches("refs/heads/")
+                .to_string();
+        }
+    }
+    if let Some(path) = current_path.take() {
+        all_blocks.push((std::mem::take(&mut current_branch), path));
+    }
+
+    // First entry is always the main worktree; skip it.
+    Ok(all_blocks.into_iter().skip(1).collect())
+}
+
 /// Add a worktree at `target_path` checking out `branch`. If `create_from_base`
 /// is `Some(base)`, the branch is created off `base` first.
 pub async fn worktree_add(

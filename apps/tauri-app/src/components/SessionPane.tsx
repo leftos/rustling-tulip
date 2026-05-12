@@ -77,6 +77,35 @@ export default function SessionPane({
     void invoke("open_session_window", { sessionId: session.id });
   }, [session.id]);
 
+  const onRestart = useCallback(() => {
+    // App.tsx owns pane-slot routing via pendingSpawnIntentRef + sends
+    // duplicate_session / discard_session in the right order. Dispatch a
+    // window event so we don't have to prop-drill those handlers through
+    // the GridRenderer tree.
+    window.dispatchEvent(
+      new CustomEvent("rt:pane_session_restart", {
+        detail: { sessionId: session.id, tabId: tabId ?? null },
+      }),
+    );
+  }, [session.id, tabId]);
+
+  const onDiscardWithWorktree = useCallback(() => {
+    if (!client) return;
+    client.send({
+      type: "discard_session",
+      session_id: session.id,
+      cleanup: session.members.map((m) => ({
+        repo_id: m.repo_id,
+        remove_worktree: true,
+      })),
+    });
+  }, [client, session]);
+
+  const onPark = useCallback(() => {
+    if (!client) return;
+    client.send({ type: "park_session", session_id: session.id });
+  }, [client, session.id]);
+
   const isHeadless = session.mode === "headless";
   const isPlainShell = session.mode === "plain_shell";
   const runtimeLabel = sessionRuntimeLabel(session);
@@ -244,11 +273,54 @@ export default function SessionPane({
               status={session.status}
               tabId={tabId ?? null}
             />
+          ) : session.status === "stopped" ? (
+            <div
+              className="terminal-placeholder session-exited-placeholder"
+              data-testid="session-exited"
+            >
+              <div className="session-exited-message">
+                Session has exited (code {session.exit_code ?? "?"}).
+              </div>
+              {client && (
+                <div className="session-exited-actions">
+                  <button
+                    type="button"
+                    onClick={onRestart}
+                    data-testid="session-restart"
+                  >
+                    Restart
+                  </button>
+                  {session.has_per_session_worktree && (
+                    <button
+                      type="button"
+                      onClick={onPark}
+                      data-testid="session-park"
+                      title="Keep the worktree on disk; session moves to inactive in the sidebar"
+                    >
+                      Remove pane, keep worktree
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={onDiscardWithWorktree}
+                    className="danger"
+                    data-testid="session-discard-worktree"
+                    title={
+                      session.has_per_session_worktree
+                        ? "Remove this pane and delete the worktree from disk"
+                        : "Remove this pane"
+                    }
+                  >
+                    {session.has_per_session_worktree
+                      ? "Remove pane and worktree"
+                      : "Remove pane"}
+                  </button>
+                </div>
+              )}
+            </div>
           ) : (
             <div className="terminal-placeholder">
-              {session.status === "stopped"
-                ? "Session has exited."
-                : "Waiting for daemon connection..."}
+              Waiting for daemon connection...
             </div>
           )}
         </div>

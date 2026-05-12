@@ -102,6 +102,13 @@ export interface SessionSnapshot {
   // "remove worktree" choice. false for orphans whose stored spawn config
   // pre-dates this field — the worktree may still exist on disk.
   has_per_session_worktree: boolean;
+  // True when the session is parked: process stopped, worktree kept on disk,
+  // session stays in the sidebar so the user can Resume it later.
+  is_inactive: boolean;
+  // Absolute on-disk paths of the per-session worktrees; empty when
+  // has_per_session_worktree is false. Used by the spawn dialog's "use
+  // existing worktree" picker to mark which worktrees are in active use.
+  worktree_paths: string[];
 }
 
 export type SpawnTarget =
@@ -296,6 +303,13 @@ export interface CleanupAction {
   remove_worktree: boolean;
 }
 
+export interface WorktreeInfo {
+  branch: string;
+  path: string;
+  // True if a non-stopped, non-parked session is currently using this path.
+  is_active: boolean;
+}
+
 export interface MemberSpawnPreview {
   repo_id: string;
   repo_name: string;
@@ -429,8 +443,11 @@ export type ClientMessage =
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
   | { type: "resume_abandoned"; session_id: string }
   | { type: "discard_abandoned"; session_id: string }
+  | { type: "park_session"; session_id: string }
+  | { type: "discard_session"; session_id: string; cleanup: CleanupAction[] }
   | { type: "resume_all_abandoned" }
   | { type: "list_branches"; repo_id: string }
+  | { type: "list_worktrees"; repo_id: string }
   | {
       type: "preview_workspace_spawn";
       workspace_id: string;
@@ -596,6 +613,11 @@ export type DaemonMessage =
       repo_id: string;
       branches: string[];
       current: string | null;
+    }
+  | {
+      type: "worktrees";
+      repo_id: string;
+      worktrees: WorktreeInfo[];
     }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
