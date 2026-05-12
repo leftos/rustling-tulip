@@ -19,8 +19,29 @@ use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tracing::warn;
 
+/// On-disk schema version for `meta.json`. Bumped only when the shape changes
+/// in a way that older daemons can't tolerate (renames, removals, semantic
+/// changes). Adding a new `#[serde(default)]` field is NOT a bump.
+///
+/// Always written by post-A.3 daemons; sidecars written before this field
+/// existed deserialize with the default-shim value (1).
+pub const CURRENT_SIDECAR_VERSION: u32 = 1;
+
+/// Highest sidecar version the current daemon understands. Today equal to
+/// [`CURRENT_SIDECAR_VERSION`]; when a future daemon learns to load a v2
+/// sidecar this bumps to 2.
+pub const MAX_KNOWN_SIDECAR_VERSION: u32 = 1;
+
+fn default_sidecar_version() -> u32 {
+    CURRENT_SIDECAR_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrphanMeta {
+    /// Schema version of this sidecar. Defaults to `CURRENT_SIDECAR_VERSION`
+    /// when missing so pre-A.3 sidecars load unchanged.
+    #[serde(default = "default_sidecar_version")]
+    pub on_disk_version: u32,
     pub session_id: String,
     pub pid: u32,
     pub label: String,
@@ -82,9 +103,7 @@ pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
 pub fn load_meta(dirs: &Dirs, session_id: &str) -> anyhow::Result<OrphanMeta> {
     let path = meta_path(dirs, session_id);
     let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    let meta: OrphanMeta =
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(meta)
+    load_meta_from_bytes(&bytes).with_context(|| format!("loading {}", path.display()))
 }
 
 pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
@@ -114,7 +133,7 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
                 continue;
             }
         };
-        match serde_json::from_slice::<OrphanMeta>(&bytes) {
+        match load_meta_from_bytes(&bytes) {
             Ok(meta) => out.push(meta),
             Err(err) => {
                 warn!(?err, path = %path.display(), "skipping malformed meta.json");
@@ -122,6 +141,31 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
         }
     }
     Ok(out)
+}
+
+/// Decode a sidecar's bytes and route through [`migrate_sidecar`]. Rejects
+/// sidecars written by a future daemon version so a downgrade scenario (v2
+/// daemon writes the file, user rolls back to v1) doesn't corrupt live state.
+fn load_meta_from_bytes(bytes: &[u8]) -> anyhow::Result<OrphanMeta> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("parsing meta.json as Value")?;
+    migrate_sidecar(value)
+}
+
+/// Migration seam for sidecar shape changes. Today every accepted on-disk
+/// version maps 1:1 to `OrphanMeta` (the only shape we know). When a future
+/// version introduces an actual migration, branch on `on_disk_version` here.
+fn migrate_sidecar(value: serde_json::Value) -> anyhow::Result<OrphanMeta> {
+    let on_disk = value
+        .get("on_disk_version")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(CURRENT_SIDECAR_VERSION, |n| u32::try_from(n).unwrap_or(0));
+    if on_disk > MAX_KNOWN_SIDECAR_VERSION {
+        return Err(anyhow!(
+            "sidecar from future daemon version: on_disk_version={on_disk}, max known={MAX_KNOWN_SIDECAR_VERSION}"
+        ));
+    }
+    serde_json::from_value::<OrphanMeta>(value).context("deserializing migrated meta")
 }
 
 /// Remove the meta sidecar for a session that has stopped or errored. Leaves
@@ -263,6 +307,7 @@ pub fn meta_from_record(
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
     }
     Ok(OrphanMeta {
+        on_disk_version: CURRENT_SIDECAR_VERSION,
         session_id,
         pid,
         label,
@@ -292,8 +337,7 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err).context("reading meta for terminal_title update"),
     };
-    let mut meta: OrphanMeta =
-        serde_json::from_slice(&bytes).context("parsing meta for terminal_title update")?;
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for terminal_title update")?;
     if meta.terminal_title.as_deref() == Some(new_title) {
         return Ok(());
     }
@@ -304,5 +348,77 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
 pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
     if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
         warn!(?err, %session_id, "failed to update orphan meta terminal_title");
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests assert preconditions with expect/unwrap; failure messages aid debugging"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_sidecar_without_version_loads_with_default_v1() {
+        // Pre-A.3 sidecars don't carry `on_disk_version`. The serde default
+        // shim must produce CURRENT_SIDECAR_VERSION so they keep loading.
+        let legacy = br#"{
+            "session_id": "s1",
+            "pid": 1234,
+            "label": "test",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let meta = load_meta_from_bytes(legacy).expect("parse legacy");
+        assert_eq!(meta.on_disk_version, CURRENT_SIDECAR_VERSION);
+        assert_eq!(meta.session_id, "s1");
+    }
+
+    #[test]
+    fn future_version_sidecar_is_rejected() {
+        // A downgrade scenario: v(N+1) daemon wrote the file with a future
+        // version, user rolled back to v(N). Refuse to load so we don't
+        // misinterpret the shape.
+        let future = br#"{
+            "on_disk_version": 999,
+            "session_id": "s1",
+            "pid": 1234,
+            "label": "test",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let res = load_meta_from_bytes(future);
+        assert!(res.is_err(), "expected future-version rejection");
+        let err = format!("{:?}", res.err().unwrap());
+        assert!(err.contains("future daemon version"), "got: {err}");
+    }
+
+    #[test]
+    fn current_version_sidecar_round_trips() {
+        let original = OrphanMeta {
+            on_disk_version: CURRENT_SIDECAR_VERSION,
+            session_id: "s1".to_string(),
+            pid: 1234,
+            label: "test".to_string(),
+            kind: SessionKind::Single,
+            mode: SessionMode::Interactive,
+            members: vec![],
+            started_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            workspace_id: None,
+            program_name: Some("claude".to_string()),
+            agent: Some(Agent::Claude),
+            terminal_title: None,
+            spawn_config: None,
+        };
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        let decoded = load_meta_from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded.on_disk_version, CURRENT_SIDECAR_VERSION);
+        assert_eq!(decoded.session_id, "s1");
     }
 }
