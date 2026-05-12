@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -110,6 +111,33 @@ export default function Terminal({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(containerRef.current);
+
+    // WebGL renderer dramatically reduces flicker on full-page TUI
+    // redraws (codex/htop/vim style). The default DOM renderer
+    // updates per-cell DOM nodes -- claude's mostly-line-append
+    // output runs fine on it, but codex's full-buffer repaint
+    // every frame thrashes layout and the cursor visibly jumps
+    // around. WebGL paints the whole grid as a single texture on
+    // each frame, so updates stay coherent.
+    //
+    // WebGL needs a working WebGL2 context; on the rare hardware
+    // where context creation fails (Mesa drivers, lost context
+    // during resume-from-sleep), the addon raises a
+    // `webglcontextlost` event and we fall back to the default
+    // renderer by simply disposing it. Wrapping the construction
+    // in try/catch also covers the up-front "no WebGL2 at all"
+    // case (e.g. headless test runners running xterm in jsdom).
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+      });
+      term.loadAddon(webgl);
+    } catch (err) {
+      // Non-fatal: keep the DOM renderer. Logged so it's visible
+      // if a user complains about flicker on otherwise-fine GPUs.
+      console.warn("xterm WebGL renderer unavailable, falling back to DOM", err);
+    }
 
     termRef.current = term;
     fitRef.current = fit;
