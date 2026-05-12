@@ -178,13 +178,18 @@ function Stop-DaemonProcesses {
         Justification = 'Stops zero-or-more processes; plural noun is accurate.')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Dev script: the subcommand itself is the user gesture; no extra prompt needed.')]
-    param([string]$Reason)
-    # Also kill rt-tracer.exe -- Phase C.3 deliberately lets the tracer
-    # outlive the daemon so a freshly-started daemon can reattach to
-    # live sessions, but explicit user-triggered stop/restart should
-    # tear everything down so cargo build can replace rt-tracer.exe on
-    # disk. The tracer's child (claude/codex/shell) goes with it.
-    $targetNames = @($ImageName, $TracerImageName)
+    # Stops the specified process names. Defaults to daemon-only so
+    # the routine "rebuilt the daemon, restart it" path preserves
+    # Phase C.3 session reattach -- the surviving tracers keep the
+    # claude/codex/shell children alive and the freshly-launched
+    # daemon picks them back up. Pass an explicit -Names list when
+    # the caller knows it needs to replace specific binaries on disk
+    # (cargo lock-retry) or wants a full teardown (`rt.ps1 stop`).
+    param(
+        [string]$Reason,
+        [string[]]$Names = @($ImageName)
+    )
+    $targetNames = $Names
     $processes = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
     if ($processes.Count -eq 0) {
         return $false
@@ -328,12 +333,31 @@ function Invoke-DebugBuild {
     $output = $script:CargoLines
     $script:DaemonAlreadyStopped = $false
 
-    if ($exit -ne 0 -and -not (Test-DaemonBinaryWritable (Get-DaemonBin -BuildProfile 'debug'))) {
-        [void](Stop-DaemonProcesses -Reason 'daemon binary locked, retrying build')
+    # Lock-retry: either the daemon binary or the tracer binary may
+    # be held open by a still-running process. Be surgical -- only
+    # kill the image(s) whose binary is actually locked. This
+    # preserves Phase C.3 session reattach when only the daemon
+    # rebuilt (tracers survive, new daemon picks them up) and only
+    # tears down sessions when the tracer binary itself needs
+    # replacing (intrinsic: can't overwrite a running exe on Windows).
+    $daemonLocked = -not (Test-DaemonBinaryWritable (Get-DaemonBin -BuildProfile 'debug'))
+    $tracerLocked = -not (Test-DaemonBinaryWritable (Get-TracerBin -BuildProfile 'debug'))
+    if ($exit -ne 0 -and ($daemonLocked -or $tracerLocked)) {
+        $names = @()
+        if ($daemonLocked) { $names += $ImageName }
+        if ($tracerLocked) { $names += $TracerImageName }
+        $reason = if ($tracerLocked -and $daemonLocked) { 'daemon + tracer binaries locked, retrying build' }
+                  elseif ($tracerLocked)                { 'tracer binary locked, retrying build (sessions will not reattach)' }
+                  else                                  { 'daemon binary locked, retrying build' }
+        [void](Stop-DaemonProcesses -Reason $reason -Names $names)
         Write-Host '==> Retrying daemon + tracer build...' -ForegroundColor Cyan
         $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
         $output = $script:CargoLines
-        $script:DaemonAlreadyStopped = $true
+        # Only treat the daemon as 'already stopped' if it actually was.
+        # If the lock-retry killed only the tracer, the daemon is still
+        # alive and may still need stopping later (e.g. the caller's
+        # "daemon was rebuilt" path).
+        $script:DaemonAlreadyStopped = $daemonLocked
     }
 
     Test-CargoExitOk 'cargo build'
@@ -575,7 +599,10 @@ function Invoke-Installer {
 }
 
 function Invoke-Stop {
-    $stopped = Stop-DaemonProcesses
+    # Explicit user `stop` gesture -- tear down sessions too. (Restart
+    # path leaves tracers alive so Phase C.3 reattach can resume
+    # sessions transparently.)
+    $stopped = Stop-DaemonProcesses -Names @($ImageName, $TracerImageName)
     if ($stopped) {
         Write-Host '==> Daemon + tracer process(es) stopped.' -ForegroundColor Green
     } else {
