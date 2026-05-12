@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::PathBuf;
-use tauri::{Manager as _, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt as _;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -21,6 +21,24 @@ pub struct DaemonHandshake {
 /// presence of any meaningful value should enable the flag.
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
+fn apply_e2e_window_options<'a, R, M>(
+    builder: WebviewWindowBuilder<'a, R, M>,
+) -> WebviewWindowBuilder<'a, R, M>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    if env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW") {
+        builder
+            .visible(false)
+            .focused(false)
+            .position(-32_000.0, -32_000.0)
+            .skip_taskbar(true)
+    } else {
+        builder
+    }
 }
 
 /// Resolve the per-user config directory. Mirrors
@@ -285,7 +303,7 @@ async fn open_session_window(app: tauri::AppHandle, session_id: String) -> Resul
         return Ok(());
     }
     let url = format!("index.html?session={session_id}");
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(format!("Session — {session_id}"))
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
@@ -295,7 +313,30 @@ async fn open_session_window(app: tauri::AppHandle, session_id: String) -> Resul
         // ⠿ handle between panes) immediately shows the "forbidden" cursor
         // because the OS thinks no drop target accepts it. We don't use
         // OS file drops anywhere, so flip it off everywhere.
-        .disable_drag_drop_handler()
+        .disable_drag_drop_handler();
+    apply_e2e_window_options(builder)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Open (or surface) a focused window for a single grid pane. The pane keeps
+/// its slot in the source tab so the user can dock the window back later; the
+/// pop-out itself reloads the same React bundle with `?pane=<id>`.
+#[tauri::command]
+async fn open_pane_window(app: tauri::AppHandle, pane_id: String) -> Result<(), String> {
+    let label = format!("pane-{pane_id}");
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = format!("index.html?pane={pane_id}");
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title(format!("Pane — {pane_id}"))
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(700.0, 400.0)
+        .disable_drag_drop_handler();
+    apply_e2e_window_options(builder)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -313,13 +354,14 @@ async fn open_tab_window(app: tauri::AppHandle, tab_id: String) -> Result<(), St
         return Ok(());
     }
     let url = format!("index.html?tab={tab_id}");
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(format!("Tab — {tab_id}"))
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
         // See open_session_window for the rationale on disabling OS-level
         // file-drop interception.
-        .disable_drag_drop_handler()
+        .disable_drag_drop_handler();
+    apply_e2e_window_options(builder)
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -340,17 +382,19 @@ pub fn run() {
         .try_init();
 
     // Mutate the bundled context BEFORE handing it to Builder::run so that
-    // any e2e-mode window adjustments (offscreen position, taskbar opt-out)
+    // any e2e-mode window adjustments (hidden, unfocused, taskbar opt-out)
     // are baked into the initial WindowConfig and the window is created at
     // the right place. Setting position post-hoc in `setup` left a frame
     // visible on screen during boot — by the time setup ran the window had
-    // already painted at its config default. See task #56.
+    // already painted at its config default.
     let mut context = tauri::generate_context!();
     let offscreen = env_flag("RUSTLING_TULIP_OFFSCREEN_WINDOW");
     if offscreen {
         for window in &mut context.config_mut().app.windows {
             window.x = Some(-32_000.0);
             window.y = Some(-32_000.0);
+            window.visible = false;
+            window.focus = false;
             window.skip_taskbar = true;
         }
     }
@@ -361,9 +405,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init());
     // Skip window-state restoration in offscreen e2e mode. The plugin
     // auto-restores from disk on window creation, which would override the
-    // -32_000 offscreen coords we just baked into the context; worse, it
-    // would also persist those offscreen coords back to the real user
-    // state file at shutdown and strand the production app off-screen on
+    // hidden/offscreen e2e config we just baked into the context; worse, it
+    // would also persist those coordinates back to the real user state file at
+    // shutdown and strand the production app off-screen on
     // the next launch. Production runs get the plugin; tests run without.
     if !offscreen {
         builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
@@ -377,6 +421,7 @@ pub fn run() {
             pick_directory,
             pick_file,
             open_session_window,
+            open_pane_window,
             open_tab_window,
             reveal_in_explorer,
             log_message,

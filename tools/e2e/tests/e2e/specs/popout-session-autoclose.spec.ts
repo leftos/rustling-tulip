@@ -153,7 +153,7 @@ describe("pop-out session window auto-close", function () {
     );
     await pane.waitForExist({ timeout: 10_000 });
 
-    // Click "Pop out" and capture the resulting new WebDriver window handle.
+    // Click "Pop out" and capture the resulting pane-backed pop-out window.
     const popOutBtn = await browser.$("[data-testid=session-pop-out]");
     await popOutBtn.waitForExist({ timeout: 5_000 });
 
@@ -164,43 +164,60 @@ describe("pop-out session window auto-close", function () {
       { timeoutMs: 10_000 },
     );
 
-    // Switch to the pop-out and assert the session window root is rendered.
+    const poppedOutPlaceholder = await browser.$(
+      `[data-testid=popped-out-pane][data-session-id="${sessionId}"]`,
+    );
+    await poppedOutPlaceholder.waitForExist({ timeout: 5_000 });
+
+    // Switch to the pop-out, assert the pane window is rendered, and dock it
+    // back. This verifies the source tab kept a real pane slot while popped
+    // out, and that docking restores the original in-tab SessionPane.
     await win.activate();
-    const sessionRoot = await browser.$(".session-window-root");
-    await sessionRoot.waitForExist({ timeout: 5_000 });
+    const paneRoot = await browser.$("[data-testid=pane-window-root]");
+    await paneRoot.waitForExist({ timeout: 5_000 });
+    const dockBack = await browser.$("[data-testid=pane-dock-back]");
+    await dockBack.click();
+    await win.waitForClose({ timeoutMs: 10_000 });
     await win.deactivate();
 
-    // Stop the session from the main window via the side-channel WS.
-    // Wait for the daemon to confirm the session is stopped before asserting
-    // the pop-out closed, so we don't race the React re-render.
-    //
-    // The predicate uses a block body with a cast because the DaemonMessage
-    // catch-all variant (`{ type: string; [k: string]: unknown }`) leaves
-    // `m.session` typed as `unknown` in an arrow expression — accessing it
-    // in a short-circuit chain doesn't narrow through the catch-all.
-    const stopped = ws.waitFor(
-      (m): m is DaemonMessage & {
-        type: "session_updated";
-        session: SessionSnapshot;
-      } => {
-        if (m.type !== "session_updated") return false;
-        const msg = m as { session: SessionSnapshot };
-        return msg.session.id === sessionId && msg.session.status === "stopped";
+    await browser.waitUntil(
+      async () => {
+        const restoredPane = await browser.$(
+          `[data-testid=session-pane][data-session-id="${sessionId}"]`,
+        );
+        if (!(await restoredPane.isExisting())) return false;
+        const placeholder = await browser.$(
+          `[data-testid=popped-out-pane][data-session-id="${sessionId}"]`,
+        );
+        return !(await placeholder.isExisting());
       },
-      { timeoutMs: 15_000 },
+      { timeout: 5_000, timeoutMsg: "pane never docked back into source tab" },
     );
+
+    const reopened = await captureNewWindow(
+      async () => {
+        const restoredPopOutBtn = await browser.$("[data-testid=session-pop-out]");
+        await restoredPopOutBtn.click();
+      },
+      { timeoutMs: 10_000 },
+    );
+    await reopened.activate();
+    const reopenedRoot = await browser.$("[data-testid=pane-window-root]");
+    await reopenedRoot.waitForExist({ timeout: 5_000 });
+    await reopened.deactivate();
+
+    // Stop the session from the main window via the side-channel WS. The fake
+    // agent can also exit naturally before this step; either path removes the
+    // session from app state, and the pop-out should close.
     ws.send({
       type: "stop_session",
       session_id: sessionId,
       cleanup: [{ repo_id: registeredRepoId, remove_worktree: false }],
     });
-    await stopped;
     spawnedSessionId = null; // already stopped; skip in after()
 
-    // The pop-out must auto-close. The App.tsx useEffect fires when the
-    // session disappears from state and calls getCurrentWindow().close().
-    await win.waitForClose({ timeoutMs: 10_000 });
-    expect(true, "pop-out window closed after session stop").to.be.true;
+    // The pop-out must auto-close once App.tsx observes the removed session.
+    await reopened.waitForClose({ timeoutMs: 10_000 });
   });
 });
 

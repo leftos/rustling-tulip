@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot } from "../types";
+import type { SessionSnapshot, TabEntry } from "../types";
 import { markForAutoFocus } from "../utils/autofocus";
+import { clearPanePoppedOut, markPanePoppedOut } from "../utils/poppedPanes";
 import {
   sessionDisplayLabel,
   sessionLabelTooltip,
@@ -12,31 +13,34 @@ import SessionPane from "./SessionPane";
 
 interface Props {
   session: SessionSnapshot;
+  tab: TabEntry;
+  paneId: string;
+  tabs: TabEntry[];
   client: DaemonClient;
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
 
-/// Standalone window chrome for a single session pop-out. Renders a
-/// minimal toolbar (label, status badge, stop, close-window) plus the
-/// reused [`SessionPane`] component below. Closing this window does not
-/// affect the daemon-side session — the main window still shows it.
-export default function SessionWindow({
+/// Standalone window chrome for a single grid-backed pane pop-out. Unlike
+/// the legacy session pop-out, this window is anchored to a concrete pane id,
+/// and the source tab keeps that pane slot reserved so the user can dock the
+/// pane back into the grid later.
+export default function PaneWindow({
   session,
+  tab,
+  paneId,
+  tabs,
   client,
   subscribePty,
 }: Props) {
-  // Mark this session for autofocus on the first render. SessionWindow is
-  // only rendered once we already have the session in state, so the
-  // child Terminal mounts on the very next React commit — and child
-  // effects run before parent effects, which means a useEffect here
-  // would mark *after* Terminal's mount effect has already consumed.
-  // The ref-in-render init pattern runs synchronously before the JSX is
-  // returned, so the mark is in the queue by the time Terminal mounts.
   const markedRef = useRef(false);
   if (!markedRef.current) {
     markedRef.current = true;
     markForAutoFocus(session.id);
   }
+
+  useEffect(() => {
+    markPanePoppedOut(paneId);
+  }, [paneId]);
 
   const onStop = useCallback(() => {
     client.send({
@@ -49,25 +53,41 @@ export default function SessionWindow({
     });
   }, [client, session]);
 
-  const onCloseWindow = useCallback(() => {
-    void getCurrentWebviewWindow().close();
-  }, []);
+  const onDockBack = useCallback(async () => {
+    clearPanePoppedOut(paneId);
+    await getCurrentWebviewWindow().close();
+  }, [paneId]);
 
-  // Replace the OS window title (originally set to a raw UUID by the
-  // Tauri builder in `open_session_window`) with the user-visible
-  // label — preferring the agent's OSC title when set, falling back to
-  // the canonical `<repo>:<branch>` otherwise. Renames + agent-side
-  // title changes both flow through here.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const win = getCurrentWebviewWindow();
+      unlisten = await win.onCloseRequested(() => {
+        clearPanePoppedOut(paneId);
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [paneId]);
+
   const displayLabel = sessionDisplayLabel(session);
   useEffect(() => {
     void getCurrentWebviewWindow().setTitle(displayLabel);
   }, [displayLabel]);
 
   return (
-    <div className="session-window-root">
+    <div
+      className="session-window-root pane-window-root"
+      data-testid="pane-window-root"
+      data-pane-id={paneId}
+    >
       <header className="session-window-toolbar">
         <span className={`status-dot status-${session.status}`} />
         <h1 title={sessionLabelTooltip(session)}>{displayLabel}</h1>
+        <span className="chip session-member-chip" title={`Docked in "${tab.name}"`}>
+          {tab.name}
+        </span>
         {session.members.map((m) => (
           <span
             key={m.repo_id}
@@ -97,16 +117,24 @@ export default function SessionWindow({
             Stop session
           </button>
         )}
-        <button type="button" onClick={onCloseWindow}>
-          Close window
+        <button
+          type="button"
+          onClick={() => {
+            void onDockBack();
+          }}
+          data-testid="pane-dock-back"
+        >
+          Dock back
         </button>
       </header>
       <div className="session-window-body">
         <SessionPane
           session={session}
           client={client}
-          tabs={[]}
+          tabs={tabs}
           subscribePty={subscribePty}
+          tabId={tab.id}
+          paneId={paneId}
           hideHeader
         />
       </div>

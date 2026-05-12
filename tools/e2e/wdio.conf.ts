@@ -122,6 +122,11 @@ export const config: WebdriverIO.Config = {
   },
 
   beforeSession: async () => {
+    // WebdriverIO logs onPrepare failures but can still schedule workers.
+    // Recheck here before tauri-driver starts so a stale debug binary never
+    // launches into a dead devUrl page.
+    await ensureTauriBinary();
+
     const tdPath = join(
       homedir(),
       ".cargo",
@@ -151,8 +156,8 @@ export const config: WebdriverIO.Config = {
     // `tauri:options.env` field is unsupported). `process.env` already
     // carries RUSTLING_TULIP_CONFIG_DIR from module load; making it
     // explicit here documents the contract. RUSTLING_TULIP_OFFSCREEN_WINDOW
-    // tells the Tauri setup hook to move the main window offscreen so test
-    // runs don't keep popping the app over the user's workspace.
+    // tells the Tauri setup hook to create e2e windows hidden, unfocused, and
+    // offscreen so test runs do not flash over the user's workspace.
     tauriDriver = spawn(tdPath, [], {
       stdio: ["ignore", "inherit", "inherit"],
       env: {

@@ -93,6 +93,26 @@ export function sessionTabBindings(
 }
 
 /**
+ * Find the tab + pane binding for a specific pane id. Used by pane pop-out
+ * windows to re-resolve their source slot after tab moves/renames.
+ */
+export function findPaneBinding(
+  tabs: TabEntry[],
+  paneId: string,
+): { tab: TabEntry; session_id: string | null } | null {
+  for (const tab of tabs) {
+    const grid = tabGrid(tab);
+    if (!grid) continue;
+    for (const pane of collectPanes(grid)) {
+      if (pane.pane_id === paneId) {
+        return { tab, session_id: pane.session_id };
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * First leaf pane in `tab`'s grid (left-to-right). Used by the "bind to
  * existing tab" path: split this pane and seed the new sibling with the
  * unbound session via `SplitPane { new_session_id: Some(s) }`.

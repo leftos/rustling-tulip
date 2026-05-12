@@ -3,6 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { SessionSnapshot, TabEntry } from "../types";
 import {
+  clearPanePoppedOut,
+  markPanePoppedOut,
+} from "../utils/poppedPanes";
+import {
   sessionDisplayLabel,
   sessionLabelTooltip,
   sessionRuntimeLabel,
@@ -19,7 +23,11 @@ import Terminal from "./Terminal";
 /// already exposes the right toolbar for the single-session form.
 const isPopoutWindow = (() => {
   const params = new URLSearchParams(window.location.search);
-  return params.get("session") !== null || params.get("tab") !== null;
+  return (
+    params.get("pane") !== null ||
+    params.get("session") !== null ||
+    params.get("tab") !== null
+  );
 })();
 
 interface Props {
@@ -58,6 +66,9 @@ interface Props {
   onSplitDown?: (e: React.MouseEvent) => void;
   onExtractToTab?: () => void;
   onClosePane?: () => void;
+  /// Wrapper pop-outs already render session chrome in their window toolbar.
+  /// Hide the in-pane header there so title/status/actions are not duplicated.
+  hideHeader?: boolean;
 }
 
 export default function SessionPane({
@@ -72,6 +83,7 @@ export default function SessionPane({
   onSplitDown,
   onExtractToTab,
   onClosePane,
+  hideHeader = false,
 }: Props) {
   const showPaneControls =
     onSplitRight !== undefined ||
@@ -103,8 +115,15 @@ export default function SessionPane({
   }, [client, session]);
 
   const onPopOut = useCallback(() => {
-    void invoke("open_session_window", { sessionId: session.id });
-  }, [session.id]);
+    if (!paneId) {
+      void invoke("open_session_window", { sessionId: session.id });
+      return;
+    }
+    markPanePoppedOut(paneId);
+    void invoke("open_pane_window", { paneId }).catch(() => {
+      clearPanePoppedOut(paneId);
+    });
+  }, [paneId, session.id]);
 
   const onRestart = useCallback(() => {
     // App.tsx owns pane-slot routing via pendingSpawnIntentRef + sends
@@ -155,164 +174,166 @@ export default function SessionPane({
       data-session-status={session.status}
       data-session-mode={session.mode}
     >
-      <header
-        className={
-          onHeaderDragStart
-            ? "session-header session-header-draggable"
-            : "session-header"
-        }
-        draggable={onHeaderDragStart !== undefined}
-        onDragStart={onHeaderDragStart}
-        onContextMenu={onHeaderContextMenu}
-      >
-        <div className="session-title">
-          {/* Shell sessions sit at Idle forever — a green dot would be
+      {!hideHeader && (
+        <header
+          className={
+            onHeaderDragStart
+              ? "session-header session-header-draggable"
+              : "session-header"
+          }
+          draggable={onHeaderDragStart !== undefined}
+          onDragStart={onHeaderDragStart}
+          onContextMenu={onHeaderContextMenu}
+        >
+          <div className="session-title">
+            {/* Shell sessions sit at Idle forever — a green dot would be
               misleading. Show a terminal glyph in its place instead. */}
-          {isPlainShell ? (
-            <span className="status-glyph" aria-hidden="true">
-              {">_"}
-            </span>
-          ) : (
-            <span
-              className={`status-dot status-${session.status}`}
-              title={`status: ${session.status}`}
-              aria-label={`status ${session.status}`}
-              role="img"
-            />
-          )}
-          <h2 title={sessionLabelTooltip(session)}>
-            {sessionDisplayLabel(session)}
-          </h2>
-          {/* Per-member <repo>:<branch> chips sit inline with the title
-              now (iter 51) so a workspace session doesn't waste an
+            {isPlainShell ? (
+              <span className="status-glyph" aria-hidden="true">
+                {">_"}
+              </span>
+            ) : (
+              <span
+                className={`status-dot status-${session.status}`}
+                title={`status: ${session.status}`}
+                aria-label={`status ${session.status}`}
+                role="img"
+              />
+            )}
+            <h2 title={sessionLabelTooltip(session)}>
+              {sessionDisplayLabel(session)}
+            </h2>
+            {/* Per-member <repo>:<branch> chips sit inline with the title
+              so a workspace session doesn't waste an
               entire row. Single-repo sessions render one chip; workspace
               sessions render N. Hover surfaces the worktree path. */}
-          {session.members.map((m) => (
-            <span
-              key={m.repo_id}
-              className="chip session-member-chip"
-              title={m.worktree_path}
-            >
-              {m.repo_name}: {m.branch}
-            </span>
-          ))}
-          {runtimeLabel && (
-            <span
-              className="chip session-runtime-chip"
-              title={`Running ${runtimeLabel}`}
-              data-testid="session-runtime-chip"
-            >
-              {runtimeLabel}
-            </span>
-          )}
-          {modeSuffix && (
-            <span className="session-meta">{modeSuffix}</span>
-          )}
-        </div>
-        <div className="session-actions">
-          {!isPopoutWindow && (
-            <button
-              type="button"
-              onClick={onPopOut}
-              title="Open this session in its own window"
-              data-testid="session-pop-out"
-            >
-              Pop out
-            </button>
-          )}
-          {/* Hide both the Stop button and the exit-code label inside a
+            {session.members.map((m) => (
+              <span
+                key={m.repo_id}
+                className="chip session-member-chip"
+                title={m.worktree_path}
+              >
+                {m.repo_name}: {m.branch}
+              </span>
+            ))}
+            {runtimeLabel && (
+              <span
+                className="chip session-runtime-chip"
+                title={`Running ${runtimeLabel}`}
+                data-testid="session-runtime-chip"
+              >
+                {runtimeLabel}
+              </span>
+            )}
+            {modeSuffix && (
+              <span className="session-meta">{modeSuffix}</span>
+            )}
+          </div>
+          <div className="session-actions">
+            {!isPopoutWindow && (
+              <button
+                type="button"
+                onClick={onPopOut}
+                title="Open this session in its own window"
+                data-testid="session-pop-out"
+              >
+                Pop out
+              </button>
+            )}
+            {/* Hide both the Stop button and the exit-code label inside a
               pop-out — SessionWindow's chrome toolbar already exposes
               the right controls. Previously the two were behaving
               differently (chrome single-click vs inner two-step) which
               confused which Stop the user thought they were clicking. */}
-          {!isPopoutWindow &&
-            (session.status !== "stopped" ? (
-              confirming ? (
-                <>
+            {!isPopoutWindow &&
+              (session.status !== "stopped" ? (
+                confirming ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={onStop}
+                      className="danger"
+                      data-testid="session-stop-confirm"
+                    >
+                      Confirm stop
+                    </button>
+                    <button type="button" onClick={() => setConfirming(false)}>
+                      Cancel
+                    </button>
+                  </>
+                ) : (
                   <button
                     type="button"
-                    onClick={onStop}
-                    className="danger"
-                    data-testid="session-stop-confirm"
+                    onClick={() => setConfirming(true)}
+                    data-testid="session-stop"
                   >
-                    Confirm stop
+                    Stop
                   </button>
-                  <button type="button" onClick={() => setConfirming(false)}>
-                    Cancel
-                  </button>
-                </>
+                )
               ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirming(true)}
-                  data-testid="session-stop"
-                >
-                  Stop
-                </button>
-              )
-            ) : (
-              <span className="muted">
-                exit code {session.exit_code ?? "?"}
-              </span>
-            ))}
-          {showPaneControls && (
-            <>
-              <span
-                className="session-actions-divider"
-                aria-hidden="true"
-              />
-              {onSplitRight && (
-                <button
-                  type="button"
-                  className="session-action-icon"
-                  onClick={onSplitRight}
-                  title="Split right (Shift+click: split left)"
-                  aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
-                  data-testid="pane-split-right"
-                >
-                  {"▶|"}
-                </button>
-              )}
-              {onSplitDown && (
-                <button
-                  type="button"
-                  className="session-action-icon"
-                  onClick={onSplitDown}
-                  title="Split down (Shift+click: split up)"
-                  aria-label="Split pane vertically; hold Shift to place the new pane on top"
-                  data-testid="pane-split-down"
-                >
-                  {"▼="}
-                </button>
-              )}
-              {onExtractToTab && (
-                <button
-                  type="button"
-                  className="session-action-icon"
-                  onClick={onExtractToTab}
-                  title="Move this pane to a new tab"
-                  aria-label="Move pane to a new tab"
-                  data-testid="pane-extract"
-                >
-                  ↗
-                </button>
-              )}
-              {onClosePane && (
-                <button
-                  type="button"
-                  className="session-action-icon session-action-close"
-                  onClick={onClosePane}
-                  title="Close pane"
-                  aria-label="Close pane"
-                  data-testid="pane-close"
-                >
-                  ×
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </header>
+                <span className="muted">
+                  exit code {session.exit_code ?? "?"}
+                </span>
+              ))}
+            {showPaneControls && (
+              <>
+                <span
+                  className="session-actions-divider"
+                  aria-hidden="true"
+                />
+                {onSplitRight && (
+                  <button
+                    type="button"
+                    className="session-action-icon"
+                    onClick={onSplitRight}
+                    title="Split right (Shift+click: split left)"
+                    aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+                    data-testid="pane-split-right"
+                  >
+                    {"▶|"}
+                  </button>
+                )}
+                {onSplitDown && (
+                  <button
+                    type="button"
+                    className="session-action-icon"
+                    onClick={onSplitDown}
+                    title="Split down (Shift+click: split up)"
+                    aria-label="Split pane vertically; hold Shift to place the new pane on top"
+                    data-testid="pane-split-down"
+                  >
+                    {"▼="}
+                  </button>
+                )}
+                {onExtractToTab && (
+                  <button
+                    type="button"
+                    className="session-action-icon"
+                    onClick={onExtractToTab}
+                    title="Move this pane to a new tab"
+                    aria-label="Move pane to a new tab"
+                    data-testid="pane-extract"
+                  >
+                    ↗
+                  </button>
+                )}
+                {onClosePane && (
+                  <button
+                    type="button"
+                    className="session-action-icon session-action-close"
+                    onClick={onClosePane}
+                    title="Close pane"
+                    aria-label="Close pane"
+                    data-testid="pane-close"
+                  >
+                    ×
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </header>
+      )}
       {session.is_orphan && (
         <div className="orphan-banner">
           PTY stream lost across daemon restart. The underlying{" "}
@@ -327,6 +348,7 @@ export default function SessionPane({
           state={sessionMenu}
           tabs={tabs}
           client={client}
+          {...(paneId ? { preferredPaneId: paneId } : {})}
           onClose={() => setSessionMenu(null)}
           onDuplicate={(withDialog, target) => {
             const sid = sessionMenu.session.id;

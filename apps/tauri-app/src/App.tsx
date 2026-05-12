@@ -38,6 +38,7 @@ import ActivityBar, {
 import Sidebar, { type SpawnInitialTarget } from "./components/Sidebar";
 import type { DuplicateTarget } from "./components/SessionContextMenu";
 import SourceControlSidebar from "./components/source-control/SourceControlSidebar";
+import PaneWindow from "./components/PaneWindow";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog from "./components/SpawnDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
@@ -55,8 +56,16 @@ import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
 import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
-import { collectPanes, findTabContainingSession } from "./utils/grid";
+import {
+  collectPanes,
+  findPaneBinding,
+  findTabContainingSession,
+} from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
+import {
+  clearPanePoppedOut,
+  prunePoppedOutPanes,
+} from "./utils/poppedPanes";
 import { loadSettings, useSettings } from "./utils/settings";
 import {
   clearSessionFontSize,
@@ -71,10 +80,12 @@ import {
   setTabFontSize,
 } from "./utils/fontSize";
 
-/// Pop-out windows: launched with either `?tab=<id>` (per-tab pop-out) or
-/// `?session=<id>` (legacy single-session pop-out). The branch in App
-/// renders either TabWindow or SessionWindow without sidebar/modals.
+/// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
+/// `?tab=<id>` (per-tab pop-out), or `?session=<id>` (legacy single-session
+/// pop-out). The branch in App renders the corresponding standalone window
+/// surface without sidebar/modals.
 const queryParams = new URLSearchParams(window.location.search);
+const popoutPaneId = queryParams.get("pane");
 const popoutTabId = queryParams.get("tab");
 const popoutSessionId = queryParams.get("session");
 
@@ -829,6 +840,33 @@ export default function App() {
     });
   }, []);
 
+  // Best-effort cleanup for pane-popout bookkeeping: if a pane id no longer
+  // exists in any tab, drop its popped-out marker so stale placeholders do
+  // not survive reloads or daemon-side topology changes.
+  useEffect(() => {
+    if (state.tabs.length === 0) return;
+    const keep = new Set<string>();
+    for (const tab of state.tabs) {
+      const grid = tabGrid(tab);
+      if (!grid) continue;
+      for (const pane of collectPanes(grid)) {
+        keep.add(pane.pane_id);
+      }
+    }
+    prunePoppedOutPanes(keep);
+  }, [state.tabs]);
+
+  // Pane pop-out: close itself when the pane disappears or loses its bound
+  // session (e.g. tab closed, pane closed, or the session was discarded).
+  useEffect(() => {
+    if (!popoutPaneId) return;
+    if (state.tabs.length === 0) return; // not yet hydrated
+    const binding = findPaneBinding(state.tabs, popoutPaneId);
+    if (binding && binding.session_id !== null) return;
+    clearPanePoppedOut(popoutPaneId);
+    void getCurrentWindow().close();
+  }, [state.tabs]);
+
   // Pop-out window: close itself when the tab it was rendering disappears
   // (e.g. user closed the tab from the main window).
   useEffect(() => {
@@ -855,7 +893,7 @@ export default function App() {
   // to preserve — just close the window and let the daemon keep running
   // for next launch.
   useEffect(() => {
-    if (popoutSessionId || popoutTabId) return;
+    if (popoutPaneId || popoutSessionId || popoutTabId) return;
     let unlisten: (() => void) | null = null;
     void (async () => {
       const win = getCurrentWindow();
@@ -1145,7 +1183,12 @@ export default function App() {
     state.settingsOpen ||
     state.vscodeQueue.length > 0;
   const shortcuts = useMemo<KeyboardShortcut[]>(() => {
-    if (anyModalOpen || popoutTabId !== null || popoutSessionId !== null) {
+    if (
+      anyModalOpen ||
+      popoutPaneId !== null ||
+      popoutTabId !== null ||
+      popoutSessionId !== null
+    ) {
       return [];
     }
     const list: KeyboardShortcut[] = [];
@@ -1274,6 +1317,39 @@ export default function App() {
     onOpenSettings,
   ]);
   useKeyboardShortcuts(shortcuts);
+
+  if (popoutPaneId) {
+    const binding = findPaneBinding(state.tabs, popoutPaneId);
+    const popoutSession =
+      binding?.session_id === null || binding === null
+        ? null
+        : (state.sessions.find((s) => s.id === binding.session_id) ?? null);
+    return (
+      <div className="app-root">
+        {state.client && binding && popoutSession ? (
+          <PaneWindow
+            session={popoutSession}
+            tab={binding.tab}
+            paneId={popoutPaneId}
+            tabs={state.tabs}
+            client={state.client}
+            subscribePty={subscribePty}
+          />
+        ) : (
+          <div className="empty-state">
+            <h1>Pane not found</h1>
+            <p className="status-line">
+              Daemon: <ConnectionBadge state={state.status} />
+            </p>
+            <p className="hint">
+              Pane <code>{popoutPaneId}</code> is not currently docked in any
+              tab with a live session.
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (popoutTabId) {
     const popoutTab = state.tabs.find((t) => t.id === popoutTabId);

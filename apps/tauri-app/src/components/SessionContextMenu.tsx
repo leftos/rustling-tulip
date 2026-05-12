@@ -5,6 +5,10 @@ import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
 import { clampMenuCoord } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
 import {
+  clearPanePoppedOut,
+  markPanePoppedOut,
+} from "../utils/poppedPanes";
+import {
   clearSessionFontSize,
   getSessionFontSize,
   MAX_FONT_SIZE,
@@ -29,6 +33,7 @@ interface Props {
   state: SessionContextMenuState;
   tabs: TabEntry[];
   client: DaemonClient;
+  preferredPaneId?: string;
   onClose: () => void;
   /** `withDialog` = true when the click was modified with Shift. When
    *  `withDialog` is false, `target` specifies where the duplicate
@@ -42,6 +47,7 @@ export default function SessionContextMenu({
   state,
   tabs,
   client,
+  preferredPaneId,
   onClose,
   onDuplicate,
 }: Props) {
@@ -155,6 +161,21 @@ export default function SessionContextMenu({
     onClose();
   };
 
+  const onPopOut = () => {
+    const paneId = preferredPaneId ?? sourceBinding?.pane_id ?? null;
+    if (!paneId) {
+      void invoke("open_session_window", { sessionId: s.id });
+      onClose();
+      return;
+    }
+    markPanePoppedOut(paneId);
+    void invoke("open_pane_window", { paneId })
+      .catch(() => {
+        clearPanePoppedOut(paneId);
+      })
+      .finally(onClose);
+  };
+
   return (
     <div
       className="context-menu-backdrop"
@@ -240,13 +261,7 @@ export default function SessionContextMenu({
 
             <li className="context-menu-separator" aria-hidden="true" />
             <li>
-              <button
-                type="button"
-                onClick={() => {
-                  void invoke("open_session_window", { sessionId: s.id });
-                  onClose();
-                }}
-              >
+              <button type="button" onClick={onPopOut}>
                 Pop out window
               </button>
             </li>

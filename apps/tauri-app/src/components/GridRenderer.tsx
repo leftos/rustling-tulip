@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { Window } from "@tauri-apps/api/window";
 import type { DaemonClient } from "../api";
 import { clampMenuCoord } from "../utils/a11y";
+import {
+  clearPanePoppedOut,
+  isPanePoppedOut,
+  subscribePoppedPaneChanges,
+} from "../utils/poppedPanes";
+import { sessionDisplayLabel } from "../utils/sessionLabel";
 import {
   tabGrid,
   type GridNode,
@@ -227,6 +235,9 @@ function PaneChrome(props: PaneChromeProps) {
   const session = node.session_id
     ? (sessions.find((s) => s.id === node.session_id) ?? null)
     : null;
+  const [poppedOut, setPoppedOut] = useState(() =>
+    isPanePoppedOut(node.pane_id),
+  );
   const isFocused = focusedPaneId === node.pane_id;
   const [dropEdge, setDropEdge] = useState<PaneDropEdge | null>(null);
   // Mirror of dropEdge for use inside onDrop — React state updates from
@@ -257,6 +268,13 @@ function PaneChrome(props: PaneChromeProps) {
       window.removeEventListener("drop", clear);
     };
   }, []);
+
+  useEffect(() => {
+    setPoppedOut(isPanePoppedOut(node.pane_id));
+    return subscribePoppedPaneChanges(() => {
+      setPoppedOut(isPanePoppedOut(node.pane_id));
+    });
+  }, [node.pane_id]);
 
   const onClick = useCallback(() => {
     props.onFocusPane(node.pane_id);
@@ -467,7 +485,9 @@ function PaneChrome(props: PaneChromeProps) {
         </div>
       )}
       <div className="grid-pane-body">
-        {session ? (
+        {session && poppedOut ? (
+          <PoppedOutPaneCard paneId={node.pane_id} session={session} />
+        ) : session ? (
           <SessionPane
             session={session}
             client={client}
@@ -526,6 +546,59 @@ function PaneChrome(props: PaneChromeProps) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function PoppedOutPaneCard({
+  paneId,
+  session,
+}: {
+  paneId: string;
+  session: SessionSnapshot;
+}) {
+  const onFocusPopout = useCallback(() => {
+    void invoke("open_pane_window", { paneId });
+  }, [paneId]);
+
+  const onDockBack = useCallback(async () => {
+    clearPanePoppedOut(paneId);
+    const win = await Window.getByLabel(`pane-${paneId}`);
+    await win?.close();
+  }, [paneId]);
+
+  return (
+    <div
+      className="terminal-placeholder popped-out-pane-card"
+      data-testid="popped-out-pane"
+      data-pane-id={paneId}
+      data-session-id={session.id}
+    >
+      <div className="popped-out-pane-title">
+        {sessionDisplayLabel(session)}
+      </div>
+      <div className="muted">
+        This pane is popped out into its own window. Its slot stays reserved
+        here so it can dock back into this tab.
+      </div>
+      <div className="session-exited-actions">
+        <button
+          type="button"
+          onClick={onFocusPopout}
+          data-testid="popped-out-pane-focus"
+        >
+          Focus window
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void onDockBack();
+          }}
+          data-testid="popped-out-pane-dock"
+        >
+          Dock back
+        </button>
+      </div>
     </div>
   );
 }

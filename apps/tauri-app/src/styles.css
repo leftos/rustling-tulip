@@ -1732,6 +1732,22 @@ button.tree-tab-pill:hover {
 .terminal-placeholder {
   color: var(--fg-muted); padding: 32px; font-style: italic;
 }
+.popped-out-pane-card {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  font-style: normal;
+  background:
+    linear-gradient(135deg, rgba(78, 168, 255, 0.08), transparent 55%),
+    var(--bg);
+}
+.popped-out-pane-title {
+  color: var(--fg);
+  font-size: var(--text-display);
+  font-weight: 600;
+}
 .session-exited-placeholder {
   display: flex;
   flex-direction: column;
