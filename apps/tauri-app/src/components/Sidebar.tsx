@@ -62,6 +62,13 @@ interface Props {
   onRemoveWorkspace: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenSpawn: (initial?: SpawnInitialTarget) => void;
+  /// Open the spawn dialog with a "land in this tab" intent armed.
+  /// Driven by right-clicking a tab container in the sidebar's Tabs
+  /// view → "Spawn session here". App.tsx wires the post-spawn
+  /// follow-up (`addToTab`) so the freshly created session attaches
+  /// to an empty pane in the target tab (or, when full, a fresh
+  /// split on the right).
+  onOpenSpawnIntoTab: (tabId: string) => void;
   /// Shift-click on a session's "Duplicate" context-menu entry. App-level
   /// handler fetches the source's SpawnConfig and opens the spawn dialog
   /// pre-filled with it. Plain click is handled inside Sidebar via
@@ -418,6 +425,8 @@ export default function Sidebar(props: Props) {
               props.onOpenSpawn({ kind: "repo", repo_id: c.id });
             } else if (c.kind === "workspace") {
               props.onOpenSpawn({ kind: "workspace", workspace_id: c.id });
+            } else if (c.kind === "tab") {
+              props.onOpenSpawnIntoTab(c.id);
             }
             closeMenu();
           }}
@@ -542,9 +551,13 @@ function ContainerNode(p: ContainerNodeProps) {
   };
 
   const onContext = (e: React.MouseEvent) => {
-    // Only `workspace` / `repo` containers have a context menu. Detached,
-    // tab, and unbound are read-only groupings.
-    if (c.kind !== "workspace" && c.kind !== "repo") return;
+    // Detached and unbound containers remain read-only groupings.
+    // Workspace / repo containers get the full menu (spawn, presets,
+    // reveal, remove). Tab containers get a minimal menu — currently
+    // just "Spawn session here" so the new session lands in this tab.
+    if (c.kind !== "workspace" && c.kind !== "repo" && c.kind !== "tab") {
+      return;
+    }
     e.preventDefault();
     p.onContextMenu(e.clientX, e.clientY);
   };
@@ -884,6 +897,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   const c = p.state.container;
   const canReveal = c.fsPath !== null;
   const canLaunchPreset = c.kind === "repo" || c.kind === "workspace";
+  const isTab = c.kind === "tab";
   const removeLabel =
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
   useEscape(p.onClose);
@@ -894,7 +908,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   // — overlap-safe, viewport-stable beats pixel-perfect). The 12px margin
   // keeps the menu off the edge.
   const clampedLeft = clampMenuCoord(p.state.x, 200);
-  const clampedTop = clampMenuCoord(p.state.y, 300, "height");
+  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 300, "height");
   return (
     <div
       className="context-menu-backdrop"
@@ -911,28 +925,37 @@ function ContainerContextMenu(p: ContextMenuProps) {
       >
         <li>
           <button type="button" onClick={p.onSpawn}>
-            Spawn new session
+            {isTab ? "Spawn session here" : "Spawn new session"}
           </button>
         </li>
-        {canLaunchPreset && (
-          <PresetSubmenu presets={p.presets} onLaunch={p.onLaunchPreset} />
+        {/* Tab containers don't expose preset / reveal / remove — they're
+            view groupings, not resources to manage. Keep the menu small. */}
+        {!isTab && (
+          <>
+            {canLaunchPreset && (
+              <PresetSubmenu
+                presets={p.presets}
+                onLaunch={p.onLaunchPreset}
+              />
+            )}
+            <li>
+              <button type="button" onClick={p.onReveal} disabled={!canReveal}>
+                Open in file explorer
+              </button>
+            </li>
+            <li>
+              <button type="button" onClick={p.onCopyPath} disabled={!canReveal}>
+                Copy path
+              </button>
+            </li>
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li>
+              <button type="button" className="danger" onClick={p.onRemove}>
+                {removeLabel}
+              </button>
+            </li>
+          </>
         )}
-        <li>
-          <button type="button" onClick={p.onReveal} disabled={!canReveal}>
-            Open in file explorer
-          </button>
-        </li>
-        <li>
-          <button type="button" onClick={p.onCopyPath} disabled={!canReveal}>
-            Copy path
-          </button>
-        </li>
-        <li className="context-menu-separator" aria-hidden="true" />
-        <li>
-          <button type="button" className="danger" onClick={p.onRemove}>
-            {removeLabel}
-          </button>
-        </li>
       </ul>
     </div>
   );

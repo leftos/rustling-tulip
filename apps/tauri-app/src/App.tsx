@@ -17,6 +17,7 @@ import {
 import {
   tabGrid,
   type DaemonMessage,
+  type GridNode,
   type PresetEntry,
   type PresetTarget,
   type RepoEntry,
@@ -166,6 +167,7 @@ export default function App() {
   const pendingSpawnIntentRef = useRef<
     | { kind: "newTab" }
     | { kind: "replacePane"; tabId: string; paneId: string }
+    | { kind: "addToTab"; tabId: string }
     | null
   >(null);
 
@@ -176,6 +178,13 @@ export default function App() {
   const spawnTargetPaneRef = useRef<{ tabId: string; paneId: string } | null>(
     null,
   );
+
+  /// Captured when the spawn dialog is opened from a tab container's
+  /// right-click "Spawn session here" entry. Read at `onSpawned` to
+  /// promote the pending intent to `addToTab`, which appends a new pane
+  /// bound to the spawned session to the target tab (or fills an empty
+  /// pane if one exists). Cleared on dialog close.
+  const spawnTargetTabRef = useRef<string | null>(null);
 
   /// Captured when a pane sends `split_pane`. Records the tab id + the
   /// pane ids that existed before the split. The next `tab_updated` for
@@ -254,6 +263,7 @@ export default function App() {
             seenSessionIdsRef,
             pendingSpawnIntentRef,
             pendingPaneFocusRef,
+            latestStateRef,
           ),
         );
         // Dev-only: expose the daemon client on window for e2e specs that
@@ -456,6 +466,7 @@ export default function App() {
     // Toolbar/sidebar spawn — explicitly clear any prior pane intent so a
     // leftover from a cancelled "spawn in this pane" doesn't re-target.
     spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
     setState((s) => ({
       ...s,
       spawnOpen: true,
@@ -464,8 +475,24 @@ export default function App() {
     }));
   }, []);
 
+  /// Right-click a tab container in the sidebar's Tabs view → "Spawn
+  /// session here". Records the target tab id and opens the spawn
+  /// dialog with no initial repo/workspace selection — the user still
+  /// picks where the session runs; only the destination tab is pinned.
+  const onOpenSpawnIntoTab = useCallback((tabId: string) => {
+    spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = tabId;
+    setState((s) => ({
+      ...s,
+      spawnOpen: true,
+      spawnInitial: undefined,
+      spawnPrefill: undefined,
+    }));
+  }, []);
+
   const onCloseSpawn = useCallback(() => {
     spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
     setState((s) => ({
       ...s,
       spawnOpen: false,
@@ -528,14 +555,28 @@ export default function App() {
   }, []);
 
   const onSpawned = useCallback(() => {
-    // Arm the one-shot follow-up for the next new session. If the user opened
-    // the dialog from an empty pane's "+ spawn" button, route the result into
-    // that pane (replacePane). Otherwise open a fresh tab (newTab).
-    const target = spawnTargetPaneRef.current;
-    pendingSpawnIntentRef.current = target
-      ? { kind: "replacePane", tabId: target.tabId, paneId: target.paneId }
-      : { kind: "newTab" };
+    // Arm the one-shot follow-up for the next new session. Priority:
+    // 1. Pane target (user opened dialog from an empty pane's "+ spawn"
+    //    button) → drop session into that pane.
+    // 2. Tab target (user opened dialog from a tab container's right-
+    //    click "Spawn session here") → add a pane bound to the session
+    //    in that tab.
+    // 3. Default → open a fresh tab containing the session.
+    const paneTarget = spawnTargetPaneRef.current;
+    const tabTarget = spawnTargetTabRef.current;
+    if (paneTarget) {
+      pendingSpawnIntentRef.current = {
+        kind: "replacePane",
+        tabId: paneTarget.tabId,
+        paneId: paneTarget.paneId,
+      };
+    } else if (tabTarget) {
+      pendingSpawnIntentRef.current = { kind: "addToTab", tabId: tabTarget };
+    } else {
+      pendingSpawnIntentRef.current = { kind: "newTab" };
+    }
     spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
     // Optimistic feedback while the daemon resolves the spawn. Worktree
     // creation can take several seconds (Phase 2 workspace flows resolve
     // multiple repos), and previously the dialog vanished without trace
@@ -962,6 +1003,7 @@ export default function App() {
             }
             onSelectSession={onSelectSession}
             onOpenSpawn={onOpenSpawn}
+            onOpenSpawnIntoTab={onOpenSpawnIntoTab}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
             onRevealInExplorer={onRevealInExplorer}
@@ -1094,7 +1136,61 @@ function loadActiveTab(): string | null {
 type PendingSpawnIntent =
   | { kind: "newTab" }
   | { kind: "replacePane"; tabId: string; paneId: string }
+  | { kind: "addToTab"; tabId: string }
   | null;
+
+/// Add the freshly spawned `sessionId` to the existing `tabId`. Prefers
+/// dropping into an empty pane (cheap, no topology change); falls back
+/// to splitting the first pane on the right when every pane already has
+/// a session. Pulled out so the `session_updated` handler stays tight.
+function sendAddSessionToTab(
+  client: DaemonClient | null,
+  tabId: string,
+  sessionId: string,
+  latestStateRef: React.MutableRefObject<AppState | null>,
+) {
+  if (!client) return;
+  const tabs = latestStateRef.current?.tabs ?? [];
+  const tab = tabs.find((t) => t.id === tabId);
+  const grid = tab ? tabGrid(tab) : null;
+  // Diff tabs (and any future non-grid kinds) can't host sessions —
+  // bail rather than synthesize a bogus pane id.
+  if (!grid) return;
+  const panes = collectPanesShallow(grid);
+  const emptyPane = panes.find((p) => p.session_id === null);
+  if (emptyPane) {
+    client.send({
+      type: "replace_pane_session",
+      tab_id: tabId,
+      pane_id: emptyPane.pane_id,
+      session_id: sessionId,
+    });
+    return;
+  }
+  const anchor = panes[0];
+  if (!anchor) return;
+  client.send({
+    type: "split_pane",
+    tab_id: tabId,
+    pane_id: anchor.pane_id,
+    direction: "horizontal",
+    place: "second",
+    new_session_id: sessionId,
+  });
+}
+
+/// Local copy of the pane walker so this file doesn't import the grid
+/// utility just for one call. Identical to `collectPanes` in
+/// `utils/grid.ts`; both walk the binary split tree in left-to-right
+/// (or first-to-second) leaf order.
+function collectPanesShallow(
+  node: GridNode,
+): Array<{ pane_id: string; session_id: string | null }> {
+  if (node.kind === "pane") {
+    return [{ pane_id: node.pane_id, session_id: node.session_id }];
+  }
+  return [...collectPanesShallow(node.first), ...collectPanesShallow(node.second)];
+}
 
 function handleMessage(
   msg: DaemonMessage,
@@ -1106,6 +1202,7 @@ function handleMessage(
   pendingPaneFocusRef: React.MutableRefObject<
     { tabId: string; knownPaneIds: Set<string> } | null
   >,
+  latestStateRef: React.MutableRefObject<AppState | null>,
 ) {
   switch (msg.type) {
     case "welcome":
@@ -1179,6 +1276,17 @@ function handleMessage(
             focusedPaneId: intent.paneId,
           };
         }
+        if (intent?.kind === "addToTab") {
+          // Activate the target tab locally; the send below attaches the
+          // session to either an empty pane or a fresh split, and the
+          // daemon's `tab_updated` reconciles the actual grid topology.
+          return {
+            ...s,
+            sessions: next,
+            attentionSessions: attention,
+            activeTabId: intent.tabId,
+          };
+        }
         return { ...s, sessions: next, attentionSessions: attention };
       });
       if (intent?.kind === "newTab") {
@@ -1194,6 +1302,13 @@ function handleMessage(
           pane_id: intent.paneId,
           session_id: session.id,
         });
+      } else if (intent?.kind === "addToTab") {
+        sendAddSessionToTab(
+          clientRef.current,
+          intent.tabId,
+          session.id,
+          latestStateRef,
+        );
       }
       return;
     }
