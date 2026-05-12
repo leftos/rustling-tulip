@@ -34,9 +34,7 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - [x] **`session_removed` leaks the id in `attentionSessions`.** *Resolved (iter 16.)*
 - [x] **Preset context-menu loading state never times out.** *Resolved (iter 38 — discriminated `{ok, entries}|{ok:false, reason}`.)*
 - [x] **Sidebar context menu is anchored to raw cursor coords with no bounds check.** *Resolved (iter 25 — `clampMenuCoord` in `utils/a11y.ts`.)*
-- [ ] **No empty state for a sidebar that has workspaces but only orphan/detached sessions.** The empty-state copy fires only when `containers.length === 0`. A detached bucket is `kind === "detached"` and counts as a container, so the user sees "Detached" with red tag and a session list but no narrative explaining what to do about it.
-  - File: `apps/tauri-app/src/components/Sidebar.tsx:550-561`.
-  - Suggested direction: hover title is good; add an inline action like "stop all" or "re-register repo" near the bucket header. (Iter 4 added a banner; the open work is the inline action.)
+- [x] **No empty state for a sidebar that has workspaces but only orphan/detached sessions.** *Resolved (iter 51 — "Stop all" two-state confirm button added to detached container header; existing inline banner explains the state.)*
 
 ### Spawn dialog
 
@@ -71,9 +69,8 @@ A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell 
 - [x] **`isPopoutWindow` in `SessionPane` only checks `?session`, not `?tab`.** *Resolved (iter 19.)*
 - [x] **Pop-out tab window's "Spawn one here" is a no-op.** *Resolved (iter 34 — drag-in hint instead.)*
 - [x] **TabWindow has no chrome controls.** *Resolved (iter 21 — Close window button + ellipsised tab name.)*
-- [ ] **TabWindow's focusedPaneId state is independent from the main window's.** Each window's pane focus is tracked locally. Probably intentional — flagged in hand-test.
-  - File: `apps/tauri-app/src/components/TabWindow.tsx:21`.
-- [ ] **`SessionWindow` ignores the daemon-emitted `Repos` / `Workspaces` payloads.** Each pop-out window opens a fresh WebSocket and receives the initial state, but doesn't subscribe to repo changes — irrelevant for it directly, but if the session disappears nothing flushes the stale snapshot. (Iter 19's close-on-disappear handles the session-removed case; the repo/workspace listener gap remains.)
+- [x] **TabWindow's focusedPaneId state is independent from the main window's.** *Won't fix (iter 52 — intentional; pop-out windows run in a separate JS context, per-window pane focus is correct and expected.)*
+- [x] **`SessionWindow` ignores the daemon-emitted `Repos` / `Workspaces` payloads.** *Won't fix (iter 52 — SessionWindow renders only from SessionSnapshot, which has member info baked in; repo/workspace updates don't affect its rendering. Session-removed auto-close is handled by iter 19.)*
 
 ### Terminal
 
@@ -115,8 +112,7 @@ The per-session `GitPanel` is gone since iter 7 (replaced by the global Source C
 - [x] **`onStopAndQuit` resolves the shutdown promise on `closed`-or-`disconnected` connection state, NOT on the daemon actually quitting.** *Resolved (iter 44 — 2 s auto-close removed; stuck path surfaces explicit force-quit affordance instead.)*
 - [x] **Three buttons of similar visual weight, ambiguous priority order.** *Resolved (iter 24.)*
 - [x] **No Escape key to cancel.** *Resolved (iter 20.)*
-- [ ] **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** OS closes pop-out windows immediately. Probably correct, but worth flagging.
-  - File: `apps/tauri-app/src/App.tsx:354-370`.
+- [x] **Closing a pop-out window invokes nothing — the main window has its own exit-confirm only.** *Won't fix (iter 52 — closing a pop-out is correctly unconditional; it doesn't stop any sessions or tabs, which remain in the main window.)*
 
 ### Global: keyboard, focus, accessibility, theming, error surfacing
 
@@ -156,7 +152,7 @@ Run-through of the live app (after iter 1–3 fixes). Bottom line: the core idea
 - [x] **3. Session identity is too weak.** OSC-emitted terminal titles overwrote canonical labels. *Resolved (iter 4 — canonical label sticks; `terminal_title` surfaces as tooltip only.)*
 - [x] **4. Workspace preview is effectively broken.** `.preview-table` collapsed to ~2 px when other modal content competed for space. *Resolved (iter 4 — `flex: 0 0 auto` + `min-height: 80px`.)*
 - [x] **5. Risky actions lack recovery.** *Partially addressed in iter 3 (repo/workspace/tab confirms).* Remaining items below.
-  - [ ] Detached-bucket session stop currently lives in the per-session Stop button. Audit asked for inline bucket-level "stop all" affordance.
+  - [x] Detached-bucket session stop — inline "Stop all" button added to the detached container header (iter 51).
   - [ ] Undo-last-action shelf — substantial feature, not started.
   - [ ] Longer-undo window for tab close — substantial feature, not started.
 - [x] **6. Keyboard/focus accessibility is weak.** *Resolved (iter 6 — `useEscape` + `useAutoFocus` + tabIndex/Enter/Space on tree leaves + aria-labels.)*

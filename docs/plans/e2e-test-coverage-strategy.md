@@ -96,7 +96,7 @@ testids first would make specs readable and stable.
       run-mode radios, spawn button)
 - [x] `GitPanel` — moot; component deleted in iter 7, replaced by the global Source
       Control sidebar (`SourceControlSidebar.tsx`)
-- [ ] Spike a second-WebDriver-session helper so pop-out windows become testable
+- [x] Spike a second-WebDriver-session helper so pop-out windows become testable
 - [x] **Config-dir isolation for the harness.** `RUSTLING_TULIP_CONFIG_DIR` is now
       honored by the daemon's `Dirs::ensure` (`crates/daemon/src/paths.rs`) and the
       Tauri app's path resolvers (`apps/tauri-app/src-tauri/src/lib.rs::config_dir`),
@@ -130,8 +130,16 @@ Candidate first specs:
 - [x] **`user-select: none` doesn't block content selection.** `tools/e2e/tests/e2e/specs/user-select.spec.ts`
       — asserts `getComputedStyle` on `.diff-pane` / `.headless-log` / `.preset-preview-list`
       / `.terminal-host` / `.session-title h2` reports `user-select: text`.
-- [ ] **Pop-out session window auto-closes on stop.** Blocked on second-WebDriver
-      session helper. Tracks the audit finding at `App.tsx:354-370`.
+- [x] **Pop-out session window auto-closes on stop.** `tools/e2e/tests/e2e/specs/popout-session-autoclose.spec.ts`
+      — uses `captureNewWindow` from `src/popout.ts` to open the pop-out via
+      the "Pop out" button, assert the `.session-window-root` renders, stop
+      the session via the side-channel WS, and assert the window handle
+      disappears from `getWindowHandles()`.
+      **Note:** the `captureNewWindow` helper relies on msedgedriver enumerating
+      all WebView2 windows in the same process via `getWindowHandles()`. This
+      is the standard WebDriver multi-window pattern for WebView2 apps; if
+      tauri-driver routes each Tauri window to its own session, the helper will
+      throw a clear error and the test will need the `multiremote` path instead.
 
 ## Net effect on the audit workflow
 

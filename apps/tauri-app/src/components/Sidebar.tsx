@@ -791,6 +791,27 @@ function ContainerNode(p: ContainerNodeProps) {
   /// opens a modal directly, since the user needs the 3-way choice
   /// (cancel / remove anyway / stop sessions and remove).
   const [confirming, setConfirming] = useState(false);
+  const [confirmingStopAll, setConfirmingStopAll] = useState(false);
+
+  const onStopAllDetached = () => {
+    if (!confirmingStopAll) {
+      setConfirmingStopAll(true);
+      return;
+    }
+    setConfirmingStopAll(false);
+    for (const s of c.sessions) {
+      if (s.status !== "stopped") {
+        p.client.send({
+          type: "stop_session",
+          session_id: s.id,
+          cleanup: s.members.map((m) => ({
+            repo_id: m.repo_id,
+            remove_worktree: false,
+          })),
+        });
+      }
+    }
+  };
 
   const [leafDragState, setLeafDragState] = useState<{
     draggingId: string;
@@ -983,6 +1004,52 @@ function ContainerNode(p: ContainerNodeProps) {
             )}
           </>
         )}
+        {c.kind === "detached" &&
+          c.sessions.some((s) => s.status !== "stopped") && (
+            <>
+              <button
+                type="button"
+                className={
+                  confirmingStopAll
+                    ? "list-item-action danger"
+                    : "list-item-action"
+                }
+                title={
+                  confirmingStopAll
+                    ? "Click again to stop all detached sessions"
+                    : "Stop all detached sessions"
+                }
+                aria-label={
+                  confirmingStopAll
+                    ? "Confirm stop all detached sessions"
+                    : "Stop all detached sessions"
+                }
+                data-testid="sidebar-stop-all-detached"
+                data-confirming={confirmingStopAll ? "true" : "false"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStopAllDetached();
+                }}
+              >
+                {confirmingStopAll ? "✓?" : "◼"}
+              </button>
+              {confirmingStopAll && (
+                <button
+                  type="button"
+                  className="list-item-action"
+                  title="Cancel"
+                  aria-label="Cancel stop all"
+                  data-testid="sidebar-stop-all-detached-cancel"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmingStopAll(false);
+                  }}
+                >
+                  ⌫
+                </button>
+              )}
+            </>
+          )}
       </div>
       {hasChildren && !p.collapsed && (
         <ul className="tree-children">

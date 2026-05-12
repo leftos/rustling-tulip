@@ -150,6 +150,7 @@ export default function SessionPane({
               type="button"
               onClick={onPopOut}
               title="Open this session in its own window"
+              data-testid="session-pop-out"
             >
               Pop out
             </button>

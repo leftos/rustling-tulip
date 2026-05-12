@@ -41,10 +41,10 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 
 ### Post-Phase-6
 - **Upgrade-survivable sessions** — `rt-tracer.exe` PTY supervisor survives daemon restarts; orphan reattach replays ring buffer. See `docs/plans/completed/upgrade-survivable-sessions.md`.
-- **E2E harness** — wdio + tauri-driver + fake-claude + side-channel WS; config-dir isolated to `.tmp/e2e/`; 10 spec files, 24+ tests. See `docs/plans/e2e-test-coverage-strategy.md`.
+- **E2E harness** — wdio + tauri-driver + fake-claude + side-channel WS; config-dir isolated to `.tmp/e2e/`; 11 spec files. Multi-window helper (`src/popout.ts`) enables pop-out window specs via WebDriver `getWindowHandles()` + `switchToWindow`. See `docs/plans/e2e-test-coverage-strategy.md`.
 - **Codex support** — per-session `Agent` enum (Claude / Codex); `build_codex_args` in `server.rs`; headless stays claude-only; workspace prelude injected for cross-repo path clarity. See `docs/plans/completed/add-support-for-codex.md`.
 - **Source Control sidebar** — VSCode-style activity-bar sidebar; path-folded ChangesTree; Monaco diff tabs; stage/unstage/commit/discard/stash; paginated history. See `docs/plans/completed/source-control-sidebar.md`.
-- **UX audit** — 11 iteration passes covering: testids, preset launch fix, error toast, destructive confirmations, identity/trust, tab↔sidebar sync, keyboard a11y, pane controls, global shortcuts, auto-reconnect, modal a11y sweep, attention-state cleanup, worktree-default UX, drag feedback, settings modal, paste/multiline, and more. See `docs/ux-audit.md` for item-by-item status.
+- **UX audit** — 52 iteration passes; all code-evidence findings resolved. Detached bucket gets a "Stop all" inline action (iter 51); pop-out window findings closed as won't-fix (iter 52). See `docs/ux-audit.md` for full history.
 - **Drag-to-reorder** — tabs, repos/workspaces, and session leaves all reorderable via drag.
 - **Design language** — Geist font + cool-neutral palette; hardcoded colors/spacing replaced with design tokens.
 - **Daemon-status footer** — persistent connection status bar + troubleshooting flyout.
@@ -52,19 +52,6 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 - **Two-mode workspace creator** — repo-list mode or VS Code `.code-workspace` file import.
 
 ## Open
-
-### UX audit — 4 remaining code findings
-See `docs/ux-audit.md` for the full tracked list. What's left:
-
-1. **No empty state for workspaces-but-orphans-only sidebar** — `Sidebar.tsx:550`. When all sessions under a workspace are orphaned/detached, the container shows as empty with no explanation.
-2. **`TabWindow.focusedPaneId` is independent** — `TabWindow.tsx:21`. Pop-out tab windows track their own focus state separately from the main window, causing inconsistency.
-3. **`SessionWindow` ignores broadcast `Repos`/`Workspaces`** — the pop-out session window doesn't update its local registry state when the daemon broadcasts registry changes.
-4. **Pop-out close has no confirmation** — `App.tsx:354`. Closing the pop-out OS window skips the exit confirmation that the main window shows.
-
-### E2E — second-WebDriver-session helper
-Pop-out windows require a second wdio `browser` session, which isn't wired up yet. This
-blocks `tools/e2e/tests/e2e/specs/` coverage of the pop-out auto-close finding above.
-Entry point: `tools/e2e/wdio.conf.ts`. See `docs/plans/e2e-test-coverage-strategy.md`.
 
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
