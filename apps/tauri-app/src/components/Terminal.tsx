@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { CanvasAddon } from "@xterm/addon-canvas";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -111,28 +110,6 @@ export default function Terminal({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(containerRef.current);
-
-    // Canvas renderer drastically reduces flicker on full-page TUI
-    // redraws (codex/htop/vim style). The default DOM renderer
-    // updates per-cell DOM nodes -- claude's mostly-line-append
-    // output runs fine on it, but codex's full-buffer repaint every
-    // frame thrashes layout and the cursor visibly jumps around.
-    // Canvas paints the whole grid in one pass per frame so updates
-    // stay coherent.
-    //
-    // Why Canvas and not WebGL: @xterm/addon-webgl @ 0.19 still has
-    // a teardown bug where, if WebGL activation fails *after*
-    // `loadAddon` registers it (any GPU/context hiccup), the
-    // addon's `dispose()` crashes with `Cannot read properties of
-    // undefined (reading '_isDisposed')` on Terminal unmount.
-    // CanvasAddon has no equivalent issue and is plenty fast for
-    // full-buffer TUI redraws. Revisit on xterm 6.x.
-    try {
-      const canvas = new CanvasAddon();
-      term.loadAddon(canvas);
-    } catch (err) {
-      console.warn("xterm Canvas renderer unavailable, falling back to DOM", err);
-    }
 
     termRef.current = term;
     fitRef.current = fit;
