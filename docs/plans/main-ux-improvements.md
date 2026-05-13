@@ -11,6 +11,8 @@ orientation, and reducing repeated-session friction.
 - Keep session identity stable even when terminals emit noisy titles.
 - Reduce the chance of launching an agent with more authority than intended.
 - Make the common launch path fast without hiding advanced control.
+- Make non-repo shell launches cheap for a default folder and precise for any
+  user-chosen folder.
 - Improve source-control usability inside the narrow activity sidebar.
 - Replace cryptic controls with affordances users can discover quickly.
 - Add undo/recovery where actions mutate tabs, panes, sessions, or worktrees.
@@ -162,6 +164,13 @@ inspect or override the full configuration before committing.
 
 - [ ] Define the primary spawn presets for a repo, workspace, empty pane, and
       existing tab.
+- [ ] Add a quick action for spawning a non-repo-tied shell in the user's
+      default folder.
+- [ ] Add a modal path for spawning a non-repo-tied shell in a specific folder.
+- [ ] Persist and display the default folder used by non-repo shell quick
+      launches.
+- [ ] Ensure non-repo shell sessions are clearly grouped as standalone, not
+      under any registered repo/workspace.
 - [ ] Add a compact "Launch last" or "Launch default" path where a last
       spawn config exists.
 - [ ] Show a concise summary of the config that will be replayed before launch.
@@ -173,6 +182,8 @@ inspect or override the full configuration before committing.
       compact segmented placement control.
 - [ ] Add e2e coverage for launch-last using the saved spawn config.
 - [ ] Add e2e coverage for switching from compact path to full edit path.
+- [ ] Add e2e coverage for quick non-repo shell launch into the default folder.
+- [ ] Add e2e coverage for modal non-repo shell launch into a chosen folder.
 
 ## Phase 5 - Source Control density and focus
 
