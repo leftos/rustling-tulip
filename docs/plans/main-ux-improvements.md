@@ -146,8 +146,8 @@ be honored, but new defaults should not silently grant broad authority.
 
 ### Tasks
 
-- [ ] Change the new-install default for skip-permissions/yolo to off.
-- [ ] Preserve existing saved user settings through migration or explicit
+- [x] Change the new-install default for skip-permissions/yolo to off.
+- [x] Preserve existing saved user settings through migration or explicit
       compatibility logic.
 - [ ] Add a clear "trusted launch" visual state when skip-permissions/yolo is
       enabled in the spawn dialog.
@@ -156,7 +156,7 @@ be honored, but new defaults should not silently grant broad authority.
 - [ ] Reword Claude and Codex permission labels into a consistent vocabulary.
 - [ ] Decide whether "launch last" can replay elevated authority without
       confirmation; document and implement the rule.
-- [ ] Add e2e coverage for default setting on a fresh config dir.
+- [x] Add e2e coverage for default setting on a fresh config dir.
 - [ ] Add e2e coverage that elevated sessions show a visible badge.
 
 ## Phase 4 - Faster common spawn path
@@ -330,8 +330,8 @@ be able to cancel before the next session spawns and see what already launched.
 
 ## Open decisions
 
-- [ ] Should existing installs keep skip-permissions/yolo enabled if their
-      settings were only default-seeded and never explicitly changed?
+- [x] Existing installs keep skip-permissions/yolo enabled when that value is
+      already saved; new installs seed it off.
 - [x] Should explicit Stop always retain a stopped session, even for sessions
       without a per-session worktree?
 - [x] Should terminal OSC titles ever become primary automatically, or only

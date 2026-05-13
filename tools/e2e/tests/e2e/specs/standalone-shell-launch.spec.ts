@@ -180,7 +180,7 @@ async function setStandaloneShellDefault(path: string): Promise<void> {
       },
       sidebar: { default_view: "container" },
       spawn: {
-        skip_permissions_default: true,
+        skip_permissions_default: false,
         default_permission_mode: null,
         default_codex_sandbox: null,
         standalone_shell_default_dir: null,

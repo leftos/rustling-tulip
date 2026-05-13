@@ -29,8 +29,8 @@ export interface Settings {
   };
   spawn: {
     /// Initial value of the SpawnDialog "skip permissions" / "yolo"
-    /// checkbox. Defaults to `true` because the pre-iter-49 code did the
-    /// same hard-coded.
+    /// checkbox. Fresh installs default to `false`; saved settings keep
+    /// their stored value through `mergeWithDefaults`.
     skip_permissions_default: boolean;
     /// Pre-fill for the spawn dialog's permission-mode dropdown (claude
     /// only; ignored when `skip_permissions_default` is on). `null` means
@@ -81,7 +81,7 @@ export const DEFAULT_SETTINGS: Settings = {
     default_view: "container",
   },
   spawn: {
-    skip_permissions_default: true,
+    skip_permissions_default: false,
     default_permission_mode: null,
     default_codex_sandbox: null,
     standalone_shell_default_dir: null,
