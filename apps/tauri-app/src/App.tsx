@@ -2507,6 +2507,7 @@ function handleMessage(
     case "scrollback":
     case "spawn_config_reply":
     case "presets":
+    case "preset_launch_job_updated":
     case "preset_launch_failed":
     case "preset_preview":
     case "preset_preview_error":
@@ -2540,6 +2541,7 @@ function handleMessage(
       if (msg.type === "preset_launch_failed") {
         const partials = `${msg.partial_session_ids.length} session(s), ${msg.partial_tab_ids.length} tab(s) partial`;
         pushToast(setState, {
+          key: `preset:${msg.job_id}`,
           severity: "warning",
           message: `Preset '${msg.preset_id}' launch failed`,
           detail: `${msg.error} · ${partials}`,
@@ -2564,7 +2566,7 @@ function handleMessage(
       }
       const done = msg.launched >= msg.total;
       pushToast(setState, {
-        key: `preset:${msg.preset_id}`,
+        key: `preset:${msg.job_id}`,
         severity: "info",
         message: done
           ? `Preset '${msg.preset_id}' launched`

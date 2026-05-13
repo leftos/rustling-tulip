@@ -90,6 +90,27 @@ export type PresetTarget =
   | { kind: "repo"; repo_id: string }
   | { kind: "workspace"; workspace_id: string };
 
+export type PresetLaunchJobStatus =
+  | "resolving"
+  | "spawning"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "unknown";
+
+export interface PresetLaunchJobSnapshot {
+  job_id: string;
+  preset_id: string;
+  target: PresetTarget;
+  total: number;
+  launched: number;
+  created_session_ids: string[];
+  created_tab_ids: string[];
+  status: PresetLaunchJobStatus;
+  error: string | null;
+  current_tab_id: string | null;
+}
+
 export type LaunchPresetSource =
   | { kind: "file"; path: string }
   | { kind: "folder"; path: string }
@@ -132,6 +153,16 @@ export type ClientMessage =
   | { type: "commit_repo"; repo_id: string; message: string }
   | { type: "list_presets"; target: PresetTarget }
   | {
+      type: "launch_preset";
+      job_id: string;
+      target: PresetTarget;
+      preset_id: string;
+      source: LaunchPresetSource;
+      variable_values: Array<[string, string]>;
+      use_worktree_override: boolean | null;
+      max_panes_per_tab_override: number | null;
+    }
+  | {
       type: "preview_preset";
       id: string;
       target: PresetTarget;
@@ -152,6 +183,27 @@ export type DaemonMessage =
   | { type: "session_removed"; session_id: string }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "pty_output"; session_id: string; data_b64: string }
+  | {
+      type: "preset_launch_job_updated";
+      job: PresetLaunchJobSnapshot;
+    }
+  | {
+      type: "preset_launch_progress";
+      job_id: string;
+      preset_id: string;
+      total: number;
+      launched: number;
+      current_tab_id: string | null;
+      tab_ids: string[];
+    }
+  | {
+      type: "preset_launch_failed";
+      job_id: string;
+      preset_id: string;
+      error: string;
+      partial_session_ids: string[];
+      partial_tab_ids: string[];
+    }
   | { type: "preset_preview"; id: string; prompts: string[] }
   | { type: "preset_preview_error"; id: string; error: string }
   | { type: "error"; message: string }

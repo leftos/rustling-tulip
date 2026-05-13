@@ -16,9 +16,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
     FooterLine, GridNode, InjectorStep, InjectorTemplate, LaunchPresetSource, PresetEntry,
-    PresetTarget, PresetVariable, PresetVariableKind, PromptInjector, RepoEntry,
-    ScriptCommandPreview, SessionMode, SpawnRequest, SpawnTarget, SplitDirection, TabEntry,
-    TabGroupingConfig, TabLayout,
+    PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetTarget, PresetVariable,
+    PresetVariableKind, PromptInjector, RepoEntry, ScriptCommandPreview, SessionMode, SpawnRequest,
+    SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
 };
 use regex::Regex;
 use tokio::process::Command;
@@ -44,6 +44,7 @@ pub async fn list(hub: &Hub, target: &PresetTarget) -> anyhow::Result<Vec<Preset
 }
 
 pub struct LaunchArgs {
+    pub job_id: String,
     pub target: PresetTarget,
     pub preset_id: String,
     pub source: LaunchPresetSource,
@@ -53,20 +54,68 @@ pub struct LaunchArgs {
 }
 
 pub async fn launch(hub: Hub, args: LaunchArgs) {
+    let mut args = args;
+    args.job_id = normalize_job_id(args.job_id);
+    let job_id = args.job_id.clone();
     let preset_id = args.preset_id.clone();
+    let target = args.target.clone();
+    send_job_update(
+        &hub,
+        PresetLaunchJobSnapshot {
+            job_id: job_id.clone(),
+            preset_id: preset_id.clone(),
+            target: target.clone(),
+            total: 0,
+            launched: 0,
+            created_session_ids: Vec::new(),
+            created_tab_ids: Vec::new(),
+            status: PresetLaunchJobStatus::Resolving,
+            error: None,
+            current_tab_id: None,
+        },
+    );
     if let Err(failure) = run(&hub, args).await {
         warn!(
             preset_id = %preset_id,
             error = %failure.error,
             "preset launch failed"
         );
+        send_job_update(
+            &hub,
+            PresetLaunchJobSnapshot {
+                job_id: job_id.clone(),
+                preset_id: preset_id.clone(),
+                target,
+                total: failure.total.unwrap_or(0),
+                launched: u32::try_from(failure.partial_session_ids.len()).unwrap_or(u32::MAX),
+                created_session_ids: failure.partial_session_ids.clone(),
+                created_tab_ids: failure.partial_tab_ids.clone(),
+                status: PresetLaunchJobStatus::Failed,
+                error: Some(failure.error.clone()),
+                current_tab_id: failure.partial_tab_ids.last().cloned(),
+            },
+        );
         let _ = hub.preset_events.send(PresetEvent::Failed {
+            job_id,
             preset_id,
             error: failure.error,
             partial_session_ids: failure.partial_session_ids,
             partial_tab_ids: failure.partial_tab_ids,
         });
     }
+}
+
+fn normalize_job_id(job_id: String) -> String {
+    let trimmed = job_id.trim();
+    if trimmed.is_empty() {
+        format!("preset-{}", Uuid::new_v4())
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn send_job_update(hub: &Hub, job: PresetLaunchJobSnapshot) {
+    let _ = hub.preset_events.send(PresetEvent::JobUpdated { job });
 }
 
 /// Resolve a preset's prompt source into raw prompt texts without spawning
@@ -185,6 +234,7 @@ fn find_repo(hub: &Hub, repo_id: &str) -> anyhow::Result<RepoEntry> {
 #[derive(Debug)]
 struct LaunchFailure {
     error: String,
+    total: Option<u32>,
     partial_session_ids: Vec<String>,
     partial_tab_ids: Vec<String>,
 }
@@ -193,9 +243,15 @@ impl LaunchFailure {
     fn new(error: impl Into<String>) -> Self {
         Self {
             error: error.into(),
+            total: None,
             partial_session_ids: Vec::new(),
             partial_tab_ids: Vec::new(),
         }
+    }
+
+    fn with_total(mut self, total: u32) -> Self {
+        self.total = Some(total);
+        self
     }
 
     fn with_partials(mut self, sessions: &[String], tabs: &[String]) -> Self {
@@ -769,6 +825,8 @@ impl TabState {
 // ---------------------------------------------------------------------------
 
 struct LaunchPlan {
+    job_id: String,
+    target: PresetTarget,
     preset: PresetEntry,
     /// Source repo: where the presets.json lives and where prompt files
     /// are sourced from. For workspace-target launches this is still the
@@ -811,7 +869,9 @@ async fn run(hub: &Hub, args: LaunchArgs) -> Result<(), LaunchFailure> {
         repo = %plan.repo.id,
         "preset launch starting"
     );
-    orchestrate(hub, plan, total).await
+    orchestrate(hub, plan, total)
+        .await
+        .map_err(|failure| failure.with_total(total))
 }
 
 async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFailure> {
@@ -870,6 +930,8 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
         },
     };
     Ok(LaunchPlan {
+        job_id: args.job_id.clone(),
+        target: args.target.clone(),
         preset,
         repo,
         spawn_kind,
@@ -999,6 +1061,22 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
     let stagger = Duration::from_millis(u64::from(plan.preset.stagger_ms));
     let last_idx = plan.raw_prompts.len() - 1;
 
+    send_job_update(
+        hub,
+        PresetLaunchJobSnapshot {
+            job_id: plan.job_id.clone(),
+            preset_id: plan.preset.id.clone(),
+            target: plan.target.clone(),
+            total,
+            launched: 0,
+            created_session_ids: Vec::new(),
+            created_tab_ids: plan.tab_state.tab_ids.clone(),
+            status: PresetLaunchJobStatus::Spawning,
+            error: None,
+            current_tab_id: plan.tab_state.current_tab_id.clone(),
+        },
+    );
+
     for (i, raw) in plan.raw_prompts.iter().enumerate() {
         let snapshot_id = spawn_one(hub, &plan, i, raw, &session_ids).await?;
         session_ids.push(snapshot_id.clone());
@@ -1008,7 +1086,23 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
         }
 
         let launched = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        send_job_update(
+            hub,
+            PresetLaunchJobSnapshot {
+                job_id: plan.job_id.clone(),
+                preset_id: plan.preset.id.clone(),
+                target: plan.target.clone(),
+                total,
+                launched,
+                created_session_ids: session_ids.clone(),
+                created_tab_ids: plan.tab_state.tab_ids.clone(),
+                status: PresetLaunchJobStatus::Spawning,
+                error: None,
+                current_tab_id: plan.tab_state.current_tab_id.clone(),
+            },
+        );
         let _ = hub.preset_events.send(PresetEvent::Progress {
+            job_id: plan.job_id.clone(),
             preset_id: plan.preset.id.clone(),
             total,
             launched,
@@ -1020,6 +1114,21 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
             sleep(stagger).await;
         }
     }
+    send_job_update(
+        hub,
+        PresetLaunchJobSnapshot {
+            job_id: plan.job_id.clone(),
+            preset_id: plan.preset.id.clone(),
+            target: plan.target.clone(),
+            total,
+            launched: total,
+            created_session_ids: session_ids,
+            created_tab_ids: plan.tab_state.tab_ids.clone(),
+            status: PresetLaunchJobStatus::Completed,
+            error: None,
+            current_tab_id: plan.tab_state.current_tab_id.clone(),
+        },
+    );
     info!(preset_id = %plan.preset.id, count = total, "preset launch complete");
     Ok(())
 }

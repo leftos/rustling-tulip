@@ -706,6 +706,43 @@ pub enum PresetTarget {
     Workspace { workspace_id: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetLaunchJobStatus {
+    Resolving,
+    Spawning,
+    Completed,
+    Cancelled,
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+
+fn default_preset_launch_job_status() -> PresetLaunchJobStatus {
+    PresetLaunchJobStatus::Resolving
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PresetLaunchJobSnapshot {
+    pub job_id: String,
+    pub preset_id: String,
+    pub target: PresetTarget,
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub launched: u32,
+    #[serde(default)]
+    pub created_session_ids: Vec<String>,
+    #[serde(default)]
+    pub created_tab_ids: Vec<String>,
+    #[serde(default = "default_preset_launch_job_status")]
+    pub status: PresetLaunchJobStatus,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub current_tab_id: Option<String>,
+}
+
 /// Where the launcher draws its list of prompts from for a single run.
 /// Declared on the preset to constrain what the launch dialog offers, and
 /// echoed back as [`LaunchPresetSource`] with concrete values.
@@ -1386,6 +1423,10 @@ pub enum ClientMessage {
     /// and spawns sessions sequentially with `preset.stagger_ms` between
     /// them. Progress streams back as [`DaemonMessage::PresetLaunchProgress`].
     LaunchPreset {
+        /// Client-assigned id for this preset-launch job. Older clients may
+        /// omit it; the daemon normalizes an empty id to a generated one.
+        #[serde(default)]
+        job_id: String,
         target: PresetTarget,
         preset_id: String,
         source: LaunchPresetSource,
@@ -1666,6 +1707,8 @@ pub enum DaemonMessage {
     /// Streamed updates while a `LaunchPreset` batch runs. UI uses
     /// `current_tab_id` to auto-switch into the freshly populated tab.
     PresetLaunchProgress {
+        #[serde(default)]
+        job_id: String,
         preset_id: String,
         total: u32,
         launched: u32,
@@ -1680,12 +1723,19 @@ pub enum DaemonMessage {
     /// Emitted when a batch fails partway. Sessions and tabs already
     /// created are kept; the user can decide what to do with them.
     PresetLaunchFailed {
+        #[serde(default)]
+        job_id: String,
         preset_id: String,
         error: String,
         #[serde(default)]
         partial_session_ids: Vec<String>,
         #[serde(default)]
         partial_tab_ids: Vec<String>,
+    },
+    /// Streamed snapshot of the daemon-visible preset launch job. Future UI
+    /// progress and cancellation surfaces key off this job id.
+    PresetLaunchJobUpdated {
+        job: PresetLaunchJobSnapshot,
     },
     /// Response to [`ClientMessage::PreviewPreset`]. Echoes the request `id`
     /// so the caller can correlate; carries the resolved prompts list.
@@ -2154,6 +2204,78 @@ mod tests {
         assert_eq!(values.len(), 1);
         assert_eq!(executed_commands.len(), 1);
         assert_eq!(executed_commands[0].variable_name, "prod_log");
+    }
+
+    #[test]
+    fn launch_preset_message_carries_job_id() {
+        let msg = ClientMessage::LaunchPreset {
+            job_id: "preset-job-1".to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            preset_id: "bug-triage".to_string(),
+            source: LaunchPresetSource::Inline {
+                prompts: vec!["one".to_string()],
+            },
+            variable_values: Vec::new(),
+            use_worktree_override: None,
+            max_panes_per_tab_override: None,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""job_id":"preset-job-1""#));
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        let ClientMessage::LaunchPreset { job_id, .. } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(job_id, "preset-job-1");
+    }
+
+    #[test]
+    fn launch_preset_message_defaults_legacy_job_id() {
+        let json = r#"{
+            "type":"launch_preset",
+            "target":{"kind":"repo","repo_id":"repo-1"},
+            "preset_id":"bug-triage",
+            "source":{"kind":"inline","prompts":["one"]},
+            "variable_values":[],
+            "use_worktree_override":null,
+            "max_panes_per_tab_override":null
+        }"#;
+        let decoded: ClientMessage = serde_json::from_str(json).expect("deserialize");
+        let ClientMessage::LaunchPreset { job_id, .. } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(job_id, "");
+    }
+
+    #[test]
+    fn preset_launch_job_updated_message_tagged() {
+        let msg = DaemonMessage::PresetLaunchJobUpdated {
+            job: PresetLaunchJobSnapshot {
+                job_id: "preset-job-1".to_string(),
+                preset_id: "bug-triage".to_string(),
+                target: PresetTarget::Repo {
+                    repo_id: "repo-1".to_string(),
+                },
+                total: 2,
+                launched: 1,
+                created_session_ids: vec!["session-1".to_string()],
+                created_tab_ids: vec!["tab-1".to_string()],
+                status: PresetLaunchJobStatus::Spawning,
+                error: None,
+                current_tab_id: Some("tab-1".to_string()),
+            },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"preset_launch_job_updated""#));
+        assert!(json.contains(r#""status":"spawning""#));
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        let DaemonMessage::PresetLaunchJobUpdated { job } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(job.job_id, "preset-job-1");
+        assert_eq!(job.status, PresetLaunchJobStatus::Spawning);
+        assert_eq!(job.created_session_ids, vec!["session-1".to_string()]);
     }
 
     #[test]

@@ -349,6 +349,7 @@ function targetsMatch(a: PresetTarget, b: PresetTarget): boolean {
 }
 
 export interface LaunchPresetOpts {
+  job_id?: string;
   target: PresetTarget;
   preset_id: string;
   source: LaunchPresetSource;
@@ -363,7 +364,13 @@ export interface LaunchPresetOpts {
  * dispatched by App.tsx.
  */
 export function launchPreset(client: DaemonClient, opts: LaunchPresetOpts) {
-  client.send({ type: "launch_preset", ...opts });
+  const job_id = opts.job_id ?? newPresetLaunchJobId();
+  client.send({ type: "launch_preset", ...opts, job_id });
+  return job_id;
+}
+
+function newPresetLaunchJobId(): string {
+  return `preset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export interface PreviewPresetOpts {

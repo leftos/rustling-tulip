@@ -340,7 +340,7 @@ be able to cancel before the next session spawns and see what already launched.
 
 ### Tasks
 
-- [ ] Model preset launch as a daemon-visible job with id, target, prompt count,
+- [x] Model preset launch as a daemon-visible job with id, target, prompt count,
       created sessions, status, and error state.
 - [ ] Add progress events: resolving prompts, running script commands,
       spawning N of M, completed, cancelled, failed.

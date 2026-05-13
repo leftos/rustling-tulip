@@ -31,7 +31,7 @@ use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
-    InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode,
+    InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode, PresetLaunchJobSnapshot,
     SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
     SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
@@ -140,7 +140,11 @@ pub enum TabEvent {
 
 #[derive(Debug, Clone)]
 pub enum PresetEvent {
+    JobUpdated {
+        job: PresetLaunchJobSnapshot,
+    },
     Progress {
+        job_id: String,
         preset_id: String,
         total: u32,
         launched: u32,
@@ -148,6 +152,7 @@ pub enum PresetEvent {
         tab_ids: Vec<String>,
     },
     Failed {
+        job_id: String,
         preset_id: String,
         error: String,
         partial_session_ids: Vec<String>,
@@ -574,7 +579,11 @@ fn spawn_preset_forwarder(
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
+                Ok(PresetEvent::JobUpdated { job }) => {
+                    let _ = out_tx.send(DaemonMessage::PresetLaunchJobUpdated { job });
+                }
                 Ok(PresetEvent::Progress {
+                    job_id,
                     preset_id,
                     total,
                     launched,
@@ -582,6 +591,7 @@ fn spawn_preset_forwarder(
                     tab_ids,
                 }) => {
                     let _ = out_tx.send(DaemonMessage::PresetLaunchProgress {
+                        job_id,
                         preset_id,
                         total,
                         launched,
@@ -590,12 +600,14 @@ fn spawn_preset_forwarder(
                     });
                 }
                 Ok(PresetEvent::Failed {
+                    job_id,
                     preset_id,
                     error,
                     partial_session_ids,
                     partial_tab_ids,
                 }) => {
                     let _ = out_tx.send(DaemonMessage::PresetLaunchFailed {
+                        job_id,
                         preset_id,
                         error,
                         partial_session_ids,
@@ -1530,6 +1542,7 @@ async fn dispatch(
             let _ = out_tx.send(DaemonMessage::Presets { target, entries });
         }
         ClientMessage::LaunchPreset {
+            job_id,
             target,
             preset_id,
             source,
@@ -1543,6 +1556,7 @@ async fn dispatch(
             // preset_events broadcast that every connected client forwards.
             let hub = hub.clone();
             let args = crate::presets::LaunchArgs {
+                job_id,
                 target,
                 preset_id,
                 source,
