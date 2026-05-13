@@ -2971,8 +2971,12 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .grid-drop-overlay {
   position: absolute;
   pointer-events: none;
+  align-items: center;
   background: rgba(78, 168, 255, 0.22);
   border: 1px solid var(--accent);
+  color: var(--fg);
+  display: flex;
+  justify-content: center;
   z-index: 3;
 }
 .grid-drop-left   { top: 0; bottom: 0; left: 0;   width: 50%; }
@@ -2983,6 +2987,15 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   top: 12%; left: 12%;
   right: 12%; bottom: 12%;
   border-radius: var(--radius);
+}
+.grid-drop-replace span {
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  font-weight: 600;
+  padding: 4px 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
 }
 
 .empty-pane {

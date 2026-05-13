@@ -1372,9 +1372,11 @@ pub enum ClientMessage {
         ratio: f32,
     },
     /// Move a pane to a new location (same tab if `src_tab_id == dst_tab_id`,
-    /// otherwise cross-tab). The source pane is removed from its current
-    /// position (with the parent split collapsing if needed) and inserted at
-    /// `edge` of the destination pane.
+    /// otherwise cross-tab). For non-replace edges, the source pane is removed
+    /// from its current position (with the parent split collapsing if needed)
+    /// and inserted at `edge` of the destination pane. For same-tab
+    /// `replace`, the two pane session bindings are swapped so both grid
+    /// positions remain intact.
     MovePane {
         src_tab_id: String,
         src_pane_id: String,

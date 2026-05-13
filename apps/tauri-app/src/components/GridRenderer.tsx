@@ -456,7 +456,7 @@ function PaneChrome(props: PaneChromeProps) {
         [sourceSnapshot, destinationSnapshot].filter(
           (candidate): candidate is TabEntry => candidate !== null,
         ),
-        "Moved pane",
+        edge === "replace" && srcTab === tabId ? "Swapped panes" : "Moved pane",
         srcPane,
       );
       client.send({
@@ -500,7 +500,7 @@ function PaneChrome(props: PaneChromeProps) {
             className="grid-pane-drag"
             draggable
             onDragStart={onDragStart}
-            title="Drag pane to move"
+            title="Drag pane to move; drop on the center of another pane to swap"
             aria-hidden="true"
           >
             <Icon name="drag" />
@@ -662,7 +662,7 @@ function PoppedOutPaneCard({
 }
 
 function computeEdge(x: number, y: number): PaneDropEdge {
-  if (x > 0.4 && x < 0.6 && y > 0.4 && y < 0.6) return "replace";
+  if (x > 0.35 && x < 0.65 && y > 0.35 && y < 0.65) return "replace";
   const dx = Math.abs(x - 0.5);
   const dy = Math.abs(y - 0.5);
   if (dx > dy) return x < 0.5 ? "left" : "right";
@@ -671,7 +671,15 @@ function computeEdge(x: number, y: number): PaneDropEdge {
 
 function DropOverlay({ edge }: { edge: PaneDropEdge }) {
   const cls = `grid-drop-overlay grid-drop-${edge}`;
-  return <div className={cls} aria-hidden="true" />;
+  return (
+    <div
+      className={cls}
+      aria-hidden="true"
+      data-drop-edge={edge}
+    >
+      {edge === "replace" && <span>Swap panes</span>}
+    </div>
+  );
 }
 
 interface PaneContextMenuProps {

@@ -46,6 +46,7 @@ interface Props {
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
   /// Wired from GridRenderer so the entire session-header strip acts as
   /// the pane drag handle, not just the small ⠿ icon in the corner.
+  /// Dropping on another pane's center swaps the two pane bindings.
   /// Omitted when SessionPane is rendered outside a grid (e.g. inside
   /// the single-session pop-out window, where there is nowhere to drop).
   onHeaderDragStart?: (e: React.DragEvent) => void;
@@ -215,6 +216,11 @@ export default function SessionPane({
           draggable={onHeaderDragStart !== undefined}
           onDragStart={onHeaderDragStart}
           onContextMenu={onHeaderContextMenu}
+          title={
+            onHeaderDragStart
+              ? "Drag pane to move; drop on the center of another pane to swap"
+              : undefined
+          }
         >
           <div className="session-title">
             {/* Shell sessions sit at Idle forever — a green dot would be

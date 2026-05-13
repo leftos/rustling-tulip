@@ -1681,11 +1681,15 @@ fn move_pane(
         if src_tab_id == dst_tab_id {
             let tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
             let grid = tabs::grid_or_err_mut(tab)?;
-            let (extracted, source_empty) = tabs::extract_pane(grid, src_pane_id)?;
-            if source_empty {
-                return Err(anyhow!("cannot move the only pane within the same tab"));
+            if edge == PaneDropEdge::Replace {
+                tabs::swap_pane_sessions(grid, src_pane_id, dst_pane_id)?;
+            } else {
+                let (extracted, source_empty) = tabs::extract_pane(grid, src_pane_id)?;
+                if source_empty {
+                    return Err(anyhow!("cannot move the only pane within the same tab"));
+                }
+                tabs::insert_adjacent(grid, dst_pane_id, edge, extracted)?;
             }
-            tabs::insert_adjacent(grid, dst_pane_id, edge, extracted)?;
             Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
         } else {
             let (extracted_node, source_empty) = {

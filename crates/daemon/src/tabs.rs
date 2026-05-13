@@ -320,6 +320,44 @@ fn replace_session_in(node: &mut GridNode, target: &str, sid: Option<String>) ->
     }
 }
 
+/// Swap the session bindings of two existing panes without changing topology
+/// or pane ids.
+pub fn swap_pane_sessions(grid: &mut GridNode, first: &str, second: &str) -> anyhow::Result<()> {
+    if first == second {
+        return Ok(());
+    }
+    let first_session = match pane_session(grid, first) {
+        PaneSessionLookup::Found(session_id) => session_id,
+        PaneSessionLookup::Missing => return Err(anyhow!("pane not found: {first}")),
+    };
+    let second_session = match pane_session(grid, second) {
+        PaneSessionLookup::Found(session_id) => session_id,
+        PaneSessionLookup::Missing => return Err(anyhow!("pane not found: {second}")),
+    };
+    replace_pane_session(grid, first, second_session)?;
+    replace_pane_session(grid, second, first_session)?;
+    Ok(())
+}
+
+enum PaneSessionLookup {
+    Missing,
+    Found(Option<String>),
+}
+
+fn pane_session(node: &GridNode, target: &str) -> PaneSessionLookup {
+    match node {
+        GridNode::Pane {
+            pane_id,
+            session_id,
+        } if pane_id == target => PaneSessionLookup::Found(session_id.clone()),
+        GridNode::Pane { .. } => PaneSessionLookup::Missing,
+        GridNode::Split { first, second, .. } => match pane_session(first, target) {
+            PaneSessionLookup::Found(session_id) => PaneSessionLookup::Found(session_id),
+            PaneSessionLookup::Missing => pane_session(second, target),
+        },
+    }
+}
+
 /// Set every pane referencing `removed_session_id` to `None`. Returns true if
 /// at least one pane was modified.
 pub fn prune_session(grid: &mut GridNode, removed_session_id: &str) -> bool {
@@ -1090,6 +1128,37 @@ mod tests {
         .expect("insert");
         assert!(matches!(grid, GridNode::Pane { pane_id, session_id }
                           if pane_id == "dst" && session_id.as_deref() == Some("ss")));
+    }
+
+    #[test]
+    fn swap_pane_sessions_preserves_topology_and_pane_ids() {
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            pane("left", Some("s-left")),
+            split(
+                Vertical,
+                0.5,
+                pane("top-right", Some("s-top")),
+                pane("bottom-right", Some("s-bottom")),
+            ),
+        );
+        swap_pane_sessions(&mut grid, "left", "bottom-right").expect("swap");
+        assert!(matches!(&grid, GridNode::Split { first, second, .. }
+            if matches!(&**first, GridNode::Pane { pane_id, session_id }
+                if pane_id == "left" && session_id.as_deref() == Some("s-bottom"))
+            && matches!(&**second, GridNode::Split { first, second, .. }
+                if matches!(&**first, GridNode::Pane { pane_id, session_id }
+                    if pane_id == "top-right" && session_id.as_deref() == Some("s-top"))
+                && matches!(&**second, GridNode::Pane { pane_id, session_id }
+                    if pane_id == "bottom-right" && session_id.as_deref() == Some("s-left")))));
+    }
+
+    #[test]
+    fn swap_pane_sessions_reports_missing_pane() {
+        let mut grid = pane("only", Some("s1"));
+        let err = swap_pane_sessions(&mut grid, "only", "missing").expect_err("missing pane");
+        assert!(err.to_string().contains("pane not found: missing"));
     }
 
     #[test]
