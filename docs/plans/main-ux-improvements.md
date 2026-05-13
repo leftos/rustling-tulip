@@ -9,6 +9,8 @@ orientation, and reducing repeated-session friction.
 
 - Make session lifecycle actions predictable and recoverable.
 - Keep session identity stable even when terminals emit noisy titles.
+- Let users visually identify important shells with quick preset colors or a
+  custom color.
 - Reduce the chance of launching an agent with more authority than intended.
 - Make the common launch path fast without hiding advanced control.
 - Make non-repo shell launches cheap for a default folder and precise for any
@@ -112,9 +114,18 @@ renames the session to that value.
 - [ ] Update `sessionDisplayLabel` and all callers to use the new hierarchy.
 - [ ] Ensure custom rename still wins over daemon-generated and terminal titles.
 - [ ] Review sidebar row truncation so the canonical label remains readable.
+- [ ] Add a per-session color setting that applies to that shell's pane gutter
+      and sidebar tree row.
+- [ ] Offer 12 default color swatches for fast assignment plus a custom color
+      picker.
+- [ ] Persist the chosen color with the session record and restore it after
+      daemon/app restart.
 - [ ] Add e2e coverage: an emitted `cmd.exe` terminal title does not replace
       the primary repo/branch label.
 - [ ] Add e2e coverage: a user rename becomes the primary label everywhere.
+- [ ] Add e2e coverage: assigning a preset color updates the pane gutter and
+      sidebar tree row.
+- [ ] Add e2e coverage: a custom color survives session refresh/reload.
 
 ## Phase 3 - Safer spawn defaults and authority visibility
 
@@ -239,6 +250,8 @@ compact but need consistent labels, accessible names, and grouping.
       component, without adding a dependency unless justified.
 - [ ] Group pane actions visually: split, move/pop-out, close.
 - [ ] Prefer text labels for destructive or uncommon actions where space allows.
+- [ ] Make per-shell color controls discoverable from the session context menu
+      and session header without crowding common stop/split controls.
 - [ ] Make disabled toolbar actions visually and textually explain why they are
       disabled.
 - [ ] Ensure every icon-only button has a useful `aria-label` and tooltip.
