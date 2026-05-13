@@ -7,6 +7,7 @@
  * parts of the app (e.g. clicking "Open in source control" from a future
  * context menu) can switch sections without going through the bar.
  */
+import Icon, { type IconName } from "./Icon";
 
 export type ActivitySection = "sessions" | "source-control";
 
@@ -56,9 +57,7 @@ export default function ActivityBar({
         active={active}
         onSelect={onSelect}
         label="Sessions"
-        // List icon (three horizontal bars). Plain Unicode glyph so we don't
-        // pull in an icon library for two icons.
-        glyph="☰"
+        icon="sessions"
         badge={0}
       />
       <ActivityButton
@@ -66,8 +65,7 @@ export default function ActivityBar({
         active={active}
         onSelect={onSelect}
         label="Source control"
-        // Branch glyph
-        glyph="⎇"
+        icon="sourceControl"
         badge={sourceControlBadge}
       />
     </nav>
@@ -79,7 +77,7 @@ interface ActivityButtonProps {
   active: ActivitySection;
   onSelect: (s: ActivitySection) => void;
   label: string;
-  glyph: string;
+  icon: IconName;
   badge: number;
 }
 
@@ -88,7 +86,7 @@ function ActivityButton({
   active,
   onSelect,
   label,
-  glyph,
+  icon,
   badge,
 }: ActivityButtonProps) {
   const isActive = section === active;
@@ -106,7 +104,7 @@ function ActivityButton({
       data-testid={`activity-btn-${section}`}
       onClick={() => onSelect(section)}
     >
-      <span aria-hidden="true">{glyph}</span>
+      <Icon name={icon} />
       {badgeText !== null && (
         <span
           className="activity-badge"

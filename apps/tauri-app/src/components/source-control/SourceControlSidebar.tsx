@@ -15,6 +15,7 @@ import type {
   RepoEntry,
 } from "../../types";
 import { clampMenuCoord, useEscape } from "../../utils/a11y";
+import Icon from "../Icon";
 import ResizableSplit from "../ResizableSplit";
 import ChangesTree, { type RowAction } from "./ChangesTree";
 import DiscardConfirmDialog from "./DiscardConfirmDialog";
@@ -132,7 +133,7 @@ export default function SourceControlSidebar({
               title="Refresh status and history"
               data-testid="source-control-refresh"
             >
-              ↻
+              <Icon name="refresh" />
             </button>
             {repos.length > 1 && (
               <select

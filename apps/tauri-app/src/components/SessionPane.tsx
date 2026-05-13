@@ -19,6 +19,7 @@ import {
 import SessionContextMenu, {
   type SessionContextMenuState,
 } from "./SessionContextMenu";
+import Icon from "./Icon";
 import Terminal from "./Terminal";
 
 /// True when running inside any pop-out window (single-session
@@ -325,53 +326,73 @@ export default function SessionPane({
                   className="session-actions-divider"
                   aria-hidden="true"
                 />
-                {onSplitRight && (
-                  <button
-                    type="button"
-                    className="session-action-icon"
-                    onClick={onSplitRight}
-                    title="Split right (Shift+click: split left)"
-                    aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
-                    data-testid="pane-split-right"
+                {(onSplitRight || onSplitDown) && (
+                  <span
+                    className="session-action-group"
+                    role="group"
+                    aria-label="Split pane"
                   >
-                    {"▶|"}
-                  </button>
-                )}
-                {onSplitDown && (
-                  <button
-                    type="button"
-                    className="session-action-icon"
-                    onClick={onSplitDown}
-                    title="Split down (Shift+click: split up)"
-                    aria-label="Split pane vertically; hold Shift to place the new pane on top"
-                    data-testid="pane-split-down"
-                  >
-                    {"▼="}
-                  </button>
+                    {onSplitRight && (
+                      <button
+                        type="button"
+                        className="session-action-icon"
+                        onClick={onSplitRight}
+                        title="Split right (Shift+click: split left)"
+                        aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+                        data-testid="pane-split-right"
+                      >
+                        <Icon name="splitRight" />
+                      </button>
+                    )}
+                    {onSplitDown && (
+                      <button
+                        type="button"
+                        className="session-action-icon"
+                        onClick={onSplitDown}
+                        title="Split down (Shift+click: split up)"
+                        aria-label="Split pane vertically; hold Shift to place the new pane on top"
+                        data-testid="pane-split-down"
+                      >
+                        <Icon name="splitDown" />
+                      </button>
+                    )}
+                  </span>
                 )}
                 {onExtractToTab && (
-                  <button
-                    type="button"
-                    className="session-action-icon"
-                    onClick={onExtractToTab}
-                    title="Move this pane to a new tab"
-                    aria-label="Move pane to a new tab"
-                    data-testid="pane-extract"
+                  <span
+                    className="session-action-group"
+                    role="group"
+                    aria-label="Move pane"
                   >
-                    ↗
-                  </button>
+                    <button
+                      type="button"
+                      className="session-action-icon"
+                      onClick={onExtractToTab}
+                      title="Move this pane to a new tab"
+                      aria-label="Move pane to a new tab"
+                      data-testid="pane-extract"
+                    >
+                      <Icon name="extract" />
+                    </button>
+                  </span>
                 )}
                 {onClosePane && (
-                  <button
-                    type="button"
-                    className="session-action-icon session-action-close"
-                    onClick={onClosePane}
-                    title="Close pane"
+                  <span
+                    className="session-action-group"
+                    role="group"
                     aria-label="Close pane"
-                    data-testid="pane-close"
                   >
-                    ×
-                  </button>
+                    <button
+                      type="button"
+                      className="session-action-icon session-action-close"
+                      onClick={onClosePane}
+                      title="Close pane"
+                      aria-label="Close pane"
+                      data-testid="pane-close"
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </span>
                 )}
               </>
             )}

@@ -262,15 +262,18 @@ compact but need consistent labels, accessible names, and grouping.
       sidebar rows, source-control rows, and pop-out windows.
 - [ ] Replace ASCII glyphs with a consistent icon set or a local minimal icon
       component, without adding a dependency unless justified.
-- [ ] Group pane actions visually: split, move/pop-out, close.
+- [x] Replace activity-bar and pane split/extract/close glyphs with local SVG
+      icons.
+- [x] Group pane actions visually: split, move/pop-out, close.
 - [ ] Prefer text labels for destructive or uncommon actions where space allows.
 - [x] Make per-shell color controls discoverable from the session context menu
       and session header without crowding common stop/split controls.
 - [ ] Make disabled toolbar actions visually and textually explain why they are
       disabled.
 - [ ] Ensure every icon-only button has a useful `aria-label` and tooltip.
-- [ ] Add e2e/a11y assertions for accessible names on icon-only controls.
-- [ ] Capture before/after screenshots for normal and small-pane headers.
+- [x] Add e2e/a11y assertions for accessible names on activity and pane
+      icon-only controls.
+- [x] Capture screenshots for normal and small-pane headers.
 
 ## Phase 7 - Undo and recovery shelf
 

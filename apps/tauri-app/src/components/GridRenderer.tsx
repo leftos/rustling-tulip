@@ -21,6 +21,7 @@ import {
 import { collectPanes } from "../utils/grid";
 import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
+import Icon from "./Icon";
 import PaneCloseDialog from "./PaneCloseDialog";
 
 const DRAG_MIME = "text/x-rt-pane";
@@ -461,38 +462,41 @@ function PaneChrome(props: PaneChromeProps) {
             title="Drag pane to move"
             aria-hidden="true"
           >
-            ⠿
+            <Icon name="drag" />
           </span>
           <button
             type="button"
             className="grid-pane-btn"
             title="Split right (Shift+click: split left)"
             aria-label="Split pane horizontally; hold Shift to place the new pane on the left"
+            data-testid="grid-pane-split-right"
             onClick={(e) =>
               sendSplit("horizontal", e.shiftKey ? "first" : "second")
             }
           >
-            ▶|
+            <Icon name="splitRight" />
           </button>
           <button
             type="button"
             className="grid-pane-btn"
             title="Split down (Shift+click: split up)"
             aria-label="Split pane vertically; hold Shift to place the new pane on top"
+            data-testid="grid-pane-split-down"
             onClick={(e) =>
               sendSplit("vertical", e.shiftKey ? "first" : "second")
             }
           >
-            ▼=
+            <Icon name="splitDown" />
           </button>
           <button
             type="button"
             className="grid-pane-btn grid-pane-btn-close"
             title="Close pane"
             aria-label="Close pane"
+            data-testid="grid-pane-close"
             onClick={onClose}
           >
-            ×
+            <Icon name="close" />
           </button>
         </div>
       )}

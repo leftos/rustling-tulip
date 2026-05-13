@@ -231,6 +231,16 @@ button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg-elev), 0 0 0 4px var(--accent);
 }
+.rt-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
 
 .app-root {
   height: 100%;
@@ -254,6 +264,9 @@ button:focus-visible {
 }
 .activity-btn {
   position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: 0;
   color: var(--fg-dim);
@@ -276,6 +289,10 @@ button:focus-visible {
 .activity-btn:focus-visible {
   outline: none;
   box-shadow: inset 2px 0 0 var(--accent), inset 0 0 0 1px var(--border-strong);
+}
+.activity-btn .rt-icon {
+  width: 18px;
+  height: 18px;
 }
 .activity-badge {
   position: absolute;
@@ -334,6 +351,9 @@ button:focus-visible {
   min-width: 0;
 }
 .source-control-refresh-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
   width: 24px;
   height: 24px;
@@ -1849,14 +1869,25 @@ button.tree-tab-pill:hover {
   margin: 2px 4px;
   background: var(--border);
 }
+.session-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+}
 .session-actions .session-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 26px;
-  padding: 3px 6px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.2;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border-color: transparent;
   color: var(--fg-muted);
-  letter-spacing: -0.5px;
 }
 .session-actions .session-action-icon:hover {
   color: var(--fg);
@@ -2785,12 +2816,15 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   z-index: 2;
 }
 .grid-pane-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
   background: var(--bg-elev2);
   border: 1px solid var(--border);
   color: var(--fg-muted);
-  padding: 2px 6px;
-  font-size: 11px;
-  line-height: 1.2;
+  padding: 0;
   border-radius: 3px;
   cursor: pointer;
 }
@@ -2816,6 +2850,10 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   border-radius: 3px;
   cursor: grab;
   user-select: none;
+}
+.grid-pane-drag .rt-icon {
+  width: 13px;
+  height: 13px;
 }
 .grid-pane-drag:active {
   cursor: grabbing;
