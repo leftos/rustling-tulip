@@ -52,6 +52,7 @@ export interface SessionSnapshot {
   workspace_id: string | null;
   terminal_title?: string | null;
   accent_color?: string | null;
+  elevated_authority?: boolean;
 }
 
 export type SplitDirection = "horizontal" | "vertical";

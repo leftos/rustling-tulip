@@ -200,6 +200,7 @@ export default function SessionPane({
       data-session-status={session.status}
       data-session-mode={session.mode}
       data-session-color={accentColor ?? ""}
+      data-session-elevated={session.elevated_authority ? "true" : "false"}
     >
       {!hideHeader && (
         <header
@@ -246,6 +247,15 @@ export default function SessionPane({
                 data-testid="session-runtime-chip"
               >
                 {runtimeLabel}
+              </span>
+            )}
+            {session.elevated_authority && (
+              <span
+                className="chip session-authority-chip"
+                title="Trusted launch: permission prompts were bypassed"
+                data-testid="session-authority-badge"
+              >
+                trusted
               </span>
             )}
             {modeSuffix && (

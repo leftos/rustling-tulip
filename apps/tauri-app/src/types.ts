@@ -108,6 +108,9 @@ export interface SessionSnapshot {
   // Optional user-chosen accent color (#RRGGBB) for the session pane gutter
   // and sidebar row. null means the session uses the default theme accent.
   accent_color: string | null;
+  // True when the session was launched with approvals/permission prompts
+  // bypassed. Drives visible trusted-launch badges after spawn.
+  elevated_authority: boolean;
   // True when the session was spawned with use_worktree=true (per-session
   // worktree under <repo>.wt/<branch>). Drives the close-context-menu's
   // "delete worktree" choice. false for orphans whose stored spawn config

@@ -1249,6 +1249,7 @@ function SessionLeaf(p: SessionLeafProps) {
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
     accentColor ? "has-session-accent" : "",
+    s.elevated_authority ? "has-elevated-authority" : "",
     paneDraggable ? "is-draggable" : "",
     p.isDraggingForReorder ? "is-dragging" : "",
     p.reorderDropSide === "before" ? "drop-before" : "",
@@ -1282,6 +1283,7 @@ function SessionLeaf(p: SessionLeafProps) {
         data-session-status={s.status}
         data-session-agent={s.agent}
         data-session-color={accentColor ?? ""}
+        data-session-elevated={s.elevated_authority ? "true" : "false"}
         data-tab-binding-count={bindings.length}
       >
         {isPlainShell ? (
@@ -1319,6 +1321,15 @@ function SessionLeaf(p: SessionLeafProps) {
             </span>
           );
         })()}
+        {s.elevated_authority && (
+          <span
+            className="tree-kind-tag session-authority-tag"
+            title="Trusted launch: permission prompts were bypassed"
+            data-testid="session-authority-badge"
+          >
+            trusted
+          </span>
+        )}
         {p.needsAttention && <span className="badge badge-warn small">!</span>}
         {s.is_orphan && (
           <span className="list-item-meta" title="Reattached after daemon restart; PTY detached">

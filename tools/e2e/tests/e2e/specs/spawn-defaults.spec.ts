@@ -8,7 +8,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
+import type {
+  DaemonMessage,
+  RepoEntry,
+  SessionSnapshot,
+} from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -22,6 +26,7 @@ describe("spawn defaults", function () {
   let ws: DaemonWsClient | null = null;
   let fixtureRepo: string | null = null;
   let registeredRepoId: string | null = null;
+  const spawnedSessionIds: string[] = [];
 
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
@@ -54,6 +59,18 @@ describe("spawn defaults", function () {
   });
 
   after(async function () {
+    if (ws) {
+      for (const sessionId of [...spawnedSessionIds].reverse()) {
+        try {
+          ws.send({ type: "stop_session", session_id: sessionId, cleanup: [] });
+          await delay(500);
+          ws.send({ type: "discard_session", session_id: sessionId, cleanup: [] });
+          await delay(300);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
     if (ws && registeredRepoId) {
       try {
         ws.send({ type: "remove_repo", repo_id: registeredRepoId });
@@ -117,12 +134,75 @@ describe("spawn defaults", function () {
     await assertStoredSkipPermissionsDefault(true);
     await closeSpawnDialog();
   });
+
+  it("marks elevated sessions in the sidebar and pane header", async function () {
+    if (!ws || !registeredRepoId) throw new Error("setup failed");
+
+    await reloadAndWaitForRepo(registeredRepoId);
+
+    const spawnPromise = ws.waitFor(
+      (msg): msg is SessionUpdatedMessage =>
+        isSessionUpdated(msg) &&
+        msg.session.label === "trusted-launch-session" &&
+        msg.session.elevated_authority === true,
+      { timeoutMs: 15_000 },
+    );
+    ws.send({
+      type: "spawn_session",
+      label: "trusted-launch-session",
+      target: {
+        kind: "single",
+        repo_id: registeredRepoId,
+        branch_name: "main",
+        base_branch: null,
+        use_worktree: false,
+      },
+      mode: "interactive",
+      initial_prompt: null,
+      dangerously_skip_permissions: true,
+      agent: "claude",
+      model: null,
+      permission_mode: null,
+      codex_sandbox: null,
+      extra_env: [],
+      prompt_injector: null,
+    });
+
+    const session = (await spawnPromise).session;
+    spawnedSessionIds.push(session.id);
+
+    const row = await sidebarRow(session.id);
+    expect(await row.getAttribute("data-session-elevated")).to.equal("true");
+    const rowBadge = await row.$('[data-testid="session-authority-badge"]');
+    await rowBadge.waitForExist({ timeout: 5_000 });
+    expect((await rowBadge.getText()).toLowerCase()).to.include("trusted");
+
+    await row.click();
+    const pane = await sessionPane(session.id);
+    expect(await pane.getAttribute("data-session-elevated")).to.equal("true");
+    const paneBadge = await pane.$('[data-testid="session-authority-badge"]');
+    await paneBadge.waitForExist({ timeout: 5_000 });
+    expect((await paneBadge.getText()).toLowerCase()).to.include("trusted");
+
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "spawn-elevated-session-badge.png"),
+    );
+  });
 });
 
 function isRepos(
   m: DaemonMessage,
 ): m is DaemonMessage & { type: "repos"; repos: RepoEntry[] } {
   return m.type === "repos";
+}
+
+type SessionUpdatedMessage = DaemonMessage & {
+  type: "session_updated";
+  session: SessionSnapshot;
+};
+
+function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {
+  return msg.type === "session_updated";
 }
 
 function runGit(cwd: string, args: string[]): void {
@@ -203,6 +283,22 @@ async function closeSpawnDialog(): Promise<void> {
   await close.click();
   const dialog = await browser.$('[data-testid="spawn-dialog"]');
   await dialog.waitForExist({ timeout: 5_000, reverse: true });
+}
+
+async function sidebarRow(sessionId: string) {
+  const row = await browser.$(
+    `[data-testid="sidebar-session"][data-session-id="${sessionId}"]`,
+  );
+  await row.waitForExist({ timeout: 10_000 });
+  return row;
+}
+
+async function sessionPane(sessionId: string) {
+  const pane = await browser.$(
+    `[data-testid="session-pane"][data-session-id="${sessionId}"]`,
+  );
+  await pane.waitForExist({ timeout: 10_000 });
+  return pane;
 }
 
 async function assertStoredSkipPermissionsDefault(expected: boolean): Promise<void> {

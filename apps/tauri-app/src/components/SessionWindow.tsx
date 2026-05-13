@@ -86,6 +86,15 @@ export default function SessionWindow({
             </span>
           ) : null;
         })()}
+        {session.elevated_authority && (
+          <span
+            className="chip session-authority-chip"
+            title="Trusted launch: permission prompts were bypassed"
+            data-testid="session-authority-badge"
+          >
+            trusted
+          </span>
+        )}
         {session.mode === "headless" && (
           <span className="session-window-meta">· headless</span>
         )}

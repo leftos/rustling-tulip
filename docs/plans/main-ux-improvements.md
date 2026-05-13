@@ -151,13 +151,13 @@ be honored, but new defaults should not silently grant broad authority.
       compatibility logic.
 - [x] Add a clear "trusted launch" visual state when skip-permissions/yolo is
       enabled in the spawn dialog.
-- [ ] Add a session header/sidebar badge for sessions launched with elevated
+- [x] Add a session header/sidebar badge for sessions launched with elevated
       authority.
 - [ ] Reword Claude and Codex permission labels into a consistent vocabulary.
 - [ ] Decide whether "launch last" can replay elevated authority without
       confirmation; document and implement the rule.
 - [x] Add e2e coverage for default setting on a fresh config dir.
-- [ ] Add e2e coverage that elevated sessions show a visible badge.
+- [x] Add e2e coverage that elevated sessions show a visible badge.
 
 ## Phase 4 - Faster common spawn path
 

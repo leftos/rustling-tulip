@@ -261,6 +261,12 @@ pub struct SessionSnapshot {
     /// pane gutter and sidebar row. `None` means use the default theme accent.
     #[serde(default)]
     pub accent_color: Option<String>,
+    /// True when the session was launched with approvals/permission prompts
+    /// bypassed (`--dangerously-skip-permissions` for Claude or `--yolo` for
+    /// Codex). Clients use this to keep elevated authority visible after the
+    /// spawn dialog closes.
+    #[serde(default)]
+    pub elevated_authority: bool,
     /// True when the session was spawned with `use_worktree = true`, i.e.
     /// the daemon created (or reused) a per-session git worktree under
     /// `<repo>.wt/<branch>`. Drives the close-context-menu's "delete

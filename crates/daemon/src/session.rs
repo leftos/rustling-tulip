@@ -149,6 +149,10 @@ impl SessionRecord {
                     | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
                     protocol::SpawnTarget::Standalone { .. } => false,
                 });
+        let elevated_authority = self
+            .spawn_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.dangerously_skip_permissions);
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -168,6 +172,7 @@ impl SessionRecord {
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
             accent_color: self.accent_color.clone(),
+            elevated_authority,
             has_per_session_worktree,
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),

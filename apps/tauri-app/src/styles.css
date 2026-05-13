@@ -1014,6 +1014,11 @@ button.link.inline { display: inline; padding: 0 2px; }
   background: var(--accent-soft);
 }
 .tree-container.tree-container-unbound .tree-kind-tag { color: var(--fg-dim); }
+.tree-kind-tag.session-authority-tag {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 44%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
 .tree-label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--text-body);
@@ -1059,6 +1064,9 @@ button.link.inline { display: inline; padding: 0 2px; }
 }
 .tree-leaf.needs-attention.selected::before { background: var(--warn); }
 .tree-leaf.needs-attention .tree-label { color: var(--fg); }
+.tree-leaf.has-elevated-authority {
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+}
 .tree-leaf.is-orphan .tree-label {
   color: var(--fg-dim);
   font-style: italic;
@@ -1792,6 +1800,15 @@ button.tree-tab-pill:hover {
   border: 1px solid var(--border);
   text-transform: lowercase;
   font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.session-authority-chip {
+  padding: 1px 7px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 42%, transparent);
+  text-transform: lowercase;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 .session-color-picker {
