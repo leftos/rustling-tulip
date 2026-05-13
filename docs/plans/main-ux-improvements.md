@@ -297,6 +297,8 @@ actions that cannot be undone should remain explicit confirmations.
 - [x] Start with close-tab undo as the first reversible UI-state action.
 - [x] Extend undo to close pane.
 - [x] Extend undo to move pane.
+- [x] Add center-drop pane swap so two same-tab shell panes can exchange
+      placement without rebuilding the grid topology.
 - [x] Extend undo to remove session binding.
 - [x] Add an undo shelf/toast host that can show one or more recent actions.
 - [x] Keep enough local state to restore a closed tab without guessing.
@@ -307,6 +309,8 @@ actions that cannot be undone should remain explicit confirmations.
 - [x] Add e2e coverage: close tab then undo restores the tab and active state.
 - [x] Add e2e coverage: close pane then undo restores the pane layout.
 - [x] Add e2e coverage: move pane then undo restores source/destination tabs.
+- [x] Add e2e coverage: center-drop pane swap exchanges the two session
+      bindings, keeps pane ids stable, and shows the swap undo affordance.
 - [x] Add e2e coverage: bind unbound session then undo removes the pane
       binding.
 
