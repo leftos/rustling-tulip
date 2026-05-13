@@ -17,6 +17,7 @@ import {
   resolveFontSize,
   setTabFontSize,
 } from "../utils/fontSize";
+import Icon from "./Icon";
 
 interface Props {
   tabs: TabEntry[];
@@ -60,7 +61,8 @@ export default function TabBar({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   /// Tab id currently in two-state "confirm close" mode. Only one tab can
-  /// be armed at a time; clicking × on another tab resets the previous arm.
+  /// be armed at a time; clicking another tab's close button resets the
+  /// previous arm.
   const [confirmingCloseId, setConfirmingCloseId] = useState<string | null>(
     null,
   );
@@ -253,7 +255,7 @@ export default function TabBar({
       // Pane drop on a tab pill: route through `move_pane` with the
       // target tab's first leaf pane as the destination + edge=right
       // so the source becomes a new sibling pane on the right side.
-      // Pre-iter-45 the pill activated the target tab on dragenter but
+      // Previously the pill activated the target tab on dragenter but
       // silently dropped the gesture — users had to drag through the
       // pill to a pane in the activated tab, which was awkward when
       // the target tab was crowded or had no visible drop edge.
@@ -414,7 +416,9 @@ export default function TabBar({
                     }
                     onClick={(e) => onCloseTab(t.id, e)}
                   >
-                    {confirmingCloseId === t.id ? "✓?" : "×"}
+                    <Icon
+                      name={confirmingCloseId === t.id ? "confirm" : "close"}
+                    />
                   </button>
                 </>
               )}
@@ -426,10 +430,11 @@ export default function TabBar({
         type="button"
         className="tab-bar-new"
         title="New tab"
+        aria-label="New tab"
         onClick={onNewTab}
         data-testid="tab-bar-new"
       >
-        +
+        <Icon name="plus" />
       </button>
       {contextMenu && (
         <TabContextMenu

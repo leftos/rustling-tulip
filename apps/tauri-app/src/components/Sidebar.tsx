@@ -27,6 +27,7 @@ import { normalizeSessionColor, sessionAccentStyle } from "../utils/sessionColor
 import { copyToClipboard } from "../utils/clipboard";
 import { saveSettings, useSettings } from "../utils/settings";
 import DaemonFooter from "./DaemonFooter";
+import Icon from "./Icon";
 import SessionContextMenu, {
   type DuplicateTarget,
   type SessionContextMenuState,
@@ -64,7 +65,7 @@ interface Props {
   /// Used to compute and display which tab(s) each session is currently
   /// open in. A session leaf renders a `[T:<tab-name>]` pill when bound, or
   /// `[unbound]` when no pane references it. Drives the drag-source payload
-  /// in iter 5.B as well.
+  /// used by pane drops.
   tabs: TabEntry[];
   client: DaemonClient;
   /// Session ids visually highlighted in the tree because they appear in
@@ -112,7 +113,7 @@ interface Props {
   onLocalReorderSessions: (containerId: string, orderedIds: string[]) => void;
   onAddRepo: () => void;
   onRemoveRepo: (id: string) => void;
-  /// Called when the user clicks × on a repo that has live sessions.
+  /// Called when the user removes a repo that has live sessions.
   /// The app opens a confirmation modal with a 3-way choice
   /// (cancel / remove anyway / stop sessions and remove).
   onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
@@ -156,8 +157,8 @@ interface Props {
   onOpenStandaloneShellDialog: () => void;
   onRevealInExplorer: (path: string) => void;
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
-  /// Open the Settings modal (iter 49). Gear icon in the sidebar header
-  /// + Ctrl/Cmd+, in App-level keyboard shortcuts both invoke this.
+  /// Open the Settings modal. The sidebar header button and Ctrl/Cmd+,
+  /// App-level keyboard shortcut both invoke this.
   onOpenSettings: () => void;
 }
 
@@ -186,7 +187,7 @@ interface TreeContainer {
   /// multiple repos) and the detached pseudo-container.
   fsPath: string | null;
   sessions: SessionSnapshot[];
-  // True iff this container can be removed via the inline × button.
+  // True iff this container can be removed from its inline action.
   removable: boolean;
 }
 
@@ -481,7 +482,7 @@ export default function Sidebar(props: Props) {
           title="Settings (Ctrl+,)"
           data-testid="sidebar-settings-btn"
         >
-          ⚙
+          <Icon name="settings" />
         </button>
         <div
           className="sidebar-view-toggle"
@@ -1084,7 +1085,7 @@ function ContainerNode(p: ContainerNodeProps) {
             data-testid="container-launch-last-quick"
             onClick={onQuickLaunchLast}
           >
-            ▶
+            <Icon name="play" />
           </button>
         )}
         {c.removable && (
@@ -1115,7 +1116,7 @@ function ContainerNode(p: ContainerNodeProps) {
                 onRemoveClick();
               }}
             >
-              {confirming ? "✓?" : "×"}
+              <Icon name={confirming ? "confirm" : "close"} />
             </button>
             {confirming && (
               <button
@@ -1129,7 +1130,7 @@ function ContainerNode(p: ContainerNodeProps) {
                   setConfirming(false);
                 }}
               >
-                ⌫
+                <Icon name="close" />
               </button>
             )}
           </>
@@ -1161,7 +1162,7 @@ function ContainerNode(p: ContainerNodeProps) {
                   onStopAllDetached();
                 }}
               >
-                {confirmingStopAll ? "✓?" : "◼"}
+                <Icon name={confirmingStopAll ? "confirm" : "stop"} />
               </button>
               {confirmingStopAll && (
                 <button
@@ -1175,7 +1176,7 @@ function ContainerNode(p: ContainerNodeProps) {
                     setConfirmingStopAll(false);
                   }}
                 >
-                  ⌫
+                  <Icon name="close" />
                 </button>
               )}
             </>

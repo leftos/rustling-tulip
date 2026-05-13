@@ -150,6 +150,23 @@ describe("pane controls discoverability", function () {
     );
   });
 
+  it("names icon-only sidebar and tab controls", async function () {
+    await assertNamedIconButton('[data-testid="sidebar-settings-btn"]');
+    await assertNamedIconButton('[data-testid="tab-bar-new"]');
+    await assertNamedIconButton('[data-testid="tab-pill-close"]');
+
+    const sessionsButton = await browser.$('[data-testid="activity-btn-sessions"]');
+    await sessionsButton.click();
+    const containerViewButton = await browser.$(
+      '[data-testid="sidebar-view-container"]',
+    );
+    await containerViewButton.click();
+
+    await assertNamedIconButton('[data-testid="container-launch-last-quick"]');
+    await assertNamedIconButton('[data-testid="sidebar-remove-repo"]');
+    await assertNoTabBarOverflow();
+  });
+
   it("keeps pane controls legible after splitting into smaller panes", async function () {
     const splitRight = await browser.$('[data-testid="pane-split-right"]');
     await splitRight.click();
@@ -219,6 +236,25 @@ async function assertNoSessionHeaderOverflow(): Promise<void> {
       .filter((entry) => entry.scrollWidth > entry.clientWidth + 1);
   `)) as unknown as Array<{
     index: number;
+    clientWidth: number;
+    scrollWidth: number;
+  }>;
+  expect(overflow).to.deep.equal([]);
+}
+
+async function assertNoTabBarOverflow(): Promise<void> {
+  const overflow = (await browser.execute(`
+    return Array.from(document.querySelectorAll(".tab-bar, .tab-pill"))
+      .map((node, index) => ({
+        index,
+        className: node.className,
+        clientWidth: node.clientWidth,
+        scrollWidth: node.scrollWidth,
+      }))
+      .filter((entry) => entry.scrollWidth > entry.clientWidth + 1);
+  `)) as unknown as Array<{
+    index: number;
+    className: string;
     clientWidth: number;
     scrollWidth: number;
   }>;

@@ -926,7 +926,16 @@ button:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 .list-item-action {
-  background: none; border: none; color: var(--fg-dim); padding: 0 5px; cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  padding: 0 4px;
+  cursor: pointer;
   border-radius: 3px;
   transition: color var(--dur-fast) var(--ease-out),
               background var(--dur-fast) var(--ease-out);
@@ -947,7 +956,6 @@ button:focus-visible {
 .tree-row:hover .tree-launch-summary { color: var(--fg-muted); }
 .tree-launch-action {
   color: var(--fg-muted);
-  font-size: 11px;
   line-height: 1;
 }
 .tree-launch-action:hover {
@@ -1826,9 +1834,8 @@ button.tree-tab-pill:hover {
   display: flex; align-items: center; gap: var(--space-2);
   min-width: 0;
   flex: 1;
-  /* Member chips moved inline with the title (iter 51). Wrap when the
-   * chip count + label exceeds the pane width so narrow workspace panes
-   * don't truncate. */
+  /* Member chips wrap with the title when the chip count + label exceeds
+   * the pane width so narrow workspace panes don't truncate. */
   flex-wrap: wrap;
 }
 .session-title h2 {
@@ -2389,7 +2396,7 @@ button.tree-tab-pill:hover {
   flex: 1;
 }
 
-/* Settings modal (iter 49) — sectioned forms. Each `.settings-section`
+/* Settings modal — sectioned forms. Each `.settings-section`
  * is a logical grouping (Notifications / Sidebar / Spawn defaults) and
  * gets a dashed top divider after the first to keep the modal visually
  * scannable without per-section <fieldset> chrome. */
@@ -2438,14 +2445,22 @@ button.tree-tab-pill:hover {
 /* Gear icon button in the sidebar header. Quiet baseline (matches the
  * brand row's typography), lights up on hover/focus. */
 .sidebar-settings-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: none;
   color: var(--fg-muted);
   cursor: pointer;
-  font-size: 14px;
-  padding: 0 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   line-height: 1;
   border-radius: 3px;
+}
+.sidebar-settings-btn .rt-icon {
+  width: 15px;
+  height: 15px;
 }
 .sidebar-settings-btn:hover,
 .sidebar-settings-btn:focus-visible { color: var(--fg); background: var(--bg-elev2); }
@@ -2723,12 +2738,16 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   max-width: 180px;
 }
 .tab-pill-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
   background: none;
   border: none;
   color: var(--fg-dim);
-  font-size: 16px;
   line-height: 1;
-  padding: 0 4px;
+  padding: 0;
   cursor: pointer;
   border-radius: 3px;
 }
@@ -2737,12 +2756,15 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--err);
 }
 .tab-bar-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: transparent;
   border: none;
   color: var(--fg-muted);
-  padding: 0 12px;
+  width: 38px;
+  padding: 0;
   cursor: pointer;
-  font-size: 16px;
 }
 .tab-bar-new:hover {
   background: var(--bg-elev2);
@@ -2805,8 +2827,7 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 }
 /* Floating chrome bar — only rendered for empty panes now. Sessions
    render the equivalent controls inline inside .session-actions, which
-   eliminates the old hover-overlap between the floating "× ▼= ▶|"
-   group and the session header's Pop-out / Stop buttons. */
+   avoids hover-overlap with the session header buttons. */
 .grid-pane-controls {
   position: absolute;
   top: 4px;

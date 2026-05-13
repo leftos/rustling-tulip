@@ -264,6 +264,8 @@ compact but need consistent labels, accessible names, and grouping.
       component, without adding a dependency unless justified.
 - [x] Replace activity-bar and pane split/extract/close glyphs with local SVG
       icons.
+- [x] Replace sidebar container action and tab close/new glyphs with local SVG
+      icons.
 - [x] Group pane actions visually: split, move/pop-out, close.
 - [ ] Prefer text labels for destructive or uncommon actions where space allows.
 - [x] Make per-shell color controls discoverable from the session context menu
