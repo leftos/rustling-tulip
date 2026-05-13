@@ -129,6 +129,26 @@ fn locate_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
 }
 
 fn locate_tracer_template() -> anyhow::Result<PathBuf> {
+    // Preferred: the directory Tauri's supervisor told us holds the original
+    // templates. Required when the daemon is running from
+    // `<binaries_dir>/rustling-tulipd-<hash>.exe` (the post-cache layout),
+    // because the tracer template lives in the install dir / target dir, not
+    // next to the cached daemon.
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_BIN_TEMPLATES")
+        && !value.is_empty()
+    {
+        let candidate = PathBuf::from(value).join(tracer_exe_name());
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        return Err(anyhow!(
+            "rt-tracer not found at RUSTLING_TULIP_BIN_TEMPLATES location: {}",
+            candidate.display()
+        ));
+    }
+
+    // Fallback: direct `cargo run -p daemon` (no supervisor). The daemon was
+    // launched from `target/<profile>/` and rt-tracer.exe sits next to it.
     let current = std::env::current_exe().context("locating daemon exe")?;
     let dir = current
         .parent()
@@ -138,7 +158,7 @@ fn locate_tracer_template() -> anyhow::Result<PathBuf> {
         return Ok(candidate);
     }
     Err(anyhow!(
-        "rt-tracer binary not found next to daemon: {}",
+        "rt-tracer binary not found (no RUSTLING_TULIP_BIN_TEMPLATES, sibling lookup missed): {}",
         candidate.display()
     ))
 }

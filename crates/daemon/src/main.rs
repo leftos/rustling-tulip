@@ -89,24 +89,19 @@ fn sweep_binary_cache(
 ) {
     let mut in_use: HashSet<PathBuf> = HashSet::new();
 
-    // The daemon's own running exe — copy it into the cache (so it gets
-    // hashed and tracked) and pin it for retain. Failure here is non-fatal:
-    // we just won't prune anything, which is the safe default.
-    match std::env::current_exe()
-        .context("locating current daemon exe for cache GC")
-        .and_then(|exe| {
-            let stem = exe
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("rustling-tulipd")
-                .to_string();
-            binary_cache::ensure_cached(&exe, &dirs.binaries_dir, &stem)
-        }) {
-        Ok(cached) => {
-            in_use.insert(cached);
+    // Pin the daemon's own running exe. Tauri spawned us from a cached copy
+    // (`<binaries_dir>/rustling-tulipd-<hash>.exe`), so current_exe() is
+    // already a cache entry — including it here keeps GC from deleting the
+    // file out from under our process. If the daemon was started directly
+    // from `target/<profile>/rustling-tulipd.exe` (dev `cargo run`), the
+    // path is outside `binaries_dir` and GC simply doesn't see it; pinning
+    // a non-cache path is harmless.
+    match std::env::current_exe().context("locating current daemon exe for cache GC") {
+        Ok(exe) => {
+            in_use.insert(exe);
         }
         Err(err) => {
-            tracing::warn!(?err, "cache GC: skipping daemon exe pin");
+            tracing::warn!(?err, "cache GC: could not pin daemon exe");
         }
     }
 

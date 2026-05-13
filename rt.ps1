@@ -189,7 +189,12 @@ function Stop-DaemonProcesses {
         [string]$Reason,
         [string[]]$Names = @($ImageName)
     )
-    $targetNames = $Names
+    # Append `*` so cached binary copies (`rustling-tulipd-<hash>.exe`,
+    # `rt-tracer-<hash>.exe`) are caught alongside the original templates.
+    # Tauri/the daemon spawn from the content-addressed binary cache (see
+    # crates/daemon/src/binary_cache.rs), so the running ProcessName has a
+    # hash suffix and an exact-match `-Name rustling-tulipd` misses it.
+    $targetNames = @($Names | ForEach-Object { "$_*" })
     $processes = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
     if ($processes.Count -eq 0) {
         return $false

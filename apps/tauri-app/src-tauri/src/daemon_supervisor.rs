@@ -65,7 +65,15 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
     reap_orphan_daemons().await;
 
     info!(template = ?template, cached = ?bin, "spawning daemon from cache");
-    spawn_daemon(&bin)?;
+    // The daemon needs to find rt-tracer.exe to spawn supervisors. Once we
+    // start running it from the cache dir, the "sibling of current_exe()"
+    // lookup no longer points at the install/target dir where rt-tracer is
+    // shipped. Tell the daemon where the templates actually live.
+    let template_dir = template
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "template has no parent dir".to_string())?;
+    spawn_daemon(&bin, &template_dir)?;
 
     wait_for_handshake().await
 }
@@ -262,11 +270,12 @@ fn hash_prefix(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-fn spawn_daemon(bin: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
     let mut cmd = Command::new(bin);
+    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -280,8 +289,9 @@ fn spawn_daemon(bin: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn spawn_daemon(bin: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result<(), String> {
     let mut cmd = Command::new(bin);
+    cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
