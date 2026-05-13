@@ -32,6 +32,7 @@ const repoRoot = resolve(here, "..", "..");
 const testConfigDir = join(repoRoot, ".tmp", "e2e", "config");
 mkdirSync(testConfigDir, { recursive: true });
 process.env["RUSTLING_TULIP_CONFIG_DIR"] = testConfigDir;
+process.env["VITE_RT_E2E"] = "1";
 
 // Resolve the fake-claude shim once. The daemon's `claude_program()` honors
 // RUSTLING_TULIP_CLAUDE; on Windows we point it at the .cmd shim, on POSIX

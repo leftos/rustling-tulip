@@ -1,6 +1,4 @@
 /**
- * Phase A of the Source Control sidebar (`docs/plans/source-control-sidebar.md`).
- *
  * The per-session `Terminal | Git` toggle is gone; git access now happens
  * through an activity-bar-driven global sidebar. This spec confirms:
  *
@@ -9,8 +7,8 @@
  *      one disappears).
  *   3. The selection is persisted to localStorage (re-reading after switch
  *      returns "source-control").
- *   4. With a repo registered, the SourceControlSidebar's Changes tab is the
- *      default and the active-repo line names the registered repo.
+ *   4. With a repo registered, the SourceControlSidebar renders Changes and
+ *      History in one split sidebar and the active-repo line names the repo.
  *
  * The actual git data fetch (repo_status round-trip) is exercised through
  * existing daemon-side coverage; this spec is about the UI host swap.
@@ -30,7 +28,7 @@ import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
 
-describe("source-control sidebar (Phase A)", function () {
+describe("source-control sidebar", function () {
   this.timeout(180_000);
 
   let ws: DaemonWsClient | null = null;
@@ -55,6 +53,7 @@ describe("source-control sidebar (Phase A)", function () {
     await browser.execute(() => {
       try {
         localStorage.removeItem("rt.activity");
+        localStorage.removeItem("rt.sourceControl.repoOverride");
       } catch {
         /* unavailable */
       }
@@ -93,16 +92,16 @@ describe("source-control sidebar (Phase A)", function () {
     const sessionsBtn = await browser.$("[data-testid=activity-btn-sessions]");
     const scBtn = await browser.$("[data-testid=activity-btn-source-control]");
 
-    expect(await sessionsBtn.isExisting()).to.be.true;
-    expect(await scBtn.isExisting()).to.be.true;
+    expect(await sessionsBtn.isExisting()).to.equal(true);
+    expect(await scBtn.isExisting()).to.equal(true);
     expect(await sessionsBtn.getAttribute("aria-selected")).to.equal("true");
     expect(await scBtn.getAttribute("aria-selected")).to.equal("false");
 
     // The Sessions sidebar should be rendering, not the source-control one.
     const sidebar = await browser.$("[data-testid=sidebar]");
-    expect(await sidebar.isExisting()).to.be.true;
+    expect(await sidebar.isExisting()).to.equal(true);
     const sc = await browser.$("[data-testid=source-control-sidebar]");
-    expect(await sc.isExisting()).to.be.false;
+    expect(await sc.isExisting()).to.equal(false);
   });
 
   it("clicking Source Control swaps the sidebar and persists the choice", async function () {
@@ -119,7 +118,9 @@ describe("source-control sidebar (Phase A)", function () {
     const sc = await browser.$("[data-testid=source-control-sidebar]");
     await sc.waitForExist({ timeout: 5_000 });
     const sidebar = await browser.$("[data-testid=sidebar]");
-    expect(await sidebar.isExisting(), "Sessions sidebar hidden").to.be.false;
+    expect(await sidebar.isExisting(), "Sessions sidebar hidden").to.equal(
+      false,
+    );
 
     // Persisted to localStorage under the documented key.
     const stored = (await browser.execute(
@@ -128,23 +129,28 @@ describe("source-control sidebar (Phase A)", function () {
     expect(stored).to.equal("source-control");
   });
 
-  it("source-control sidebar shows the registered repo + Changes tab by default", async function () {
+  it("source-control sidebar shows the registered repo with changes and history together", async function () {
     const sc = await browser.$("[data-testid=source-control-sidebar]");
-    expect(await sc.isExisting()).to.be.true;
+    expect(await sc.isExisting()).to.equal(true);
 
     // Active-repo header should name the fixture.
-    const headerText = await sc.getText();
-    expect(headerText).to.include("rt-e2e-scsidebar");
+    const activeRepo = await browser.$("[data-testid=source-control-active-repo]");
+    await activeRepo.waitForExist({ timeout: 5_000 });
+    expect(await activeRepo.getText()).to.include("rt-e2e-scsidebar");
 
-    // Changes tab is the default selected one.
-    const changesTab = await browser.$(
-      "[data-testid=source-control-tab-changes]",
+    const tabControls = await browser.$$(
+      "[data-testid=source-control-tab-changes], [data-testid=source-control-tab-history]",
     );
-    const historyTab = await browser.$(
-      "[data-testid=source-control-tab-history]",
-    );
-    expect(await changesTab.getAttribute("class")).to.match(/active/);
-    expect(await historyTab.getAttribute("class")).to.not.match(/active/);
+    expect(await tabControls.length).to.equal(0);
+
+    const changes = await browser.$("[data-testid=source-control-changes-list]");
+    await changes.waitForExist({ timeout: 5_000 });
+
+    const history = await browser.$("[data-testid=source-control-history-list]");
+    await history.waitForExist({ timeout: 5_000 });
+    const changesLocation = await changes.getLocation();
+    const historyLocation = await history.getLocation();
+    expect(historyLocation.y).to.be.greaterThan(changesLocation.y);
 
     // Working tree clean → the empty state copy renders.
     await browser.waitUntil(
@@ -157,6 +163,9 @@ describe("source-control sidebar (Phase A)", function () {
         timeoutMsg: "changes list never showed working-tree-clean",
       },
     );
+
+    const historyRow = await browser.$("[data-testid=source-control-history-row]");
+    await historyRow.waitForExist({ timeout: 5_000 });
   });
 
   it("the in-pane Terminal/Git toggle is gone (no session-view-git testid anywhere)", async function () {

@@ -336,24 +336,9 @@ button:focus-visible {
   text-transform: none;
   letter-spacing: 0;
 }
-.source-control-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--border);
-}
-.source-control-tabs .tab {
-  flex: 1;
-  background: transparent;
-  border: 0;
-  color: var(--fg-muted);
-  padding: 6px 8px;
-  font-size: 12px;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-}
-.source-control-tabs .tab:hover { color: var(--fg); }
-.source-control-tabs .tab.active {
-  color: var(--fg);
-  border-bottom-color: var(--accent);
+.source-control > .split {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .source-control-list { padding: 4px 0; }
 .source-control > .empty { padding: 12px 14px; }
@@ -369,6 +354,10 @@ button:focus-visible {
 .changes-tree-folder .tree-label { color: var(--fg); }
 .changes-tree-file .tree-label { color: var(--fg-muted); }
 .changes-tree-file.selected .tree-label { color: var(--fg); }
+.changes-tree .tree-row.selected {
+  background: var(--bg-elev2);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .changes-tree-folder .list-item-meta {
   margin-left: auto;
   padding-right: 6px;
@@ -645,6 +634,29 @@ button:focus-visible {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+.source-control-history-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.source-control-history-panel > .split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.source-control-section-title {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 /* Inline error banner above the changes list. */

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { CodexSandbox, PermissionMode } from "../types";
 
+const DISABLE_NOTIFICATIONS = import.meta.env["VITE_RT_E2E"] === "1";
+
 /// User-facing preferences persisted via localStorage. Stored as a single
 /// JSON-serialised object under `STORAGE_KEY` so loading is atomic. The
 /// shape carries an explicit `version` so we can migrate cleanly later
@@ -68,9 +70,9 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   version: 1,
   notifications: {
-    awaiting_input: true,
-    stopped: true,
-    error: true,
+    awaiting_input: !DISABLE_NOTIFICATIONS,
+    stopped: !DISABLE_NOTIFICATIONS,
+    error: !DISABLE_NOTIFICATIONS,
   },
   sidebar: {
     default_view: "container",
@@ -164,8 +166,9 @@ function mergeWithDefaults(partial: Partial<Settings>): Settings {
   return {
     version: 1,
     notifications: {
-      ...def.notifications,
-      ...partial.notifications,
+      ...(DISABLE_NOTIFICATIONS
+        ? def.notifications
+        : { ...def.notifications, ...partial.notifications }),
     },
     sidebar: {
       ...def.sidebar,

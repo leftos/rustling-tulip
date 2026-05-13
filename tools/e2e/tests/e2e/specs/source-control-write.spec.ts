@@ -1,15 +1,13 @@
 /**
- * Phase C of the Source Control sidebar (`docs/plans/source-control-sidebar.md`).
- *
  * Exercises the stage / unstage / commit round-trip end-to-end:
  *
  *   1. Make an unstaged change in a fixture repo.
  *   2. Request `repo_status`; expect the change to land in `worktree_changes`.
- *   3. Stage via the UI (per-row "+" button); expect the file to flip into
+ *   3. Stage via the row context menu; expect the file to flip into
  *      `index_changes` and the STAGED bucket to render.
- *   4. Unstage via the UI ("−" on the staged row); expect it to flip back.
- *   5. Stage again, type a commit message, click Commit; expect `commit_ok`
- *      and a clean status afterwards.
+ *   4. Unstage via the staged-row context menu; expect it to flip back.
+ *   5. Stage again, type a commit message, click Commit; expect a clean
+ *      status and the new commit in git history.
  *
  * The harness watches the daemon's broadcast `repo_status` messages directly
  * — those are the authoritative signal that the write happened. UI assertions
@@ -44,15 +42,7 @@ interface RepoStatusMessage {
   [k: string]: unknown;
 }
 
-interface CommitOkMessage {
-  type: "commit_ok";
-  repo_id: string;
-  sha: string;
-  short_sha: string;
-  [k: string]: unknown;
-}
-
-describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
+describe("source-control sidebar stage/unstage/commit", function () {
   this.timeout(180_000);
 
   let ws: DaemonWsClient | null = null;
@@ -133,14 +123,27 @@ describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
     await worktreeBucket.waitForExist({ timeout: 5_000 });
   });
 
-  it("clicking the row '+' stages the file (moves to index bucket)", async function () {
+  it("right-clicking the row can stage the file (moves to index bucket)", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup");
+    const row = await browser.$(
+      `[data-testid=source-control-changes-row][data-file-path="README.md"]`,
+    );
+    await row.waitForExist({ timeout: 5_000 });
+    await row.click({ button: "right" });
+
     const stageBtn = await browser.$(
-      `[data-testid=source-control-row-stage][data-file-path="README.md"]`,
+      `[data-testid=source-control-context-stage][data-file-path="README.md"]`,
     );
     await stageBtn.waitForExist({ timeout: 5_000 });
+    await stageBtn.waitForEnabled({ timeout: 5_000 });
 
-    const statusPromise = waitForRepoStatus(ws, registeredRepoId);
+    const statusPromise = waitForRepoStatusWhere(
+      ws,
+      registeredRepoId,
+      (status) =>
+        status.index_changes.some((c) => c.path === "README.md") &&
+        !status.worktree_changes.some((c) => c.path === "README.md"),
+    );
     await stageBtn.click();
     const status = await statusPromise;
     expect(status.index_changes.map((c) => c.path)).to.include("README.md");
@@ -152,14 +155,27 @@ describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
     await indexBucket.waitForExist({ timeout: 5_000 });
   });
 
-  it("clicking the row '−' on a staged file unstages it", async function () {
+  it("right-clicking a staged row can unstage it", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup");
+    const row = await browser.$(
+      `[data-testid=source-control-changes-row][data-file-path="README.md"]`,
+    );
+    await row.waitForExist({ timeout: 5_000 });
+    await row.click({ button: "right" });
+
     const unstageBtn = await browser.$(
-      `[data-testid=source-control-row-unstage][data-file-path="README.md"]`,
+      `[data-testid=source-control-context-unstage][data-file-path="README.md"]`,
     );
     await unstageBtn.waitForExist({ timeout: 5_000 });
+    await unstageBtn.waitForEnabled({ timeout: 5_000 });
 
-    const statusPromise = waitForRepoStatus(ws, registeredRepoId);
+    const statusPromise = waitForRepoStatusWhere(
+      ws,
+      registeredRepoId,
+      (status) =>
+        !status.index_changes.some((c) => c.path === "README.md") &&
+        status.worktree_changes.some((c) => c.path === "README.md"),
+    );
     await unstageBtn.click();
     const status = await statusPromise;
     expect(status.index_changes.map((c) => c.path)).to.not.include("README.md");
@@ -167,13 +183,20 @@ describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
   });
 
   it("commits cleanly after staging + typing a message", async function () {
-    if (!ws || !registeredRepoId) throw new Error("setup");
+    if (!ws || !registeredRepoId || !fixtureRepo) throw new Error("setup");
     // Stage again.
     const stageBtn = await browser.$(
       `[data-testid=source-control-row-stage][data-file-path="README.md"]`,
     );
     await stageBtn.waitForExist({ timeout: 5_000 });
-    const stagePromise = waitForRepoStatus(ws, registeredRepoId);
+    await stageBtn.waitForEnabled({ timeout: 5_000 });
+    const stagePromise = waitForRepoStatusWhere(
+      ws,
+      registeredRepoId,
+      (status) =>
+        status.index_changes.some((c) => c.path === "README.md") &&
+        !status.worktree_changes.some((c) => c.path === "README.md"),
+    );
     await stageBtn.click();
     await stagePromise;
 
@@ -183,15 +206,7 @@ describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
     );
     await messageEl.setValue("e2e: commit from sidebar");
 
-    // Click commit, then wait for `commit_ok` and a clean status broadcast.
-    const commitOkPromise = ws.waitFor(
-      (m): m is CommitOkMessage => {
-        if (m.type !== "commit_ok") return false;
-        const rec = m as unknown as CommitOkMessage;
-        return rec.repo_id === registeredRepoId;
-      },
-      { timeoutMs: 10_000 },
-    );
+    // Click commit, then wait for a clean status broadcast.
     const cleanStatusPromise = ws.waitFor(
       (m): m is RepoStatusMessage => {
         if (m.type !== "repo_status") return false;
@@ -206,11 +221,12 @@ describe("source-control sidebar (Phase C: stage/unstage/commit)", function () {
     );
 
     const submit = await browser.$("[data-testid=source-control-commit-submit]");
+    await submit.waitForEnabled({ timeout: 5_000 });
     await submit.click();
 
-    const ok = await commitOkPromise;
-    expect(ok.short_sha).to.have.length.greaterThan(0);
     await cleanStatusPromise;
+    const latestSubject = readGit(fixtureRepo, ["log", "-1", "--pretty=%s"]);
+    expect(latestSubject).to.equal("e2e: commit from sidebar");
 
     // Visible empty state.
     const sc = await browser.$("[data-testid=source-control-sidebar]");
@@ -237,11 +253,19 @@ function waitForRepoStatus(
   ws: DaemonWsClient,
   repoId: string,
 ): Promise<RepoStatusMessage> {
+  return waitForRepoStatusWhere(ws, repoId, () => true);
+}
+
+function waitForRepoStatusWhere(
+  ws: DaemonWsClient,
+  repoId: string,
+  predicate: (status: RepoStatusMessage) => boolean,
+): Promise<RepoStatusMessage> {
   return ws.waitFor(
     (m): m is RepoStatusMessage => {
       if (m.type !== "repo_status") return false;
       const rec = m as unknown as RepoStatusMessage;
-      return rec.repo_id === repoId;
+      return rec.repo_id === repoId && predicate(rec);
     },
     { timeoutMs: 5_000 },
   );
@@ -249,4 +273,8 @@ function waitForRepoStatus(
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+function readGit(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }

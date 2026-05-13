@@ -1,10 +1,9 @@
 /**
- * Global Source Control sidebar — Phases A–C of
- * `docs/plans/source-control-sidebar.md`.
+ * Global Source Control sidebar.
  *
  * Tracks the focused pane's repo; manual override is available when more
- * than one repo is registered. Phase C adds the staged/unstaged split and
- * write actions (stage, unstage, commit) — error reporting is via toast.
+ * than one repo is registered. The sidebar exposes staged/unstaged changes,
+ * history, and write actions; error reporting is via toast.
  */
 import { useEffect, useMemo, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
@@ -15,12 +14,11 @@ import type {
   GitFileChange,
   RepoEntry,
 } from "../../types";
+import { clampMenuCoord, useEscape } from "../../utils/a11y";
 import ResizableSplit from "../ResizableSplit";
 import ChangesTree, { type RowAction } from "./ChangesTree";
 import DiscardConfirmDialog from "./DiscardConfirmDialog";
 import StashesSection from "./StashesSection";
-
-type Tab = "changes" | "history";
 
 const COMMIT_PAGE_SIZE = 50;
 const STORAGE_KEY = "rt.sourceControl.repoOverride";
@@ -34,13 +32,30 @@ interface Props {
   onActivateTab: (tabId: string) => void;
 }
 
+type ChangeBucket = "index" | "worktree";
+
+interface SelectedChange {
+  repoId: string;
+  bucket: ChangeBucket;
+  path: string;
+}
+
+interface FileContextMenuState {
+  bucket: ChangeBucket;
+  path: string;
+  x: number;
+  y: number;
+}
+
 export default function SourceControlSidebar({
   repos,
   focusedRepoId,
   client,
   onActivateTab,
 }: Props) {
-  const [tab, setTab] = useState<Tab>("changes");
+  const [selectedChange, setSelectedChange] = useState<SelectedChange | null>(
+    null,
+  );
   const [override, setOverride] = useState<string | null>(() => {
     try {
       return localStorage.getItem(STORAGE_KEY);
@@ -112,7 +127,11 @@ export default function SourceControlSidebar({
           )}
         </div>
         {activeRepo && (
-          <div className="source-control-active-repo" title={activeRepo.path}>
+          <div
+            className="source-control-active-repo"
+            title={activeRepo.path}
+            data-testid="source-control-active-repo"
+          >
             <strong>{activeRepo.name}</strong>
             {followingFocus && (
               <span className="muted small inline-note">
@@ -130,34 +149,23 @@ export default function SourceControlSidebar({
           </div>
         )}
       </header>
-      <div className="source-control-tabs">
-        <button
-          type="button"
-          className={tab === "changes" ? "tab active" : "tab"}
-          onClick={() => setTab("changes")}
-          data-testid="source-control-tab-changes"
+      {activeRepoId && (
+        <ResizableSplit
+          storageKey="source-control.sidebar"
+          defaultSize={360}
+          minSize={140}
+          direction="vertical"
         >
-          Changes
-        </button>
-        <button
-          type="button"
-          className={tab === "history" ? "tab active" : "tab"}
-          onClick={() => setTab("history")}
-          data-testid="source-control-tab-history"
-        >
-          History
-        </button>
-      </div>
-      {activeRepoId && tab === "changes" && (
-        <ChangesView
-          activeRepoId={activeRepoId}
-          activeRepoName={activeRepo?.name ?? ""}
-          client={client}
-          onActivateTab={onActivateTab}
-        />
-      )}
-      {activeRepoId && tab === "history" && (
-        <HistoryView activeRepoId={activeRepoId} client={client} />
+          <ChangesView
+            activeRepoId={activeRepoId}
+            activeRepoName={activeRepo?.name ?? ""}
+            client={client}
+            selectedChange={selectedChange}
+            onSelectedChange={setSelectedChange}
+            onActivateTab={onActivateTab}
+          />
+          <HistoryView activeRepoId={activeRepoId} client={client} />
+        </ResizableSplit>
       )}
     </aside>
   );
@@ -169,6 +177,8 @@ interface ChangesViewProps {
   activeRepoId: string;
   activeRepoName: string;
   client: DaemonClient;
+  selectedChange: SelectedChange | null;
+  onSelectedChange: (selected: SelectedChange) => void;
   onActivateTab: (tabId: string) => void;
 }
 
@@ -176,10 +186,13 @@ function ChangesView({
   activeRepoId,
   activeRepoName,
   client,
+  selectedChange,
+  onSelectedChange,
   onActivateTab,
 }: ChangesViewProps) {
   const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
   const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
+  const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [pendingOp, setPendingOp] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -188,6 +201,7 @@ function ChangesView({
   useEffect(() => {
     setIndexChanges(null);
     setWorktreeChanges(null);
+    setContextMenu(null);
     setErrorBanner(null);
     setCommitMessage("");
     client.send({ type: "repo_status", repo_id: activeRepoId });
@@ -197,6 +211,7 @@ function ChangesView({
         return;
       setIndexChanges(detail.index_changes);
       setWorktreeChanges(detail.worktree_changes);
+      setPendingOp((op) => (op === "commit" ? op : null));
     };
     window.addEventListener("rt:repo_status", handler);
     return () => window.removeEventListener("rt:repo_status", handler);
@@ -231,7 +246,8 @@ function ChangesView({
     };
   }, [activeRepoId]);
 
-  const openDiff = (path: string, bucket: "index" | "worktree") => {
+  const openDiff = (path: string, bucket: ChangeBucket) => {
+    onSelectedChange({ repoId: activeRepoId, path, bucket });
     void openDiffTab(client, {
       repoId: activeRepoId,
       path,
@@ -239,6 +255,14 @@ function ChangesView({
     }).then((tabId) => {
       if (tabId) onActivateTab(tabId);
     });
+  };
+  const openContextMenu = (
+    path: string,
+    bucket: ChangeBucket,
+    e: React.MouseEvent,
+  ) => {
+    onSelectedChange({ repoId: activeRepoId, path, bucket });
+    setContextMenu({ path, bucket, x: e.clientX, y: e.clientY });
   };
 
   const stagedPaths = useMemo(
@@ -386,8 +410,16 @@ function ChangesView({
                 />
                 <ChangesTree
                   changes={indexChanges}
-                  selectedPath={null}
+                  selectedPath={
+                    selectedChange?.repoId === activeRepoId &&
+                    selectedChange.bucket === "index"
+                      ? selectedChange.path
+                      : null
+                  }
                   onSelect={(path) => openDiff(path, "index")}
+                  onRowContextMenu={(path, e) =>
+                    openContextMenu(path, "index", e)
+                  }
                   rowActions={[unstageAction]}
                 />
               </section>
@@ -418,8 +450,16 @@ function ChangesView({
                 />
                 <ChangesTree
                   changes={worktreeChanges}
-                  selectedPath={null}
+                  selectedPath={
+                    selectedChange?.repoId === activeRepoId &&
+                    selectedChange.bucket === "worktree"
+                      ? selectedChange.path
+                      : null
+                  }
                   onSelect={(path) => openDiff(path, "worktree")}
+                  onRowContextMenu={(path, e) =>
+                    openContextMenu(path, "worktree", e)
+                  }
                   rowActions={[discardAction, stageAction]}
                 />
               </section>
@@ -438,6 +478,17 @@ function ChangesView({
             open in forge ↗
           </button>
         </div>
+        {contextMenu && (
+          <FileContextMenu
+            state={contextMenu}
+            pendingOp={pendingOp}
+            onClose={() => setContextMenu(null)}
+            onOpenDiff={() => openDiff(contextMenu.path, contextMenu.bucket)}
+            onStage={() => sendStage([contextMenu.path])}
+            onUnstage={() => sendUnstage([contextMenu.path])}
+            onDiscard={() => requestDiscard([contextMenu.path])}
+          />
+        )}
         {pendingDiscard && (
           <DiscardConfirmDialog
             paths={pendingDiscard}
@@ -482,6 +533,108 @@ function BucketHeader({ label, count, actions }: BucketHeaderProps) {
           {action.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+interface FileContextMenuProps {
+  state: FileContextMenuState;
+  pendingOp: string | null;
+  onClose: () => void;
+  onOpenDiff: () => void;
+  onStage: () => void;
+  onUnstage: () => void;
+  onDiscard: () => void;
+}
+
+function FileContextMenu({
+  state,
+  pendingOp,
+  onClose,
+  onOpenDiff,
+  onStage,
+  onUnstage,
+  onDiscard,
+}: FileContextMenuProps) {
+  useEscape(onClose);
+  const disabled = pendingOp !== null;
+  const closeAfter = (action: () => void) => {
+    action();
+    onClose();
+  };
+  return (
+    <div
+      className="context-menu-backdrop"
+      onClick={onClose}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onClose();
+      }}
+    >
+      <ul
+        className="context-menu"
+        style={{
+          left: clampMenuCoord(state.x, 220),
+          top: clampMenuCoord(
+            state.y,
+            state.bucket === "worktree" ? 140 : 100,
+            "height",
+          ),
+        }}
+        onClick={(e) => e.stopPropagation()}
+        data-testid="source-control-file-context-menu"
+      >
+        <li>
+          <button
+            type="button"
+            onClick={() => closeAfter(onOpenDiff)}
+            data-testid="source-control-context-open-diff"
+            data-file-path={state.path}
+          >
+            {state.bucket === "index" ? "Open Staged Changes" : "Open Changes"}
+          </button>
+        </li>
+        {state.bucket === "index" ? (
+          <li>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => closeAfter(onUnstage)}
+              data-testid="source-control-context-unstage"
+              data-file-path={state.path}
+            >
+              Unstage Changes
+            </button>
+          </li>
+        ) : (
+          <>
+            <li>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => closeAfter(onStage)}
+                data-testid="source-control-context-stage"
+                data-file-path={state.path}
+              >
+                Stage Changes
+              </button>
+            </li>
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li>
+              <button
+                type="button"
+                className="danger"
+                disabled={disabled}
+                onClick={() => closeAfter(onDiscard)}
+                data-testid="source-control-context-discard"
+                data-file-path={state.path}
+              >
+                Discard Changes
+              </button>
+            </li>
+          </>
+        )}
+      </ul>
     </div>
   );
 }
@@ -584,63 +737,69 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
   }, [activeRepoId, selected, client]);
 
   return (
-    <ResizableSplit
-      storageKey="source-control.history"
-      defaultSize={260}
-      minSize={180}
-      direction="vertical"
+    <section
+      className="source-control-history-panel"
+      data-testid="source-control-history-panel"
     >
-      <div
-        className="git-list source-control-list"
-        data-testid="source-control-history-list"
+      <div className="source-control-section-title">History</div>
+      <ResizableSplit
+        storageKey="source-control.history"
+        defaultSize={180}
+        minSize={90}
+        direction="vertical"
       >
-        {!commits ? (
-          <p className="empty">loading…</p>
-        ) : commits.length === 0 ? (
-          <p className="empty">no commits</p>
-        ) : (
-          <>
-            <ul className="list">
-              {commits.map((c) => (
-                <li
-                  key={c.sha}
-                  className={
-                    c.sha === selected ? "list-item selected" : "list-item"
-                  }
-                  onClick={() => setSelected(c.sha)}
-                  data-testid="source-control-history-row"
+        <div
+          className="git-list source-control-list"
+          data-testid="source-control-history-list"
+        >
+          {!commits ? (
+            <p className="empty">loading…</p>
+          ) : commits.length === 0 ? (
+            <p className="empty">no commits</p>
+          ) : (
+            <>
+              <ul className="list">
+                {commits.map((c) => (
+                  <li
+                    key={c.sha}
+                    className={
+                      c.sha === selected ? "list-item selected" : "list-item"
+                    }
+                    onClick={() => setSelected(c.sha)}
+                    data-testid="source-control-history-row"
+                  >
+                    <span className="commit-sha">{c.short_sha}</span>
+                    <span className="list-item-label" title={c.subject}>
+                      {c.subject}
+                    </span>
+                    <span className="list-item-meta small">
+                      {c.author_name.split(" ")[0]} ·{" "}
+                      {c.authored_at.slice(0, 10)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {!exhausted && (
+                <button
+                  type="button"
+                  className="history-load-more"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  data-testid="source-control-history-load-more"
                 >
-                  <span className="commit-sha">{c.short_sha}</span>
-                  <span className="list-item-label" title={c.subject}>
-                    {c.subject}
-                  </span>
-                  <span className="list-item-meta small">
-                    {c.author_name.split(" ")[0]} ·{" "}
-                    {c.authored_at.slice(0, 10)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            {!exhausted && (
-              <button
-                type="button"
-                className="history-load-more"
-                onClick={loadMore}
-                disabled={loadingMore}
-                data-testid="source-control-history-load-more"
-              >
-                {loadingMore ? "loading…" : "load more"}
-              </button>
-            )}
-          </>
-        )}
-      </div>
-      <DiffView
-        diff={detailDiff}
-        testId="source-control-history-diff"
-        placeholder="Select a commit to view its diff."
-      />
-    </ResizableSplit>
+                  {loadingMore ? "loading…" : "load more"}
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        <DiffView
+          diff={detailDiff}
+          testId="source-control-history-diff"
+          placeholder="Select a commit to view its diff."
+        />
+      </ResizableSplit>
+    </section>
   );
 }
 

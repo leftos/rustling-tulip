@@ -274,6 +274,10 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
+      const prefs = loadSettings().notifications;
+      if (!prefs.awaiting_input && !prefs.stopped && !prefs.error) {
+        return;
+      }
       const granted = await isPermissionGranted();
       if (granted) return;
       const requested = await requestPermission();
@@ -1241,9 +1245,8 @@ export default function App() {
     writeActivitySection(next);
   }, []);
 
-  // Resolve the focused pane's session — shared by the source-control
-  // badge scoping and the focused-repo derivation below. `null` whenever
-  // no session is focused (no active tab, an empty pane, a diff tab).
+  // Resolve the focused pane's session for session-scoped controls. Diff tabs
+  // carry their repo id directly and are handled in `focusedRepoId`.
   const focusedSession = useMemo(() => {
     if (!activeTab || !state.focusedPaneId) return null;
     const grid = tabGrid(activeTab);
@@ -1275,14 +1278,15 @@ export default function App() {
     return total;
   }, [focusedSession, state.repoChangeCounts]);
 
-  // Derive the focused-repo id from the focused pane's session — used by
-  // the source-control sidebar to default its repo selection. Falls back
-  // to a manual override or the first registered repo when no session is
-  // focused.
-  const focusedRepoId = useMemo(
-    () => focusedSession?.members[0]?.repo_id ?? null,
-    [focusedSession],
-  );
+  // Derive the focused repo id for the source-control sidebar. Diff tabs keep
+  // following the repo they were opened from, so selecting a diff does not make
+  // the sidebar fall back to another registered repo.
+  const focusedRepoId = useMemo(() => {
+    if (activeTab?.content.kind === "diff") {
+      return activeTab.content.repo_id;
+    }
+    return focusedSession?.members[0]?.repo_id ?? null;
+  }, [activeTab, focusedSession]);
 
   // Session id of the focused pane (or null). Reused by the font-size
   // shortcuts to know which session's override to bump when the user

@@ -16,6 +16,7 @@ interface Props {
   changes: GitFileChange[];
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRowContextMenu: ((path: string, e: React.MouseEvent) => void) | undefined;
   /// Optional list of hover-visible action buttons. Rendered in the order
   /// given, right-aligned at the end of the row. Pass an empty array
   /// (or omit) to disable.
@@ -38,6 +39,7 @@ export default function ChangesTree({
   changes,
   selectedPath,
   onSelect,
+  onRowContextMenu,
   rowActions,
 }: Props) {
   const tree = useMemo(() => buildChangesTree(changes), [changes]);
@@ -66,6 +68,7 @@ export default function ChangesTree({
           onToggle={toggle}
           selectedPath={selectedPath}
           onSelect={onSelect}
+          onRowContextMenu={onRowContextMenu}
           rowActions={actions}
         />
       ))}
@@ -76,6 +79,7 @@ export default function ChangesTree({
           depth={0}
           selected={c.path === selectedPath}
           onSelect={onSelect}
+          onContextMenu={onRowContextMenu}
           rowActions={actions}
         />
       ))}
@@ -90,6 +94,7 @@ interface FolderRowProps {
   onToggle: (path: string) => void;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  onRowContextMenu: ((path: string, e: React.MouseEvent) => void) | undefined;
   rowActions: RowAction[];
 }
 
@@ -100,6 +105,7 @@ function FolderRow({
   onToggle,
   selectedPath,
   onSelect,
+  onRowContextMenu,
   rowActions,
 }: FolderRowProps) {
   const isCollapsed = collapsed.has(node.fullPath);
@@ -142,6 +148,7 @@ function FolderRow({
               onToggle={onToggle}
               selectedPath={selectedPath}
               onSelect={onSelect}
+              onRowContextMenu={onRowContextMenu}
               rowActions={rowActions}
             />
           ))}
@@ -152,6 +159,7 @@ function FolderRow({
               depth={depth + 1}
               selected={c.path === selectedPath}
               onSelect={onSelect}
+              onContextMenu={onRowContextMenu}
               rowActions={rowActions}
             />
           ))}
@@ -166,10 +174,18 @@ interface FileRowProps {
   depth: number;
   selected: boolean;
   onSelect: (path: string) => void;
+  onContextMenu: ((path: string, e: React.MouseEvent) => void) | undefined;
   rowActions: RowAction[];
 }
 
-function FileRow({ change, depth, selected, onSelect, rowActions }: FileRowProps) {
+function FileRow({
+  change,
+  depth,
+  selected,
+  onSelect,
+  onContextMenu,
+  rowActions,
+}: FileRowProps) {
   const basename = change.path.split(/[/\\]/).pop() ?? change.path;
   const classes = [
     "tree-row",
@@ -185,6 +201,12 @@ function FileRow({ change, depth, selected, onSelect, rowActions }: FileRowProps
         className={classes}
         style={{ "--tree-depth": depth } as React.CSSProperties}
         onClick={() => onSelect(change.path)}
+        onContextMenu={(e) => {
+          if (!onContextMenu) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onContextMenu(change.path, e);
+        }}
         role="button"
         tabIndex={0}
         aria-label={`${statusToWords(change.status)} ${change.path}`}
