@@ -331,36 +331,30 @@ function PaneChrome(props: PaneChromeProps) {
     client.send({ type: "close_pane", tab_id: tabId, pane_id: node.pane_id });
   }, [client, session, tab, tabId, node.pane_id, onTabsSnapshotUndo]);
 
-  const stopSessionAndClosePane = useCallback(
+  const closePaneAndDiscardSession = useCallback(
     (removeWorktree: boolean) => {
       if (!session) return;
       const cleanup = session.members.map((m) => ({
         repo_id: m.repo_id,
         remove_worktree: removeWorktree,
       }));
-      client.send({
-        type: "stop_session",
-        session_id: session.id,
-        cleanup: cleanup.map((action) => ({
-          ...action,
-          remove_worktree: false,
-        })),
-      });
-      if (removeWorktree) {
+      if (session.status !== "stopped" && session.status !== "error") {
         client.send({
-          type: "discard_session",
+          type: "stop_session",
           session_id: session.id,
-          cleanup,
-        });
-      } else {
-        client.send({
-          type: "close_pane",
-          tab_id: tabId,
-          pane_id: node.pane_id,
+          cleanup: cleanup.map((action) => ({
+            ...action,
+            remove_worktree: false,
+          })),
         });
       }
+      client.send({
+        type: "discard_session",
+        session_id: session.id,
+        cleanup,
+      });
     },
-    [client, session, tabId, node.pane_id],
+    [client, session],
   );
 
   // Pane × button: empty pane closes immediately (nothing to protect);
@@ -580,12 +574,12 @@ function PaneChrome(props: PaneChromeProps) {
             closePaneOnly();
             setCloseConfirm(false);
           }}
-          onCloseAndStopKeepWorktree={() => {
-            stopSessionAndClosePane(false);
+          onClosePaneDiscardSessionKeepWorktree={() => {
+            closePaneAndDiscardSession(false);
             setCloseConfirm(false);
           }}
-          onCloseAndStopRemoveWorktree={() => {
-            stopSessionAndClosePane(true);
+          onClosePaneDiscardSessionRemoveWorktree={() => {
+            closePaneAndDiscardSession(true);
             setCloseConfirm(false);
           }}
         />

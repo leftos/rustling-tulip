@@ -1325,7 +1325,7 @@ export default function App() {
             "info",
             "main window close: no active sessions, skipping confirmation",
           );
-          // Same path as "Quit, leave running" — invoke `quit_app` so the
+          // Same path as "keep sessions running" — invoke `quit_app` so the
           // teardown runs from the host side instead of the webview's
           // event loop (see lib.rs::quit_app comment).
           event.preventDefault();
@@ -1358,6 +1358,19 @@ export default function App() {
     setState((s) => ({ ...s, exitConfirmOpen: false }));
   }, []);
 
+  useEffect(() => {
+    if (import.meta.env["VITE_RT_E2E"] !== "1") {
+      return;
+    }
+    const openExitConfirm = () => {
+      setState((s) => ({ ...s, exitConfirmOpen: true }));
+    };
+    window.addEventListener("rt:e2e_open_exit_confirm", openExitConfirm);
+    return () => {
+      window.removeEventListener("rt:e2e_open_exit_confirm", openExitConfirm);
+    };
+  }, []);
+
   const onOpenSettings = useCallback(() => {
     setState((s) => (s.settingsOpen ? s : { ...s, settingsOpen: true }));
   }, []);
@@ -1367,7 +1380,7 @@ export default function App() {
   }, []);
 
   const onQuitLeaveRunning = useCallback(() => {
-    logToFile("info", "exit modal: Quit, leave running");
+    logToFile("info", "exit modal: Keep sessions running in background");
     void closeMainWindow();
   }, [closeMainWindow]);
 
@@ -1377,11 +1390,17 @@ export default function App() {
   }, [closeMainWindow]);
 
   const sendShutdown = useCallback(
-    (drain: boolean) => {
-      const tag = drain ? "Stop sessions & quit" : "Abandon sessions & quit";
+    (mode: "stopKeepWorktrees" | "stopRemoveWorktrees" | "abandon") => {
+      const drain = mode === "stopKeepWorktrees";
+      const tag =
+        mode === "stopRemoveWorktrees"
+          ? "Stop sessions, remove worktrees"
+          : drain
+          ? "Stop sessions and quit"
+          : "Abandon sessions and quit";
       logToFile("info", `exit modal: ${tag} clicked`);
       setState((s) => ({ ...s, exitInFlight: true, exitStuck: false }));
-      const client = state.client;
+      const client = clientRef.current;
       if (!client) {
         logToFile("warn", `${tag}: no client; closing window directly`);
         void closeMainWindow();
@@ -1422,15 +1441,47 @@ export default function App() {
         if (next.kind === "open" || next.kind === "connecting") return;
         finish(`WS ${next.kind}`);
       });
+      if (mode === "stopRemoveWorktrees") {
+        const sessions = latestStateRef.current?.sessions ?? [];
+        const activeSessions = sessions.filter(
+          (session) => session.status !== "stopped" && !session.is_orphan,
+        );
+        for (const session of activeSessions) {
+          const cleanup = session.members.map((member) => ({
+            repo_id: member.repo_id,
+            remove_worktree: session.has_per_session_worktree,
+          }));
+          client.send({
+            type: "stop_session",
+            session_id: session.id,
+            cleanup: cleanup.map((action) => ({
+              ...action,
+              remove_worktree: false,
+            })),
+          });
+          client.send({
+            type: "discard_session",
+            session_id: session.id,
+            cleanup,
+          });
+        }
+      }
       logToFile("info", `${tag}: sending shutdown message (drain=${drain})`);
       client.send({ type: "shutdown", drain });
     },
-    [closeMainWindow, state.client],
+    [closeMainWindow],
   );
 
-  const onStopAndQuit = useCallback(() => sendShutdown(true), [sendShutdown]);
+  const onStopAndQuit = useCallback(
+    () => sendShutdown("stopKeepWorktrees"),
+    [sendShutdown],
+  );
+  const onStopAndQuitRemoveWorktrees = useCallback(
+    () => sendShutdown("stopRemoveWorktrees"),
+    [sendShutdown],
+  );
   const onAbandonAndQuit = useCallback(
-    () => sendShutdown(false),
+    () => sendShutdown("abandon"),
     [sendShutdown],
   );
 
@@ -1478,9 +1529,19 @@ export default function App() {
         .length,
     [state.sessions],
   );
+  const activeWorktreeSessionCount = useMemo(
+    () =>
+      state.sessions.filter(
+        (s) =>
+          s.status !== "stopped" &&
+          !s.is_orphan &&
+          s.has_per_session_worktree,
+      ).length,
+    [state.sessions],
+  );
   // Orphans are non-stopped sessions whose PTY handle was lost across a
   // daemon restart. Counted separately so the exit-confirm dialog can
-  // explain why "Stop sessions & quit" is a no-op for them (the daemon's
+  // explain why "Stop sessions and quit" is a no-op for them (the daemon's
   // an orphan needs a best-effort sidecar kill rather than a live PTY
   // handle. See ux-audit "No active
   // sessions message hides orphan sessions".
@@ -2078,10 +2139,12 @@ export default function App() {
       {state.exitConfirmOpen && (
         <ExitConfirmDialog
           activeSessionCount={activeSessionCount}
+          activeWorktreeSessionCount={activeWorktreeSessionCount}
           orphanSessionCount={orphanSessionCount}
           busy={state.exitInFlight}
           stuck={state.exitStuck}
           onStopAndQuit={onStopAndQuit}
+          onStopAndQuitRemoveWorktrees={onStopAndQuitRemoveWorktrees}
           onAbandonAndQuit={onAbandonAndQuit}
           onQuitLeaveRunning={onQuitLeaveRunning}
           onForceQuit={onForceQuit}

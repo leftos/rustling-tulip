@@ -1802,6 +1802,13 @@ button.tree-tab-pill:hover {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+.exit-confirm-footer {
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.exit-confirm-footer button {
+  white-space: normal;
+}
 .modal-warning {
   margin: 0.75rem 0 0;
   padding: 0.6rem 0.8rem;

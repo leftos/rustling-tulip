@@ -8,34 +8,31 @@ interface Props {
   onCancel: () => void;
   /// close_pane only — session keeps running in the sidebar / other tabs.
   onClosePaneKeepSession: () => void;
-  /// stop_session + close_pane. The worktree directory survives on disk so
-  /// the user can keep poking at files.
-  onCloseAndStopKeepWorktree: () => void;
-  /// stop_session + discard_session with remove_worktree=true. Daemon runs
-  /// `git worktree remove --force` for each member after the explicit
-  /// discard. Only offered when the session was spawned with a worktree.
-  onCloseAndStopRemoveWorktree: () => void;
+  /// stop_session when needed, then discard_session with remove_worktree=false.
+  onClosePaneDiscardSessionKeepWorktree: () => void;
+  /// stop_session when needed, then discard_session with remove_worktree=true.
+  /// Daemon runs `git worktree remove --force` for each member after discard.
+  /// Only offered when the session was spawned with a worktree.
+  onClosePaneDiscardSessionRemoveWorktree: () => void;
 }
 
 /// Confirmation modal for the pane-corner × button when the pane has a
-/// session bound to it. Three destructive choices plus Cancel — the
-/// safest option (close pane only, session keeps running) is autofocused
-/// so a stray Enter never destroys state.
+/// session bound to it. The safest option (close pane only, session keeps
+/// running) is autofocused so a stray Enter never destroys state.
 ///
 /// Skipped entirely for empty panes (the caller does the close
 /// inline) — no session to protect.
 ///
 /// "Close pane only" is shown for every session including stopped ones
-/// because removing the layout reference is still useful. The two
-/// "stop session" buttons disappear once the session is already stopped
-/// — there's nothing left to kill, only the worktree to clean up via
-/// "delete worktree".
+/// because removing the layout reference is still useful. The discard
+/// actions are also shown for stopped sessions; in that case they remove
+/// the sidebar record without sending another stop request.
 export default function PaneCloseDialog({
   session,
   onCancel,
   onClosePaneKeepSession,
-  onCloseAndStopKeepWorktree,
-  onCloseAndStopRemoveWorktree,
+  onClosePaneDiscardSessionKeepWorktree,
+  onClosePaneDiscardSessionRemoveWorktree,
 }: Props) {
   const keepRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onCancel);
@@ -45,7 +42,15 @@ export default function PaneCloseDialog({
   const isStopped = session.status === "stopped";
   const hasWorktree = session.has_per_session_worktree;
   const label = sessionDisplayLabel(session);
-  const stopLabel = hasWorktree ? "Stop session, keep worktree" : "Stop session";
+  const keepSessionLabel = hasWorktree
+    ? "Close pane, keep session, keep worktree"
+    : "Close pane but keep session in sidebar";
+  const discardSessionLabel = hasWorktree
+    ? "Close pane, don't keep session, keep worktree"
+    : "Close pane and close session";
+  const stoppedDiscardSessionLabel = hasWorktree
+    ? discardSessionLabel
+    : "Close pane and remove session";
 
   return (
     <div
@@ -78,10 +83,10 @@ export default function PaneCloseDialog({
             {isStopped ? " (already stopped)" : ""}. What would you like to do?
           </p>
           <p className="muted small">
-            Closing the pane only removes it from this tab — the session keeps
-            running in the sidebar and you can re-bind it to another pane
-            later. Stopping the session sends the underlying agent the kill
-            signal.
+            Closing the pane only removes it from this tab. Keeping the session
+            leaves it running in the sidebar so you can re-bind it later.
+            Closing the session stops the underlying process and removes it
+            from the sidebar.
           </p>
         </div>
         <footer className="modal-footer pane-close-dialog-footer">
@@ -98,26 +103,24 @@ export default function PaneCloseDialog({
             onClick={onClosePaneKeepSession}
             data-testid="pane-close-dialog-pane-only"
           >
-            Close pane, keep session
+            {keepSessionLabel}
           </button>
-          {!isStopped && (
-            <button
-              type="button"
-              className="danger"
-              onClick={onCloseAndStopKeepWorktree}
-              data-testid="pane-close-dialog-stop-keep"
-            >
-              {stopLabel}
-            </button>
-          )}
+          <button
+            type="button"
+            className="danger"
+            onClick={onClosePaneDiscardSessionKeepWorktree}
+            data-testid="pane-close-dialog-close-session-keep-worktree"
+          >
+            {isStopped ? stoppedDiscardSessionLabel : discardSessionLabel}
+          </button>
           {hasWorktree && (
             <button
               type="button"
               className="danger"
-              onClick={onCloseAndStopRemoveWorktree}
-              data-testid="pane-close-dialog-stop-remove"
+              onClick={onClosePaneDiscardSessionRemoveWorktree}
+              data-testid="pane-close-dialog-close-session-delete-worktree"
             >
-              {isStopped ? "Delete worktree" : "Stop session, delete worktree"}
+              Close pane, don't keep session, delete worktree
             </button>
           )}
         </footer>
