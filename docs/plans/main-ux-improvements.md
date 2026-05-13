@@ -346,7 +346,7 @@ be able to cancel before the next session spawns and see what already launched.
       spawning N of M, completed, cancelled, failed.
 - [x] Add a cancel message that stops future spawns and leaves already-created
       sessions alone unless the user explicitly cleans them up.
-- [ ] Update `PresetLaunchDialog` to show progress after submit instead of
+- [x] Update `PresetLaunchDialog` to show progress after submit instead of
       closing immediately for large jobs.
 - [ ] Add a compact preset-job toast or sidebar entry after the dialog closes.
 - [ ] Make partial-launch cleanup discoverable: select launched sessions, stop

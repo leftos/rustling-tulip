@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  cancelPresetLaunch,
   type DaemonClient,
   launchPreset,
   pickDirectory,
@@ -9,6 +10,7 @@ import {
 } from "../api";
 import type {
   LaunchPresetSource,
+  PresetLaunchJobSnapshot,
   PresetEntry,
   PresetPromptSource,
   PresetTarget,
@@ -30,7 +32,7 @@ interface Props {
 }
 
 type SourceKind = "file" | "folder" | "inline";
-type Stage = "source" | "variables" | "preview";
+type Stage = "source" | "variables" | "preview" | "launching";
 
 const FIRST_LINE_PREVIEW_LIMIT = 80;
 
@@ -153,6 +155,24 @@ export default function PresetLaunchDialog({
     | { kind: "failed"; error: string; variableName: string | null }
     | { kind: "done" };
   const [scriptStage, setScriptStage] = useState<ScriptStage>({ kind: "idle" });
+  const [launchJobId, setLaunchJobId] = useState<string | null>(null);
+  const [launchJob, setLaunchJob] = useState<PresetLaunchJobSnapshot | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!launchJobId) return;
+    const handler = (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{ type: string; job: PresetLaunchJobSnapshot }>
+      ).detail;
+      if (detail.type !== "preset_launch_job_updated") return;
+      if (detail.job.job_id !== launchJobId) return;
+      setLaunchJob(detail.job);
+    };
+    window.addEventListener("rt:preset_launch_job_updated", handler);
+    return () => window.removeEventListener("rt:preset_launch_job_updated", handler);
+  }, [launchJobId]);
 
   const canAdvanceFromSource = isSourceReady({
     sourceKind,
@@ -205,7 +225,7 @@ export default function PresetLaunchDialog({
     const cap = parseMaxPerTab(maxPerTab);
     // No scripts → fire-and-forget the launch directly.
     if (scriptVariables.length === 0) {
-      launchPreset(client, {
+      const jobId = launchPreset(client, {
         target,
         preset_id: preset.id,
         source,
@@ -213,7 +233,9 @@ export default function PresetLaunchDialog({
         use_worktree_override: null,
         max_panes_per_tab_override: cap,
       });
-      onClose();
+      setLaunchJobId(jobId);
+      setLaunchJob(null);
+      setStage("launching");
       return;
     }
     // Scripts present → resolve first, then launch with the resolved
@@ -233,7 +255,7 @@ export default function PresetLaunchDialog({
         return;
       }
       setScriptStage({ kind: "done" });
-      launchPreset(client, {
+      const jobId = launchPreset(client, {
         target,
         preset_id: preset.id,
         source,
@@ -241,8 +263,15 @@ export default function PresetLaunchDialog({
         use_worktree_override: null,
         max_panes_per_tab_override: cap,
       });
-      onClose();
+      setLaunchJobId(jobId);
+      setLaunchJob(null);
+      setStage("launching");
     });
+  };
+
+  const onCancelLaunch = () => {
+    if (!launchJobId) return;
+    cancelPresetLaunch(client, launchJobId);
   };
 
   useEscape(onClose);
@@ -316,59 +345,88 @@ export default function PresetLaunchDialog({
               scriptStage={scriptStage}
             />
           )}
+          {stage === "launching" && (
+            <LaunchProgressStage
+              job={launchJob}
+              presetName={preset.name}
+            />
+          )}
         </div>
         <footer className="modal-footer">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={scriptStage.kind === "running"}
-            data-testid="preset-launch-cancel"
-          >
-            Cancel
-          </button>
-          {stage !== "source" && (
-            <button
-              type="button"
-              onClick={onBack}
-              disabled={scriptStage.kind === "running"}
-              data-testid="preset-launch-back"
-            >
-              Back
-            </button>
-          )}
-          {stage !== "preview" ? (
-            <button
-              type="button"
-              className="primary"
-              onClick={onAdvance}
-              disabled={
-                stage === "source"
-                  ? !canAdvanceFromSource
-                  : !canAdvanceFromVariables
-              }
-              title={
-                stage === "variables" && !canAdvanceFromVariables
-                  ? `Fill in: ${missingRequiredVariables.map((v) => v.label).join(", ")}`
-                  : undefined
-              }
-              data-testid="preset-launch-next"
-            >
-              Next
-            </button>
+          {stage === "launching" ? (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                data-testid="preset-launch-close-progress"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                className="danger"
+                onClick={onCancelLaunch}
+                disabled={!launchJobId || isTerminalLaunchJob(launchJob)}
+                data-testid="preset-launch-cancel-job"
+              >
+                Cancel launch
+              </button>
+            </>
           ) : (
-            <button
-              type="button"
-              className="primary"
-              onClick={onLaunch}
-              disabled={!canSubmit}
-              data-testid="preset-launch-submit"
-            >
-              {launchButtonLabel(
-                scriptStage.kind,
-                scriptVariables.length,
-                previewPrompts.length,
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={scriptStage.kind === "running"}
+                data-testid="preset-launch-cancel"
+              >
+                Cancel
+              </button>
+              {stage !== "source" && (
+                <button
+                  type="button"
+                  onClick={onBack}
+                  disabled={scriptStage.kind === "running"}
+                  data-testid="preset-launch-back"
+                >
+                  Back
+                </button>
               )}
-            </button>
+              {stage !== "preview" ? (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={onAdvance}
+                  disabled={
+                    stage === "source"
+                      ? !canAdvanceFromSource
+                      : !canAdvanceFromVariables
+                  }
+                  title={
+                    stage === "variables" && !canAdvanceFromVariables
+                      ? `Fill in: ${missingRequiredVariables.map((v) => v.label).join(", ")}`
+                      : undefined
+                  }
+                  data-testid="preset-launch-next"
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={onLaunch}
+                  disabled={!canSubmit}
+                  data-testid="preset-launch-submit"
+                >
+                  {launchButtonLabel(
+                    scriptStage.kind,
+                    scriptVariables.length,
+                    previewPrompts.length,
+                  )}
+                </button>
+              )}
+            </>
           )}
         </footer>
       </div>
@@ -726,9 +784,8 @@ function PreviewStage({
           className="muted small preset-launch-caveat"
           data-testid="preset-launch-caveat"
         >
-          Launching is one-shot — there's no in-app cancel once the daemon
-          starts spawning. To stop a partial launch you'd have to stop each
-          spawned session by hand, or kill the daemon process.
+          After launch starts, this dialog shows progress and can cancel before
+          the next session spawns. Already-created sessions remain visible.
         </p>
       )}
       <div className="preset-preview-list" data-testid="preset-preview-list">
@@ -742,6 +799,81 @@ function PreviewStage({
         )}
       </div>
     </>
+  );
+}
+
+function LaunchProgressStage({
+  job,
+  presetName,
+}: {
+  job: PresetLaunchJobSnapshot | null;
+  presetName: string;
+}) {
+  const status = launchJobStatusText(job);
+  const total = job?.total ?? 0;
+  const launched = job?.launched ?? 0;
+  const progressMax = Math.max(1, total);
+  const progressValue = Math.min(progressMax, launched);
+  return (
+    <div className="preset-launch-progress" data-testid="preset-launch-progress">
+      <p className="muted small">Preset</p>
+      <h3>{presetName}</h3>
+      <p data-testid="preset-launch-progress-status">{status}</p>
+      <progress
+        className="preset-launch-progress-bar"
+        max={progressMax}
+        value={progressValue}
+        aria-label="Preset launch progress"
+        data-testid="preset-launch-progress-bar"
+      />
+      {job && (
+        <dl className="preset-launch-progress-facts">
+          <div>
+            <dt>Sessions</dt>
+            <dd data-testid="preset-launch-progress-sessions">
+              {job.created_session_ids.length}
+            </dd>
+          </div>
+          <div>
+            <dt>Tabs</dt>
+            <dd>{job.created_tab_ids.length}</dd>
+          </div>
+        </dl>
+      )}
+      {job?.status === "failed" && job.error && (
+        <p className="error" data-testid="preset-launch-progress-error">
+          {job.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function launchJobStatusText(job: PresetLaunchJobSnapshot | null): string {
+  if (!job) {
+    return "Starting launch…";
+  }
+  switch (job.status) {
+    case "resolving":
+      return "Resolving prompts…";
+    case "spawning":
+      return `Spawning ${job.launched} / ${job.total} sessions`;
+    case "completed":
+      return `Launched ${job.launched} / ${job.total} sessions`;
+    case "cancelled":
+      return `Cancelled after ${job.launched} / ${job.total} sessions`;
+    case "failed":
+      return `Failed after ${job.launched} / ${job.total} sessions`;
+    case "unknown":
+      return `Launch status: ${job.status}`;
+  }
+}
+
+function isTerminalLaunchJob(job: PresetLaunchJobSnapshot | null): boolean {
+  return (
+    job?.status === "completed" ||
+    job?.status === "cancelled" ||
+    job?.status === "failed"
   );
 }
 

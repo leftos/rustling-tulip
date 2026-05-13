@@ -2535,6 +2535,46 @@ button.tree-tab-pill:hover {
   border-bottom: 1px dashed var(--border);
   margin-bottom: 2px;
 }
+.preset-launch-progress {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.preset-launch-progress h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.preset-launch-progress p {
+  margin: 0;
+}
+.preset-launch-progress-bar {
+  width: 100%;
+  height: 10px;
+}
+.preset-launch-progress-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.preset-launch-progress-facts div {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+}
+.preset-launch-progress-facts dt {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.preset-launch-progress-facts dd {
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+}
 
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field > span { color: var(--fg-muted); font-size: 11px; }
