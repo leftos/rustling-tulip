@@ -2669,6 +2669,8 @@ function presetJobToastMessage(job: PresetLaunchJobSnapshot): string {
       return `Preset '${job.preset_id}' launch failed`;
     case "spawning":
       return `Launching preset '${job.preset_id}'`;
+    case "running_scripts":
+      return `Running preset '${job.preset_id}' scripts`;
     case "resolving":
       return `Preparing preset '${job.preset_id}'`;
     case "unknown":

@@ -92,6 +92,7 @@ export type PresetTarget =
 
 export type PresetLaunchJobStatus =
   | "resolving"
+  | "running_scripts"
   | "spawning"
   | "completed"
   | "cancelled"

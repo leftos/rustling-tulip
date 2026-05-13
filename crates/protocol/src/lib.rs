@@ -710,6 +710,7 @@ pub enum PresetTarget {
 #[serde(rename_all = "snake_case")]
 pub enum PresetLaunchJobStatus {
     Resolving,
+    RunningScripts,
     Spawning,
     Completed,
     Cancelled,
@@ -2295,6 +2296,15 @@ mod tests {
         assert_eq!(job.job_id, "preset-job-1");
         assert_eq!(job.status, PresetLaunchJobStatus::Spawning);
         assert_eq!(job.created_session_ids, vec!["session-1".to_string()]);
+    }
+
+    #[test]
+    fn preset_launch_running_scripts_status_tagged() {
+        let status = PresetLaunchJobStatus::RunningScripts;
+        let json = serde_json::to_string(&status).expect("serialize");
+        assert_eq!(json, r#""running_scripts""#);
+        let decoded: PresetLaunchJobStatus = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, PresetLaunchJobStatus::RunningScripts);
     }
 
     #[test]

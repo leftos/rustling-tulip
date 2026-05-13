@@ -412,13 +412,32 @@ async fn resolve_variables(
     repo_root: &Path,
     executed: &mut Vec<ScriptCommandPreview>,
 ) -> Result<HashMap<String, String>, LaunchFailure> {
+    resolve_variables_with_script_observer(
+        preset_vars,
+        values,
+        repo_root,
+        executed,
+        &mut |_command| {},
+    )
+    .await
+}
+
+async fn resolve_variables_with_script_observer(
+    preset_vars: &[PresetVariable],
+    values: &[(String, String)],
+    repo_root: &Path,
+    executed: &mut Vec<ScriptCommandPreview>,
+    on_script_command: &mut impl FnMut(&ScriptCommandPreview),
+) -> Result<HashMap<String, String>, LaunchFailure> {
     let supplied: HashMap<&str, &str> = values
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     let mut out: HashMap<String, String> = HashMap::new();
     for var in preset_vars {
-        let value = resolve_one_variable(var, &supplied, repo_root, &out, executed).await?;
+        let value =
+            resolve_one_variable(var, &supplied, repo_root, &out, executed, on_script_command)
+                .await?;
         if value.is_empty() && !var.optional {
             return Err(LaunchFailure::new(format!(
                 "variable '{}' is required but no value was supplied",
@@ -436,6 +455,7 @@ async fn resolve_one_variable(
     repo_root: &Path,
     earlier: &HashMap<String, String>,
     executed: &mut Vec<ScriptCommandPreview>,
+    on_script_command: &mut impl FnMut(&ScriptCommandPreview),
 ) -> Result<String, LaunchFailure> {
     match &var.kind {
         PresetVariableKind::Text
@@ -468,11 +488,13 @@ async fn resolve_one_variable(
                 .iter()
                 .map(|a| expand_script_token(a, repo_root, earlier, &var.name))
                 .collect::<Result<_, _>>()?;
-            executed.push(ScriptCommandPreview {
+            let command_preview = ScriptCommandPreview {
                 variable_name: var.name.clone(),
                 cmd: cmd.clone(),
                 args: rendered_args.clone(),
-            });
+            };
+            on_script_command(&command_preview);
+            executed.push(command_preview);
             run_script(
                 &var.name,
                 cmd,
@@ -902,11 +924,35 @@ async fn build_plan(hub: &Hub, args: &LaunchArgs) -> Result<LaunchPlan, LaunchFa
         return Err(LaunchFailure::new("no prompts to launch"));
     }
     let mut executed: Vec<ScriptCommandPreview> = Vec::new();
-    let vars = resolve_variables(
+    let total = u32::try_from(raw_prompts.len()).unwrap_or(u32::MAX);
+    let mut running_scripts_status_sent = false;
+    let mut on_script_command = |_command: &ScriptCommandPreview| {
+        if running_scripts_status_sent {
+            return;
+        }
+        running_scripts_status_sent = true;
+        send_job_update(
+            hub,
+            PresetLaunchJobSnapshot {
+                job_id: args.job_id.clone(),
+                preset_id: args.preset_id.clone(),
+                target: args.target.clone(),
+                total,
+                launched: 0,
+                created_session_ids: Vec::new(),
+                created_tab_ids: Vec::new(),
+                status: PresetLaunchJobStatus::RunningScripts,
+                error: None,
+                current_tab_id: None,
+            },
+        );
+    };
+    let vars = resolve_variables_with_script_observer(
         &preset.variables,
         &args.variable_values,
         &repo_path,
         &mut executed,
+        &mut on_script_command,
     )
     .await?;
     let date_str = Utc::now().format("%Y-%m-%d").to_string();
@@ -1747,6 +1793,43 @@ mod tests {
         assert!(
             executed.is_empty(),
             "supplied script value should skip spawning"
+        );
+    }
+
+    #[tokio::test]
+    async fn script_variable_notifies_before_running_command() {
+        let vars = vec![PresetVariable {
+            name: "rustc_version".to_string(),
+            label: "Rustc version".to_string(),
+            kind: PresetVariableKind::Script {
+                cmd: "rustc".to_string(),
+                args: vec!["--version".to_string()],
+                extract_pattern: None,
+                timeout_ms: 10_000,
+                skip_if_empty: None,
+            },
+            prompt_at_launch: false,
+            default: None,
+            optional: true,
+        }];
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let mut observed: Vec<ScriptCommandPreview> = Vec::new();
+        let resolved = resolve_variables_with_script_observer(
+            &vars,
+            &[],
+            Path::new("."),
+            &mut executed,
+            &mut |command| observed.push(command.clone()),
+        )
+        .await
+        .expect("ok");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed, executed);
+        assert_eq!(observed[0].variable_name, "rustc_version");
+        assert!(
+            resolved
+                .get("rustc_version")
+                .is_some_and(|value| value.starts_with("rustc "))
         );
     }
 

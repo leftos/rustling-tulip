@@ -856,6 +856,8 @@ function launchJobStatusText(job: PresetLaunchJobSnapshot | null): string {
   switch (job.status) {
     case "resolving":
       return "Resolving prompts…";
+    case "running_scripts":
+      return "Running script commands…";
     case "spawning":
       return `Spawning ${job.launched} / ${job.total} sessions`;
     case "completed":

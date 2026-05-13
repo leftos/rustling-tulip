@@ -342,7 +342,7 @@ be able to cancel before the next session spawns and see what already launched.
 
 - [x] Model preset launch as a daemon-visible job with id, target, prompt count,
       created sessions, status, and error state.
-- [ ] Add progress events: resolving prompts, running script commands,
+- [x] Add progress events: resolving prompts, running script commands,
       spawning N of M, completed, cancelled, failed.
 - [x] Add a cancel message that stops future spawns and leaves already-created
       sessions alone unless the user explicitly cleans them up.
