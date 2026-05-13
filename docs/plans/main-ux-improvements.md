@@ -297,7 +297,7 @@ actions that cannot be undone should remain explicit confirmations.
 - [x] Start with close-tab undo as the first reversible UI-state action.
 - [x] Extend undo to close pane.
 - [x] Extend undo to move pane.
-- [ ] Extend undo to remove session binding.
+- [x] Extend undo to remove session binding.
 - [x] Add an undo shelf/toast host that can show one or more recent actions.
 - [x] Keep enough local state to restore a closed tab without guessing.
 - [x] Add daemon-backed `restore_tab` and `restore_tab_snapshot` for exact
@@ -307,6 +307,8 @@ actions that cannot be undone should remain explicit confirmations.
 - [x] Add e2e coverage: close tab then undo restores the tab and active state.
 - [x] Add e2e coverage: close pane then undo restores the pane layout.
 - [x] Add e2e coverage: move pane then undo restores source/destination tabs.
+- [x] Add e2e coverage: bind unbound session then undo removes the pane
+      binding.
 
 ### Action classification
 
@@ -361,7 +363,7 @@ be able to cancel before the next session spawns and see what already launched.
 4. [x] Phase 4: Faster common spawn path.
 5. [x] Phase 5: Source Control density and focus.
 6. [x] Phase 6: Discoverable controls and icon affordances.
-7. [ ] Phase 7: Undo and recovery shelf.
+7. [x] Phase 7: Undo and recovery shelf.
 8. [ ] Phase 8: Preset launch observability and cancellation.
 
 ## Open decisions
@@ -374,4 +376,6 @@ be able to cancel before the next session spawns and see what already launched.
       after the user chooses to promote/rename?
 - [ ] Should Source Control History be a collapsible section, a separate sidebar
       mode, or a secondary pane below Changes?
-- [ ] Should the undo shelf be app-global or scoped to the active tab/sidebar?
+- [x] Should the undo shelf be app-global or scoped to the active tab/sidebar?
+      App-global, because tab, pane, and sidebar actions can affect multiple
+      tabs at once.

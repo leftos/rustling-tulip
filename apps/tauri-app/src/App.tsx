@@ -84,6 +84,7 @@ import {
   setSessionFontSize,
   setTabFontSize,
 } from "./utils/fontSize";
+import { sessionDisplayLabel } from "./utils/sessionLabel";
 
 /// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
 /// `?tab=<id>` (per-tab pop-out), or `?session=<id>` (legacy single-session
@@ -570,12 +571,34 @@ export default function App() {
       return;
     }
     let openInNewTab = true;
+    let bindUndoEntry: UndoEntry | null = null;
     const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
     const activeGrid = activeTab ? tabGrid(activeTab) : null;
     if (activeTab && activeGrid) {
       const panes = collectPanes(activeGrid);
       const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
       if (focusedPane && focusedPane.session_id === null) {
+        const session = s.sessions.find((candidate) => candidate.id === sessionId);
+        bindUndoEntry = {
+          id: newUndoId(),
+          kind: "restore_tabs",
+          message: session
+            ? `Bound session "${sessionDisplayLabel(session)}"`
+            : "Bound session",
+          actionLabel: "Undo",
+          tabs: [
+            {
+              tab: cloneTab(activeTab),
+              index: Math.max(
+                0,
+                s.tabs.findIndex((existingTab) => existingTab.id === activeTab.id),
+              ),
+              restoreActive: true,
+              restoreFocusedPaneId: focusedPane.pane_id,
+            },
+          ],
+          expiresAt: Date.now() + UNDO_TTL_MS,
+        };
         client.send({
           type: "replace_pane_session",
           tab_id: activeTab.id,
@@ -595,13 +618,28 @@ export default function App() {
     setState((cur) => {
       const next = new Set(cur.attentionSessions);
       next.delete(sessionId);
-      return openInNewTab
+      const nextState = openInNewTab
         ? {
             ...cur,
             attentionSessions: next,
             pendingTabActivate: cur.pendingTabActivate + 1,
           }
         : { ...cur, attentionSessions: next };
+      if (!bindUndoEntry) {
+        return nextState;
+      }
+      const affectedTabIds = new Set(
+        bindUndoEntry.tabs.map((snapshot) => snapshot.tab.id),
+      );
+      return {
+        ...nextState,
+        undoEntries: [
+          bindUndoEntry,
+          ...cur.undoEntries.filter(
+            (existingUndo) => !undoTouches(existingUndo, affectedTabIds),
+          ),
+        ].slice(0, UNDO_LIMIT),
+      };
     });
   }, []);
 

@@ -216,7 +216,7 @@ describe("undo shelf", function () {
       throw new Error("setup failed");
     }
 
-    const session = await spawnStandaloneShell(ws);
+    const session = await spawnStandaloneShell(ws, "undo-move-shell");
     spawnedSessionIds.push(session.id);
 
     const suffix = Date.now().toString(36);
@@ -285,6 +285,70 @@ describe("undo shelf", function () {
     );
     await restoredPane.waitForExist({ timeout: 10_000 });
   });
+
+  it("removes a new session binding from an empty pane", async function () {
+    if (!ws) {
+      throw new Error("setup failed");
+    }
+
+    const session = await spawnStandaloneShell(ws, "undo-bind-shell");
+    spawnedSessionIds.push(session.id);
+
+    const suffix = Date.now().toString(36);
+    const tab = await createTab(ws, `Bind target ${suffix}`);
+    createdTabIds.push(tab.id);
+    await tabPill(tab.id).click();
+
+    const paneId = paneIds(tab)[0];
+    if (!paneId) {
+      throw new Error("new tab did not contain a root pane");
+    }
+    const pane = await browser.$(`.grid-pane[data-pane-id="${paneId}"]`);
+    await pane.waitForExist({ timeout: 5_000 });
+    await pane.click();
+
+    const row = await browser.$(
+      `[data-testid="sidebar-session"][data-session-id="${session.id}"]`,
+    );
+    await row.waitForExist({ timeout: 10_000 });
+    expect(await row.getAttribute("data-tab-binding-count")).to.equal("0");
+
+    const bound = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === tab.id &&
+        tabContainsSession(msg.tab, session.id),
+      { timeoutMs: 5_000 },
+    );
+    await row.$(".tree-label").click();
+    await bound;
+
+    const shelf = await browser.$('[data-testid="undo-shelf"]');
+    await shelf.waitForExist({ timeout: 5_000 });
+    expect(await shelf.getText()).to.include("Bound session");
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "undo-bind-session-shelf.png"),
+    );
+
+    const unbound = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === tab.id &&
+        !tabContainsSession(msg.tab, session.id),
+      { timeoutMs: 5_000 },
+    );
+    await browser.$('[data-testid="undo-action"]').click();
+    await unbound;
+
+    await browser.waitUntil(
+      async () =>
+        (await row.getAttribute("data-tab-binding-count")) === "0",
+      {
+        timeout: 5_000,
+        timeoutMsg: "session remained bound after undo",
+      },
+    );
+  });
 });
 
 async function createTab(
@@ -303,6 +367,7 @@ async function createTab(
 
 async function spawnStandaloneShell(
   ws: DaemonWsClient,
+  label: string,
 ): Promise<SessionSnapshot> {
   const spawned = ws.waitFor(
     (msg): msg is SessionUpdatedMessage =>
@@ -313,7 +378,7 @@ async function spawnStandaloneShell(
   );
   ws.send({
     type: "spawn_session",
-    label: "undo-move-shell",
+    label,
     target: { kind: "standalone", cwd: null },
     mode: "plain_shell",
     initial_prompt: null,
