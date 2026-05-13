@@ -334,6 +334,7 @@ export default function SpawnDialog({
                   onAgentChange={setAgent}
                   onRunModeChange={setRunMode}
                   restoreLastSpawnDefaults={restoreLastSpawnDefaults}
+                  spawnPrefill={spawnPrefill}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -354,6 +355,7 @@ export default function SpawnDialog({
                   onAgentChange={setAgent}
                   onRunModeChange={setRunMode}
                   restoreLastSpawnDefaults={restoreLastSpawnDefaults}
+                  spawnPrefill={spawnPrefill}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -897,6 +899,7 @@ function SpawnPlacementPicker({
 }
 
 /// Branch field shared by both forms. Behavior:
+///   * When editing a saved spawn config, seed with its saved branch name.
 ///   * On mount / when `defaultBranch` changes (entity switch): if
 ///     `useWorktree`, seed with a random `wt/<adj>-<noun>` (because
 ///     worktree-adding the default branch fails — it's already checked out
@@ -916,21 +919,30 @@ function useBranchField(
   defaultBranch: string,
   useWorktree: boolean,
   targetKey: string,
+  prefillValue: string | null,
 ) {
-  const initial = useWorktree
+  const initial = prefillValue ?? (useWorktree
     ? (branchSuggestionCache.get(targetKey) ?? randomWorktreeBranchName())
-    : defaultBranch;
-  if (useWorktree && !branchSuggestionCache.has(targetKey)) {
+    : defaultBranch);
+  if (
+    prefillValue === null &&
+    useWorktree &&
+    !branchSuggestionCache.has(targetKey)
+  ) {
     branchSuggestionCache.set(targetKey, initial);
   }
   const [value, setValue] = useState<string>(initial);
   // Track whether the random rule should still fire. Reset to true whenever
   // the entity (and therefore `defaultBranch`) changes; flipped to false the
   // moment the user edits the field by hand.
-  const allowAutoRef = useRef(true);
+  const allowAutoRef = useRef(prefillValue === null);
 
   useEffect(() => {
-    allowAutoRef.current = true;
+    allowAutoRef.current = prefillValue === null;
+    if (prefillValue !== null) {
+      setValue(prefillValue);
+      return;
+    }
     if (useWorktree && defaultBranch) {
       const cached = branchSuggestionCache.get(targetKey);
       const next = cached ?? randomWorktreeBranchName();
@@ -941,7 +953,7 @@ function useBranchField(
     }
     // The use_worktree effect below picks up the rest after a toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultBranch, targetKey]);
+  }, [defaultBranch, targetKey, prefillValue]);
 
   useEffect(() => {
     if (!allowAutoRef.current) return;
@@ -991,6 +1003,7 @@ function SingleForm({
   onAgentChange,
   onRunModeChange,
   restoreLastSpawnDefaults,
+  spawnPrefill,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -1010,6 +1023,7 @@ function SingleForm({
   onAgentChange: (a: Agent) => void;
   onRunModeChange: (m: RunMode) => void;
   restoreLastSpawnDefaults: boolean;
+  spawnPrefill: SpawnConfig | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -1025,6 +1039,11 @@ function SingleForm({
     () => repos.find((r) => r.id === repoId) ?? null,
     [repos, repoId],
   );
+  const prefillTarget =
+    spawnPrefill?.target.kind === "single" &&
+    spawnPrefill.target.repo_id === repoId
+      ? spawnPrefill.target
+      : null;
 
   // Default runtime controls to whatever this repo was last launched with.
   useEffect(() => {
@@ -1052,7 +1071,9 @@ function SingleForm({
   }, [repoId, client]);
 
   const defaultBranch = repo?.default_branch ?? "main";
-  const [useWorktree, setUseWorktree] = useState<boolean>(true);
+  const [useWorktree, setUseWorktree] = useState<boolean>(
+    () => prefillTarget?.use_worktree ?? true,
+  );
   /// "new" creates a fresh worktree (auto-named or user-typed branch).
   /// "existing" picks an already-checked-out worktree from this repo —
   /// useful for returning to a parked session's worktree, or one created
@@ -1062,12 +1083,14 @@ function SingleForm({
 
   // Reset the persistent-preference seed when the chosen repo changes.
   useEffect(() => {
-    setUseWorktree(repo?.default_use_worktree ?? true);
+    setUseWorktree(
+      prefillTarget?.use_worktree ?? repo?.default_use_worktree ?? true,
+    );
     // Flip back to "new" on repo change — the existing worktree list
     // belongs to the previous repo and would be misleading.
     setWorktreeMode("new");
     setWorktreeList([]);
-  }, [repo]);
+  }, [repo, prefillTarget?.use_worktree]);
 
   // Fetch the worktree list when entering "existing" mode for the current
   // repo. Mirrors the list_branches pattern above.
@@ -1084,12 +1107,19 @@ function SingleForm({
     return () => window.removeEventListener("rt:worktrees", handler);
   }, [repoId, useWorktree, worktreeMode, client]);
 
-  const branch = useBranchField(defaultBranch, useWorktree, `repo:${repoId}`);
+  const branch = useBranchField(
+    defaultBranch,
+    useWorktree,
+    `repo:${repoId}`,
+    prefillTarget?.branch_name ?? null,
+  );
 
-  const [baseBranch, setBaseBranch] = useState<string>("");
+  const [baseBranch, setBaseBranch] = useState<string>(
+    () => prefillTarget?.base_branch ?? "",
+  );
   useEffect(() => {
-    setBaseBranch(defaultBranch);
-  }, [defaultBranch]);
+    setBaseBranch(prefillTarget?.base_branch ?? defaultBranch);
+  }, [defaultBranch, prefillTarget?.base_branch]);
 
   /// Worktrees a user can still pick — entries already bound to a live
   /// session are shown disabled (greyed) below, so we keep them in the
@@ -1305,6 +1335,7 @@ function WorkspaceForm({
   onAgentChange,
   onRunModeChange,
   restoreLastSpawnDefaults,
+  spawnPrefill,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -1323,6 +1354,7 @@ function WorkspaceForm({
   onAgentChange: (a: Agent) => void;
   onRunModeChange: (m: RunMode) => void;
   restoreLastSpawnDefaults: boolean;
+  spawnPrefill: SpawnConfig | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -1366,23 +1398,36 @@ function WorkspaceForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspace?.id, firstMember?.id, restoreLastSpawnDefaults]);
 
+  const prefillTarget =
+    spawnPrefill?.target.kind === "workspace" &&
+    spawnPrefill.target.workspace_id === workspaceId
+      ? spawnPrefill.target
+      : null;
+
   const defaultBranch = firstMember?.default_branch ?? "main";
-  const [useWorktree, setUseWorktree] = useState<boolean>(true);
+  const [useWorktree, setUseWorktree] = useState<boolean>(
+    () => prefillTarget?.use_worktree ?? true,
+  );
 
   useEffect(() => {
-    setUseWorktree(workspace?.default_use_worktree ?? true);
-  }, [workspace]);
+    setUseWorktree(
+      prefillTarget?.use_worktree ?? workspace?.default_use_worktree ?? true,
+    );
+  }, [workspace, prefillTarget?.use_worktree]);
 
   const branch = useBranchField(
     defaultBranch,
     useWorktree,
     `workspace:${workspaceId}`,
+    prefillTarget?.branch_name ?? null,
   );
 
-  const [baseBranch, setBaseBranch] = useState<string>("");
+  const [baseBranch, setBaseBranch] = useState<string>(
+    () => prefillTarget?.base_branch ?? "",
+  );
   useEffect(() => {
-    setBaseBranch(defaultBranch);
-  }, [defaultBranch]);
+    setBaseBranch(prefillTarget?.base_branch ?? defaultBranch);
+  }, [defaultBranch, prefillTarget?.base_branch]);
 
   const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
   useEffect(() => {

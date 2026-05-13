@@ -203,18 +203,110 @@ describe("spawn defaults", function () {
     expect((await warning.getText()).toLowerCase()).to.include("trusted launch");
     await closeSpawnDialog();
   });
+
+  it("replays launch last from the compact repo row action", async function () {
+    if (!ws || !registeredRepoId) throw new Error("setup failed");
+
+    await reloadAndWaitForRepo(registeredRepoId);
+
+    const seed = await spawnRepoSession(
+      ws,
+      registeredRepoId,
+      "compact-launch-last-seed",
+      false,
+    );
+    spawnedSessionIds.push(seed.id);
+
+    const repoRow = await repoContainer(registeredRepoId);
+    const summary = await repoRow.$('[data-testid="container-launch-summary"]');
+    await summary.waitForExist({ timeout: 5_000 });
+    expect(await summary.getText()).to.include("Claude");
+    expect(await summary.getText()).to.include("main");
+
+    const quickLaunch = await repoRow.$(
+      '[data-testid="container-launch-last-quick"]',
+    );
+    await quickLaunch.waitForExist({ timeout: 5_000 });
+    const knownSessionIds = new Set(spawnedSessionIds);
+    const replayPromise = ws.waitFor(
+      (msg): msg is SessionUpdatedMessage =>
+        isSessionUpdated(msg) &&
+        !knownSessionIds.has(msg.session.id) &&
+        msg.session.members.some((m) => m.repo_id === registeredRepoId),
+      { timeoutMs: 15_000 },
+    );
+    await quickLaunch.click();
+
+    const replayed = (await replayPromise).session;
+    spawnedSessionIds.push(replayed.id);
+    await (await sidebarRow(replayed.id)).waitForExist({ timeout: 10_000 });
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "spawn-compact-launch-last.png"),
+    );
+  });
+
+  it("opens the full spawn dialog from compact launch-last edit", async function () {
+    if (!ws || !registeredRepoId) throw new Error("setup failed");
+
+    await reloadAndWaitForRepo(registeredRepoId);
+
+    const seed = await spawnRepoSession(
+      ws,
+      registeredRepoId,
+      "compact-launch-edit-seed",
+      false,
+    );
+    spawnedSessionIds.push(seed.id);
+
+    await openRepoContextMenu(registeredRepoId);
+    const summary = await browser.$(
+      '[data-testid="container-launch-last-summary"]',
+    );
+    await summary.waitForExist({ timeout: 5_000 });
+    await browser.waitUntil(
+      async () => (await summary.getText()).includes("main"),
+      {
+        timeout: 10_000,
+        timeoutMsg: "launch-last summary did not update to the saved main branch",
+      },
+    );
+    expect(await summary.getText()).to.include("Claude");
+
+    const edit = await browser.$('[data-testid="container-launch-last-edit"]');
+    await browser.waitUntil(async () => edit.isEnabled(), {
+      timeout: 5_000,
+      timeoutMsg: "launch-last edit did not become enabled",
+    });
+    await edit.click();
+
+    const dialog = await browser.$('[data-testid="spawn-dialog"]');
+    await dialog.waitForExist({ timeout: 10_000 });
+    const target = await dialog.$('[data-testid="spawn-target-select"]');
+    expect(await target.getValue()).to.equal(`repo:${registeredRepoId}`);
+    const claude = await dialog.$('[data-testid="spawn-agent-claude"]');
+    expect(await claude.isSelected()).to.equal(true);
+    const branch = await dialog.$('[data-testid="spawn-single-branch"]');
+    expect(await branch.getValue()).to.equal("main");
+    const worktree = await dialog.$('[data-testid="spawn-single-worktree"]');
+    expect(await worktree.isSelected()).to.equal(false);
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "spawn-compact-launch-edit.png"),
+    );
+    await closeSpawnDialog();
+  });
 });
 
-async function spawnElevatedSession(
+async function spawnRepoSession(
   ws: DaemonWsClient,
   repoId: string,
   label: string,
+  dangerouslySkipPermissions: boolean,
 ): Promise<SessionSnapshot> {
   const spawnPromise = ws.waitFor(
     (msg): msg is SessionUpdatedMessage =>
       isSessionUpdated(msg) &&
       msg.session.label === label &&
-      msg.session.elevated_authority === true,
+      Boolean(msg.session.elevated_authority) === dangerouslySkipPermissions,
     { timeoutMs: 15_000 },
   );
   ws.send({
@@ -229,7 +321,7 @@ async function spawnElevatedSession(
     },
     mode: "interactive",
     initial_prompt: null,
-    dangerously_skip_permissions: true,
+    dangerously_skip_permissions: dangerouslySkipPermissions,
     agent: "claude",
     model: null,
     permission_mode: null,
@@ -239,6 +331,14 @@ async function spawnElevatedSession(
   });
 
   return (await spawnPromise).session;
+}
+
+async function spawnElevatedSession(
+  ws: DaemonWsClient,
+  repoId: string,
+  label: string,
+): Promise<SessionSnapshot> {
+  return spawnRepoSession(ws, repoId, label, true);
 }
 
 function isRepos(
@@ -337,11 +437,15 @@ async function closeSpawnDialog(): Promise<void> {
 }
 
 async function openRepoContextMenu(repoId: string): Promise<void> {
-  const repoRow = await browser.$(
-    `[data-testid="sidebar-container-repo"][data-container-id="${repoId}"]`,
-  );
+  const repoRow = await repoContainer(repoId);
   await repoRow.waitForExist({ timeout: 10_000 });
   await repoRow.click({ button: "right" });
+}
+
+async function repoContainer(repoId: string) {
+  return browser.$(
+    `[data-testid="sidebar-container-repo"][data-container-id="${repoId}"]`,
+  );
 }
 
 async function sidebarRow(sessionId: string) {

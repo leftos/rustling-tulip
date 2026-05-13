@@ -829,6 +829,27 @@ button:focus-visible {
 }
 .list-item-action:hover { color: var(--err); background: var(--err-soft); }
 .list-item-action.danger { color: var(--err); }
+.tree-launch-summary {
+  flex: 0 1 140px;
+  min-width: 0;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+  font-size: var(--text-micro);
+  font-family: var(--font-mono);
+}
+.tree-row:hover .tree-launch-summary { color: var(--fg-muted); }
+.tree-launch-action {
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1;
+}
+.tree-launch-action:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
 
 .empty { color: var(--fg-dim); font-style: italic; padding: 4px 8px; margin: 0; }
 
@@ -2382,6 +2403,17 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--fg-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+.context-menu-summary {
+  color: var(--fg-muted);
+  font-size: var(--text-micro);
+  font-family: var(--font-mono);
+  line-height: 1.35;
+  max-width: 220px;
+  padding: 2px 10px 6px 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .context-menu-hint {
   margin-left: 12px;

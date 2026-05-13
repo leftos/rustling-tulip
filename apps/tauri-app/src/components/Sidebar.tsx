@@ -12,6 +12,7 @@ import {
   type PresetTarget,
   type RepoEntry,
   type SessionSnapshot,
+  type SpawnConfig,
   type TabEntry,
   type WorkspaceEntry,
 } from "../types";
@@ -135,6 +136,7 @@ interface Props {
     target: SpawnInitialTarget,
     placement: LaunchLastPlacement,
   ) => void;
+  onEditLastSpawn: (target: SpawnInitialTarget) => void;
   /// Active main-window tab. Threaded down so the "Launch last in current
   /// tab" submenu entry can be disabled when no tab is selected.
   activeTabId: string | null;
@@ -648,6 +650,11 @@ export default function Sidebar(props: Props) {
                 onDrop: (e) => onContainerDrop(ref, e),
               };
             }
+            const lastSpawnConfig = lastSpawnConfigFor(
+              c,
+              props.repos,
+              props.workspaces,
+            );
 
             return (
               <ContainerNode
@@ -665,6 +672,7 @@ export default function Sidebar(props: Props) {
                 onRemoveRepoWithLiveSessions={props.onRemoveRepoWithLiveSessions}
                 onRemoveWorkspace={props.onRemoveWorkspace}
                 onLaunchLast={props.onLaunchLast}
+                lastSpawnSummary={spawnConfigSummary(lastSpawnConfig)}
                 onContextMenu={(x, y) =>
                   setContextMenu({ x, y, container: c })
                 }
@@ -699,14 +707,21 @@ export default function Sidebar(props: Props) {
           presets={currentPresets}
           tabs={props.tabs}
           activeTabId={props.activeTabId}
-          hasLastConfig={hasLastConfig(
-            contextMenu.container,
-            props.repos,
-            props.workspaces,
+          lastSpawnSummary={spawnConfigSummary(
+            lastSpawnConfigFor(
+              contextMenu.container,
+              props.repos,
+              props.workspaces,
+            ),
           )}
           onLaunchLast={(placement) => {
             const target = containerLaunchTarget(contextMenu.container);
             if (target) props.onLaunchLast(target, placement);
+            closeMenu();
+          }}
+          onEditLastSpawn={() => {
+            const target = containerLaunchTarget(contextMenu.container);
+            if (target) props.onEditLastSpawn(target);
             closeMenu();
           }}
           onClose={closeMenu}
@@ -810,6 +825,7 @@ interface ContainerNodeProps {
     target: SpawnInitialTarget,
     placement: LaunchLastPlacement,
   ) => void;
+  lastSpawnSummary: string | null;
   onContextMenu: (x: number, y: number) => void;
   /// Threads through to each SessionLeaf so a right-click on a session
   /// opens the per-session context menu (Duplicate, …).
@@ -977,6 +993,13 @@ function ContainerNode(p: ContainerNodeProps) {
     p.onLaunchLast(target, { kind: "current_tab" });
   };
 
+  const onQuickLaunchLast = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const target = launchLastTargetFor(c);
+    if (!target) return;
+    p.onLaunchLast(target, { kind: "current_tab" });
+  };
+
   // Tab + repo/workspace containers participate in drag-to-reorder
   // (different MIMEs, but same `dragHandlers` shape). Detached/unbound
   // pass undefined handlers and stay non-draggable.
@@ -1030,6 +1053,15 @@ function ContainerNode(p: ContainerNodeProps) {
                     : "?"}
         </span>
         <span className="tree-label">{c.name}</span>
+        {p.lastSpawnSummary && (
+          <span
+            className="tree-launch-summary"
+            title={`Last launch: ${p.lastSpawnSummary}`}
+            data-testid="container-launch-summary"
+          >
+            {p.lastSpawnSummary}
+          </span>
+        )}
         {c.sessions.length > 0 && (
           <span className="list-item-meta">{c.sessions.length}</span>
         )}
@@ -1042,6 +1074,18 @@ function ContainerNode(p: ContainerNodeProps) {
           >
             !
           </span>
+        )}
+        {p.lastSpawnSummary && (
+          <button
+            type="button"
+            className="list-item-action tree-launch-action"
+            title={`Launch last in current tab: ${p.lastSpawnSummary}`}
+            aria-label={`Launch last for ${c.name}`}
+            data-testid="container-launch-last-quick"
+            onClick={onQuickLaunchLast}
+          >
+            ▶
+          </button>
         )}
         {c.removable && (
           <>
@@ -1476,8 +1520,9 @@ interface ContextMenuProps {
     | null;
   tabs: TabEntry[];
   activeTabId: string | null;
-  hasLastConfig: boolean;
+  lastSpawnSummary: string | null;
   onLaunchLast: (placement: LaunchLastPlacement) => void;
+  onEditLastSpawn: () => void;
   onClose: () => void;
   onSpawn: () => void;
   onRemove: () => void;
@@ -1497,7 +1542,8 @@ function ContainerContextMenu(p: ContextMenuProps) {
   const activeTab = p.activeTabId
     ? p.tabs.find((t) => t.id === p.activeTabId)
     : null;
-  const lastConfigDisabledTitle = p.hasLastConfig
+  const hasLastConfig = p.lastSpawnSummary !== null;
+  const lastConfigDisabledTitle = hasLastConfig
     ? undefined
     : "No saved spawn config — launch the spawn dialog at least once first.";
   useEscape(p.onClose);
@@ -1508,7 +1554,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   // — overlap-safe, viewport-stable beats pixel-perfect). The 12px margin
   // keeps the menu off the edge.
   const clampedLeft = clampMenuCoord(p.state.x, 200);
-  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 360, "height");
+  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 400, "height");
   return (
     <div
       className="context-menu-backdrop"
@@ -1532,10 +1578,19 @@ function ContainerContextMenu(p: ContextMenuProps) {
           <>
             <li className="context-menu-separator" aria-hidden="true" />
             <li className="context-menu-label">Launch last again</li>
+            {p.lastSpawnSummary && (
+              <li
+                className="context-menu-summary"
+                title={p.lastSpawnSummary}
+                data-testid="container-launch-last-summary"
+              >
+                {p.lastSpawnSummary}
+              </li>
+            )}
             <li>
               <button
                 type="button"
-                disabled={!p.hasLastConfig || !activeTab}
+                disabled={!hasLastConfig || !activeTab}
                 onClick={() => p.onLaunchLast({ kind: "current_tab" })}
                 title={
                   lastConfigDisabledTitle ??
@@ -1554,9 +1609,11 @@ function ContainerContextMenu(p: ContextMenuProps) {
             <li>
               <button
                 type="button"
-                disabled={!p.hasLastConfig}
+                disabled={!hasLastConfig}
                 onClick={() => p.onLaunchLast({ kind: "new_tab" })}
-                title={lastConfigDisabledTitle ?? "Replay last spawn in a fresh tab"}
+                title={
+                  lastConfigDisabledTitle ?? "Replay last spawn in a fresh tab"
+                }
                 data-testid="container-launch-last-new"
               >
                 &nbsp;&nbsp;In new tab
@@ -1569,7 +1626,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
                   <li key={`launch-last:${t.id}`}>
                     <button
                       type="button"
-                      disabled={!p.hasLastConfig}
+                      disabled={!hasLastConfig}
                       onClick={() =>
                         p.onLaunchLast({ kind: "tab", tabId: t.id })
                       }
@@ -1584,6 +1641,20 @@ function ContainerContextMenu(p: ContextMenuProps) {
                 ))}
               </>
             )}
+            <li>
+              <button
+                type="button"
+                disabled={!hasLastConfig}
+                onClick={p.onEditLastSpawn}
+                title={
+                  lastConfigDisabledTitle ??
+                  "Open the full spawn dialog with this config pre-filled"
+                }
+                data-testid="container-launch-last-edit"
+              >
+                &nbsp;&nbsp;Edit before launch
+              </button>
+            </li>
           </>
         )}
         {/* Tab containers don't expose preset / reveal / remove — they're
@@ -1694,23 +1765,60 @@ function containerLaunchTarget(c: TreeContainer): SpawnInitialTarget | null {
   return launchLastTargetFor(c);
 }
 
-/// Does the targeted container have a saved spawn config to relaunch?
-/// Drives the disabled state of the "Launch last again" submenu items
-/// when the user hasn't launched this repo/workspace yet.
-function hasLastConfig(
+function lastSpawnConfigFor(
   c: TreeContainer,
   repos: RepoEntry[],
   workspaces: WorkspaceEntry[],
-): boolean {
+): SpawnConfig | null {
   if (c.kind === "repo") {
-    return repos.find((r) => r.id === c.id)?.last_spawn_config != null;
+    return repos.find((r) => r.id === c.id)?.last_spawn_config ?? null;
   }
   if (c.kind === "workspace") {
-    return (
-      workspaces.find((w) => w.id === c.id)?.last_spawn_config != null
-    );
+    return workspaces.find((w) => w.id === c.id)?.last_spawn_config ?? null;
   }
-  return false;
+  return null;
+}
+
+function spawnConfigSummary(config: SpawnConfig | null): string | null {
+  if (!config) return null;
+  const parts = [
+    config.agent === "claude" ? "Claude" : "Codex",
+    sessionModeLabel(config.mode),
+  ];
+  const target = spawnTargetSummary(config);
+  if (target) parts.push(target);
+  if (config.model) parts.push(config.model);
+  if (!config.dangerously_skip_permissions) {
+    const authority = authoritySettingSummary(config);
+    if (authority) parts.push(authority);
+  }
+  if (config.dangerously_skip_permissions) parts.push("trusted");
+  if (config.extra_env.length > 0) parts.push(`${config.extra_env.length} env`);
+  return parts.join(" · ");
+}
+
+function sessionModeLabel(mode: SpawnConfig["mode"]): string {
+  if (mode === "plain_shell") return "shell";
+  return mode;
+}
+
+function spawnTargetSummary(config: SpawnConfig): string | null {
+  const target = config.target;
+  if (target.kind === "standalone") return "standalone shell";
+  if (target.use_worktree) {
+    const base = target.base_branch ?? target.branch_name;
+    return `new worktree from ${base}`;
+  }
+  return target.branch_name;
+}
+
+function authoritySettingSummary(config: SpawnConfig): string | null {
+  if (config.agent === "claude") {
+    if (config.permission_mode === "accept_edits") return "accept edits";
+    if (config.permission_mode === "bypass_permissions") return "bypass permissions";
+    return config.permission_mode;
+  }
+  return config.codex_sandbox;
 }
 
 function targetCacheKey(target: PresetTarget): string {

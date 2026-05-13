@@ -174,9 +174,18 @@ The default path should feel like "launch the thing I normally launch here",
 with advanced configuration still one click away. The user should be able to
 inspect or override the full configuration before committing.
 
+Primary launch presets:
+
+- Repo/workspace row: replay the saved spawn config in the current tab when it
+  exists; otherwise open the full spawn dialog scoped to that container.
+- Empty pane: open the full spawn dialog and route the result back into that
+  pane.
+- Existing tab: open the spawn dialog with that tab pinned as the placement
+  target.
+
 ### Tasks
 
-- [ ] Define the primary spawn presets for a repo, workspace, empty pane, and
+- [x] Define the primary spawn presets for a repo, workspace, empty pane, and
       existing tab.
 - [x] Add a quick action for spawning a non-repo-tied shell in the user's
       default folder.
@@ -185,17 +194,17 @@ inspect or override the full configuration before committing.
       launches.
 - [x] Ensure non-repo shell sessions are clearly grouped as standalone, not
       under any registered repo/workspace.
-- [ ] Add a compact "Launch last" or "Launch default" path where a last
+- [x] Add a compact "Launch last" or "Launch default" path where a last
       spawn config exists.
-- [ ] Show a concise summary of the config that will be replayed before launch.
+- [x] Show a concise summary of the config that will be replayed before launch.
 - [ ] Keep branch/worktree controls visible only when they affect the selected
       launch mode.
 - [ ] Consider moving base branch into advanced/new-worktree details unless
       it differs from the repo default.
 - [ ] Make "current tab", "new tab", and explicit tab placement read as a
       compact segmented placement control.
-- [ ] Add e2e coverage for launch-last using the saved spawn config.
-- [ ] Add e2e coverage for switching from compact path to full edit path.
+- [x] Add e2e coverage for launch-last using the saved spawn config.
+- [x] Add e2e coverage for switching from compact path to full edit path.
 - [x] Add e2e coverage for quick non-repo shell launch into the default folder.
 - [x] Add e2e coverage for modal non-repo shell launch into a chosen folder.
 

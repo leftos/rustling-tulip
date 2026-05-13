@@ -162,6 +162,17 @@ interface AppState {
   sessionOrder: Map<string, string[]>;
 }
 
+function lastSpawnConfigForTarget(
+  state: AppState,
+  target: SpawnInitialTarget,
+): SpawnConfig | null {
+  return target.kind === "repo"
+    ? (state.repos.find((r) => r.id === target.repo_id)?.last_spawn_config ??
+        null)
+    : (state.workspaces.find((w) => w.id === target.workspace_id)
+        ?.last_spawn_config ?? null);
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>({
     client: null,
@@ -653,12 +664,7 @@ export default function App() {
       const s = latestStateRef.current;
       const client = s?.client;
       if (!s || !client) return;
-      const config: SpawnConfig | null =
-        target.kind === "repo"
-          ? (s.repos.find((r) => r.id === target.repo_id)?.last_spawn_config ??
-            null)
-          : (s.workspaces.find((w) => w.id === target.workspace_id)
-              ?.last_spawn_config ?? null);
+      const config = lastSpawnConfigForTarget(s, target);
       if (!config) {
         onOpenSpawn(target);
         return;
@@ -729,6 +735,21 @@ export default function App() {
     },
     [onOpenSpawn],
   );
+
+  const onEditLastSpawn = useCallback((target: SpawnInitialTarget) => {
+    const s = latestStateRef.current;
+    if (!s) return;
+    const config = lastSpawnConfigForTarget(s, target);
+    spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
+    setState((state) => ({
+      ...state,
+      spawnOpen: true,
+      spawnInitial: target,
+      spawnPrefill:
+        config && config.target.kind !== "standalone" ? config : undefined,
+    }));
+  }, []);
 
   /// Shift-click on a session's "Duplicate" context-menu entry. Fetches
   /// the source's persisted SpawnConfig and opens the spawn dialog with
@@ -1690,6 +1711,7 @@ export default function App() {
             onOpenSpawn={onOpenSpawn}
             onOpenSpawnIntoTab={onOpenSpawnIntoTab}
             onLaunchLast={onLaunchLast}
+            onEditLastSpawn={onEditLastSpawn}
             activeTabId={state.activeTabId}
             onDuplicateSession={onDuplicateSession}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
