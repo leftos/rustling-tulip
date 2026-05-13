@@ -1116,9 +1116,26 @@ fn build_tab_state(
 
 async fn orchestrate(
     hub: &Hub,
+    plan: LaunchPlan,
+    total: u32,
+    cancel_rx: watch::Receiver<bool>,
+) -> Result<(), LaunchFailure> {
+    let mut spawner = PresetSpawner::Real;
+    orchestrate_with_spawner(hub, plan, total, cancel_rx, &mut spawner).await
+}
+
+enum PresetSpawner {
+    Real,
+    #[cfg(test)]
+    Fake(Box<dyn FnMut(usize, &[String]) -> Result<String, LaunchFailure> + Send>),
+}
+
+async fn orchestrate_with_spawner(
+    hub: &Hub,
     mut plan: LaunchPlan,
     total: u32,
     mut cancel_rx: watch::Receiver<bool>,
+    spawner: &mut PresetSpawner,
 ) -> Result<(), LaunchFailure> {
     let mut session_ids: Vec<String> = Vec::new();
     let stagger = Duration::from_millis(u64::from(plan.preset.stagger_ms));
@@ -1151,7 +1168,11 @@ async fn orchestrate(
             return Ok(());
         }
 
-        let snapshot_id = spawn_one(hub, &plan, i, raw, &session_ids).await?;
+        let snapshot_id = match spawner {
+            PresetSpawner::Real => spawn_one(hub, &plan, i, raw, &session_ids).await?,
+            #[cfg(test)]
+            PresetSpawner::Fake(spawn) => spawn(i, &session_ids)?,
+        };
         session_ids.push(snapshot_id.clone());
 
         if plan.tab_state.is_active() {
@@ -1401,6 +1422,14 @@ fn open_new_tab(
 )]
 mod tests {
     use super::*;
+    use crate::paths::Dirs;
+    use crate::session::SessionRegistry;
+    use crate::state::AppState;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::{Mutex as AsyncMutex, broadcast, mpsc, watch};
 
     #[test]
     fn parse_prompts_bullets() {
@@ -1597,6 +1626,61 @@ mod tests {
         let injector = build_injector(&template, "x");
         assert_eq!(injector.steps.len(), 1);
         assert!(matches!(injector.steps[0], InjectorStep::Text { .. }));
+    }
+
+    #[tokio::test]
+    async fn preset_launch_cancel_before_first_spawn_emits_cancelled_job() {
+        let (hub, mut preset_rx, _scratch) = test_hub();
+        let plan = test_launch_plan(2, 60_000);
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let observed_spawn_count = Arc::clone(&spawn_count);
+        let mut spawner = PresetSpawner::Fake(Box::new(move |_, _| {
+            observed_spawn_count.fetch_add(1, Ordering::SeqCst);
+            Ok("should-not-spawn".to_string())
+        }));
+
+        orchestrate_with_spawner(&hub, plan, 2, cancel_rx, &mut spawner)
+            .await
+            .expect("cancelled launch should finish cleanly");
+
+        let cancelled = recv_job_update(&mut preset_rx).await;
+        assert_eq!(cancelled.status, PresetLaunchJobStatus::Cancelled);
+        assert_eq!(cancelled.launched, 0);
+        assert!(cancelled.created_session_ids.is_empty());
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preset_launch_cancel_mid_launch_stops_future_spawns() {
+        let (hub, mut preset_rx, _scratch) = test_hub();
+        let plan = test_launch_plan(2, 60_000);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let observed_spawn_count = Arc::clone(&spawn_count);
+        let mut spawner = PresetSpawner::Fake(Box::new(move |i, _| {
+            let count = observed_spawn_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if i == 0 {
+                let _ = cancel_tx.send(true);
+            }
+            Ok(format!("session-{count}"))
+        }));
+
+        orchestrate_with_spawner(&hub, plan, 2, cancel_rx, &mut spawner)
+            .await
+            .expect("mid-launch cancellation should finish cleanly");
+
+        let starting = recv_job_update(&mut preset_rx).await;
+        let first_spawned = recv_job_update(&mut preset_rx).await;
+        let cancelled = recv_job_update(&mut preset_rx).await;
+        assert_eq!(starting.status, PresetLaunchJobStatus::Spawning);
+        assert_eq!(starting.launched, 0);
+        assert_eq!(first_spawned.status, PresetLaunchJobStatus::Spawning);
+        assert_eq!(first_spawned.launched, 1);
+        assert_eq!(cancelled.status, PresetLaunchJobStatus::Cancelled);
+        assert_eq!(cancelled.launched, 1);
+        assert_eq!(cancelled.created_session_ids, vec!["session-1".to_string()]);
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1898,5 +1982,150 @@ mod tests {
         .await
         .expect_err("non-matching pattern must fail");
         assert!(err.error.contains("did not match"));
+    }
+
+    async fn recv_job_update(rx: &mut broadcast::Receiver<PresetEvent>) -> PresetLaunchJobSnapshot {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("timed out waiting for preset job update")
+                .expect("preset event channel closed");
+            if let PresetEvent::JobUpdated { job } = event {
+                return job;
+            }
+        }
+    }
+
+    fn test_hub() -> (Hub, broadcast::Receiver<PresetEvent>, ScratchDir) {
+        let scratch = ScratchDir::new();
+        let config = scratch.path().join("config");
+        let sessions_dir = config.join("sessions");
+        let worktrees_dir = scratch.path().join("worktrees");
+        let binaries_dir = scratch.path().join("binaries");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        std::fs::create_dir_all(&worktrees_dir).expect("create worktrees dir");
+        std::fs::create_dir_all(&binaries_dir).expect("create binaries dir");
+        let dirs = Dirs {
+            config: config.clone(),
+            state_file: config.join("state.json"),
+            handshake_file: config.join("daemon.json"),
+            sessions_dir,
+            worktrees_dir,
+            binaries_dir,
+        };
+        let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
+        let sessions = SessionRegistry::new(dirs.clone());
+        let (attention_tx, _) = mpsc::unbounded_channel();
+        let (shutdown_tx, _) = watch::channel(false);
+        let (tab_events, _) = broadcast::channel(16);
+        let (preset_events, preset_rx) = broadcast::channel(16);
+        let (state_events, _) = broadcast::channel(16);
+        let (client_count, _) = watch::channel(0);
+        let hub = Hub {
+            state,
+            sessions,
+            auth_token: "test-token".to_string(),
+            attention_tx,
+            dirs,
+            shutdown_tx,
+            tab_events,
+            preset_events,
+            preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
+            state_events,
+            client_count: Arc::new(client_count),
+        };
+        (hub, preset_rx, scratch)
+    }
+
+    fn test_launch_plan(prompt_count: usize, stagger_ms: u32) -> LaunchPlan {
+        let raw_prompts = (0..prompt_count)
+            .map(|i| RawPrompt {
+                text: format!("prompt {}", i + 1),
+                stem: None,
+            })
+            .collect::<Vec<_>>();
+        let branch_names = (0..prompt_count)
+            .map(|i| format!("branch-{}", i + 1))
+            .collect::<Vec<_>>();
+        LaunchPlan {
+            job_id: "preset-job-test".to_string(),
+            target: PresetTarget::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            preset: PresetEntry {
+                id: "preset-1".to_string(),
+                name: "Preset test".to_string(),
+                description: None,
+                source_repo_id: "repo-1".to_string(),
+                prompt_sources: vec![protocol::PresetPromptSource::Inline],
+                prompt_template: "{prompt}".to_string(),
+                context_footer_lines: Vec::new(),
+                variables: Vec::new(),
+                branch_template: "branch-{index}".to_string(),
+                session_label_template: Some("session {index}".to_string()),
+                default_use_worktree: Some(false),
+                dangerously_skip_permissions: false,
+                model: None,
+                permission_mode: None,
+                agent: protocol::Agent::Claude,
+                codex_sandbox: None,
+                tab_grouping: TabGroupingConfig::None,
+                injector: InjectorTemplate {
+                    startup_delay_ms: 0,
+                    pre_input: Vec::new(),
+                    post_input: Vec::new(),
+                },
+                stagger_ms,
+            },
+            repo: RepoEntry {
+                id: "repo-1".to_string(),
+                name: "repo".to_string(),
+                path: "X:/tmp/repo".to_string(),
+                default_branch: Some("main".to_string()),
+                default_use_worktree: false,
+                last_agent: None,
+                last_spawn_config: None,
+            },
+            spawn_kind: PresetSpawnKind::Repo {
+                repo_id: "repo-1".to_string(),
+            },
+            raw_prompts,
+            vars: HashMap::new(),
+            branch_names,
+            use_worktree: false,
+            tab_state: TabState {
+                layout: None,
+                base_name: String::new(),
+                cap: None,
+                tab_ids: Vec::new(),
+                current_tab_id: None,
+                current_panes: Vec::new(),
+                tab_count: 0,
+            },
+            date_str: "2026-05-13".to_string(),
+            datetime_str: "2026-05-13T00:00:00".to_string(),
+        }
+    }
+
+    struct ScratchDir {
+        path: PathBuf,
+    }
+
+    impl ScratchDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("rt-preset-test-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }

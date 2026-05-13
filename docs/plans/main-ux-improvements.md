@@ -31,13 +31,13 @@ orientation, and reducing repeated-session friction.
 
 ## Cross-cutting validation
 
-- [ ] For every UI-facing slice, capture before/after screenshots with the
+- [x] For every UI-facing slice, capture before/after screenshots with the
       isolated `tools/e2e` host or WDIO specs.
-- [ ] Add a focused e2e regression for each deterministic behavior change.
-- [ ] Use hand testing only for feel, density, drag nuance, OS dialogs, and
+- [x] Add a focused e2e regression for each deterministic behavior change.
+- [x] Use hand testing only for feel, density, drag nuance, OS dialogs, and
       anything not reliably exposed through WebDriver.
-- [ ] Keep `.tmp/` outputs untracked and do not write screenshots into docs.
-- [ ] Run the narrow frontend/Rust checks for files touched by each slice.
+- [x] Keep `.tmp/` outputs untracked and do not write screenshots into docs.
+- [x] Run the narrow frontend/Rust checks for files touched by each slice.
 
 ## Phase 1 - Stop, removal, and recovery semantics
 
@@ -351,7 +351,7 @@ be able to cancel before the next session spawns and see what already launched.
 - [x] Add a compact preset-job toast or sidebar entry after the dialog closes.
 - [x] Make partial-launch cleanup discoverable: select launched sessions, stop
       all from this preset, or leave them running.
-- [ ] Add daemon tests for cancel-before-first-spawn and cancel-mid-launch.
+- [x] Add daemon tests for cancel-before-first-spawn and cancel-mid-launch.
 - [x] Add e2e coverage for a multi-prompt preset: progress appears, cancel
       stops later spawns, existing sessions remain visible.
 
@@ -364,7 +364,7 @@ be able to cancel before the next session spawns and see what already launched.
 5. [x] Phase 5: Source Control density and focus.
 6. [x] Phase 6: Discoverable controls and icon affordances.
 7. [x] Phase 7: Undo and recovery shelf.
-8. [ ] Phase 8: Preset launch observability and cancellation.
+8. [x] Phase 8: Preset launch observability and cancellation.
 
 ## Open decisions
 
@@ -374,8 +374,10 @@ be able to cancel before the next session spawns and see what already launched.
       without a per-session worktree?
 - [x] Should terminal OSC titles ever become primary automatically, or only
       after the user chooses to promote/rename?
-- [ ] Should Source Control History be a collapsible section, a separate sidebar
+- [x] Should Source Control History be a collapsible section, a separate sidebar
       mode, or a secondary pane below Changes?
+      Secondary pane below Changes with collapse/focus affordances, matching
+      the VS Code-like split requested for this sidebar.
 - [x] Should the undo shelf be app-global or scoped to the active tab/sidebar?
       App-global, because tab, pane, and sidebar actions can affect multiple
       tabs at once.
