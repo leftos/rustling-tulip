@@ -7,6 +7,7 @@ import {
   type DaemonPaths,
 } from "../api";
 import { copyToClipboard } from "../utils/clipboard";
+import CopyPulse from "./CopyPulse";
 
 /// Union the footer accepts. Mirrors the shape `Sidebar.tsx::renderConnectionBadge`
 /// took before this component subsumed it — App's `status` adds `init` and
@@ -131,6 +132,7 @@ export default function DaemonFooter({
 
   return (
     <div className="daemon-footer-host" data-testid="daemon-footer-host">
+      <CopyPulse />
       <button
         ref={buttonRef}
         type="button"

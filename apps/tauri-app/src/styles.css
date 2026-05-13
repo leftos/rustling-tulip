@@ -1118,21 +1118,22 @@ button.tree-tab-pill:hover {
 
 /* ---------------------------------------------------------------------------
  * CopyPulse — transient "✓ copied" chip that fades in/out just above the
- * daemon footer whenever copyToClipboard succeeds. Zero-height sticky host
- * provides a positioning context without disturbing the sidebar's flex
- * layout; the chip itself is absolutely positioned and animates a box-
- * shadow ring as the pulse.
+ * daemon footer whenever copyToClipboard succeeds. Mounted as the first
+ * child of .daemon-footer-host (already sticky bottom:0); the host sits
+ * just above the footer's box so the chip's bottom:38px reliably anchors
+ * to the footer regardless of sidebar scroll state. The chip itself is
+ * absolutely positioned and animates a box-shadow ring as the pulse.
  * --------------------------------------------------------------------------- */
 .copy-pulse-host {
-  position: sticky;
-  bottom: 0;
+  position: absolute;
+  inset: auto 0 100% 0;
   height: 0;
   z-index: 7;
   pointer-events: none;
 }
 .copy-pulse {
   position: absolute;
-  bottom: 38px;
+  bottom: 6px;
   left: 50%;
   display: inline-flex;
   align-items: center;
@@ -1195,6 +1196,48 @@ button.tree-tab-pill:hover {
 @media (prefers-reduced-motion: reduce) {
   .copy-pulse {
     animation: copy-pulse-fade-reduced 800ms ease-out forwards;
+  }
+}
+
+/* Boot intro — chip flashes once on app start so first-time users learn
+ * where copy confirmations appear. Holds at full opacity for ~80% of the
+ * duration, fades out, no shadow ring (the ring is reserved for real
+ * copies so the two states feel distinct). */
+.copy-pulse.is-intro {
+  animation: copy-pulse-intro 5000ms ease-out forwards;
+}
+@keyframes copy-pulse-intro {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 6px) scale(0.94);
+  }
+  6% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-pulse.is-intro {
+    animation: copy-pulse-intro-reduced 5000ms linear forwards;
+  }
+  @keyframes copy-pulse-intro-reduced {
+    0%,
+    85% {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+    100% {
+      opacity: 0;
+      transform: translate(-50%, 0);
+    }
   }
 }
 

@@ -259,6 +259,40 @@ export default function Terminal({
       termRef.current = term;
       fitRef.current = fit;
 
+      // OSC 52 observer — fires the clipboard-copy event whenever a TUI
+      // running in this terminal pushes text to the system clipboard via
+      // the standard ESC]52;<Pc>;<Pd>BEL sequence. Claude Code, codex,
+      // tmux, vim and friends use this to implement copy-on-select while
+      // mouse-tracking is enabled (which prevents xterm's local
+      // selection from firing onSelectionChange). We're a passive
+      // observer: return false so xterm's native handling (when
+      // allowProposedApi is on) is unaffected, and we never write to the
+      // clipboard ourselves — the OSC sequence already did that.
+      //
+      // Format: <Pc>;<Pd> where Pc is the selection target ("c" for
+      // clipboard, "p"/"s" for primary/select, etc.) and Pd is base64
+      // payload OR "?" for a query. We ignore queries.
+      const oscDisposable = term.parser.registerOscHandler(52, (data) => {
+        const sep = data.indexOf(";");
+        if (sep === -1) return false;
+        const payload = data.substring(sep + 1);
+        if (payload === "?" || payload.length === 0) return false;
+        let length = 0;
+        try {
+          length = atob(payload).length;
+        } catch {
+          // Malformed base64 — still surface the pulse but with length 0
+          // so the user gets feedback that *something* tried to write.
+        }
+        window.dispatchEvent(
+          new CustomEvent("rt:clipboard-copy", {
+            detail: { source: "OSC52", length },
+          }),
+        );
+        return false;
+      });
+      cleanupFns.push(() => oscDisposable.dispose());
+
       // Spawn flow and pop-out windows mark the session id so the xterm
       // helper textarea grabs OS keyboard focus on mount — without this the
       // user has to click into the terminal before they can type. Deferred
