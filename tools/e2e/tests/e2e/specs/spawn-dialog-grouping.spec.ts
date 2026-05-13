@@ -105,7 +105,7 @@ describe("spawn dialog tab grouping", function () {
     const currentPlacement = await browser.$(
       '[data-testid="spawn-placement-current-tab"]',
     );
-    if (!(await currentPlacement.isSelected())) {
+    if ((await currentPlacement.getAttribute("aria-checked")) !== "true") {
       await currentPlacement.click();
     }
     const plainShell = await browser.$('[data-testid="spawn-agent-plain-shell"]');

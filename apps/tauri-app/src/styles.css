@@ -2115,6 +2115,30 @@ button.tree-tab-pill:hover {
   background: var(--accent-soft);
   color: var(--accent);
 }
+.segmented > button:disabled {
+  color: var(--fg-dim);
+  cursor: not-allowed;
+}
+.spawn-placement-segmented {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+.spawn-placement-segmented > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.segmented-hint {
+  color: var(--fg-dim);
+  font-size: var(--text-micro);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .muted { color: var(--fg-muted); }
 .inline-note { margin-left: 6px; }

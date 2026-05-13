@@ -120,8 +120,8 @@ describe("spawn dialog placement", function () {
     const newTabPlacement = await browser.$(
       '[data-testid="spawn-placement-new-tab"]',
     );
-    expect(await currentPlacement.isSelected()).to.equal(true);
-    expect(await newTabPlacement.isSelected()).to.equal(false);
+    expect(await currentPlacement.getAttribute("aria-checked")).to.equal("true");
+    expect(await newTabPlacement.getAttribute("aria-checked")).to.equal("false");
 
     await browser.saveScreenshot(".tmp/spawn-dialog-placement.png");
 
@@ -141,9 +141,9 @@ describe("spawn dialog placement", function () {
     expect(runModeText).to.not.include("Plain shell");
 
     await newTabPlacement.click();
-    expect(await newTabPlacement.isSelected()).to.equal(true);
+    expect(await newTabPlacement.getAttribute("aria-checked")).to.equal("true");
     await currentPlacement.click();
-    expect(await currentPlacement.isSelected()).to.equal(true);
+    expect(await currentPlacement.getAttribute("aria-checked")).to.equal("true");
 
     const worktreeToggle = await browser.$(
       '[data-testid="spawn-single-worktree"]',

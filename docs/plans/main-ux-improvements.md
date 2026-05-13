@@ -201,7 +201,7 @@ Primary launch presets:
       launch mode.
 - [x] Consider moving base branch into advanced/new-worktree details unless
       it differs from the repo default.
-- [ ] Make "current tab", "new tab", and explicit tab placement read as a
+- [x] Make "current tab", "new tab", and explicit tab placement read as a
       compact segmented placement control.
 - [x] Add e2e coverage for launch-last using the saved spawn config.
 - [x] Add e2e coverage for switching from compact path to full edit path.
@@ -332,7 +332,7 @@ be able to cancel before the next session spawns and see what already launched.
 1. [x] Phase 1: Stop, removal, and recovery semantics.
 2. [x] Phase 2: Stable session identity.
 3. [x] Phase 3: Safer spawn defaults and authority visibility.
-4. [ ] Phase 4: Faster common spawn path.
+4. [x] Phase 4: Faster common spawn path.
 5. [ ] Phase 5: Source Control density and focus.
 6. [ ] Phase 6: Discoverable controls and icon affordances.
 7. [ ] Phase 7: Undo and recovery shelf.

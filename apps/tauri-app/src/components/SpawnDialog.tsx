@@ -852,49 +852,59 @@ function SpawnPlacementPicker({
   // side. The non-active tabs each get their own radio.
   const otherTabs = tabs.filter((t) => t.id !== activeTabId);
   return (
-    <fieldset className="field">
-      <legend>Open in</legend>
-      <label
-        className={`radio${canUseCurrentTab ? "" : " radio-disabled"}`}
-        title={
-          canUseCurrentTab
-            ? undefined
-            : "The current tab cannot host terminal panes"
-        }
+    <div className="field">
+      <span>Open in</span>
+      <div
+        className="segmented spawn-placement-segmented"
+        role="radiogroup"
+        aria-label="Open in"
       >
-        <input
-          type="radio"
-          checked={value.kind === "current_tab"}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={value.kind === "current_tab"}
+          className={value.kind === "current_tab" ? "active" : ""}
           disabled={!canUseCurrentTab}
-          onChange={() => onChange({ kind: "current_tab" })}
+          onClick={() => onChange({ kind: "current_tab" })}
+          title={
+            canUseCurrentTab
+              ? undefined
+              : "The current tab cannot host terminal panes"
+          }
           data-testid="spawn-placement-current-tab"
-        />
-        Current tab
-        {currentTabName && (
-          <span className="muted small inline-note">{currentTabName}</span>
-        )}
-      </label>
-      <label className="radio">
-        <input
-          type="radio"
-          checked={value.kind === "new_tab"}
-          onChange={() => onChange({ kind: "new_tab" })}
+        >
+          Current tab
+          {currentTabName && (
+            <span className="segmented-hint">{currentTabName}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          role="radio"
+          aria-checked={value.kind === "new_tab"}
+          className={value.kind === "new_tab" ? "active" : ""}
+          onClick={() => onChange({ kind: "new_tab" })}
           data-testid="spawn-placement-new-tab"
-        />
-        New tab
-      </label>
-      {otherTabs.map((t) => (
-        <label key={`placement:${t.id}`} className="radio">
-          <input
-            type="radio"
-            checked={value.kind === "tab" && value.tabId === t.id}
-            onChange={() => onChange({ kind: "tab", tabId: t.id })}
+        >
+          New tab
+        </button>
+        {otherTabs.map((t) => (
+          <button
+            key={`placement:${t.id}`}
+            type="button"
+            role="radio"
+            aria-checked={value.kind === "tab" && value.tabId === t.id}
+            className={
+              value.kind === "tab" && value.tabId === t.id ? "active" : ""
+            }
+            onClick={() => onChange({ kind: "tab", tabId: t.id })}
             data-testid={`spawn-placement-tab-${t.id}`}
-          />
-          {t.name}
-        </label>
-      ))}
-    </fieldset>
+          >
+            {t.name}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
