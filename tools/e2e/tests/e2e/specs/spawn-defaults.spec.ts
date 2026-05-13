@@ -54,8 +54,8 @@ describe("spawn defaults", function () {
       (r: RepoEntry) =>
         r.path === fixtureRepo || r.path === fixtureRepo!.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
-    registeredRepoId = fixture!.id;
+    if (!fixture) throw new Error("fixture repo was not registered");
+    registeredRepoId = fixture.id;
   });
 
   after(async function () {
@@ -139,7 +139,7 @@ describe("spawn defaults", function () {
     await closeSpawnDialog();
   });
 
-  it("marks elevated sessions in the sidebar and pane header", async function () {
+  it("keeps elevated state out of the compact sidebar row", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 
     await reloadAndWaitForRepo(registeredRepoId);
@@ -153,9 +153,14 @@ describe("spawn defaults", function () {
 
     const row = await sidebarRow(session.id);
     expect(await row.getAttribute("data-session-elevated")).to.equal("true");
+    const rowRuntime = await row.$('[data-testid="session-runtime-tag"]');
+    await rowRuntime.waitForExist({ timeout: 5_000 });
+    expect((await rowRuntime.getText()).toLowerCase()).to.equal("claude");
+    expect((await rowRuntime.getAttribute("title"))?.toLowerCase()).to.include(
+      "approval prompts were bypassed",
+    );
     const rowBadge = await row.$('[data-testid="session-authority-badge"]');
-    await rowBadge.waitForExist({ timeout: 5_000 });
-    expect((await rowBadge.getText()).toLowerCase()).to.include("trusted");
+    expect(await rowBadge.isExisting()).to.equal(false);
 
     await row.click();
     const pane = await sessionPane(session.id);

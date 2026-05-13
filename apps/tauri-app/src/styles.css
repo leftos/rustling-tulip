@@ -49,11 +49,11 @@
 
   /* ---- Foreground ladder ----
    * Slightly warmed (a touch of yellow) so long-running text doesn't
-   * read as sterile. fg-dim moved up from #5c6773 → #656872 — the old
-   * value crossed into "is this disabled?" territory on real screens. */
+   * read as sterile. Secondary and tertiary text stay visibly distinct
+   * without falling into disabled-looking contrast. */
   --fg:        #e5e6e8;  /* primary text */
-  --fg-muted:  #969aa3;  /* secondary text, captions, section headers */
-  --fg-dim:    #656872;  /* tertiary, runtime chips, timestamps */
+  --fg-muted:  #aeb3bd;  /* secondary text, captions, section headers */
+  --fg-dim:    #838a96;  /* tertiary, runtime chips, timestamps */
 
   /* ---- Accent (interactive) ----
    * Shifted slightly warmer + brighter than the old #4ea8ff so it pops
@@ -1114,6 +1114,28 @@ button.link.inline { display: inline; padding: 0 2px; }
   margin: 4px 4px 6px;
   user-select: text; -webkit-user-select: text;
 }
+.sidebar .tree {
+  gap: 6px;
+  padding-top: 6px;
+}
+.sidebar .tree-children {
+  gap: 3px;
+  margin: 3px 0 4px 28px;
+  padding-left: 0;
+}
+.sidebar .tree-children::before {
+  left: -15px;
+  top: 1px;
+  bottom: 6px;
+}
+.sidebar .tree-children > li:not(.tree-children-banner)::before {
+  left: -15px;
+  top: 13px;
+  width: 13px;
+}
+.sidebar .tree-children-banner {
+  margin-left: 0;
+}
 .tree-row {
   position: relative;
   display: flex; align-items: center; gap: 6px;
@@ -1132,7 +1154,28 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree-row.is-dragging { opacity: 0.45; }
 /* Container header row — slightly heavier weight so the hierarchy reads
  * even at a glance. Section-header semantics without yelling. */
-.tree-container > .tree-label { font-weight: 600; }
+.tree-container {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 2px;
+}
+.tree-container-primary,
+.tree-container-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.tree-container-primary > .tree-label {
+  font-weight: 700;
+}
+.tree-container-meta {
+  padding-left: 18px;
+}
+.tree-container-meta > .tree-launch-summary {
+  flex: 1 1 auto;
+  max-width: none;
+}
 .tree-caret {
   width: 12px; flex: none;
   color: var(--fg-dim);
@@ -1170,11 +1213,6 @@ button.link.inline { display: inline; padding: 0 2px; }
   background: var(--accent-soft);
 }
 .tree-container.tree-container-unbound .tree-kind-tag { color: var(--fg-dim); }
-.tree-kind-tag.session-authority-tag {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 44%, transparent);
-  background: color-mix(in srgb, var(--warn) 12%, transparent);
-}
 .tree-label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--text-body);
@@ -2356,11 +2394,11 @@ button.tree-tab-pill:hover {
 }
 .modal-tabs button {
   background: none; border: none; padding: 8px 12px;
-  font-size: var(--text-small); color: var(--text-muted);
+  font-size: var(--text-small); color: var(--fg-muted);
   cursor: pointer; border-bottom: 2px solid transparent;
   margin-bottom: -1px; transition: color var(--dur-fast);
 }
-.modal-tabs button:hover { color: var(--text); }
+.modal-tabs button:hover { color: var(--fg); }
 .modal-tabs button.active {
   color: var(--accent); border-bottom-color: var(--accent);
 }
@@ -2369,17 +2407,17 @@ button.tree-tab-pill:hover {
 .file-picker-row {
   display: flex; gap: 8px; align-items: center;
   padding: 6px 10px; border: 1px solid var(--border);
-  border-radius: var(--radius); background: var(--bg-input);
+  border-radius: var(--radius); background: var(--bg);
 }
 .file-picker-path {
-  flex: 1; font-size: var(--text-small); color: var(--text-muted);
+  flex: 1; font-size: var(--text-small); color: var(--fg-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0;
 }
 
 /* Inline status/error lines inside modal panels */
 .status-message {
-  font-size: var(--text-small); color: var(--text-muted);
+  font-size: var(--text-small); color: var(--fg-muted);
   margin: 0; padding: 4px 0;
 }
 .status-message.error { color: var(--err); }

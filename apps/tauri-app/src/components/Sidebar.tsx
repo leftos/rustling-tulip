@@ -1035,6 +1035,18 @@ function ContainerNode(p: ContainerNodeProps) {
   // (different MIMEs, but same `dragHandlers` shape). Detached/unbound
   // pass undefined handlers and stay non-draggable.
   const isDraggable = p.dragHandlers !== undefined;
+  const kindLabel =
+    c.kind === "workspace"
+      ? "WS"
+      : c.kind === "repo"
+        ? "REPO"
+        : c.kind === "tab"
+          ? "TAB"
+          : c.kind === "standalone"
+            ? "SH"
+            : c.kind === "unbound"
+              ? "UNB"
+              : "?";
 
   return (
     <li>
@@ -1067,143 +1079,76 @@ function ContainerNode(p: ContainerNodeProps) {
         onDragEnd={p.dragHandlers?.onDragEnd}
         onDrop={p.dragHandlers?.onDrop}
       >
-        <span className="tree-caret" aria-hidden="true">
-          {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
-        </span>
-        <span className="tree-kind-tag">
-          {c.kind === "workspace"
-            ? "WS"
-            : c.kind === "repo"
-              ? "REPO"
-              : c.kind === "tab"
-                ? "TAB"
-                : c.kind === "standalone"
-                  ? "SH"
-                  : c.kind === "unbound"
-                    ? "UNB"
-                    : "?"}
-        </span>
-        <span className="tree-label">{c.name}</span>
-        {p.lastSpawnSummary && (
-          <span
-            className="tree-launch-summary"
-            title={`Last launch: ${p.lastSpawnSummary}`}
-            data-testid="container-launch-summary"
-          >
-            {p.lastSpawnSummary}
+        <div className="tree-container-primary">
+          <span className="tree-caret" aria-hidden="true">
+            {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
           </span>
-        )}
-        {c.sessions.length > 0 && (
-          <span className="list-item-meta">{c.sessions.length}</span>
-        )}
-        {p.hasAttention && (
-          <span
-            className="container-attention-chip"
-            title="A session in this container is awaiting input or has stopped/errored"
-            aria-label="container has attention-flagged session"
-            data-testid="container-attention-chip"
-          >
-            !
-          </span>
-        )}
-        {p.lastSpawnSummary && (
-          <button
-            type="button"
-            className="list-item-action tree-launch-action"
-            title={`Launch last in current tab: ${p.lastSpawnSummary}`}
-            aria-label={`Launch last for ${c.name}`}
-            data-testid="container-launch-last-quick"
-            onClick={onQuickLaunchLast}
-          >
-            <Icon name="play" />
-          </button>
-        )}
-        {c.removable && (
-          <>
+          <span className="tree-label">{c.name}</span>
+          {c.sessions.length > 0 && (
+            <span className="list-item-meta">{c.sessions.length}</span>
+          )}
+          {p.hasAttention && (
+            <span
+              className="container-attention-chip"
+              title="A session in this container is awaiting input or has stopped/errored"
+              aria-label="container has attention-flagged session"
+              data-testid="container-attention-chip"
+            >
+              !
+            </span>
+          )}
+          {p.lastSpawnSummary && (
             <button
               type="button"
-              className={
-                confirming
-                  ? "list-item-action danger"
-                  : "list-item-action"
-              }
-              title={
-                confirming
-                  ? "Click again to confirm"
-                  : c.kind === "workspace"
-                    ? "Remove workspace"
-                    : "Remove repo"
-              }
-              aria-label={
-                confirming
-                  ? `Confirm removal of ${c.kind} ${c.name}`
-                  : `Remove ${c.kind} ${c.name}`
-              }
-              data-testid={`sidebar-remove-${c.kind}`}
-              data-confirming={confirming ? "true" : "false"}
-              onClick={(e) => {
-                e.stopPropagation();
-                onRemoveClick();
-              }}
+              className="list-item-action tree-launch-action"
+              title={`Launch last in current tab: ${p.lastSpawnSummary}`}
+              aria-label={`Launch last for ${c.name}`}
+              data-testid="container-launch-last-quick"
+              onClick={onQuickLaunchLast}
             >
-              <Icon name={confirming ? "confirm" : "close"} />
+              <Icon name="play" />
             </button>
-            {confirming && (
-              <button
-                type="button"
-                className="list-item-action"
-                title="Cancel"
-                aria-label="Cancel removal"
-                data-testid={`sidebar-remove-${c.kind}-cancel`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfirming(false);
-                }}
-              >
-                <Icon name="close" />
-              </button>
-            )}
-          </>
-        )}
-        {c.kind === "detached" &&
-          c.sessions.some((s) => s.status !== "stopped") && (
+          )}
+          {c.removable && (
             <>
               <button
                 type="button"
                 className={
-                  confirmingStopAll
+                  confirming
                     ? "list-item-action danger"
                     : "list-item-action"
                 }
                 title={
-                  confirmingStopAll
-                    ? "Click again to stop all detached sessions"
-                    : "Stop all detached sessions"
+                  confirming
+                    ? "Click again to confirm"
+                    : c.kind === "workspace"
+                      ? "Remove workspace"
+                      : "Remove repo"
                 }
                 aria-label={
-                  confirmingStopAll
-                    ? "Confirm stop all detached sessions"
-                    : "Stop all detached sessions"
+                  confirming
+                    ? `Confirm removal of ${c.kind} ${c.name}`
+                    : `Remove ${c.kind} ${c.name}`
                 }
-                data-testid="sidebar-stop-all-detached"
-                data-confirming={confirmingStopAll ? "true" : "false"}
+                data-testid={`sidebar-remove-${c.kind}`}
+                data-confirming={confirming ? "true" : "false"}
                 onClick={(e) => {
                   e.stopPropagation();
-                  onStopAllDetached();
+                  onRemoveClick();
                 }}
               >
-                <Icon name={confirmingStopAll ? "confirm" : "stop"} />
+                <Icon name={confirming ? "confirm" : "close"} />
               </button>
-              {confirmingStopAll && (
+              {confirming && (
                 <button
                   type="button"
                   className="list-item-action"
                   title="Cancel"
-                  aria-label="Cancel stop all"
-                  data-testid="sidebar-stop-all-detached-cancel"
+                  aria-label="Cancel removal"
+                  data-testid={`sidebar-remove-${c.kind}-cancel`}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setConfirmingStopAll(false);
+                    setConfirming(false);
                   }}
                 >
                   <Icon name="close" />
@@ -1211,6 +1156,65 @@ function ContainerNode(p: ContainerNodeProps) {
               )}
             </>
           )}
+          {c.kind === "detached" &&
+            c.sessions.some((s) => s.status !== "stopped") && (
+              <>
+                <button
+                  type="button"
+                  className={
+                    confirmingStopAll
+                      ? "list-item-action danger"
+                      : "list-item-action"
+                  }
+                  title={
+                    confirmingStopAll
+                      ? "Click again to stop all detached sessions"
+                      : "Stop all detached sessions"
+                  }
+                  aria-label={
+                    confirmingStopAll
+                      ? "Confirm stop all detached sessions"
+                      : "Stop all detached sessions"
+                  }
+                  data-testid="sidebar-stop-all-detached"
+                  data-confirming={confirmingStopAll ? "true" : "false"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStopAllDetached();
+                  }}
+                >
+                  <Icon name={confirmingStopAll ? "confirm" : "stop"} />
+                </button>
+                {confirmingStopAll && (
+                  <button
+                    type="button"
+                    className="list-item-action"
+                    title="Cancel"
+                    aria-label="Cancel stop all"
+                    data-testid="sidebar-stop-all-detached-cancel"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmingStopAll(false);
+                    }}
+                  >
+                    <Icon name="close" />
+                  </button>
+                )}
+              </>
+            )}
+        </div>
+        <div className="tree-container-meta">
+          <span className="tree-kind-tag">{kindLabel}</span>
+          {p.lastSpawnSummary && (
+            <span
+              className="tree-launch-summary"
+              title={`Last launch: ${p.lastSpawnSummary}`}
+              data-testid="container-launch-summary"
+            >
+              {p.lastSpawnSummary}
+            </span>
+          )}
+        </div>
       </div>
       {hasChildren && !p.collapsed && (
         <ul className="tree-children">
@@ -1386,25 +1390,19 @@ function SessionLeaf(p: SessionLeafProps) {
         {(() => {
           const runtime = sessionRuntimeLabel(s);
           if (!runtime) return null;
+          const title = s.elevated_authority
+            ? `Running ${runtime}; approval prompts were bypassed`
+            : `Running ${runtime}`;
           return (
             <span
               className="tree-kind-tag"
-              title={`Running ${runtime}`}
+              title={title}
               data-testid="session-runtime-tag"
             >
               {runtime}
             </span>
           );
         })()}
-        {s.elevated_authority && (
-          <span
-            className="tree-kind-tag session-authority-tag"
-            title="Trusted launch: permission prompts were bypassed"
-            data-testid="session-authority-badge"
-          >
-            trusted
-          </span>
-        )}
         {p.needsAttention && <span className="badge badge-warn small">!</span>}
         {s.is_orphan && (
           <span className="list-item-meta" title="Reattached after daemon restart; PTY detached">

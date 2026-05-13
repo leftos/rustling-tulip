@@ -19,18 +19,12 @@ export function sessionLabelTooltip(s: SessionSnapshot): string {
   return `${display}\nTerminal title: ${terminalTitle}`;
 }
 
-/// Short token identifying what's running in this session — "claude" /
-/// "codex" for agent sessions, "pwsh" / "powershell" / "cmd" / "bash" /
-/// "sh" for plain shells. Falls back to the `agent` field for sessions
-/// reattached from a pre-iter-51 sidecar that didn't write
-/// `program_name`. Returns null only when nothing is knowable (which
-/// shouldn't happen in practice on a fresh spawn).
+/// Short token identifying the user-facing runtime: "claude" / "codex" for
+/// agent sessions, "pwsh" / "powershell" / "cmd" / "bash" / "sh" for plain
+/// shells.
 export function sessionRuntimeLabel(s: SessionSnapshot): string | null {
-  if (s.program_name) return s.program_name;
-  // Pre-iter-51 fallback: orphan reattach without program_name. For
-  // plain-shell sessions we have no information, so return null. For
-  // agent sessions the protocol's `agent` field gives us the answer.
   if (s.mode !== "plain_shell") return s.agent;
+  if (s.program_name) return s.program_name;
   return null;
 }
 
