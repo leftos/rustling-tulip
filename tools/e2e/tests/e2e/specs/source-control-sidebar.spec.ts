@@ -14,10 +14,11 @@
  * existing daemon-side coverage; this spec is about the UI host swap.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { browser } from "@wdio/globals";
 import { expect } from "chai";
@@ -27,6 +28,23 @@ import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
+const repoRoot = resolve(
+  fileURLToPath(new URL("../../../../..", import.meta.url)),
+);
+
+interface HistoryRowGeometry {
+  chipLeft: number;
+  chipRight: number;
+  rowRight: number;
+  subjectLeft: number;
+  subjectRight: number;
+}
+
+interface OverflowProbe {
+  selector: string;
+  clientWidth: number;
+  scrollWidth: number;
+}
 
 describe("source-control sidebar", function () {
   this.timeout(180_000);
@@ -45,19 +63,26 @@ describe("source-control sidebar", function () {
     await writeFile(join(fixtureRepo, "README.md"), "fixture for sc-sidebar e2e\n");
     runGit(fixtureRepo, ["init", "-b", "main"]);
     runGit(fixtureRepo, ["config", "user.email", "e2e@rustling-tulip.test"]);
-    runGit(fixtureRepo, ["config", "user.name", "rt-e2e"]);
+    runGit(fixtureRepo, ["config", "user.name", "Jane E2E"]);
     runGit(fixtureRepo, ["add", "README.md"]);
-    runGit(fixtureRepo, ["commit", "-m", "initial fixture commit"]);
+    runGit(fixtureRepo, [
+      "commit",
+      "-m",
+      "initial fixture commit with a long subject that should truncate before the author chip",
+    ]);
 
     // Reset activity-bar to default so a previous spec run can't carry over.
     await browser.execute(() => {
       try {
         localStorage.removeItem("rt.activity");
         localStorage.removeItem("rt.sourceControl.repoOverride");
+        localStorage.removeItem("rt:split:source-control.sidebar");
+        localStorage.removeItem("rt:split:source-control.history");
       } catch {
         /* unavailable */
       }
     });
+    await mkdir(join(repoRoot, ".tmp", "e2e"), { recursive: true });
 
     // Register the fixture so the source-control sidebar has something to
     // show beyond the empty state.
@@ -168,6 +193,125 @@ describe("source-control sidebar", function () {
     await historyRow.waitForExist({ timeout: 5_000 });
   });
 
+  it("clean source-control state has no horizontal overflow", async function () {
+    const sc = await browser.$("[data-testid=source-control-sidebar]");
+    await sc.waitForExist({ timeout: 5_000 });
+
+    const commitBox = await browser.$("[data-testid=source-control-commit-message]");
+    expect(await commitBox.isExisting()).to.equal(false);
+
+    await assertNoHorizontalOverflow();
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "source-control-clean.png"),
+    );
+  });
+
+  it("history rows append the author chip without covering the subject", async function () {
+    const historyRow = await browser.$("[data-testid=source-control-history-row]");
+    await historyRow.waitForExist({ timeout: 5_000 });
+
+    const author = await historyRow.$("[data-testid=source-control-history-author]");
+    await author.waitForExist({ timeout: 5_000 });
+    expect(await author.getText()).to.equal("Jane E2E");
+
+    const geometry = (await browser.execute(`
+      const row = document.querySelector(
+        "[data-testid=source-control-history-row]"
+      );
+      const subject = row?.querySelector(
+        "[data-testid=source-control-history-subject]"
+      );
+      const chip = row?.querySelector(
+        "[data-testid=source-control-history-author]"
+      );
+      if (!row || !subject || !chip) {
+        return null;
+      }
+      const rowRect = row.getBoundingClientRect();
+      const subjectRect = subject.getBoundingClientRect();
+      const chipRect = chip.getBoundingClientRect();
+      return {
+        chipLeft: chipRect.left,
+        chipRight: chipRect.right,
+        rowRight: rowRect.right,
+        subjectLeft: subjectRect.left,
+        subjectRight: subjectRect.right,
+      };
+    `)) as unknown as HistoryRowGeometry | null;
+    if (!geometry) throw new Error("history row geometry unavailable");
+    expect(geometry.chipLeft).to.be.greaterThan(geometry.subjectLeft);
+    expect(geometry.subjectRight).to.be.at.most(geometry.chipLeft);
+    expect(geometry.chipRight).to.be.at.most(geometry.rowRight);
+  });
+
+  it("dirty source-control state collapses history and stays within width", async function () {
+    if (!fixtureRepo) throw new Error("setup");
+    await writeFile(
+      join(fixtureRepo, "README.md"),
+      "fixture for sc-sidebar e2e\nmodified for density screenshot\n",
+    );
+
+    const refresh = await browser.$("[data-testid=source-control-refresh]");
+    await refresh.click();
+
+    const worktreeBucket = await browser.$(
+      "[data-testid=source-control-bucket-worktree]",
+    );
+    await worktreeBucket.waitForExist({ timeout: 5_000 });
+
+    const toggle = await browser.$("[data-testid=source-control-history-toggle]");
+    await toggle.waitForExist({ timeout: 5_000 });
+    await browser.waitUntil(
+      async () => (await toggle.getAttribute("aria-expanded")) === "false",
+      {
+        timeout: 2_000,
+        timeoutMsg: "history section did not collapse for dirty state",
+      },
+    );
+
+    const historyList = await browser.$("[data-testid=source-control-history-list]");
+    expect(await historyList.isExisting()).to.equal(false);
+
+    await assertNoHorizontalOverflow();
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "source-control-dirty.png"),
+    );
+  });
+
+  it("expanded history-selected state has no horizontal overflow", async function () {
+    const toggle = await browser.$("[data-testid=source-control-history-toggle]");
+    await toggle.click();
+    await browser.waitUntil(
+      async () => (await toggle.getAttribute("aria-expanded")) === "true",
+      {
+        timeout: 2_000,
+        timeoutMsg: "history section did not expand",
+      },
+    );
+
+    const row = await browser.$("[data-testid=source-control-history-row]");
+    await row.waitForExist({ timeout: 5_000 });
+    await row.click();
+
+    const diff = await browser.$("[data-testid=source-control-history-diff]");
+    await diff.waitForExist({ timeout: 5_000 });
+    await browser.waitUntil(
+      async () => {
+        const text = await diff.getText();
+        return text.includes("Files:");
+      },
+      {
+        timeout: 5_000,
+        timeoutMsg: "history detail diff did not load",
+      },
+    );
+
+    await assertNoHorizontalOverflow();
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "source-control-history-selected.png"),
+    );
+  });
+
   it("the in-pane Terminal/Git toggle is gone (no session-view-git testid anywhere)", async function () {
     // Even with no session spawned, the testid string should not appear in
     // the DOM. Any future regression that re-introduces the toggle will
@@ -185,4 +329,29 @@ function isRepos(
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+async function assertNoHorizontalOverflow(): Promise<void> {
+  const overflow = (await browser.execute(`
+    const selectors = [
+      "[data-testid=source-control-sidebar]",
+      "[data-testid=source-control-changes-list]",
+      "[data-testid=source-control-history-panel]",
+      "[data-testid=source-control-history-list]",
+      "[data-testid=source-control-history-diff]",
+    ];
+    return selectors
+      .map((selector) => {
+        const node = document.querySelector(selector);
+        if (!node) return null;
+        return {
+          selector,
+          clientWidth: node.clientWidth,
+          scrollWidth: node.scrollWidth,
+        };
+      })
+      .filter((entry) => entry !== null)
+      .filter((entry) => entry.scrollWidth > entry.clientWidth + 1);
+  `)) as unknown as OverflowProbe[];
+  expect(overflow).to.deep.equal([]);
 }

@@ -53,9 +53,12 @@ export default function SourceControlSidebar({
   client,
   onActivateTab,
 }: Props) {
+  const [refreshSeq, setRefreshSeq] = useState(0);
   const [selectedChange, setSelectedChange] = useState<SelectedChange | null>(
     null,
   );
+  const [changesNeedSpace, setChangesNeedSpace] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [override, setOverride] = useState<string | null>(() => {
     try {
       return localStorage.getItem(STORAGE_KEY);
@@ -91,6 +94,19 @@ export default function SourceControlSidebar({
   // picker is hidden anyway and there's nothing to fall back from.
   const autoNoActive = isAuto && focusedRepoId === null && repos.length > 1;
 
+  useEffect(() => {
+    setChangesNeedSpace(false);
+    setHistoryCollapsed(false);
+  }, [activeRepoId]);
+
+  useEffect(() => {
+    setHistoryCollapsed(changesNeedSpace);
+  }, [changesNeedSpace]);
+
+  const refreshSourceControl = () => {
+    setRefreshSeq((value) => value + 1);
+  };
+
   if (repos.length === 0) {
     return (
       <aside className="source-control" data-testid="source-control-sidebar">
@@ -107,24 +123,36 @@ export default function SourceControlSidebar({
       <header className="source-control-header">
         <div className="source-control-header-row">
           <span className="brand">Source control</span>
-          {repos.length > 1 && (
-            <select
-              className="repo-picker"
-              value={override ?? ""}
-              onChange={(e) =>
-                updateOverride(e.target.value === "" ? null : e.target.value)
-              }
-              aria-label="Pin source-control sidebar to a specific repo"
-              data-testid="source-control-repo-picker"
+          <div className="source-control-header-actions">
+            <button
+              type="button"
+              className="source-control-refresh-button"
+              onClick={refreshSourceControl}
+              aria-label="Refresh source-control status and history"
+              title="Refresh status and history"
+              data-testid="source-control-refresh"
             >
-              <option value="">Auto · follow active pane</option>
-              {repos.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.name}
-                </option>
-              ))}
-            </select>
-          )}
+              ↻
+            </button>
+            {repos.length > 1 && (
+              <select
+                className="repo-picker"
+                value={override ?? ""}
+                onChange={(e) =>
+                  updateOverride(e.target.value === "" ? null : e.target.value)
+                }
+                aria-label="Pin source-control sidebar to a specific repo"
+                data-testid="source-control-repo-picker"
+              >
+                <option value="">Auto · follow active pane</option>
+                {repos.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
         {activeRepo && (
           <div
@@ -150,22 +178,38 @@ export default function SourceControlSidebar({
         )}
       </header>
       {activeRepoId && (
-        <ResizableSplit
-          storageKey="source-control.sidebar"
-          defaultSize={360}
-          minSize={140}
-          direction="vertical"
+        <div
+          className={
+            historyCollapsed
+              ? "source-control-body source-control-history-collapsed"
+              : "source-control-body"
+          }
         >
-          <ChangesView
-            activeRepoId={activeRepoId}
-            activeRepoName={activeRepo?.name ?? ""}
-            client={client}
-            selectedChange={selectedChange}
-            onSelectedChange={setSelectedChange}
-            onActivateTab={onActivateTab}
-          />
-          <HistoryView activeRepoId={activeRepoId} client={client} />
-        </ResizableSplit>
+          <ResizableSplit
+            storageKey="source-control.sidebar"
+            defaultSize={420}
+            minSize={180}
+            direction="vertical"
+          >
+            <ChangesView
+              activeRepoId={activeRepoId}
+              activeRepoName={activeRepo?.name ?? ""}
+              client={client}
+              refreshSeq={refreshSeq}
+              selectedChange={selectedChange}
+              onSelectedChange={setSelectedChange}
+              onActivateTab={onActivateTab}
+              onChangesNeedSpace={setChangesNeedSpace}
+            />
+            <HistoryView
+              activeRepoId={activeRepoId}
+              client={client}
+              collapsed={historyCollapsed}
+              refreshSeq={refreshSeq}
+              onCollapsedChange={setHistoryCollapsed}
+            />
+          </ResizableSplit>
+        </div>
       )}
     </aside>
   );
@@ -177,18 +221,22 @@ interface ChangesViewProps {
   activeRepoId: string;
   activeRepoName: string;
   client: DaemonClient;
+  refreshSeq: number;
   selectedChange: SelectedChange | null;
   onSelectedChange: (selected: SelectedChange) => void;
   onActivateTab: (tabId: string) => void;
+  onChangesNeedSpace: (needsSpace: boolean) => void;
 }
 
 function ChangesView({
   activeRepoId,
   activeRepoName,
   client,
+  refreshSeq,
   selectedChange,
   onSelectedChange,
   onActivateTab,
+  onChangesNeedSpace,
 }: ChangesViewProps) {
   const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
   const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
@@ -204,18 +252,25 @@ function ChangesView({
     setContextMenu(null);
     setErrorBanner(null);
     setCommitMessage("");
-    client.send({ type: "repo_status", repo_id: activeRepoId });
+    onChangesNeedSpace(false);
+  }, [activeRepoId, onChangesNeedSpace]);
+
+  useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "repo_status" || detail.repo_id !== activeRepoId)
         return;
       setIndexChanges(detail.index_changes);
       setWorktreeChanges(detail.worktree_changes);
+      onChangesNeedSpace(
+        detail.index_changes.length > 0 || detail.worktree_changes.length > 0,
+      );
       setPendingOp((op) => (op === "commit" ? op : null));
     };
     window.addEventListener("rt:repo_status", handler);
+    client.send({ type: "repo_status", repo_id: activeRepoId });
     return () => window.removeEventListener("rt:repo_status", handler);
-  }, [activeRepoId, client]);
+  }, [activeRepoId, client, onChangesNeedSpace, refreshSeq]);
 
   // Listen for write errors + commit confirmation across the lifetime of
   // this view.
@@ -336,12 +391,17 @@ function ChangesView({
     stagedPaths.length > 0 &&
     commitMessage.trim().length > 0 &&
     pendingOp !== "commit";
+  const showCommitBox =
+    stagedPaths.length > 0 ||
+    commitMessage.trim().length > 0 ||
+    pendingOp === "commit";
 
   return (
     <div
       className="git-list source-control-list source-control-changes-full"
       data-testid="source-control-changes-list"
     >
+      {showCommitBox && (
         <div className="source-control-commit">
           <textarea
             className="commit-input"
@@ -368,6 +428,7 @@ function ChangesView({
             {pendingOp === "commit" ? "Committing…" : "Commit"}
           </button>
         </div>
+      )}
         {errorBanner && (
           <div
             className="source-control-error"
@@ -644,9 +705,18 @@ function FileContextMenu({
 interface HistoryViewProps {
   activeRepoId: string;
   client: DaemonClient;
+  collapsed: boolean;
+  refreshSeq: number;
+  onCollapsedChange: (collapsed: boolean) => void;
 }
 
-function HistoryView({ activeRepoId, client }: HistoryViewProps) {
+function HistoryView({
+  activeRepoId,
+  client,
+  collapsed,
+  refreshSeq,
+  onCollapsedChange,
+}: HistoryViewProps) {
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detailDiff, setDetailDiff] = useState<string | null>(null);
@@ -661,13 +731,6 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
     setDetailDiff(null);
     setExhausted(false);
     setLoadingMore(false);
-    client.send({
-      type: "list_commits",
-      repo_id: activeRepoId,
-      branch: null,
-      limit: COMMIT_PAGE_SIZE,
-      offset: 0,
-    });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "commits" || detail.repo_id !== activeRepoId) return;
@@ -693,8 +756,15 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
       }
     };
     window.addEventListener("rt:commits", handler);
+    client.send({
+      type: "list_commits",
+      repo_id: activeRepoId,
+      branch: null,
+      limit: COMMIT_PAGE_SIZE,
+      offset: 0,
+    });
     return () => window.removeEventListener("rt:commits", handler);
-  }, [activeRepoId, client]);
+  }, [activeRepoId, client, refreshSeq]);
 
   const loadMore = () => {
     if (!commits || loadingMore || exhausted) return;
@@ -741,80 +811,108 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
       className="source-control-history-panel"
       data-testid="source-control-history-panel"
     >
-      <div className="source-control-section-title">History</div>
-      <ResizableSplit
-        storageKey="source-control.history"
-        defaultSize={180}
-        minSize={90}
-        direction="vertical"
-      >
-        <div
-          className="git-list source-control-list"
-          data-testid="source-control-history-list"
+      <div className="source-control-section-title source-control-history-title">
+        <button
+          type="button"
+          className="source-control-history-toggle"
+          aria-expanded={!collapsed}
+          onClick={() => onCollapsedChange(!collapsed)}
+          data-testid="source-control-history-toggle"
         >
-          {!commits ? (
-            <p className="empty">loading…</p>
-          ) : commits.length === 0 ? (
-            <p className="empty">no commits</p>
-          ) : (
-            <>
-              <ul className="list">
-                {commits.map((c) => (
-                  <li
-                    key={c.sha}
-                    className={
-                      c.sha === selected
-                        ? "list-item history-commit-row selected"
-                        : "list-item history-commit-row"
-                    }
-                    onClick={() => setSelected(c.sha)}
-                    title={commitHoverText(c)}
-                    aria-label={commitHoverText(c)}
-                    data-testid="source-control-history-row"
+          <span className="tree-caret" aria-hidden="true">
+            {collapsed ? "▸" : "▾"}
+          </span>
+          <span>History</span>
+          <span className="bucket-count">{commits?.length ?? 0}</span>
+        </button>
+      </div>
+      {!collapsed && (
+        <ResizableSplit
+          storageKey="source-control.history"
+          defaultSize={220}
+          minSize={110}
+          direction="vertical"
+        >
+          <div
+            className="git-list source-control-list"
+            data-testid="source-control-history-list"
+          >
+            {!commits ? (
+              <p className="empty">loading…</p>
+            ) : commits.length === 0 ? (
+              <p className="empty">no commits</p>
+            ) : (
+              <>
+                <ul className="list">
+                  {commits.map((c) => (
+                    <li
+                      key={c.sha}
+                      className={
+                        c.sha === selected
+                          ? "list-item history-commit-row selected"
+                          : "list-item history-commit-row"
+                      }
+                      onClick={() => setSelected(c.sha)}
+                      title={commitHoverText(c)}
+                      aria-label={commitHoverText(c)}
+                      data-testid="source-control-history-row"
+                    >
+                      <span className="commit-sha">{c.short_sha}</span>
+                      <span
+                        className="commit-subject"
+                        data-testid="source-control-history-subject"
+                      >
+                        {c.subject}
+                      </span>
+                      <span
+                        className="commit-author-chip"
+                        title={commitAuthor(c)}
+                        data-testid="source-control-history-author"
+                      >
+                        {c.author_name}
+                      </span>
+                      <span className="commit-hover-card" aria-hidden="true">
+                        <span className="commit-hover-subject">
+                          {c.subject}
+                        </span>
+                        <span>
+                          <span className="commit-hover-label">SHA</span>
+                          {c.sha}
+                        </span>
+                        <span>
+                          <span className="commit-hover-label">Author</span>
+                          {commitAuthor(c)}
+                        </span>
+                        <span>
+                          <span className="commit-hover-label">Date</span>
+                          {c.authored_at}
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {!exhausted && (
+                  <button
+                    type="button"
+                    className="history-load-more"
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    data-testid="source-control-history-load-more"
                   >
-                    <span className="commit-sha">{c.short_sha}</span>
-                    <span className="commit-subject">
-                      {c.subject}
-                    </span>
-                    <span className="commit-hover-card" aria-hidden="true">
-                      <span className="commit-hover-subject">{c.subject}</span>
-                      <span>
-                        <span className="commit-hover-label">SHA</span>
-                        {c.sha}
-                      </span>
-                      <span>
-                        <span className="commit-hover-label">Author</span>
-                        {commitAuthor(c)}
-                      </span>
-                      <span>
-                        <span className="commit-hover-label">Date</span>
-                        {c.authored_at}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-              {!exhausted && (
-                <button
-                  type="button"
-                  className="history-load-more"
-                  onClick={loadMore}
-                  disabled={loadingMore}
-                  data-testid="source-control-history-load-more"
-                >
-                  {loadingMore ? "loading…" : "load more"}
-                </button>
-              )}
-            </>
-          )}
-        </div>
-        <DiffView
-          diff={detailDiff}
-          testId="source-control-history-diff"
-          placeholder="Select a commit to view its diff."
-          wrap
-        />
-      </ResizableSplit>
+                    {loadingMore ? "loading…" : "load more"}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+          <DiffView
+            diff={detailDiff}
+            testId="source-control-history-diff"
+            placeholder="Select a commit to view its diff."
+            wrap
+          />
+        </ResizableSplit>
+      )}
     </section>
   );
 }

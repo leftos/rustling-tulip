@@ -302,6 +302,7 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
   min-height: 0;
 }
 .source-control-header {
@@ -324,10 +325,34 @@ button:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+}
+.source-control-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.source-control-refresh-button {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.source-control-refresh-button:hover {
+  background: var(--bg-elev2);
+  color: var(--fg);
 }
 .source-control-header .repo-picker {
   font-size: 11px;
   max-width: 140px;
+  min-width: 0;
 }
 .source-control-active-repo {
   margin-top: 4px;
@@ -335,12 +360,40 @@ button:focus-visible {
   color: var(--fg);
   text-transform: none;
   letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-control-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
 }
 .source-control > .split {
   flex: 1 1 auto;
   min-height: 0;
 }
-.source-control-list { padding: 4px 0; }
+.source-control-body > .split {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.source-control-history-collapsed > .split {
+  grid-template-rows: minmax(0, 1fr) 0 30px !important;
+}
+.source-control-history-collapsed > .split > .split-divider {
+  pointer-events: none;
+  visibility: hidden;
+}
+.source-control-history-collapsed .source-control-history-panel {
+  flex: none;
+  border-top: 1px solid var(--border);
+}
+.source-control-list {
+  overflow-x: hidden;
+  padding: 4px 0;
+}
 .source-control > .empty { padding: 12px 14px; }
 .changes-tree { list-style: none; margin: 0; padding: 0; }
 .changes-tree ul { list-style: none; margin: 0; padding: 0; }
@@ -640,11 +693,13 @@ button:focus-visible {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
 }
 
 .source-control-history-panel > .split {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
 }
 
 .source-control-section-title {
@@ -657,6 +712,35 @@ button:focus-visible {
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+.source-control-history-title {
+  display: flex;
+  align-items: center;
+  padding: 0;
+}
+.source-control-history-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  padding: 5px 10px;
+  text-align: left;
+  text-transform: inherit;
+}
+.source-control-history-toggle:hover {
+  background: var(--bg-elev2);
+  color: var(--fg);
+}
+.source-control-history-toggle .bucket-count {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Inline error banner above the changes list. */
@@ -1928,11 +2012,11 @@ button.tree-tab-pill:hover {
   flex: 1; min-height: 0;
 }
 .git-list {
-  overflow-y: auto; padding: 6px;
+  overflow-x: hidden; overflow-y: auto; padding: 6px;
   display: flex; flex-direction: column;
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; min-width: 0;
 }
-.git-list .list { flex: 1; }
+.git-list .list { flex: 1; min-width: 0; }
 .history-load-more {
   display: block;
   width: calc(100% - 16px);
@@ -1973,6 +2057,7 @@ button.tree-tab-pill:hover {
   gap: 8px;
   padding: 6px 8px;
   overflow: visible;
+  min-width: 0;
 }
 .history-commit-row .commit-sha {
   width: 50px;
@@ -1987,6 +2072,21 @@ button.tree-tab-pill:hover {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-author-chip {
+  flex: 0 0 auto;
+  max-width: 82px;
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2034,6 +2134,8 @@ button.tree-tab-pill:hover {
   font-weight: 600;
 }
 .diff-pane {
+  box-sizing: border-box;
+  width: 100%;
   margin: 0; padding: 8px 12px;
   font-family: var(--font-mono); font-size: 12px;
   overflow: auto;
@@ -2044,7 +2146,13 @@ button.tree-tab-pill:hover {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.diff-pane.empty { padding: 32px; color: var(--fg-muted); font-style: italic; }
+.diff-pane.empty {
+  padding: 16px 18px;
+  color: var(--fg-muted);
+  font-style: italic;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
 .diff-add { color: var(--ok); }
 .diff-del { color: var(--err); }
 .diff-hunk { color: var(--accent); }

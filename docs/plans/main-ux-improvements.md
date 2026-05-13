@@ -225,19 +225,21 @@ horizontal space when the user is trying to stage/commit.
 
 ### Tasks
 
-- [ ] Revisit default Source Control split sizes and minimum heights.
-- [ ] Remove avoidable horizontal overflow in history and diff-placeholder
+- [x] Revisit default Source Control split sizes and minimum heights.
+- [x] Remove avoidable horizontal overflow in history and diff-placeholder
       areas.
-- [ ] Add a collapsed or focus mode for History when the Changes section needs
+- [x] Add a collapsed or focus mode for History when the Changes section needs
       space.
-- [ ] Keep the commit message box visible only when useful, or collapse it
+- [x] Keep the commit message box visible only when useful, or collapse it
       when the working tree is clean.
-- [ ] Surface stash count without forcing stashes to consume vertical space.
-- [ ] Add a "refresh" affordance for status/history if automatic updates are
+- [x] Surface stash count without forcing stashes to consume vertical space.
+- [x] Add a "refresh" affordance for status/history if automatic updates are
       intentionally limited.
-- [ ] Add e2e coverage that the Source Control sidebar has no horizontal
+- [x] Show history authors as appended chips so subject text remains the
+      flexible, truncated field.
+- [x] Add e2e coverage that the Source Control sidebar has no horizontal
       overflow at default width.
-- [ ] Add screenshot checks for clean repo, dirty repo, and history-selected
+- [x] Add screenshot checks for clean repo, dirty repo, and history-selected
       states.
 
 ## Phase 6 - Discoverable controls and icon affordances
@@ -333,7 +335,7 @@ be able to cancel before the next session spawns and see what already launched.
 2. [x] Phase 2: Stable session identity.
 3. [x] Phase 3: Safer spawn defaults and authority visibility.
 4. [x] Phase 4: Faster common spawn path.
-5. [ ] Phase 5: Source Control density and focus.
+5. [x] Phase 5: Source Control density and focus.
 6. [ ] Phase 6: Discoverable controls and icon affordances.
 7. [ ] Phase 7: Undo and recovery shelf.
 8. [ ] Phase 8: Preset launch observability and cancellation.
