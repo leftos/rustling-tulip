@@ -1035,16 +1035,35 @@ button:focus-visible {
    * visual gap. Borders between every section read boxy. */
 }
 .sidebar-toolbar button.primary.small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 3px 10px; font-size: var(--text-small);
   font-weight: 600;
 }
+.sidebar-toolbar button.primary.small:disabled {
+  background: var(--bg-elev2);
+  border-color: var(--border);
+  color: var(--fg-dim);
+  opacity: 1;
+}
 .sidebar-toolbar button.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: var(--text-small);
   color: var(--fg-muted);
 }
 .sidebar-toolbar button.link:hover { color: var(--fg); }
 .sidebar-toolbar button.link[disabled] {
   color: var(--fg-dim); cursor: default; opacity: 0.5;
+}
+.toolbar-disabled-reason {
+  color: currentColor;
+  font-size: var(--text-micro);
+  font-weight: 500;
+  opacity: 0.82;
+  white-space: nowrap;
 }
 button.link.inline { display: inline; padding: 0 2px; }
 

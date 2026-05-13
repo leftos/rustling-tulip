@@ -184,6 +184,57 @@ describe("pane controls discoverability", function () {
       join(repoRoot, ".tmp", "e2e", "pane-controls-small.png"),
     );
   });
+
+  it("explains disabled sidebar toolbar actions", async function () {
+    if (!ws || !spawnedSessionId || !registeredRepoId) {
+      throw new Error("fixture session and repo must exist before cleanup test");
+    }
+
+    ws.send({ type: "stop_session", session_id: spawnedSessionId, cleanup: [] });
+    await delay(500);
+    ws.send({
+      type: "discard_session",
+      session_id: spawnedSessionId,
+      cleanup: [],
+    });
+    await delay(300);
+
+    const reposPromise = ws.waitFor(isRepos, { timeoutMs: 5_000 });
+    ws.send({ type: "remove_repo", repo_id: registeredRepoId });
+    await reposPromise;
+    spawnedSessionId = null;
+    registeredRepoId = null;
+
+    const addSession = await browser.$('[data-testid="sidebar-add-session"]');
+    await browser.waitUntil(
+      async () => (await addSession.getAttribute("disabled")) !== null,
+      {
+        timeout: 5_000,
+        timeoutMsg: "expected add-session toolbar action to become disabled",
+      },
+    );
+    expect(await addSession.getText()).to.contain("needs repo");
+    expect(await addSession.getAttribute("title")).to.equal(
+      "Register a repo to spawn repo-tied sessions.",
+    );
+    expect(await addSession.getAttribute("aria-describedby")).to.equal(
+      "sidebar-add-session-disabled-reason",
+    );
+
+    const addWorkspace = await browser.$(
+      '[data-testid="sidebar-add-workspace"]',
+    );
+    expect(await addWorkspace.getText()).to.contain("needs 2 repos");
+    expect(await addWorkspace.getAttribute("title")).to.equal(
+      "Register at least 2 repos to create a workspace.",
+    );
+    expect(await addWorkspace.getAttribute("aria-describedby")).to.equal(
+      "sidebar-add-workspace-disabled-reason",
+    );
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "sidebar-disabled-toolbar.png"),
+    );
+  });
 });
 
 function isRepos(

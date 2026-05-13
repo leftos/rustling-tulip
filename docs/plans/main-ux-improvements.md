@@ -270,11 +270,12 @@ compact but need consistent labels, accessible names, and grouping.
 - [ ] Prefer text labels for destructive or uncommon actions where space allows.
 - [x] Make per-shell color controls discoverable from the session context menu
       and session header without crowding common stop/split controls.
-- [ ] Make disabled toolbar actions visually and textually explain why they are
+- [x] Make disabled toolbar actions visually and textually explain why they are
       disabled.
 - [ ] Ensure every icon-only button has a useful `aria-label` and tooltip.
 - [x] Add e2e/a11y assertions for accessible names on activity and pane
       icon-only controls.
+- [x] Add e2e assertions for disabled sidebar toolbar reasons.
 - [x] Capture screenshots for normal and small-pane headers.
 
 ## Phase 7 - Undo and recovery shelf

@@ -469,6 +469,14 @@ export default function Sidebar(props: Props) {
     }
     return out;
   }, [containers, props.attentionSessions]);
+  const addSessionDisabledReason =
+    props.repos.length === 0
+      ? "Register a repo to spawn repo-tied sessions."
+      : null;
+  const workspaceDisabledReason =
+    props.repos.length < 2
+      ? "Register at least 2 repos to create a workspace."
+      : null;
 
   return (
     <aside className="sidebar" data-testid="sidebar">
@@ -523,14 +531,25 @@ export default function Sidebar(props: Props) {
             props.repos.length > 0 ? () => props.onOpenSpawn() : undefined
           }
           disabled={props.repos.length === 0}
+          aria-describedby={
+            addSessionDisabledReason
+              ? "sidebar-add-session-disabled-reason"
+              : undefined
+          }
           title={
-            props.repos.length === 0
-              ? "Register a repo first"
-              : "Spawn a new session"
+            addSessionDisabledReason ?? "Spawn a new session"
           }
           data-testid="sidebar-add-session"
         >
           + Session
+          {addSessionDisabledReason && (
+            <span
+              id="sidebar-add-session-disabled-reason"
+              className="toolbar-disabled-reason"
+            >
+              needs repo
+            </span>
+          )}
         </button>
         <button
           type="button"
@@ -567,14 +586,25 @@ export default function Sidebar(props: Props) {
             props.repos.length >= 2 ? props.onOpenWorkspaceCreator : undefined
           }
           disabled={props.repos.length < 2}
+          aria-describedby={
+            workspaceDisabledReason
+              ? "sidebar-add-workspace-disabled-reason"
+              : undefined
+          }
           title={
-            props.repos.length < 2
-              ? "Register at least 2 repos first"
-              : "Create a workspace"
+            workspaceDisabledReason ?? "Create a workspace"
           }
           data-testid="sidebar-add-workspace"
         >
           + Workspace
+          {workspaceDisabledReason && (
+            <span
+              id="sidebar-add-workspace-disabled-reason"
+              className="toolbar-disabled-reason"
+            >
+              needs 2 repos
+            </span>
+          )}
         </button>
         {abandonedCount >= 2 && (
           <button
