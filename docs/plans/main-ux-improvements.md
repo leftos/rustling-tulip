@@ -293,7 +293,7 @@ actions that cannot be undone should remain explicit confirmations.
 
 ### Tasks
 
-- [ ] Classify actions as reversible, replayable, or destructive.
+- [x] Classify actions as reversible, replayable, or destructive.
 - [ ] Start with reversible UI-state actions: close tab, close pane, move pane,
       remove session binding.
 - [ ] Add an undo shelf/toast host that can show one or more recent actions.
@@ -304,6 +304,21 @@ actions that cannot be undone should remain explicit confirmations.
       daemon stop unless the underlying operation is genuinely reversible.
 - [ ] Add e2e coverage: close tab then undo restores the tab and active state.
 - [ ] Add e2e coverage: close pane then undo restores the pane layout.
+
+### Action classification
+
+- [x] Reversible UI-state actions: close tab, close pane, move pane, extract pane
+      to a tab, bind an unbound session into a tab, tab reorder, and sidebar
+      reorder. These can be undone with recent local snapshots plus existing
+      tab/pane commands.
+- [x] Replayable session actions: launch last, duplicate session, resume
+      inactive session, resume abandoned session, and preset launch. Undo should
+      not pretend to reverse these; the safer recovery path is a clear stop or
+      dismiss action for the spawned session(s).
+- [x] Destructive or external actions: worktree deletion, source-control discard,
+      stash drop, daemon stop, repo/workspace removal, and terminal process stop.
+      Keep explicit confirmations; do not show undo unless the underlying data is
+      actually restorable.
 
 ## Phase 8 - Preset launch observability and cancellation
 
