@@ -296,7 +296,8 @@ actions that cannot be undone should remain explicit confirmations.
 - [x] Classify actions as reversible, replayable, or destructive.
 - [x] Start with close-tab undo as the first reversible UI-state action.
 - [x] Extend undo to close pane.
-- [ ] Extend undo to move pane and remove session binding.
+- [x] Extend undo to move pane.
+- [ ] Extend undo to remove session binding.
 - [x] Add an undo shelf/toast host that can show one or more recent actions.
 - [x] Keep enough local state to restore a closed tab without guessing.
 - [x] Add daemon-backed `restore_tab` and `restore_tab_snapshot` for exact
@@ -305,6 +306,7 @@ actions that cannot be undone should remain explicit confirmations.
       daemon stop unless the underlying operation is genuinely reversible.
 - [x] Add e2e coverage: close tab then undo restores the tab and active state.
 - [x] Add e2e coverage: close pane then undo restores the pane layout.
+- [x] Add e2e coverage: move pane then undo restores source/destination tabs.
 
 ### Action classification
 

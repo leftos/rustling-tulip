@@ -35,6 +35,11 @@ interface Props {
   /// arrival; for a same-order broadcast the reducer is a no-op.
   onLocalReorder: (orderedIds: string[]) => void;
   onTabWillClose: (tab: TabEntry, index: number, restoreActive: boolean) => void;
+  onTabsSnapshotUndo: (
+    tabs: TabEntry[],
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
 }
 
 interface ContextMenuState {
@@ -57,6 +62,7 @@ export default function TabBar({
   onArmNextNewTab,
   onLocalReorder,
   onTabWillClose,
+  onTabsSnapshotUndo,
 }: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
@@ -288,6 +294,10 @@ export default function TabBar({
         // destination's first leaf — moving it to its own right edge
         // would just collapse-and-re-create the parent split).
         if (srcTab === tabId && srcPane === dst.pane_id) return;
+        const sourceTab = tabs.find((t) => t.id === srcTab) ?? null;
+        if (sourceTab) {
+          onTabsSnapshotUndo([sourceTab, targetTab], "Moved pane", srcPane);
+        }
         client.send({
           type: "move_pane",
           src_tab_id: srcTab,
@@ -316,7 +326,7 @@ export default function TabBar({
       onLocalReorder(order);
       client.send({ type: "reorder_tabs", ordered_ids: order });
     },
-    [tabs, dragState, client, onLocalReorder],
+    [tabs, dragState, client, onLocalReorder, onTabsSnapshotUndo],
   );
 
   if (tabs.length === 0) {

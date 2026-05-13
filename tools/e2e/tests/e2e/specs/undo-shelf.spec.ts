@@ -7,7 +7,12 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type { DaemonMessage, GridNode, TabEntry } from "../../../src/types.js";
+import type {
+  DaemonMessage,
+  GridNode,
+  SessionSnapshot,
+  TabEntry,
+} from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -25,11 +30,17 @@ type TabRemovedMessage = {
   tab_id: string;
 } & Record<string, unknown>;
 
+type SessionUpdatedMessage = {
+  type: "session_updated";
+  session: SessionSnapshot;
+} & Record<string, unknown>;
+
 describe("undo shelf", function () {
   this.timeout(120_000);
 
   let ws: DaemonWsClient | null = null;
   const createdTabIds: string[] = [];
+  const spawnedSessionIds: string[] = [];
 
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
@@ -41,6 +52,20 @@ describe("undo shelf", function () {
 
   after(async function () {
     if (ws) {
+      for (const sessionId of [...spawnedSessionIds].reverse()) {
+        try {
+          ws.send({ type: "stop_session", session_id: sessionId, cleanup: [] });
+          await delay(300);
+          ws.send({
+            type: "discard_session",
+            session_id: sessionId,
+            cleanup: [],
+          });
+          await delay(100);
+        } catch {
+          /* best-effort */
+        }
+      }
       for (const tabId of [...createdTabIds].reverse()) {
         try {
           ws.send({ type: "close_tab", tab_id: tabId });
@@ -185,16 +210,122 @@ describe("undo shelf", function () {
     );
     await restoredPane.waitForExist({ timeout: 5_000 });
   });
+
+  it("restores a moved pane to its source tab", async function () {
+    if (!ws) {
+      throw new Error("setup failed");
+    }
+
+    const session = await spawnStandaloneShell(ws);
+    spawnedSessionIds.push(session.id);
+
+    const suffix = Date.now().toString(36);
+    const source = await createTab(ws, `Move source ${suffix}`, session.id);
+    const target = await createTab(ws, `Move target ${suffix}`);
+    createdTabIds.push(source.id, target.id);
+
+    await tabPill(source.id).click();
+    const pane = await browser.$(
+      `[data-testid="session-pane"][data-session-id="${session.id}"]`,
+    );
+    await pane.waitForExist({ timeout: 10_000 });
+    const header = await pane.$(".session-header");
+    await header.click({ button: "right" });
+
+    const moveButton = await browser.$(
+      `[data-testid="session-context-move-to-tab"][data-tab-id="${target.id}"]`,
+    );
+    await moveButton.waitForExist({ timeout: 5_000 });
+
+    const sourceRemoved = ws.waitFor(
+      (msg): msg is TabRemovedMessage => isTabRemoved(msg, source.id),
+      { timeoutMs: 5_000 },
+    );
+    const targetUpdated = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === target.id &&
+        tabContainsSession(msg.tab, session.id),
+      { timeoutMs: 5_000 },
+    );
+    await moveButton.click();
+    await sourceRemoved;
+    await targetUpdated;
+
+    const shelf = await browser.$('[data-testid="undo-shelf"]');
+    await shelf.waitForExist({ timeout: 5_000 });
+    expect(await shelf.getText()).to.include("Moved pane");
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "undo-move-pane-shelf.png"),
+    );
+
+    const sourceRestored = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === source.id &&
+        tabContainsSession(msg.tab, session.id),
+      { timeoutMs: 5_000 },
+    );
+    const targetRestored = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === target.id &&
+        !tabContainsSession(msg.tab, session.id),
+      { timeoutMs: 5_000 },
+    );
+    await browser.$('[data-testid="undo-action"]').click();
+    await sourceRestored;
+    await targetRestored;
+
+    const sourcePill = await tabPill(source.id);
+    await sourcePill.waitForExist({ timeout: 5_000 });
+    expect(await sourcePill.getAttribute("data-tab-active")).to.equal("true");
+    const restoredPane = await browser.$(
+      `[data-testid="session-pane"][data-session-id="${session.id}"]`,
+    );
+    await restoredPane.waitForExist({ timeout: 10_000 });
+  });
 });
 
-async function createTab(ws: DaemonWsClient, name: string): Promise<TabEntry> {
+async function createTab(
+  ws: DaemonWsClient,
+  name: string,
+  initialSessionId: string | null = null,
+): Promise<TabEntry> {
   const tabPromise = ws.waitFor(
     (msg): msg is TabUpdatedMessage =>
       isTabUpdated(msg) && msg.tab.name === name,
     { timeoutMs: 5_000 },
   );
-  ws.send({ type: "create_tab", name, initial_session_id: null });
+  ws.send({ type: "create_tab", name, initial_session_id: initialSessionId });
   return (await tabPromise).tab;
+}
+
+async function spawnStandaloneShell(
+  ws: DaemonWsClient,
+): Promise<SessionSnapshot> {
+  const spawned = ws.waitFor(
+    (msg): msg is SessionUpdatedMessage =>
+      isSessionUpdated(msg) &&
+      msg.session.kind === "standalone" &&
+      msg.session.mode === "plain_shell",
+    { timeoutMs: 20_000 },
+  );
+  ws.send({
+    type: "spawn_session",
+    label: "undo-move-shell",
+    target: { kind: "standalone", cwd: null },
+    mode: "plain_shell",
+    initial_prompt: null,
+    dangerously_skip_permissions: false,
+    agent: "claude",
+    model: null,
+    permission_mode: null,
+    codex_sandbox: null,
+    extra_env: [],
+    prompt_injector: null,
+  });
+  return (await spawned).session;
 }
 
 function isTabUpdated(msg: DaemonMessage): msg is TabUpdatedMessage {
@@ -217,6 +348,15 @@ function isTabRemoved(
   return candidate.type === "tab_removed" && candidate.tab_id === tabId;
 }
 
+function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {
+  const candidate = msg as { type?: unknown; session?: unknown };
+  return (
+    candidate.type === "session_updated" &&
+    typeof candidate.session === "object" &&
+    candidate.session !== null
+  );
+}
+
 function paneIds(tab: TabEntry): string[] {
   if (tab.content.kind !== "grid") {
     return [];
@@ -229,6 +369,23 @@ function collectPaneIds(node: GridNode): string[] {
     return [node.pane_id];
   }
   return [...collectPaneIds(node.first), ...collectPaneIds(node.second)];
+}
+
+function tabContainsSession(tab: TabEntry, sessionId: string): boolean {
+  if (tab.content.kind !== "grid") {
+    return false;
+  }
+  return gridContainsSession(tab.content.grid, sessionId);
+}
+
+function gridContainsSession(node: GridNode, sessionId: string): boolean {
+  if (node.kind === "pane") {
+    return node.session_id === sessionId;
+  }
+  return (
+    gridContainsSession(node.first, sessionId) ||
+    gridContainsSession(node.second, sessionId)
+  );
 }
 
 function tabPill(tabId: string) {

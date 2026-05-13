@@ -45,6 +45,11 @@ interface Props {
    *  `withDialog` is false, `target` specifies where the duplicate
    *  lands; defaults to a fresh new tab. */
   onDuplicate: (withDialog: boolean, target: DuplicateTarget) => void;
+  onTabsSnapshotUndo?: (
+    tabs: TabEntry[],
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
 }
 
 type CloseMode = "idle" | "confirming";
@@ -62,6 +67,7 @@ export default function SessionContextMenu({
   preferredPaneId,
   onClose,
   onDuplicate,
+  onTabsSnapshotUndo,
 }: Props) {
   const s = state.session;
 
@@ -194,6 +200,10 @@ export default function SessionContextMenu({
     const emptyPane = dstPanes.find((p) => p.session_id === null);
     const dstPane = emptyPane ?? dstPanes[0];
     if (!dstPane) return;
+    const sourceTab = tabs.find((t) => t.id === sourceBinding.tab_id) ?? null;
+    if (onTabsSnapshotUndo && sourceTab) {
+      onTabsSnapshotUndo([sourceTab, dstTab], "Moved pane", sourceBinding.pane_id);
+    }
     client.send({
       type: "move_pane",
       src_tab_id: sourceBinding.tab_id,
@@ -312,6 +322,8 @@ export default function SessionContextMenu({
                       type="button"
                       onClick={() => onMoveTo(t)}
                       title={`Move this session into "${t.name}"`}
+                      data-testid="session-context-move-to-tab"
+                      data-tab-id={t.id}
                     >
                       {t.name}
                     </button>

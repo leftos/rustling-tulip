@@ -98,12 +98,16 @@ const ACTIVE_TAB_KEY = "rt:active-tab:main";
 const UNDO_TTL_MS = 8000;
 const UNDO_LIMIT = 3;
 
-type UndoEntry = UndoShelfEntry & {
-  kind: "restore_tab";
+type UndoTabSnapshot = {
   tab: TabEntry;
   index: number;
   restoreActive: boolean;
   restoreFocusedPaneId: string | null;
+};
+
+type UndoEntry = UndoShelfEntry & {
+  kind: "restore_tabs";
+  tabs: UndoTabSnapshot[];
 };
 
 interface AppState {
@@ -1057,49 +1061,64 @@ export default function App() {
     (tab: TabEntry, index: number, restoreActive: boolean) => {
       const entry: UndoEntry = {
         id: newUndoId(),
-        kind: "restore_tab",
+        kind: "restore_tabs",
         message: `Closed tab "${tab.name}"`,
         actionLabel: "Undo",
-        tab: cloneTab(tab),
-        index,
-        restoreActive,
-        restoreFocusedPaneId: null,
+        tabs: [
+          {
+            tab: cloneTab(tab),
+            index,
+            restoreActive,
+            restoreFocusedPaneId: null,
+          },
+        ],
         expiresAt: Date.now() + UNDO_TTL_MS,
       };
+      const affectedTabIds = new Set(entry.tabs.map((snapshot) => snapshot.tab.id));
       setState((s) => ({
         ...s,
         undoEntries: [
           entry,
-          ...s.undoEntries.filter((existing) => existing.tab.id !== tab.id),
+          ...s.undoEntries.filter((existing) => !undoTouches(existing, affectedTabIds)),
         ].slice(0, UNDO_LIMIT),
       }));
     },
     [],
   );
 
-  const onTabSnapshotUndo = useCallback(
-    (tab: TabEntry, message: string, restoreFocusedPaneId: string | null) => {
+  const onTabsSnapshotUndo = useCallback(
+    (tabs: TabEntry[], message: string, restoreFocusedPaneId: string | null) => {
       const current = latestStateRef.current;
-      const index = Math.max(
-        0,
-        current?.tabs.findIndex((existing) => existing.id === tab.id) ?? 0,
-      );
+      const snapshots = uniqueTabs(tabs).map((tab) => {
+        const index = Math.max(
+          0,
+          current?.tabs.findIndex((existing) => existing.id === tab.id) ?? 0,
+        );
+        const restoreActive = current?.activeTabId === tab.id;
+        return {
+          tab: cloneTab(tab),
+          index,
+          restoreActive,
+          restoreFocusedPaneId: restoreActive ? restoreFocusedPaneId : null,
+        };
+      });
+      if (snapshots.length === 0) {
+        return;
+      }
       const entry: UndoEntry = {
         id: newUndoId(),
-        kind: "restore_tab",
+        kind: "restore_tabs",
         message,
         actionLabel: "Undo",
-        tab: cloneTab(tab),
-        index,
-        restoreActive: current?.activeTabId === tab.id,
-        restoreFocusedPaneId,
+        tabs: snapshots,
         expiresAt: Date.now() + UNDO_TTL_MS,
       };
+      const affectedTabIds = new Set(entry.tabs.map((snapshot) => snapshot.tab.id));
       setState((s) => ({
         ...s,
         undoEntries: [
           entry,
-          ...s.undoEntries.filter((existing) => existing.tab.id !== tab.id),
+          ...s.undoEntries.filter((existing) => !undoTouches(existing, affectedTabIds)),
         ].slice(0, UNDO_LIMIT),
       }));
     },
@@ -1119,25 +1138,31 @@ export default function App() {
       return;
     }
     const client = clientRef.current;
-    const tabExists =
-      latestStateRef.current?.tabs.some((tab) => tab.id === entry.tab.id) ??
-      false;
+    const currentTabs = latestStateRef.current?.tabs ?? [];
+    const activeSnapshot =
+      entry.tabs.find((snapshot) => snapshot.restoreActive) ?? null;
     setState((s) => ({
       ...s,
       undoEntries: s.undoEntries.filter((e) => e.id !== id),
-      activeTabId: entry.restoreActive ? entry.tab.id : s.activeTabId,
-      focusedPaneId: entry.restoreActive
-        ? entry.restoreFocusedPaneId
+      activeTabId: activeSnapshot ? activeSnapshot.tab.id : s.activeTabId,
+      focusedPaneId: activeSnapshot
+        ? activeSnapshot.restoreFocusedPaneId
         : s.focusedPaneId,
     }));
-    if (tabExists) {
-      client?.send({ type: "restore_tab_snapshot", tab: cloneTab(entry.tab) });
-    } else {
-      client?.send({
-        type: "restore_tab",
-        tab: cloneTab(entry.tab),
-        index: entry.index,
-      });
+    for (const snapshot of [...entry.tabs].sort((a, b) => a.index - b.index)) {
+      const tabExists = currentTabs.some((tab) => tab.id === snapshot.tab.id);
+      if (tabExists) {
+        client?.send({
+          type: "restore_tab_snapshot",
+          tab: cloneTab(snapshot.tab),
+        });
+      } else {
+        client?.send({
+          type: "restore_tab",
+          tab: cloneTab(snapshot.tab),
+          index: snapshot.index,
+        });
+      }
     }
   }, []);
 
@@ -1859,6 +1884,7 @@ export default function App() {
             onArmNextNewTab={onArmNextNewTab}
             onLocalReorder={onLocalReorder}
             onTabWillClose={onTabWillClose}
+            onTabsSnapshotUndo={onTabsSnapshotUndo}
           />
           {activeTab && state.client ? (
             activeTab.content.kind === "diff" ? (
@@ -1881,7 +1907,7 @@ export default function App() {
                 hasRepos={state.repos.length > 0}
                 onArmNextNewTab={onArmNextNewTab}
                 onArmFocusNewPane={onArmFocusNewPane}
-                onTabSnapshotUndo={onTabSnapshotUndo}
+                onTabsSnapshotUndo={onTabsSnapshotUndo}
               />
             )
           ) : (
@@ -1995,6 +2021,23 @@ function newUndoId(): string {
 
 function cloneTab(tab: TabEntry): TabEntry {
   return JSON.parse(JSON.stringify(tab)) as TabEntry;
+}
+
+function undoTouches(entry: UndoEntry, tabIds: Set<string>): boolean {
+  return entry.tabs.some((snapshot) => tabIds.has(snapshot.tab.id));
+}
+
+function uniqueTabs(tabs: TabEntry[]): TabEntry[] {
+  const seen = new Set<string>();
+  const next: TabEntry[] = [];
+  for (const tab of tabs) {
+    if (seen.has(tab.id)) {
+      continue;
+    }
+    seen.add(tab.id);
+    next.push(tab);
+  }
+  return next;
 }
 
 type PendingSpawnIntent =

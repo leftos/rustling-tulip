@@ -72,6 +72,11 @@ interface Props {
   onSplitDown?: (e: React.MouseEvent) => void;
   onExtractToTab?: () => void;
   onClosePane?: () => void;
+  onTabsSnapshotUndo?: (
+    tabs: TabEntry[],
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
   /// Wrapper pop-outs already render session chrome in their window toolbar.
   /// Hide the in-pane header there so title/status/actions are not duplicated.
   hideHeader?: boolean;
@@ -89,6 +94,7 @@ export default function SessionPane({
   onSplitDown,
   onExtractToTab,
   onClosePane,
+  onTabsSnapshotUndo,
   hideHeader = false,
 }: Props) {
   const showPaneControls =
@@ -414,6 +420,7 @@ export default function SessionPane({
           tabs={tabs}
           client={client}
           {...(paneId ? { preferredPaneId: paneId } : {})}
+          {...(onTabsSnapshotUndo ? { onTabsSnapshotUndo } : {})}
           onClose={() => setSessionMenu(null)}
           onDuplicate={(withDialog, target) => {
             const sid = sessionMenu.session.id;
