@@ -1159,6 +1159,10 @@ function SingleForm({
     existingWorktreeOk &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
     envRowsAreValid(advanced.envRows);
+  const effectiveBaseBranch =
+    useWorktree && worktreeMode === "new"
+      ? baseBranch.trim() || null
+      : null;
 
   const submit = () => {
     if (!canSubmit || submittedRef.current) return;
@@ -1183,7 +1187,7 @@ function SingleForm({
         kind: "single",
         repo_id: repoId,
         branch_name: branch.value.trim(),
-        base_branch: baseBranch.trim() || null,
+        base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
       },
       mode: runMode,
@@ -1271,7 +1275,7 @@ function SingleForm({
       ) : (
         <>
           <label className="field">
-            <span>Branch name</span>
+            <span>{useWorktree ? "New worktree branch" : "Branch"}</span>
             <input
               ref={branchInputRef}
               type="text"
@@ -1288,16 +1292,18 @@ function SingleForm({
             </datalist>
           </label>
 
-          <label className="field">
-            <span>Base when creating new (optional)</span>
-            <input
-              type="text"
-              value={baseBranch}
-              onChange={(e) => setBaseBranch(e.target.value)}
-              placeholder={defaultBranch}
-              data-testid="spawn-single-base-branch"
-            />
-          </label>
+          {useWorktree && worktreeMode === "new" && (
+            <label className="field">
+              <span>Base branch (optional)</span>
+              <input
+                type="text"
+                value={baseBranch}
+                onChange={(e) => setBaseBranch(e.target.value)}
+                placeholder={defaultBranch}
+                data-testid="spawn-single-base-branch"
+              />
+            </label>
+          )}
         </>
       )}
 
@@ -1462,7 +1468,7 @@ function WorkspaceForm({
   };
 
   const requestPreview = () => {
-    if (!workspaceId || !branch.value) return;
+    if (!workspaceId || !branch.value || !useWorktree) return;
     client.send({
       type: "preview_workspace_spawn",
       workspace_id: workspaceId,
@@ -1479,6 +1485,7 @@ function WorkspaceForm({
     branch.value.trim().length > 0 &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
     envRowsAreValid(advanced.envRows);
+  const effectiveBaseBranch = useWorktree ? baseBranch.trim() || null : null;
 
   const submit = () => {
     if (!canSpawn || submittedRef.current) return;
@@ -1501,7 +1508,7 @@ function WorkspaceForm({
         kind: "workspace",
         workspace_id: workspaceId,
         branch_name: branch.value.trim(),
-        base_branch: baseBranch.trim() || null,
+        base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
       },
       mode: runMode,
@@ -1518,7 +1525,11 @@ function WorkspaceForm({
   return (
     <>
       <label className="field">
-        <span>Branch name (same across all members)</span>
+        <span>
+          {useWorktree
+            ? "New worktree branch (same across all members)"
+            : "Branch (same across all members)"}
+        </span>
         <input
           ref={branchInputRef}
           type="text"
@@ -1526,17 +1537,6 @@ function WorkspaceForm({
           onChange={(e) => branch.setValue(e.target.value)}
           placeholder={defaultBranch}
           data-testid="spawn-workspace-branch"
-        />
-      </label>
-
-      <label className="field">
-        <span>Base when creating new (optional)</span>
-        <input
-          type="text"
-          value={baseBranch}
-          onChange={(e) => setBaseBranch(e.target.value)}
-          placeholder={defaultBranch}
-          data-testid="spawn-workspace-base-branch"
         />
       </label>
 
@@ -1555,18 +1555,33 @@ function WorkspaceForm({
         </span>
       </label>
 
-      <div className="modal-footer-inline">
-        <button
-          type="button"
-          onClick={requestPreview}
-          disabled={!branch.value}
-          data-testid="spawn-workspace-preview"
-        >
-          Preview
-        </button>
-      </div>
+      {useWorktree && (
+        <>
+          <label className="field">
+            <span>Base branch (optional)</span>
+            <input
+              type="text"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+              placeholder={defaultBranch}
+              data-testid="spawn-workspace-base-branch"
+            />
+          </label>
 
-      {preview && (
+          <div className="modal-footer-inline">
+            <button
+              type="button"
+              onClick={requestPreview}
+              disabled={!branch.value}
+              data-testid="spawn-workspace-preview"
+            >
+              Preview
+            </button>
+          </div>
+        </>
+      )}
+
+      {useWorktree && preview && (
         <div className="preview-table" data-testid="spawn-workspace-preview-table">
           <table>
             <thead>

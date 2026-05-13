@@ -289,6 +289,8 @@ describe("spawn defaults", function () {
     expect(await branch.getValue()).to.equal("main");
     const worktree = await dialog.$('[data-testid="spawn-single-worktree"]');
     expect(await worktree.isSelected()).to.equal(false);
+    const baseBranch = await dialog.$('[data-testid="spawn-single-base-branch"]');
+    expect(await baseBranch.isExisting()).to.equal(false);
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "spawn-compact-launch-edit.png"),
     );

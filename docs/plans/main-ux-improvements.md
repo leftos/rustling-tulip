@@ -197,9 +197,9 @@ Primary launch presets:
 - [x] Add a compact "Launch last" or "Launch default" path where a last
       spawn config exists.
 - [x] Show a concise summary of the config that will be replayed before launch.
-- [ ] Keep branch/worktree controls visible only when they affect the selected
+- [x] Keep branch/worktree controls visible only when they affect the selected
       launch mode.
-- [ ] Consider moving base branch into advanced/new-worktree details unless
+- [x] Consider moving base branch into advanced/new-worktree details unless
       it differs from the repo default.
 - [ ] Make "current tab", "new tab", and explicit tab placement read as a
       compact segmented placement control.
