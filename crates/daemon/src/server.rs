@@ -935,19 +935,19 @@ async fn dispatch(
                     Some(trimmed.to_string())
                 }
             });
-            let snap = if let Some(rec) = hub.sessions.get(&session_id) {
-                let (default_label, user_label, effective) = {
-                    let mut guard = crate::sync::lock(&rec);
-                    guard.user_label.clone_from(&normalized);
-                    guard.label = normalized
-                        .clone()
-                        .unwrap_or_else(|| guard.default_label.clone());
-                    (
-                        guard.default_label.clone(),
-                        guard.user_label.clone(),
-                        guard.label.clone(),
-                    )
-                };
+            let mut labels = None;
+            hub.sessions.update(&session_id, |guard| {
+                guard.user_label.clone_from(&normalized);
+                guard.label = normalized
+                    .clone()
+                    .unwrap_or_else(|| guard.default_label.clone());
+                labels = Some((
+                    guard.default_label.clone(),
+                    guard.user_label.clone(),
+                    guard.label.clone(),
+                ));
+            });
+            if let Some((default_label, user_label, effective)) = labels {
                 orphan::try_update_labels(
                     &hub.dirs,
                     &session_id,
@@ -955,12 +955,6 @@ async fn dispatch(
                     user_label.as_deref(),
                     &effective,
                 );
-                Some(crate::sync::lock(&rec).snapshot())
-            } else {
-                None
-            };
-            if let Some(session) = snap {
-                let _ = out_tx.send(DaemonMessage::SessionUpdated { session });
             }
         }
         ClientMessage::Attach { session_id } => {

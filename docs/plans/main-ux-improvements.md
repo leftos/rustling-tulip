@@ -107,22 +107,22 @@ renames the session to that value.
 
 ### Tasks
 
-- [ ] Define display precedence: explicit user label, canonical repo/workspace
+- [x] Define display precedence: explicit user label, canonical repo/workspace
       label, then fallback runtime label.
-- [ ] Demote OSC/terminal title to tooltip or secondary chip by default.
-- [ ] Keep a visible runtime chip (`claude`, `codex`, `pwsh`, `cmd`, etc.).
-- [ ] Update `sessionDisplayLabel` and all callers to use the new hierarchy.
-- [ ] Ensure custom rename still wins over daemon-generated and terminal titles.
-- [ ] Review sidebar row truncation so the canonical label remains readable.
+- [x] Demote OSC/terminal title to tooltip or secondary chip by default.
+- [x] Keep a visible runtime chip (`claude`, `codex`, `pwsh`, `cmd`, etc.).
+- [x] Update `sessionDisplayLabel` and all callers to use the new hierarchy.
+- [x] Ensure custom rename still wins over daemon-generated and terminal titles.
+- [x] Review sidebar row truncation so the canonical label remains readable.
 - [ ] Add a per-session color setting that applies to that shell's pane gutter
       and sidebar tree row.
 - [ ] Offer 12 default color swatches for fast assignment plus a custom color
       picker.
 - [ ] Persist the chosen color with the session record and restore it after
       daemon/app restart.
-- [ ] Add e2e coverage: an emitted `cmd.exe` terminal title does not replace
+- [x] Add e2e coverage: an emitted `cmd.exe` terminal title does not replace
       the primary repo/branch label.
-- [ ] Add e2e coverage: a user rename becomes the primary label everywhere.
+- [x] Add e2e coverage: a user rename becomes the primary label everywhere.
 - [ ] Add e2e coverage: assigning a preset color updates the pane gutter and
       sidebar tree row.
 - [ ] Add e2e coverage: a custom color survives session refresh/reload.
@@ -332,7 +332,7 @@ be able to cancel before the next session spawns and see what already launched.
       settings were only default-seeded and never explicitly changed?
 - [x] Should explicit Stop always retain a stopped session, even for sessions
       without a per-session worktree?
-- [ ] Should terminal OSC titles ever become primary automatically, or only
+- [x] Should terminal OSC titles ever become primary automatically, or only
       after the user chooses to promote/rename?
 - [ ] Should Source Control History be a collapsible section, a separate sidebar
       mode, or a secondary pane below Changes?

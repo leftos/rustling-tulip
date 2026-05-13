@@ -1229,7 +1229,7 @@ function SessionLeaf(p: SessionLeafProps) {
         onClick={() => p.onSelect(s.id)}
         role="button"
         tabIndex={0}
-        aria-label={`Session ${s.label}`}
+        aria-label={`Session ${sessionDisplayLabel(s)}`}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
@@ -1901,4 +1901,3 @@ function buildTabContainers(
   }
   return out;
 }
-

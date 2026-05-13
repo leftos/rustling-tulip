@@ -1,29 +1,22 @@
 import type { SessionSnapshot } from "../types";
 
-/// Name shown in sidebars / pane headers / pop-out window titles. The
-/// OSC window title (`terminal_title`) wins whenever a process has
-/// emitted one — matches what VS Code / Windows Terminal / iTerm /
-/// every other terminal host does. Covers Claude's `/rename`, codex's
-/// equivalent, *and* shells that emit a meaningful title (powershell's
-/// `$Host.UI.RawUI.WindowTitle = ...`, bash's `PROMPT_COMMAND` setting
-/// `\033]0;...\007`, etc.). When no title has been emitted, falls back
-/// to the daemon-curated `<repo>:<branch>` label.
-///
-/// Pre-iter-51 this was tooltip-only (iter 4 demoted OSC titles after
-/// `cmd.exe` clobbered canonical labels at the source). Iter 51 keeps
-/// the canonical label visible in the tooltip so nothing is lost, and
-/// promotes the OSC title to primary regardless of session mode.
+/// Name shown in sidebars / pane headers / pop-out window titles. The daemon
+/// label is already the effective identity: explicit user label when one is
+/// set, otherwise the canonical repo/workspace label. Terminal-emitted OSC
+/// titles stay secondary because shells often publish noisy process titles.
 export function sessionDisplayLabel(s: SessionSnapshot): string {
-  return s.terminal_title ?? s.label;
+  const label = nonEmptyLabel(s.label);
+  if (label) return label;
+  return sessionRuntimeLabel(s) ?? s.id;
 }
 
-/// Tooltip combining the display label and the canonical spawn-time
-/// label when they differ, so a renamed session still surfaces the
-/// `<repo>:<branch>` origin on hover.
+/// Tooltip surfaces secondary runtime title context without letting it replace
+/// the stable primary label.
 export function sessionLabelTooltip(s: SessionSnapshot): string {
   const display = sessionDisplayLabel(s);
-  if (display === s.label) return s.label;
-  return `${display}\n${s.label}`;
+  const terminalTitle = nonEmptyLabel(s.terminal_title);
+  if (!terminalTitle || terminalTitle === display) return display;
+  return `${display}\nTerminal title: ${terminalTitle}`;
 }
 
 /// Short token identifying what's running in this session — "claude" /
@@ -39,4 +32,9 @@ export function sessionRuntimeLabel(s: SessionSnapshot): string | null {
   // agent sessions the protocol's `agent` field gives us the answer.
   if (s.mode !== "plain_shell") return s.agent;
   return null;
+}
+
+function nonEmptyLabel(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }

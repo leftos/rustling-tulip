@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import type { SessionSnapshot } from "../types";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
+import { sessionDisplayLabel } from "../utils/sessionLabel";
 
 interface Props {
   repoName: string;
@@ -67,7 +68,9 @@ export default function RepoRemoveDialog({
             {liveSessions.map((s) => (
               <li key={s.id} data-session-id={s.id}>
                 <span className={`status-dot status-${s.status}`} />
-                <span className="repo-remove-session-label">{s.label}</span>
+                <span className="repo-remove-session-label">
+                  {sessionDisplayLabel(s)}
+                </span>
                 <span className="muted small">{s.status}</span>
               </li>
             ))}

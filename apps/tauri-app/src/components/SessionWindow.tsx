@@ -54,10 +54,8 @@ export default function SessionWindow({
   }, []);
 
   // Replace the OS window title (originally set to a raw UUID by the
-  // Tauri builder in `open_session_window`) with the user-visible
-  // label — preferring the agent's OSC title when set, falling back to
-  // the canonical `<repo>:<branch>` otherwise. Renames + agent-side
-  // title changes both flow through here.
+  // Tauri builder in `open_session_window`) with the stable user-visible
+  // label. Terminal-emitted titles stay in the tooltip.
   const displayLabel = sessionDisplayLabel(session);
   useEffect(() => {
     void getCurrentWebviewWindow().setTitle(displayLabel);

@@ -1,6 +1,6 @@
-//! Watches a PTY output stream for OSC window-title sequences and updates the
-//! session's label live, so the sidebar tree reflects whatever the agent set
-//! via `printf '\e]0;...\a'` (or `]1;` / `]2;`).
+//! Watches a PTY output stream for OSC window-title sequences and stores the
+//! latest terminal title alongside the session's stable label. The UI may show
+//! this as secondary context without replacing the daemon/user session label.
 //!
 //! The recognized sequences are:
 //! - `ESC ] 0 ; <title> BEL`  (set icon + window title)
