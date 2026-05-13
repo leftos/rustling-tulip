@@ -19,6 +19,13 @@ pub struct Dirs {
     /// `<worktrees_dir>/<sanitized-anchor>/wt.<branch-slug>/<rel-to-anchor>`
     /// (see `git::workspace_worktree_paths`).
     pub worktrees_dir: PathBuf,
+    /// Cached-binary root: `<data_local>/leftos/rustling-tulip/data/binaries/`
+    /// on Windows. Holds content-addressed copies of `rustling-tulipd.exe`
+    /// and `rt-tracer.exe` so a rebuild or reinstall can replace the shipped
+    /// templates without colliding with running processes (Windows refuses to
+    /// overwrite a running `.exe`). Each cached file is named
+    /// `<template-stem>-<sha256-prefix>.exe`. See [`crate::binary_cache`].
+    pub binaries_dir: PathBuf,
 }
 
 /// Strip the Windows verbatim (`\\?\`) prefix from a canonicalized path when
@@ -93,11 +100,15 @@ impl Dirs {
         let worktrees_dir = resolve_worktrees_dir()?;
         std::fs::create_dir_all(&worktrees_dir).context("creating worktrees dir")?;
 
+        let binaries_dir = resolve_binaries_dir()?;
+        std::fs::create_dir_all(&binaries_dir).context("creating binaries dir")?;
+
         Ok(Self {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
             sessions_dir,
             worktrees_dir,
+            binaries_dir,
             config,
         })
     }
@@ -135,4 +146,21 @@ fn resolve_worktrees_dir() -> anyhow::Result<PathBuf> {
     let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve worktrees directory"))?;
     Ok(pd.data_local_dir().join("worktrees"))
+}
+
+/// Resolve the cached-binary root, honoring `RUSTLING_TULIP_BINARIES_DIR` when
+/// set (used by e2e isolation). Falls back to
+/// `<data_local>/leftos/rustling-tulip/data/binaries/` — same root as
+/// worktrees, machine-local and known-writable. The Tauri-side daemon
+/// supervisor resolves the same path independently so both processes share
+/// one cache.
+pub fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
+    if let Ok(value) = std::env::var("RUSTLING_TULIP_BINARIES_DIR")
+        && !value.is_empty()
+    {
+        return Ok(PathBuf::from(value));
+    }
+    let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
+        .ok_or_else(|| anyhow!("could not resolve binaries directory"))?;
+    Ok(pd.data_local_dir().join("binaries"))
 }

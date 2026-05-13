@@ -319,46 +319,21 @@ function Initialize-FrontendDeps {
 # Builders
 # ---------------------------------------------------------------------------
 
-# Debug daemon + tracer build with the smart "locked binary" retry from
-# the old launch.ps1. Sets $script:DaemonAlreadyStopped when the running
-# daemon was killed to break the lock, so the caller knows not to
-# redundantly stop it. The tracer is bundled in the same cargo invocation
-# because Tauri's externalBin contract (tauri.conf.json) requires both
-# sidecars to exist before `tauri dev` will even start.
+# Debug daemon + tracer build. Both binaries are spawned from a
+# content-addressed cache (see crates/daemon/src/binary_cache.rs) so the
+# shipped target/debug/{rustling-tulipd,rt-tracer}.exe templates are never
+# held by a running process -- cargo can overwrite them while the daemon
+# and tracers continue running their cached copies. No lock-retry needed.
 function Invoke-DebugBuild {
     Write-Host '==> Building daemon + tracer (debug)...' -ForegroundColor Cyan
     $cargoArgs = @('build', '-p', 'daemon', '-p', 'tracer')
 
     $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
     $output = $script:CargoLines
+    # The lock-retry path is gone (binary cache eliminates the file lock),
+    # so a running daemon is never killed by the build. The caller's
+    # "restart after rebuild" path stays in charge of bouncing the daemon.
     $script:DaemonAlreadyStopped = $false
-
-    # Lock-retry: either the daemon binary or the tracer binary may
-    # be held open by a still-running process. Be surgical -- only
-    # kill the image(s) whose binary is actually locked. This
-    # preserves Phase C.3 session reattach when only the daemon
-    # rebuilt (tracers survive, new daemon picks them up) and only
-    # tears down sessions when the tracer binary itself needs
-    # replacing (intrinsic: can't overwrite a running exe on Windows).
-    $daemonLocked = -not (Test-DaemonBinaryWritable (Get-DaemonBin -BuildProfile 'debug'))
-    $tracerLocked = -not (Test-DaemonBinaryWritable (Get-TracerBin -BuildProfile 'debug'))
-    if ($exit -ne 0 -and ($daemonLocked -or $tracerLocked)) {
-        $names = @()
-        if ($daemonLocked) { $names += $ImageName }
-        if ($tracerLocked) { $names += $TracerImageName }
-        $reason = if ($tracerLocked -and $daemonLocked) { 'daemon + tracer binaries locked, retrying build' }
-                  elseif ($tracerLocked)                { 'tracer binary locked, retrying build (sessions will not reattach)' }
-                  else                                  { 'daemon binary locked, retrying build' }
-        [void](Stop-DaemonProcesses -Reason $reason -Names $names)
-        Write-Host '==> Retrying daemon + tracer build...' -ForegroundColor Cyan
-        $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
-        $output = $script:CargoLines
-        # Only treat the daemon as 'already stopped' if it actually was.
-        # If the lock-retry killed only the tracer, the daemon is still
-        # alive and may still need stopping later (e.g. the caller's
-        # "daemon was rebuilt" path).
-        $script:DaemonAlreadyStopped = $daemonLocked
-    }
 
     Test-CargoExitOk 'cargo build'
 
@@ -382,9 +357,13 @@ function Invoke-DebugBuild {
 # raw `cargo build` does not -- without it the launched release exe shows
 # "localhost refused to connect".
 function Invoke-ReleaseBuild {
-    Write-Host '==> Stopping running rustling-tulip processes (release rebuild needs the exe lock)...' -ForegroundColor Cyan
+    # The Tauri app exe is loaded directly (no binary cache for it), so
+    # rebuilding target/release/rustling-tulip.exe still requires the GUI
+    # to be closed first. The daemon and tracer are spawned via the
+    # binary cache and don't lock their templates -- they keep running.
+    Write-Host '==> Stopping running rustling-tulip GUI (its exe must be free for release rebuild)...' -ForegroundColor Cyan
     $killed = 0
-    Get-Process -Name $AppImageName, $ImageName -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-Process -Name $AppImageName -ErrorAction SilentlyContinue | ForEach-Object {
         Write-Host "    killing $($_.ProcessName) (pid=$($_.Id))"
         Stop-Process -Id $_.Id -Force
         $killed++

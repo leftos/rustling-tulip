@@ -22,8 +22,9 @@ use anyhow::{Context as _, anyhow};
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
-use axum::routing::get;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use base64::Engine as _;
 use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
@@ -299,6 +300,7 @@ pub async fn run(
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
+        .route("/shutdown", post(shutdown_handler))
         .with_state(hub);
 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -359,6 +361,39 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
 
 async fn ws_handler(State(hub): State<Hub>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| client_session(hub, socket))
+}
+
+/// Out-of-band graceful-shutdown trigger. Mirrors the WS
+/// `ClientMessage::Shutdown { drain: false }` path so an installer (or any
+/// other non-WS caller) can take the daemon down cleanly without dropping
+/// tracers — sidecars + scrollback stay on disk and a freshly-spawned daemon
+/// reattaches every still-running supervisor.
+///
+/// Auth: requires `Authorization: Bearer <auth_token>` matching the daemon's
+/// in-memory token (the same one written to `daemon.json`). Without a valid
+/// token the endpoint returns 401 — anyone with read access to the config
+/// dir can already shut us down via `taskkill`, but we still gate the soft
+/// path so a stray local script can't trip it.
+async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Response {
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    let Some(token) = presented else {
+        return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
+    };
+    if token != hub.auth_token {
+        return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
+    }
+
+    info!("HTTP /shutdown: graceful shutdown requested (no drain)");
+    // Mirrors the WS handler: don't drain — leave sidecars + scrollback on
+    // disk so the next daemon start can surface these sessions in the
+    // Abandoned bucket (or, when tracers are still alive, reattach them).
+    let send_result = hub.shutdown_tx.send(true);
+    info!(?send_result, "HTTP /shutdown: shutdown_tx.send returned");
+    (StatusCode::ACCEPTED, "shutting down").into_response()
 }
 
 async fn client_session(hub: Hub, socket: WebSocket) {
@@ -2221,13 +2256,17 @@ async fn spawn_interactive_session(
         cols: 120,
         rows: 32,
     };
-    let tracer_spawn =
-        tracer_client::spawn(spec, expected_output_subscribers(SessionMode::Interactive))
-            .await
-            .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
+    let tracer_spawn = tracer_client::spawn(
+        &hub.dirs,
+        spec,
+        expected_output_subscribers(SessionMode::Interactive),
+    )
+    .await
+    .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
+    let tracer_exe_path = tracer_spawn.tracer_exe_path.to_string_lossy().into_owned();
     let pid = pty.pid();
 
     let started_at = Utc::now();
@@ -2285,6 +2324,7 @@ async fn spawn_interactive_session(
             last_prompt,
             Some(tracer_pid),
             Some(tracer_pipe),
+            Some(tracer_exe_path),
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -2362,13 +2402,17 @@ async fn spawn_plain_shell_session(
         cols: 120,
         rows: 32,
     };
-    let tracer_spawn =
-        tracer_client::spawn(spec, expected_output_subscribers(SessionMode::PlainShell))
-            .await
-            .context("spawning plain shell via tracer")?;
+    let tracer_spawn = tracer_client::spawn(
+        &hub.dirs,
+        spec,
+        expected_output_subscribers(SessionMode::PlainShell),
+    )
+    .await
+    .context("spawning plain shell via tracer")?;
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
+    let tracer_exe_path = tracer_spawn.tracer_exe_path.to_string_lossy().into_owned();
     let pid = pty.pid();
 
     let started_at = Utc::now();
@@ -2429,6 +2473,7 @@ async fn spawn_plain_shell_session(
             None,
             Some(tracer_pid),
             Some(tracer_pipe),
+            Some(tracer_exe_path),
         )
     {
         // `shell_label` is now informational only — surfaced to the user via
@@ -2555,6 +2600,7 @@ fn spawn_headless_session(
             last_prompt,
             // Headless `claude --print` doesn't use a PTY and therefore doesn't
             // go through rt-tracer; the tracer fields stay None.
+            None,
             None,
             None,
         )

@@ -10,6 +10,8 @@
 //! identical to the pre-tracer world — call sites stay agnostic to whether
 //! the bytes are coming from a local `ConPTY` or a remote pipe.
 
+use crate::binary_cache;
+use crate::paths::Dirs;
 use crate::pty::{PtyHandle, PtyHandleParts, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -43,17 +45,28 @@ pub struct TracerSpawn {
     /// to the sidecar; not derivable from session id alone if the ABI ever
     /// changes the format.
     pub pipe_name: String,
+    /// Absolute path of the cached `rt-tracer.exe` this supervisor was spawned
+    /// from (see [`crate::binary_cache`]). Persisted to the sidecar so the
+    /// daemon's startup GC sweep can tell which cache entries are still in
+    /// use.
+    pub tracer_exe_path: PathBuf,
 }
 
 /// Spawn `rt-tracer.exe` for this session and wire up its pipe. The tracer
 /// inherits no console (Windows: `CREATE_NO_WINDOW`) and is detached from the
 /// daemon's lifetime — when the daemon dies the tracer keeps owning its PTY
 /// child until either a new daemon reconnects or it receives `Stop`.
+///
+/// `dirs` is consulted to copy the shipped `rt-tracer` template into the
+/// content-addressed binary cache; the supervisor is launched from the cached
+/// copy rather than the template itself so a rebuild or reinstall can replace
+/// the template without disturbing live sessions.
 pub async fn spawn(
+    dirs: &Dirs,
     spec: PtySpawnSpec,
     expected_output_subscribers: usize,
 ) -> anyhow::Result<TracerSpawn> {
-    let tracer_path = locate_tracer_exe()?;
+    let tracer_path = locate_tracer_exe(dirs)?;
     let pipe = pipe_name(&spec.session_id);
     debug!(
         tracer = %tracer_path.display(),
@@ -78,6 +91,7 @@ pub async fn spawn(
         handle,
         tracer_pid,
         pipe_name: pipe,
+        tracer_exe_path: tracer_path,
     })
 }
 
@@ -101,7 +115,20 @@ pub async fn reattach(
     Ok(handle)
 }
 
-fn locate_tracer_exe() -> anyhow::Result<PathBuf> {
+/// Resolve the cached `rt-tracer` path, copying the shipped template into
+/// the binary cache on first use. Returns the cached path the tracer should
+/// be spawned from. Each rebuild of the template lands at a new hash, so
+/// existing tracer processes keep running their own private copies.
+fn locate_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    let template = locate_tracer_template()?;
+    let stem = template
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rt-tracer");
+    binary_cache::ensure_cached(&template, &dirs.binaries_dir, stem)
+}
+
+fn locate_tracer_template() -> anyhow::Result<PathBuf> {
     let current = std::env::current_exe().context("locating daemon exe")?;
     let dir = current
         .parent()
@@ -110,9 +137,6 @@ fn locate_tracer_exe() -> anyhow::Result<PathBuf> {
     if candidate.is_file() {
         return Ok(candidate);
     }
-    // Dev fallback: cargo target/<profile>/ — useful for `cargo run -p daemon`
-    // before the installer is built. In production the side-by-side path above
-    // hits.
     Err(anyhow!(
         "rt-tracer binary not found next to daemon: {}",
         candidate.display()

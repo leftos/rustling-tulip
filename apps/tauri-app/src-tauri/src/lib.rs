@@ -206,7 +206,7 @@ async fn stop_daemon() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-async fn kill_pid(pid: u32) -> Result<(), String> {
+pub(crate) async fn kill_pid(pid: u32) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = tokio::process::Command::new("taskkill")
         .arg("/PID")
@@ -223,7 +223,7 @@ async fn kill_pid(pid: u32) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-async fn kill_pid(pid: u32) -> Result<(), String> {
+pub(crate) async fn kill_pid(pid: u32) -> Result<(), String> {
     let status = tokio::process::Command::new("kill")
         .arg("-TERM")
         .arg(pid.to_string())

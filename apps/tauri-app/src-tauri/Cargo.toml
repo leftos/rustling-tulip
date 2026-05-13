@@ -27,6 +27,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["fs", "process", "rt", "time", "macros"] }
+sha2 = "0.10"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

@@ -122,6 +122,15 @@ pub struct OrphanMeta {
     /// sidecars). `None` whenever `tracer_pid` is `None`.
     #[serde(default)]
     pub tracer_pipe: Option<String>,
+    /// Absolute path of the cached tracer binary the supervisor was spawned
+    /// from (see [`crate::binary_cache`]). Persisted so the daemon's startup
+    /// GC sweep can tell which cached entries are still in use by live
+    /// tracers. `None` for sidecars written before the binary cache existed
+    /// or for a future spawn path that bypasses the cache; the GC sweep
+    /// treats absent entries as "unknown — keep" by including only
+    /// known-in-use paths in its retain set.
+    #[serde(default)]
+    pub tracer_exe_path: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -355,6 +364,7 @@ pub fn meta_from_record(
     last_prompt: Option<String>,
     tracer_pid: Option<u32>,
     tracer_pipe: Option<String>,
+    tracer_exe_path: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -382,6 +392,7 @@ pub fn meta_from_record(
         recent_actions_tail: Vec::new(),
         tracer_pid,
         tracer_pipe,
+        tracer_exe_path,
     })
 }
 
@@ -562,6 +573,7 @@ mod tests {
             recent_actions_tail: Vec::new(),
             tracer_pid: Some(1234),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
+            tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -572,6 +584,36 @@ mod tests {
             decoded.tracer_pipe.as_deref(),
             Some(r"\\.\pipe\rt-tracer-s1")
         );
+        assert_eq!(
+            decoded.tracer_exe_path.as_deref(),
+            Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe")
+        );
+    }
+
+    #[test]
+    fn v2_sidecar_without_tracer_exe_path_loads_as_none() {
+        // A sidecar written before the binary-cache feature carries
+        // tracer_pid + tracer_pipe but no tracer_exe_path. Serde defaults
+        // it to None; the GC sweep simply doesn't get a hint and treats
+        // the cache entry as unknown (excluded from the retain set —
+        // unsafe to delete only if it matches the live daemon's own
+        // exe, which is also in the retain set).
+        let v2 = br#"{
+            "on_disk_version": 2,
+            "session_id": "old-cache",
+            "pid": 4321,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "program_name": "rt-tracer",
+            "tracer_pid": 4321,
+            "tracer_pipe": "\\\\.\\pipe\\rt-tracer-old"
+        }"#;
+        let meta = load_meta_from_bytes(v2).expect("parse v2 without exe path");
+        assert_eq!(meta.tracer_pid, Some(4321));
+        assert_eq!(meta.tracer_exe_path, None);
     }
 
     #[test]
