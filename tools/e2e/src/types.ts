@@ -162,6 +162,7 @@ export type ClientMessage =
       use_worktree_override: boolean | null;
       max_panes_per_tab_override: number | null;
     }
+  | { type: "cancel_preset_launch"; job_id: string }
   | {
       type: "preview_preset";
       id: string;

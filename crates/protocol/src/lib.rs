@@ -1444,6 +1444,11 @@ pub enum ClientMessage {
         #[serde(default)]
         max_panes_per_tab_override: Option<u32>,
     },
+    /// Request cancellation for an in-flight preset launch. The daemon stops
+    /// before the next session spawn; already-created sessions and tabs stay.
+    CancelPresetLaunch {
+        job_id: String,
+    },
     /// Resolve a preset's prompt source into the list of prompts that would
     /// be launched, without spawning anything. Used by the launch dialog to
     /// preview file/folder sources before the user commits. Daemon replies
@@ -2246,6 +2251,20 @@ mod tests {
             panic!("wrong variant");
         };
         assert_eq!(job_id, "");
+    }
+
+    #[test]
+    fn cancel_preset_launch_message_tagged() {
+        let msg = ClientMessage::CancelPresetLaunch {
+            job_id: "preset-job-1".to_string(),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"cancel_preset_launch""#));
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        let ClientMessage::CancelPresetLaunch { job_id } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(job_id, "preset-job-1");
     }
 
     #[test]

@@ -37,7 +37,7 @@ use protocol::{
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,6 +66,9 @@ pub struct Hub {
     /// client subscribes and forwards. Lets the launching client auto-switch
     /// tabs while the batch runs, and lets other clients see new tabs appear.
     pub preset_events: broadcast::Sender<PresetEvent>,
+    /// Cancellation handles for in-flight preset launch jobs. The launch task
+    /// inserts a sender on start and removes it on completion/failure/cancel.
+    pub preset_cancellations: Arc<AsyncMutex<HashMap<String, tokio::sync::watch::Sender<bool>>>>,
     /// Broadcast for repo + workspace registry mutations. Every connected
     /// client subscribes and forwards full `Repos` / `Workspaces` snapshots
     /// to its WS sender. Without this, a registry change made on one client
@@ -299,6 +302,7 @@ pub async fn run(
         shutdown_tx,
         tab_events,
         preset_events,
+        preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
         state_events,
         client_count,
     };
@@ -1567,6 +1571,19 @@ async fn dispatch(
             tokio::spawn(async move {
                 crate::presets::launch(hub, args).await;
             });
+        }
+        ClientMessage::CancelPresetLaunch { job_id } => {
+            let sender = hub.preset_cancellations.lock().await.get(&job_id).cloned();
+            match sender {
+                Some(cancel_tx) => {
+                    let _ = cancel_tx.send(true);
+                }
+                None => {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: format!("unknown preset launch job: {job_id}"),
+                    });
+                }
+            }
         }
         ClientMessage::PreviewPreset {
             id,

@@ -22,6 +22,7 @@ use protocol::{
 };
 use regex::Regex;
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -74,7 +75,14 @@ pub async fn launch(hub: Hub, args: LaunchArgs) {
             current_tab_id: None,
         },
     );
-    if let Err(failure) = run(&hub, args).await {
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    hub.preset_cancellations
+        .lock()
+        .await
+        .insert(job_id.clone(), cancel_tx);
+    let result = run(&hub, args, cancel_rx).await;
+    hub.preset_cancellations.lock().await.remove(&job_id);
+    if let Err(failure) = result {
         warn!(
             preset_id = %preset_id,
             error = %failure.error,
@@ -859,7 +867,11 @@ enum PresetSpawnKind {
     Workspace { workspace_id: String },
 }
 
-async fn run(hub: &Hub, args: LaunchArgs) -> Result<(), LaunchFailure> {
+async fn run(
+    hub: &Hub,
+    args: LaunchArgs,
+    cancel_rx: watch::Receiver<bool>,
+) -> Result<(), LaunchFailure> {
     let plan = build_plan(hub, &args).await?;
     let preset_id = plan.preset.id.clone();
     let total = u32::try_from(plan.raw_prompts.len()).unwrap_or(u32::MAX);
@@ -869,7 +881,7 @@ async fn run(hub: &Hub, args: LaunchArgs) -> Result<(), LaunchFailure> {
         repo = %plan.repo.id,
         "preset launch starting"
     );
-    orchestrate(hub, plan, total)
+    orchestrate(hub, plan, total, cancel_rx)
         .await
         .map_err(|failure| failure.with_total(total))
 }
@@ -1056,10 +1068,20 @@ fn build_tab_state(
     }
 }
 
-async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), LaunchFailure> {
+async fn orchestrate(
+    hub: &Hub,
+    mut plan: LaunchPlan,
+    total: u32,
+    mut cancel_rx: watch::Receiver<bool>,
+) -> Result<(), LaunchFailure> {
     let mut session_ids: Vec<String> = Vec::new();
     let stagger = Duration::from_millis(u64::from(plan.preset.stagger_ms));
     let last_idx = plan.raw_prompts.len() - 1;
+
+    if *cancel_rx.borrow() {
+        send_cancelled_job_update(hub, &plan, total, &session_ids);
+        return Ok(());
+    }
 
     send_job_update(
         hub,
@@ -1078,6 +1100,11 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
     );
 
     for (i, raw) in plan.raw_prompts.iter().enumerate() {
+        if *cancel_rx.borrow() {
+            send_cancelled_job_update(hub, &plan, total, &session_ids);
+            return Ok(());
+        }
+
         let snapshot_id = spawn_one(hub, &plan, i, raw, &session_ids).await?;
         session_ids.push(snapshot_id.clone());
 
@@ -1111,7 +1138,11 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
         });
 
         if i < last_idx {
-            sleep(stagger).await;
+            let cancelled = wait_for_stagger_or_cancel(stagger, &mut cancel_rx).await;
+            if cancelled {
+                send_cancelled_job_update(hub, &plan, total, &session_ids);
+                return Ok(());
+            }
         }
     }
     send_job_update(
@@ -1131,6 +1162,37 @@ async fn orchestrate(hub: &Hub, mut plan: LaunchPlan, total: u32) -> Result<(), 
     );
     info!(preset_id = %plan.preset.id, count = total, "preset launch complete");
     Ok(())
+}
+
+async fn wait_for_stagger_or_cancel(
+    stagger: Duration,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    if *cancel_rx.borrow() {
+        return true;
+    }
+    tokio::select! {
+        () = sleep(stagger) => false,
+        changed = cancel_rx.changed() => changed.is_ok() && *cancel_rx.borrow(),
+    }
+}
+
+fn send_cancelled_job_update(hub: &Hub, plan: &LaunchPlan, total: u32, session_ids: &[String]) {
+    send_job_update(
+        hub,
+        PresetLaunchJobSnapshot {
+            job_id: plan.job_id.clone(),
+            preset_id: plan.preset.id.clone(),
+            target: plan.target.clone(),
+            total,
+            launched: u32::try_from(session_ids.len()).unwrap_or(u32::MAX),
+            created_session_ids: session_ids.to_vec(),
+            created_tab_ids: plan.tab_state.tab_ids.clone(),
+            status: PresetLaunchJobStatus::Cancelled,
+            error: None,
+            current_tab_id: plan.tab_state.current_tab_id.clone(),
+        },
+    );
 }
 
 async fn spawn_one(

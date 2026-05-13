@@ -369,6 +369,10 @@ export function launchPreset(client: DaemonClient, opts: LaunchPresetOpts) {
   return job_id;
 }
 
+export function cancelPresetLaunch(client: DaemonClient, job_id: string) {
+  client.send({ type: "cancel_preset_launch", job_id });
+}
+
 function newPresetLaunchJobId(): string {
   return `preset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }

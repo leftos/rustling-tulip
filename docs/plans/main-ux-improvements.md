@@ -344,7 +344,7 @@ be able to cancel before the next session spawns and see what already launched.
       created sessions, status, and error state.
 - [ ] Add progress events: resolving prompts, running script commands,
       spawning N of M, completed, cancelled, failed.
-- [ ] Add a cancel message that stops future spawns and leaves already-created
+- [x] Add a cancel message that stops future spawns and leaves already-created
       sessions alone unless the user explicitly cleans them up.
 - [ ] Update `PresetLaunchDialog` to show progress after submit instead of
       closing immediately for large jobs.
