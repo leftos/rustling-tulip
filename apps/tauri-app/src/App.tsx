@@ -21,6 +21,7 @@ import {
   type ContainerRef,
   type DaemonMessage,
   type PresetEntry,
+  type PresetLaunchJobSnapshot,
   type PresetTarget,
   type RepoEntry,
   type SessionSnapshot,
@@ -2538,6 +2539,9 @@ function handleMessage(
             : { ...s, repoChangeCounts: { ...s.repoChangeCounts, [repoId]: count } },
         );
       }
+      if (msg.type === "preset_launch_job_updated") {
+        pushPresetJobToast(setState, msg.job);
+      }
       if (msg.type === "preset_launch_failed") {
         const partials = `${msg.partial_session_ids.length} session(s), ${msg.partial_tab_ids.length} tab(s) partial`;
         pushToast(setState, {
@@ -2630,6 +2634,54 @@ function pushToast(
     }
     return { ...s, toasts: [...s.toasts, { id, ...toast, generation: 1 }] };
   });
+}
+
+function pushPresetJobToast(
+  setState: React.Dispatch<React.SetStateAction<AppState>>,
+  job: PresetLaunchJobSnapshot,
+) {
+  const terminal = isTerminalPresetJob(job);
+  const severity = job.status === "failed" ? "warning" : "info";
+  pushToast(setState, {
+    key: `preset:${job.job_id}`,
+    severity,
+    message: presetJobToastMessage(job),
+    detail: presetJobToastDetail(job),
+    sticky: !terminal,
+  });
+}
+
+function isTerminalPresetJob(job: PresetLaunchJobSnapshot): boolean {
+  return (
+    job.status === "completed" ||
+    job.status === "cancelled" ||
+    job.status === "failed"
+  );
+}
+
+function presetJobToastMessage(job: PresetLaunchJobSnapshot): string {
+  switch (job.status) {
+    case "completed":
+      return `Preset '${job.preset_id}' launched`;
+    case "cancelled":
+      return `Preset '${job.preset_id}' cancelled`;
+    case "failed":
+      return `Preset '${job.preset_id}' launch failed`;
+    case "spawning":
+      return `Launching preset '${job.preset_id}'`;
+    case "resolving":
+      return `Preparing preset '${job.preset_id}'`;
+    case "unknown":
+      return `Preset '${job.preset_id}' updated`;
+  }
+}
+
+function presetJobToastDetail(job: PresetLaunchJobSnapshot): string {
+  const sessions = `${job.launched} / ${job.total} session${job.total === 1 ? "" : "s"}`;
+  if (job.status === "failed" && job.error) {
+    return `${job.error} · ${sessions}`;
+  }
+  return sessions;
 }
 
 function findSession(
