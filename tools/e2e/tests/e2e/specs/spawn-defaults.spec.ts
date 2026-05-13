@@ -140,35 +140,11 @@ describe("spawn defaults", function () {
 
     await reloadAndWaitForRepo(registeredRepoId);
 
-    const spawnPromise = ws.waitFor(
-      (msg): msg is SessionUpdatedMessage =>
-        isSessionUpdated(msg) &&
-        msg.session.label === "trusted-launch-session" &&
-        msg.session.elevated_authority === true,
-      { timeoutMs: 15_000 },
+    const session = await spawnElevatedSession(
+      ws,
+      registeredRepoId,
+      "trusted-launch-session",
     );
-    ws.send({
-      type: "spawn_session",
-      label: "trusted-launch-session",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: true,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
-    });
-
-    const session = (await spawnPromise).session;
     spawnedSessionIds.push(session.id);
 
     const row = await sidebarRow(session.id);
@@ -188,7 +164,78 @@ describe("spawn defaults", function () {
       join(repoRoot, ".tmp", "e2e", "spawn-elevated-session-badge.png"),
     );
   });
+
+  it("opens the spawn dialog before replaying elevated launch-last", async function () {
+    if (!ws || !registeredRepoId) throw new Error("setup failed");
+
+    await reloadAndWaitForRepo(registeredRepoId);
+
+    const session = await spawnElevatedSession(
+      ws,
+      registeredRepoId,
+      "trusted-launch-last-seed",
+    );
+    spawnedSessionIds.push(session.id);
+
+    await openRepoContextMenu(registeredRepoId);
+    const launchLast = await browser.$(
+      '[data-testid="container-launch-last-new"]',
+    );
+    await launchLast.waitForExist({ timeout: 5_000 });
+    await browser.waitUntil(async () => launchLast.isEnabled(), {
+      timeout: 10_000,
+      timeoutMsg: "launch-last did not become enabled",
+    });
+    await launchLast.click();
+
+    const dialog = await browser.$('[data-testid="spawn-dialog"]');
+    await dialog.waitForExist({ timeout: 10_000 });
+    const skipPerms = await dialog.$('[data-testid="spawn-skip-perms"]');
+    expect(await skipPerms.isSelected()).to.equal(true);
+    const warning = await dialog.$(
+      '[data-testid="spawn-trusted-launch-warning"]',
+    );
+    await warning.waitForExist({ timeout: 5_000 });
+    expect((await warning.getText()).toLowerCase()).to.include("trusted launch");
+    await closeSpawnDialog();
+  });
 });
+
+async function spawnElevatedSession(
+  ws: DaemonWsClient,
+  repoId: string,
+  label: string,
+): Promise<SessionSnapshot> {
+  const spawnPromise = ws.waitFor(
+    (msg): msg is SessionUpdatedMessage =>
+      isSessionUpdated(msg) &&
+      msg.session.label === label &&
+      msg.session.elevated_authority === true,
+    { timeoutMs: 15_000 },
+  );
+  ws.send({
+    type: "spawn_session",
+    label,
+    target: {
+      kind: "single",
+      repo_id: repoId,
+      branch_name: "main",
+      base_branch: null,
+      use_worktree: false,
+    },
+    mode: "interactive",
+    initial_prompt: null,
+    dangerously_skip_permissions: true,
+    agent: "claude",
+    model: null,
+    permission_mode: null,
+    codex_sandbox: null,
+    extra_env: [],
+    prompt_injector: null,
+  });
+
+  return (await spawnPromise).session;
+}
 
 function isRepos(
   m: DaemonMessage,
@@ -283,6 +330,14 @@ async function closeSpawnDialog(): Promise<void> {
   await close.click();
   const dialog = await browser.$('[data-testid="spawn-dialog"]');
   await dialog.waitForExist({ timeout: 5_000, reverse: true });
+}
+
+async function openRepoContextMenu(repoId: string): Promise<void> {
+  const repoRow = await browser.$(
+    `[data-testid="sidebar-container-repo"][data-container-id="${repoId}"]`,
+  );
+  await repoRow.waitForExist({ timeout: 10_000 });
+  await repoRow.click({ button: "right" });
 }
 
 async function sidebarRow(sessionId: string) {

@@ -154,8 +154,9 @@ be honored, but new defaults should not silently grant broad authority.
 - [x] Add a session header/sidebar badge for sessions launched with elevated
       authority.
 - [ ] Reword Claude and Codex permission labels into a consistent vocabulary.
-- [ ] Decide whether "launch last" can replay elevated authority without
-      confirmation; document and implement the rule.
+- [x] Decide whether "launch last" can replay elevated authority without
+      confirmation; rule: elevated launch-last opens the full spawn dialog for
+      explicit review instead of replaying immediately.
 - [x] Add e2e coverage for default setting on a fresh config dir.
 - [x] Add e2e coverage that elevated sessions show a visible badge.
 

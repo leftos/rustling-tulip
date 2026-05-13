@@ -667,6 +667,23 @@ export default function App() {
         onOpenSpawn(target);
         return;
       }
+      if (config.dangerously_skip_permissions) {
+        spawnTargetPaneRef.current = null;
+        spawnTargetTabRef.current = null;
+        setState((state) => ({
+          ...state,
+          spawnOpen: true,
+          spawnInitial: target,
+          spawnPrefill: config,
+        }));
+        pushToast(setState, {
+          severity: "warning",
+          message: "Review trusted launch",
+          detail:
+            "Launch last uses elevated authority, so the full spawn dialog opens before replay.",
+        });
+        return;
+      }
       const nextTarget = {
         ...config.target,
         branch_name: config.target.use_worktree
