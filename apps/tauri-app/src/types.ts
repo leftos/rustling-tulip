@@ -43,7 +43,7 @@ export type ContainerRef =
   | { kind: "repo"; id: string }
   | { kind: "workspace"; id: string };
 
-export type SessionKind = "single" | "workspace";
+export type SessionKind = "single" | "workspace" | "standalone";
 export type SessionStatus =
   | "spawning"
   | "idle"
@@ -136,6 +136,10 @@ export type SpawnTarget =
       branch_name: string;
       base_branch: string | null;
       use_worktree: boolean;
+    }
+  | {
+      kind: "standalone";
+      cwd: string | null;
     };
 
 export type PermissionMode =

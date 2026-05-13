@@ -147,6 +147,7 @@ impl SessionRecord {
                 .is_some_and(|cfg| match &cfg.target {
                     protocol::SpawnTarget::Single { use_worktree, .. }
                     | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                    protocol::SpawnTarget::Standalone { .. } => false,
                 });
         SessionSnapshot {
             id: self.id.clone(),

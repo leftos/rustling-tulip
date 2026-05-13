@@ -43,6 +43,7 @@ import SourceControlSidebar from "./components/source-control/SourceControlSideb
 import PaneWindow from "./components/PaneWindow";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog, { type SpawnPlacement } from "./components/SpawnDialog";
+import StandaloneShellDialog from "./components/StandaloneShellDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
@@ -69,7 +70,7 @@ import {
   clearPanePoppedOut,
   prunePoppedOutPanes,
 } from "./utils/poppedPanes";
-import { loadSettings, useSettings } from "./utils/settings";
+import { loadSettings, saveSettings, useSettings } from "./utils/settings";
 import {
   clearSessionFontSize,
   clearTabFontSize,
@@ -104,6 +105,8 @@ interface AppState {
   activeTabId: string | null;
   focusedPaneId: string | null;
   spawnOpen: boolean;
+  standaloneShellOpen: boolean;
+  standaloneShellInitial: string | null;
   spawnInitial: SpawnInitialTarget | undefined;
   /// Full SpawnConfig to seed the spawn dialog from (used by "Duplicate
   /// session → Shift-click → open dialog pre-filled"). When set, the
@@ -170,6 +173,8 @@ export default function App() {
     activeTabId: loadActiveTab(),
     focusedPaneId: null,
     spawnOpen: false,
+    standaloneShellOpen: false,
+    standaloneShellInitial: null,
     spawnInitial: undefined,
     spawnPrefill: undefined,
     pendingTabActivate: 0,
@@ -658,6 +663,10 @@ export default function App() {
         onOpenSpawn(target);
         return;
       }
+      if (config.target.kind === "standalone") {
+        onOpenSpawn(target);
+        return;
+      }
       const nextTarget = {
         ...config.target,
         branch_name: config.target.use_worktree
@@ -716,6 +725,17 @@ export default function App() {
     void requestSpawnConfig(client, sessionId).then((config) => {
       let initial: SpawnInitialTarget | undefined;
       if (config) {
+        if (config.target.kind === "standalone") {
+          const cwd = config.target.cwd;
+          spawnTargetPaneRef.current = null;
+          spawnTargetTabRef.current = null;
+          setState((s) => ({
+            ...s,
+            standaloneShellOpen: true,
+            standaloneShellInitial: cwd,
+          }));
+          return;
+        }
         initial =
           config.target.kind === "single"
             ? { kind: "repo", repo_id: config.target.repo_id }
@@ -821,7 +841,7 @@ export default function App() {
     setState((s) => ({ ...s, presetLaunch: null }));
   }, []);
 
-  const onSpawned = useCallback((placement: SpawnPlacement) => {
+  const onSpawned = useCallback((placement: SpawnPlacement, detail?: string) => {
     // Arm the one-shot follow-up for the next new session. Priority:
     // 1. `new_tab` placement → open a fresh tab.
     // 2. `tab` placement → land in that specific tab (overrides pane/
@@ -874,9 +894,81 @@ export default function App() {
     pushToast(setState, {
       severity: "info",
       message: "Spawning session…",
-      detail: "Worktree creation may take a few seconds.",
+      detail: detail ?? "Worktree creation may take a few seconds.",
     });
   }, []);
+
+  const launchStandaloneShell = useCallback(
+    (cwd: string | null) => {
+      const client = latestStateRef.current?.client;
+      if (!client) return;
+      client.send({
+        type: "spawn_session",
+        label: null,
+        target: { kind: "standalone", cwd },
+        mode: "plain_shell",
+        initial_prompt: null,
+        dangerously_skip_permissions: false,
+        agent: "claude",
+        model: null,
+        permission_mode: null,
+        codex_sandbox: null,
+        extra_env: [],
+        prompt_injector: null,
+      });
+      onSpawned(
+        { kind: "current_tab" },
+        "Shell startup may take a few seconds.",
+      );
+    },
+    [onSpawned],
+  );
+
+  const onLaunchStandaloneShellDefault = useCallback(() => {
+    launchStandaloneShell(
+      settingsRef.current.spawn.standalone_shell_default_dir,
+    );
+  }, [launchStandaloneShell]);
+
+  const onOpenStandaloneShellDialog = useCallback(() => {
+    spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
+    setState((s) => ({
+      ...s,
+      standaloneShellOpen: true,
+      standaloneShellInitial: null,
+    }));
+  }, []);
+
+  const onCloseStandaloneShellDialog = useCallback(() => {
+    setState((s) => ({
+      ...s,
+      standaloneShellOpen: false,
+      standaloneShellInitial: null,
+    }));
+  }, []);
+
+  const onSubmitStandaloneShell = useCallback(
+    (cwd: string, saveAsDefault: boolean) => {
+      if (saveAsDefault) {
+        const current = settingsRef.current;
+        saveSettings({
+          ...current,
+          spawn: {
+            ...current.spawn,
+            standalone_shell_default_dir: cwd,
+          },
+        });
+      }
+      setState((s) => ({
+        ...s,
+        standaloneShellOpen: false,
+        standaloneShellInitial: null,
+      }));
+      launchStandaloneShell(cwd);
+    },
+    [launchStandaloneShell],
+  );
 
   const onOpenWorkspaceCreator = useCallback(() => {
     setState((s) => ({ ...s, workspaceCreatorOpen: true }));
@@ -1585,6 +1677,11 @@ export default function App() {
             onDuplicateSession={onDuplicateSession}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
+            standaloneShellDefaultDir={
+              settings.spawn.standalone_shell_default_dir
+            }
+            onLaunchStandaloneShellDefault={onLaunchStandaloneShellDefault}
+            onOpenStandaloneShellDialog={onOpenStandaloneShellDialog}
             onRevealInExplorer={onRevealInExplorer}
             onLaunchPreset={onLaunchPreset}
             onOpenSettings={onOpenSettings}
@@ -1632,6 +1729,7 @@ export default function App() {
           ) : (
             <EmptyState
               onOpenSpawn={() => onOpenSpawn()}
+              onLaunchShell={onLaunchStandaloneShellDefault}
               onAddRepo={onAddRepo}
               hasRepos={state.repos.length > 0}
               hasTabs={state.tabs.length > 0}
@@ -1655,6 +1753,16 @@ export default function App() {
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
           onAddRepo={onAddRepo}
+        />
+      )}
+      {state.standaloneShellOpen && (
+        <StandaloneShellDialog
+          initialPath={
+            state.standaloneShellInitial ??
+            settings.spawn.standalone_shell_default_dir
+          }
+          onClose={onCloseStandaloneShellDialog}
+          onSubmit={onSubmitStandaloneShell}
         />
       )}
       {state.presetLaunch && state.client && (
@@ -2299,11 +2407,13 @@ function ConnectionBadge({ state }: { state: AppState["status"] }) {
 
 function EmptyState({
   onOpenSpawn,
+  onLaunchShell,
   onAddRepo,
   hasRepos,
   hasTabs,
 }: {
   onOpenSpawn: () => void;
+  onLaunchShell: () => void;
   onAddRepo: () => void;
   hasRepos: boolean;
   hasTabs: boolean;
@@ -2330,17 +2440,25 @@ function EmptyState({
       ) : (
         <>
           <p className="hint">
-            No repos registered yet. Add one to spawn sessions and create
-            workspaces.
+            No repos registered yet.
           </p>
-          <button
-            type="button"
-            onClick={onAddRepo}
-            className="primary"
-            data-testid="empty-state-add-repo"
-          >
-            + Add repo
-          </button>
+          <div className="empty-state-actions">
+            <button
+              type="button"
+              onClick={onLaunchShell}
+              className="primary"
+              data-testid="empty-state-open-shell"
+            >
+              Open shell
+            </button>
+            <button
+              type="button"
+              onClick={onAddRepo}
+              data-testid="empty-state-add-repo"
+            >
+              + Add repo
+            </button>
+          </div>
         </>
       )}
     </div>

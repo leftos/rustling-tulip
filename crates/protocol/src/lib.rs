@@ -153,6 +153,8 @@ pub struct VscodeWorkspaceFolder {
 pub enum SessionKind {
     Single,
     Workspace,
+    /// Plain shell launched outside any registered repo or workspace.
+    Standalone,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +310,12 @@ pub enum SpawnTarget {
         /// See [`SpawnTarget::Single::use_worktree`]; applied independently to
         /// each member.
         use_worktree: bool,
+    },
+    Standalone {
+        /// Absolute directory for a non-repo shell. `None` lets the daemon
+        /// choose its platform default, usually the user's home directory.
+        #[serde(default)]
+        cwd: Option<String>,
     },
 }
 
@@ -2241,6 +2249,30 @@ mod tests {
         assert_eq!(req, decoded);
         assert!(json.contains(r#""agent":"codex""#));
         assert!(json.contains(r#""codex_sandbox":"workspace-write""#));
+    }
+
+    #[test]
+    fn spawn_request_round_trip_standalone_shell() {
+        let req = SpawnRequest {
+            label: None,
+            target: SpawnTarget::Standalone {
+                cwd: Some("X:/scratch".to_string()),
+            },
+            mode: SessionMode::PlainShell,
+            initial_prompt: None,
+            dangerously_skip_permissions: false,
+            agent: Agent::Claude,
+            model: None,
+            permission_mode: None,
+            codex_sandbox: None,
+            extra_env: vec![],
+            prompt_injector: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, decoded);
+        assert!(json.contains(r#""kind":"standalone""#));
+        assert!(json.contains(r#""mode":"plain_shell""#));
     }
 
     #[test]

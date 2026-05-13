@@ -149,6 +149,9 @@ interface Props {
   /// pre-filled with it.
   onDuplicateSessionWithDialog: (sessionId: string) => void;
   onOpenWorkspaceCreator: () => void;
+  standaloneShellDefaultDir: string | null;
+  onLaunchStandaloneShellDefault: () => void;
+  onOpenStandaloneShellDialog: () => void;
   onRevealInExplorer: (path: string) => void;
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
   /// Open the Settings modal (iter 49). Gear icon in the sidebar header
@@ -156,7 +159,13 @@ interface Props {
   onOpenSettings: () => void;
 }
 
-type ContainerKind = "workspace" | "repo" | "detached" | "tab" | "unbound";
+type ContainerKind =
+  | "workspace"
+  | "repo"
+  | "standalone"
+  | "detached"
+  | "tab"
+  | "unbound";
 
 /// Sidebar tree organization. "container" groups by workspace/repo/detached
 /// (matches the daemon's registry view); "tab" groups by which tab each
@@ -519,6 +528,26 @@ export default function Sidebar(props: Props) {
           data-testid="sidebar-add-session"
         >
           + Session
+        </button>
+        <button
+          type="button"
+          className="link"
+          onClick={props.onLaunchStandaloneShellDefault}
+          title={`Open a standalone shell in ${
+            props.standaloneShellDefaultDir ?? "the default folder"
+          }`}
+          data-testid="sidebar-add-shell-default"
+        >
+          + Shell
+        </button>
+        <button
+          type="button"
+          className="link"
+          onClick={props.onOpenStandaloneShellDialog}
+          title="Choose a folder for a standalone shell"
+          data-testid="sidebar-add-shell-folder"
+        >
+          Shell...
         </button>
         <button
           type="button"
@@ -994,9 +1023,11 @@ function ContainerNode(p: ContainerNodeProps) {
               ? "REPO"
               : c.kind === "tab"
                 ? "TAB"
-                : c.kind === "unbound"
-                  ? "UNB"
-                  : "?"}
+                : c.kind === "standalone"
+                  ? "SH"
+                  : c.kind === "unbound"
+                    ? "UNB"
+                    : "?"}
         </span>
         <span className="tree-label">{c.name}</span>
         {c.sessions.length > 0 && (
@@ -1763,10 +1794,13 @@ function buildContainers(
   // Group sessions by their owning container.
   const wsSessions = new Map<string, SessionSnapshot[]>();
   const repoSessions = new Map<string, SessionSnapshot[]>();
+  const standalone: SessionSnapshot[] = [];
   const detached: SessionSnapshot[] = [];
 
   for (const s of sessions) {
-    if (s.workspace_id) {
+    if (s.kind === "standalone") {
+      standalone.push(s);
+    } else if (s.workspace_id) {
       if (workspaceById.has(s.workspace_id)) {
         pushTo(wsSessions, s.workspace_id, s);
       } else {
@@ -1828,6 +1862,19 @@ function buildContainers(
     repoContainers,
     containerOrder,
   );
+
+  if (standalone.length > 0) {
+    out.push({
+      key: "standalone",
+      kind: "standalone",
+      id: "",
+      name: "Standalone",
+      hoverTitle: "Shells launched outside registered repos and workspaces",
+      fsPath: null,
+      sessions: sortSessions(standalone),
+      removable: false,
+    });
+  }
 
   if (detached.length > 0) {
     out.push({

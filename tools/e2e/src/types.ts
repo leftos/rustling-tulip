@@ -23,7 +23,7 @@ export type SessionStatus =
   | "error";
 
 export type SessionMode = "interactive" | "headless" | "plain_shell";
-export type SessionKind = "single" | "workspace";
+export type SessionKind = "single" | "workspace" | "standalone";
 
 export interface SessionMember {
   repo_id: string;

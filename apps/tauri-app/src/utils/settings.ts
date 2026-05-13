@@ -40,6 +40,9 @@ export interface Settings {
     /// only; ignored when `skip_permissions_default` is on, which becomes
     /// `--yolo` for codex).
     default_codex_sandbox: CodexSandbox | null;
+    /// Folder used by the sidebar's quick standalone-shell action. `null`
+    /// lets the daemon choose its platform default.
+    standalone_shell_default_dir: string | null;
   };
   terminal: {
     /// App-wide default font size in pixels. Per-tab and per-session
@@ -81,6 +84,7 @@ export const DEFAULT_SETTINGS: Settings = {
     skip_permissions_default: true,
     default_permission_mode: null,
     default_codex_sandbox: null,
+    standalone_shell_default_dir: null,
   },
   terminal: {
     font_size: 13,

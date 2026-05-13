@@ -177,12 +177,12 @@ inspect or override the full configuration before committing.
 
 - [ ] Define the primary spawn presets for a repo, workspace, empty pane, and
       existing tab.
-- [ ] Add a quick action for spawning a non-repo-tied shell in the user's
+- [x] Add a quick action for spawning a non-repo-tied shell in the user's
       default folder.
-- [ ] Add a modal path for spawning a non-repo-tied shell in a specific folder.
-- [ ] Persist and display the default folder used by non-repo shell quick
+- [x] Add a modal path for spawning a non-repo-tied shell in a specific folder.
+- [x] Persist and display the default folder used by non-repo shell quick
       launches.
-- [ ] Ensure non-repo shell sessions are clearly grouped as standalone, not
+- [x] Ensure non-repo shell sessions are clearly grouped as standalone, not
       under any registered repo/workspace.
 - [ ] Add a compact "Launch last" or "Launch default" path where a last
       spawn config exists.
@@ -195,8 +195,8 @@ inspect or override the full configuration before committing.
       compact segmented placement control.
 - [ ] Add e2e coverage for launch-last using the saved spawn config.
 - [ ] Add e2e coverage for switching from compact path to full edit path.
-- [ ] Add e2e coverage for quick non-repo shell launch into the default folder.
-- [ ] Add e2e coverage for modal non-repo shell launch into a chosen folder.
+- [x] Add e2e coverage for quick non-repo shell launch into the default folder.
+- [x] Add e2e coverage for modal non-repo shell launch into a chosen folder.
 
 ## Phase 5 - Source Control density and focus
 

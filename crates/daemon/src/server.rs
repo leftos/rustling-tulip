@@ -27,6 +27,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use base64::Engine as _;
 use chrono::Utc;
+use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
     Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
@@ -1761,6 +1762,7 @@ fn worktree_paths_for_config(
     let use_worktree = match &config.target {
         protocol::SpawnTarget::Single { use_worktree, .. }
         | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+        protocol::SpawnTarget::Standalone { .. } => false,
     };
     if use_worktree {
         members.iter().map(|m| m.worktree_path.clone()).collect()
@@ -1925,9 +1927,15 @@ pub(crate) async fn spawn_session(
         target_kind = match &target {
             SpawnTarget::Single { .. } => "single",
             SpawnTarget::Workspace { .. } => "workspace",
+            SpawnTarget::Standalone { .. } => "standalone",
         },
         "spawn_session: begin"
     );
+    if matches!(&target, SpawnTarget::Standalone { .. }) && mode != SessionMode::PlainShell {
+        return Err(anyhow!(
+            "standalone targets only support plain_shell sessions"
+        ));
+    }
     if mode == SessionMode::Headless && agent == Agent::Codex {
         return Err(anyhow!(
             "headless mode is not yet supported for codex; use interactive mode"
@@ -1948,6 +1956,7 @@ pub(crate) async fn spawn_session(
             base_branch,
             use_worktree,
         } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?,
+        SpawnTarget::Standalone { cwd } => spawn_standalone_shell(cwd)?,
     };
     info!(
         elapsed_ms = u64::try_from(t_resolve.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -2003,6 +2012,7 @@ pub(crate) async fn spawn_session(
                 workspaces_changed = true;
             }
         }
+        SpawnTarget::Standalone { .. } => {}
     }
     if repos_changed {
         let repos = hub.state.with_persisted(|s| s.repos.clone());
@@ -2708,6 +2718,52 @@ async fn spawn_single(
     Ok((SessionKind::Single, vec![member], working_path, label, None))
 }
 
+fn spawn_standalone_shell(
+    cwd: Option<String>,
+) -> anyhow::Result<(
+    SessionKind,
+    Vec<SessionMember>,
+    PathBuf,
+    String,
+    Option<String>,
+)> {
+    let cwd = resolve_standalone_cwd(cwd)?;
+    let label = format!("Shell: {}", path_leaf_label(&cwd));
+    Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
+}
+
+fn resolve_standalone_cwd(cwd: Option<String>) -> anyhow::Result<PathBuf> {
+    let path = match cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => default_standalone_cwd()?,
+    };
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("reading standalone shell directory: {}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(anyhow!(
+            "standalone shell path is not a directory: {}",
+            path.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(crate::paths::simplify_path(&canonical))
+}
+
+fn default_standalone_cwd() -> anyhow::Result<PathBuf> {
+    if let Some(user_dirs) = UserDirs::new() {
+        return Ok(user_dirs.home_dir().to_path_buf());
+    }
+    std::env::current_dir().context("resolving fallback standalone shell directory")
+}
+
+fn path_leaf_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 async fn spawn_workspace(
     hub: &Hub,
     workspace_id: &str,
@@ -2900,6 +2956,7 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
                     .is_some_and(|cfg| match &cfg.target {
                         SpawnTarget::Single { use_worktree, .. }
                         | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                        SpawnTarget::Standalone { .. } => false,
                     });
             (
                 guard.members.clone(),
