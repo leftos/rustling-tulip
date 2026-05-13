@@ -124,6 +124,7 @@ export type ClientMessage =
       new_session_id: string | null;
     }
   | { type: "close_tab"; tab_id: string }
+  | { type: "restore_tab"; tab: TabEntry; index: number }
   | { type: "repo_status"; repo_id: string }
   | { type: "stage_files"; repo_id: string; paths: string[] }
   | { type: "unstage_files"; repo_id: string; paths: string[] }

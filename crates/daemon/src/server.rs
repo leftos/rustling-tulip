@@ -1350,6 +1350,15 @@ async fn dispatch(
                 let _ = hub.tab_events.send(TabEvent::Removed(tab_id));
             }
         }
+        ClientMessage::RestoreTab { tab, index } => {
+            let (restored, ordered_ids) = hub.state.mutate(|s| {
+                let restored = tabs::restore_tab(&mut s.tabs, tab, index)?;
+                let ordered_ids = s.tabs.iter().map(|t| t.id.clone()).collect();
+                Ok::<_, anyhow::Error>((restored, ordered_ids))
+            })??;
+            let _ = hub.tab_events.send(TabEvent::Updated(restored));
+            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+        }
         ClientMessage::RenameTab { tab_id, name } => {
             let updated = hub.state.mutate(|s| {
                 tabs::find_tab_mut(&mut s.tabs, &tab_id).map(|t| {

@@ -3038,3 +3038,66 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   padding: 0;
 }
 .error-toast-close:hover { color: var(--fg); background: none; }
+
+.undo-shelf {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 210;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  width: min(460px, calc(100vw - 32px));
+}
+.undo-entry {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg-elev) 94%, var(--accent));
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.38);
+}
+.undo-message {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.undo-action {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.undo-action:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.undo-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+}
+.undo-dismiss:hover {
+  background: var(--bg-elev2);
+  color: var(--fg);
+}

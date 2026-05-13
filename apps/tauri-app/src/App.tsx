@@ -57,6 +57,7 @@ import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
 import DiffPane from "./components/DiffPane";
 import TabWindow from "./components/TabWindow";
+import UndoShelf, { type UndoShelfEntry } from "./components/UndoShelf";
 import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
 import { randomWorktreeBranchName } from "./utils/randomName";
@@ -94,6 +95,15 @@ const popoutTabId = queryParams.get("tab");
 const popoutSessionId = queryParams.get("session");
 
 const ACTIVE_TAB_KEY = "rt:active-tab:main";
+const UNDO_TTL_MS = 8000;
+const UNDO_LIMIT = 3;
+
+type UndoEntry = UndoShelfEntry & {
+  kind: "restore_tab";
+  tab: TabEntry;
+  index: number;
+  restoreActive: boolean;
+};
 
 interface AppState {
   client: DaemonClient | null;
@@ -133,6 +143,7 @@ interface AppState {
   settingsOpen: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
   toasts: ToastEntry[];
+  undoEntries: UndoEntry[];
   /// Repo-remove modal state, set when the sidebar's × click hit a repo
   /// with at least one non-stopped session. `null` when no modal is open.
   repoRemove: RepoRemoveIntent | null;
@@ -198,6 +209,7 @@ export default function App() {
     settingsOpen: false,
     presetLaunch: null,
     toasts: [],
+    undoEntries: [],
     repoRemove: null,
     repoChangeCounts: {},
     handshake: null,
@@ -417,6 +429,22 @@ export default function App() {
       localStorage.removeItem(ACTIVE_TAB_KEY);
     }
   }, [state.activeTabId]);
+
+  useEffect(() => {
+    if (state.undoEntries.length === 0) {
+      return;
+    }
+    const nextExpiry = Math.min(...state.undoEntries.map((entry) => entry.expiresAt));
+    const delayMs = Math.max(0, nextExpiry - Date.now()) + 50;
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      setState((s) => ({
+        ...s,
+        undoEntries: s.undoEntries.filter((entry) => entry.expiresAt > now),
+      }));
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [state.undoEntries]);
 
   const onAddRepo = useCallback(async () => {
     const path = await pickDirectory(undefined, { lastDirKey: "addRepo" });
@@ -1022,6 +1050,54 @@ export default function App() {
 
   const onDismissToast = useCallback((id: string) => {
     setState((s) => ({ ...s, toasts: s.toasts.filter((t) => t.id !== id) }));
+  }, []);
+
+  const onTabWillClose = useCallback(
+    (tab: TabEntry, index: number, restoreActive: boolean) => {
+      const entry: UndoEntry = {
+        id: newUndoId(),
+        kind: "restore_tab",
+        message: `Closed tab "${tab.name}"`,
+        actionLabel: "Undo",
+        tab: cloneTab(tab),
+        index,
+        restoreActive,
+        expiresAt: Date.now() + UNDO_TTL_MS,
+      };
+      setState((s) => ({
+        ...s,
+        undoEntries: [
+          entry,
+          ...s.undoEntries.filter((existing) => existing.tab.id !== tab.id),
+        ].slice(0, UNDO_LIMIT),
+      }));
+    },
+    [],
+  );
+
+  const onDismissUndo = useCallback((id: string) => {
+    setState((s) => ({
+      ...s,
+      undoEntries: s.undoEntries.filter((entry) => entry.id !== id),
+    }));
+  }, []);
+
+  const onUndo = useCallback((id: string) => {
+    const entry = latestStateRef.current?.undoEntries.find((e) => e.id === id);
+    if (!entry) {
+      return;
+    }
+    const client = clientRef.current;
+    setState((s) => ({
+      ...s,
+      undoEntries: s.undoEntries.filter((e) => e.id !== id),
+      activeTabId: entry.restoreActive ? entry.tab.id : s.activeTabId,
+    }));
+    client?.send({
+      type: "restore_tab",
+      tab: cloneTab(entry.tab),
+      index: entry.index,
+    });
   }, []);
 
   const onRemoveRepoWithLiveSessions = useCallback(
@@ -1741,6 +1817,7 @@ export default function App() {
             onActivate={onActivateTab}
             onArmNextNewTab={onArmNextNewTab}
             onLocalReorder={onLocalReorder}
+            onTabWillClose={onTabWillClose}
           />
           {activeTab && state.client ? (
             activeTab.content.kind === "diff" ? (
@@ -1844,6 +1921,11 @@ export default function App() {
         />
       )}
       <ErrorToast toasts={state.toasts} onDismiss={onDismissToast} />
+      <UndoShelf
+        entries={state.undoEntries}
+        onUndo={onUndo}
+        onDismiss={onDismissUndo}
+      />
       {state.repoRemove && (
         <RepoRemoveDialog
           repoName={state.repoRemove.repoName}
@@ -1863,6 +1945,14 @@ function loadActiveTab(): string | null {
   } catch {
     return null;
   }
+}
+
+function newUndoId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cloneTab(tab: TabEntry): TabEntry {
+  return JSON.parse(JSON.stringify(tab)) as TabEntry;
 }
 
 type PendingSpawnIntent =

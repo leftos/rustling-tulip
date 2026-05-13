@@ -34,6 +34,7 @@ interface Props {
   /// round-trip completes. The daemon broadcast still reconciles on
   /// arrival; for a same-order broadcast the reducer is a no-op.
   onLocalReorder: (orderedIds: string[]) => void;
+  onTabWillClose: (tab: TabEntry, index: number, restoreActive: boolean) => void;
 }
 
 interface ContextMenuState {
@@ -55,6 +56,7 @@ export default function TabBar({
   onActivate,
   onArmNextNewTab,
   onLocalReorder,
+  onTabWillClose,
 }: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
@@ -107,9 +109,13 @@ export default function TabBar({
         return;
       }
       setConfirmingCloseId(null);
+      if (tab) {
+        const index = Math.max(0, tabs.findIndex((t) => t.id === tabId));
+        onTabWillClose(tab, index, activeTabId === tabId);
+      }
       client.send({ type: "close_tab", tab_id: tabId });
     },
-    [client, tabs, confirmingCloseId],
+    [client, tabs, confirmingCloseId, activeTabId, onTabWillClose],
   );
 
   const onPillClick = useCallback(

@@ -294,15 +294,14 @@ actions that cannot be undone should remain explicit confirmations.
 ### Tasks
 
 - [x] Classify actions as reversible, replayable, or destructive.
-- [ ] Start with reversible UI-state actions: close tab, close pane, move pane,
-      remove session binding.
-- [ ] Add an undo shelf/toast host that can show one or more recent actions.
-- [ ] Keep enough local state to undo tab/pane mutations without guessing.
-- [ ] Decide whether daemon-backed undo needs new protocol messages or can
-      replay existing tab/pane commands.
-- [ ] Do not offer undo for worktree deletion, discard changes, stash drop, or
+- [x] Start with close-tab undo as the first reversible UI-state action.
+- [ ] Extend undo to close pane, move pane, and remove session binding.
+- [x] Add an undo shelf/toast host that can show one or more recent actions.
+- [x] Keep enough local state to restore a closed tab without guessing.
+- [x] Add daemon-backed `restore_tab` for exact tab reinsert/active-state undo.
+- [x] Do not offer undo for worktree deletion, discard changes, stash drop, or
       daemon stop unless the underlying operation is genuinely reversible.
-- [ ] Add e2e coverage: close tab then undo restores the tab and active state.
+- [x] Add e2e coverage: close tab then undo restores the tab and active state.
 - [ ] Add e2e coverage: close pane then undo restores the pane layout.
 
 ### Action classification

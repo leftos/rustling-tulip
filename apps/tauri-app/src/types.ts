@@ -538,6 +538,7 @@ export type ClientMessage =
       initial_session_id: string | null;
     }
   | { type: "close_tab"; tab_id: string }
+  | { type: "restore_tab"; tab: TabEntry; index: number }
   | { type: "rename_tab"; tab_id: string; name: string }
   | { type: "reorder_tabs"; ordered_ids: string[] }
   | { type: "reorder_containers"; ordered: ContainerRef[] }

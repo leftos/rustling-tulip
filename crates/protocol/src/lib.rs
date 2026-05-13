@@ -1271,6 +1271,15 @@ pub enum ClientMessage {
     CloseTab {
         tab_id: String,
     },
+    /// Restore a previously closed tab snapshot at its prior index. Used by
+    /// the desktop undo shelf; preserves pane ids, tab id, tab name, and tab
+    /// content exactly as they existed before close. Fails if the tab id is
+    /// already live.
+    RestoreTab {
+        tab: TabEntry,
+        /// Desired insertion index. Values past the end append.
+        index: usize,
+    },
     RenameTab {
         tab_id: String,
         name: String,

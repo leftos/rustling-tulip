@@ -58,6 +58,19 @@ pub fn make_tab(
     }
 }
 
+pub fn restore_tab(
+    tabs: &mut Vec<TabEntry>,
+    tab: TabEntry,
+    index: usize,
+) -> anyhow::Result<TabEntry> {
+    if tabs.iter().any(|existing| existing.id == tab.id) {
+        return Err(anyhow!("tab already exists: {}", tab.id));
+    }
+    let insert_at = index.min(tabs.len());
+    tabs.insert(insert_at, tab.clone());
+    Ok(tab)
+}
+
 /// Pick the smallest positive integer N such that neither `"Tab"` (for
 /// N == 1) nor `"Tab N"` (for N >= 2) already appears in `existing`'s
 /// names. Lets a closed-and-reopened tab reuse the freed slot instead of
@@ -739,6 +752,38 @@ mod tests {
             first: Box::new(a),
             second: Box::new(b),
         }
+    }
+
+    #[test]
+    fn restore_tab_reinserts_snapshot_at_index() {
+        let mut tabs = vec![
+            make_tab(Some("A".to_string()), None, &[]),
+            make_tab(Some("B".to_string()), None, &[]),
+        ];
+        let restored = TabEntry {
+            id: "restored".to_string(),
+            name: "Restored".to_string(),
+            content: TabContent::Grid {
+                grid: pane("p-restored", Some("s-restored")),
+            },
+            created_at: Utc::now(),
+        };
+
+        let inserted = restore_tab(&mut tabs, restored.clone(), 1).expect("restore");
+
+        assert_eq!(inserted.id, "restored");
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[1].id, "restored");
+        assert_eq!(tabs[1], restored);
+    }
+
+    #[test]
+    fn restore_tab_rejects_duplicate_id() {
+        let existing = make_tab(Some("A".to_string()), None, &[]);
+        let mut tabs = vec![existing.clone()];
+        let err = restore_tab(&mut tabs, existing, 0).expect_err("duplicate id");
+
+        assert!(err.to_string().contains("tab already exists"));
     }
 
     #[test]
