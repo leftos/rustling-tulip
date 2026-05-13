@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import Icon from "./Icon";
 
 export type ToastSeverity = "error" | "warning" | "info";
 
@@ -94,9 +95,10 @@ function Toast({
         className="error-toast-close"
         onClick={() => onDismiss(toast.id)}
         aria-label="Dismiss notification"
+        title="Dismiss notification"
         data-testid="error-toast-close"
       >
-        ×
+        <Icon name="close" />
       </button>
     </div>
   );

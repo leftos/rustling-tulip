@@ -258,21 +258,21 @@ compact but need consistent labels, accessible names, and grouping.
 
 ### Tasks
 
-- [ ] Inventory icon-only controls across activity bar, tab bar, pane header,
+- [x] Inventory icon-only controls across activity bar, tab bar, pane header,
       sidebar rows, source-control rows, and pop-out windows.
-- [ ] Replace ASCII glyphs with a consistent icon set or a local minimal icon
+- [x] Replace ASCII glyphs with a consistent icon set or a local minimal icon
       component, without adding a dependency unless justified.
 - [x] Replace activity-bar and pane split/extract/close glyphs with local SVG
       icons.
 - [x] Replace sidebar container action and tab close/new glyphs with local SVG
       icons.
 - [x] Group pane actions visually: split, move/pop-out, close.
-- [ ] Prefer text labels for destructive or uncommon actions where space allows.
+- [x] Prefer text labels for destructive or uncommon actions where space allows.
 - [x] Make per-shell color controls discoverable from the session context menu
       and session header without crowding common stop/split controls.
 - [x] Make disabled toolbar actions visually and textually explain why they are
       disabled.
-- [ ] Ensure every icon-only button has a useful `aria-label` and tooltip.
+- [x] Ensure every icon-only button has a useful `aria-label` and tooltip.
 - [x] Add e2e/a11y assertions for accessible names on activity and pane
       icon-only controls.
 - [x] Add e2e assertions for disabled sidebar toolbar reasons.
@@ -342,7 +342,7 @@ be able to cancel before the next session spawns and see what already launched.
 3. [x] Phase 3: Safer spawn defaults and authority visibility.
 4. [x] Phase 4: Faster common spawn path.
 5. [x] Phase 5: Source Control density and focus.
-6. [ ] Phase 6: Discoverable controls and icon affordances.
+6. [x] Phase 6: Discoverable controls and icon affordances.
 7. [ ] Phase 7: Undo and recovery shelf.
 8. [ ] Phase 8: Preset launch observability and cancellation.
 

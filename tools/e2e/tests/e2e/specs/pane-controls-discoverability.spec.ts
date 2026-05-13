@@ -155,6 +155,12 @@ describe("pane controls discoverability", function () {
     await assertNamedIconButton('[data-testid="tab-bar-new"]');
     await assertNamedIconButton('[data-testid="tab-pill-close"]');
 
+    const settingsButton = await browser.$('[data-testid="sidebar-settings-btn"]');
+    await settingsButton.click();
+    await assertNamedIconButton(".modal-close");
+    const modalClose = await browser.$(".modal-close");
+    await modalClose.click();
+
     const sessionsButton = await browser.$('[data-testid="activity-btn-sessions"]');
     await sessionsButton.click();
     const containerViewButton = await browser.$(

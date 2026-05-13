@@ -9,6 +9,7 @@ import { useEscape, useFocusReturn } from "../utils/a11y";
 import { saveSettings, type Settings } from "../utils/settings";
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "../utils/fontSize";
 import { BUNDLED_FONTS, isBundledFont } from "../utils/bundledFonts";
+import Icon from "./Icon";
 
 interface Props {
   settings: Settings;
@@ -93,7 +94,7 @@ export default function SettingsModal({ settings, onClose }: Props) {
             aria-label="Close dialog"
             title="Close"
           >
-            ×
+            <Icon name="close" />
           </button>
         </header>
         <div className="modal-body settings-body">

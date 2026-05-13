@@ -442,8 +442,9 @@ function ChangesView({
               className="dismiss"
               onClick={() => setErrorBanner(null)}
               aria-label="Dismiss error"
+              title="Dismiss error"
             >
-              ×
+              <Icon name="close" />
             </button>
           </div>
         )}
@@ -535,9 +536,10 @@ function ChangesView({
             type="button"
             className="link"
             onClick={() => openInForge(client, activeRepoId)}
+            title="Open repository in forge"
             data-testid="source-control-open-in-forge"
           >
-            open in forge ↗
+            Open in forge
           </button>
         </div>
         {contextMenu && (
