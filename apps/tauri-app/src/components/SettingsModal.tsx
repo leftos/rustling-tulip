@@ -17,23 +17,18 @@ interface Props {
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
 
-/// Settings modal — a thin localStorage-backed configuration surface. Wired
-/// in iter 49 to unblock several audit items (notification re-request,
-/// persisted skip-perms / sidebar-view defaults). State persistence runs
-/// through `saveSettings` in `utils/settings.ts`, which writes localStorage
-/// AND fires a `rt:settings-changed` window event so cross-component
-/// subscribers (notification gate, Sidebar, SpawnDialog) re-read on every
-/// write without prop-drilling.
+/// Settings modal — a thin localStorage-backed configuration surface.
+/// State persistence runs through `saveSettings` in `utils/settings.ts`,
+/// which writes localStorage AND fires a `rt:settings-changed` window event
+/// so cross-component subscribers re-read on every write without prop-drilling.
 export default function SettingsModal({ settings, onClose }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
   useFocusReturn();
 
   // Edit-in-place: we mutate a local copy and call `saveSettings` on each
-  // change so the user sees instant feedback (toggles flip, dropdowns
-  // commit) without a separate Save / Apply button. The localStorage write
-  // is cheap. Pre-iter-49 there was no live-sync requirement — first iter
-  // intentionally keeps it simple.
+  // change so the user sees instant feedback without a separate Save /
+  // Apply button.
   const update = useCallback(
     (mut: (s: Settings) => Settings) => {
       saveSettings(mut(settings));
@@ -237,7 +232,7 @@ export default function SettingsModal({ settings, onClose }: Props) {
             </p>
             <Toggle
               testid="settings-spawn-skip-permissions"
-              label="Skip permissions / yolo by default"
+              label="Trusted launch by default"
               checked={settings.spawn.skip_permissions_default}
               onChange={(v) =>
                 update((s) => ({
@@ -246,8 +241,12 @@ export default function SettingsModal({ settings, onClose }: Props) {
                 }))
               }
             />
+            <p className="settings-section-hint">
+              When enabled, new Claude and Codex sessions bypass approval
+              prompts. Codex also bypasses sandboxing.
+            </p>
             <div className="settings-row">
-              <span>Default permission mode (claude)</span>
+              <span>Claude approval mode</span>
               <select
                 value={settings.spawn.default_permission_mode ?? ""}
                 onChange={(e) => {
@@ -265,19 +264,19 @@ export default function SettingsModal({ settings, onClose }: Props) {
                 data-testid="settings-spawn-permission-mode"
                 title={
                   settings.spawn.skip_permissions_default
-                    ? "Ignored while 'skip permissions' is on"
+                    ? "Ignored while trusted launch is on"
                     : ""
                 }
               >
                 <option value="">(none — claude's default)</option>
                 <option value="default">default</option>
-                <option value="accept_edits">accept_edits</option>
-                <option value="bypass_permissions">bypass_permissions</option>
+                <option value="accept_edits">accept edits</option>
+                <option value="bypass_permissions">bypass permissions</option>
                 <option value="plan">plan</option>
               </select>
             </div>
             <div className="settings-row">
-              <span>Default sandbox (codex)</span>
+              <span>Codex sandbox mode</span>
               <select
                 value={settings.spawn.default_codex_sandbox ?? ""}
                 onChange={(e) => {
@@ -295,7 +294,7 @@ export default function SettingsModal({ settings, onClose }: Props) {
                 data-testid="settings-spawn-codex-sandbox"
                 title={
                   settings.spawn.skip_permissions_default
-                    ? "Ignored while 'yolo' is on"
+                    ? "Ignored while trusted launch is on"
                     : ""
                 }
               >

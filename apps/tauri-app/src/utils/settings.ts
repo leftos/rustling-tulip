@@ -23,22 +23,21 @@ export interface Settings {
   };
   sidebar: {
     /// Which tree organisation the sidebar starts in on a fresh window.
-    /// Was a standalone localStorage key (`rt.sidebar.view`) pre-iter-49;
+    /// Was previously a standalone localStorage key (`rt.sidebar.view`);
     /// `loadSettings` migrates that key on first load.
     default_view: "container" | "tab";
   };
   spawn: {
-    /// Initial value of the SpawnDialog "skip permissions" / "yolo"
-    /// checkbox. Fresh installs default to `false`; saved settings keep
-    /// their stored value through `mergeWithDefaults`.
+    /// Initial value of the SpawnDialog trusted-launch checkbox. Fresh
+    /// installs default to `false`; saved settings keep their stored value
+    /// through `mergeWithDefaults`.
     skip_permissions_default: boolean;
     /// Pre-fill for the spawn dialog's permission-mode dropdown (claude
     /// only; ignored when `skip_permissions_default` is on). `null` means
     /// "no flag" — falls through to claude's own default.
     default_permission_mode: PermissionMode | null;
-    /// Pre-fill for the spawn dialog's codex-sandbox dropdown (codex
-    /// only; ignored when `skip_permissions_default` is on, which becomes
-    /// `--yolo` for codex).
+    /// Pre-fill for the spawn dialog's codex-sandbox dropdown (codex only;
+    /// ignored when trusted launch is on).
     default_codex_sandbox: CodexSandbox | null;
     /// Folder used by the sidebar's quick standalone-shell action. `null`
     /// lets the daemon choose its platform default.
@@ -95,10 +94,9 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 const STORAGE_KEY = "rt.settings";
-/// Pre-iter-49 standalone key for the sidebar view toggle. Read once
-/// during migration and then ignored. We don't delete it: a downgrade to
-/// a pre-iter-49 build still sees the value, and the storage cost is
-/// trivial.
+/// Legacy standalone key for the sidebar view toggle. Read once during
+/// migration and then ignored. We don't delete it: older builds still see
+/// the value, and the storage cost is trivial.
 const LEGACY_SIDEBAR_VIEW_KEY = "rt.sidebar.view";
 /// DOM event fired on every settings write so cross-component listeners
 /// (notification gate, Sidebar default-view, SpawnDialog initial state)
@@ -111,8 +109,8 @@ export function loadSettings(): Settings {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw === null) {
       // First boot for this user (or post-clear): seed from defaults,
-      // honoring the legacy sidebar-view key so users who set the toggle
-      // pre-iter-49 don't lose their preference on upgrade.
+      // honoring the legacy sidebar-view key so users who set the old toggle
+      // don't lose their preference on upgrade.
       const seeded = { ...DEFAULT_SETTINGS };
       const legacyView = localStorage.getItem(LEGACY_SIDEBAR_VIEW_KEY);
       if (legacyView === "container" || legacyView === "tab") {

@@ -90,13 +90,17 @@ describe("spawn defaults", function () {
     }
   });
 
-  it("defaults skip permissions off for fresh settings", async function () {
+  it("defaults trusted launch off for fresh settings", async function () {
     if (!registeredRepoId) throw new Error("setup failed");
 
     await seedSettings(null);
     await reloadAndWaitForRepo(registeredRepoId);
 
     const dialog = await openSpawnDialog();
+    const authorityToggle = await dialog.$(
+      '[data-testid="spawn-authority-toggle"]',
+    );
+    expect(await authorityToggle.getText()).to.include("Trusted launch");
     const skipPerms = await dialog.$('[data-testid="spawn-skip-perms"]');
     expect(await skipPerms.isSelected()).to.equal(false);
     const inactiveWarning = await dialog.$(
@@ -117,7 +121,7 @@ describe("spawn defaults", function () {
     await closeSpawnDialog();
   });
 
-  it("preserves an existing saved skip-permissions default", async function () {
+  it("preserves an existing saved trusted launch default", async function () {
     if (!registeredRepoId) throw new Error("setup failed");
 
     await seedSettings(true);

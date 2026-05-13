@@ -110,7 +110,7 @@ interface AppState {
   spawnInitial: SpawnInitialTarget | undefined;
   /// Full SpawnConfig to seed the spawn dialog from (used by "Duplicate
   /// session → Shift-click → open dialog pre-filled"). When set, the
-  /// dialog hydrates agent, run mode, skip-perms, model, permission mode,
+  /// dialog hydrates agent, run mode, trusted-launch state, model, permission mode,
   /// codex sandbox, and extra env vars from this config — overriding the
   /// usual Settings defaults. `undefined` for normal spawns.
   spawnPrefill: SpawnConfig | undefined;

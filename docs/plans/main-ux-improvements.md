@@ -133,10 +133,10 @@ renames the session to that value.
 
 ### Pain point
 
-Fresh settings currently default to "Skip permissions / yolo by default". That
-is convenient but risky for a launcher that can run agents across worktrees and
-workspaces. The spawn dialog surfaces the checkbox, but the default is still
-easy to accept without thought.
+Fresh settings previously defaulted to trusted launch
+(`--dangerously-skip-permissions` / `--yolo`). That is convenient but risky for
+a launcher that can run agents across worktrees and workspaces. The spawn dialog
+surfaces the checkbox, but the default was easy to accept without thought.
 
 ### Desired behavior
 
@@ -146,14 +146,14 @@ be honored, but new defaults should not silently grant broad authority.
 
 ### Tasks
 
-- [x] Change the new-install default for skip-permissions/yolo to off.
+- [x] Change the new-install default for trusted launch to off.
 - [x] Preserve existing saved user settings through migration or explicit
       compatibility logic.
-- [x] Add a clear "trusted launch" visual state when skip-permissions/yolo is
-      enabled in the spawn dialog.
+- [x] Add a clear "trusted launch" visual state when enabled in the spawn
+      dialog.
 - [x] Add a session header/sidebar badge for sessions launched with elevated
       authority.
-- [ ] Reword Claude and Codex permission labels into a consistent vocabulary.
+- [x] Reword Claude and Codex permission labels into a consistent vocabulary.
 - [x] Decide whether "launch last" can replay elevated authority without
       confirmation; rule: elevated launch-last opens the full spawn dialog for
       explicit review instead of replaying immediately.
@@ -322,7 +322,7 @@ be able to cancel before the next session spawns and see what already launched.
 
 1. [x] Phase 1: Stop, removal, and recovery semantics.
 2. [x] Phase 2: Stable session identity.
-3. [ ] Phase 3: Safer spawn defaults and authority visibility.
+3. [x] Phase 3: Safer spawn defaults and authority visibility.
 4. [ ] Phase 4: Faster common spawn path.
 5. [ ] Phase 5: Source Control density and focus.
 6. [ ] Phase 6: Discoverable controls and icon affordances.
@@ -331,7 +331,7 @@ be able to cancel before the next session spawns and see what already launched.
 
 ## Open decisions
 
-- [x] Existing installs keep skip-permissions/yolo enabled when that value is
+- [x] Existing installs keep trusted launch enabled when that value is
       already saved; new installs seed it off.
 - [x] Should explicit Stop always retain a stopped session, even for sessions
       without a per-session worktree?

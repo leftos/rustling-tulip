@@ -25,7 +25,7 @@ interface Props {
   initialTarget?: SpawnInitialTarget | undefined;
   /// Full SpawnConfig used to seed the dialog when invoked as
   /// "Duplicate session → Shift-click → open dialog pre-filled". When
-  /// set, hydrates agent, run mode, skip-perms, model, permission mode,
+  /// set, hydrates agent, run mode, trusted-launch state, model, permission mode,
   /// codex sandbox, and extra env vars from this config — overriding
   /// the usual Settings defaults. `undefined` for normal spawns.
   spawnPrefill?: SpawnConfig | undefined;
@@ -90,10 +90,8 @@ interface AdvancedConfig {
 
 function emptyAdvanced(): AdvancedConfig {
   // Read defaults from Settings so users who configured a default
-  // permission_mode or codex_sandbox (iter 49 Settings modal) get them
-  // pre-filled. Read at dialog-open time (vs once-at-module-load) so a
-  // user who flips the setting in the modal and then re-opens spawn
-  // picks up the new value without restarting the app.
+  // permission_mode or codex_sandbox get them pre-filled. Read at
+  // dialog-open time so changes apply without restarting the app.
   const settings = loadSettings();
   return {
     model: null,
@@ -141,10 +139,10 @@ function advancedToWire(
     // that they are unset, so force them to null on the wire even if the
     // user left stale state from a previous run mode.
     model: isPlainShell ? null : cfg.model,
-    // Permission mode is claude-only. Skip-perms (yolo) also wins over it.
+    // Permission mode is claude-only. Trusted launch also wins over it.
     permission_mode:
       isPlainShell || skipPerms || isCodex ? null : cfg.permissionMode,
-    // Codex sandbox is codex-only. Skip-perms (yolo) wins over it too.
+    // Codex sandbox is codex-only. Trusted launch wins over it too.
     codex_sandbox:
       isPlainShell || skipPerms || !isCodex ? null : cfg.codexSandbox,
     extra_env: cfg.envRows
@@ -435,13 +433,10 @@ function Footer({
   const headlessDisabledReason = isCodex
     ? "headless mode is not yet supported for codex"
     : undefined;
-  const skipPermsLabel = isCodex
-    ? "Pass --yolo (skip approvals + sandbox)"
-    : "Pass --dangerously-skip-permissions";
   const authorityFlag = isCodex ? "--yolo" : "--dangerously-skip-permissions";
   const authorityDetail = isCodex
-    ? "Approvals and sandboxing are bypassed for this session."
-    : "Tool permission prompts are bypassed for this session.";
+    ? "Codex approvals and sandboxing are bypassed for this session."
+    : "Claude approval prompts are bypassed for this session.";
   return (
     <>
       {!isPlainShell && (
@@ -495,7 +490,10 @@ function Footer({
               onChange={(e) => onSkipPermsChange(e.target.checked)}
               data-testid="spawn-skip-perms"
             />
-            <span>{skipPermsLabel}</span>
+            <span>
+              Trusted launch{" "}
+              <span className="muted small">({authorityFlag})</span>
+            </span>
           </label>
           {skipPerms && (
             <div
@@ -544,7 +542,7 @@ function AdvancedSection({
   const setEnvRows = (envRows: EnvRow[]) =>
     onAdvancedChange({ ...advanced, envRows });
   const isCodex = agent === "codex";
-  const skipPermsLabel = isCodex ? "yolo" : "skip-permissions";
+  const trustedLaunchLabel = "trusted launch";
 
   return (
     <details className="field advanced-config" data-testid="spawn-advanced">
@@ -574,7 +572,7 @@ function AdvancedSection({
 
       {!isPlainShell && !isCodex && (
         <label className="field">
-          <span>Permission mode</span>
+          <span>Claude approval mode</span>
           <select
             value={advanced.permissionMode ?? ""}
             onChange={(e) =>
@@ -588,15 +586,15 @@ function AdvancedSection({
           >
             <option value="">CLI default</option>
             <option value="default">default</option>
-            <option value="accept_edits">acceptEdits</option>
-            <option value="bypass_permissions">bypassPermissions</option>
+            <option value="accept_edits">accept edits</option>
+            <option value="bypass_permissions">bypass permissions</option>
             <option value="plan">plan</option>
           </select>
           {skipPerms && (
             <span className="muted small">
-              Ignored while {skipPermsLabel} is on — claude will run without
-              --permission-mode. The dropdown value is preserved for when you
-              toggle {skipPermsLabel} off.
+              Ignored while {trustedLaunchLabel} is on. Claude will run
+              without --permission-mode. The dropdown value is preserved for
+              when you toggle {trustedLaunchLabel} off.
             </span>
           )}
         </label>
@@ -604,7 +602,7 @@ function AdvancedSection({
 
       {!isPlainShell && isCodex && (
         <label className="field">
-          <span>Sandbox</span>
+          <span>Codex sandbox mode</span>
           <select
             value={advanced.codexSandbox ?? ""}
             onChange={(e) =>
@@ -623,9 +621,9 @@ function AdvancedSection({
           </select>
           {skipPerms && (
             <span className="muted small">
-              Ignored while {skipPermsLabel} is on — codex will run with
-              --yolo overriding the sandbox. The dropdown value is preserved
-              for when you toggle {skipPermsLabel} off.
+              Ignored while {trustedLaunchLabel} is on. Codex will run with
+              --yolo, which overrides sandbox mode. The dropdown value is
+              preserved for when you toggle {trustedLaunchLabel} off.
             </span>
           )}
         </label>
@@ -1139,10 +1137,8 @@ function SingleForm({
     // next dialog open generates a fresh one rather than re-pinning the
     // name the user just spawned with.
     branchSuggestionCache.delete(`repo:${repoId}`);
-    // Persist the worktree-toggle choice as the new default for this
-    // repo only on successful submit. Was previously fired live on
-    // toggle, but that left the preference changed even if the user
-    // cancelled (audit finding closed in iter 42).
+    // Persist the worktree-toggle choice as the new default for this repo
+    // only on successful submit, so cancellation leaves the setting intact.
     if (repo && useWorktree !== (repo.default_use_worktree ?? true)) {
       client.send({
         type: "set_repo_worktree_default",
