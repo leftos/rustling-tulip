@@ -49,7 +49,10 @@ pub struct TracerSpawn {
 /// inherits no console (Windows: `CREATE_NO_WINDOW`) and is detached from the
 /// daemon's lifetime — when the daemon dies the tracer keeps owning its PTY
 /// child until either a new daemon reconnects or it receives `Stop`.
-pub async fn spawn(spec: PtySpawnSpec) -> anyhow::Result<TracerSpawn> {
+pub async fn spawn(
+    spec: PtySpawnSpec,
+    expected_output_subscribers: usize,
+) -> anyhow::Result<TracerSpawn> {
     let tracer_path = locate_tracer_exe()?;
     let pipe = pipe_name(&spec.session_id);
     debug!(
@@ -63,8 +66,13 @@ pub async fn spawn(spec: PtySpawnSpec) -> anyhow::Result<TracerSpawn> {
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
     let client = connect_with_retry(&pipe).await?;
-    let (handle, _negotiated_version) =
-        handshake_and_wire(client, spec.session_id.clone(), Some(tracer_pid)).await?;
+    let (handle, _negotiated_version) = handshake_and_wire(
+        client,
+        spec.session_id.clone(),
+        Some(tracer_pid),
+        expected_output_subscribers,
+    )
+    .await?;
 
     Ok(TracerSpawn {
         handle,
@@ -80,10 +88,16 @@ pub async fn reattach(
     session_id: &str,
     pipe: &str,
     tracer_pid: u32,
+    expected_output_subscribers: usize,
 ) -> anyhow::Result<Arc<PtyHandle>> {
     let client = connect_with_retry(pipe).await?;
-    let (handle, _negotiated_version) =
-        handshake_and_wire(client, session_id.to_string(), Some(tracer_pid)).await?;
+    let (handle, _negotiated_version) = handshake_and_wire(
+        client,
+        session_id.to_string(),
+        Some(tracer_pid),
+        expected_output_subscribers,
+    )
+    .await?;
     Ok(handle)
 }
 
@@ -233,6 +247,7 @@ async fn handshake_and_wire(
     client: NamedPipeClient,
     session_id: String,
     pid_for_handle: Option<u32>,
+    expected_output_subscribers: usize,
 ) -> anyhow::Result<(Arc<PtyHandle>, u32)> {
     let (reader, writer) = tokio::io::split(client);
     let mut reader = BufReader::new(reader);
@@ -274,30 +289,27 @@ async fn handshake_and_wire(
     // Reader task: parse TracerResponse frames, route to output broadcast +
     // exit oneshot. On stream EOF or parse error, transition exit to -1.
     //
-    // Critical: yield until at least one subscriber has called
+    // Critical: yield until every startup subscriber has called
     // `output_tx.subscribe()` before starting the pipe read loop. Otherwise
-    // the very first Output frame (ring snapshot from the tracer with the
-    // child's startup bytes) gets sent into a broadcast with zero receivers
-    // and is dropped silently — leaving scrollback empty, no PtyOutput on
-    // the WS, and the child blocked forever waiting for an answer to its
-    // DSR-6 cursor-position query. The caller (`spawn_interactive_session`)
-    // wires up `attach_lifecycle`, `pty_state::watch`, and
-    // `osc_title::watch` immediately after `tracer_client::spawn` returns;
-    // a few yield rounds suffice to let those subscriptions register.
+    // the first Output frame (the tracer's ring snapshot containing shell
+    // startup bytes) can be consumed by an early watcher before
+    // `attach_lifecycle` has subscribed, leaving scrollback empty and the
+    // terminal blank until the child writes more output.
     let output_for_reader = output_tx.clone();
     let session_id_for_reader = session_id.clone();
     tokio::spawn(async move {
         let mut waits = 0_u32;
-        while output_for_reader.receiver_count() == 0 {
+        while output_for_reader.receiver_count() < expected_output_subscribers {
             tokio::task::yield_now().await;
             waits += 1;
             if waits >= 1_000 {
-                // ~ms-scale at most; if we hit this we're stuck and bytes
-                // would be dropped — log loudly and proceed anyway so the
-                // task doesn't deadlock the session.
+                // Avoid deadlocking the session if a caller regresses and
+                // forgets to install one of the expected watchers.
                 tracing::warn!(
                     session_id = %session_id_for_reader,
-                    "tracer_client: no subscriber after 1000 yields; starting reader anyway",
+                    expected_output_subscribers,
+                    subscriber_count = output_for_reader.receiver_count(),
+                    "tracer_client: missing expected subscribers after 1000 yields; starting reader anyway",
                 );
                 break;
             }

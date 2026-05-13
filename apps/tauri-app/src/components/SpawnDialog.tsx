@@ -103,6 +103,12 @@ function emptyAdvanced(): AdvancedConfig {
   };
 }
 
+function defaultRunModeFromLastSpawn(config: SpawnConfig | null): RunMode {
+  // Headless prompts are intentionally one-shot, so only plain shell becomes
+  // a sticky runtime preference for normal dialog opens.
+  return config?.mode === "plain_shell" ? "plain_shell" : "interactive";
+}
+
 /// Hydrate the advanced-section state from a duplicate's SpawnConfig.
 /// Mirrors the wire-vs-form translation in advancedToWire (above) but
 /// in the reverse direction — env vars come back as a row list so the
@@ -222,6 +228,7 @@ export default function SpawnDialog({
   const [spawnPlacement, setSpawnPlacement] = useState<SpawnPlacement>(() =>
     canUseCurrentTab ? { kind: "current_tab" } : { kind: "new_tab" },
   );
+  const restoreLastSpawnDefaults = spawnPrefill === undefined;
 
   // Headless mode isn't supported for codex yet — snap back to interactive
   // when the user picks codex while headless was selected.
@@ -327,6 +334,8 @@ export default function SpawnDialog({
                   advanced={advanced}
                   agent={agent}
                   onAgentChange={setAgent}
+                  onRunModeChange={setRunMode}
+                  restoreLastSpawnDefaults={restoreLastSpawnDefaults}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -345,6 +354,8 @@ export default function SpawnDialog({
                   advanced={advanced}
                   agent={agent}
                   onAgentChange={setAgent}
+                  onRunModeChange={setRunMode}
+                  restoreLastSpawnDefaults={restoreLastSpawnDefaults}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -959,6 +970,8 @@ function SingleForm({
   advanced,
   agent,
   onAgentChange,
+  onRunModeChange,
+  restoreLastSpawnDefaults,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -976,6 +989,8 @@ function SingleForm({
   advanced: AdvancedConfig;
   agent: Agent;
   onAgentChange: (a: Agent) => void;
+  onRunModeChange: (m: RunMode) => void;
+  restoreLastSpawnDefaults: boolean;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -992,13 +1007,16 @@ function SingleForm({
     [repos, repoId],
   );
 
-  // Default the agent picker to whatever this repo was last launched with.
+  // Default runtime controls to whatever this repo was last launched with.
   useEffect(() => {
-    if (repo) {
-      onAgentChange(repo.last_agent ?? "claude");
+    if (repo && restoreLastSpawnDefaults) {
+      onAgentChange(
+        repo.last_spawn_config?.agent ?? repo.last_agent ?? "claude",
+      );
+      onRunModeChange(defaultRunModeFromLastSpawn(repo.last_spawn_config));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo?.id]);
+  }, [repo?.id, restoreLastSpawnDefaults]);
 
   const [knownBranches, setKnownBranches] = useState<string[]>([]);
   useEffect(() => {
@@ -1268,6 +1286,8 @@ function WorkspaceForm({
   advanced,
   agent,
   onAgentChange,
+  onRunModeChange,
+  restoreLastSpawnDefaults,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -1284,6 +1304,8 @@ function WorkspaceForm({
   advanced: AdvancedConfig;
   agent: Agent;
   onAgentChange: (a: Agent) => void;
+  onRunModeChange: (m: RunMode) => void;
+  restoreLastSpawnDefaults: boolean;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -1312,13 +1334,20 @@ function WorkspaceForm({
     return null;
   }, [workspace, repos]);
 
-  // Default the agent picker to the first member repo's last_agent.
+  // Default runtime controls to the workspace's last spawn when available.
   useEffect(() => {
-    if (firstMember) {
-      onAgentChange(firstMember.last_agent ?? "claude");
+    if (restoreLastSpawnDefaults && (workspace || firstMember)) {
+      onAgentChange(
+        workspace?.last_spawn_config?.agent ??
+          firstMember?.last_agent ??
+          "claude",
+      );
+      onRunModeChange(
+        defaultRunModeFromLastSpawn(workspace?.last_spawn_config ?? null),
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstMember?.id]);
+  }, [workspace?.id, firstMember?.id, restoreLastSpawnDefaults]);
 
   const defaultBranch = firstMember?.default_branch ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(true);

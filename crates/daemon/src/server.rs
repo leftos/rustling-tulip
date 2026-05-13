@@ -179,7 +179,14 @@ async fn reattach_orphans(
     for meta in orphans {
         match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
             (Some(pipe), Some(tracer_pid)) => {
-                match tracer_client::reattach(&meta.session_id, pipe, tracer_pid).await {
+                match tracer_client::reattach(
+                    &meta.session_id,
+                    pipe,
+                    tracer_pid,
+                    expected_output_subscribers(meta.mode),
+                )
+                .await
+                {
                     Ok(pty) => {
                         info!(
                             session_id = %meta.session_id,
@@ -187,23 +194,25 @@ async fn reattach_orphans(
                             "tracer reattach succeeded"
                         );
                         sessions.insert_reattached(&meta, Arc::clone(&pty));
-                        pty_state::watch(
-                            sessions,
-                            meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            attention_tx.clone(),
-                        );
-                        osc_title::watch(
-                            sessions,
-                            meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            dirs.clone(),
-                        );
                         attach_lifecycle(
                             sessions,
                             meta.session_id.clone(),
                             &pty,
                             Some(dirs.clone()),
+                        );
+                        if meta.mode != SessionMode::PlainShell {
+                            pty_state::watch(
+                                sessions,
+                                meta.session_id.clone(),
+                                pty.output.subscribe(),
+                                attention_tx.clone(),
+                            );
+                        }
+                        osc_title::watch(
+                            sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            dirs.clone(),
                         );
                     }
                     Err(err) => {
@@ -1891,9 +1900,13 @@ pub(crate) async fn spawn_session(
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
     // write failure here is logged but not fatal to the spawn.
+    let mut repos_changed = false;
+    let mut workspaces_changed = false;
     for member in &members {
         if let Err(err) = persist_last_agent(&hub.state, &member.repo_id, agent) {
             warn!(?err, repo_id = %member.repo_id, agent = agent.as_label(), "persist_last_agent failed");
+        } else {
+            repos_changed = true;
         }
     }
 
@@ -1907,6 +1920,8 @@ pub(crate) async fn spawn_session(
                 persist_repo_last_spawn_config(&hub.state, repo_id, stored_config.clone())
             {
                 warn!(?err, %repo_id, "persist_repo_last_spawn_config failed");
+            } else {
+                repos_changed = true;
             }
         }
         SpawnTarget::Workspace { workspace_id, .. } => {
@@ -1916,8 +1931,18 @@ pub(crate) async fn spawn_session(
                 stored_config.clone(),
             ) {
                 warn!(?err, %workspace_id, "persist_workspace_last_spawn_config failed");
+            } else {
+                workspaces_changed = true;
             }
         }
+    }
+    if repos_changed {
+        let repos = hub.state.with_persisted(|s| s.repos.clone());
+        let _ = hub.state_events.send(StateEvent::Repos(repos));
+    }
+    if workspaces_changed {
+        let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+        let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
     }
 
     let t_child = std::time::Instant::now();
@@ -1982,6 +2007,14 @@ pub(crate) async fn spawn_session(
         "spawn_session: child boot done"
     );
     result
+}
+
+fn expected_output_subscribers(mode: SessionMode) -> usize {
+    match mode {
+        SessionMode::Interactive => 3,
+        SessionMode::PlainShell => 2,
+        SessionMode::Headless => 0,
+    }
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
@@ -2177,9 +2210,10 @@ async fn spawn_interactive_session(
         cols: 120,
         rows: 32,
     };
-    let tracer_spawn = tracer_client::spawn(spec)
-        .await
-        .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
+    let tracer_spawn =
+        tracer_client::spawn(spec, expected_output_subscribers(SessionMode::Interactive))
+            .await
+            .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
@@ -2244,6 +2278,12 @@ async fn spawn_interactive_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
+    attach_lifecycle(
+        &hub.sessions,
+        session_id.clone(),
+        &pty,
+        Some(hub.dirs.clone()),
+    );
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
@@ -2259,7 +2299,6 @@ async fn spawn_interactive_session(
     if let Some(injector) = cfg.prompt_injector.clone() {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
     }
-    attach_lifecycle(&hub.sessions, session_id, &pty, Some(hub.dirs.clone()));
     Ok(snap)
 }
 
@@ -2305,9 +2344,10 @@ async fn spawn_plain_shell_session(
         cols: 120,
         rows: 32,
     };
-    let tracer_spawn = tracer_client::spawn(spec)
-        .await
-        .context("spawning plain shell via tracer")?;
+    let tracer_spawn =
+        tracer_client::spawn(spec, expected_output_subscribers(SessionMode::PlainShell))
+            .await
+            .context("spawning plain shell via tracer")?;
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
@@ -2384,13 +2424,18 @@ async fn spawn_plain_shell_session(
     // `osc_title::watch` so window-title escape sequences (which pwsh emits
     // by default) are recorded as `terminal_title` annotations; the canonical
     // session `label` stays whatever the spawn pipeline assigned.
+    attach_lifecycle(
+        &hub.sessions,
+        session_id.clone(),
+        &pty,
+        Some(hub.dirs.clone()),
+    );
     osc_title::watch(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
         hub.dirs.clone(),
     );
-    attach_lifecycle(&hub.sessions, session_id, &pty, Some(hub.dirs.clone()));
     Ok(snap)
 }
 

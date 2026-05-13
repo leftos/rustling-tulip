@@ -45,6 +45,9 @@ export default function PaneCloseDialog({
   const isStopped = session.status === "stopped";
   const hasWorktree = session.has_per_session_worktree;
   const label = sessionDisplayLabel(session);
+  const stopLabel = hasWorktree
+    ? "Stop session, keep worktree"
+    : "Stop session";
 
   return (
     <div
@@ -106,7 +109,7 @@ export default function PaneCloseDialog({
               onClick={onCloseAndStopKeepWorktree}
               data-testid="pane-close-dialog-stop-keep"
             >
-              Stop session, keep worktree
+              {stopLabel}
             </button>
           )}
           {hasWorktree && (
