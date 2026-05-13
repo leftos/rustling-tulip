@@ -13,7 +13,7 @@ use protocol::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -117,6 +117,12 @@ pub struct SessionRecord {
     /// be surfaced via `SessionSnapshot::last_prompt` and replayed by the
     /// abandoned-resume handler.
     pub last_prompt: Option<String>,
+    /// Notifier feeding user-input byte counts into `pty_state::watch` so
+    /// the status watcher can distinguish echo from genuine model output.
+    /// `Some` for interactive sessions whose watcher is running; `None`
+    /// for headless, plain-shell, orphaned, or stopped sessions. Cleared
+    /// by the exit watcher when the child dies.
+    pub input_notifier: Option<mpsc::UnboundedSender<usize>>,
 }
 
 impl SessionRecord {
@@ -325,6 +331,7 @@ pub fn attach_lifecycle(
                 rec.status = SessionStatus::Stopped;
                 rec.exit_code = Some(code);
                 rec.pty = None;
+                rec.input_notifier = None;
                 push_recent_action(rec, format!("exited with code {code}"));
             });
             registry_for_exit
@@ -383,6 +390,7 @@ impl SessionRegistry {
             is_inactive: false,
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
+            input_notifier: None,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -419,6 +427,7 @@ impl SessionRegistry {
             is_inactive: false,
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
+            input_notifier: None,
         };
         push_recent_action(
             &mut record,
@@ -456,6 +465,7 @@ impl SessionRegistry {
             is_inactive: false,
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
+            input_notifier: None,
         };
         push_recent_action(
             &mut record,

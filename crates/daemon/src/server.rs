@@ -201,10 +201,15 @@ async fn reattach_orphans(
                             Some(dirs.clone()),
                         );
                         if meta.mode != SessionMode::PlainShell {
+                            let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                            if let Some(arc) = sessions.get(&meta.session_id) {
+                                crate::sync::lock(&arc).input_notifier = Some(in_tx);
+                            }
                             pty_state::watch(
                                 sessions,
                                 meta.session_id.clone(),
                                 pty.output.subscribe(),
+                                in_rx,
                                 attention_tx.clone(),
                             );
                         }
@@ -935,8 +940,14 @@ async fn dispatch(
                 .decode(data_b64.as_bytes())
                 .context("decoding input b64")?;
             if let Some(rec) = hub.sessions.get(&session_id) {
-                let pty = crate::sync::lock(&rec).pty.clone();
+                let (pty, notifier) = {
+                    let guard = crate::sync::lock(&rec);
+                    (guard.pty.clone(), guard.input_notifier.clone())
+                };
                 if let Some(pty) = pty {
+                    if let Some(tx) = notifier {
+                        let _ = tx.send(bytes.len());
+                    }
                     pty.write_input(bytes);
                 }
             }
@@ -2244,6 +2255,7 @@ async fn spawn_interactive_session(
         is_inactive: false,
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
+        input_notifier: None,
     };
     push_recent_action(&mut record, "session started".to_string());
     hub.sessions.insert(record);
@@ -2284,10 +2296,15 @@ async fn spawn_interactive_session(
         &pty,
         Some(hub.dirs.clone()),
     );
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    if let Some(arc) = hub.sessions.get(&session_id) {
+        crate::sync::lock(&arc).input_notifier = Some(in_tx);
+    }
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
+        in_rx,
         hub.attention_tx.clone(),
     );
     osc_title::watch(
@@ -2304,6 +2321,7 @@ async fn spawn_interactive_session(
 
 #[expect(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "Constructing a session record is naturally wide; bundling into a struct adds noise"
 )]
 async fn spawn_plain_shell_session(
@@ -2384,6 +2402,7 @@ async fn spawn_plain_shell_session(
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         // Plain shells never carry a kickoff prompt.
         last_prompt: None,
+        input_notifier: None,
     };
     push_recent_action(&mut record, format!("session started: {shell_label}"));
     hub.sessions.insert(record);
@@ -2511,6 +2530,7 @@ fn spawn_headless_session(
         is_inactive: false,
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
+        input_notifier: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
@@ -2780,6 +2800,7 @@ async fn park_session(hub: &Hub, session_id: &str) {
         r.is_inactive = true;
         r.pty = None;
         r.headless = None;
+        r.input_notifier = None;
         if !matches!(
             r.status,
             protocol::SessionStatus::Stopped | protocol::SessionStatus::Error

@@ -8,15 +8,33 @@
 
 use crate::session::{SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
-use tracing::warn;
+use tracing::{debug, warn};
 
 const IDLE_AFTER: Duration = Duration::from_millis(800);
 const SCROLLBACK_BYTES: usize = 8 * 1024;
+
+/// Sliding window used to compare input vs output byte volume. Chosen to be
+/// long enough to smooth out inter-keystroke timing for slow typists, short
+/// enough that the dot reacts to model output within a fraction of a second.
+const VOLUME_WINDOW: Duration = Duration::from_millis(500);
+
+/// Output bytes per input byte that we still consider "echo / TUI redraw"
+/// rather than model output. One keystroke in codex/Claude's input box can
+/// emit cursor moves, color resets, and a full line redraw — easily a few
+/// hundred bytes. Picked generously so a fast typist never trips Working;
+/// the model's streaming output dwarfs this budget within one window.
+const ECHO_BUDGET_PER_INPUT_BYTE: u64 = 512;
+
+/// Minimum excess (output above echo budget) before we flip to Working.
+/// Stops a stray cursor-position report or title escape from blipping the
+/// dot blue between keystrokes.
+const MIN_WORKING_EXCESS: u64 = 64;
 
 pub struct AttentionEvent {
     pub session_id: String,
@@ -24,13 +42,24 @@ pub struct AttentionEvent {
 }
 
 /// Spawn a background task that watches the given PTY broadcast for a session
-/// and updates its status. `attention_tx` receives one event each time the
-/// session transitions into `AwaitingInput` (used by the server to forward
-/// `DaemonMessage::Attention` to clients).
+/// and updates its status.
+///
+/// `attention_tx` receives one event each time the session transitions into
+/// `AwaitingInput` (used by the server to forward `DaemonMessage::Attention`
+/// to clients).
+///
+/// `input_pulses` carries the byte count of each user input chunk forwarded
+/// to the PTY. The watcher maintains a sliding window of recent input and
+/// output volume; output that fits inside an "echo budget" proportional to
+/// input volume keeps the session in its current state (typing into codex
+/// echoes back via the PTY but should not flip the dot to Working). Output
+/// that exceeds the budget — i.e. genuine model streaming — promotes to
+/// Working as before.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     mut output: broadcast::Receiver<Vec<u8>>,
+    mut input_pulses: mpsc::UnboundedReceiver<usize>,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
 ) {
     let registry = Arc::clone(registry);
@@ -38,15 +67,37 @@ pub fn watch(
         let mut state = State::Idle;
         let mut last_output = Instant::now();
         let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
+        let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
+        let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
 
         loop {
             let next_idle_check = last_output + IDLE_AFTER;
             tokio::select! {
                 msg = output.recv() => match msg {
                     Ok(bytes) => {
-                        last_output = Instant::now();
+                        let now = Instant::now();
+                        last_output = now;
                         append_scrollback(&mut scrollback, &bytes);
-                        let new_state = classify(&scrollback, State::Working);
+                        push_window(&mut out_window, now, bytes.len());
+                        trim_window(&mut in_window, now);
+                        trim_window(&mut out_window, now);
+
+                        let in_sum = window_sum(&in_window);
+                        let out_sum = window_sum(&out_window);
+                        let budget = in_sum.saturating_mul(ECHO_BUDGET_PER_INPUT_BYTE);
+                        let exceeds_echo = out_sum > budget.saturating_add(MIN_WORKING_EXCESS);
+
+                        debug!(
+                            session_id = %session_id,
+                            in_sum,
+                            out_sum,
+                            budget,
+                            exceeds_echo,
+                            current = ?state,
+                            "pty_state volume tick"
+                        );
+
+                        let new_state = classify(&scrollback, state, exceeds_echo);
                         on_transition(
                             &registry,
                             &session_id,
@@ -60,8 +111,20 @@ pub fn watch(
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                pulse = input_pulses.recv() => {
+                    // `None` means the sender was dropped because the session
+                    // is going away; the output stream's `Closed` arm will end
+                    // this task shortly, so we just keep looping in the meantime.
+                    if let Some(n) = pulse {
+                        let now = Instant::now();
+                        push_window(&mut in_window, now, n);
+                        trim_window(&mut in_window, now);
+                        // Input alone never flips state. The next output chunk
+                        // will reclassify with this volume in scope.
+                    }
+                },
                 () = sleep_until(next_idle_check), if matches!(state, State::Working | State::AwaitingInput) => {
-                    let new_state = classify(&scrollback, State::Idle);
+                    let new_state = classify(&scrollback, State::Idle, false);
                     on_transition(
                         &registry,
                         &session_id,
@@ -73,6 +136,26 @@ pub fn watch(
             }
         }
     });
+}
+
+fn push_window(window: &mut VecDeque<(Instant, u32)>, now: Instant, bytes: usize) {
+    let n = u32::try_from(bytes).unwrap_or(u32::MAX);
+    window.push_back((now, n));
+}
+
+fn trim_window(window: &mut VecDeque<(Instant, u32)>, now: Instant) {
+    let cutoff = now.checked_sub(VOLUME_WINDOW).unwrap_or(now);
+    while let Some(&(t, _)) = window.front() {
+        if t < cutoff {
+            window.pop_front();
+        } else {
+            break;
+        }
+    }
+}
+
+fn window_sum(window: &VecDeque<(Instant, u32)>) -> u64 {
+    window.iter().map(|(_, n)| u64::from(*n)).sum()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +183,7 @@ fn append_scrollback(buf: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
-fn classify(scrollback: &[u8], default: State) -> State {
+fn classify(scrollback: &[u8], current: State, exceeds_echo: bool) -> State {
     // Strip ANSI escape sequences and non-ASCII before matching: Claude's TUI
     // emits a lot of color codes that would otherwise break naive substring
     // matches. We work on the last ~2 KB of stripped output.
@@ -110,8 +193,13 @@ fn classify(scrollback: &[u8], default: State) -> State {
 
     if matches_prompt(tail) {
         State::AwaitingInput
+    } else if exceeds_echo {
+        State::Working
     } else {
-        default
+        // Output fit inside the echo budget — keep current state. When
+        // current is already Working from a prior tick the IDLE_AFTER timer
+        // demotes us to Idle once the PTY actually goes quiet.
+        current
     }
 }
 
