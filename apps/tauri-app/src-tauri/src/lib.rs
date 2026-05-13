@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::PathBuf;
-use tauri::{Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::utils::config::Color;
+use tauri::{Manager, Runtime, Theme, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt as _;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod daemon_supervisor;
+
+const APP_BACKGROUND_COLOR: Color = Color(8, 9, 11, 255);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonHandshake {
@@ -39,6 +42,18 @@ where
     } else {
         builder
     }
+}
+
+fn apply_window_appearance<R, M>(
+    builder: WebviewWindowBuilder<'_, R, M>,
+) -> WebviewWindowBuilder<'_, R, M>
+where
+    R: Runtime,
+    M: Manager<R>,
+{
+    builder
+        .theme(Some(Theme::Dark))
+        .background_color(APP_BACKGROUND_COLOR)
 }
 
 /// Resolve the per-user config directory. Mirrors
@@ -314,7 +329,7 @@ async fn open_session_window(app: tauri::AppHandle, session_id: String) -> Resul
         // because the OS thinks no drop target accepts it. We don't use
         // OS file drops anywhere, so flip it off everywhere.
         .disable_drag_drop_handler();
-    apply_e2e_window_options(builder)
+    apply_e2e_window_options(apply_window_appearance(builder))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -336,7 +351,7 @@ async fn open_pane_window(app: tauri::AppHandle, pane_id: String) -> Result<(), 
         .inner_size(1100.0, 720.0)
         .min_inner_size(700.0, 400.0)
         .disable_drag_drop_handler();
-    apply_e2e_window_options(builder)
+    apply_e2e_window_options(apply_window_appearance(builder))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -361,7 +376,7 @@ async fn open_tab_window(app: tauri::AppHandle, tab_id: String) -> Result<(), St
         // See open_session_window for the rationale on disabling OS-level
         // file-drop interception.
         .disable_drag_drop_handler();
-    apply_e2e_window_options(builder)
+    apply_e2e_window_options(apply_window_appearance(builder))
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())

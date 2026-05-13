@@ -63,7 +63,7 @@ describe("session color customization", function () {
       (r: RepoEntry) =>
         r.path === fixtureRepo || r.path === fixtureRepo!.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
   });
 
@@ -111,11 +111,12 @@ describe("session color customization", function () {
 
     const row = await sidebarRow(spawnedSessionId);
     await row.click();
-    const pane = await sessionPane(spawnedSessionId);
+    await sessionPane(spawnedSessionId);
 
     await row.click({ button: "right" });
+    await openContextSubmenu("session-context-color-menu");
     const preset = await browser.$('[data-testid="session-context-color-0"]');
-    await preset.waitForExist({ timeout: 5_000 });
+    await preset.waitForDisplayed({ timeout: 5_000 });
     const presetButtons = await browser.$$(".session-color-preset");
     expect(presetButtons.length).to.equal(12);
     expect(await preset.getText()).to.include("Blue");
@@ -160,6 +161,7 @@ describe("session color customization", function () {
     await sessionPane(spawnedSessionId);
 
     await row.click({ button: "right" });
+    await openContextSubmenu("session-context-color-menu");
     const colorApplied = ws.waitFor(
       (msg): msg is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
         isSessionUpdated(msg) &&
@@ -257,7 +259,7 @@ async function styleAttribute(selector: string): Promise<string> {
 
 async function setCustomColor(color: string): Promise<void> {
   const input = await browser.$('[data-testid="session-context-color-custom"]');
-  await input.waitForExist({ timeout: 5_000 });
+  await input.waitForDisplayed({ timeout: 5_000 });
   await browser.execute((nextColor: string) => {
     type ColorInput = {
       value: string;
@@ -286,6 +288,13 @@ async function setCustomColor(color: string): Promise<void> {
     input.dispatchEvent(new scope.Event("input", { bubbles: true }));
     input.dispatchEvent(new scope.Event("change", { bubbles: true }));
   }, color);
+}
+
+async function openContextSubmenu(testId: string): Promise<void> {
+  const trigger = await browser.$(`[data-testid="${testId}"]`);
+  await trigger.waitForDisplayed({ timeout: 5_000 });
+  await trigger.moveTo();
+  await trigger.click();
 }
 
 async function waitForColor(sessionId: string, color: string): Promise<void> {

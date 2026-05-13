@@ -138,6 +138,8 @@
 html, body, #root {
   height: 100%;
   margin: 0;
+  background: var(--bg);
+  color-scheme: dark;
 }
 
 body {
@@ -2701,6 +2703,45 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .context-menu button:disabled:hover { background: transparent; }
 .context-menu button.danger { color: var(--err); }
 .context-menu button.danger:hover { background: rgba(244, 78, 78, 0.12); }
+.context-menu-submenu {
+  position: relative;
+}
+.context-menu-submenu-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.context-menu-submenu-label {
+  flex: 1;
+  min-width: 0;
+}
+.context-menu-submenu-arrow {
+  margin-left: auto;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+.context-menu-submenu-panel {
+  display: none;
+  position: absolute;
+  top: -4px;
+  left: calc(100% - 2px);
+  min-width: 210px;
+  max-width: 280px;
+  max-height: min(48vh, 360px);
+  overflow: auto;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  box-shadow: var(--shadow-2);
+  z-index: 1;
+}
+.context-menu-submenu:hover > .context-menu-submenu-panel,
+.context-menu-submenu:focus-within > .context-menu-submenu-panel {
+  display: block;
+}
 .context-menu-separator {
   height: 1px; background: var(--border); margin: 4px 2px;
 }

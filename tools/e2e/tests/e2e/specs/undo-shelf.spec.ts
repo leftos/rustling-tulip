@@ -231,11 +231,12 @@ describe("undo shelf", function () {
     await pane.waitForExist({ timeout: 10_000 });
     const header = await pane.$(".session-header");
     await header.click({ button: "right" });
+    await openContextSubmenu("session-context-move-menu");
 
     const moveButton = await browser.$(
       `[data-testid="session-context-move-to-tab"][data-tab-id="${target.id}"]`,
     );
-    await moveButton.waitForExist({ timeout: 5_000 });
+    await moveButton.waitForDisplayed({ timeout: 5_000 });
 
     const sourceRemoved = ws.waitFor(
       (msg): msg is TabRemovedMessage => isTabRemoved(msg, source.id),
@@ -455,4 +456,11 @@ function gridContainsSession(node: GridNode, sessionId: string): boolean {
 
 function tabPill(tabId: string) {
   return browser.$(`[data-testid="tab-pill"][data-tab-id="${tabId}"]`);
+}
+
+async function openContextSubmenu(testId: string): Promise<void> {
+  const trigger = await browser.$(`[data-testid="${testId}"]`);
+  await trigger.waitForDisplayed({ timeout: 5_000 });
+  await trigger.moveTo();
+  await trigger.click();
 }

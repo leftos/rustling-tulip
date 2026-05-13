@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
@@ -273,49 +273,47 @@ export default function SessionContextMenu({
                 Rename…
               </button>
             </li>
-            <li>
-              <button
-                type="button"
-                disabled={!canDuplicate}
-                onClick={(e) => {
-                  if (!canDuplicate) return;
-                  onDuplicate(e.shiftKey, "new_tab");
-                }}
-                title={
-                  canDuplicate
-                    ? "Click to clone into a fresh tab. Shift-click to open the spawn dialog pre-filled."
-                    : "Headless sessions can't be duplicated — they're one-shot kickoffs."
-                }
-                data-testid="session-context-duplicate"
-              >
-                Duplicate (new tab)
-                {canDuplicate && (
-                  <span className="context-menu-hint">⇧ to edit</span>
-                )}
-              </button>
-            </li>
-
-            {canDuplicate && tabs.length > 0 && (
-              <>
-                <li className="context-menu-label">Duplicate into</li>
-                {tabs.map((t) => (
-                  <li key={`dup:${t.id}`}>
-                    <button
-                      type="button"
-                      onClick={() => onDuplicate(false, { tabId: t.id })}
-                      title={`Spawn a clone of this session into "${t.name}"`}
-                    >
-                      {t.name}
-                    </button>
-                  </li>
-                ))}
-              </>
-            )}
+            <MenuSubmenu
+              label="Duplicate"
+              disabled={!canDuplicate}
+              title={
+                canDuplicate
+                  ? "Clone this session into a new or existing tab."
+                  : "Headless sessions can't be duplicated; they're one-shot kickoffs."
+              }
+              dataTestId="session-context-duplicate-menu"
+            >
+              <li>
+                <button
+                  type="button"
+                  onClick={(e) => onDuplicate(e.shiftKey, "new_tab")}
+                  title="Clone into a fresh tab. Shift-click to open the spawn dialog pre-filled."
+                  data-testid="session-context-duplicate"
+                >
+                  New tab
+                  <span className="context-menu-hint">Shift to edit</span>
+                </button>
+              </li>
+              {tabs.length > 0 && (
+                <li className="context-menu-separator" aria-hidden="true" />
+              )}
+              {tabs.map((t) => (
+                <li key={`dup:${t.id}`}>
+                  <button
+                    type="button"
+                    onClick={() => onDuplicate(false, { tabId: t.id })}
+                    title={`Spawn a clone of this session into "${t.name}"`}
+                    data-testid="session-context-duplicate-to-tab"
+                    data-tab-id={t.id}
+                  >
+                    {t.name}
+                  </button>
+                </li>
+              ))}
+            </MenuSubmenu>
 
             {moveTargets.length > 0 && (
-              <>
-                <li className="context-menu-separator" aria-hidden="true" />
-                <li className="context-menu-label">Move to</li>
+              <MenuSubmenu label="Move to" dataTestId="session-context-move-menu">
                 {moveTargets.map((t) => (
                   <li key={`mv:${t.id}`}>
                     <button
@@ -329,7 +327,7 @@ export default function SessionContextMenu({
                     </button>
                   </li>
                 ))}
-              </>
+              </MenuSubmenu>
             )}
 
             <li className="context-menu-separator" aria-hidden="true" />
@@ -407,69 +405,66 @@ export default function SessionContextMenu({
             )}
 
             <li className="context-menu-separator" aria-hidden="true" />
-            <li className="context-menu-label">
-              Color{" "}
-              <span
-                className={
-                  currentColor
-                    ? "context-menu-chip context-menu-chip-emph"
-                    : "context-menu-chip"
-                }
-              >
-                {currentColor ?? "default"}
-              </span>
-            </li>
-            <li>
-              <div
-                className="session-color-list"
-                role="group"
-                aria-label="Preset colors"
-              >
-                {SESSION_COLOR_PRESETS.map((preset, index) => (
-                  <button
-                    key={preset.color}
-                    type="button"
-                    className="session-color-preset"
-                    style={sessionAccentStyle(preset.color)}
-                    title={`Use ${preset.name} (${preset.color})`}
-                    aria-label={`Use ${preset.name} session color`}
-                    data-testid={`session-context-color-${index}`}
-                    data-session-color={preset.color}
-                    onClick={() => sendColor(preset.color)}
-                  >
-                    <span
-                      className="session-color-preview-dot"
-                      aria-hidden="true"
-                    />
-                    <span className="session-color-preview-label">{preset.name}</span>
-                    <span className="context-menu-hint">{preset.color}</span>
-                  </button>
-                ))}
-              </div>
-            </li>
-            <li>
-              <label className="session-color-custom">
-                <span>Custom</span>
-                <input
-                  type="color"
-                  value={currentColor ?? DEFAULT_SESSION_COLOR}
-                  aria-label="Custom session color"
-                  data-testid="session-context-color-custom"
-                  onChange={(e) => sendColor(e.currentTarget.value)}
-                />
-              </label>
-            </li>
-            {currentColor && (
+            <MenuSubmenu
+              label="Color"
+              chip={currentColor ?? "default"}
+              chipEmphasis={currentColor !== null}
+              dataTestId="session-context-color-menu"
+            >
               <li>
-                <button
-                  type="button"
-                  onClick={() => sendColor(null)}
-                  data-testid="session-context-color-reset"
+                <div
+                  className="session-color-list"
+                  role="group"
+                  aria-label="Preset colors"
                 >
-                  Reset color
-                </button>
+                  {SESSION_COLOR_PRESETS.map((preset, index) => (
+                    <button
+                      key={preset.color}
+                      type="button"
+                      className="session-color-preset"
+                      style={sessionAccentStyle(preset.color)}
+                      title={`Use ${preset.name} (${preset.color})`}
+                      aria-label={`Use ${preset.name} session color`}
+                      data-testid={`session-context-color-${index}`}
+                      data-session-color={preset.color}
+                      onClick={() => sendColor(preset.color)}
+                    >
+                      <span
+                        className="session-color-preview-dot"
+                        aria-hidden="true"
+                      />
+                      <span className="session-color-preview-label">
+                        {preset.name}
+                      </span>
+                      <span className="context-menu-hint">{preset.color}</span>
+                    </button>
+                  ))}
+                </div>
               </li>
-            )}
+              <li>
+                <label className="session-color-custom">
+                  <span>Custom</span>
+                  <input
+                    type="color"
+                    value={currentColor ?? DEFAULT_SESSION_COLOR}
+                    aria-label="Custom session color"
+                    data-testid="session-context-color-custom"
+                    onChange={(e) => sendColor(e.currentTarget.value)}
+                  />
+                </label>
+              </li>
+              {currentColor && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => sendColor(null)}
+                    data-testid="session-context-color-reset"
+                  >
+                    Reset color
+                  </button>
+                </li>
+              )}
+            </MenuSubmenu>
 
             <li className="context-menu-separator" aria-hidden="true" />
             {isInactive ? (
@@ -567,6 +562,64 @@ export default function SessionContextMenu({
         )}
       </ul>
     </div>
+  );
+}
+
+interface MenuSubmenuProps {
+  label: string;
+  children: ReactNode;
+  disabled?: boolean;
+  title?: string;
+  dataTestId?: string;
+  chip?: string;
+  chipEmphasis?: boolean;
+}
+
+function MenuSubmenu({
+  label,
+  children,
+  disabled = false,
+  title,
+  dataTestId,
+  chip,
+  chipEmphasis = false,
+}: MenuSubmenuProps) {
+  return (
+    <li className="context-menu-submenu">
+      <button
+        type="button"
+        className="context-menu-submenu-trigger"
+        disabled={disabled}
+        title={title}
+        aria-haspopup="menu"
+        data-testid={dataTestId}
+        onClick={(e) => {
+          e.preventDefault();
+          e.currentTarget.focus();
+        }}
+      >
+        <span className="context-menu-submenu-label">{label}</span>
+        {chip && (
+          <span
+            className={
+              chipEmphasis
+                ? "context-menu-chip context-menu-chip-emph"
+                : "context-menu-chip"
+            }
+          >
+            {chip}
+          </span>
+        )}
+        <span className="context-menu-submenu-arrow" aria-hidden="true">
+          &gt;
+        </span>
+      </button>
+      {!disabled && (
+        <ul className="context-menu-submenu-panel" role="menu">
+          {children}
+        </ul>
+      )}
+    </li>
   );
 }
 
