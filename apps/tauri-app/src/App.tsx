@@ -149,6 +149,7 @@ interface AppState {
   exitStuck: boolean;
   settingsOpen: boolean;
   presetLaunch: { preset: PresetEntry; target: PresetTarget } | null;
+  spotlightSessionIds: Set<string>;
   toasts: ToastEntry[];
   undoEntries: UndoEntry[];
   /// Repo-remove modal state, set when the sidebar's × click hit a repo
@@ -215,6 +216,7 @@ export default function App() {
     exitStuck: false,
     settingsOpen: false,
     presetLaunch: null,
+    spotlightSessionIds: new Set<string>(),
     toasts: [],
     undoEntries: [],
     repoRemove: null,
@@ -550,10 +552,12 @@ export default function App() {
     const client = s?.client;
     if (!client) {
       setState((cur) => {
-        if (!cur.attentionSessions.has(sessionId)) return cur;
+        if (!cur.attentionSessions.has(sessionId) && cur.spotlightSessionIds.size === 0) {
+          return cur;
+        }
         const next = new Set(cur.attentionSessions);
         next.delete(sessionId);
-        return { ...cur, attentionSessions: next };
+        return { ...cur, attentionSessions: next, spotlightSessionIds: new Set<string>() };
       });
       return;
     }
@@ -567,6 +571,7 @@ export default function App() {
           attentionSessions: nextAttention,
           activeTabId: existing.tabId,
           focusedPaneId: existing.paneId,
+          spotlightSessionIds: new Set<string>(),
         };
       });
       return;
@@ -624,8 +629,9 @@ export default function App() {
             ...cur,
             attentionSessions: next,
             pendingTabActivate: cur.pendingTabActivate + 1,
+            spotlightSessionIds: new Set<string>(),
           }
-        : { ...cur, attentionSessions: next };
+        : { ...cur, attentionSessions: next, spotlightSessionIds: new Set<string>() };
       if (!bindUndoEntry) {
         return nextState;
       }
@@ -1543,6 +1549,14 @@ export default function App() {
     );
   }, [activeTab]);
 
+  const highlightedSessionIds = useMemo(() => {
+    const ids = new Set(sessionIdsInActiveTab);
+    for (const id of state.spotlightSessionIds) {
+      ids.add(id);
+    }
+    return ids;
+  }, [sessionIdsInActiveTab, state.spotlightSessionIds]);
+
   // Which sidebar panel is showing (Sessions vs Source control). Persisted
   // to localStorage so it survives reloads.
   const [activitySection, setActivitySection] = useState<ActivitySection>(
@@ -1551,6 +1565,51 @@ export default function App() {
   const onSelectActivity = useCallback((next: ActivitySection) => {
     setActivitySection(next);
     writeActivitySection(next);
+  }, []);
+
+  const onSelectPresetLaunchSessions = useCallback((sessionIds: string[]) => {
+    const wanted = new Set(sessionIds);
+    setActivitySection("sessions");
+    writeActivitySection("sessions");
+    setState((s) => ({
+      ...s,
+      spotlightSessionIds: new Set(
+        s.sessions.filter((session) => wanted.has(session.id)).map((session) => session.id),
+      ),
+    }));
+  }, []);
+
+  const onStopPresetLaunchSessions = useCallback((sessionIds: string[]) => {
+    const cur = latestStateRef.current;
+    const client = cur?.client;
+    if (!client) return;
+    const wanted = new Set(sessionIds);
+    const launched = cur.sessions.filter(
+      (session) => wanted.has(session.id) && session.status !== "stopped",
+    );
+    for (const session of launched) {
+      client.send({
+        type: "stop_session",
+        session_id: session.id,
+        cleanup: session.members.map((member) => ({
+          repo_id: member.repo_id,
+          remove_worktree: false,
+        })),
+      });
+    }
+    pushToast(setState, {
+      severity: "info",
+      message:
+        launched.length === 0
+          ? "No running launched sessions"
+          : launched.length === 1
+          ? "Stopping launched session"
+          : `Stopping ${launched.length} launched sessions`,
+      detail:
+        launched.length === 0
+          ? "The launched session records are already stopped."
+          : "The session records stay visible after the processes stop.",
+    });
   }, []);
 
   // Resolve the focused pane's session for session-scoped controls. Diff tabs
@@ -1867,7 +1926,7 @@ export default function App() {
             workspaces={state.workspaces}
             sessions={state.sessions}
             client={state.client!}
-            highlightedSessionIds={sessionIdsInActiveTab}
+            highlightedSessionIds={highlightedSessionIds}
             attentionSessions={state.attentionSessions}
             connection={state.status}
             handshake={state.handshake}
@@ -1995,6 +2054,8 @@ export default function App() {
           repos={state.repos}
           client={state.client}
           onClose={onClosePresetLaunch}
+          onSelectSessions={onSelectPresetLaunchSessions}
+          onStopSessions={onStopPresetLaunchSessions}
         />
       )}
       {state.workspaceCreatorOpen && state.client && (

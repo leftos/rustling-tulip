@@ -349,10 +349,10 @@ be able to cancel before the next session spawns and see what already launched.
 - [x] Update `PresetLaunchDialog` to show progress after submit instead of
       closing immediately for large jobs.
 - [x] Add a compact preset-job toast or sidebar entry after the dialog closes.
-- [ ] Make partial-launch cleanup discoverable: select launched sessions, stop
+- [x] Make partial-launch cleanup discoverable: select launched sessions, stop
       all from this preset, or leave them running.
 - [ ] Add daemon tests for cancel-before-first-spawn and cancel-mid-launch.
-- [ ] Add e2e coverage for a multi-prompt preset: progress appears, cancel
+- [x] Add e2e coverage for a multi-prompt preset: progress appears, cancel
       stops later spawns, existing sessions remain visible.
 
 ## Suggested sequence

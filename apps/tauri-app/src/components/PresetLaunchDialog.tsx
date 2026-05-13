@@ -29,6 +29,8 @@ interface Props {
   repos: RepoEntry[];
   client: DaemonClient;
   onClose: () => void;
+  onSelectSessions: (sessionIds: string[]) => void;
+  onStopSessions: (sessionIds: string[]) => void;
 }
 
 type SourceKind = "file" | "folder" | "inline";
@@ -42,6 +44,8 @@ export default function PresetLaunchDialog({
   repos,
   client,
   onClose,
+  onSelectSessions,
+  onStopSessions,
 }: Props) {
   const sourceRepo = useMemo(
     () => repos.find((r) => r.id === preset.source_repo_id) ?? null,
@@ -349,6 +353,8 @@ export default function PresetLaunchDialog({
             <LaunchProgressStage
               job={launchJob}
               presetName={preset.name}
+              onSelectSessions={onSelectSessions}
+              onStopSessions={onStopSessions}
             />
           )}
         </div>
@@ -805,13 +811,20 @@ function PreviewStage({
 function LaunchProgressStage({
   job,
   presetName,
+  onSelectSessions,
+  onStopSessions,
 }: {
   job: PresetLaunchJobSnapshot | null;
   presetName: string;
+  onSelectSessions: (sessionIds: string[]) => void;
+  onStopSessions: (sessionIds: string[]) => void;
 }) {
   const status = launchJobStatusText(job);
   const total = job?.total ?? 0;
   const launched = job?.launched ?? 0;
+  const createdSessionIds = job?.created_session_ids ?? [];
+  const canManageCreatedSessions =
+    job !== null && isTerminalLaunchJob(job) && createdSessionIds.length > 0;
   const progressMax = Math.max(1, total);
   const progressValue = Math.min(progressMax, launched);
   return (
@@ -844,6 +857,36 @@ function LaunchProgressStage({
         <p className="error" data-testid="preset-launch-progress-error">
           {job.error}
         </p>
+      )}
+      {canManageCreatedSessions && (
+        <div
+          className="preset-launch-cleanup"
+          data-testid="preset-launch-cleanup"
+        >
+          <p>
+            {createdSessionIds.length} launched{" "}
+            {createdSessionIds.length === 1 ? "session is" : "sessions are"}{" "}
+            still visible in the sidebar.
+          </p>
+          <div className="preset-launch-cleanup-actions">
+            <button
+              type="button"
+              onClick={() => onSelectSessions(createdSessionIds)}
+              data-testid="preset-launch-select-created"
+            >
+              Select launched sessions
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => onStopSessions(createdSessionIds)}
+              data-testid="preset-launch-stop-created"
+            >
+              Stop all from this preset
+            </button>
+            <span className="muted small">Close to leave them running.</span>
+          </div>
+        </div>
       )}
     </div>
   );
