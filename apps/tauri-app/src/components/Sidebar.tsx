@@ -22,6 +22,7 @@ import {
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
+import { normalizeSessionColor, sessionAccentStyle } from "../utils/sessionColor";
 import { copyToClipboard } from "../utils/clipboard";
 import { saveSettings, useSettings } from "../utils/settings";
 import DaemonFooter from "./DaemonFooter";
@@ -1174,6 +1175,7 @@ function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
   const isPlainShell = s.mode === "plain_shell";
   const isCodex = !isPlainShell && s.agent === "codex";
+  const accentColor = normalizeSessionColor(s.accent_color);
   const bindings = useMemo(
     () => sessionTabBindings(s.id, p.tabs),
     [s.id, p.tabs],
@@ -1215,6 +1217,7 @@ function SessionLeaf(p: SessionLeafProps) {
     s.is_inactive ? "is-inactive" : "",
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
+    accentColor ? "has-session-accent" : "",
     paneDraggable ? "is-draggable" : "",
     p.isDraggingForReorder ? "is-dragging" : "",
     p.reorderDropSide === "before" ? "drop-before" : "",
@@ -1226,6 +1229,7 @@ function SessionLeaf(p: SessionLeafProps) {
     <li>
       <div
         className={classes}
+        style={sessionAccentStyle(accentColor)}
         onClick={() => p.onSelect(s.id)}
         role="button"
         tabIndex={0}
@@ -1246,6 +1250,7 @@ function SessionLeaf(p: SessionLeafProps) {
         data-session-id={s.id}
         data-session-status={s.status}
         data-session-agent={s.agent}
+        data-session-color={accentColor ?? ""}
         data-tab-binding-count={bindings.length}
       >
         {isPlainShell ? (

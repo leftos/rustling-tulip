@@ -11,6 +11,11 @@ import {
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
+import {
+  DEFAULT_SESSION_COLOR,
+  normalizeSessionColor,
+  sessionAccentStyle,
+} from "../utils/sessionColor";
 import SessionContextMenu, {
   type SessionContextMenuState,
 } from "./SessionContextMenu";
@@ -165,22 +170,40 @@ export default function SessionPane({
   const isPlainShell = session.mode === "plain_shell";
   const runtimeLabel = sessionRuntimeLabel(session);
   const modeSuffix = isHeadless ? " · headless" : "";
+  const accentColor = normalizeSessionColor(session.accent_color);
+  const sessionStyle = sessionAccentStyle(accentColor);
+  const headerClasses = [
+    "session-header",
+    onHeaderDragStart ? "session-header-draggable" : "",
+    accentColor ? "has-session-accent" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const setColor = useCallback(
+    (color: string | null) => {
+      if (!client) return;
+      client.send({
+        type: "set_session_color",
+        session_id: session.id,
+        color,
+      });
+    },
+    [client, session.id],
+  );
 
   return (
     <div
-      className="session-pane"
+      className={accentColor ? "session-pane has-session-accent" : "session-pane"}
+      style={sessionStyle}
       data-testid="session-pane"
       data-session-id={session.id}
       data-session-status={session.status}
       data-session-mode={session.mode}
+      data-session-color={accentColor ?? ""}
     >
       {!hideHeader && (
         <header
-          className={
-            onHeaderDragStart
-              ? "session-header session-header-draggable"
-              : "session-header"
-          }
+          className={headerClasses}
           draggable={onHeaderDragStart !== undefined}
           onDragStart={onHeaderDragStart}
           onContextMenu={onHeaderContextMenu}
@@ -227,6 +250,17 @@ export default function SessionPane({
             )}
             {modeSuffix && (
               <span className="session-meta">{modeSuffix}</span>
+            )}
+            {client && (
+              <input
+                type="color"
+                className="session-color-picker"
+                value={accentColor ?? DEFAULT_SESSION_COLOR}
+                title="Set session color"
+                aria-label="Set session color"
+                data-testid="session-color-picker"
+                onChange={(e) => setColor(e.currentTarget.value)}
+              />
             )}
           </div>
           <div className="session-actions">

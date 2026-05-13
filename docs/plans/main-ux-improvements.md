@@ -114,16 +114,18 @@ renames the session to that value.
 - [x] Update `sessionDisplayLabel` and all callers to use the new hierarchy.
 - [x] Ensure custom rename still wins over daemon-generated and terminal titles.
 - [x] Review sidebar row truncation so the canonical label remains readable.
-- [ ] Add a per-session color setting that applies to that shell's pane gutter
+- [x] Add a per-session color setting that applies to that shell's pane gutter
       and sidebar tree row.
-- [ ] Offer 12 default color swatches for fast assignment plus a custom color
-      picker.
-- [ ] Persist the chosen color with the session record and restore it after
+- [x] Offer 12 named default color presets for fast assignment plus a custom
+      color picker.
+- [x] Preview preset colors in the color submenu using the same tree-row accent
+      treatment the selected session will get.
+- [x] Persist the chosen color with the session record and restore it after
       daemon/app restart.
 - [x] Add e2e coverage: an emitted `cmd.exe` terminal title does not replace
       the primary repo/branch label.
 - [x] Add e2e coverage: a user rename becomes the primary label everywhere.
-- [ ] Add e2e coverage: assigning a preset color updates the pane gutter and
+- [x] Add e2e coverage: assigning a preset color updates the pane gutter and
       sidebar tree row.
 - [ ] Add e2e coverage: a custom color survives session refresh/reload.
 
@@ -250,7 +252,7 @@ compact but need consistent labels, accessible names, and grouping.
       component, without adding a dependency unless justified.
 - [ ] Group pane actions visually: split, move/pop-out, close.
 - [ ] Prefer text labels for destructive or uncommon actions where space allows.
-- [ ] Make per-shell color controls discoverable from the session context menu
+- [x] Make per-shell color controls discoverable from the session context menu
       and session header without crowding common stop/split controls.
 - [ ] Make disabled toolbar actions visually and textually explain why they are
       disabled.

@@ -89,6 +89,9 @@ pub struct SessionRecord {
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
+    /// User-chosen accent color for the pane gutter and sidebar row. Stored
+    /// as `#rrggbb` after daemon validation.
+    pub accent_color: Option<String>,
     /// Persisted spawn-time configuration used to clone this session via
     /// [`protocol::ClientMessage::DuplicateSession`]. Always `Some` for
     /// sessions spawned by daemons that know about this field; `None`
@@ -163,6 +166,7 @@ impl SessionRecord {
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
+            accent_color: self.accent_color.clone(),
             has_per_session_worktree,
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
@@ -385,6 +389,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            accent_color: meta.accent_color.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
             is_inactive: false,
@@ -422,6 +427,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            accent_color: meta.accent_color.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
             is_inactive: false,
@@ -460,6 +466,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            accent_color: meta.accent_color.clone(),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: true,
             is_inactive: false,

@@ -105,6 +105,9 @@ export interface SessionSnapshot {
   // next to the session title. null when reattached from a daemon
   // sidecar written before this field existed.
   program_name: string | null;
+  // Optional user-chosen accent color (#RRGGBB) for the session pane gutter
+  // and sidebar row. null means the session uses the default theme accent.
+  accent_color: string | null;
   // True when the session was spawned with use_worktree=true (per-session
   // worktree under <repo>.wt/<branch>). Drives the close-context-menu's
   // "delete worktree" choice. false for orphans whose stored spawn config
@@ -445,6 +448,7 @@ export type ClientMessage =
   | { type: "duplicate_session"; session_id: string }
   | { type: "get_spawn_config"; session_id: string }
   | { type: "rename_session"; session_id: string; label: string | null }
+  | { type: "set_session_color"; session_id: string; color: string | null }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "send_input"; session_id: string; data_b64: string }

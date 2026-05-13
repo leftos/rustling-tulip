@@ -1070,6 +1070,30 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree-leaf.is-inactive .status-dot {
   opacity: 0.5;
 }
+.tree-leaf.has-session-accent {
+  border-left-color: color-mix(in srgb, var(--session-accent) 68%, transparent);
+  background-image: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--session-accent) 16%, transparent),
+    transparent 42%
+  );
+}
+.tree-leaf.has-session-accent.selected {
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--session-accent) 24%, transparent),
+      transparent 48%
+    ),
+    color-mix(in srgb, var(--accent) 16%, var(--bg));
+  border-color: color-mix(in srgb, var(--session-accent) 52%, transparent);
+}
+.tree-leaf.has-session-accent.selected::before {
+  background: var(--session-accent);
+}
+.tree-leaf.has-session-accent .status-dot {
+  background: var(--session-accent);
+}
 .tree-tab-pill {
   flex: none;
   font-size: 10px;
@@ -1606,6 +1630,9 @@ button.tree-tab-pill:hover {
 .session-pane {
   display: flex; flex-direction: column; flex: 1; min-height: 0;
 }
+.session-pane.has-session-accent {
+  box-shadow: inset 3px 0 0 var(--session-accent);
+}
 .session-header {
   display: flex; justify-content: space-between; align-items: center;
   gap: var(--space-3);
@@ -1620,6 +1647,18 @@ button.tree-tab-pill:hover {
       var(--bg-elev) 100%);
   min-height: 38px;
   transition: background var(--dur-fast) var(--ease-out);
+}
+.session-header.has-session-accent {
+  border-left: 3px solid var(--session-accent);
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--session-accent) 14%, transparent),
+      transparent 34%
+    ),
+    linear-gradient(to bottom,
+      color-mix(in srgb, var(--bg-elev2) 35%, var(--bg-elev)) 0%,
+      var(--bg-elev) 100%);
 }
 .session-header-draggable {
   cursor: grab;
@@ -1749,6 +1788,20 @@ button.tree-tab-pill:hover {
   text-transform: lowercase;
   font-weight: 500;
   letter-spacing: 0.02em;
+}
+.session-color-picker {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.session-color-picker::-webkit-color-swatch-wrapper { padding: 2px; }
+.session-color-picker::-webkit-color-swatch {
+  border: 0;
+  border-radius: 3px;
 }
 
 .orphan-banner {
@@ -2283,6 +2336,57 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .context-menu-chip-emph {
   color: var(--fg);
   border-color: var(--accent);
+}
+.session-color-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+.context-menu .session-color-preset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-left: 3px solid var(--session-accent);
+  background-image: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--session-accent) 16%, transparent),
+    transparent 45%
+  );
+}
+.context-menu .session-color-preset:hover {
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--session-accent) 24%, transparent),
+      transparent 52%
+    ),
+    var(--bg-elev2);
+}
+.session-color-preview-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--session-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--session-accent) 45%, var(--border));
+}
+.session-color-preview-label {
+  flex: 1;
+}
+.session-color-custom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  color: var(--fg);
+}
+.session-color-custom input {
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
 }
 
 /* ------- Tabs and grid renderer ------- */

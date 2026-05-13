@@ -255,6 +255,10 @@ pub struct SessionSnapshot {
     /// claude / codex) in that case.
     #[serde(default)]
     pub program_name: Option<String>,
+    /// Optional user-chosen accent color (`#RRGGBB`) applied to the session's
+    /// pane gutter and sidebar row. `None` means use the default theme accent.
+    #[serde(default)]
+    pub accent_color: Option<String>,
     /// True when the session was spawned with `use_worktree = true`, i.e.
     /// the daemon created (or reused) a per-session git worktree under
     /// `<repo>.wt/<branch>`. Drives the close-context-menu's "delete
@@ -1006,6 +1010,12 @@ pub enum ClientMessage {
     RenameSession {
         session_id: String,
         label: Option<String>,
+    },
+    /// Set or clear the user-chosen session accent color. Colors are accepted
+    /// as `#RRGGBB`; `None` or blank clears the override.
+    SetSessionColor {
+        session_id: String,
+        color: Option<String>,
     },
     Attach {
         session_id: String,

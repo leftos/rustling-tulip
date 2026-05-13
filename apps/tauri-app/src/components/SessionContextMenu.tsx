@@ -16,6 +16,12 @@ import {
   resolveFontSize,
   setSessionFontSize,
 } from "../utils/fontSize";
+import {
+  DEFAULT_SESSION_COLOR,
+  normalizeSessionColor,
+  SESSION_COLOR_PRESETS,
+  sessionAccentStyle,
+} from "../utils/sessionColor";
 
 export interface SessionContextMenuState {
   x: number;
@@ -91,6 +97,7 @@ export default function SessionContextMenu({
     !isInactive && (s.status === "stopped" || s.status === "error");
   const [closeMode, setCloseMode] = useState<CloseMode>("idle");
   const [renameMode, setRenameMode] = useState<RenameMode>(null);
+  const currentColor = normalizeSessionColor(s.accent_color);
 
   const sendRename = (raw: string) => {
     const trimmed = raw.trim();
@@ -115,6 +122,14 @@ export default function SessionContextMenu({
       Math.min(MAX_FONT_SIZE, sessionFontSize + delta),
     );
     setSessionFontSize(s.id, next);
+  };
+  const sendColor = (color: string | null) => {
+    client.send({
+      type: "set_session_color",
+      session_id: s.id,
+      color,
+    });
+    onClose();
   };
 
   const sendStop = (removeWorktree: boolean) => {
@@ -375,6 +390,71 @@ export default function SessionContextMenu({
                   data-testid="session-context-font-reset"
                 >
                   &nbsp;&nbsp;Reset to tab/app default
+                </button>
+              </li>
+            )}
+
+            <li className="context-menu-separator" aria-hidden="true" />
+            <li className="context-menu-label">
+              Color{" "}
+              <span
+                className={
+                  currentColor
+                    ? "context-menu-chip context-menu-chip-emph"
+                    : "context-menu-chip"
+                }
+              >
+                {currentColor ?? "default"}
+              </span>
+            </li>
+            <li>
+              <div
+                className="session-color-list"
+                role="group"
+                aria-label="Preset colors"
+              >
+                {SESSION_COLOR_PRESETS.map((preset, index) => (
+                  <button
+                    key={preset.color}
+                    type="button"
+                    className="session-color-preset"
+                    style={sessionAccentStyle(preset.color)}
+                    title={`Use ${preset.name} (${preset.color})`}
+                    aria-label={`Use ${preset.name} session color`}
+                    data-testid={`session-context-color-${index}`}
+                    data-session-color={preset.color}
+                    onClick={() => sendColor(preset.color)}
+                  >
+                    <span
+                      className="session-color-preview-dot"
+                      aria-hidden="true"
+                    />
+                    <span className="session-color-preview-label">{preset.name}</span>
+                    <span className="context-menu-hint">{preset.color}</span>
+                  </button>
+                ))}
+              </div>
+            </li>
+            <li>
+              <label className="session-color-custom">
+                <span>Custom</span>
+                <input
+                  type="color"
+                  value={currentColor ?? DEFAULT_SESSION_COLOR}
+                  aria-label="Custom session color"
+                  data-testid="session-context-color-custom"
+                  onChange={(e) => sendColor(e.currentTarget.value)}
+                />
+              </label>
+            </li>
+            {currentColor && (
+              <li>
+                <button
+                  type="button"
+                  onClick={() => sendColor(null)}
+                  data-testid="session-context-color-reset"
+                >
+                  Reset color
                 </button>
               </li>
             )}

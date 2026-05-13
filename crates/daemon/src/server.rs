@@ -957,6 +957,17 @@ async fn dispatch(
                 );
             }
         }
+        ClientMessage::SetSessionColor { session_id, color } => {
+            let color = normalize_session_color(color)?;
+            let mut applied = None;
+            hub.sessions.update(&session_id, |guard| {
+                guard.accent_color.clone_from(&color);
+                applied = Some(guard.accent_color.clone());
+            });
+            if let Some(color) = applied {
+                orphan::try_update_accent_color(&hub.dirs, &session_id, color.as_deref());
+            }
+        }
         ClientMessage::Attach { session_id } => {
             attached.lock().await.insert(session_id);
         }
@@ -1584,6 +1595,23 @@ async fn dispatch(
         }
     }
     Ok(())
+}
+
+fn normalize_session_color(color: Option<String>) -> anyhow::Result<Option<String>> {
+    let Some(raw) = color else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let Some(hex) = trimmed.strip_prefix('#') else {
+        return Err(anyhow!("session color must use #RRGGBB format"));
+    };
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(anyhow!("session color must use #RRGGBB format"));
+    }
+    Ok(Some(format!("#{}", hex.to_ascii_lowercase())))
 }
 
 enum CloseOutcome {
@@ -2283,6 +2311,7 @@ async fn spawn_interactive_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        accent_color: None,
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,
@@ -2434,6 +2463,7 @@ async fn spawn_plain_shell_session(
         agent: Agent::Claude,
         terminal_title: None,
         program_name: Some(shell_label.clone()),
+        accent_color: None,
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,
@@ -2564,6 +2594,7 @@ fn spawn_headless_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        accent_color: None,
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,

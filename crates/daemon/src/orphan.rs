@@ -88,6 +88,10 @@ pub struct OrphanMeta {
     /// watcher will repopulate it on the next title broadcast.
     #[serde(default)]
     pub terminal_title: Option<String>,
+    /// User-chosen accent color (`#rrggbb`) for the session UI. `None`
+    /// means the app uses its theme accent.
+    #[serde(default)]
+    pub accent_color: Option<String>,
     /// Spawn-time configuration used to clone this session via
     /// [`protocol::ClientMessage::DuplicateSession`]. `None` for sidecars
     /// written by daemon versions before this field existed; reattached
@@ -387,6 +391,7 @@ pub fn meta_from_record(
         program_name,
         agent: Some(agent),
         terminal_title: None,
+        accent_color: None,
         spawn_config,
         last_prompt,
         recent_actions_tail: Vec::new(),
@@ -465,6 +470,31 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
 pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
     if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
         warn!(?err, %session_id, "failed to update orphan meta terminal_title");
+    }
+}
+
+pub fn update_accent_color(
+    dirs: &Dirs,
+    session_id: &str,
+    color: Option<&str>,
+) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("reading meta for accent_color update"),
+    };
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for accent_color update")?;
+    if meta.accent_color.as_deref() == color {
+        return Ok(());
+    }
+    meta.accent_color = color.map(str::to_string);
+    write_meta(dirs, &meta)
+}
+
+pub fn try_update_accent_color(dirs: &Dirs, session_id: &str, color: Option<&str>) {
+    if let Err(err) = update_accent_color(dirs, session_id, color) {
+        warn!(?err, %session_id, "failed to update orphan meta accent_color");
     }
 }
 
@@ -568,6 +598,7 @@ mod tests {
             program_name: Some("rt-tracer".to_string()),
             agent: Some(Agent::Claude),
             terminal_title: None,
+            accent_color: Some("#2f81f7".to_string()),
             spawn_config: None,
             last_prompt: None,
             recent_actions_tail: Vec::new(),
@@ -588,6 +619,7 @@ mod tests {
             decoded.tracer_exe_path.as_deref(),
             Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe")
         );
+        assert_eq!(decoded.accent_color.as_deref(), Some("#2f81f7"));
     }
 
     #[test]

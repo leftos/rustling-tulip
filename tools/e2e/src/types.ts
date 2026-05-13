@@ -51,6 +51,7 @@ export interface SessionSnapshot {
   is_orphan: boolean;
   workspace_id: string | null;
   terminal_title?: string | null;
+  accent_color?: string | null;
 }
 
 export type SplitDirection = "horizontal" | "vertical";
@@ -103,6 +104,7 @@ export type ClientMessage =
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "rename_session"; session_id: string; label: string | null }
+  | { type: "set_session_color"; session_id: string; color: string | null }
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "discard_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
