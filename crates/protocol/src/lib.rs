@@ -257,10 +257,9 @@ pub struct SessionSnapshot {
     pub program_name: Option<String>,
     /// True when the session was spawned with `use_worktree = true`, i.e.
     /// the daemon created (or reused) a per-session git worktree under
-    /// `<repo>.wt/<branch>`. Drives the close-context-menu's "remove
+    /// `<repo>.wt/<branch>`. Drives the close-context-menu's "delete
     /// worktree" choice: only when this is true does the menu offer
-    /// "Close and remove worktree" vs "Close and keep worktree". For
-    /// orphans with no stored spawn config we conservatively default to
+    /// per-session worktree deletion. For orphans with no stored spawn config we conservatively default to
     /// `false` (the cleanup choice is hidden, but the worktree is still
     /// on disk for the user to clean up manually).
     #[serde(default)]
@@ -1025,6 +1024,10 @@ pub enum ClientMessage {
     },
     StopSession {
         session_id: String,
+        /// Legacy field kept for wire compatibility. Stop only terminates the
+        /// process and retains the stopped session record; use
+        /// [`ClientMessage::DiscardSession`] to remove the session record or
+        /// delete worktrees.
         cleanup: Vec<CleanupAction>,
     },
     /// Replay an abandoned session: read its stored [`SpawnConfig`] and

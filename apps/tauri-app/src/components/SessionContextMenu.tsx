@@ -118,14 +118,25 @@ export default function SessionContextMenu({
   };
 
   const sendStop = (removeWorktree: boolean) => {
+    const cleanup = s.members.map((m) => ({
+      repo_id: m.repo_id,
+      remove_worktree: removeWorktree,
+    }));
     client.send({
       type: "stop_session",
       session_id: s.id,
-      cleanup: s.members.map((m) => ({
-        repo_id: m.repo_id,
-        remove_worktree: removeWorktree,
+      cleanup: cleanup.map((action) => ({
+        ...action,
+        remove_worktree: false,
       })),
     });
+    if (removeWorktree) {
+      client.send({
+        type: "discard_session",
+        session_id: s.id,
+        cleanup,
+      });
+    }
     onClose();
   };
 
@@ -400,7 +411,7 @@ export default function SessionContextMenu({
                       data-testid="session-context-remove-with-worktree"
                       title="Remove this entry and delete the worktree from disk"
                     >
-                      Remove from sidebar and worktree
+                      Remove from sidebar and delete worktree
                     </button>
                   </li>
                 )}
@@ -442,7 +453,7 @@ export default function SessionContextMenu({
                     }
                   >
                     {s.has_per_session_worktree
-                      ? "Remove pane and worktree"
+                      ? "Remove pane and delete worktree"
                       : "Remove pane"}
                   </button>
                 </li>
@@ -453,10 +464,10 @@ export default function SessionContextMenu({
                   type="button"
                   className="danger"
                   onClick={() => setCloseMode("confirming")}
-                  title="Terminate this session (asks before removing worktrees)"
+                  title="Stop this session (asks before deleting worktrees)"
                   data-testid="session-context-close"
                 >
-                  Terminate shell…
+                  Stop session…
                 </button>
               </li>
             )}
@@ -491,7 +502,7 @@ function CloseConfirm({
             onClick={onCloseRemove}
             data-testid="session-context-close-remove-worktree"
           >
-            Close and remove worktree
+            Stop and delete worktree
           </button>
         </li>
       )}
@@ -506,7 +517,7 @@ function CloseConfirm({
               : "session-context-close-confirm"
           }
         >
-          {hasWorktree ? "Close and keep worktree" : "Confirm close"}
+          {hasWorktree ? "Stop session, keep worktree" : "Stop session"}
         </button>
       </li>
       <li>

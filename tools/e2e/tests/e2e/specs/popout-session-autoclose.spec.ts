@@ -1,22 +1,16 @@
 /**
- * Pop-out session window auto-close spec.
+ * Pop-out pane stop/discard lifecycle spec.
  *
- * Verifies that when a session is stopped from the main window, any open
- * pop-out window for that session closes itself automatically.
+ * Verifies that stopping a session leaves a pane pop-out open on the stopped
+ * placeholder, and discarding the stopped session closes the pop-out.
  *
  * This spec exercises the multi-window WebDriver path: `captureNewWindow`
  * records the set of WebDriver handles before the pop-out opens, clicks the
  * "Pop out" button, polls until a new handle appears, then uses
  * `switchToWindow` to assert content in the pop-out before switching back.
  *
- * After the session is stopped via the side-channel WS, the pop-out's
- * `useEffect` (in `App.tsx`) removes the session from state and calls
- * `getCurrentWindow().close()` — this spec asserts that handle subsequently
- * disappears from `getWindowHandles()`.
- *
- * Audit finding: "Pop-out session window never auto-closes when its session
- * is stopped or removed" — resolved in iter 19; this spec locks in the
- * regression guard.
+ * After the stopped session is discarded via the side-channel WS, the pane
+ * loses its binding and the pop-out's `useEffect` closes the window.
  */
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -38,7 +32,7 @@ import type {
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
 
-describe("pop-out session window auto-close", function () {
+describe("pop-out pane stop/discard lifecycle", function () {
   this.timeout(180_000);
 
   let ws: DaemonWsClient | null = null;
@@ -64,7 +58,7 @@ describe("pop-out session window auto-close", function () {
     if (ws && spawnedSessionId) {
       try {
         ws.send({
-          type: "stop_session",
+          type: "discard_session",
           session_id: spawnedSessionId,
           cleanup: registeredRepoId
             ? [{ repo_id: registeredRepoId, remove_worktree: false }]
@@ -87,7 +81,7 @@ describe("pop-out session window auto-close", function () {
     if (fixtureRepo) await rm(fixtureRepo, { recursive: true, force: true });
   });
 
-  it("closes the pop-out window when the session is stopped from the main window", async function () {
+  it("keeps the pop-out open when stopped, then closes it when discarded", async function () {
     expect(ws, "ws").to.not.be.null;
     expect(fixtureRepo, "fixtureRepo").to.not.be.null;
     if (!ws || !fixtureRepo) throw new Error("setup failed");
@@ -206,17 +200,32 @@ describe("pop-out session window auto-close", function () {
     await reopenedRoot.waitForExist({ timeout: 5_000 });
     await reopened.deactivate();
 
-    // Stop the session from the main window via the side-channel WS. The fake
-    // agent can also exit naturally before this step; either path removes the
-    // session from app state, and the pop-out should close.
+    // Stop the session from the main window via the side-channel WS. Stop now
+    // retains the session record and pane binding, so the pop-out should stay
+    // open and render the same stopped placeholder as the docked pane.
     ws.send({
       type: "stop_session",
       session_id: sessionId,
       cleanup: [{ repo_id: registeredRepoId, remove_worktree: false }],
     });
-    spawnedSessionId = null; // already stopped; skip in after()
+    await delay(500);
+    expect(
+      (await browser.getWindowHandles()).includes(reopened.handle),
+      "pop-out remains open after stop",
+    ).to.be.true;
+    await reopened.activate();
+    const exited = await browser.$("[data-testid=session-exited]");
+    await exited.waitForExist({ timeout: 10_000 });
+    await reopened.deactivate();
 
-    // The pop-out must auto-close once App.tsx observes the removed session.
+    // Discard is the explicit removal path. Once the pane binding disappears,
+    // the pane pop-out should close.
+    ws.send({
+      type: "discard_session",
+      session_id: sessionId,
+      cleanup: [{ repo_id: registeredRepoId, remove_worktree: false }],
+    });
+    spawnedSessionId = null;
     await reopened.waitForClose({ timeoutMs: 10_000 });
   });
 });

@@ -8,12 +8,12 @@ interface Props {
   onCancel: () => void;
   /// close_pane only — session keeps running in the sidebar / other tabs.
   onClosePaneKeepSession: () => void;
-  /// close_pane + stop_session with remove_worktree=false. The worktree
-  /// directory survives on disk so the user can keep poking at files.
+  /// stop_session + close_pane. The worktree directory survives on disk so
+  /// the user can keep poking at files.
   onCloseAndStopKeepWorktree: () => void;
-  /// close_pane + stop_session with remove_worktree=true. Daemon runs
-  /// `git worktree remove --force` for each member after killing the
-  /// process. Only offered when the session was spawned with a worktree.
+  /// stop_session + discard_session with remove_worktree=true. Daemon runs
+  /// `git worktree remove --force` for each member after the explicit
+  /// discard. Only offered when the session was spawned with a worktree.
   onCloseAndStopRemoveWorktree: () => void;
 }
 
@@ -29,7 +29,7 @@ interface Props {
 /// because removing the layout reference is still useful. The two
 /// "stop session" buttons disappear once the session is already stopped
 /// — there's nothing left to kill, only the worktree to clean up via
-/// "remove worktree".
+/// "delete worktree".
 export default function PaneCloseDialog({
   session,
   onCancel,
@@ -45,9 +45,7 @@ export default function PaneCloseDialog({
   const isStopped = session.status === "stopped";
   const hasWorktree = session.has_per_session_worktree;
   const label = sessionDisplayLabel(session);
-  const stopLabel = hasWorktree
-    ? "Stop session, keep worktree"
-    : "Stop session";
+  const stopLabel = hasWorktree ? "Stop session, keep worktree" : "Stop session";
 
   return (
     <div
@@ -119,9 +117,7 @@ export default function PaneCloseDialog({
               onClick={onCloseAndStopRemoveWorktree}
               data-testid="pane-close-dialog-stop-remove"
             >
-              {isStopped
-                ? "Remove worktree"
-                : "Stop session, remove worktree"}
+              {isStopped ? "Delete worktree" : "Stop session, delete worktree"}
             </button>
           )}
         </footer>

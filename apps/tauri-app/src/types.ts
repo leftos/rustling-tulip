@@ -107,7 +107,7 @@ export interface SessionSnapshot {
   program_name: string | null;
   // True when the session was spawned with use_worktree=true (per-session
   // worktree under <repo>.wt/<branch>). Drives the close-context-menu's
-  // "remove worktree" choice. false for orphans whose stored spawn config
+  // "delete worktree" choice. false for orphans whose stored spawn config
   // pre-dates this field — the worktree may still exist on disk.
   has_per_session_worktree: boolean;
   // True when the session is parked: process stopped, worktree kept on disk,

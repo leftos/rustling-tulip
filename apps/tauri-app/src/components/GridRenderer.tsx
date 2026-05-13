@@ -305,19 +305,31 @@ function PaneChrome(props: PaneChromeProps) {
   const stopSessionAndClosePane = useCallback(
     (removeWorktree: boolean) => {
       if (!session) return;
+      const cleanup = session.members.map((m) => ({
+        repo_id: m.repo_id,
+        remove_worktree: removeWorktree,
+      }));
       client.send({
         type: "stop_session",
         session_id: session.id,
-        cleanup: session.members.map((m) => ({
-          repo_id: m.repo_id,
-          remove_worktree: removeWorktree,
+        cleanup: cleanup.map((action) => ({
+          ...action,
+          remove_worktree: false,
         })),
       });
-      client.send({
-        type: "close_pane",
-        tab_id: tabId,
-        pane_id: node.pane_id,
-      });
+      if (removeWorktree) {
+        client.send({
+          type: "discard_session",
+          session_id: session.id,
+          cleanup,
+        });
+      } else {
+        client.send({
+          type: "close_pane",
+          tab_id: tabId,
+          pane_id: node.pane_id,
+        });
+      }
     },
     [client, session, tabId, node.pane_id],
   );

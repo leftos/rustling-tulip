@@ -732,16 +732,15 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
 }
 
 fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces, tabs, container_order, session_order) =
-        hub.state.with_persisted(|s| {
-            (
-                s.repos.clone(),
-                s.workspaces.clone(),
-                s.tabs.clone(),
-                s.container_order.clone(),
-                s.session_order.clone(),
-            )
-        });
+    let (repos, workspaces, tabs, container_order, session_order) = hub.state.with_persisted(|s| {
+        (
+            s.repos.clone(),
+            s.workspaces.clone(),
+            s.tabs.clone(),
+            s.container_order.clone(),
+            s.session_order.clone(),
+        )
+    });
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
     let _ = out_tx.send(DaemonMessage::ContainersReordered {
@@ -882,7 +881,10 @@ async fn dispatch(
         }
         ClientMessage::ParseVscodeWorkspace { path } => {
             let known_repos: Vec<(String, String)> = hub.state.with_persisted(|s| {
-                s.repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect()
+                s.repos
+                    .iter()
+                    .map(|r| (r.id.clone(), r.path.clone()))
+                    .collect()
             });
             let suggestion =
                 crate::vscode::parse_workspace_file(std::path::Path::new(&path), &known_repos)
@@ -1001,9 +1003,9 @@ async fn dispatch(
         }
         ClientMessage::StopSession {
             session_id,
-            cleanup,
+            cleanup: _,
         } => {
-            stop_session(hub, &session_id, &cleanup).await?;
+            stop_session(hub, &session_id).await?;
             // Surface a one-shot Attention so connected clients can prompt.
             let _ = out_tx.send(DaemonMessage::Attention {
                 session_id,
@@ -1652,7 +1654,7 @@ async fn shutdown_all(hub: &Hub) {
     info!(count = ids.len(), "shutdown_all: starting");
     for id in &ids {
         info!(session_id = %id, "shutdown_all: stopping session");
-        if let Err(err) = stop_session(hub, id, &[]).await {
+        if let Err(err) = stop_session(hub, id).await {
             warn!(session_id = %id, ?err, "stop_session during shutdown failed");
         }
         info!(session_id = %id, "shutdown_all: session stopped");
@@ -1971,11 +1973,9 @@ pub(crate) async fn spawn_session(
             }
         }
         SpawnTarget::Workspace { workspace_id, .. } => {
-            if let Err(err) = persist_workspace_last_spawn_config(
-                &hub.state,
-                workspace_id,
-                stored_config.clone(),
-            ) {
+            if let Err(err) =
+                persist_workspace_last_spawn_config(&hub.state, workspace_id, stored_config.clone())
+            {
                 warn!(?err, %workspace_id, "persist_workspace_last_spawn_config failed");
             } else {
                 workspaces_changed = true;
@@ -2863,14 +2863,28 @@ async fn park_session(hub: &Hub, session_id: &str) {
 /// Remove a stopped or inactive session from the registry. Optionally removes
 /// per-member worktrees from disk. Does not kill a running session.
 async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::CleanupAction]) {
-    let members = hub
+    let (members, has_per_session_worktree) = hub
         .sessions
         .get(session_id)
-        .map(|rec| crate::sync::lock(&rec).members.clone())
-        .unwrap_or_default();
+        .map(|rec| {
+            let guard = crate::sync::lock(&rec);
+            let spawned_with_worktree =
+                guard
+                    .spawn_config
+                    .as_ref()
+                    .is_some_and(|cfg| match &cfg.target {
+                        SpawnTarget::Single { use_worktree, .. }
+                        | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                    });
+            (
+                guard.members.clone(),
+                spawned_with_worktree || !guard.worktree_paths.is_empty(),
+            )
+        })
+        .unwrap_or_else(|| (Vec::new(), false));
 
     for action in cleanup {
-        if !action.remove_worktree {
+        if !action.remove_worktree || !has_per_session_worktree {
             continue;
         }
         let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
@@ -2896,21 +2910,13 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
     prune_session_from_tabs(hub, session_id);
 }
 
-async fn stop_session(
-    hub: &Hub,
-    session_id: &str,
-    cleanup: &[protocol::CleanupAction],
-) -> anyhow::Result<()> {
+async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     let Some(rec) = hub.sessions.get(session_id) else {
         return Err(anyhow!("unknown session: {session_id}"));
     };
-    let (members, pty, headless_handle) = {
+    let (pty, headless_handle) = {
         let guard = crate::sync::lock(&rec);
-        (
-            guard.members.clone(),
-            guard.pty.clone(),
-            guard.headless.clone(),
-        )
+        (guard.pty.clone(), guard.headless.clone())
     };
     let had_live_handle = pty.is_some() || headless_handle.is_some();
     if let Some(pty) = pty {
@@ -2923,9 +2929,8 @@ async fn stop_session(
         // Orphan session — neither PTY nor headless handle survived the
         // daemon restart. Read the sidecar to recover the pid and try a
         // best-effort kill. Without this, `stop_session` on an orphan
-        // would prune daemon state but leave the underlying claude /
-        // shell process running forever (audit: "Orphan banner instructs
-        // to Stop ... but Stop does nothing to the underlying process").
+        // would mark daemon state as stopped but leave the underlying
+        // claude / shell process running forever.
         match orphan::load_meta(&hub.dirs, session_id) {
             Ok(meta) => {
                 if orphan::kill_pid(&meta) {
@@ -2943,30 +2948,15 @@ async fn stop_session(
             }
         }
     }
-    for action in cleanup {
-        if !action.remove_worktree {
-            continue;
-        }
-        let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
-            continue;
-        };
-        let repo_path = hub.state.with_persisted(|s| {
-            s.repos
-                .iter()
-                .find(|r| r.id == member.repo_id)
-                .map(|r| r.path.clone())
-        });
-        let Some(repo_path) = repo_path else {
-            continue;
-        };
-        let worktree_path = PathBuf::from(&member.worktree_path);
-        if let Err(err) = git::worktree_remove(Path::new(&repo_path), &worktree_path).await {
-            warn!(?err, "worktree remove failed");
-        }
-    }
-    hub.sessions.remove(session_id);
-    orphan::try_delete_session_dir(&hub.dirs, session_id);
-    prune_session_from_tabs(hub, session_id);
+    hub.sessions.update(session_id, |r| {
+        r.status = protocol::SessionStatus::Stopped;
+        r.pty = None;
+        r.headless = None;
+        r.input_notifier = None;
+        r.is_inactive = false;
+        push_recent_action(r, "stopped by user".to_string());
+    });
+    orphan::try_delete_meta(&hub.dirs, session_id);
     Ok(())
 }
 

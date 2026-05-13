@@ -151,7 +151,7 @@ export default function SessionPane({
       session_id: session.id,
       cleanup: session.members.map((m) => ({
         repo_id: m.repo_id,
-        remove_worktree: true,
+        remove_worktree: session.has_per_session_worktree,
       })),
     });
   }, [client, session]);
@@ -428,7 +428,7 @@ export default function SessionPane({
                     }
                   >
                     {session.has_per_session_worktree
-                      ? "Remove pane and worktree"
+                      ? "Remove pane and delete worktree"
                       : "Remove pane"}
                   </button>
                 </div>

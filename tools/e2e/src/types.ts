@@ -104,6 +104,7 @@ export type ClientMessage =
   | { type: "detach"; session_id: string }
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
+  | { type: "discard_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "list_tabs" }
   | {
       type: "create_tab";

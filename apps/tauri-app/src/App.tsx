@@ -978,11 +978,9 @@ export default function App() {
     void getCurrentWindow().close();
   }, [state.tabs]);
 
-  // Session pop-out: close itself when the session it was rendering is
-  // removed from the registry (Stop session in the main window, or any
-  // daemon-side cleanup). Previously the pop-out kept rendering an
-  // exit-code state forever — see ux-audit "Pop-out session window never
-  // auto-closes when its session is stopped or removed".
+  // Session pop-out: close itself only when the session it was rendering is
+  // removed from the registry. A stopped session remains renderable so the
+  // pop-out can show the same restart/remove surface as an in-grid pane.
   useEffect(() => {
     if (!popoutSessionId) return;
     if (state.sessions.length === 0) return; // not yet hydrated
@@ -1166,8 +1164,8 @@ export default function App() {
   // Orphans are non-stopped sessions whose PTY handle was lost across a
   // daemon restart. Counted separately so the exit-confirm dialog can
   // explain why "Stop sessions & quit" is a no-op for them (the daemon's
-  // stop_session early-returns when the pty handle is None — there's
-  // nothing to send the kill signal to). See ux-audit "No active
+  // an orphan needs a best-effort sidecar kill rather than a live PTY
+  // handle. See ux-audit "No active
   // sessions message hides orphan sessions".
   const orphanSessionCount = useMemo(
     () =>
@@ -1879,15 +1877,17 @@ function handleMessage(
       if (isNew) seenSessionIdsRef.current.add(session.id);
       const intent = isNew ? pendingSpawnIntentRef.current : null;
       // Detect self-exit: status just transitioned to "stopped" from an
-      // active state (NOT user-initiated, which fires SessionRemoved instead),
-      // AND the session is not already parked (is_inactive covers the
-      // park_session feedback loop).
+      // active state with a child exit code, AND the session is not already
+      // parked (is_inactive covers the park_session feedback loop). Explicit
+      // Stop first emits a retained stopped snapshot without an exit code, so
+      // it does not take the auto-discard path for no-worktree sessions.
       const prevSession = latestStateRef.current?.sessions.find(
         (sn) => sn.id === session.id,
       );
       const justSelfExited =
         !isNew &&
         session.status === "stopped" &&
+        session.exit_code !== null &&
         !session.is_inactive &&
         prevSession !== undefined &&
         prevSession.status !== "stopped" &&
