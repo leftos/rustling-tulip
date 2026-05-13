@@ -120,6 +120,7 @@ export default function TabWindow({
              in the main window; we just can't activate it from here. */
           onArmNextNewTab={() => {}}
           onArmFocusNewPane={onArmFocusNewPane}
+          onTabSnapshotUndo={() => {}}
           inPopout
         />
       )}

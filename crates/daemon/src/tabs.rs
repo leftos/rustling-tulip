@@ -71,6 +71,12 @@ pub fn restore_tab(
     Ok(tab)
 }
 
+pub fn restore_tab_snapshot(tabs: &mut [TabEntry], tab: TabEntry) -> anyhow::Result<TabEntry> {
+    let existing = find_tab_mut(tabs, &tab.id)?;
+    *existing = tab.clone();
+    Ok(tab)
+}
+
 /// Pick the smallest positive integer N such that neither `"Tab"` (for
 /// N == 1) nor `"Tab N"` (for N >= 2) already appears in `existing`'s
 /// names. Lets a closed-and-reopened tab reuse the freed slot instead of
@@ -784,6 +790,26 @@ mod tests {
         let err = restore_tab(&mut tabs, existing, 0).expect_err("duplicate id");
 
         assert!(err.to_string().contains("tab already exists"));
+    }
+
+    #[test]
+    fn restore_tab_snapshot_replaces_live_tab() {
+        let original = make_tab(Some("Original".to_string()), None, &[]);
+        let mut tabs = vec![original.clone()];
+        let replacement = TabEntry {
+            id: original.id.clone(),
+            name: "Restored".to_string(),
+            content: TabContent::Grid {
+                grid: pane("restored-pane", None),
+            },
+            created_at: original.created_at,
+        };
+
+        let restored =
+            restore_tab_snapshot(&mut tabs, replacement.clone()).expect("restore snapshot");
+
+        assert_eq!(restored, replacement);
+        assert_eq!(tabs[0], replacement);
     }
 
     #[test]

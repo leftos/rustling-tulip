@@ -7,7 +7,7 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type { DaemonMessage, TabEntry } from "../../../src/types.js";
+import type { DaemonMessage, GridNode, TabEntry } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -109,6 +109,82 @@ describe("undo shelf", function () {
       visibleNames.indexOf("Undo second"),
     );
   });
+
+  it("restores a closed pane layout in the active tab", async function () {
+    if (!ws) {
+      throw new Error("setup failed");
+    }
+
+    const tab = await createTab(ws, "Undo pane");
+    createdTabIds.push(tab.id);
+    await tabPill(tab.id).click();
+
+    const rootPaneId = paneIds(tab)[0];
+    if (!rootPaneId) {
+      throw new Error("new tab did not contain a root pane");
+    }
+
+    const split = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) && msg.tab.id === tab.id && paneIds(msg.tab).length === 2,
+      { timeoutMs: 5_000 },
+    );
+    ws.send({
+      type: "split_pane",
+      tab_id: tab.id,
+      pane_id: rootPaneId,
+      direction: "horizontal",
+      place: "second",
+      new_session_id: null,
+    });
+    const splitTab = (await split).tab;
+    const beforeClosePaneIds = paneIds(splitTab);
+    const closePaneId = beforeClosePaneIds[1];
+    if (!closePaneId) {
+      throw new Error("split tab did not contain a second pane");
+    }
+
+    const closed = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) && msg.tab.id === tab.id && paneIds(msg.tab).length === 1,
+      { timeoutMs: 5_000 },
+    );
+    const closeButton = await browser.$(
+      `.grid-pane[data-pane-id="${closePaneId}"] [data-testid="grid-pane-close"]`,
+    );
+    await closeButton.waitForExist({ timeout: 5_000 });
+    await closeButton.click();
+    await closed;
+
+    await browser.waitUntil(
+      async () =>
+        !(await browser
+          .$(`.grid-pane[data-pane-id="${closePaneId}"]`)
+          .isExisting()),
+      { timeout: 5_000, timeoutMsg: "closed pane still rendered" },
+    );
+    const shelf = await browser.$('[data-testid="undo-shelf"]');
+    await shelf.waitForExist({ timeout: 5_000 });
+    expect(await shelf.getText()).to.include("Closed empty pane");
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "undo-close-pane-shelf.png"),
+    );
+
+    const restored = ws.waitFor(
+      (msg): msg is TabUpdatedMessage =>
+        isTabUpdated(msg) &&
+        msg.tab.id === tab.id &&
+        paneIds(msg.tab).join("|") === beforeClosePaneIds.join("|"),
+      { timeoutMs: 5_000 },
+    );
+    await browser.$('[data-testid="undo-action"]').click();
+    await restored;
+
+    const restoredPane = await browser.$(
+      `.grid-pane[data-pane-id="${closePaneId}"]`,
+    );
+    await restoredPane.waitForExist({ timeout: 5_000 });
+  });
 });
 
 async function createTab(ws: DaemonWsClient, name: string): Promise<TabEntry> {
@@ -139,6 +215,20 @@ function isTabRemoved(
 ): msg is TabRemovedMessage {
   const candidate = msg as { type?: unknown; tab_id?: unknown };
   return candidate.type === "tab_removed" && candidate.tab_id === tabId;
+}
+
+function paneIds(tab: TabEntry): string[] {
+  if (tab.content.kind !== "grid") {
+    return [];
+  }
+  return collectPaneIds(tab.content.grid);
+}
+
+function collectPaneIds(node: GridNode): string[] {
+  if (node.kind === "pane") {
+    return [node.pane_id];
+  }
+  return [...collectPaneIds(node.first), ...collectPaneIds(node.second)];
 }
 
 function tabPill(tabId: string) {

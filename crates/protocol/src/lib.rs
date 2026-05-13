@@ -1280,6 +1280,11 @@ pub enum ClientMessage {
         /// Desired insertion index. Values past the end append.
         index: usize,
     },
+    /// Replace an existing live tab with a previously captured snapshot.
+    /// Used by pane/layout undo when the tab itself remains open.
+    RestoreTabSnapshot {
+        tab: TabEntry,
+    },
     RenameTab {
         tab_id: String,
         name: String,

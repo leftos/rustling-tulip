@@ -539,6 +539,7 @@ export type ClientMessage =
     }
   | { type: "close_tab"; tab_id: string }
   | { type: "restore_tab"; tab: TabEntry; index: number }
+  | { type: "restore_tab_snapshot"; tab: TabEntry }
   | { type: "rename_tab"; tab_id: string; name: string }
   | { type: "reorder_tabs"; ordered_ids: string[] }
   | { type: "reorder_containers"; ordered: ContainerRef[] }

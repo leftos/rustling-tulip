@@ -53,6 +53,11 @@ interface Props {
   /// (TabWindow). Threads through to EmptyPane so the "Spawn one here"
   /// button is replaced by a hint, since the pop-out has no SpawnDialog.
   inPopout?: boolean;
+  onTabSnapshotUndo: (
+    tab: TabEntry,
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
 }
 
 export default function GridRenderer({
@@ -67,6 +72,7 @@ export default function GridRenderer({
   hasRepos,
   onArmNextNewTab,
   onArmFocusNewPane,
+  onTabSnapshotUndo,
   inPopout,
 }: Props) {
   const grid = tabGrid(tab);
@@ -88,6 +94,7 @@ export default function GridRenderer({
       <NodeRenderer
         node={grid}
         path={[]}
+        tab={tab}
         tabId={tab.id}
         tabs={tabs}
         client={client}
@@ -99,6 +106,7 @@ export default function GridRenderer({
         hasRepos={hasRepos}
         onArmNextNewTab={onArmNextNewTab}
         onArmFocusNewPane={onArmFocusNewPane}
+        onTabSnapshotUndo={onTabSnapshotUndo}
         knownPaneIds={knownPaneIds}
         inPopout={inPopout ?? false}
       />
@@ -109,6 +117,7 @@ export default function GridRenderer({
 interface NodeProps {
   node: GridNode;
   path: number[];
+  tab: TabEntry;
   tabId: string;
   tabs: TabEntry[];
   client: DaemonClient;
@@ -120,6 +129,11 @@ interface NodeProps {
   hasRepos: boolean;
   onArmNextNewTab: () => void;
   onArmFocusNewPane: (tabId: string, knownPaneIds: Set<string>) => void;
+  onTabSnapshotUndo: (
+    tab: TabEntry,
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
   knownPaneIds: Set<string>;
   inPopout: boolean;
 }
@@ -232,7 +246,16 @@ interface PaneContextMenuState {
 }
 
 function PaneChrome(props: PaneChromeProps) {
-  const { node, tabId, client, sessions, subscribePty, focusedPaneId } = props;
+  const {
+    node,
+    tab,
+    tabId,
+    client,
+    sessions,
+    subscribePty,
+    focusedPaneId,
+    onTabSnapshotUndo,
+  } = props;
   const session = node.session_id
     ? (sessions.find((s) => s.id === node.session_id) ?? null)
     : null;
@@ -300,8 +323,12 @@ function PaneChrome(props: PaneChromeProps) {
   );
 
   const closePaneOnly = useCallback(() => {
+    const message = session
+      ? `Closed pane "${sessionDisplayLabel(session)}"`
+      : "Closed empty pane";
+    onTabSnapshotUndo(tab, message, node.pane_id);
     client.send({ type: "close_pane", tab_id: tabId, pane_id: node.pane_id });
-  }, [client, tabId, node.pane_id]);
+  }, [client, session, tab, tabId, node.pane_id, onTabSnapshotUndo]);
 
   const stopSessionAndClosePane = useCallback(
     (removeWorktree: boolean) => {
@@ -444,6 +471,7 @@ function PaneChrome(props: PaneChromeProps) {
     <div
       ref={paneRef}
       className={classes}
+      data-pane-id={node.pane_id}
       onPointerDownCapture={onClick}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}

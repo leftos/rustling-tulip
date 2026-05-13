@@ -103,6 +103,7 @@ type UndoEntry = UndoShelfEntry & {
   tab: TabEntry;
   index: number;
   restoreActive: boolean;
+  restoreFocusedPaneId: string | null;
 };
 
 interface AppState {
@@ -1062,6 +1063,36 @@ export default function App() {
         tab: cloneTab(tab),
         index,
         restoreActive,
+        restoreFocusedPaneId: null,
+        expiresAt: Date.now() + UNDO_TTL_MS,
+      };
+      setState((s) => ({
+        ...s,
+        undoEntries: [
+          entry,
+          ...s.undoEntries.filter((existing) => existing.tab.id !== tab.id),
+        ].slice(0, UNDO_LIMIT),
+      }));
+    },
+    [],
+  );
+
+  const onTabSnapshotUndo = useCallback(
+    (tab: TabEntry, message: string, restoreFocusedPaneId: string | null) => {
+      const current = latestStateRef.current;
+      const index = Math.max(
+        0,
+        current?.tabs.findIndex((existing) => existing.id === tab.id) ?? 0,
+      );
+      const entry: UndoEntry = {
+        id: newUndoId(),
+        kind: "restore_tab",
+        message,
+        actionLabel: "Undo",
+        tab: cloneTab(tab),
+        index,
+        restoreActive: current?.activeTabId === tab.id,
+        restoreFocusedPaneId,
         expiresAt: Date.now() + UNDO_TTL_MS,
       };
       setState((s) => ({
@@ -1088,16 +1119,26 @@ export default function App() {
       return;
     }
     const client = clientRef.current;
+    const tabExists =
+      latestStateRef.current?.tabs.some((tab) => tab.id === entry.tab.id) ??
+      false;
     setState((s) => ({
       ...s,
       undoEntries: s.undoEntries.filter((e) => e.id !== id),
       activeTabId: entry.restoreActive ? entry.tab.id : s.activeTabId,
+      focusedPaneId: entry.restoreActive
+        ? entry.restoreFocusedPaneId
+        : s.focusedPaneId,
     }));
-    client?.send({
-      type: "restore_tab",
-      tab: cloneTab(entry.tab),
-      index: entry.index,
-    });
+    if (tabExists) {
+      client?.send({ type: "restore_tab_snapshot", tab: cloneTab(entry.tab) });
+    } else {
+      client?.send({
+        type: "restore_tab",
+        tab: cloneTab(entry.tab),
+        index: entry.index,
+      });
+    }
   }, []);
 
   const onRemoveRepoWithLiveSessions = useCallback(
@@ -1840,6 +1881,7 @@ export default function App() {
                 hasRepos={state.repos.length > 0}
                 onArmNextNewTab={onArmNextNewTab}
                 onArmFocusNewPane={onArmFocusNewPane}
+                onTabSnapshotUndo={onTabSnapshotUndo}
               />
             )
           ) : (
