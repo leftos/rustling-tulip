@@ -82,9 +82,20 @@ describe("spawn defaults", function () {
     const dialog = await openSpawnDialog();
     const skipPerms = await dialog.$('[data-testid="spawn-skip-perms"]');
     expect(await skipPerms.isSelected()).to.equal(false);
+    const inactiveWarning = await dialog.$(
+      '[data-testid="spawn-trusted-launch-warning"]',
+    );
+    expect(await inactiveWarning.isExisting()).to.equal(false);
+
+    await skipPerms.click();
+    const warning = await dialog.$(
+      '[data-testid="spawn-trusted-launch-warning"]',
+    );
+    await warning.waitForExist({ timeout: 5_000 });
+    expect((await warning.getText()).toLowerCase()).to.include("trusted launch");
     await assertStoredSkipPermissionsDefault(false);
     await browser.saveScreenshot(
-      join(repoRoot, ".tmp", "e2e", "spawn-default-safe-after.png"),
+      join(repoRoot, ".tmp", "e2e", "spawn-trusted-launch-warning.png"),
     );
     await closeSpawnDialog();
   });
@@ -98,6 +109,11 @@ describe("spawn defaults", function () {
     const dialog = await openSpawnDialog();
     const skipPerms = await dialog.$('[data-testid="spawn-skip-perms"]');
     expect(await skipPerms.isSelected()).to.equal(true);
+    const warning = await dialog.$(
+      '[data-testid="spawn-trusted-launch-warning"]',
+    );
+    await warning.waitForExist({ timeout: 5_000 });
+    expect(await warning.getText()).to.include("--dangerously-skip-permissions");
     await assertStoredSkipPermissionsDefault(true);
     await closeSpawnDialog();
   });

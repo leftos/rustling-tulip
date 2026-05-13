@@ -438,6 +438,10 @@ function Footer({
   const skipPermsLabel = isCodex
     ? "Pass --yolo (skip approvals + sandbox)"
     : "Pass --dangerously-skip-permissions";
+  const authorityFlag = isCodex ? "--yolo" : "--dangerously-skip-permissions";
+  const authorityDetail = isCodex
+    ? "Approvals and sandboxing are bypassed for this session."
+    : "Tool permission prompts are bypassed for this session.";
   return (
     <>
       {!isPlainShell && (
@@ -480,15 +484,32 @@ function Footer({
         </label>
       )}
       {!isPlainShell && (
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={skipPerms}
-            onChange={(e) => onSkipPermsChange(e.target.checked)}
-            data-testid="spawn-skip-perms"
-          />
-          <span>{skipPermsLabel}</span>
-        </label>
+        <>
+          <label
+            className={`checkbox spawn-authority-toggle${skipPerms ? " elevated" : ""}`}
+            data-testid="spawn-authority-toggle"
+          >
+            <input
+              type="checkbox"
+              checked={skipPerms}
+              onChange={(e) => onSkipPermsChange(e.target.checked)}
+              data-testid="spawn-skip-perms"
+            />
+            <span>{skipPermsLabel}</span>
+          </label>
+          {skipPerms && (
+            <div
+              className="spawn-authority-warning"
+              role="status"
+              data-testid="spawn-trusted-launch-warning"
+            >
+              <strong>Trusted launch</strong>
+              <span>
+                {authorityDetail} Uses <code>{authorityFlag}</code>.
+              </span>
+            </div>
+          )}
+        </>
       )}
       <AdvancedSection
         agent={agent}

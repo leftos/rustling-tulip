@@ -2294,6 +2294,42 @@ button.tree-tab-pill:hover {
 .field > legend { color: var(--fg-muted); font-size: 11px; padding: 0 4px; }
 fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; flex-direction: row; gap: 14px; }
 .radio, .checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.spawn-authority-toggle {
+  align-self: flex-start;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+.spawn-authority-toggle.elevated {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 48%, transparent);
+  color: var(--warn);
+}
+.spawn-authority-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 48%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.spawn-authority-warning strong {
+  color: var(--warn);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.spawn-authority-warning code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--warn);
+  font-family: var(--font-mono);
+}
 
 .context-menu-backdrop {
   position: fixed; inset: 0; z-index: 200;

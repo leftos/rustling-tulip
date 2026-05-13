@@ -149,7 +149,7 @@ be honored, but new defaults should not silently grant broad authority.
 - [x] Change the new-install default for skip-permissions/yolo to off.
 - [x] Preserve existing saved user settings through migration or explicit
       compatibility logic.
-- [ ] Add a clear "trusted launch" visual state when skip-permissions/yolo is
+- [x] Add a clear "trusted launch" visual state when skip-permissions/yolo is
       enabled in the spawn dialog.
 - [ ] Add a session header/sidebar badge for sessions launched with elevated
       authority.
