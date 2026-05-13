@@ -37,12 +37,12 @@ describe("daemon error toast", function () {
   });
 
   it("surfaces a daemon Error reply as a bottom-right toast", async function () {
-    // Send an unknown message variant through the React app's own WS. The
-    // daemon's serde decoder rejects it and the dispatcher replies with
-    // DaemonMessage::Error, which the React app's onMessage handler routes
-    // through pushToast.
+    // Send a well-formed request that targets a missing tab through the React
+    // app's own WS. Unknown future message variants are intentionally ignored
+    // by the daemon for forward compatibility; missing-resource failures still
+    // exercise the DaemonMessage::Error toast path.
     await browser.execute(
-      `globalThis.__rt_daemon_client.send({ type: "bogus_message_for_test" });`,
+      `globalThis.__rt_daemon_client.send({ type: "rename_tab", tab_id: "missing_tab_for_test", name: "Nope" });`,
     );
 
     const toast = await browser.$('[data-testid=error-toast]');
@@ -53,24 +53,24 @@ describe("daemon error toast", function () {
 
     const text = await toast.getText();
     expect(text).to.match(/Daemon error/i);
-    expect(text).to.match(/bogus_message_for_test|unknown variant|malformed/i);
+    expect(text).to.include("missing_tab_for_test");
   });
 
   it("dismisses the toast when the close button is clicked", async function () {
     await browser.execute(
-      `globalThis.__rt_daemon_client.send({ type: "another_bogus" });`,
+      `globalThis.__rt_daemon_client.send({ type: "rename_tab", tab_id: "another_missing_tab", name: "Nope" });`,
     );
 
-    // Wait for a toast referencing "another_bogus" to render.
+    // Wait for a toast referencing "another_missing_tab" to render.
     await browser.waitUntil(
       async () => {
         const allToasts = await browser.$$('[data-testid=error-toast]');
         const texts = await allToasts.map((t) => t.getText());
-        return texts.some((t: string) => t.includes("another_bogus"));
+        return texts.some((t: string) => t.includes("another_missing_tab"));
       },
       {
         timeout: 5_000,
-        timeoutMsg: "expected 'another_bogus' toast to appear",
+        timeoutMsg: "expected 'another_missing_tab' toast to appear",
       },
     );
 
@@ -79,25 +79,25 @@ describe("daemon error toast", function () {
     let dismissed = false;
     for (const toast of allToasts) {
       const text = await toast.getText();
-      if (text.includes("another_bogus")) {
+      if (text.includes("another_missing_tab")) {
         const closeBtn = await toast.$('[data-testid=error-toast-close]');
         await closeBtn.click();
         dismissed = true;
         break;
       }
     }
-    expect(dismissed, "found and clicked dismiss on 'another_bogus' toast").to
+    expect(dismissed, "found and clicked dismiss on 'another_missing_tab' toast").to
       .be.true;
 
     await browser.waitUntil(
       async () => {
         const allToasts = await browser.$$('[data-testid=error-toast]');
         const texts = await allToasts.map((t) => t.getText());
-        return !texts.some((t: string) => t.includes("another_bogus"));
+        return !texts.some((t: string) => t.includes("another_missing_tab"));
       },
       {
         timeout: 5_000,
-        timeoutMsg: "expected 'another_bogus' toast to be dismissed",
+        timeoutMsg: "expected 'another_missing_tab' toast to be dismissed",
       },
     );
   });
