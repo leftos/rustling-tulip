@@ -76,11 +76,13 @@ xterm buffer.
 ## How it works
 
 - `src/handshake.ts` mirrors `crates/daemon/src/paths.rs` to find
-  `daemon.json`. In tests the harness sets `RUSTLING_TULIP_CONFIG_DIR` to
-  `.tmp/e2e/config/` so the daemon writes its state, sessions, and logs
-  there instead of the user's real `%APPDATA%\leftos\rustling-tulip\config\`
-  (Windows) / XDG dir. The override is honored by both `Dirs::ensure` in
-  the daemon and `config_dir` in the Tauri app.
+  `daemon.json`. In tests the harness sets `RUSTLING_TULIP_CONFIG_DIR`,
+  `RUSTLING_TULIP_WORKTREES_DIR`, `RUSTLING_TULIP_BINARIES_DIR`, and
+  `RUSTLING_TULIP_TRACER_PIPE_PREFIX` so daemon state, sessions, logs,
+  worktrees, cached process images, and tracer pipes all live under
+  `.tmp/e2e/`. The config override is honored by both `Dirs::ensure` in the
+  daemon and `config_dir` in the Tauri app; the binary override keeps test
+  daemon/tracer process cleanup scoped away from regular `rt.ps1` launches.
 - `src/ws-client.ts` opens a side-channel WebSocket to the daemon. The Tauri
   app already has its own WS client; the side channel exists so tests can
   send `add_repo` etc. without driving the OS file dialog (which is

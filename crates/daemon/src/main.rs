@@ -26,7 +26,7 @@ mod workspace;
 
 use anyhow::Context as _;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         "orphan recovery scan complete"
     );
     sweep_binary_cache(&dirs, &live, &dead);
-    reap_orphan_tracers(&live, &dead);
+    reap_orphan_tracers(&dirs, &live, &dead);
     // Pre-B.2: dead sidecars were unconditionally deleted, losing recovery
     // context. Now we keep them — they become "abandoned" sessions the user
     // can Resume (replay spawn config + last_prompt against a fresh process)
@@ -127,18 +127,20 @@ fn sweep_binary_cache(
     }
 }
 
-/// Find every `rt-tracer.exe` running on the system that no sidecar
-/// references and force-kill it. These are tracers from a previous install
-/// (different config dir, sidecars wiped, etc.) — we can't reattach to them
-/// because we don't have their session metadata, so they're holding system
-/// resources for nothing.
+/// Find every `rt-tracer.exe` running from this daemon's binary cache that no
+/// sidecar references and force-kill it. Tracers from a different launcher or
+/// e2e run live in a different binary cache and are left alone.
 ///
 /// Sidecars in BOTH the live and abandoned buckets count as "referenced" —
 /// abandoned sessions can still be Resumed by the user, and we don't want
 /// to kill the supervisor out from under them. Best-effort: failures are
 /// logged and skipped.
-fn reap_orphan_tracers(live: &[orphan::OrphanMeta], dead: &[orphan::OrphanMeta]) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+fn reap_orphan_tracers(
+    dirs: &paths::Dirs,
+    live: &[orphan::OrphanMeta],
+    dead: &[orphan::OrphanMeta],
+) {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
     let mut referenced: HashSet<u32> = HashSet::new();
     for meta in live.iter().chain(dead.iter()) {
@@ -147,14 +149,9 @@ fn reap_orphan_tracers(live: &[orphan::OrphanMeta], dead: &[orphan::OrphanMeta])
         }
     }
 
-    let mut sys = System::new_with_specifics(
-        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
-    );
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::new(),
-    );
+    let process_refresh = ProcessRefreshKind::new().with_exe(UpdateKind::Always);
+    let mut sys = System::new_with_specifics(RefreshKind::new().with_processes(process_refresh));
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
 
     // Cached tracers are spawned from `<binaries>/rt-tracer-<hash>.exe`, so
     // matching by exact filename misses every cached copy. Prefix-match the
@@ -167,6 +164,12 @@ fn reap_orphan_tracers(live: &[orphan::OrphanMeta], dead: &[orphan::OrphanMeta])
     let mut spared = 0_usize;
     for (pid, proc_) in sys.processes() {
         if !is_tracer_image(&proc_.name().to_string_lossy()) {
+            continue;
+        }
+        if !proc_
+            .exe()
+            .is_some_and(|exe| path_is_under(exe, &dirs.binaries_dir))
+        {
             continue;
         }
         let pid_u32 = pid.as_u32();
@@ -185,10 +188,7 @@ fn reap_orphan_tracers(live: &[orphan::OrphanMeta], dead: &[orphan::OrphanMeta])
         }
     }
     if killed > 0 || failed > 0 || spared > 0 {
-        info!(
-            killed,
-            failed, spared, "orphan tracer reap complete"
-        );
+        info!(killed, failed, spared, "orphan tracer reap complete");
     }
 }
 
@@ -201,6 +201,28 @@ fn is_tracer_image(name: &str) -> bool {
         .strip_suffix(".exe")
         .map_or_else(|| name.to_ascii_lowercase(), str::to_string);
     stem == "rt-tracer" || stem.starts_with("rt-tracer-")
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = normalize_process_path(path);
+    let root = normalize_process_path(root);
+    path == root || path.starts_with(&format!("{root}{}", std::path::MAIN_SEPARATOR))
+}
+
+#[cfg(windows)]
+fn normalize_process_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('/', "\\");
+    let trimmed = raw
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string))
+        .unwrap_or(raw);
+    trimmed.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+#[cfg(not(windows))]
+fn normalize_process_path(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
 }
 
 fn prune_stale_tabs(
@@ -290,7 +312,8 @@ fn init_tracing(dirs: &paths::Dirs) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_tracer_image;
+    use super::{is_tracer_image, path_is_under};
+    use std::path::Path;
 
     #[test]
     fn matches_template_names() {
@@ -312,5 +335,33 @@ mod tests {
         assert!(!is_tracer_image("rustling-tulipd.exe"));
         assert!(!is_tracer_image("tracer.exe"));
         assert!(!is_tracer_image(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_scope_matches_only_cache_children() {
+        let root = Path::new(r"C:\rt\.tmp\e2e\binaries");
+        assert!(path_is_under(
+            Path::new(r"C:\rt\.tmp\e2e\binaries\rt-tracer-hash.exe"),
+            root,
+        ));
+        assert!(!path_is_under(
+            Path::new(r"C:\rt\.tmp\e2e\binaries-other\rt-tracer-hash.exe"),
+            root,
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn path_scope_matches_only_cache_children() {
+        let root = Path::new("/tmp/rt/.tmp/e2e/binaries");
+        assert!(path_is_under(
+            Path::new("/tmp/rt/.tmp/e2e/binaries/rt-tracer-hash"),
+            root,
+        ));
+        assert!(!path_is_under(
+            Path::new("/tmp/rt/.tmp/e2e/binaries-other/rt-tracer-hash"),
+            root,
+        ));
     }
 }

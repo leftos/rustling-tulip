@@ -22,16 +22,24 @@ import { shutdownExistingDaemon } from "./src/lifecycle.js";
 const here = fileURLToPath(new URL(".", import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 
-// Per-run test config dir. The daemon's `paths::Dirs::ensure` and the Tauri
-// app's `config_dir` both honor RUSTLING_TULIP_CONFIG_DIR; setting it here
-// at module evaluation ensures `handshakeFilePath()` (called by
+// Per-run test roots. The app, daemon, and tracer honor these env vars;
+// setting them at module evaluation ensures `handshakeFilePath()` (called by
 // `shutdownExistingDaemon` in onPrepare) and every downstream child process
-// resolve to this directory instead of the user's real %APPDATA%. Without
-// this, a crashed test could corrupt the user's real state.json, and
-// leftover repos/workspaces from real use would contaminate specs.
-const testConfigDir = join(repoRoot, ".tmp", "e2e", "config");
+// resolve to .tmp/e2e instead of the user's real %APPDATA% or binary cache.
+// The separate binary cache is important because daemon/tracer cleanup is
+// intentionally scoped by executable path.
+const testRoot = join(repoRoot, ".tmp", "e2e");
+const testConfigDir = join(testRoot, "config");
+const testWorktreesDir = join(testRoot, "worktrees");
+const testBinariesDir = join(testRoot, "binaries");
+const testTracerPipePrefix = "rt-e2e-tracer";
 mkdirSync(testConfigDir, { recursive: true });
+mkdirSync(testWorktreesDir, { recursive: true });
+mkdirSync(testBinariesDir, { recursive: true });
 process.env["RUSTLING_TULIP_CONFIG_DIR"] = testConfigDir;
+process.env["RUSTLING_TULIP_WORKTREES_DIR"] = testWorktreesDir;
+process.env["RUSTLING_TULIP_BINARIES_DIR"] = testBinariesDir;
+process.env["RUSTLING_TULIP_TRACER_PIPE_PREFIX"] = testTracerPipePrefix;
 process.env["VITE_RT_E2E"] = "1";
 
 // Resolve the fake-claude shim once. The daemon's `claude_program()` honors
@@ -119,7 +127,10 @@ export const config: WebdriverIO.Config = {
     // starts hermetic. Done AFTER shutdownExistingDaemon so any prior test
     // daemon is gone — wiping while one is alive would orphan its process.
     rmSync(testConfigDir, { recursive: true, force: true });
+    rmSync(testWorktreesDir, { recursive: true, force: true });
     mkdirSync(testConfigDir, { recursive: true });
+    mkdirSync(testWorktreesDir, { recursive: true });
+    mkdirSync(testBinariesDir, { recursive: true });
   },
 
   beforeSession: async () => {
@@ -149,23 +160,24 @@ export const config: WebdriverIO.Config = {
     // making the daemon's startup race-safe.
     await shutdownExistingDaemon({ timeoutMs: 4_000 });
     await unlink(handshakeFilePath()).catch(() => undefined);
-    // Inject the fake-claude shim path and the test config dir into
-    // tauri-driver's environment. The driver inherits its env to
-    // msedgedriver, which in turn inherits it to the spawned Tauri app —
-    // and the daemon supervisor inherits it to the daemon. This is the
-    // only way to feed env to the app under tauri-driver 2.0.6 (the
-    // `tauri:options.env` field is unsupported). `process.env` already
-    // carries RUSTLING_TULIP_CONFIG_DIR from module load; making it
-    // explicit here documents the contract. RUSTLING_TULIP_OFFSCREEN_WINDOW
-    // tells the Tauri setup hook to create e2e windows hidden, unfocused, and
-    // offscreen so test runs do not flash over the user's workspace.
+    // Inject the fake-claude shim path and test roots into tauri-driver's
+    // environment. The driver inherits its env to msedgedriver, which in turn
+    // inherits it to the spawned Tauri app — and the daemon supervisor
+    // inherits it to the daemon. This is the only way to feed env to the app
+    // under tauri-driver 2.0.6 (the `tauri:options.env` field is unsupported).
+    // RUSTLING_TULIP_OFFSCREEN_WINDOW tells the Tauri setup hook to create e2e
+    // windows hidden, unfocused, and offscreen so test runs do not flash over
+    // the user's workspace.
     tauriDriver = spawn(tdPath, [], {
       stdio: ["ignore", "inherit", "inherit"],
       env: {
         ...process.env,
         RUSTLING_TULIP_CLAUDE: fakeClaudePath,
+        RUSTLING_TULIP_BINARIES_DIR: testBinariesDir,
         RUSTLING_TULIP_CONFIG_DIR: testConfigDir,
         RUSTLING_TULIP_OFFSCREEN_WINDOW: "1",
+        RUSTLING_TULIP_TRACER_PIPE_PREFIX: testTracerPipePrefix,
+        RUSTLING_TULIP_WORKTREES_DIR: testWorktreesDir,
       },
     });
     tauriDriver.on("error", (err) => {
@@ -182,8 +194,12 @@ export const config: WebdriverIO.Config = {
     });
   },
 
-  afterSession: () => {
+  afterSession: async () => {
     exited = true;
+    await shutdownExistingDaemon({ timeoutMs: 4_000 }).catch((err: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error("[wdio] daemon shutdown after session failed:", err);
+    });
     tauriDriver?.kill();
     tauriDriver = null;
   },

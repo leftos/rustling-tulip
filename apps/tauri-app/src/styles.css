@@ -918,9 +918,9 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree { list-style: none; margin: 0; padding: 4px 8px 16px; display: flex; flex-direction: column; gap: 1px; }
 .tree ul { list-style: none; margin: 0; padding: 0; }
 .tree-children {
-  padding-left: 14px;
+  padding-left: 20px;
   display: flex; flex-direction: column; gap: 1px;
-  margin-top: 1px;
+  margin: 2px 0 4px 3px;
   /* Subtle 1px guide line trailing down the indent column. Reads as a
    * tree, not just an indented list. The hex value is bg-elev3-ish at
    * 40% — borrowed via the border tokens so a future theme tweak
@@ -930,9 +930,21 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree-children::before {
   content: "";
   position: absolute;
-  left: 5px; top: 2px; bottom: 4px;
+  left: 7px; top: 2px; bottom: 5px;
   width: 1px;
-  background: var(--border);
+  background: color-mix(in srgb, var(--border-strong) 52%, transparent);
+  pointer-events: none;
+}
+.tree-children > li {
+  position: relative;
+}
+.tree-children > li:not(.tree-children-banner)::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 13px;
+  width: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--border-strong) 52%, transparent);
   pointer-events: none;
 }
 .tree-children-banner {
@@ -1008,15 +1020,23 @@ button.link.inline { display: inline; padding: 0 2px; }
   color: var(--fg);
 }
 .tree-leaf {
-  padding-left: 12px;
+  padding-left: 10px;
+  min-height: 22px;
+  background: color-mix(in srgb, var(--bg) 78%, var(--bg-elev2));
+  border: 1px solid transparent;
 }
 .tree-leaf .tree-label {
   font-size: var(--text-small);
   color: var(--fg-muted);
 }
+.tree-leaf:hover {
+  background: var(--bg-elev2);
+  border-color: var(--border);
+}
 .tree-leaf:hover .tree-label { color: var(--fg); }
 .tree-leaf.selected {
-  background: var(--accent-soft);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 .tree-leaf.selected .tree-label { color: var(--fg); }
 /* Left-edge accent bar — the IDE-native "you are here" indicator.
@@ -1025,13 +1045,18 @@ button.link.inline { display: inline; padding: 0 2px; }
 .tree-leaf.selected::before {
   content: "";
   position: absolute;
-  left: 0; top: 3px; bottom: 3px;
+  left: -1px; top: 2px; bottom: 2px;
   width: 2px;
   border-radius: 1px;
   background: var(--accent);
 }
-.tree-leaf.needs-attention { background: var(--warn-soft); }
-.tree-leaf.needs-attention.selected { background: var(--warn-soft); }
+.tree-leaf.needs-attention {
+  background: color-mix(in srgb, var(--warn-soft) 72%, var(--bg));
+  border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+}
+.tree-leaf.needs-attention.selected {
+  background: color-mix(in srgb, var(--warn-soft) 82%, var(--bg));
+}
 .tree-leaf.needs-attention.selected::before { background: var(--warn); }
 .tree-leaf.needs-attention .tree-label { color: var(--fg); }
 .tree-leaf.is-orphan .tree-label {
@@ -1846,12 +1871,82 @@ button.tree-tab-pill:hover {
   font-family: var(--font-mono); font-size: 11px; color: var(--accent);
   flex: none;
 }
+.history-commit-row {
+  min-height: 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  overflow: visible;
+}
+.history-commit-row .commit-sha {
+  width: 50px;
+  color: color-mix(in srgb, var(--accent) 86%, var(--fg));
+  font-size: 11px;
+}
+.commit-subject {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit-hover-card {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 8px;
+  right: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev2);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.36);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.4;
+  opacity: 0;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out),
+    visibility var(--dur-fast) var(--ease-out);
+  visibility: hidden;
+}
+.history-commit-row:hover .commit-hover-card {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+.commit-hover-subject {
+  color: var(--fg);
+  font-weight: 600;
+}
+.commit-hover-label {
+  display: inline-block;
+  width: 44px;
+  color: var(--fg-muted);
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
 .diff-pane {
   margin: 0; padding: 8px 12px;
   font-family: var(--font-mono); font-size: 12px;
   overflow: auto;
   background: var(--bg);
   white-space: pre;
+}
+.diff-pane.diff-pane-wrap {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .diff-pane.empty { padding: 32px; color: var(--fg-muted); font-style: italic; }
 .diff-add { color: var(--ok); }

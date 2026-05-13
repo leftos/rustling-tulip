@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const TRACER_PIPE_PREFIX_ENV: &str = "RUSTLING_TULIP_TRACER_PIPE_PREFIX";
 
 /// The result of spawning (or reattaching to) a tracer for a single session.
 pub struct TracerSpawn {
@@ -41,9 +42,8 @@ pub struct TracerSpawn {
     /// OS pid of the `rt-tracer.exe` process. Persisted to the orphan sidecar
     /// so a future daemon can detect a still-live tracer to reattach to.
     pub tracer_pid: u32,
-    /// Pipe name (matches `tracer_protocol::pipe_name(session_id)`). Persisted
-    /// to the sidecar; not derivable from session id alone if the ABI ever
-    /// changes the format.
+    /// Pipe name persisted to the sidecar; not derivable from session id alone
+    /// when a launcher supplies a per-instance pipe namespace.
     pub pipe_name: String,
     /// Absolute path of the cached `rt-tracer.exe` this supervisor was spawned
     /// from (see [`crate::binary_cache`]). Persisted to the sidecar so the
@@ -67,7 +67,7 @@ pub async fn spawn(
     expected_output_subscribers: usize,
 ) -> anyhow::Result<TracerSpawn> {
     let tracer_path = locate_tracer_exe(dirs)?;
-    let pipe = pipe_name(&spec.session_id);
+    let pipe = tracer_pipe_name(&spec.session_id);
     debug!(
         tracer = %tracer_path.display(),
         pipe = %pipe,
@@ -75,7 +75,7 @@ pub async fn spawn(
         "tracer_client: spawning tracer"
     );
 
-    let tracer_pid = spawn_tracer_process(&tracer_path, &spec)?;
+    let tracer_pid = spawn_tracer_process(&tracer_path, &spec, &pipe)?;
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
     let client = connect_with_retry(&pipe).await?;
@@ -128,6 +128,38 @@ fn locate_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
     binary_cache::ensure_cached(&template, &dirs.binaries_dir, stem)
 }
 
+fn tracer_pipe_name(session_id: &str) -> String {
+    let prefix = std::env::var(TRACER_PIPE_PREFIX_ENV).ok();
+    pipe_name_with_prefix(session_id, prefix.as_deref())
+}
+
+fn pipe_name_with_prefix(session_id: &str, prefix: Option<&str>) -> String {
+    if let Some(prefix) = prefix.and_then(sanitize_pipe_prefix) {
+        return format!(r"\\.\pipe\{prefix}-{session_id}");
+    }
+    pipe_name(session_id)
+}
+
+fn sanitize_pipe_prefix(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len().min(80));
+    for ch in raw.chars() {
+        if out.len() >= 80 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 fn locate_tracer_template() -> anyhow::Result<PathBuf> {
     // Preferred: the directory Tauri's supervisor told us holds the original
     // templates. Required when the daemon is running from
@@ -174,7 +206,11 @@ const fn tracer_exe_name() -> &'static str {
 }
 
 #[cfg(windows)]
-fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u32> {
+fn spawn_tracer_process(
+    tracer: &Path,
+    spec: &PtySpawnSpec,
+    pipe_name: &str,
+) -> anyhow::Result<u32> {
     use std::os::windows::process::CommandExt;
     /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
     /// flash for the tracer process. The tracer's tracing output goes to
@@ -185,6 +221,8 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
     let mut cmd = std::process::Command::new(tracer);
     cmd.arg("--session-id")
         .arg(&spec.session_id)
+        .arg("--pipe-name")
+        .arg(pipe_name)
         .arg("--cwd")
         .arg(&spec.cwd)
         .arg("--cols")
@@ -223,8 +261,14 @@ fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u3
 /// same `directories` resolution as `paths::Dirs` so both processes see
 /// the same root.
 fn tracer_log_path(session_id: &str) -> Option<PathBuf> {
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")?;
-    let dir = pd.config_dir().join("logs");
+    let dir = if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
+        && !value.is_empty()
+    {
+        PathBuf::from(value).join("logs")
+    } else {
+        let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")?;
+        pd.config_dir().join("logs")
+    };
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
     }
@@ -232,10 +276,16 @@ fn tracer_log_path(session_id: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn spawn_tracer_process(tracer: &Path, spec: &PtySpawnSpec) -> anyhow::Result<u32> {
+fn spawn_tracer_process(
+    tracer: &Path,
+    spec: &PtySpawnSpec,
+    pipe_name: &str,
+) -> anyhow::Result<u32> {
     let mut cmd = std::process::Command::new(tracer);
     cmd.arg("--session-id")
         .arg(&spec.session_id)
+        .arg("--pipe-name")
+        .arg(pipe_name)
         .arg("--cwd")
         .arg(&spec.cwd)
         .arg("--cols")
@@ -501,5 +551,36 @@ impl ChildKiller for TracerKiller {
         Box::new(Self {
             stop_tx: self.stop_tx.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pipe_name_with_prefix, sanitize_pipe_prefix};
+
+    #[test]
+    fn pipe_prefix_is_sanitized() {
+        assert_eq!(
+            pipe_name_with_prefix("session-1", Some("rt/e2e:test")),
+            r"\\.\pipe\rt-e2e-test-session-1",
+        );
+    }
+
+    #[test]
+    fn empty_pipe_prefix_uses_default_protocol_name() {
+        assert_eq!(
+            pipe_name_with_prefix("session-1", Some("///")),
+            tracer_protocol::pipe_name("session-1"),
+        );
+    }
+
+    #[test]
+    fn sanitize_pipe_prefix_limits_length() {
+        assert_eq!(
+            sanitize_pipe_prefix(&"a".repeat(100))
+                .as_deref()
+                .map(str::len),
+            Some(80),
+        );
     }
 }

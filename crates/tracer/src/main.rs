@@ -31,6 +31,11 @@ struct Cli {
     #[arg(long)]
     session_id: String,
 
+    /// Named-pipe path supplied by the daemon. Defaults to the protocol's
+    /// legacy session-derived pipe path when omitted.
+    #[arg(long)]
+    pipe_name: Option<String>,
+
     /// Working directory passed to the child.
     #[arg(long)]
     cwd: std::path::PathBuf,
@@ -70,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
         .split_first()
         .context("program_and_args must contain at least the program name")?;
 
-    let pipe_name = tracer_protocol::pipe_name(&cli.session_id);
+    let pipe_name = cli
+        .pipe_name
+        .unwrap_or_else(|| tracer_protocol::pipe_name(&cli.session_id));
 
     let cfg = supervisor::Config {
         session_id: cli.session_id,

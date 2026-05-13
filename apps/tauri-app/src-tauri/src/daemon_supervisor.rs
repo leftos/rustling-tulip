@@ -54,15 +54,19 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
 
     let template = locate_daemon_binary()?;
     let bin = cache_daemon_binary(&template).map_err(|e| e.to_string())?;
+    let cache_dir = bin
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "cached daemon binary has no parent dir".to_string())?;
 
     // Reap any leftover daemon processes before spawning. We're in the slow
     // path because no healthy daemon was found, so any `rustling-tulipd.exe`
-    // still running is a stale instance — most often a previous run that
-    // crashed without removing `daemon.json`, or one that survived a
-    // `cargo build` retry. Killing them avoids two daemons racing for the
-    // handshake file when our fresh spawn comes up. Best-effort: failures
-    // log and don't block startup.
-    reap_orphan_daemons().await;
+    // still running from this instance's binary cache is a stale instance —
+    // most often a previous run that crashed without removing `daemon.json`,
+    // or one that survived a `cargo build` retry. Scope the sweep to our
+    // binary cache so e2e and regular launchers cannot reap each other.
+    // Best-effort: failures log and don't block startup.
+    reap_orphan_daemons(&cache_dir).await;
 
     info!(template = ?template, cached = ?bin, "spawning daemon from cache");
     // The daemon needs to find rt-tracer.exe to spawn supervisors. Once we
@@ -78,15 +82,13 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
     wait_for_handshake().await
 }
 
-/// Find every `rustling-tulipd*` process (including content-addressed cache
-/// copies named `rustling-tulipd-<hash>.exe`) and kill it. Called from the
-/// spawn path; relies on the caller having already verified no healthy
-/// daemon exists (otherwise we'd kill the live one). Skips our own pid as a
-/// belt-and-braces guard — Tauri isn't named `rustling-tulipd`, but if a
-/// future rename ever collided we'd want the safety net.
-async fn reap_orphan_daemons() {
+/// Find every `rustling-tulipd*` process launched from this instance's binary
+/// cache and kill it. Called from the spawn path; relies on the caller having
+/// already verified no healthy daemon exists in the current config dir.
+/// Skips our own pid as a belt-and-braces guard.
+async fn reap_orphan_daemons(cache_dir: &Path) {
     let our_pid = std::process::id();
-    let pids: Vec<u32> = enumerate_daemon_processes()
+    let pids: Vec<u32> = enumerate_daemon_processes(cache_dir)
         .into_iter()
         .filter(|pid| *pid != our_pid)
         .collect();
@@ -101,18 +103,17 @@ async fn reap_orphan_daemons() {
     }
 }
 
-fn enumerate_daemon_processes() -> Vec<u32> {
+fn enumerate_daemon_processes(cache_dir: &Path) -> Vec<u32> {
+    let process_refresh = sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always);
     let mut sys = sysinfo::System::new_with_specifics(
-        sysinfo::RefreshKind::new().with_processes(sysinfo::ProcessRefreshKind::new()),
+        sysinfo::RefreshKind::new().with_processes(process_refresh),
     );
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::All,
-        true,
-        sysinfo::ProcessRefreshKind::new(),
-    );
+    sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::All, true, process_refresh);
     let mut out = Vec::new();
     for (pid, proc_) in sys.processes() {
-        if is_daemon_image(&proc_.name().to_string_lossy()) {
+        if is_daemon_image(&proc_.name().to_string_lossy())
+            && proc_.exe().is_some_and(|exe| path_is_under(exe, cache_dir))
+        {
             out.push(pid.as_u32());
         }
     }
@@ -128,6 +129,28 @@ fn is_daemon_image(name: &str) -> bool {
         .strip_suffix(".exe")
         .map_or_else(|| name.to_ascii_lowercase(), str::to_string);
     stem == "rustling-tulipd" || stem.starts_with("rustling-tulipd-")
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = normalize_process_path(path);
+    let root = normalize_process_path(root);
+    path == root || path.starts_with(&format!("{root}{}", std::path::MAIN_SEPARATOR))
+}
+
+#[cfg(windows)]
+fn normalize_process_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('/', "\\");
+    let trimmed = raw
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string))
+        .unwrap_or(raw);
+    trimmed.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+#[cfg(not(windows))]
+fn normalize_process_path(path: &Path) -> String {
+    path.to_string_lossy().trim_end_matches('/').to_string()
 }
 
 async fn load_existing_if_alive() -> Option<DaemonHandshake> {
@@ -210,8 +233,8 @@ fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
 
-    let bytes = fs::read(template)
-        .with_context(|| format!("reading template {}", template.display()))?;
+    let bytes =
+        fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
     let hash = hash_prefix(&bytes);
     let stem = template
         .file_stem()
@@ -327,7 +350,8 @@ async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_daemon_image;
+    use super::{is_daemon_image, path_is_under};
+    use std::path::Path;
 
     #[test]
     fn matches_template_names() {
@@ -348,5 +372,33 @@ mod tests {
         assert!(!is_daemon_image("rustling-tulip.exe")); // GUI app, not daemon
         assert!(!is_daemon_image("rt-tracer.exe"));
         assert!(!is_daemon_image(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_scope_matches_only_cache_children() {
+        let root = Path::new(r"C:\rt\.tmp\e2e\binaries");
+        assert!(path_is_under(
+            Path::new(r"C:\rt\.tmp\e2e\binaries\rustling-tulipd-hash.exe"),
+            root,
+        ));
+        assert!(!path_is_under(
+            Path::new(r"C:\rt\.tmp\e2e\binaries-other\rustling-tulipd-hash.exe"),
+            root,
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn path_scope_matches_only_cache_children() {
+        let root = Path::new("/tmp/rt/.tmp/e2e/binaries");
+        assert!(path_is_under(
+            Path::new("/tmp/rt/.tmp/e2e/binaries/rustling-tulipd-hash"),
+            root,
+        ));
+        assert!(!path_is_under(
+            Path::new("/tmp/rt/.tmp/e2e/binaries-other/rustling-tulipd-hash"),
+            root,
+        ));
     }
 }

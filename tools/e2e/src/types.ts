@@ -53,6 +53,35 @@ export interface SessionSnapshot {
   terminal_title?: string | null;
 }
 
+export type SplitDirection = "horizontal" | "vertical";
+export type SplitPlace = "first" | "second";
+
+export type GridNode =
+  | { kind: "pane"; pane_id: string; session_id: string | null }
+  | {
+      kind: "split";
+      direction: SplitDirection;
+      ratio: number;
+      first: GridNode;
+      second: GridNode;
+    };
+
+export type TabContent =
+  | { kind: "grid"; grid: GridNode }
+  | {
+      kind: "diff";
+      repo_id: string;
+      path: string;
+      against: string | null;
+    };
+
+export interface TabEntry {
+  id: string;
+  name: string;
+  content: TabContent;
+  created_at: string;
+}
+
 // --- Client → Daemon ---------------------------------------------------------
 
 export type PresetTarget =
@@ -81,6 +110,14 @@ export type ClientMessage =
       name: string | null;
       initial_session_id: string | null;
     }
+  | {
+      type: "split_pane";
+      tab_id: string;
+      pane_id: string;
+      direction: SplitDirection;
+      place: SplitPlace;
+      new_session_id: string | null;
+    }
   | { type: "close_tab"; tab_id: string }
   | { type: "repo_status"; repo_id: string }
   | { type: "stage_files"; repo_id: string; paths: string[] }
@@ -106,6 +143,7 @@ export type DaemonMessage =
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
   | { type: "session_removed"; session_id: string }
+  | { type: "tab_updated"; tab: TabEntry }
   | { type: "pty_output"; session_id: string; data_b64: string }
   | { type: "preset_preview"; id: string; prompts: string[] }
   | { type: "preset_preview_error"; id: string; error: string }

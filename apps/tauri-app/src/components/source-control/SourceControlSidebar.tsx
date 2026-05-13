@@ -763,18 +763,33 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
                   <li
                     key={c.sha}
                     className={
-                      c.sha === selected ? "list-item selected" : "list-item"
+                      c.sha === selected
+                        ? "list-item history-commit-row selected"
+                        : "list-item history-commit-row"
                     }
                     onClick={() => setSelected(c.sha)}
+                    title={commitHoverText(c)}
+                    aria-label={commitHoverText(c)}
                     data-testid="source-control-history-row"
                   >
                     <span className="commit-sha">{c.short_sha}</span>
-                    <span className="list-item-label" title={c.subject}>
+                    <span className="commit-subject">
                       {c.subject}
                     </span>
-                    <span className="list-item-meta small">
-                      {c.author_name.split(" ")[0]} ·{" "}
-                      {c.authored_at.slice(0, 10)}
+                    <span className="commit-hover-card" aria-hidden="true">
+                      <span className="commit-hover-subject">{c.subject}</span>
+                      <span>
+                        <span className="commit-hover-label">SHA</span>
+                        {c.sha}
+                      </span>
+                      <span>
+                        <span className="commit-hover-label">Author</span>
+                        {commitAuthor(c)}
+                      </span>
+                      <span>
+                        <span className="commit-hover-label">Date</span>
+                        {c.authored_at}
+                      </span>
                     </span>
                   </li>
                 ))}
@@ -797,10 +812,28 @@ function HistoryView({ activeRepoId, client }: HistoryViewProps) {
           diff={detailDiff}
           testId="source-control-history-diff"
           placeholder="Select a commit to view its diff."
+          wrap
         />
       </ResizableSplit>
     </section>
   );
+}
+
+function commitHoverText(commit: GitCommit): string {
+  return [
+    commit.subject,
+    `SHA: ${commit.sha}`,
+    `Author: ${commitAuthor(commit)}`,
+    `Date: ${commit.authored_at}`,
+  ].join("\n");
+}
+
+function commitAuthor(commit: GitCommit): string {
+  const email = commit.author_email.trim();
+  if (email.length === 0) {
+    return commit.author_name;
+  }
+  return `${commit.author_name} <${email}>`;
 }
 
 // ---------- DiffView (shared) ----------
@@ -809,6 +842,7 @@ function DiffView({
   diff,
   testId,
   placeholder,
+  wrap,
 }: {
   diff: string | null;
   testId?: string;
@@ -817,6 +851,7 @@ function DiffView({
   /// override this so the user knows which view they're in even when
   /// nothing is selected.
   placeholder?: string;
+  wrap: boolean;
 }) {
   if (diff === null) {
     return (
@@ -833,7 +868,10 @@ function DiffView({
     );
   }
   return (
-    <pre className="diff-pane" data-testid={testId}>
+    <pre
+      className={wrap ? "diff-pane diff-pane-wrap" : "diff-pane"}
+      data-testid={testId}
+    >
       {diff.split("\n").map((line, i) => (
         // eslint-disable-next-line react/no-array-index-key
         <span key={i} className={diffLineClass(line)}>

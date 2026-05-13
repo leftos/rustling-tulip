@@ -20,7 +20,6 @@ import {
   tabGrid,
   type ContainerRef,
   type DaemonMessage,
-  type GridNode,
   type PresetEntry,
   type PresetTarget,
   type RepoEntry,
@@ -1727,57 +1726,93 @@ type PendingSpawnIntent =
   | { kind: "addToTab"; tabId: string }
   | null;
 
-/// Add the freshly spawned `sessionId` to the existing `tabId`. Prefers
-/// dropping into an empty pane (cheap, no topology change); falls back
-/// to splitting the first pane on the right when every pane already has
-/// a session. Pulled out so the `session_updated` handler stays tight.
+/// Add the freshly spawned session to the existing `tabId`. Prefers a pane
+/// beside sessions from the same repo/workspace before falling back to the
+/// first empty pane or first pane split.
 function sendAddSessionToTab(
   client: DaemonClient | null,
   tabId: string,
-  sessionId: string,
+  session: SessionSnapshot,
   latestStateRef: React.MutableRefObject<AppState | null>,
 ) {
   if (!client) return;
   const tabs = latestStateRef.current?.tabs ?? [];
   const tab = tabs.find((t) => t.id === tabId);
   const grid = tab ? tabGrid(tab) : null;
-  // Diff tabs (and any future non-grid kinds) can't host sessions —
-  // bail rather than synthesize a bogus pane id.
   if (!grid) return;
-  const panes = collectPanesShallow(grid);
-  const emptyPane = panes.find((p) => p.session_id === null);
-  if (emptyPane) {
+  const panes = collectPanes(grid);
+  const sessions = latestStateRef.current?.sessions ?? [];
+  const target = paneTargetForSession(panes, sessions, session);
+  if (!target) return;
+  if (target.kind === "replace") {
     client.send({
       type: "replace_pane_session",
       tab_id: tabId,
-      pane_id: emptyPane.pane_id,
-      session_id: sessionId,
+      pane_id: target.paneId,
+      session_id: session.id,
     });
     return;
   }
-  const anchor = panes[0];
-  if (!anchor) return;
   client.send({
     type: "split_pane",
     tab_id: tabId,
-    pane_id: anchor.pane_id,
+    pane_id: target.paneId,
     direction: "horizontal",
     place: "second",
-    new_session_id: sessionId,
+    new_session_id: session.id,
   });
 }
 
-/// Local copy of the pane walker so this file doesn't import the grid
-/// utility just for one call. Identical to `collectPanes` in
-/// `utils/grid.ts`; both walk the binary split tree in left-to-right
-/// (or first-to-second) leaf order.
-function collectPanesShallow(
-  node: GridNode,
-): Array<{ pane_id: string; session_id: string | null }> {
-  if (node.kind === "pane") {
-    return [{ pane_id: node.pane_id, session_id: node.session_id }];
+type PanePlacementTarget =
+  | { kind: "replace"; paneId: string }
+  | { kind: "split"; paneId: string };
+
+function paneTargetForSession(
+  panes: Array<{ pane_id: string; session_id: string | null }>,
+  sessions: SessionSnapshot[],
+  session: SessionSnapshot,
+): PanePlacementTarget | null {
+  const sessionKey = sessionParentKey(session);
+  if (sessionKey) {
+    const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
+    const matchingIndexes: number[] = [];
+    for (let i = 0; i < panes.length; i += 1) {
+      const sessionId = panes[i]?.session_id;
+      if (!sessionId) continue;
+      const existing = sessionById.get(sessionId);
+      if (existing && sessionParentKey(existing) === sessionKey) {
+        matchingIndexes.push(i);
+      }
+    }
+    for (const index of matchingIndexes) {
+      const after = panes[index + 1];
+      if (after?.session_id === null) {
+        return { kind: "replace", paneId: after.pane_id };
+      }
+      const before = panes[index - 1];
+      if (before?.session_id === null) {
+        return { kind: "replace", paneId: before.pane_id };
+      }
+    }
+    const lastMatch = matchingIndexes.at(-1);
+    if (lastMatch !== undefined) {
+      const pane = panes[lastMatch];
+      if (pane) return { kind: "split", paneId: pane.pane_id };
+    }
   }
-  return [...collectPanesShallow(node.first), ...collectPanesShallow(node.second)];
+
+  const emptyPane = panes.find((p) => p.session_id === null);
+  if (emptyPane) {
+    return { kind: "replace", paneId: emptyPane.pane_id };
+  }
+  const anchor = panes[0];
+  return anchor ? { kind: "split", paneId: anchor.pane_id } : null;
+}
+
+function sessionParentKey(session: SessionSnapshot): string | null {
+  if (session.workspace_id) return `workspace:${session.workspace_id}`;
+  const primaryRepo = session.members[0]?.repo_id;
+  return primaryRepo ? `repo:${primaryRepo}` : null;
 }
 
 function handleMessage(
@@ -1942,12 +1977,7 @@ function handleMessage(
           session_id: session.id,
         });
       } else if (intent?.kind === "addToTab") {
-        sendAddSessionToTab(
-          clientRef.current,
-          intent.tabId,
-          session.id,
-          latestStateRef,
-        );
+        sendAddSessionToTab(clientRef.current, intent.tabId, session, latestStateRef);
       }
       return;
     }

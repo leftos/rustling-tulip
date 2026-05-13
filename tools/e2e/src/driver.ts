@@ -42,6 +42,11 @@ function daemonBinary(): string {
   return join(REPO_ROOT, "target", "debug", exe);
 }
 
+function tracerBinary(): string {
+  const exe = platform() === "win32" ? "rt-tracer.exe" : "rt-tracer";
+  return join(REPO_ROOT, "target", "debug", exe);
+}
+
 /**
  * Recursively find the newest mtime under `root`. Returns 0 if the path is
  * absent. We use this to decide whether `dist/` is stale relative to the
@@ -134,11 +139,12 @@ function buildFrontendDev(): void {
 }
 
 /**
- * Run `cargo build` for the Tauri app and the daemon in a single
+ * Run `cargo build` for the Tauri app, daemon, and tracer in a single
  * invocation. Cargo's incremental compilation makes this a sub-second
  * no-op when nothing changed, but if either source tree was touched
- * (including `crates/daemon/`) the rebuild happens automatically — so the
- * test runner never silently exercises a stale daemon binary.
+ * (including `crates/daemon/` or `crates/tracer/`) the rebuild happens
+ * automatically — so the test runner never silently exercises a stale
+ * process binary.
  *
  * The `custom-protocol` feature MUST be enabled on the Tauri app — without
  * it the binary loads `devUrl` (http://localhost:1420) at runtime instead
@@ -149,7 +155,7 @@ function buildFrontendDev(): void {
 function buildRustBinaries(): void {
   // eslint-disable-next-line no-console
   console.log(
-    "[driver] cargo build -p rustling-tulip-app (custom-protocol) -p daemon…",
+    "[driver] cargo build -p rustling-tulip-app (custom-protocol) -p daemon -p tracer…",
   );
   const result = spawnSync(
     "cargo",
@@ -161,6 +167,8 @@ function buildRustBinaries(): void {
       "rustling-tulip-app/custom-protocol",
       "-p",
       "daemon",
+      "-p",
+      "tracer",
     ],
     {
       cwd: REPO_ROOT,
@@ -174,11 +182,11 @@ function buildRustBinaries(): void {
 }
 
 /**
- * Make sure the Tauri binary, the daemon binary, and the frontend bundle
- * are up to date. Each step is independently mtime-gated, so the typical
- * cost on a no-change re-run is dominated by cargo's incremental check
- * (~300-500ms total). Pass `forceFrontend` to nuke the frontend mtime
- * gate; cargo always decides for itself.
+ * Make sure the Tauri binary, daemon binary, tracer binary, and frontend
+ * bundle are up to date. Each step is independently mtime-gated, so the
+ * typical cost on a no-change re-run is dominated by cargo's incremental
+ * check. Pass `forceFrontend` to nuke the frontend mtime gate; cargo always
+ * decides for itself.
  */
 export async function ensureTauriBinary(opts: {
   forceFrontend?: boolean;
@@ -203,6 +211,13 @@ export async function ensureTauriBinary(opts: {
     throw new Error(
       `Daemon binary missing after build: ${daemonPath}. ` +
         `Run \`cargo build -p daemon\` from the workspace root and check the output.`,
+    );
+  }
+  const tracerPath = tracerBinary();
+  if (!existsSync(tracerPath)) {
+    throw new Error(
+      `Tracer binary missing after build: ${tracerPath}. ` +
+        `Run \`cargo build -p tracer\` from the workspace root and check the output.`,
     );
   }
   return appPath;
@@ -253,7 +268,7 @@ export async function startDriver(
   // pass env vars to the Tauri child we set them on tauri-driver's own
   // process; msedgedriver inherits them, and the spawned Tauri app
   // inherits them in turn (along with the daemon it supervises).
-  const driverEnv = filterEnv({ ...process.env, ...(opts.env ?? {}) });
+  const driverEnv = filterEnv({ ...process.env, ...opts.env });
   const tauriDriver = spawn(tdPath, [], {
     stdio: ["ignore", "inherit", "inherit"],
     env: driverEnv,
