@@ -127,7 +127,7 @@ renames the session to that value.
 - [x] Add e2e coverage: a user rename becomes the primary label everywhere.
 - [x] Add e2e coverage: assigning a preset color updates the pane gutter and
       sidebar tree row.
-- [ ] Add e2e coverage: a custom color survives session refresh/reload.
+- [x] Add e2e coverage: a custom color survives session refresh/reload.
 
 ## Phase 3 - Safer spawn defaults and authority visibility
 
@@ -320,7 +320,7 @@ be able to cancel before the next session spawns and see what already launched.
 ## Suggested sequence
 
 1. [x] Phase 1: Stop, removal, and recovery semantics.
-2. [ ] Phase 2: Stable session identity.
+2. [x] Phase 2: Stable session identity.
 3. [ ] Phase 3: Safer spawn defaults and authority visibility.
 4. [ ] Phase 4: Faster common spawn path.
 5. [ ] Phase 5: Source Control density and focus.
