@@ -58,8 +58,7 @@ export default function SessionWindow({
   }, []);
 
   // Replace the OS window title (originally set to a raw UUID by the
-  // Tauri builder in `open_session_window`) with the stable user-visible
-  // label. Terminal-emitted titles stay in the tooltip.
+  // Tauri builder in `open_session_window`) with the user-visible label.
   const displayLabel = sessionDisplayLabel(session);
   useEffect(() => {
     void getCurrentWebviewWindow().setTitle(displayLabel);

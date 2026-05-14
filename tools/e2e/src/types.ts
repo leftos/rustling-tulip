@@ -45,6 +45,7 @@ export interface SessionMember {
 export interface SessionSnapshot {
   id: string;
   label: string;
+  user_label?: string | null;
   kind: SessionKind;
   members: SessionMember[];
   status: SessionStatus;

@@ -234,6 +234,12 @@ pub struct SessionMetrics {
 pub struct SessionSnapshot {
     pub id: String,
     pub label: String,
+    /// Explicit label set through the app's session rename command. When
+    /// `None`, clients may choose a dynamic display label, such as a terminal
+    /// title emitted by the running program, while keeping `label` as the
+    /// canonical repo/workspace fallback.
+    #[serde(default)]
+    pub user_label: Option<String>,
     pub kind: SessionKind,
     pub members: Vec<SessionMember>,
     pub status: SessionStatus,
@@ -270,11 +276,10 @@ pub struct SessionSnapshot {
     /// Which CLI is driving this session. Daemon always populates this so the
     /// UI can label the session.
     pub agent: Agent,
-    /// Window title last emitted by the agent via OSC 0/2 escape sequences.
-    /// Distinct from `label` so the canonical sidebar/header name stays
-    /// `<repo>:<branch>` (or the user override) instead of being clobbered by
-    /// whatever the underlying shell/agent broadcasts. UIs may surface it as a
-    /// tooltip or subtitle. `None` until the agent emits its first title.
+    /// Window title last emitted by the agent via OSC 0/1/2 escape sequences.
+    /// Distinct from `label` so clients can preserve explicit user labels and
+    /// still expose dynamic terminal titles when no user override is set.
+    /// `None` until the agent emits its first title.
     #[serde(default)]
     pub terminal_title: Option<String>,
     /// Short label for whatever program is driving this session — `"claude"`,

@@ -94,22 +94,21 @@ remove pane, park session, delete worktree, or discard the session record.
 
 ### Pain point
 
-Terminal-emitted titles can be noisy. The review run showed the primary session
-title as `C:\Windows\system32\cmd.exe`, while the useful repo/branch context was
-only a chip. That weakens orientation in the sidebar, tab, pane, and pop-out
-surfaces.
+Terminal-emitted titles can be useful when agent CLIs set them to their current
+session/thread names, but noisy shell defaults like `C:\Windows\system32\cmd.exe`
+should not replace useful repo/branch context.
 
 ### Desired behavior
 
-The primary display name should be stable and user/workflow-oriented. Terminal
-titles should remain visible, but as secondary context unless the user explicitly
-renames the session to that value.
+Explicit app renames should win. When no explicit app rename is set, meaningful
+terminal titles should become the visible session name, while the canonical
+repo/workspace label remains available as metadata.
 
 ### Tasks
 
-- [x] Define display precedence: explicit user label, canonical repo/workspace
-      label, then fallback runtime label.
-- [x] Demote OSC/terminal title to tooltip or secondary chip by default.
+- [x] Define display precedence: explicit user label, meaningful terminal title,
+      canonical repo/workspace label, then fallback runtime label.
+- [x] Keep noisy shell executable titles out of the primary label.
 - [x] Keep a visible runtime chip (`claude`, `codex`, `pwsh`, `cmd`, etc.).
 - [x] Update `sessionDisplayLabel` and all callers to use the new hierarchy.
 - [x] Ensure custom rename still wins over daemon-generated and terminal titles.
@@ -122,8 +121,8 @@ renames the session to that value.
       treatment the selected session will get.
 - [x] Persist the chosen color with the session record and restore it after
       daemon/app restart.
-- [x] Add e2e coverage: an emitted `cmd.exe` terminal title does not replace
-      the primary repo/branch label.
+- [x] Add e2e coverage: an emitted terminal title updates the visible label
+      without mutating the canonical repo/branch label.
 - [x] Add e2e coverage: a user rename becomes the primary label everywhere.
 - [x] Add e2e coverage: assigning a preset color updates the pane gutter and
       sidebar tree row.

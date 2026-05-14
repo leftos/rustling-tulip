@@ -77,10 +77,10 @@ pub struct SessionRecord {
     /// Which CLI is driving this session. Surfaced to clients via the
     /// `SessionSnapshot.agent` field.
     pub agent: Agent,
-    /// Latest window title emitted by the agent/shell via OSC 0/2. Kept
-    /// separate from `label` so the canonical name (set at spawn time, or by
-    /// the user) is not overwritten by transient shell titles like
-    /// `C:\WINDOWS\system32\cmd.exe`. `None` until the first OSC title arrives.
+    /// Latest window title emitted by the agent/shell via OSC 0/1/2. Kept
+    /// separate from `label` so explicit app renames can still win and the UI
+    /// can filter transient shell titles like `C:\WINDOWS\system32\cmd.exe`.
+    /// `None` until the first OSC title arrives.
     pub terminal_title: Option<String>,
     /// Short program name driving this session. For `Mode::PlainShell`
     /// this is the shell label (`"pwsh"`, `"cmd"`, `"bash"`, …); for
@@ -155,6 +155,7 @@ impl SessionRecord {
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
+            user_label: self.user_label.clone(),
             kind: self.kind.clone(),
             members: self.members.clone(),
             status: self.status,

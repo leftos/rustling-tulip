@@ -149,7 +149,7 @@ Run-through of the live app (after iter 1–3 fixes). Bottom line: the core idea
 
 - [x] **1. First-run onboarding is misleading.** `+ Session` enabled with no repos, opening a full spawn form with empty dropdown. *Resolved (iter 4 — toolbar gating + EmptyState `+ Add repo` button.)*
 - [x] **2. Workspace creation disrupts mental model.** Existing single-repo sessions move into Detached with only a `?` marker. *Resolved (iter 4 — Detached banner explains; iter 5 — `[unbound]` pill rebinds.)*
-- [x] **3. Session identity is too weak.** OSC-emitted terminal titles overwrote canonical labels. *Resolved (iter 4 — canonical label sticks; `terminal_title` surfaces as tooltip only.)*
+- [x] **3. Session identity is too weak.** OSC-emitted terminal titles overwrote canonical labels. *Resolved (iter 4, later revised — explicit app renames win, meaningful terminal titles become the visible label, and noisy shell executable titles are filtered.)*
 - [x] **4. Workspace preview is effectively broken.** `.preview-table` collapsed to ~2 px when other modal content competed for space. *Resolved (iter 4 — `flex: 0 0 auto` + `min-height: 80px`.)*
 - [x] **5. Risky actions lack recovery.** *Partially addressed in iter 3 (repo/workspace/tab confirms).* Remaining items below.
   - [x] Detached-bucket session stop — inline "Stop all" button added to the detached container header (iter 51).

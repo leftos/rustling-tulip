@@ -81,6 +81,9 @@ export interface SessionMetrics {
 export interface SessionSnapshot {
   id: string;
   label: string;
+  // Explicit label set through the app's session rename command. null/absent
+  // means the UI may prefer a meaningful terminal_title for display.
+  user_label?: string | null;
   kind: SessionKind;
   members: SessionMember[];
   status: SessionStatus;
@@ -103,12 +106,9 @@ export interface SessionSnapshot {
   workspace_id: string | null;
   // Which CLI is driving this session. Drives the agent badge in the UI.
   agent: Agent;
-  // Last OSC 0/2 window title emitted by the agent/shell. Distinct from
-  // `label` so the canonical sidebar/header name stays the daemon-curated
-  // `<repo>:<branch>` (or user override) rather than being clobbered by
-  // shell-emitted titles like `C:\WINDOWS\system32\cmd.exe`. Surfaced as a
-  // tooltip; never as the primary label. null until the agent emits its
-  // first title.
+  // Last OSC 0/1/2 window title emitted by the agent/shell. Distinct from
+  // `label` so explicit app renames can still win while dynamic terminal
+  // titles are available for display.
   terminal_title: string | null;
   // Short program label driving this session — "claude" / "codex" for
   // agent sessions, "pwsh" / "powershell" / "cmd" / "bash" / "sh" for

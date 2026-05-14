@@ -1,11 +1,12 @@
 //! Watches a PTY output stream for OSC window-title sequences and stores the
-//! latest terminal title alongside the session's stable label. The UI may show
-//! this as secondary context without replacing the daemon/user session label.
+//! latest terminal title alongside the session's stable label. The UI can use
+//! that title as a dynamic display label when no explicit user label is set.
 //!
 //! The recognized sequences are:
 //! - `ESC ] 0 ; <title> BEL`  (set icon + window title)
 //! - `ESC ] 1 ; <title> BEL`  (icon only — most terminals also surface this as the title)
 //! - `ESC ] 2 ; <title> BEL`  (window title only)
+//! - `0x9D <0|1|2> ; <title> 0x9C`  (8-bit C1 OSC/ST form)
 //!
 //! Either `BEL` (`0x07`) or `ST` (`ESC \`) terminates the string. Title bytes
 //! are decoded as UTF-8 lossily — non-UTF-8 bytes turn into U+FFFD rather than
@@ -28,6 +29,8 @@ const MAX_TITLE_BYTES: usize = 256;
 const MAX_BUFFER_BYTES: usize = 4096;
 const BEL: u8 = 0x07;
 const ESC: u8 = 0x1B;
+const OSC_C1: u8 = 0x9D;
+const ST_C1: u8 = 0x9C;
 
 #[derive(Debug)]
 enum State {
@@ -74,6 +77,11 @@ impl Parser {
                 State::Normal => {
                     if b == ESC {
                         self.state = State::AfterEsc;
+                    } else if b == OSC_C1 {
+                        self.state = State::OscParam {
+                            param: 0,
+                            had_digit: false,
+                        };
                     }
                 }
                 State::AfterEsc => {
@@ -107,7 +115,7 @@ impl Parser {
                     }
                 }
                 State::OscString => {
-                    if b == BEL {
+                    if b == BEL || b == ST_C1 {
                         if let Some(title) = self.emit() {
                             latest = Some(title);
                         }
@@ -218,6 +226,13 @@ mod tests {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]2;world\x1b\\"]);
         assert_eq!(titles, vec!["world"]);
+    }
+
+    #[test]
+    fn c1_osc_and_st() {
+        let mut p = Parser::new();
+        let titles = feed_all(&mut p, &[b"\x9d0;c1-title\x9c"]);
+        assert_eq!(titles, vec!["c1-title"]);
     }
 
     #[test]

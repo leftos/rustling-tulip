@@ -1,8 +1,9 @@
 /**
  * Session identity label coverage.
  *
- * The primary session label should stay stable even when a terminal emits a
- * noisy OSC title. User renames remain the explicit primary override.
+ * A meaningful terminal title becomes the visible label unless the user has
+ * explicitly renamed the session in the app. The daemon repo/branch label
+ * remains canonical metadata.
  */
 import { execFileSync } from "node:child_process";
 import { Buffer } from "node:buffer";
@@ -27,6 +28,7 @@ const DAEMON_BOOT_TIMEOUT = 30_000;
 const SESSION_OUTPUT_TIMEOUT = 15_000;
 const DEFAULT_BRANCH = "main";
 const TERMINAL_TITLE = "Codex style title from slash command";
+const NOISY_TITLE = String.raw`C:\WINDOWS\system32\cmd.exe`;
 const USER_LABEL = "My shell label";
 const WORKING_DOT_COLOR = "rgb(232, 165, 49)";
 const repoRoot = resolve(
@@ -80,7 +82,7 @@ describe("session identity labels", function () {
     if (fixtureRepo) await rm(fixtureRepo, { recursive: true, force: true });
   });
 
-  it("keeps terminal titles secondary and user renames primary", async function () {
+  it("uses terminal titles until the user renames the session", async function () {
     if (!ws || !fixtureRepo) throw new Error("setup failed");
 
     const repoName = "rt-e2e-identity-fixture";
@@ -146,14 +148,37 @@ describe("session identity labels", function () {
     sendInput(ws, spawnedSessionId, `/rename ${TERMINAL_TITLE}\r`);
     const titleUpdate = await titlePromise;
     expect(titleUpdate.session.label).to.equal(expectedDefaultLabel);
+    expect(titleUpdate.session.user_label ?? null).to.equal(null);
 
     await waitForBufferText(
       spawnedSessionId,
       `[fake-claude] renamed: ${TERMINAL_TITLE}`,
       SESSION_OUTPUT_TIMEOUT,
     );
+    await assertRenderedLabel(spawnedSessionId, TERMINAL_TITLE);
+    await assertLabelTooltipsInclude(spawnedSessionId, expectedDefaultLabel);
+    await mkdir(join(repoRoot, ".tmp", "e2e"), { recursive: true });
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "session-terminal-title-label.png"),
+    );
+
+    const noisyTitlePromise = ws.waitFor(
+      (m): m is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
+        isSessionUpdated(m) &&
+        m.session.id === spawnedSessionId &&
+        m.session.terminal_title === NOISY_TITLE,
+      { timeoutMs: 10_000 },
+    );
+    sendInput(ws, spawnedSessionId, `/rename ${NOISY_TITLE}\r`);
+    const noisyTitleUpdate = await noisyTitlePromise;
+    expect(noisyTitleUpdate.session.label).to.equal(expectedDefaultLabel);
+    await waitForBufferText(
+      spawnedSessionId,
+      `[fake-claude] renamed: ${NOISY_TITLE}`,
+      SESSION_OUTPUT_TIMEOUT,
+    );
     await assertRenderedLabel(spawnedSessionId, expectedDefaultLabel);
-    await assertLabelTooltipsInclude(spawnedSessionId, TERMINAL_TITLE);
+    await assertLabelTooltipsInclude(spawnedSessionId, NOISY_TITLE);
 
     sendInput(ws, spawnedSessionId, "/stream\r");
     await assertWorkingDotIsOrangeAndPulsing(spawnedSessionId);

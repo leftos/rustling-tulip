@@ -1,22 +1,33 @@
 import type { SessionSnapshot } from "../types";
 
-/// Name shown in sidebars / pane headers / pop-out window titles. The daemon
-/// label is already the effective identity: explicit user label when one is
-/// set, otherwise the canonical repo/workspace label. Terminal-emitted OSC
-/// titles stay secondary because shells often publish noisy process titles.
+/// Name shown in sidebars / pane headers / pop-out window titles. Explicit app
+/// renames win. Otherwise a meaningful terminal title emitted by the running
+/// program becomes the display label, with the daemon label as the stable
+/// repo/workspace fallback.
 export function sessionDisplayLabel(s: SessionSnapshot): string {
+  const userLabel = nonEmptyLabel(s.user_label);
+  if (userLabel) return userLabel;
+  const terminalTitle = displayableTerminalTitle(s);
+  if (terminalTitle) return terminalTitle;
   const label = nonEmptyLabel(s.label);
   if (label) return label;
   return sessionRuntimeLabel(s) ?? s.id;
 }
 
-/// Tooltip surfaces secondary runtime title context without letting it replace
-/// the stable primary label.
+/// Tooltip keeps the display label connected to the stable daemon label and
+/// raw terminal title when those differ.
 export function sessionLabelTooltip(s: SessionSnapshot): string {
   const display = sessionDisplayLabel(s);
+  const fallbackLabel = nonEmptyLabel(s.label);
   const terminalTitle = nonEmptyLabel(s.terminal_title);
-  if (!terminalTitle || terminalTitle === display) return display;
-  return `${display}\nTerminal title: ${terminalTitle}`;
+  const lines = [display];
+  if (fallbackLabel && fallbackLabel !== display) {
+    lines.push(`Session: ${fallbackLabel}`);
+  }
+  if (terminalTitle && terminalTitle !== display) {
+    lines.push(`Terminal title: ${terminalTitle}`);
+  }
+  return lines.join("\n");
 }
 
 /// Short token identifying the user-facing runtime: "claude" / "codex" for
@@ -31,4 +42,24 @@ export function sessionRuntimeLabel(s: SessionSnapshot): string | null {
 function nonEmptyLabel(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function displayableTerminalTitle(s: SessionSnapshot): string | null {
+  const title = nonEmptyLabel(s.terminal_title);
+  if (!title || isNoisyShellTitle(title)) return null;
+  return title;
+}
+
+function isNoisyShellTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase().replaceAll("\\", "/");
+  const basename = normalized.split("/").at(-1) ?? normalized;
+  return (
+    basename === "cmd.exe" ||
+    basename === "powershell.exe" ||
+    basename === "pwsh.exe" ||
+    basename === "bash.exe" ||
+    basename === "sh.exe" ||
+    normalized === "windows powershell" ||
+    normalized === "administrator: windows powershell"
+  );
 }

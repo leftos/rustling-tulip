@@ -449,12 +449,10 @@ pub fn try_update_labels(
 }
 
 /// Best-effort: read the meta sidecar, mutate `terminal_title`, write it back.
-/// Used by the OSC-title parser when the agent emits an OSC 0/2 sequence — we
-/// want that annotation to survive a daemon restart so a reattached orphan
-/// keeps its terminal-title hint. The canonical `label` is intentionally not
-/// touched (it stays whatever the spawn pipeline chose). Returns `Ok(())` for
-/// both "meta did not exist" and "meta updated" — only true I/O errors
-/// surface.
+/// Used by the OSC-title parser when the agent emits an OSC 0/1/2 sequence.
+/// Updating the sidecar preserves the terminal-title hint without changing the
+/// canonical repo/workspace label. Returns `Ok(())` for both "meta did not
+/// exist" and "meta updated" — only true I/O errors surface.
 pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> anyhow::Result<()> {
     let path = meta_path(dirs, session_id);
     let bytes = match std::fs::read(&path) {
