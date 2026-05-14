@@ -2191,6 +2191,12 @@ pub(crate) async fn spawn_session(
         elapsed_total_ms = u64::try_from(t_total.elapsed().as_millis()).unwrap_or(u64::MAX),
         "spawn_session: child boot done"
     );
+    if let Err(err) = &result {
+        warn!(
+            error = %format!("{err:#}"),
+            "spawn_session: child boot failed"
+        );
+    }
     result
 }
 

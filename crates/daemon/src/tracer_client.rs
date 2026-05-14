@@ -36,6 +36,7 @@ const PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const OUTPUT_SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_SUBSCRIBER_WAIT_INTERVAL: Duration = Duration::from_millis(5);
 const TRACER_PIPE_PREFIX_ENV: &str = "RUSTLING_TULIP_TRACER_PIPE_PREFIX";
+const TRACER_TEMPLATE_DIR_ENV: &str = "RUSTLING_TULIP_BIN_TEMPLATES";
 
 /// The result of spawning (or reattaching to) a tracer for a single session.
 pub struct TracerSpawn {
@@ -163,38 +164,86 @@ fn sanitize_pipe_prefix(raw: &str) -> Option<String> {
 }
 
 fn locate_tracer_template() -> anyhow::Result<PathBuf> {
+    let current = std::env::current_exe().context("locating daemon exe")?;
+    let template_dir = std::env::var(TRACER_TEMPLATE_DIR_ENV).ok();
+    locate_tracer_template_candidate(
+        template_dir.as_deref(),
+        &current,
+        installed_tracer_template_candidate(),
+    )
+}
+
+fn locate_tracer_template_candidate(
+    template_dir: Option<&str>,
+    current_exe: &Path,
+    installed_candidate: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
     // Preferred: the directory Tauri's supervisor told us holds the original
     // templates. Required when the daemon is running from
     // `<binaries_dir>/rustling-tulipd-<hash>.exe` (the post-cache layout),
     // because the tracer template lives in the install dir / target dir, not
     // next to the cached daemon.
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_BIN_TEMPLATES")
-        && !value.is_empty()
-    {
+    if let Some(value) = template_dir.filter(|value| !value.is_empty()) {
         let candidate = PathBuf::from(value).join(tracer_exe_name());
         if candidate.is_file() {
             return Ok(candidate);
         }
         return Err(anyhow!(
-            "rt-tracer not found at RUSTLING_TULIP_BIN_TEMPLATES location: {}",
+            "rt-tracer not found at {TRACER_TEMPLATE_DIR_ENV} location: {}",
             candidate.display()
         ));
     }
 
+    let mut attempted = Vec::new();
+
     // Fallback: direct `cargo run -p daemon` (no supervisor). The daemon was
     // launched from `target/<profile>/` and rt-tracer.exe sits next to it.
-    let current = std::env::current_exe().context("locating daemon exe")?;
-    let dir = current
-        .parent()
-        .ok_or_else(|| anyhow!("daemon exe has no parent dir"))?;
-    let candidate = dir.join(tracer_exe_name());
-    if candidate.is_file() {
-        return Ok(candidate);
+    if let Some(dir) = current_exe.parent() {
+        let candidate = dir.join(tracer_exe_name());
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        attempted.push(format!("sibling of daemon: {}", candidate.display()));
+    } else {
+        attempted.push(format!(
+            "sibling of daemon: {} has no parent directory",
+            current_exe.display()
+        ));
     }
+
+    // Installed-app fallback: a compatible daemon can survive an app reinstall
+    // and be reused without inheriting the current supervisor's template-dir
+    // environment. Current-user NSIS installs place external bins beside the
+    // app under LOCALAPPDATA\rustling-tulip, so the daemon can still recover.
+    if let Some(candidate) = installed_candidate {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        attempted.push(format!("installed app dir: {}", candidate.display()));
+    }
+
     Err(anyhow!(
-        "rt-tracer binary not found (no RUSTLING_TULIP_BIN_TEMPLATES, sibling lookup missed): {}",
-        candidate.display()
+        "rt-tracer binary not found (no {TRACER_TEMPLATE_DIR_ENV}, fallback lookups missed):\n  - {}",
+        attempted.join("\n  - ")
     ))
+}
+
+#[cfg(windows)]
+fn installed_tracer_template_candidate() -> Option<PathBuf> {
+    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
+    if local_app_data.is_empty() {
+        return None;
+    }
+    Some(
+        PathBuf::from(local_app_data)
+            .join("rustling-tulip")
+            .join(tracer_exe_name()),
+    )
+}
+
+#[cfg(not(windows))]
+fn installed_tracer_template_candidate() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(windows)]
@@ -571,8 +620,40 @@ impl ChildKiller for TracerKiller {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert scratch setup preconditions with expect for clear failure messages"
+)]
 mod tests {
-    use super::{pipe_name_with_prefix, sanitize_pipe_prefix};
+    use super::{locate_tracer_template_candidate, pipe_name_with_prefix, sanitize_pipe_prefix};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rt-tracer-client-{label}-{}",
+                Uuid::new_v4().simple()
+            ));
+            fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn pipe_prefix_is_sanitized() {
@@ -598,5 +679,29 @@ mod tests {
                 .map(str::len),
             Some(80),
         );
+    }
+
+    #[test]
+    fn locates_installed_tracer_when_reusing_cached_daemon_without_template_env() {
+        let scratch = Scratch::new("installed-fallback");
+        let cache_dir = scratch.path().join("binaries");
+        let install_dir = scratch.path().join("installed");
+        fs::create_dir_all(&cache_dir).expect("create cache dir");
+        fs::create_dir_all(&install_dir).expect("create install dir");
+
+        let cached_daemon = cache_dir.join(if cfg!(windows) {
+            "rustling-tulipd-aaaaaaaaaaaaaaaa.exe"
+        } else {
+            "rustling-tulipd-aaaaaaaaaaaaaaaa"
+        });
+        fs::write(&cached_daemon, b"daemon").expect("write cached daemon");
+        let installed_tracer = install_dir.join(super::tracer_exe_name());
+        fs::write(&installed_tracer, b"tracer").expect("write installed tracer");
+
+        let located =
+            locate_tracer_template_candidate(None, &cached_daemon, Some(installed_tracer.clone()))
+                .expect("installed tracer fallback should resolve");
+
+        assert_eq!(located, installed_tracer);
     }
 }
