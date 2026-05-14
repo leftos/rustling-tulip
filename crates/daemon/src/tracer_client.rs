@@ -314,26 +314,37 @@ fn spawn_tracer_process(
 }
 
 async fn connect_with_retry(pipe: &str) -> anyhow::Result<NamedPipeClient> {
+    enum PendingPipeState {
+        Missing,
+        Busy,
+    }
+
     let started = Instant::now();
+    let mut pending: PendingPipeState;
     loop {
         match ClientOptions::new().open(pipe) {
             Ok(c) => return Ok(c),
             Err(err) if err.raw_os_error() == Some(2) => {
                 // ERROR_FILE_NOT_FOUND — tracer hasn't created the pipe yet.
                 // Retry until the timeout.
+                pending = PendingPipeState::Missing;
             }
             Err(err) if err.raw_os_error() == Some(231) => {
-                // ERROR_PIPE_BUSY — another daemon attached first.
-                return Err(anyhow!(
-                    "tracer pipe {pipe} is already in use by another daemon (ERROR_PIPE_BUSY)"
-                ));
+                // ERROR_PIPE_BUSY — a concurrent daemon restart can briefly
+                // claim the pipe before the surviving daemon settles.
+                pending = PendingPipeState::Busy;
             }
             Err(err) => return Err(err).context(format!("opening tracer pipe {pipe}")),
         }
         if started.elapsed() >= PIPE_CONNECT_TIMEOUT {
-            return Err(anyhow!(
-                "tracer pipe {pipe} did not appear within {PIPE_CONNECT_TIMEOUT:?}"
-            ));
+            return match pending {
+                PendingPipeState::Missing => Err(anyhow!(
+                    "tracer pipe {pipe} did not appear within {PIPE_CONNECT_TIMEOUT:?}"
+                )),
+                PendingPipeState::Busy => Err(anyhow!(
+                    "tracer pipe {pipe} stayed busy for {PIPE_CONNECT_TIMEOUT:?}"
+                )),
+            };
         }
         tokio::time::sleep(PIPE_RETRY_INTERVAL).await;
     }

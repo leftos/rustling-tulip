@@ -7,6 +7,8 @@ import type { SessionSnapshot } from "../types";
 export function sessionDisplayLabel(s: SessionSnapshot): string {
   const userLabel = nonEmptyLabel(s.user_label);
   if (userLabel) return userLabel;
+  const cwdLabel = currentCwdLabel(s);
+  if (cwdLabel) return cwdLabel;
   const terminalTitle = displayableTerminalTitle(s);
   if (terminalTitle) return terminalTitle;
   const label = nonEmptyLabel(s.label);
@@ -26,6 +28,10 @@ export function sessionLabelTooltip(s: SessionSnapshot): string {
   }
   if (terminalTitle && terminalTitle !== display) {
     lines.push(`Terminal title: ${terminalTitle}`);
+  }
+  const cwd = nonEmptyLabel(s.current_cwd);
+  if (cwd) {
+    lines.push(`Cwd: ${cwd}`);
   }
   return lines.join("\n");
 }
@@ -50,6 +56,13 @@ function displayableTerminalTitle(s: SessionSnapshot): string | null {
   return title;
 }
 
+function currentCwdLabel(s: SessionSnapshot): string | null {
+  if (s.mode !== "plain_shell") return null;
+  const cwd = nonEmptyLabel(s.current_cwd);
+  if (!cwd) return null;
+  return pathLeafName(cwd);
+}
+
 function isNoisyShellTitle(title: string): boolean {
   const normalized = title.trim().toLowerCase().replaceAll("\\", "/");
   const basename = normalized.split("/").at(-1) ?? normalized;
@@ -62,4 +75,10 @@ function isNoisyShellTitle(title: string): boolean {
     normalized === "windows powershell" ||
     normalized === "administrator: windows powershell"
   );
+}
+
+function pathLeafName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/g, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
 }

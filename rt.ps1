@@ -171,6 +171,11 @@ function Test-DaemonBinaryWritable {
     }
 }
 
+function Test-AppProcessesRunning {
+    $processes = @(Get-Process -Name "$AppImageName*" -ErrorAction SilentlyContinue)
+    return $processes.Count -gt 0
+}
+
 function Stop-DaemonProcesses {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -187,7 +192,8 @@ function Stop-DaemonProcesses {
     # (cargo lock-retry) or wants a full teardown (`rt.ps1 stop`).
     param(
         [string]$Reason,
-        [string[]]$Names = @($ImageName)
+        [string[]]$Names = @($ImageName),
+        [switch]$AllowRespawn
     )
     # Append `*` so cached binary copies (`rustling-tulipd-<hash>.exe`,
     # `rt-tracer-<hash>.exe`) are caught alongside the original templates.
@@ -205,23 +211,36 @@ function Stop-DaemonProcesses {
     $msg = if ($Reason) { "==> Stopping $summary process(es) -- $Reason..." }
            else        { "==> Stopping $summary process(es)..." }
     Write-Host $msg -ForegroundColor Yellow
+    $stoppedIds = @($processes | ForEach-Object { $_.Id })
     foreach ($p in $processes) {
         Write-Host "    killing PID $($p.Id) ($($p.ProcessName))"
         Stop-Process -Id $p.Id -Force -ErrorAction Continue
     }
     # Give the OS up to 2s for handles to release.
+    $remaining = @()
     for ($i = 0; $i -lt 20; $i++) {
-        $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
+        if ($AllowRespawn) {
+            $remaining = @(Get-Process -Id $stoppedIds -ErrorAction SilentlyContinue)
+        } else {
+            $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
+        }
         if ($remaining.Count -eq 0) { break }
         Start-Sleep -Milliseconds 100
     }
-    $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
+    if ($AllowRespawn) {
+        $remaining = @(Get-Process -Id $stoppedIds -ErrorAction SilentlyContinue)
+    } else {
+        $remaining = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
+    }
     if ($remaining.Count -gt 0) {
         $names = ($remaining | ForEach-Object { "$($_.ProcessName)#$($_.Id)" }) -join ', '
         throw "Failed to stop $($remaining.Count) process(es) within 2s: $names"
     }
     if (Test-Path $HandshakeFile) {
-        Remove-Item $HandshakeFile -Force
+        $current = @(Get-Process -Name $targetNames -ErrorAction SilentlyContinue)
+        if (-not $AllowRespawn -or $current.Count -eq 0) {
+            Remove-Item $HandshakeFile -Force
+        }
     }
     return $true
 }
@@ -599,9 +618,37 @@ function Invoke-Stop {
 }
 
 function Invoke-Restart {
-    [void](Stop-DaemonProcesses -Reason 'restart requested')
+    Assert-Tooling
+    $appWasRunning = Test-AppProcessesRunning
+
+    if ($NoBuild) {
+        [void](Stop-DaemonProcesses -Reason 'restart requested' -AllowRespawn:$appWasRunning)
+        $script:DaemonAlreadyStopped = $true
+        if ($appWasRunning -and -not $Release) {
+            Write-Host '==> Existing app is already running; skipping second dev app launch.' -ForegroundColor DarkGray
+            Write-Host '    The open app will reconnect to the restarted daemon.' -ForegroundColor DarkGray
+            return
+        }
+        if ($Release) { Invoke-ReleaseLaunch } else { Invoke-DevLaunch }
+        return
+    }
+
+    if ($Release) {
+        Invoke-ReleaseBuild
+        [void](Stop-DaemonProcesses -Reason 'restart requested')
+        Invoke-ReleaseLaunch
+        return
+    }
+
+    Invoke-DebugBuild
+    [void](Stop-DaemonProcesses -Reason 'restart requested' -AllowRespawn:$appWasRunning)
     $script:DaemonAlreadyStopped = $true
-    Invoke-Launch
+    if ($appWasRunning) {
+        Write-Host '==> Existing app is already running; skipping second dev app launch.' -ForegroundColor DarkGray
+        Write-Host '    The open app will reconnect to the restarted daemon.' -ForegroundColor DarkGray
+        return
+    }
+    Invoke-DevLaunch
 }
 
 function Invoke-Test {

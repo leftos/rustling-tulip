@@ -174,6 +174,7 @@ describe("standalone shell launch", function () {
       msg.session.id,
       nestedDir,
     );
+    await waitForVisibleShellLabel(msg.session.id, basename(nestedDir));
     await (
       await nestedContainer.$('[data-testid="sidebar-cwd-add-workspace"]')
     ).waitForExist({
@@ -186,7 +187,8 @@ describe("standalone shell launch", function () {
     registeredRepoIds.push(registeredRepoId);
 
     await waitForContainer("repo", registeredRepoId);
-    await waitForStandaloneContainer(msg.session.id, nestedDir);
+    await waitForSessionInsideContainer("repo", registeredRepoId, msg.session.id);
+    await waitForStandaloneContainerGone(msg.session.id);
 
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "standalone-shell-after.png"),
@@ -332,6 +334,31 @@ async function waitForContainer(
   });
 }
 
+async function waitForSessionInsideContainer(
+  kind: "repo" | "workspace" | "cwd",
+  containerId: string,
+  sessionId: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      const container = await browser.$(
+        `[data-testid="sidebar-container-${kind}"][data-container-id="${containerId}"]`,
+      );
+      if (!(await container.isExisting())) return false;
+      const item = await container.$("./ancestor::li[1]");
+      if (!(await item.isExisting())) return false;
+      const row = await item.$(
+        `[data-testid="sidebar-session"][data-session-id="${sessionId}"]`,
+      );
+      return row.isExisting();
+    },
+    {
+      timeout: 10_000,
+      timeoutMsg: `${sessionId} did not move under ${kind}:${containerId}`,
+    },
+  );
+}
+
 async function waitForStandaloneContainer(
   sessionId: string,
   expectedPath: string,
@@ -364,6 +391,19 @@ async function findStandaloneContainer(
   );
   if (!(await container.isExisting())) return null;
   return container as unknown as WebdriverIO.Element;
+}
+
+async function waitForStandaloneContainerGone(sessionId: string): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      const container = await findStandaloneContainer(sessionId);
+      return container === null;
+    },
+    {
+      timeout: 10_000,
+      timeoutMsg: `standalone container still present after regroup: ${sessionId}`,
+    },
+  );
 }
 
 async function waitForBufferText(
@@ -444,6 +484,32 @@ async function waitForRenderedShellStatus(
   );
   const dot = await row.$(`.status-dot.status-${status}`);
   await dot.waitForExist({ timeout: 5_000 });
+}
+
+async function waitForVisibleShellLabel(
+  sessionId: string,
+  expected: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      const leaf = await browser.$(
+        `[data-testid="sidebar-session"][data-session-id="${sessionId}"] .tree-label`,
+      );
+      const paneTitle = await browser.$(
+        `[data-testid="session-pane"][data-session-id="${sessionId}"] .session-title h2`,
+      );
+      return (
+        (await leaf.isExisting()) &&
+        (await paneTitle.isExisting()) &&
+        (await leaf.getText()) === expected &&
+        (await paneTitle.getText()) === expected
+      );
+    },
+    {
+      timeout: 5_000,
+      timeoutMsg: `visible shell label did not update to ${expected}`,
+    },
+  );
 }
 
 function shellCdCommand(path: string): string {

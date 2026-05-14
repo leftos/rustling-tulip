@@ -9,6 +9,8 @@
 //! - `ESC ] 2 ; <title> BEL`  (window title only)
 //! - `ESC ] 7 ; file://<host>/<cwd> BEL`  (current working directory)
 //! - `0x9D <0|1|2|7> ; <payload> 0x9C`  (8-bit C1 OSC/ST form)
+//! - for plain shells only, visible `PS <cwd>` prompt text as a fallback for
+//!   sessions that were spawned before the prompt hook emitted OSC 7.
 //!
 //! Either `BEL` (`0x07`) or `ST` (`ESC \`) terminates the string. Title bytes
 //! are decoded as UTF-8 lossily — non-UTF-8 bytes turn into U+FFFD rather than
@@ -31,6 +33,7 @@ use tracing::{debug, warn};
 const MAX_TITLE_BYTES: usize = 256;
 const MAX_CWD_BYTES: usize = 1024;
 const MAX_BUFFER_BYTES: usize = 4096;
+const MAX_PROMPT_TAIL_BYTES: usize = 8192;
 const BEL: u8 = 0x07;
 const ESC: u8 = 0x1B;
 const OSC_C1: u8 = 0x9D;
@@ -65,13 +68,17 @@ enum OscEvent {
 struct Parser {
     state: State,
     buf: Vec<u8>,
+    prompt_tail: Vec<u8>,
+    infer_prompt_cwd: bool,
 }
 
 impl Parser {
-    fn new() -> Self {
+    fn new(infer_prompt_cwd: bool) -> Self {
         Self {
             state: State::Normal,
             buf: Vec::new(),
+            prompt_tail: Vec::new(),
+            infer_prompt_cwd,
         }
     }
 
@@ -161,6 +168,12 @@ impl Parser {
                 }
             }
         }
+        if self.infer_prompt_cwd {
+            self.remember_prompt_bytes(bytes);
+            if let Some(cwd) = self.latest_prompt_cwd() {
+                events.push(OscEvent::CurrentCwd(cwd));
+            }
+        }
         events
     }
 
@@ -178,6 +191,24 @@ impl Parser {
             7 => parse_osc7_cwd(&value).map(OscEvent::CurrentCwd),
             _ => None,
         }
+    }
+
+    fn remember_prompt_bytes(&mut self, bytes: &[u8]) {
+        self.prompt_tail.extend_from_slice(bytes);
+        if self.prompt_tail.len() > MAX_PROMPT_TAIL_BYTES {
+            let extra = self.prompt_tail.len() - MAX_PROMPT_TAIL_BYTES;
+            self.prompt_tail.drain(..extra);
+        }
+    }
+
+    fn latest_prompt_cwd(&self) -> Option<String> {
+        let text = String::from_utf8_lossy(&self.prompt_tail);
+        let visible = strip_terminal_sequences(&text);
+        let normalized = visible.replace('\r', "\n");
+        normalized
+            .lines()
+            .rev()
+            .find_map(parse_powershell_prompt_cwd)
     }
 }
 
@@ -257,16 +288,95 @@ const fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
+fn strip_terminal_sequences(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            ESC => {
+                i += 1;
+                if i >= bytes.len() {
+                    break;
+                }
+                if bytes[i] == b'[' {
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    i = (i + 1).min(bytes.len());
+                } else if bytes[i] == b']' {
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == BEL {
+                            i += 1;
+                            break;
+                        }
+                        if bytes[i] == ESC && bytes.get(i + 1) == Some(&b'\\') {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            OSC_C1 => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != ST_C1 {
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            _ => {
+                let Some(ch) = input[i..].chars().next() else {
+                    break;
+                };
+                if !ch.is_control() || ch == '\r' || ch == '\n' || ch == '\t' {
+                    out.push(ch);
+                }
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn parse_powershell_prompt_cwd(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix("PS ")?;
+    let raw = rest.split('>').next()?.trim();
+    let path = raw.rsplit_once("::").map_or(raw, |(_, path)| path).trim();
+    if is_filesystem_path(path) {
+        Some(normalize_path_separators(path))
+    } else {
+        None
+    }
+}
+
+fn is_filesystem_path(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with(r"\\") {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// Spawn the watcher task. The task ends when the PTY broadcast closes.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     mut output: broadcast::Receiver<Vec<u8>>,
     dirs: Dirs,
+    infer_prompt_cwd: bool,
 ) {
     let registry = Arc::clone(registry);
     tokio::spawn(async move {
-        let mut parser = Parser::new();
+        let mut parser = Parser::new(infer_prompt_cwd);
         let mut last_title: Option<String> = None;
         let mut last_cwd: Option<String> = None;
         loop {
@@ -331,28 +441,28 @@ mod tests {
 
     #[test]
     fn bel_terminator() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]0;hello\x07"]);
         assert_eq!(titles, vec![title("hello")]);
     }
 
     #[test]
     fn st_terminator() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]2;world\x1b\\"]);
         assert_eq!(titles, vec![title("world")]);
     }
 
     #[test]
     fn c1_osc_and_st() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x9d0;c1-title\x9c"]);
         assert_eq!(titles, vec![title("c1-title")]);
     }
 
     #[test]
     fn split_across_chunks() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"prefix\x1b]0;part", b"ial-then\x07rest"]);
         assert_eq!(titles, vec![title("partial-then")]);
     }
@@ -360,21 +470,21 @@ mod tests {
     #[test]
     fn ignores_other_osc_commands() {
         // OSC 8 (hyperlink) should not be interpreted as terminal metadata.
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]8;;http://x\x07"]);
         assert!(titles.is_empty(), "got titles: {titles:?}");
     }
 
     #[test]
     fn drops_empty_title() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]0;\x07"]);
         assert!(titles.is_empty());
     }
 
     #[test]
     fn caps_oversized_title() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let mut s = Vec::from(b"\x1b]0;".as_slice());
         s.extend(std::iter::repeat_n(b'a', MAX_TITLE_BYTES + 1));
         s.push(BEL);
@@ -384,7 +494,7 @@ mod tests {
 
     #[test]
     fn abandons_runaway_buffer() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let mut s = Vec::from(b"\x1b]0;".as_slice());
         s.extend(std::iter::repeat_n(b'a', MAX_BUFFER_BYTES + 10));
         // No terminator at all in the chunk.
@@ -397,21 +507,21 @@ mod tests {
 
     #[test]
     fn accepts_param_1_and_2_within_chunk() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]1;icon\x07\x1b]2;window\x07"]);
         assert_eq!(titles, vec![title("icon"), title("window")]);
     }
 
     #[test]
     fn accepts_param_1_and_2_across_separate_chunks() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]1;icon\x07", b"\x1b]2;window\x07"]);
         assert_eq!(titles, vec![title("icon"), title("window")]);
     }
 
     #[test]
     fn parses_osc_7_file_uri() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let sequence: &[u8] = if cfg!(windows) {
             b"\x1b]7;file:///C:/Users/Leftos/a%20b\x07"
         } else {
@@ -428,7 +538,7 @@ mod tests {
 
     #[test]
     fn keeps_title_and_cwd_events_from_one_chunk() {
-        let mut p = Parser::new();
+        let mut p = Parser::new(false);
         let sequence: &[u8] = if cfg!(windows) {
             b"\x1b]0;title\x07\x1b]7;file:///C:/dev/repo\x07"
         } else {
@@ -441,5 +551,29 @@ mod tests {
         };
         let events = feed_all(&mut p, &[sequence]);
         assert_eq!(events, vec![title("title"), cwd(expected)]);
+    }
+
+    #[test]
+    fn infers_powershell_cwd_from_visible_prompt() {
+        let mut p = Parser::new(true);
+        let events = feed_all(
+            &mut p,
+            &[b"PS X:\\dev> cd .\\rustling-tulip\\\r\nPS X:\\dev\\rustling-tulip> "],
+        );
+        assert_eq!(events, vec![cwd("X:\\dev\\rustling-tulip")]);
+    }
+
+    #[test]
+    fn ignores_powershell_prompt_text_when_prompt_inference_is_off() {
+        let mut p = Parser::new(false);
+        let events = feed_all(&mut p, &[b"PS X:\\dev\\rustling-tulip> "]);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn strips_csi_before_powershell_prompt_inference() {
+        let mut p = Parser::new(true);
+        let events = feed_all(&mut p, &[b"\x1b[32mPS X:\\dev\\repo> \x1b[0m"]);
+        assert_eq!(events, vec![cwd("X:\\dev\\repo")]);
     }
 }

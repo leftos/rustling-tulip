@@ -237,6 +237,7 @@ async fn reattach_orphans(
                             meta.session_id.clone(),
                             pty.output.subscribe(),
                             dirs.clone(),
+                            meta.mode == SessionMode::PlainShell,
                         );
                     }
                     Err(err) => {
@@ -2493,6 +2494,7 @@ async fn spawn_interactive_session(
         session_id.clone(),
         pty.output.subscribe(),
         hub.dirs.clone(),
+        false,
     );
     if let Some(injector) = cfg.prompt_injector.clone() {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
@@ -2648,6 +2650,7 @@ async fn spawn_plain_shell_session(
         session_id.clone(),
         pty.output.subscribe(),
         hub.dirs.clone(),
+        true,
     );
     Ok(snap)
 }

@@ -2169,7 +2169,32 @@ function buildContainers(
   const detached: SessionSnapshot[] = [];
 
   for (const s of sessions) {
-    if (s.kind === "standalone") {
+    if (s.mode === "plain_shell" && s.current_cwd) {
+      const cwdHome = findContainerForCwd(
+        s.current_cwd,
+        repos,
+        workspaces,
+        memberRepoIds,
+      );
+      if (cwdHome.kind === "workspace") {
+        pushTo(wsSessions, cwdHome.id, s);
+      } else if (cwdHome.kind === "repo") {
+        pushTo(repoSessions, cwdHome.id, s);
+      } else if (s.kind === "standalone") {
+        standaloneContainers.push({
+          key: `standalone:${s.id}`,
+          kind: "standalone",
+          id: s.id,
+          name: sessionDisplayLabel(s),
+          hoverTitle: cwdHome.path,
+          fsPath: cwdHome.path,
+          sessions: [s],
+          removable: false,
+        });
+      } else {
+        pushTo(cwdSessions, cwdHome.path, s);
+      }
+    } else if (s.kind === "standalone") {
       const cwd = s.current_cwd ? normalizeFsPath(s.current_cwd) : null;
       standaloneContainers.push({
         key: `standalone:${s.id}`,
@@ -2181,20 +2206,6 @@ function buildContainers(
         sessions: [s],
         removable: false,
       });
-    } else if (s.mode === "plain_shell" && s.current_cwd) {
-      const cwdHome = findContainerForCwd(
-        s.current_cwd,
-        repos,
-        workspaces,
-        memberRepoIds,
-      );
-      if (cwdHome.kind === "workspace") {
-        pushTo(wsSessions, cwdHome.id, s);
-      } else if (cwdHome.kind === "repo") {
-        pushTo(repoSessions, cwdHome.id, s);
-      } else {
-        pushTo(cwdSessions, cwdHome.path, s);
-      }
     } else if (s.workspace_id) {
       if (workspaceById.has(s.workspace_id)) {
         pushTo(wsSessions, s.workspace_id, s);
