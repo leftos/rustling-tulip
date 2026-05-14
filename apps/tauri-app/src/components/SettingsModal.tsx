@@ -75,7 +75,7 @@ export default function SettingsModal({ settings, onClose }: Props) {
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop modal-backdrop-preview"
       data-testid="settings-modal"
     >
       <div

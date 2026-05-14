@@ -132,7 +132,7 @@ describe("keyboard a11y", function () {
   });
 
   it("Escape dismisses the RepoRemoveDialog (and Cancel is focused on open)", async function () {
-    expect(registeredRepoId, "registeredRepoId").to.not.be.null;
+    expect(registeredRepoId, "registeredRepoId").to.not.equal(null);
     if (!registeredRepoId) throw new Error("setup failed");
 
     // Open the repo-remove modal by clicking × on the repo row. With a
@@ -182,7 +182,7 @@ describe("keyboard a11y", function () {
   });
 
   it("workspace/repo container headers expose aria-expanded state", async function () {
-    if (!registeredRepoId) throw new Error("setup failed");
+    if (!registeredRepoId || !spawnedSessionId) throw new Error("setup failed");
     const header = await browser.$(
       `[data-testid=sidebar-container-repo][data-container-id="${registeredRepoId}"]`,
     );
@@ -199,6 +199,33 @@ describe("keyboard a11y", function () {
       "true",
       "false",
     ]);
+
+    const chip = await header.$('[data-testid=tree-toggle-chip]');
+    await chip.waitForExist({ timeout: 5_000 });
+    expect(await chip.getAttribute("aria-expanded")).to.equal(ariaExpanded);
+
+    await chip.click();
+    await browser.waitUntil(
+      async () => (await header.getAttribute("aria-expanded")) !== ariaExpanded,
+      {
+        timeout: 5_000,
+        timeoutMsg: "tree toggle chip did not change container expansion",
+      },
+    );
+    const leaf = await browser.$(
+      `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
+    );
+    await leaf.waitForExist({ timeout: 5_000, reverse: ariaExpanded === "true" });
+
+    const restoreChip = await header.$('[data-testid=tree-toggle-chip]');
+    await restoreChip.click();
+    await browser.waitUntil(
+      async () => (await header.getAttribute("aria-expanded")) === ariaExpanded,
+      {
+        timeout: 5_000,
+        timeoutMsg: "tree toggle chip did not restore container expansion",
+      },
+    );
   });
 });
 

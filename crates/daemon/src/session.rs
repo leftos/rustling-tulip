@@ -121,9 +121,9 @@ pub struct SessionRecord {
     pub last_prompt: Option<String>,
     /// Notifier feeding user-input byte counts into `pty_state::watch` so
     /// the status watcher can distinguish echo from genuine model output.
-    /// `Some` for interactive sessions whose watcher is running; `None`
-    /// for headless, plain-shell, orphaned, or stopped sessions. Cleared
-    /// by the exit watcher when the child dies.
+    /// `Some` for PTY sessions whose status watcher is running; `None`
+    /// for headless, orphaned, or stopped sessions. Cleared by the exit
+    /// watcher when the child dies.
     pub input_notifier: Option<mpsc::UnboundedSender<usize>>,
 }
 

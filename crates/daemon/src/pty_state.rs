@@ -36,6 +36,13 @@ const ECHO_BUDGET_PER_INPUT_BYTE: u64 = 512;
 /// dot blue between keystrokes.
 const MIN_WORKING_EXCESS: u64 = 64;
 
+/// Shells echo commands and prompts, but a real command's output should
+/// outpace that echo quickly. Keep this tighter than the agent TUI budget so
+/// short shell commands visibly pulse without treating normal typing as work.
+const SHELL_ECHO_BUDGET_PER_INPUT_BYTE: u64 = 8;
+const SHELL_MIN_WORKING_OUTPUT: u64 = 160;
+const SHELL_MIN_WORKING_EXCESS: u64 = 96;
+
 pub struct AttentionEvent {
     pub session_id: String,
     pub reason: AttentionReason,
@@ -138,6 +145,64 @@ pub fn watch(
     });
 }
 
+/// Spawn a background task that infers `idle / working` for a plain shell.
+///
+/// Plain shells deliberately avoid the Claude prompt classifier, but they can
+/// still expose useful activity: command output should set the status to
+/// `Working`, while echoed input and prompt redraws should leave it `Idle`.
+pub fn watch_plain_shell(
+    registry: &Arc<SessionRegistry>,
+    session_id: String,
+    mut output: broadcast::Receiver<Vec<u8>>,
+    mut input_pulses: mpsc::UnboundedReceiver<usize>,
+) {
+    let registry = Arc::clone(registry);
+    tokio::spawn(async move {
+        let mut state = State::Idle;
+        let mut last_output = Instant::now();
+        let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
+        let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
+
+        loop {
+            let next_idle_check = last_output + IDLE_AFTER;
+            tokio::select! {
+                msg = output.recv() => match msg {
+                    Ok(bytes) => {
+                        let now = Instant::now();
+                        last_output = now;
+                        push_window(&mut out_window, now, bytes.len());
+                        trim_window(&mut in_window, now);
+                        trim_window(&mut out_window, now);
+
+                        let in_sum = window_sum(&in_window);
+                        let out_sum = window_sum(&out_window);
+                        let next = if shell_output_is_working(in_sum, out_sum) {
+                            State::Working
+                        } else {
+                            state
+                        };
+                        on_plain_shell_transition(&registry, &session_id, &mut state, next);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(session_id = %session_id, lagged = n, "plain shell state lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                pulse = input_pulses.recv() => {
+                    if let Some(n) = pulse {
+                        let now = Instant::now();
+                        push_window(&mut in_window, now, n);
+                        trim_window(&mut in_window, now);
+                    }
+                },
+                () = sleep_until(next_idle_check), if state == State::Working => {
+                    on_plain_shell_transition(&registry, &session_id, &mut state, State::Idle);
+                }
+            }
+        }
+    });
+}
+
 fn push_window(window: &mut VecDeque<(Instant, u32)>, now: Instant, bytes: usize) {
     let n = u32::try_from(bytes).unwrap_or(u32::MAX);
     window.push_back((now, n));
@@ -156,6 +221,13 @@ fn trim_window(window: &mut VecDeque<(Instant, u32)>, now: Instant) {
 
 fn window_sum(window: &VecDeque<(Instant, u32)>) -> u64 {
     window.iter().map(|(_, n)| u64::from(*n)).sum()
+}
+
+fn shell_output_is_working(input_bytes: u64, output_bytes: u64) -> bool {
+    let budget = input_bytes
+        .saturating_mul(SHELL_ECHO_BUDGET_PER_INPUT_BYTE)
+        .saturating_add(SHELL_MIN_WORKING_EXCESS);
+    output_bytes >= SHELL_MIN_WORKING_OUTPUT && output_bytes > budget
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,5 +361,40 @@ fn on_transition(
             session_id: session_id.to_string(),
             reason: AttentionReason::AwaitingInput,
         });
+    }
+}
+
+fn on_plain_shell_transition(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    current: &mut State,
+    next: State,
+) {
+    if next == *current {
+        return;
+    }
+    *current = next;
+    registry.update(session_id, |rec| {
+        rec.status = SessionStatus::from(next);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_output_is_working;
+
+    #[test]
+    fn shell_output_below_minimum_does_not_mark_working() {
+        assert!(!shell_output_is_working(0, 120));
+    }
+
+    #[test]
+    fn shell_echo_budget_suppresses_typed_input_redraws() {
+        assert!(!shell_output_is_working(32, 220));
+    }
+
+    #[test]
+    fn shell_command_output_marks_working() {
+        assert!(shell_output_is_working(8, 1_200));
     }
 }

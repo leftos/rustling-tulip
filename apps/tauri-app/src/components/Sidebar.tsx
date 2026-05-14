@@ -1138,9 +1138,24 @@ function ContainerNode(p: ContainerNodeProps) {
         onDrop={p.dragHandlers?.onDrop}
       >
         <div className="tree-container-primary">
-          <span className="tree-caret" aria-hidden="true">
-            {hasChildren ? (p.collapsed ? "▸" : "▾") : ""}
-          </span>
+          {hasChildren ? (
+            <button
+              type="button"
+              className="tree-toggle-chip"
+              title={p.collapsed ? `Expand ${c.name}` : `Collapse ${c.name}`}
+              aria-label={p.collapsed ? `Expand ${c.name}` : `Collapse ${c.name}`}
+              aria-expanded={!p.collapsed}
+              data-testid="tree-toggle-chip"
+              onClick={(e) => {
+                e.stopPropagation();
+                p.onToggle();
+              }}
+            >
+              {p.collapsed ? "▸" : "▾"}
+            </button>
+          ) : (
+            <span className="tree-toggle-chip-placeholder" aria-hidden="true" />
+          )}
           <span className="tree-label">{c.name}</span>
           {c.sessions.length > 0 && (
             <span className="list-item-meta">{c.sessions.length}</span>
@@ -1434,22 +1449,12 @@ function SessionLeaf(p: SessionLeafProps) {
         data-session-elevated={s.elevated_authority ? "true" : "false"}
         data-tab-binding-count={bindings.length}
       >
-        {isPlainShell ? (
-          <span
-            className="status-glyph"
-            aria-hidden="true"
-            title="Plain shell session"
-          >
-            {">_"}
-          </span>
-        ) : (
-          <span
-            className={`status-dot status-${s.status}`}
-            title={`status: ${s.status}`}
-            aria-label={`status ${s.status}`}
-            role="img"
-          />
-        )}
+        <span
+          className={`status-dot status-${s.status}`}
+          title={`status: ${s.status}`}
+          aria-label={`status ${s.status}`}
+          role="img"
+        />
         <span
           className="tree-label"
           title={sessionLabelTooltip(s)}

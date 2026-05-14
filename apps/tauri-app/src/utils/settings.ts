@@ -44,6 +44,9 @@ export interface Settings {
     standalone_shell_default_dir: string | null;
   };
   appearance: AppearanceOverrides;
+  /// Last custom colours picked through any appearance colour input.
+  /// Preset clicks do not enter this list; it exists for manual recall.
+  appearance_recent_colors: string[];
   terminal: {
     /// Auto-copy any non-empty terminal selection to the system
     /// clipboard. Opt-out — defaults to `true` because most users
@@ -78,6 +81,7 @@ export const DEFAULT_SETTINGS: Settings = {
     terminal_font_size: 13,
     terminal_font_bold: false,
   },
+  appearance_recent_colors: [],
   terminal: {
     copy_on_selection: true,
   },
@@ -147,12 +151,25 @@ export function useSettings(): [Settings, (next: Settings) => void] {
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<Settings>).detail;
-      setLocal(detail);
+      setLocal(mergeWithDefaults(detail));
     };
     window.addEventListener(CHANGE_EVENT, handler);
     return () => window.removeEventListener(CHANGE_EVENT, handler);
   }, []);
   return [settings, saveSettings];
+}
+
+export function rememberRecentCustomColor(color: string): void {
+  const normalized = normalizeSettingsColor(color);
+  if (normalized === null) return;
+  const settings = loadSettings();
+  const existing = settings.appearance_recent_colors.filter(
+    (candidate) => candidate !== normalized,
+  );
+  saveSettings({
+    ...settings,
+    appearance_recent_colors: [normalized, ...existing].slice(0, 12),
+  });
 }
 
 /// Merge a partial (possibly older-version) object with the current
@@ -208,6 +225,9 @@ function mergeWithDefaults(
       ...partial.spawn,
     },
     appearance,
+    appearance_recent_colors: normalizeRecentColors(
+      partial.appearance_recent_colors,
+    ),
     terminal: {
       ...def.terminal,
       ...partial.terminal,
@@ -215,4 +235,23 @@ function mergeWithDefaults(
         partial.terminal?.copy_on_selection ?? def.terminal.copy_on_selection,
     },
   };
+}
+
+function normalizeRecentColors(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const colors: string[] = [];
+  for (const candidate of value) {
+    if (typeof candidate !== "string") continue;
+    const normalized = normalizeSettingsColor(candidate);
+    if (normalized === null || colors.includes(normalized)) continue;
+    colors.push(normalized);
+    if (colors.length >= 12) break;
+  }
+  return colors;
+}
+
+function normalizeSettingsColor(color: string): string | null {
+  const trimmed = color.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) return null;
+  return trimmed.toLowerCase();
 }

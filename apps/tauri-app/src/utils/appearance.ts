@@ -41,13 +41,22 @@ export const BUILT_IN_APPEARANCE: EffectiveAppearance = {
   terminal_font_bold: false,
 };
 
-export const APPEARANCE_COLOR_PRESETS = [
+export const APPEARANCE_BACKGROUND_COLOR_PRESETS = [
   { name: "Default", color: "#08090b" },
   { name: "Graphite", color: "#111318" },
   { name: "Ink", color: "#0b1020" },
   { name: "Evergreen", color: "#07150f" },
   { name: "Aubergine", color: "#1a1024" },
   { name: "Paper", color: "#f6f4ef" },
+] as const;
+
+export const APPEARANCE_ACCENT_COLOR_PRESETS = [
+  { name: "Sky", color: "#38bdf8" },
+  { name: "Blue", color: "#3b82f6" },
+  { name: "Violet", color: "#8b5cf6" },
+  { name: "Emerald", color: "#22c55e" },
+  { name: "Amber", color: "#f59e0b" },
+  { name: "Rose", color: "#fb7185" },
 ] as const;
 
 export function normalizeAppearanceColor(

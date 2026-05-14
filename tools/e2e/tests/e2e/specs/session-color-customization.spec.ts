@@ -22,10 +22,10 @@ import type {
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
-const PRESET_COLOR = "#111318";
-const CUSTOM_ACCENT = "#22c55e";
+const PRESET_COLOR = "#38bdf8";
+const CUSTOM_ACCENT_FRAME = "#22c55e";
 const CUSTOM_BACKGROUND = "#0b1020";
-const CUSTOM_FRAME = "#1a1024";
+const STAGED_ONLY_COLOR = "#d946ef";
 const repoRoot = resolve(
   fileURLToPath(new URL("../../../../..", import.meta.url)),
 );
@@ -101,7 +101,7 @@ describe("session appearance customization", function () {
     }
   });
 
-  it("applies a preset accent to the sidebar row and pane", async function () {
+  it("applies a context-menu preset to the sidebar row and pane frame", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 
     const spawnedSessionId = await spawnAppearanceSession(
@@ -115,13 +115,17 @@ describe("session appearance customization", function () {
     await row.click();
     await sessionPane(spawnedSessionId);
 
-    await openSessionAppearance(spawnedSessionId);
-    const preset = await browser.$('[data-testid="appearance-accent_color-graphite"]');
+    await openSessionContextMenu(spawnedSessionId);
+    await openContextSubmenu("session-context-accent-frame-menu");
+    const preset = await browser.$(
+      '[data-testid="session-context-accent-frame-sky"]',
+    );
     await preset.waitForDisplayed({ timeout: 5_000 });
     await preset.click();
 
     await waitForAppearance(spawnedSessionId, {
       accent: PRESET_COLOR,
+      frame: PRESET_COLOR,
     });
 
     expect(await styleAttribute(sidebarSelector(spawnedSessionId))).to.include(
@@ -130,7 +134,45 @@ describe("session appearance customization", function () {
     expect(await styleAttribute(paneSelector(spawnedSessionId))).to.include(
       `--session-accent: ${PRESET_COLOR}`,
     );
-    await closeAppearanceModal();
+
+    const activePane = await sessionPane(spawnedSessionId);
+    await activePane.click();
+    await browser.waitUntil(async () => sessionPaneIsFocused(spawnedSessionId), {
+      timeout: 5_000,
+      timeoutMsg: "session pane did not take focus",
+    });
+    const activeFrame = await computedStyleProperty(
+      paneSelector(spawnedSessionId),
+      "border-color",
+    );
+    const splitRight = await browser.$('[data-testid="pane-split-right"]');
+    await splitRight.waitForDisplayed({ timeout: 5_000 });
+    await splitRight.click();
+    const emptyPane = await browser.$(".empty-pane");
+    await emptyPane.waitForDisplayed({ timeout: 5_000 });
+    await emptyPane.click();
+    await browser.waitUntil(async () => !(await sessionPaneIsFocused(spawnedSessionId)), {
+      timeout: 5_000,
+      timeoutMsg: "newly split pane did not take focus",
+    });
+    const mutedFrame = await computedStyleProperty(
+      paneSelector(spawnedSessionId),
+      "border-color",
+    );
+    expect(mutedFrame).to.not.equal(activeFrame);
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "session-frame-muted-while-inactive.png"),
+    );
+
+    const inactivePane = await sessionPane(spawnedSessionId);
+    await inactivePane.click();
+    await browser.waitUntil(async () => sessionPaneIsFocused(spawnedSessionId), {
+      timeout: 5_000,
+      timeoutMsg: "session pane did not regain focus",
+    });
+    expect(
+      await computedStyleProperty(paneSelector(spawnedSessionId), "border-color"),
+    ).to.equal(activeFrame);
   });
 
   it("keeps custom session appearance after the app reloads state", async function () {
@@ -148,24 +190,35 @@ describe("session appearance customization", function () {
     await sessionPane(spawnedSessionId);
 
     await openSessionAppearance(spawnedSessionId);
+    const settingsBeforeStage = await localStorageSettings();
+    await stageAppearanceColor("accent_frame_color", STAGED_ONLY_COLOR);
+    expect(await localStorageSettings()).to.equal(settingsBeforeStage);
+    expect(await styleAttribute(sidebarSelector(spawnedSessionId))).to.not.include(
+      `--session-accent: ${STAGED_ONLY_COLOR}`,
+    );
+
     const appearanceApplied = ws.waitFor(
       (msg): msg is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
         isSessionUpdated(msg) &&
         msg.session.id === spawnedSessionId &&
-        msg.session.appearance?.accent_color === CUSTOM_ACCENT &&
+        msg.session.appearance?.accent_color === CUSTOM_ACCENT_FRAME &&
         msg.session.appearance.terminal_background_color === CUSTOM_BACKGROUND &&
-        msg.session.appearance.terminal_frame_color === CUSTOM_FRAME,
+        msg.session.appearance.terminal_frame_color === CUSTOM_ACCENT_FRAME,
       { timeoutMs: 10_000 },
     );
-    await setAppearanceColor("accent_color", CUSTOM_ACCENT);
+    await setAppearanceColor("accent_frame_color", CUSTOM_ACCENT_FRAME);
     await setAppearanceColor("terminal_background_color", CUSTOM_BACKGROUND);
-    await setAppearanceColor("terminal_frame_color", CUSTOM_FRAME);
     await appearanceApplied;
+    await waitForRecentColor("accent_frame_color", 0, CUSTOM_BACKGROUND);
+    await waitForRecentColor("terminal_background_color", 1, CUSTOM_ACCENT_FRAME);
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "session-appearance-modal-preview.png"),
+    );
 
     await waitForAppearance(spawnedSessionId, {
-      accent: CUSTOM_ACCENT,
+      accent: CUSTOM_ACCENT_FRAME,
       background: CUSTOM_BACKGROUND,
-      frame: CUSTOM_FRAME,
+      frame: CUSTOM_ACCENT_FRAME,
     });
     await closeAppearanceModal();
 
@@ -174,9 +227,9 @@ describe("session appearance customization", function () {
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
     await waitForAppDaemonConnection();
     await waitForAppearance(spawnedSessionId, {
-      accent: CUSTOM_ACCENT,
+      accent: CUSTOM_ACCENT_FRAME,
       background: CUSTOM_BACKGROUND,
-      frame: CUSTOM_FRAME,
+      frame: CUSTOM_ACCENT_FRAME,
     });
 
     await browser.saveScreenshot(
@@ -256,9 +309,49 @@ async function styleAttribute(selector: string): Promise<string> {
   return (await element.getAttribute("style")) ?? "";
 }
 
+async function computedStyleProperty(
+  selector: string,
+  property: string,
+): Promise<string> {
+  const result = await browser.execute(
+    ({ elementSelector, propertyName }: { elementSelector: string; propertyName: string }) => {
+      type BrowserScope = {
+        document: { querySelector: (selector: string) => unknown };
+        getComputedStyle: (
+          element: unknown,
+        ) => { getPropertyValue: (property: string) => string };
+      };
+      const scope = globalThis as unknown as BrowserScope;
+      const element = scope.document.querySelector(elementSelector);
+      if (!element) {
+        throw new Error(`element not found: ${elementSelector}`);
+      }
+      return scope.getComputedStyle(element).getPropertyValue(propertyName);
+    },
+    { elementSelector: selector, propertyName: property },
+  );
+  return String(result);
+}
+
+async function sessionPaneIsFocused(sessionId: string): Promise<boolean> {
+  const result = await browser.execute((id: string) => {
+    type BrowserElement = {
+      closest: (selector: string) => { classList: { contains: (name: string) => boolean } } | null;
+    };
+    type BrowserScope = {
+      document: { querySelector: (selector: string) => BrowserElement | null };
+    };
+    const scope = globalThis as unknown as BrowserScope;
+    const pane = scope.document.querySelector(
+      `[data-testid=session-pane][data-session-id="${id}"]`,
+    );
+    return pane?.closest(".grid-pane")?.classList.contains("is-focused") ?? false;
+  }, sessionId);
+  return Boolean(result);
+}
+
 async function openSessionAppearance(sessionId: string): Promise<void> {
-  const row = await sidebarRow(sessionId);
-  await row.click({ button: "right" });
+  await openSessionContextMenu(sessionId);
   const item = await browser.$('[data-testid="session-context-appearance"]');
   await item.waitForDisplayed({ timeout: 5_000 });
   await item.click();
@@ -266,7 +359,29 @@ async function openSessionAppearance(sessionId: string): Promise<void> {
   await modal.waitForDisplayed({ timeout: 5_000 });
 }
 
+async function openSessionContextMenu(sessionId: string): Promise<void> {
+  const row = await sidebarRow(sessionId);
+  await row.click({ button: "right" });
+}
+
+async function openContextSubmenu(testId: string): Promise<void> {
+  const trigger = await browser.$(`[data-testid="${testId}"]`);
+  await trigger.waitForDisplayed({ timeout: 5_000 });
+  await trigger.moveTo();
+  await trigger.click();
+}
+
 async function setAppearanceColor(field: string, color: string): Promise<void> {
+  await stageAppearanceColor(field, color);
+  const apply = await browser.$(`[data-testid="appearance-${field}-custom-apply"]`);
+  await browser.waitUntil(async () => apply.isEnabled(), {
+    timeout: 5_000,
+    timeoutMsg: `appearance apply button did not enable for ${field}`,
+  });
+  await apply.click();
+}
+
+async function stageAppearanceColor(field: string, color: string): Promise<void> {
   const selector = `[data-testid="appearance-${field}-custom"]`;
   const input = await browser.$(selector);
   await input.waitForDisplayed({ timeout: 5_000 });
@@ -299,6 +414,25 @@ async function setAppearanceColor(field: string, color: string): Promise<void> {
     },
     { inputSelector: selector, nextColor: color },
   );
+}
+
+async function localStorageSettings(): Promise<string | null> {
+  const value = await browser.execute(() => globalThis.localStorage.getItem("rt.settings"));
+  return typeof value === "string" ? value : null;
+}
+
+async function waitForRecentColor(
+  field: string,
+  index: number,
+  color: string,
+): Promise<void> {
+  const selector = `[data-testid="appearance-${field}-recent-${index}"]`;
+  const swatch = await browser.$(selector);
+  await swatch.waitForDisplayed({ timeout: 5_000 });
+  await browser.waitUntil(async () => (await swatch.getAttribute("data-color")) === color, {
+    timeout: 5_000,
+    timeoutMsg: `recent color ${color} did not appear for ${field}`,
+  });
 }
 
 async function closeAppearanceModal(): Promise<void> {

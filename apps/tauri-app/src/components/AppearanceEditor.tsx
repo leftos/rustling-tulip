@@ -1,13 +1,15 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AppearanceOverrides } from "../types";
 import {
-  APPEARANCE_COLOR_PRESETS,
+  APPEARANCE_ACCENT_COLOR_PRESETS,
+  APPEARANCE_BACKGROUND_COLOR_PRESETS,
   BUILT_IN_APPEARANCE,
   EMPTY_APPEARANCE,
   type ResolvedAppearance,
 } from "../utils/appearance";
 import { BUNDLED_FONTS, isBundledFont } from "../utils/bundledFonts";
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "../utils/fontSize";
+import { rememberRecentCustomColor, useSettings } from "../utils/settings";
 import Icon from "./Icon";
 
 interface AppearanceFieldsProps {
@@ -39,7 +41,10 @@ export function AppearanceModal({
   onClose,
 }: AppearanceModalProps) {
   return (
-    <div className="modal-backdrop" data-testid="appearance-modal">
+    <div
+      className="modal-backdrop modal-backdrop-preview"
+      data-testid="appearance-modal"
+    >
       <div
         className="modal modal-wide"
         role="dialog"
@@ -88,23 +93,42 @@ export function AppearanceFields({
   inheritLabel,
   onChange,
 }: AppearanceFieldsProps) {
+  const [settings] = useSettings();
   const update = <K extends keyof AppearanceOverrides>(
     key: K,
     next: AppearanceOverrides[K],
   ) => {
     onChange({ ...EMPTY_APPEARANCE, ...value, [key]: next });
   };
+  const updateAccentFrame = (next: string | null) => {
+    onChange({
+      ...EMPTY_APPEARANCE,
+      ...value,
+      accent_color: next,
+      terminal_frame_color: next,
+    });
+  };
+  const accentFrameValue = value.accent_color ?? value.terminal_frame_color;
+  const inheritedAccentFrame =
+    inherited.values.accent_color ?? inherited.values.terminal_frame_color;
+  const inheritedAccentFrameSource =
+    inherited.values.accent_color !== null
+      ? inherited.sources.accent_color
+      : inherited.sources.terminal_frame_color;
   return (
     <section className="settings-section" data-testid="appearance-fields">
       <h3>Appearance</h3>
       <ColorRow
-        label="Sidebar accent"
-        field="accent_color"
-        value={value.accent_color}
-        inherited={inherited.values.accent_color}
-        source={inherited.sources.accent_color}
+        label="Sidebar accent and pane frame"
+        field="accent_frame_color"
+        value={accentFrameValue}
+        inherited={inheritedAccentFrame}
+        source={inheritedAccentFrameSource}
         inheritLabel={inheritLabel}
-        onChange={(next) => update("accent_color", next)}
+        presets={APPEARANCE_ACCENT_COLOR_PRESETS}
+        recentColors={settings.appearance_recent_colors}
+        onCustomColor={rememberRecentCustomColor}
+        onChange={updateAccentFrame}
       />
       <ColorRow
         label="Shell background"
@@ -113,16 +137,10 @@ export function AppearanceFields({
         inherited={inherited.values.terminal_background_color}
         source={inherited.sources.terminal_background_color}
         inheritLabel={inheritLabel}
+        presets={APPEARANCE_BACKGROUND_COLOR_PRESETS}
+        recentColors={settings.appearance_recent_colors}
+        onCustomColor={rememberRecentCustomColor}
         onChange={(next) => update("terminal_background_color", next)}
-      />
-      <ColorRow
-        label="Shell frame"
-        field="terminal_frame_color"
-        value={value.terminal_frame_color}
-        inherited={inherited.values.terminal_frame_color}
-        source={inherited.sources.terminal_frame_color}
-        inheritLabel={inheritLabel}
-        onChange={(next) => update("terminal_frame_color", next)}
       />
       <FontFamilyRow
         value={value.terminal_font_family}
@@ -190,6 +208,9 @@ function ColorRow({
   inherited,
   source,
   inheritLabel,
+  presets,
+  recentColors,
+  onCustomColor,
   onChange,
 }: {
   label: string;
@@ -198,9 +219,22 @@ function ColorRow({
   inherited: string | null;
   source: string;
   inheritLabel: string;
+  presets: readonly { name: string; color: string }[];
+  recentColors: readonly string[];
+  onCustomColor: (color: string) => void;
   onChange: (next: string | null) => void;
 }) {
   const effective = value ?? inherited ?? BUILT_IN_APPEARANCE.terminal_background_color;
+  const effectiveSource = value === null ? source : "current";
+  const [draftColor, setDraftColor] = useState(effective);
+  useEffect(() => {
+    setDraftColor(effective);
+  }, [effective]);
+  const customChanged = draftColor !== effective;
+  const applyCustomColor = () => {
+    onChange(draftColor);
+    onCustomColor(draftColor);
+  };
   return (
     <>
       <div className="settings-row">
@@ -211,7 +245,7 @@ function ColorRow({
             role="group"
             aria-label={`${label} presets`}
           >
-            {APPEARANCE_COLOR_PRESETS.map((preset) => (
+            {presets.map((preset) => (
               <button
                 key={`${field}:${preset.color}`}
                 type="button"
@@ -220,25 +254,66 @@ function ColorRow({
                 title={`${preset.name} (${preset.color})`}
                 aria-label={`Use ${preset.name}`}
                 data-testid={`appearance-${field}-${preset.name.toLowerCase()}`}
-                onClick={() => onChange(preset.color)}
+                onClick={() => {
+                  setDraftColor(preset.color);
+                  onChange(preset.color);
+                }}
               />
             ))}
           </div>
+          {recentColors.length > 0 && (
+            <div
+              className="appearance-swatch-list appearance-recent-swatch-list"
+              role="group"
+              aria-label={`${label} recent custom colors`}
+            >
+              {recentColors.map((color, index) => (
+                <button
+                  key={`${field}:recent:${color}`}
+                  type="button"
+                  className="appearance-swatch"
+                  style={{ background: color }}
+                  title={`Recent custom color ${color}`}
+                  aria-label={`Use recent custom color ${color}`}
+                  data-color={color}
+                  data-testid={`appearance-${field}-recent-${index}`}
+                  onClick={() => {
+                    setDraftColor(color);
+                    onChange(color);
+                  }}
+                />
+              ))}
+            </div>
+          )}
           <input
             type="color"
-            value={effective}
+            value={draftColor}
             aria-label={label}
             data-testid={`appearance-${field}-custom`}
-            onChange={(e) => onChange(e.currentTarget.value)}
+            onChange={(e) => setDraftColor(e.currentTarget.value)}
           />
+          <button
+            type="button"
+            className="appearance-color-apply"
+            disabled={!customChanged}
+            data-testid={`appearance-${field}-custom-apply`}
+            onClick={applyCustomColor}
+          >
+            Apply
+          </button>
           <ResetButton
             label={inheritLabel}
             disabled={value === null}
-            onClick={() => onChange(null)}
+            onClick={() => {
+              setDraftColor(
+                inherited ?? BUILT_IN_APPEARANCE.terminal_background_color,
+              );
+              onChange(null);
+            }}
           />
         </div>
       </div>
-      <InheritedHint value={inherited ?? "none"} source={source} />
+      <InheritedHint value={effective} source={effectiveSource} />
     </>
   );
 }

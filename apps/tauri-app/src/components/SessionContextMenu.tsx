@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import {
@@ -15,8 +15,11 @@ import {
   clearPanePoppedOut,
   markPanePoppedOut,
 } from "../utils/poppedPanes";
-import { resolveAppearance } from "../utils/appearance";
-import { useSettings } from "../utils/settings";
+import {
+  APPEARANCE_ACCENT_COLOR_PRESETS,
+  resolveAppearance,
+} from "../utils/appearance";
+import { rememberRecentCustomColor, useSettings } from "../utils/settings";
 import { AppearanceModal } from "./AppearanceEditor";
 
 export interface SessionContextMenuState {
@@ -134,6 +137,31 @@ export default function SessionContextMenu({
       session_id: s.id,
       appearance,
     });
+  };
+  const setAccentFrameColor = (color: string | null) => {
+    sendAppearance({
+      ...appearanceDraft,
+      accent_color: color,
+      terminal_frame_color: color,
+    });
+  };
+  const activeAccentFrameColor =
+    appearanceDraft.accent_color ??
+    appearanceDraft.terminal_frame_color ??
+    inheritedAppearance.values.accent_color ??
+    inheritedAppearance.values.terminal_frame_color;
+  const [customAccentFrameDraft, setCustomAccentFrameDraft] = useState(
+    activeAccentFrameColor,
+  );
+  useEffect(() => {
+    setCustomAccentFrameDraft(activeAccentFrameColor);
+  }, [activeAccentFrameColor]);
+  const customAccentFrameChanged =
+    customAccentFrameDraft !== activeAccentFrameColor;
+  const applyCustomAccentFrameColor = () => {
+    setAccentFrameColor(customAccentFrameDraft);
+    rememberRecentCustomColor(customAccentFrameDraft);
+    onClose();
   };
 
   const sendStop = (removeWorktree: boolean) => {
@@ -359,6 +387,102 @@ export default function SessionContextMenu({
                 Appearance...
               </button>
             </li>
+            <MenuSubmenu
+              label="Accent/frame color"
+              dataTestId="session-context-accent-frame-menu"
+              chip={activeAccentFrameColor}
+            >
+              <li className="context-menu-label">Presets</li>
+              <li>
+                <div
+                  className="context-menu-swatch-grid"
+                  role="group"
+                  aria-label="Accent and frame color presets"
+                >
+                  {APPEARANCE_ACCENT_COLOR_PRESETS.map((preset) => (
+                    <button
+                      key={`accent-frame:${preset.color}`}
+                      type="button"
+                      className="context-menu-swatch"
+                      style={{ background: preset.color }}
+                      title={`${preset.name} (${preset.color})`}
+                      aria-label={`Use ${preset.name}`}
+                      data-testid={`session-context-accent-frame-${preset.name.toLowerCase()}`}
+                      onClick={() => {
+                        setCustomAccentFrameDraft(preset.color);
+                        setAccentFrameColor(preset.color);
+                        onClose();
+                      }}
+                    />
+                  ))}
+                </div>
+              </li>
+              {settings.appearance_recent_colors.length > 0 && (
+                <>
+                  <li className="context-menu-label">Recent</li>
+                  <li>
+                    <div
+                      className="context-menu-swatch-grid"
+                      role="group"
+                      aria-label="Recent custom accent and frame colors"
+                    >
+                      {settings.appearance_recent_colors.map((color, index) => (
+                        <button
+                          key={`accent-frame-recent:${color}`}
+                          type="button"
+                          className="context-menu-swatch"
+                          style={{ background: color }}
+                          title={color}
+                          aria-label={`Use recent custom color ${color}`}
+                          data-color={color}
+                          data-testid={`session-context-accent-frame-recent-${index}`}
+                          onClick={() => {
+                            setCustomAccentFrameDraft(color);
+                            setAccentFrameColor(color);
+                            onClose();
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </li>
+                </>
+              )}
+              <li className="context-menu-label">Custom</li>
+              <li>
+                <div className="context-menu-color-picker">
+                  <span>Pick color</span>
+                  <input
+                    type="color"
+                    value={customAccentFrameDraft}
+                    aria-label="Custom accent and frame color"
+                    data-testid="session-context-accent-frame-custom"
+                    onChange={(e) => setCustomAccentFrameDraft(e.currentTarget.value)}
+                  />
+                  <button
+                    type="button"
+                    className="context-menu-color-apply"
+                    disabled={!customAccentFrameChanged}
+                    data-testid="session-context-accent-frame-custom-apply"
+                    onClick={applyCustomAccentFrameColor}
+                  >
+                    Apply
+                  </button>
+                </div>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomAccentFrameDraft(activeAccentFrameColor);
+                    setAccentFrameColor(null);
+                    onClose();
+                  }}
+                  data-testid="session-context-accent-frame-reset"
+                >
+                  Inherit accent/frame
+                </button>
+              </li>
+            </MenuSubmenu>
             {worktreePath && (
               <li>
                 <button

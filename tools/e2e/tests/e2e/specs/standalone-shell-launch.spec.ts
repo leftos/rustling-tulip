@@ -111,11 +111,28 @@ describe("standalone shell launch", function () {
       `[data-testid="session-pane"][data-session-id="${msg.session.id}"]`,
     );
     await pane.waitForExist({ timeout: 10_000 });
+    await waitForRenderedShellStatus(msg.session.id, "idle");
     await waitForBufferText(
       msg.session.id,
       basename(shellDir),
       SESSION_OUTPUT_TIMEOUT,
     );
+
+    const working = waitForSessionStatus(ws, msg.session.id, "working");
+    ws.send({
+      type: "send_input",
+      session_id: msg.session.id,
+      data_b64: Buffer.from(shellActivityCommand()).toString("base64"),
+    });
+    await working;
+    await waitForRenderedShellStatus(msg.session.id, "working");
+    await waitForBufferText(
+      msg.session.id,
+      "rt-shell-working-20",
+      SESSION_OUTPUT_TIMEOUT,
+    );
+    await waitForSessionStatus(ws, msg.session.id, "idle");
+    await waitForRenderedShellStatus(msg.session.id, "idle");
 
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "standalone-shell-after.png"),
@@ -255,6 +272,46 @@ async function waitForBufferText(
     `xterm buffer for ${sessionId} never contained "${needle}" within ${timeoutMs}ms.\n` +
       `Last seen (truncated to 500 chars):\n${lastSeen.slice(0, 500)}`,
   );
+}
+
+async function waitForSessionStatus(
+  ws: DaemonWsClient,
+  sessionId: string,
+  status: SessionSnapshot["status"],
+): Promise<SessionSnapshot> {
+  const msg = await ws.waitFor(
+    (candidate): candidate is SessionUpdatedMessage =>
+      isSessionUpdated(candidate) &&
+      candidate.session.id === sessionId &&
+      candidate.session.status === status,
+    { timeoutMs: 10_000 },
+  );
+  return msg.session;
+}
+
+async function waitForRenderedShellStatus(
+  sessionId: string,
+  status: SessionSnapshot["status"],
+): Promise<void> {
+  const selector = `[data-testid="sidebar-session"][data-session-id="${sessionId}"]`;
+  const row = await browser.$(selector);
+  await row.waitForExist({ timeout: 10_000 });
+  await browser.waitUntil(
+    async () => (await row.getAttribute("data-session-status")) === status,
+    {
+      timeout: 10_000,
+      timeoutMsg: `plain shell row did not render ${status}`,
+    },
+  );
+  const dot = await row.$(`.status-dot.status-${status}`);
+  await dot.waitForExist({ timeout: 5_000 });
+}
+
+function shellActivityCommand(): string {
+  if (process.platform === "win32") {
+    return '1..24 | ForEach-Object { "rt-shell-working-$_"; Start-Sleep -Milliseconds 20 }\r';
+  }
+  return 'for i in $(seq 1 24); do echo "rt-shell-working-$i"; sleep 0.02; done\r';
 }
 
 function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {

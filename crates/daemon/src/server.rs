@@ -212,11 +212,18 @@ async fn reattach_orphans(
                             &pty,
                             Some(dirs.clone()),
                         );
-                        if meta.mode != SessionMode::PlainShell {
-                            let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                            if let Some(arc) = sessions.get(&meta.session_id) {
-                                crate::sync::lock(&arc).input_notifier = Some(in_tx);
-                            }
+                        let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                        if let Some(arc) = sessions.get(&meta.session_id) {
+                            crate::sync::lock(&arc).input_notifier = Some(in_tx);
+                        }
+                        if meta.mode == SessionMode::PlainShell {
+                            pty_state::watch_plain_shell(
+                                sessions,
+                                meta.session_id.clone(),
+                                pty.output.subscribe(),
+                                in_rx,
+                            );
+                        } else {
                             pty_state::watch(
                                 sessions,
                                 meta.session_id.clone(),
@@ -2184,8 +2191,7 @@ pub(crate) async fn spawn_session(
 
 fn expected_output_subscribers(mode: SessionMode) -> usize {
     match mode {
-        SessionMode::Interactive => 3,
-        SessionMode::PlainShell => 2,
+        SessionMode::Interactive | SessionMode::PlainShell => 3,
         SessionMode::Headless => 0,
     }
 }
@@ -2553,9 +2559,6 @@ async fn spawn_plain_shell_session(
         members: members.clone(),
         mode: SessionMode::PlainShell,
         started_at,
-        // Shell sessions never transition status — they sit at Idle for their
-        // whole lifetime, then `attach_lifecycle`'s exit watcher flips to
-        // Stopped on exit.
         status: SessionStatus::Idle,
         exit_code: None,
         metrics: SessionMetrics::default(),
@@ -2612,17 +2615,25 @@ async fn spawn_plain_shell_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
-    // Deliberately skip `pty_state::watch` — its Claude TUI prompt heuristic
-    // would mis-classify a normal shell prompt as `AwaitingInput`. Keep
-    // `osc_title::watch` so window-title escape sequences (which pwsh emits
-    // by default) are recorded as `terminal_title` annotations; the canonical
-    // session `label` stays whatever the spawn pipeline assigned.
     attach_lifecycle(
         &hub.sessions,
         session_id.clone(),
         &pty,
         Some(hub.dirs.clone()),
     );
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    if let Some(arc) = hub.sessions.get(&session_id) {
+        crate::sync::lock(&arc).input_notifier = Some(in_tx);
+    }
+    pty_state::watch_plain_shell(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        in_rx,
+    );
+    // Keep `osc_title::watch` so window-title escape sequences (which pwsh
+    // emits by default) are recorded as `terminal_title` annotations; the
+    // canonical session `label` stays whatever the spawn pipeline assigned.
     osc_title::watch(
         &hub.sessions,
         session_id.clone(),

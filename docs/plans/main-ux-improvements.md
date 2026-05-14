@@ -115,7 +115,11 @@ repo/workspace label remains available as metadata.
 - [x] Review sidebar row truncation so the canonical label remains readable.
 - [x] Add a per-session color setting that applies to that shell's pane gutter
       and sidebar tree row.
-- [x] Offer 12 named default color presets for fast assignment plus a custom
+- [x] Apply the unified session color to the full pane frame, with a strong
+      focused state and a muted inactive state.
+- [x] Offer distinct vibrant accent/frame presets and dark terminal-background
+      presets for fast assignment plus a custom color picker.
+- [x] Remember the last 12 custom colors and expose them from each appearance
       color picker.
 - [x] Preview preset colors in the color submenu using the same tree-row accent
       treatment the selected session will get.
@@ -127,6 +131,16 @@ repo/workspace label remains available as metadata.
 - [x] Add e2e coverage: assigning a preset color updates the pane gutter and
       sidebar tree row.
 - [x] Add e2e coverage: a custom color survives session refresh/reload.
+- [x] Show regular status dots for plain shells, using debounced PTY output
+      activity instead of a static shell glyph.
+- [x] Add a left-side tree toggle chip for repo, workspace, tab, and pseudo
+      containers so collapse/expand reads like a tree control.
+- [ ] Track plain-shell cwd changes from terminal escape sequences or prompt
+      integration without parsing arbitrary prompt text.
+- [ ] Re-home plain shells dynamically under the matching repo/workspace as
+      cwd changes, while preserving their session identity and tab bindings.
+- [ ] Surface a temporary sidebar container for shell cwd paths outside known
+      repos/workspaces, with add-repo and add-workspace actions.
 
 ## Phase 3 - Safer spawn defaults and authority visibility
 

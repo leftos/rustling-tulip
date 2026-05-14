@@ -12,7 +12,7 @@ import {
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
 import { sessionAccentStyle } from "../utils/sessionColor";
-import { resolveAppearance } from "../utils/appearance";
+import { BUILT_IN_APPEARANCE, resolveAppearance } from "../utils/appearance";
 import { useSettings } from "../utils/settings";
 import SessionContextMenu, {
   type SessionContextMenuState,
@@ -189,27 +189,34 @@ export default function SessionPane({
   );
   const appearance = resolvedAppearance.values;
   const accentColor = appearance.accent_color;
+  const hasCustomFrame =
+    appearance.terminal_frame_color !== BUILT_IN_APPEARANCE.terminal_frame_color;
   const sessionStyle = {
     ...sessionAccentStyle(accentColor),
     "--terminal-bg": appearance.terminal_background_color,
     "--terminal-frame-bg": appearance.terminal_frame_color,
   } as CSSProperties;
+  const paneClasses = [
+    "session-pane",
+    accentColor ? "has-session-accent" : "",
+    "has-terminal-frame",
+    hasCustomFrame ? "has-custom-terminal-frame" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   const headerClasses = [
     "session-header",
     onHeaderDragStart ? "session-header-draggable" : "",
     accentColor ? "has-session-accent" : "",
     "has-terminal-frame",
+    hasCustomFrame ? "has-custom-terminal-frame" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   return (
     <div
-      className={
-        accentColor
-          ? "session-pane has-session-accent has-terminal-frame"
-          : "session-pane has-terminal-frame"
-      }
+      className={paneClasses}
       style={sessionStyle}
       data-testid="session-pane"
       data-session-id={session.id}
@@ -233,20 +240,12 @@ export default function SessionPane({
           }
         >
           <div className="session-title">
-            {/* Shell sessions sit at Idle forever — a green dot would be
-              misleading. Show a terminal glyph in its place instead. */}
-            {isPlainShell ? (
-              <span className="status-glyph" aria-hidden="true">
-                {">_"}
-              </span>
-            ) : (
-              <span
-                className={`status-dot status-${session.status}`}
-                title={`status: ${session.status}`}
-                aria-label={`status ${session.status}`}
-                role="img"
-              />
-            )}
+            <span
+              className={`status-dot status-${session.status}`}
+              title={`status: ${session.status}`}
+              aria-label={`status ${session.status}`}
+              role="img"
+            />
             <h2 title={sessionLabelTooltip(session)}>
               {sessionDisplayLabel(session)}
             </h2>
