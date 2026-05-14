@@ -459,6 +459,13 @@ export default function App() {
     state.client?.send({ type: "add_repo", path, name: null });
   }, [state.client]);
 
+  const onAddRepoPath = useCallback(
+    (path: string) => {
+      state.client?.send({ type: "add_repo", path, name: null });
+    },
+    [state.client],
+  );
+
   const onActivateTab = useCallback((tabId: string) => {
     setState((s) => ({ ...s, activeTabId: tabId, focusedPaneId: null }));
   }, []);
@@ -2050,6 +2057,7 @@ export default function App() {
             onLocalReorderSessions={onLocalReorderSessions}
             tabs={state.tabs}
             onAddRepo={onAddRepo}
+            onAddRepoPath={onAddRepoPath}
             onRemoveRepo={(id) =>
               state.client?.send({ type: "remove_repo", repo_id: id })
             }

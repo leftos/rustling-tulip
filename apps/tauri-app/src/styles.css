@@ -1139,6 +1139,17 @@ button.link.inline { display: inline; padding: 0 2px; }
 .sidebar .tree-children-banner {
   margin-left: 0;
 }
+.tree-children-banner.cwd-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.tree-children-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .tree-row {
   position: relative;
   display: flex; align-items: center; gap: 6px;
@@ -1234,6 +1245,11 @@ button.tree-toggle-chip:hover {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   background: var(--accent-soft);
+}
+.tree-container.tree-container-cwd .tree-kind-tag {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  background: var(--warn-soft);
 }
 .tree-container.tree-container-unbound .tree-kind-tag { color: var(--fg-dim); }
 .tree-label {

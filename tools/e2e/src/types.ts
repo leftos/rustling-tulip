@@ -62,8 +62,21 @@ export interface SessionSnapshot {
   is_orphan: boolean;
   workspace_id: string | null;
   terminal_title?: string | null;
+  current_cwd?: string | null;
   appearance?: AppearanceOverrides;
   elevated_authority?: boolean;
+}
+
+export interface VscodeWorkspaceFolder {
+  path: string;
+  name: string | null;
+  matched_repo_id: string | null;
+}
+
+export interface VscodeWorkspaceSuggestion {
+  source_path: string;
+  suggested_name: string;
+  folders: VscodeWorkspaceFolder[];
 }
 
 export type SplitDirection = "horizontal" | "vertical";
@@ -132,6 +145,7 @@ export type ClientMessage =
   | { type: "hello"; protocol_version: number; auth_token: string }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
+  | { type: "scan_vscode_workspaces"; path: string }
   | { type: "remove_repo"; repo_id: string }
   | { type: "list_sessions" }
   | { type: "spawn_session"; [k: string]: unknown }
@@ -208,6 +222,11 @@ export type DaemonMessage =
   | { type: "repos"; repos: RepoEntry[] }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
+  | {
+      type: "vscode_workspaces_scanned";
+      path: string;
+      suggestions: VscodeWorkspaceSuggestion[];
+    }
   | { type: "session_removed"; session_id: string }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "pty_output"; session_id: string; data_b64: string }

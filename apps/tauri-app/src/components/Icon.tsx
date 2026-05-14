@@ -8,11 +8,13 @@ export type IconName =
   | "play"
   | "plus"
   | "refresh"
+  | "repo"
   | "sessions"
   | "settings"
   | "sourceControl"
   | "splitDown"
   | "splitRight"
+  | "workspace"
   | "stop";
 
 interface Props {
@@ -82,6 +84,15 @@ function iconPath(name: IconName): ReactNode {
           <path d="M13 14.5V12h-2.5" />
         </>
       );
+    case "repo":
+      return (
+        <>
+          <path d="M4 3.5h6.5L12 5v7.5H4z" />
+          <path d="M10.5 3.5V5H12" />
+          <path d="M6 7h4" />
+          <path d="M6 9.5h4" />
+        </>
+      );
     case "sessions":
       return (
         <>
@@ -135,6 +146,15 @@ function iconPath(name: IconName): ReactNode {
     case "stop":
       return (
         <path d="M4.5 4.5h7v7h-7z" />
+      );
+    case "workspace":
+      return (
+        <>
+          <path d="M3.5 4.5h4v3h-4z" />
+          <path d="M8.5 4.5h4v3h-4z" />
+          <path d="M3.5 8.5h4v3h-4z" />
+          <path d="M8.5 8.5h4v3h-4z" />
+        </>
       );
   }
 }

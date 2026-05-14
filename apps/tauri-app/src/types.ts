@@ -116,6 +116,9 @@ export interface SessionSnapshot {
   // next to the session title. null when reattached from a daemon
   // sidecar written before this field existed.
   program_name: string | null;
+  // Latest cwd reported by the session. Plain shells initialize this from
+  // the spawn folder and update it from OSC 7 prompt metadata.
+  current_cwd: string | null;
   // Session-level appearance overrides. null fields inherit from the
   // owning repo/workspace, then the app default.
   appearance: AppearanceOverrides;
@@ -591,6 +594,7 @@ export type ClientMessage =
   | { type: "reorder_tabs"; ordered_ids: string[] }
   | { type: "reorder_containers"; ordered: ContainerRef[] }
   | { type: "parse_vscode_workspace"; path: string }
+  | { type: "scan_vscode_workspaces"; path: string }
   | {
       type: "reorder_sessions";
       container_id: string;
@@ -714,6 +718,11 @@ export type DaemonMessage =
       type: "vscode_workspace_suggestion";
       repo_id: string;
       suggestion: VscodeWorkspaceSuggestion;
+    }
+  | {
+      type: "vscode_workspaces_scanned";
+      path: string;
+      suggestions: VscodeWorkspaceSuggestion[];
     }
   | {
       type: "commits";

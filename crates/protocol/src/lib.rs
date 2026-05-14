@@ -291,6 +291,12 @@ pub struct SessionSnapshot {
     /// claude / codex) in that case.
     #[serde(default)]
     pub program_name: Option<String>,
+    /// Current working directory last reported by the session. Plain shells
+    /// start with their spawn directory and update when the shell emits OSC 7
+    /// after prompt redraws. `None` for older sidecars or non-PTY paths that
+    /// have not reported a cwd.
+    #[serde(default)]
+    pub current_cwd: Option<String>,
     /// Session-level appearance overrides. `None` fields inherit from the
     /// owning repo/workspace, then the app default.
     #[serde(default)]
@@ -1061,6 +1067,13 @@ pub enum ClientMessage {
     ParseVscodeWorkspace {
         path: String,
     },
+    /// Scan a directory for `.code-workspace` files. The daemon replies with
+    /// [`DaemonMessage::VscodeWorkspacesScanned`]. Used by shell cwd actions
+    /// so the UI can offer "Add workspace" only when the cwd actually has a
+    /// VS Code workspace file.
+    ScanVscodeWorkspaces {
+        path: String,
+    },
     RemoveWorkspace {
         workspace_id: String,
     },
@@ -1584,6 +1597,10 @@ pub enum DaemonMessage {
     VscodeWorkspaceSuggestion {
         repo_id: String,
         suggestion: VscodeWorkspaceSuggestion,
+    },
+    VscodeWorkspacesScanned {
+        path: String,
+        suggestions: Vec<VscodeWorkspaceSuggestion>,
     },
     Branches {
         repo_id: String,

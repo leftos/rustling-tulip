@@ -1,12 +1,14 @@
-//! Watches a PTY output stream for OSC window-title sequences and stores the
-//! latest terminal title alongside the session's stable label. The UI can use
-//! that title as a dynamic display label when no explicit user label is set.
+//! Watches a PTY output stream for OSC terminal metadata sequences and stores
+//! the latest terminal title / cwd alongside the session's stable label. The
+//! UI can use that title as a dynamic display label and can use cwd to keep
+//! plain shells grouped under their current repo or workspace.
 //!
 //! The recognized sequences are:
 //! - `ESC ] 0 ; <title> BEL`  (set icon + window title)
 //! - `ESC ] 1 ; <title> BEL`  (icon only — most terminals also surface this as the title)
 //! - `ESC ] 2 ; <title> BEL`  (window title only)
-//! - `0x9D <0|1|2> ; <title> 0x9C`  (8-bit C1 OSC/ST form)
+//! - `ESC ] 7 ; file://<host>/<cwd> BEL`  (current working directory)
+//! - `0x9D <0|1|2|7> ; <payload> 0x9C`  (8-bit C1 OSC/ST form)
 //!
 //! Either `BEL` (`0x07`) or `ST` (`ESC \`) terminates the string. Title bytes
 //! are decoded as UTF-8 lossily — non-UTF-8 bytes turn into U+FFFD rather than
@@ -14,6 +16,7 @@
 //!
 //! Defensive caps:
 //! - Titles longer than [`MAX_TITLE_BYTES`] are dropped at emit time.
+//! - Cwd payloads longer than [`MAX_CWD_BYTES`] are dropped at emit time.
 //! - Unterminated buffers longer than [`MAX_BUFFER_BYTES`] cause a return to
 //!   `Normal` state so a malformed (or hostile) producer can't grow the buffer
 //!   unboundedly.
@@ -26,6 +29,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 const MAX_TITLE_BYTES: usize = 256;
+const MAX_CWD_BYTES: usize = 1024;
 const MAX_BUFFER_BYTES: usize = 4096;
 const BEL: u8 = 0x07;
 const ESC: u8 = 0x1B;
@@ -40,17 +44,22 @@ enum State {
     AfterEsc,
     /// In `ESC ]`, reading the OSC parameter digits before `;`.
     OscParam {
-        /// Parsed number so far. Bounded; we don't accept >2 since we ignore
-        /// non-title OSC commands.
+        /// Parsed number so far. Bounded to the commands this watcher accepts.
         param: u8,
         /// True once we've seen at least one digit (so a stray `;` doesn't
         /// match an empty parameter).
         had_digit: bool,
     },
-    /// In `ESC ] <0|1|2> ;`, accumulating the title until BEL or `ESC \`.
-    OscString,
+    /// In `ESC ] <0|1|2|7> ;`, accumulating until BEL or `ESC \`.
+    OscString { param: u8 },
     /// Inside `OscString` and we just saw `ESC`; if next byte is `\` (ST), commit.
-    OscStringAfterEsc,
+    OscStringAfterEsc { param: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OscEvent {
+    Title(String),
+    CurrentCwd(String),
 }
 
 struct Parser {
@@ -66,12 +75,9 @@ impl Parser {
         }
     }
 
-    /// Feed a chunk of bytes. Returns the most recent complete title in this
-    /// chunk, if any. (If a chunk contains multiple title sequences, only the
-    /// last is returned — intermediate ones would be overwritten in the UI
-    /// anyway.)
-    fn feed(&mut self, bytes: &[u8]) -> Option<String> {
-        let mut latest: Option<String> = None;
+    /// Feed a chunk of bytes. Returns every complete metadata event in order.
+    fn feed(&mut self, bytes: &[u8]) -> Vec<OscEvent> {
+        let mut events = Vec::new();
         for &b in bytes {
             match self.state {
                 State::Normal => {
@@ -98,30 +104,33 @@ impl Parser {
                     if b.is_ascii_digit() {
                         let digit = b - b'0';
                         let next = param.saturating_mul(10).saturating_add(digit);
-                        // Only param values 0,1,2 set the title; reject anything else early.
-                        if next > 2 {
-                            self.state = State::Normal;
-                        } else {
+                        if is_supported_param_prefix(next) {
                             self.state = State::OscParam {
                                 param: next,
                                 had_digit: true,
                             };
+                        } else {
+                            self.state = State::Normal;
                         }
                     } else if b == b';' && had_digit {
-                        self.buf.clear();
-                        self.state = State::OscString;
+                        if is_supported_param(param) {
+                            self.buf.clear();
+                            self.state = State::OscString { param };
+                        } else {
+                            self.state = State::Normal;
+                        }
                     } else {
                         self.state = State::Normal;
                     }
                 }
-                State::OscString => {
+                State::OscString { param } => {
                     if b == BEL || b == ST_C1 {
-                        if let Some(title) = self.emit() {
-                            latest = Some(title);
+                        if let Some(event) = self.emit(param) {
+                            events.push(event);
                         }
                         self.state = State::Normal;
                     } else if b == ESC {
-                        self.state = State::OscStringAfterEsc;
+                        self.state = State::OscStringAfterEsc { param };
                     } else {
                         self.buf.push(b);
                         if self.buf.len() > MAX_BUFFER_BYTES {
@@ -131,10 +140,10 @@ impl Parser {
                         }
                     }
                 }
-                State::OscStringAfterEsc => {
+                State::OscStringAfterEsc { param } => {
                     if b == b'\\' {
-                        if let Some(title) = self.emit() {
-                            latest = Some(title);
+                        if let Some(event) = self.emit(param) {
+                            events.push(event);
                         }
                         self.state = State::Normal;
                     } else {
@@ -152,16 +161,99 @@ impl Parser {
                 }
             }
         }
-        latest
+        events
     }
 
-    fn emit(&mut self) -> Option<String> {
+    fn emit(&mut self, param: u8) -> Option<OscEvent> {
         let bytes = std::mem::take(&mut self.buf);
-        if bytes.is_empty() || bytes.len() > MAX_TITLE_BYTES {
+        if bytes.is_empty() || bytes.len() > max_bytes_for_param(param) {
             return None;
         }
-        let title = String::from_utf8_lossy(&bytes).trim().to_string();
-        if title.is_empty() { None } else { Some(title) }
+        let value = String::from_utf8_lossy(&bytes).trim().to_string();
+        if value.is_empty() {
+            return None;
+        }
+        match param {
+            0..=2 => Some(OscEvent::Title(value)),
+            7 => parse_osc7_cwd(&value).map(OscEvent::CurrentCwd),
+            _ => None,
+        }
+    }
+}
+
+fn is_supported_param_prefix(param: u8) -> bool {
+    matches!(param, 0 | 1 | 2 | 7)
+}
+
+fn is_supported_param(param: u8) -> bool {
+    matches!(param, 0 | 1 | 2 | 7)
+}
+
+const fn max_bytes_for_param(param: u8) -> usize {
+    match param {
+        7 => MAX_CWD_BYTES,
+        _ => MAX_TITLE_BYTES,
+    }
+}
+
+fn parse_osc7_cwd(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let Some(rest) = raw.strip_prefix("file://") else {
+        return Some(normalize_path_separators(raw));
+    };
+    let slash = rest.find('/')?;
+    let path = percent_decode(&rest[slash..]);
+    if path.is_empty() {
+        None
+    } else {
+        Some(normalize_file_uri_path(&path))
+    }
+}
+
+fn normalize_file_uri_path(path: &str) -> String {
+    let mut out = path.to_string();
+    if cfg!(windows) && out.starts_with('/') && out.as_bytes().get(2) == Some(&b':') {
+        out.remove(0);
+    }
+    normalize_path_separators(&out)
+}
+
+fn normalize_path_separators(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+const fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
     }
 }
 
@@ -175,20 +267,37 @@ pub fn watch(
     let registry = Arc::clone(registry);
     tokio::spawn(async move {
         let mut parser = Parser::new();
-        let mut last_applied: Option<String> = None;
+        let mut last_title: Option<String> = None;
+        let mut last_cwd: Option<String> = None;
         loop {
             match output.recv().await {
                 Ok(bytes) => {
-                    if let Some(title) = parser.feed(&bytes)
-                        && last_applied.as_deref() != Some(title.as_str())
-                    {
-                        debug!(session_id = %session_id, %title, "applying OSC title");
-                        let title_for_update = title.clone();
-                        registry.update(&session_id, |rec| {
-                            rec.terminal_title = Some(title_for_update.clone());
-                        });
-                        orphan::try_update_terminal_title(&dirs, &session_id, &title);
-                        last_applied = Some(title);
+                    for event in parser.feed(&bytes) {
+                        match event {
+                            OscEvent::Title(title)
+                                if last_title.as_deref() != Some(title.as_str()) =>
+                            {
+                                debug!(session_id = %session_id, %title, "applying OSC title");
+                                let title_for_update = title.clone();
+                                registry.update(&session_id, |rec| {
+                                    rec.terminal_title = Some(title_for_update.clone());
+                                });
+                                orphan::try_update_terminal_title(&dirs, &session_id, &title);
+                                last_title = Some(title);
+                            }
+                            OscEvent::CurrentCwd(cwd)
+                                if last_cwd.as_deref() != Some(cwd.as_str()) =>
+                            {
+                                debug!(session_id = %session_id, %cwd, "applying OSC cwd");
+                                let cwd_for_update = cwd.clone();
+                                registry.update(&session_id, |rec| {
+                                    rec.current_cwd = Some(cwd_for_update.clone());
+                                });
+                                orphan::try_update_current_cwd(&dirs, &session_id, &cwd);
+                                last_cwd = Some(cwd);
+                            }
+                            OscEvent::Title(_) | OscEvent::CurrentCwd(_) => {}
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -204,47 +313,53 @@ pub fn watch(
 mod tests {
     use super::*;
 
-    fn feed_all(p: &mut Parser, chunks: &[&[u8]]) -> Vec<String> {
+    fn feed_all(p: &mut Parser, chunks: &[&[u8]]) -> Vec<OscEvent> {
         let mut out = Vec::new();
         for c in chunks {
-            if let Some(t) = p.feed(c) {
-                out.push(t);
-            }
+            out.extend(p.feed(c));
         }
         out
+    }
+
+    fn title(value: &str) -> OscEvent {
+        OscEvent::Title(value.to_string())
+    }
+
+    fn cwd(value: &str) -> OscEvent {
+        OscEvent::CurrentCwd(value.to_string())
     }
 
     #[test]
     fn bel_terminator() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]0;hello\x07"]);
-        assert_eq!(titles, vec!["hello"]);
+        assert_eq!(titles, vec![title("hello")]);
     }
 
     #[test]
     fn st_terminator() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]2;world\x1b\\"]);
-        assert_eq!(titles, vec!["world"]);
+        assert_eq!(titles, vec![title("world")]);
     }
 
     #[test]
     fn c1_osc_and_st() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x9d0;c1-title\x9c"]);
-        assert_eq!(titles, vec!["c1-title"]);
+        assert_eq!(titles, vec![title("c1-title")]);
     }
 
     #[test]
     fn split_across_chunks() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"prefix\x1b]0;part", b"ial-then\x07rest"]);
-        assert_eq!(titles, vec!["partial-then"]);
+        assert_eq!(titles, vec![title("partial-then")]);
     }
 
     #[test]
     fn ignores_other_osc_commands() {
-        // OSC 8 (hyperlink) should not be interpreted as title.
+        // OSC 8 (hyperlink) should not be interpreted as terminal metadata.
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]8;;http://x\x07"]);
         assert!(titles.is_empty(), "got titles: {titles:?}");
@@ -277,23 +392,54 @@ mod tests {
         assert!(titles.is_empty());
         // After the runaway, a fresh sequence should still parse.
         let titles = feed_all(&mut p, &[b"\x1b]0;ok\x07"]);
-        assert_eq!(titles, vec!["ok"]);
+        assert_eq!(titles, vec![title("ok")]);
     }
 
     #[test]
-    fn accepts_param_1_and_2_collapses_to_latest_within_chunk() {
-        // feed() intentionally returns only the most recent completed title
-        // per call — intermediate values would be overwritten in the UI
-        // before anyone could see them anyway.
+    fn accepts_param_1_and_2_within_chunk() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]1;icon\x07\x1b]2;window\x07"]);
-        assert_eq!(titles, vec!["window"]);
+        assert_eq!(titles, vec![title("icon"), title("window")]);
     }
 
     #[test]
     fn accepts_param_1_and_2_across_separate_chunks() {
         let mut p = Parser::new();
         let titles = feed_all(&mut p, &[b"\x1b]1;icon\x07", b"\x1b]2;window\x07"]);
-        assert_eq!(titles, vec!["icon", "window"]);
+        assert_eq!(titles, vec![title("icon"), title("window")]);
+    }
+
+    #[test]
+    fn parses_osc_7_file_uri() {
+        let mut p = Parser::new();
+        let sequence: &[u8] = if cfg!(windows) {
+            b"\x1b]7;file:///C:/Users/Leftos/a%20b\x07"
+        } else {
+            b"\x1b]7;file:///home/leftos/a%20b\x07"
+        };
+        let expected = if cfg!(windows) {
+            "C:\\Users\\Leftos\\a b"
+        } else {
+            "/home/leftos/a b"
+        };
+        let events = feed_all(&mut p, &[sequence]);
+        assert_eq!(events, vec![cwd(expected)]);
+    }
+
+    #[test]
+    fn keeps_title_and_cwd_events_from_one_chunk() {
+        let mut p = Parser::new();
+        let sequence: &[u8] = if cfg!(windows) {
+            b"\x1b]0;title\x07\x1b]7;file:///C:/dev/repo\x07"
+        } else {
+            b"\x1b]0;title\x07\x1b]7;file:///tmp/repo\x07"
+        };
+        let expected = if cfg!(windows) {
+            "C:\\dev\\repo"
+        } else {
+            "/tmp/repo"
+        };
+        let events = feed_all(&mut p, &[sequence]);
+        assert_eq!(events, vec![title("title"), cwd(expected)]);
     }
 }

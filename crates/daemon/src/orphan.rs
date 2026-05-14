@@ -88,6 +88,11 @@ pub struct OrphanMeta {
     /// watcher will repopulate it on the next title broadcast.
     #[serde(default)]
     pub terminal_title: Option<String>,
+    /// Latest cwd reported by the session. Used to restore plain-shell
+    /// sidebar grouping after a daemon restart. `None` for older sidecars or
+    /// sessions that have not emitted a cwd yet.
+    #[serde(default)]
+    pub current_cwd: Option<String>,
     /// Legacy user-chosen accent color (`#rrggbb`) for the session UI.
     /// Loaded into `appearance.accent_color` and omitted on future writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -369,6 +374,7 @@ pub fn meta_from_record(
     agent: Agent,
     spawn_config: Option<SpawnConfig>,
     last_prompt: Option<String>,
+    current_cwd: Option<String>,
     tracer_pid: Option<u32>,
     tracer_pipe: Option<String>,
     tracer_exe_path: Option<String>,
@@ -394,6 +400,7 @@ pub fn meta_from_record(
         program_name,
         agent: Some(agent),
         terminal_title: None,
+        current_cwd,
         accent_color: None,
         appearance: AppearanceOverrides::default(),
         spawn_config,
@@ -472,6 +479,30 @@ pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> 
 pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
     if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
         warn!(?err, %session_id, "failed to update orphan meta terminal_title");
+    }
+}
+
+/// Best-effort: read the meta sidecar, mutate `current_cwd`, write it back.
+/// Used by the OSC watcher when a shell emits OSC 7. Returns `Ok(())` for
+/// both "meta did not exist" and "meta updated".
+pub fn update_current_cwd(dirs: &Dirs, session_id: &str, new_cwd: &str) -> anyhow::Result<()> {
+    let path = meta_path(dirs, session_id);
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).context("reading meta for current_cwd update"),
+    };
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for current_cwd update")?;
+    if meta.current_cwd.as_deref() == Some(new_cwd) {
+        return Ok(());
+    }
+    meta.current_cwd = Some(new_cwd.to_string());
+    write_meta(dirs, &meta)
+}
+
+pub fn try_update_current_cwd(dirs: &Dirs, session_id: &str, new_cwd: &str) {
+    if let Err(err) = update_current_cwd(dirs, session_id, new_cwd) {
+        warn!(?err, %session_id, "failed to update orphan meta current_cwd");
     }
 }
 
@@ -601,6 +632,7 @@ mod tests {
             program_name: Some("rt-tracer".to_string()),
             agent: Some(Agent::Claude),
             terminal_title: None,
+            current_cwd: Some(r"C:\work\repo".to_string()),
             accent_color: Some("#2f81f7".to_string()),
             appearance: AppearanceOverrides {
                 accent_color: Some("#3fb950".to_string()),
@@ -628,6 +660,7 @@ mod tests {
         );
         assert_eq!(decoded.accent_color.as_deref(), Some("#2f81f7"));
         assert_eq!(decoded.appearance.accent_color.as_deref(), Some("#3fb950"));
+        assert_eq!(decoded.current_cwd.as_deref(), Some(r"C:\work\repo"));
     }
 
     #[test]

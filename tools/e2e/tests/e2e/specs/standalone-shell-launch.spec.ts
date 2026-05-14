@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -7,7 +8,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type { DaemonMessage, SessionSnapshot } from "../../../src/types.js";
+import type {
+  DaemonMessage,
+  RepoEntry,
+  SessionSnapshot,
+} from "../../../src/types.js";
 
 type SessionUpdatedMessage = DaemonMessage & {
   type: "session_updated";
@@ -28,6 +33,7 @@ describe("standalone shell launch", function () {
   let shellDir: string | null = null;
   let modalShellDir: string | null = null;
   const spawnedSessionIds: string[] = [];
+  const registeredRepoIds: string[] = [];
 
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
@@ -51,6 +57,14 @@ describe("standalone shell launch", function () {
             cleanup: [],
           });
           await delay(300);
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+      for (const repoId of [...registeredRepoIds].reverse()) {
+        try {
+          ws.send({ type: "remove_repo", repo_id: repoId });
+          await delay(200);
         } catch {
           /* best-effort cleanup */
         }
@@ -98,9 +112,15 @@ describe("standalone shell launch", function () {
 
     expect(msg.session.label).to.include(basename(shellDir));
     expect(msg.session.workspace_id).to.equal(null);
+    expectPathEqual(msg.session.current_cwd ?? null, shellDir);
 
-    const container = await browser.$('[data-testid="sidebar-container-standalone"]');
-    await container.waitForExist({ timeout: 10_000 });
+    const container = await waitForStandaloneContainer(msg.session.id, shellDir);
+    const addRepoButton = await container.$('[data-testid="sidebar-cwd-add-repo"]');
+    await addRepoButton.waitForExist({ timeout: 5_000 });
+    expect(
+      await (await container.$('[data-testid="sidebar-cwd-add-workspace"]')).isExisting(),
+      "workspace action hidden without .code-workspace",
+    ).to.equal(false);
 
     const row = await browser.$(
       `[data-testid="sidebar-session"][data-session-id="${msg.session.id}"]`,
@@ -133,6 +153,40 @@ describe("standalone shell launch", function () {
     );
     await waitForSessionStatus(ws, msg.session.id, "idle");
     await waitForRenderedShellStatus(msg.session.id, "idle");
+
+    const nestedDir = join(shellDir, "nested-cwd");
+    await mkdir(nestedDir, { recursive: true });
+    initGitRepo(nestedDir);
+    await writeFile(
+      join(nestedDir, "nested.code-workspace"),
+      JSON.stringify({ folders: [{ path: "." }] }),
+      "utf8",
+    );
+
+    const cwdUpdated = waitForSessionCwd(ws, msg.session.id, nestedDir);
+    ws.send({
+      type: "send_input",
+      session_id: msg.session.id,
+      data_b64: Buffer.from(shellCdCommand(nestedDir)).toString("base64"),
+    });
+    await cwdUpdated;
+    const nestedContainer = await waitForStandaloneContainer(
+      msg.session.id,
+      nestedDir,
+    );
+    await (
+      await nestedContainer.$('[data-testid="sidebar-cwd-add-workspace"]')
+    ).waitForExist({
+      timeout: 10_000,
+      timeoutMsg: "workspace action did not appear for .code-workspace cwd",
+    });
+    const registered = waitForRepo(ws, nestedDir);
+    await nestedContainer.$('[data-testid="sidebar-cwd-add-repo"]').click();
+    const registeredRepoId = (await registered).id;
+    registeredRepoIds.push(registeredRepoId);
+
+    await waitForContainer("repo", registeredRepoId);
+    await waitForStandaloneContainer(msg.session.id, nestedDir);
 
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "standalone-shell-after.png"),
@@ -197,6 +251,29 @@ async function waitForAppDaemonConnection(): Promise<void> {
   );
 }
 
+async function waitForRepo(
+  ws: DaemonWsClient,
+  path: string,
+): Promise<RepoEntry> {
+  const reposPromise = ws.waitFor(isRepos, { timeoutMs: 5_000 });
+  const repos = await reposPromise;
+  const repo = repos.repos.find((candidate) =>
+    pathsEqual(candidate.path, path),
+  );
+  if (!repo) throw new Error(`repo was not registered: ${path}`);
+  return repo;
+}
+
+function initGitRepo(path: string): void {
+  execFileSync("git", ["init", "-b", "main"], { cwd: path, stdio: "ignore" });
+}
+
+function isRepos(
+  msg: DaemonMessage,
+): msg is DaemonMessage & { type: "repos"; repos: RepoEntry[] } {
+  return msg.type === "repos";
+}
+
 async function setStandaloneShellDefault(path: string): Promise<void> {
   await browser.execute((defaultDir: string) => {
     const fallback = {
@@ -242,6 +319,53 @@ async function setStandaloneShellDefault(path: string): Promise<void> {
   }, path);
 }
 
+async function waitForContainer(
+  kind: "repo" | "workspace" | "cwd",
+  containerId: string,
+): Promise<void> {
+  const container = await browser.$(
+    `[data-testid="sidebar-container-${kind}"][data-container-id="${containerId}"]`,
+  );
+  await container.waitForExist({
+    timeout: 10_000,
+    timeoutMsg: `${kind}:${containerId} did not appear`,
+  });
+}
+
+async function waitForStandaloneContainer(
+  sessionId: string,
+  expectedPath: string,
+): Promise<WebdriverIO.Element> {
+  await browser.waitUntil(
+    async () => {
+      const container = await findStandaloneContainer(sessionId);
+      const path = container
+        ? await container.getAttribute("data-container-path")
+        : null;
+      return pathsEqual(path, expectedPath);
+    },
+    {
+      timeout: 10_000,
+      timeoutMsg: `standalone container ${sessionId} did not move to ${expectedPath}`,
+    },
+  );
+  const found = await findStandaloneContainer(sessionId);
+  if (!found) {
+    throw new Error(`standalone container missing after wait: ${sessionId}`);
+  }
+  return found;
+}
+
+async function findStandaloneContainer(
+  sessionId: string,
+): Promise<WebdriverIO.Element | null> {
+  const container = await browser.$(
+    `[data-testid="sidebar-container-standalone"][data-container-id="${sessionId}"]`,
+  );
+  if (!(await container.isExisting())) return null;
+  return container as unknown as WebdriverIO.Element;
+}
+
 async function waitForBufferText(
   sessionId: string,
   needle: string,
@@ -272,6 +396,21 @@ async function waitForBufferText(
     `xterm buffer for ${sessionId} never contained "${needle}" within ${timeoutMs}ms.\n` +
       `Last seen (truncated to 500 chars):\n${lastSeen.slice(0, 500)}`,
   );
+}
+
+async function waitForSessionCwd(
+  ws: DaemonWsClient,
+  sessionId: string,
+  cwd: string,
+): Promise<SessionSnapshot> {
+  const msg = await ws.waitFor(
+    (candidate): candidate is SessionUpdatedMessage =>
+      isSessionUpdated(candidate) &&
+      candidate.session.id === sessionId &&
+      pathsEqual(candidate.session.current_cwd ?? null, cwd),
+    { timeoutMs: 10_000 },
+  );
+  return msg.session;
 }
 
 async function waitForSessionStatus(
@@ -307,11 +446,37 @@ async function waitForRenderedShellStatus(
   await dot.waitForExist({ timeout: 5_000 });
 }
 
+function shellCdCommand(path: string): string {
+  const escaped = path.replace(/"/g, '\\"');
+  return `cd "${escaped}"\r`;
+}
+
 function shellActivityCommand(): string {
   if (process.platform === "win32") {
     return '1..24 | ForEach-Object { "rt-shell-working-$_"; Start-Sleep -Milliseconds 20 }\r';
   }
   return 'for i in $(seq 1 24); do echo "rt-shell-working-$i"; sleep 0.02; done\r';
+}
+
+function expectPathEqual(actual: string | null, expected: string): void {
+  expect(
+    actual && normalizePathForCompare(actual),
+    `path mismatch: ${actual ?? "(null)"} !== ${expected}`,
+  ).to.equal(normalizePathForCompare(expected));
+}
+
+function pathsEqual(actual: string | null, expected: string): boolean {
+  return actual !== null && normalizePathForCompare(actual) === normalizePathForCompare(expected);
+}
+
+function normalizePathForCompare(path: string): string {
+  const windowsLike = /^[A-Za-z]:[\\/]/.test(path) || path.includes("\\");
+  const normalized = windowsLike ? path.replace(/\//g, "\\") : path;
+  const trimmed =
+    normalized.length > 3
+      ? normalized.replace(windowsLike ? /\\+$/g : /\/+$/g, "")
+      : normalized;
+  return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
 }
 
 function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {

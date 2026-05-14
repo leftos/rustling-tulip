@@ -89,6 +89,9 @@ pub struct SessionRecord {
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
+    /// Latest cwd reported by the PTY. Plain shells initialize this from the
+    /// spawn cwd and update it from OSC 7 prompt sequences.
+    pub current_cwd: Option<String>,
     /// Session-level appearance overrides. Stored after daemon validation.
     pub appearance: AppearanceOverrides,
     /// Persisted spawn-time configuration used to clone this session via
@@ -171,6 +174,7 @@ impl SessionRecord {
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
+            current_cwd: self.current_cwd.clone(),
             appearance: self.appearance.clone(),
             elevated_authority,
             has_per_session_worktree,
@@ -403,6 +407,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            current_cwd: meta.current_cwd.clone(),
             appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
@@ -441,6 +446,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            current_cwd: meta.current_cwd.clone(),
             appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
@@ -480,6 +486,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
+            current_cwd: meta.current_cwd.clone(),
             appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: true,

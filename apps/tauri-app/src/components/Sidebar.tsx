@@ -15,6 +15,7 @@ import {
   type SessionSnapshot,
   type SpawnConfig,
   type TabEntry,
+  type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
 } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
@@ -115,6 +116,7 @@ interface Props {
   /// WS confirmation arrives.
   onLocalReorderSessions: (containerId: string, orderedIds: string[]) => void;
   onAddRepo: () => void;
+  onAddRepoPath: (path: string) => void;
   onRemoveRepo: (id: string) => void;
   /// Called when the user removes a repo that has live sessions.
   /// The app opens a confirmation modal with a 3-way choice
@@ -168,6 +170,7 @@ interface Props {
 type ContainerKind =
   | "workspace"
   | "repo"
+  | "cwd"
   | "standalone"
   | "detached"
   | "tab"
@@ -184,7 +187,7 @@ interface TreeContainer {
   // For "workspace" / "repo": the entity id. For "detached": "".
   id: string;
   name: string;
-  // Subtitle line for repos (path) — hover-only via title attribute.
+  // Subtitle line for repos/cwd paths — hover-only via title attribute.
   hoverTitle?: string;
   /// Filesystem path for repo containers; null for workspaces (which span
   /// multiple repos) and the detached pseudo-container.
@@ -204,6 +207,8 @@ interface AppearanceEditorState {
   container: TreeContainer;
   draft: AppearanceOverrides;
 }
+
+type VscodeWorkspaceScanState = VscodeWorkspaceSuggestion | null | "pending";
 
 export default function Sidebar(props: Props) {
   // The current sidebar view is a per-window selection but it also serves
@@ -241,6 +246,54 @@ export default function Sidebar(props: Props) {
       props.containerOrder,
     ],
   );
+  const cwdActionPaths = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of containers) {
+      if ((c.kind !== "cwd" && c.kind !== "standalone") || !c.fsPath) {
+        continue;
+      }
+      const key = normalizeFsPathForCompare(c.fsPath);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c.fsPath);
+    }
+    return out;
+  }, [containers]);
+  const [vscodeWorkspaceByPath, setVscodeWorkspaceByPath] = useState<
+    Map<string, VscodeWorkspaceScanState>
+  >(new Map());
+
+  useEffect(() => {
+    if (!props.client) return;
+    return props.client.onMessage((msg) => {
+      if (msg.type !== "vscode_workspaces_scanned") return;
+      const key = normalizeFsPathForCompare(msg.path);
+      setVscodeWorkspaceByPath((prev) => {
+        const next = new Map(prev);
+        next.set(key, msg.suggestions[0] ?? null);
+        return next;
+      });
+    });
+  }, [props.client]);
+
+  useEffect(() => {
+    if (!props.client) return;
+    const missing = cwdActionPaths.filter(
+      (path) => !vscodeWorkspaceByPath.has(normalizeFsPathForCompare(path)),
+    );
+    if (missing.length === 0) return;
+    setVscodeWorkspaceByPath((prev) => {
+      const next = new Map(prev);
+      for (const path of missing) {
+        next.set(normalizeFsPathForCompare(path), "pending");
+      }
+      return next;
+    });
+    for (const path of missing) {
+      props.client.send({ type: "scan_vscode_workspaces", path });
+    }
+  }, [cwdActionPaths, props.client, vscodeWorkspaceByPath]);
 
   const abandonedCount = useMemo(
     () => props.sessions.filter((s) => s.is_abandoned).length,
@@ -442,27 +495,6 @@ export default function Sidebar(props: Props) {
     });
   }, [currentTarget, currentTargetKey, presetCache, props.client]);
 
-  // Force-expand any container whose **highlighted** session lives inside.
-  // Highlighting is user-initiated (clicking into a pane with that session),
-  // so the expand-on-discovery is welcome. Attention used to also force the
-  // expansion, but that overrode the user's collapse decision for sessions
-  // they intentionally backgrounded — audit's "Force-expand silently
-  // overrides the user's collapse state". The container header surfaces a
-  // distinct `has-attention` rollup chip instead, so the warning is still
-  // visible without disturbing the layout.
-  const forceExpand = useMemo(() => {
-    const out = new Set<string>();
-    for (const c of containers) {
-      for (const s of c.sessions) {
-        if (props.highlightedSessionIds.has(s.id)) {
-          out.add(c.key);
-          break;
-        }
-      }
-    }
-    return out;
-  }, [containers, props.highlightedSessionIds]);
-
   // Sets of container keys whose sessions include at least one
   // attention-flagged id. Computed once per render and threaded into the
   // container header below so collapsed containers can still show a
@@ -640,7 +672,7 @@ export default function Sidebar(props: Props) {
       ) : (
         <ul className="tree">
           {containers.map((c) => {
-            const isCollapsed = collapsed.has(c.key) && !forceExpand.has(c.key);
+            const isCollapsed = collapsed.has(c.key);
             // Tab and repo/workspace containers participate in DIFFERENT
             // drag-reorder paths (different MIMEs, different protocol
             // messages, different state buckets). Compute both side and
@@ -696,6 +728,9 @@ export default function Sidebar(props: Props) {
               props.repos,
               props.workspaces,
             );
+            const vscodeWorkspace = c.fsPath
+              ? vscodeWorkspaceByPath.get(normalizeFsPathForCompare(c.fsPath))
+              : null;
 
             return (
               <ContainerNode
@@ -712,6 +747,12 @@ export default function Sidebar(props: Props) {
                 highlightedSessionIds={props.highlightedSessionIds}
                 attentionSessions={props.attentionSessions}
                 onSelectSession={props.onSelectSession}
+                onAddRepoPath={props.onAddRepoPath}
+                vscodeWorkspaceSuggestion={
+                  vscodeWorkspace && vscodeWorkspace !== "pending"
+                    ? vscodeWorkspace
+                    : null
+                }
                 onRemoveRepo={props.onRemoveRepo}
                 onRemoveRepoWithLiveSessions={props.onRemoveRepoWithLiveSessions}
                 onRemoveWorkspace={props.onRemoveWorkspace}
@@ -728,9 +769,13 @@ export default function Sidebar(props: Props) {
                 dragHandlers={dragHandlers}
                 sessionOrder={props.sessionOrder.get(c.id)}
                 onReorderSessions={(ids) => {
-                  // Only workspace/repo/tab containers have a stable id
-                  // worth persisting; detached/unbound use id="".
-                  if (c.id) {
+                  // Only workspace/repo/tab containers have daemon-backed
+                  // session-order buckets. Cwd containers are transient.
+                  if (
+                    c.kind === "workspace" ||
+                    c.kind === "repo" ||
+                    c.kind === "tab"
+                  ) {
                     props.onLocalReorderSessions(c.id, ids);
                     props.client.send({
                       type: "reorder_sessions",
@@ -904,6 +949,8 @@ interface ContainerNodeProps {
   highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   onSelectSession: (id: string) => void;
+  onAddRepoPath: (path: string) => void;
+  vscodeWorkspaceSuggestion: VscodeWorkspaceSuggestion | null;
   onRemoveRepo: (id: string) => void;
   onRemoveRepoWithLiveSessions: (intent: RepoRemoveIntent) => void;
   onRemoveWorkspace: (id: string) => void;
@@ -1100,6 +1147,8 @@ function ContainerNode(p: ContainerNodeProps) {
         ? "REPO"
         : c.kind === "tab"
           ? "TAB"
+          : c.kind === "cwd"
+            ? "DIR"
           : c.kind === "standalone"
             ? "SH"
             : c.kind === "unbound"
@@ -1131,6 +1180,7 @@ function ContainerNode(p: ContainerNodeProps) {
         data-testid={`sidebar-container-${c.kind}`}
         data-container-id={c.id}
         data-container-name={c.name}
+        data-container-path={c.fsPath ?? undefined}
         draggable={isDraggable}
         onDragStart={p.dragHandlers?.onDragStart}
         onDragOver={p.dragHandlers?.onDragOver}
@@ -1275,6 +1325,42 @@ function ContainerNode(p: ContainerNodeProps) {
                 )}
               </>
             )}
+          {(c.kind === "cwd" || c.kind === "standalone") && c.fsPath && (
+            <>
+              <button
+                type="button"
+                className="list-item-action"
+                title={`Add repo: ${c.fsPath}`}
+                aria-label={`Add repo ${c.name}`}
+                data-testid="sidebar-cwd-add-repo"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  p.onAddRepoPath(c.fsPath!);
+                }}
+              >
+                <Icon name="repo" />
+              </button>
+              {p.vscodeWorkspaceSuggestion && (
+                <button
+                  type="button"
+                  className="list-item-action"
+                  title={`Add workspace: ${p.vscodeWorkspaceSuggestion.suggested_name}`}
+                  aria-label={`Add workspace ${p.vscodeWorkspaceSuggestion.suggested_name}`}
+                  data-testid="sidebar-cwd-add-workspace"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    p.client.send({
+                      type: "accept_vscode_workspace_suggestion",
+                      suggestion: p.vscodeWorkspaceSuggestion!,
+                      watch: false,
+                    });
+                  }}
+                >
+                  <Icon name="workspace" />
+                </button>
+              )}
+            </>
+          )}
         </div>
         <div className="tree-container-meta">
           <span className="tree-kind-tag">{kindLabel}</span>
@@ -1304,6 +1390,39 @@ function ContainerNode(p: ContainerNodeProps) {
               These sessions are alive but no tab currently references them.
               Click the <span className="tree-tab-pill unbound">unbound</span>
               {" "}pill on a session to open it in a new tab.
+            </li>
+          )}
+          {(c.kind === "cwd" || c.kind === "standalone") && c.fsPath && (
+            <li
+              className="tree-children-banner cwd-banner"
+              data-testid={c.kind === "standalone" ? "standalone-cwd-banner" : "cwd-banner"}
+            >
+              <span>{c.fsPath}</span>
+              <span className="tree-children-banner-actions">
+                <button
+                  type="button"
+                  className="link inline"
+                  data-testid="cwd-banner-add-repo"
+                  onClick={() => p.onAddRepoPath(c.fsPath!)}
+                >
+                  Add repo
+                </button>
+                {p.vscodeWorkspaceSuggestion && (
+                  <button
+                    type="button"
+                    className="link inline"
+                    data-testid="cwd-banner-add-workspace"
+                    onClick={() =>
+                      p.client.send({
+                        type: "accept_vscode_workspace_suggestion",
+                        suggestion: p.vscodeWorkspaceSuggestion!,
+                        watch: false,
+                      })}
+                  >
+                    Add workspace
+                  </button>
+                )}
+              </span>
             </li>
           )}
           {displayedSessions.map((s) => (
@@ -2045,12 +2164,37 @@ function buildContainers(
   // Group sessions by their owning container.
   const wsSessions = new Map<string, SessionSnapshot[]>();
   const repoSessions = new Map<string, SessionSnapshot[]>();
-  const standalone: SessionSnapshot[] = [];
+  const cwdSessions = new Map<string, SessionSnapshot[]>();
+  const standaloneContainers: TreeContainer[] = [];
   const detached: SessionSnapshot[] = [];
 
   for (const s of sessions) {
     if (s.kind === "standalone") {
-      standalone.push(s);
+      const cwd = s.current_cwd ? normalizeFsPath(s.current_cwd) : null;
+      standaloneContainers.push({
+        key: `standalone:${s.id}`,
+        kind: "standalone",
+        id: s.id,
+        name: sessionDisplayLabel(s),
+        hoverTitle: cwd ?? "Shell launched outside registered repos and workspaces",
+        fsPath: cwd,
+        sessions: [s],
+        removable: false,
+      });
+    } else if (s.mode === "plain_shell" && s.current_cwd) {
+      const cwdHome = findContainerForCwd(
+        s.current_cwd,
+        repos,
+        workspaces,
+        memberRepoIds,
+      );
+      if (cwdHome.kind === "workspace") {
+        pushTo(wsSessions, cwdHome.id, s);
+      } else if (cwdHome.kind === "repo") {
+        pushTo(repoSessions, cwdHome.id, s);
+      } else {
+        pushTo(cwdSessions, cwdHome.path, s);
+      }
     } else if (s.workspace_id) {
       if (workspaceById.has(s.workspace_id)) {
         pushTo(wsSessions, s.workspace_id, s);
@@ -2114,15 +2258,23 @@ function buildContainers(
     containerOrder,
   );
 
-  if (standalone.length > 0) {
+  for (const c of standaloneContainers.sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
+    out.push(c);
+  }
+
+  for (const [path, pathSessions] of [...cwdSessions.entries()].sort((a, b) =>
+    pathLeafName(a[0]).localeCompare(pathLeafName(b[0])),
+  )) {
     out.push({
-      key: "standalone",
-      kind: "standalone",
-      id: "",
-      name: "Standalone",
-      hoverTitle: "Shells launched outside registered repos and workspaces",
-      fsPath: null,
-      sessions: sortSessions(standalone),
+      key: `cwd:${path}`,
+      kind: "cwd",
+      id: path,
+      name: pathLeafName(path),
+      hoverTitle: path,
+      fsPath: path,
+      sessions: sortSessions(pathSessions),
       removable: false,
     });
   }
@@ -2141,6 +2293,65 @@ function buildContainers(
   }
 
   return out;
+}
+
+type CwdHome =
+  | { kind: "workspace"; id: string }
+  | { kind: "repo"; id: string }
+  | { kind: "cwd"; path: string };
+
+function findContainerForCwd(
+  cwd: string,
+  repos: RepoEntry[],
+  workspaces: WorkspaceEntry[],
+  memberRepoIds: Set<string>,
+): CwdHome {
+  const normalizedCwd = normalizeFsPath(cwd);
+  let bestRepo: RepoEntry | null = null;
+  for (const repo of repos) {
+    if (!pathContains(repo.path, cwd)) continue;
+    if (
+      !bestRepo ||
+      normalizeFsPath(repo.path).length > normalizeFsPath(bestRepo.path).length
+    ) {
+      bestRepo = repo;
+    }
+  }
+  if (bestRepo) {
+    const workspace = workspaces.find((w) =>
+      w.member_repo_ids.includes(bestRepo.id),
+    );
+    if (workspace) return { kind: "workspace", id: workspace.id };
+    if (!memberRepoIds.has(bestRepo.id)) return { kind: "repo", id: bestRepo.id };
+  }
+  return { kind: "cwd", path: normalizedCwd };
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const p = normalizeFsPathForCompare(parent);
+  const c = normalizeFsPathForCompare(child);
+  if (p === c) return true;
+  const sep = p.includes("\\") ? "\\" : "/";
+  return c.startsWith(`${p}${sep}`);
+}
+
+function normalizeFsPath(path: string): string {
+  const windowsLike = /^[A-Za-z]:[\\/]/.test(path) || path.includes("\\");
+  const normalized = windowsLike ? path.replace(/\//g, "\\") : path;
+  if (normalized.length <= 3) return normalized;
+  return windowsLike
+    ? normalized.replace(/\\+$/g, "")
+    : normalized.replace(/\/+$/g, "");
+}
+
+function normalizeFsPathForCompare(path: string): string {
+  return normalizeFsPath(path).toLowerCase();
+}
+
+function pathLeafName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/g, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
 }
 
 function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V) {

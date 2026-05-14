@@ -917,6 +917,10 @@ async fn dispatch(
                     .map_err(|e| anyhow!("parse_vscode_workspace: {e}"))?;
             let _ = out_tx.send(DaemonMessage::VscodeWorkspaceParsed { suggestion });
         }
+        ClientMessage::ScanVscodeWorkspaces { path } => {
+            let suggestions = scan_vscode_workspaces_in_path(hub, &path);
+            let _ = out_tx.send(DaemonMessage::VscodeWorkspacesScanned { path, suggestions });
+        }
         ClientMessage::ListSessions => {
             let _ = out_tx.send(DaemonMessage::Sessions {
                 sessions: hub.sessions.snapshots(),
@@ -2380,6 +2384,7 @@ async fn spawn_interactive_session(
         "spawn_interactive_session: resolved program"
     );
 
+    let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
         program,
@@ -2422,6 +2427,7 @@ async fn spawn_interactive_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
@@ -2456,6 +2462,7 @@ async fn spawn_interactive_session(
             cfg.agent,
             Some(stored_config),
             last_prompt,
+            Some(initial_cwd),
             Some(tracer_pid),
             Some(tracer_pipe),
             Some(tracer_exe_path),
@@ -2526,11 +2533,12 @@ async fn spawn_plain_shell_session(
         ));
     }
 
-    let (program, shell_label) = resolve_shell_program()?;
+    let shell = resolve_shell_program()?;
+    let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
-        program,
-        args: Vec::new(),
+        program: shell.program,
+        args: shell.args,
         cwd: primary_cwd,
         env: merged_env(&cfg.extra_env),
         cols: 120,
@@ -2570,7 +2578,8 @@ async fn spawn_plain_shell_session(
         // as claude so the UI badge doesn't render `· codex` on a pwsh prompt.
         agent: Agent::Claude,
         terminal_title: None,
-        program_name: Some(shell_label.clone()),
+        program_name: Some(shell.label.clone()),
+        current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
@@ -2580,7 +2589,10 @@ async fn spawn_plain_shell_session(
         last_prompt: None,
         input_notifier: None,
     };
-    push_recent_action(&mut record, format!("session started: {shell_label}"));
+    push_recent_action(
+        &mut record,
+        format!("session started: {}", shell.label.as_str()),
+    );
     hub.sessions.insert(record);
     let snap = hub
         .sessions
@@ -2603,15 +2615,12 @@ async fn spawn_plain_shell_session(
             Some(stored_config),
             // Plain shells never carry a kickoff prompt.
             None,
+            Some(initial_cwd),
             Some(tracer_pid),
             Some(tracer_pipe),
             Some(tracer_exe_path),
         )
     {
-        // `shell_label` is now informational only — surfaced to the user via
-        // the SessionRecord, not the sidecar's program_name (which describes
-        // the OS process, which is rt-tracer).
-        let _ = &shell_label;
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
@@ -2683,6 +2692,7 @@ fn spawn_headless_session(
     args.push("-p".to_string());
     args.push(prompt);
 
+    let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = headless::HeadlessSpec {
         program: agent_program(cfg.agent),
         args,
@@ -2710,6 +2720,7 @@ fn spawn_headless_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
+        current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
@@ -2739,6 +2750,7 @@ fn spawn_headless_session(
             cfg.agent,
             Some(stored_config),
             last_prompt,
+            Some(initial_cwd),
             // Headless `claude --print` doesn't use a PTY and therefore doesn't
             // go through rt-tracer; the tracer fields stay None.
             None,
@@ -3289,19 +3301,31 @@ fn npm_shim_to_node_entry(shim: &Path) -> Option<(PathBuf, PathBuf)> {
     Some((node, js))
 }
 
-/// Pick a shell executable for [`SessionMode::PlainShell`] spawns. Returns
-/// `(program, label)` where `program` is what we pass to `CommandBuilder`
-/// (resolved on PATH if it has no separator) and `label` is the short token
-/// used for `recent_actions` text and for the orphan-recovery name match.
+#[derive(Debug, Clone)]
+struct ShellProgram {
+    program: String,
+    args: Vec<String>,
+    label: String,
+}
+
+/// Pick a shell executable for [`SessionMode::PlainShell`] spawns. `program`
+/// is what we pass to `CommandBuilder` (resolved on PATH if it has no
+/// separator); `label` is the short token shown in the UI; `args` installs a
+/// prompt hook for shells whose cwd changes are otherwise invisible to the
+/// containing terminal app.
 ///
 /// Resolution order:
 /// - `RUSTLING_TULIP_SHELL` env override (any platform);
 /// - Windows: `pwsh.exe` → `powershell.exe` → `cmd.exe`;
 /// - Unix: `$SHELL` → `bash` → `sh`.
-fn resolve_shell_program() -> anyhow::Result<(String, String)> {
+fn resolve_shell_program() -> anyhow::Result<ShellProgram> {
     if let Ok(p) = std::env::var("RUSTLING_TULIP_SHELL") {
         let label = shell_label_from_path(&p);
-        return Ok((p, label));
+        return Ok(ShellProgram {
+            program: p,
+            args: plain_shell_args(&label),
+            label,
+        });
     }
     #[cfg(windows)]
     {
@@ -3311,7 +3335,12 @@ fn resolve_shell_program() -> anyhow::Result<(String, String)> {
             ("cmd.exe", "cmd"),
         ] {
             if which::which(candidate).is_ok() {
-                return Ok((candidate.to_string(), label.to_string()));
+                let label = label.to_string();
+                return Ok(ShellProgram {
+                    program: candidate.to_string(),
+                    args: plain_shell_args(&label),
+                    label,
+                });
             }
         }
         anyhow::bail!("no shell on PATH (tried pwsh.exe, powershell.exe, cmd.exe)")
@@ -3320,11 +3349,20 @@ fn resolve_shell_program() -> anyhow::Result<(String, String)> {
     {
         if let Ok(p) = std::env::var("SHELL") {
             let label = shell_label_from_path(&p);
-            return Ok((p, label));
+            return Ok(ShellProgram {
+                program: p,
+                args: plain_shell_args(&label),
+                label,
+            });
         }
         for (candidate, label) in [("bash", "bash"), ("sh", "sh")] {
             if which::which(candidate).is_ok() {
-                return Ok((candidate.to_string(), label.to_string()));
+                let label = label.to_string();
+                return Ok(ShellProgram {
+                    program: candidate.to_string(),
+                    args: plain_shell_args(&label),
+                    label,
+                });
             }
         }
         anyhow::bail!("no shell on PATH (tried bash, sh)")
@@ -3338,18 +3376,70 @@ fn shell_label_from_path(path: &str) -> String {
         .map_or_else(|| "shell".to_string(), str::to_lowercase)
 }
 
+fn plain_shell_args(label: &str) -> Vec<String> {
+    match label {
+        "pwsh" | "powershell" => vec![
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            powershell_cwd_prompt_script(),
+        ],
+        "cmd" => vec![
+            "/K".to_string(),
+            "prompt $E]7;file:///$P$E\\$P$G".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn powershell_cwd_prompt_script() -> String {
+    [
+        "$global:__rt_original_prompt = if (Test-Path function:\\prompt) {",
+        "(Get-Command prompt).ScriptBlock",
+        "} else {",
+        "{ \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" }",
+        "};",
+        "function global:__rt_emit_cwd {",
+        "try {",
+        "$path = (Get-Location).ProviderPath;",
+        "if ($path) {",
+        "$uri = [System.Uri]::new($path).AbsoluteUri;",
+        "[Console]::Out.Write([char]27 + ']7;' + $uri + [char]7)",
+        "}",
+        "} catch { Write-Debug $_ };",
+        "}",
+        "function global:prompt {",
+        "global:__rt_emit_cwd;",
+        "& $global:__rt_original_prompt",
+        "};",
+        "global:__rt_emit_cwd",
+    ]
+    .join(" ")
+}
+
 fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
+    scan_vscode_workspace_files(hub, repo_path, true)
+}
+
+fn scan_vscode_workspaces_in_path(hub: &Hub, path: &str) -> Vec<VscodeWorkspaceSuggestion> {
+    scan_vscode_workspace_files(hub, path, false)
+}
+
+fn scan_vscode_workspace_files(
+    hub: &Hub,
+    dir_path: &str,
+    require_multiple_folders: bool,
+) -> Vec<VscodeWorkspaceSuggestion> {
     let known: Vec<(String, String)> = hub.state.with_persisted(|s| {
         s.repos
             .iter()
             .map(|r| (r.id.clone(), r.path.clone()))
             .collect()
     });
-    let dir = std::path::Path::new(repo_path);
+    let dir = std::path::Path::new(dir_path);
     vscode::find_workspace_files(dir)
         .into_iter()
         .filter_map(|file| match vscode::parse_workspace_file(&file, &known) {
-            Ok(s) if s.folders.len() > 1 => Some(s),
+            Ok(s) if !require_multiple_folders || s.folders.len() > 1 => Some(s),
             Ok(_) => None,
             Err(err) => {
                 warn!(?err, file = %file.display(), "failed to parse code-workspace");
