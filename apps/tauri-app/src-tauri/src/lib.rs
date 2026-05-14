@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::utils::config::Color;
 use tauri::{Manager, Runtime, Theme, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt as _;
@@ -289,6 +290,202 @@ async fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn open_url(url: String) -> Result<(), String> {
+    let validated = validate_http_url(&url)?;
+    open_with_system_handler(validated)
+}
+
+#[tauri::command]
+async fn open_path_in_vscode(
+    path: String,
+    base_dirs: Vec<String>,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> Result<(), String> {
+    let resolved = resolve_existing_terminal_path(&path, &base_dirs)?;
+    spawn_vscode(&resolved, line, column)
+}
+
+fn validate_http_url(url: &str) -> Result<&str, String> {
+    if url.trim() != url || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("URL contains whitespace or control characters".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return Err("only http:// and https:// URLs can be opened".to_string());
+    }
+    Ok(url)
+}
+
+fn open_with_system_handler(target: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("open URL: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("open URL: {e}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("open URL: {e}"))?;
+    }
+    Ok(())
+}
+
+fn resolve_existing_terminal_path(path: &str, base_dirs: &[String]) -> Result<PathBuf, String> {
+    let requested = PathBuf::from(path);
+    let candidates = if requested.is_absolute() {
+        vec![requested]
+    } else {
+        let mut out: Vec<PathBuf> = base_dirs
+            .iter()
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| PathBuf::from(dir).join(&requested))
+            .collect();
+        if out.is_empty()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            out.push(cwd.join(&requested));
+        }
+        out
+    };
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate
+                .canonicalize()
+                .map_err(|e| format!("canonicalize {}: {e}", candidate.display()));
+        }
+    }
+    Err(format!("path does not exist: {path}"))
+}
+
+fn spawn_vscode(path: &Path, line: Option<u32>, column: Option<u32>) -> Result<(), String> {
+    let target = if let Some(line) = line {
+        let column = column.unwrap_or(1).max(1);
+        format!("{}:{}:{column}", path.display(), line.max(1))
+    } else {
+        path.to_string_lossy().into_owned()
+    };
+    let mut last_error = None;
+    for command in vscode_commands() {
+        let mut child = Command::new(&command);
+        if line.is_some() {
+            child.arg("-g");
+        }
+        child.arg(&target);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            child.creation_flags(CREATE_NO_WINDOW);
+        }
+        match child.spawn() {
+            Ok(_) => return Ok(()),
+            Err(err) => last_error = Some(format!("{}: {err}", command.display())),
+        }
+    }
+    Err(format!(
+        "failed to launch VS Code{}",
+        last_error.map_or_else(String::new, |err| format!(" ({err})"))
+    ))
+}
+
+fn vscode_commands() -> Vec<PathBuf> {
+    let mut commands = Vec::new();
+    #[cfg(windows)]
+    {
+        commands.push(PathBuf::from("code.exe"));
+        commands.push(PathBuf::from("Code.exe"));
+        for (env_name, suffix) in [
+            ("LOCALAPPDATA", "Programs\\Microsoft VS Code\\Code.exe"),
+            (
+                "LOCALAPPDATA",
+                "Programs\\Microsoft VS Code Insiders\\Code - Insiders.exe",
+            ),
+            ("PROGRAMFILES", "Microsoft VS Code\\Code.exe"),
+            ("PROGRAMFILES(X86)", "Microsoft VS Code\\Code.exe"),
+        ] {
+            if let Ok(root) = std::env::var(env_name)
+                && !root.is_empty()
+            {
+                commands.push(PathBuf::from(root).join(suffix));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        commands.push(PathBuf::from("code"));
+    }
+    commands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_existing_terminal_path, validate_http_url};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn validate_http_url_accepts_http_and_https_only() {
+        assert!(validate_http_url("https://example.com/path").is_ok());
+        assert!(validate_http_url("http://example.com/path").is_ok());
+        assert!(validate_http_url("file:///C:/temp/a.txt").is_err());
+        assert!(validate_http_url("https://example.com/a b").is_err());
+    }
+
+    #[test]
+    fn resolve_existing_terminal_path_uses_base_directory() -> Result<(), String> {
+        let root = unique_temp_dir("base")?;
+        let nested = root.join("src");
+        let file = nested.join("main.rs");
+        fs::create_dir_all(&nested).map_err(|e| e.to_string())?;
+        fs::write(&file, "fn main() {}\n").map_err(|e| e.to_string())?;
+
+        let resolved =
+            resolve_existing_terminal_path("src/main.rs", &[root.to_string_lossy().into_owned()])?;
+
+        let expected = file.canonicalize().map_err(|e| e.to_string())?;
+        fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        assert_eq!(resolved, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_existing_terminal_path_rejects_missing_paths() {
+        let result = resolve_existing_terminal_path("missing.rs", &[]);
+        assert!(result.is_err());
+    }
+
+    fn unique_temp_dir(label: &str) -> Result<std::path::PathBuf, String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rustling-tulip-terminal-link-{label}-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        Ok(path)
+    }
+}
+
 /// Terminate the Tauri app process. Used by the exit flow instead of
 /// `WebviewWindow::destroy()`, which in Tauri v2 can deadlock when invoked
 /// from inside the webview's own event loop (the IPC round-trip needed to
@@ -439,6 +636,8 @@ pub fn run() {
             open_pane_window,
             open_tab_window,
             reveal_in_explorer,
+            open_url,
+            open_path_in_vscode,
             log_message,
             quit_app
         ])

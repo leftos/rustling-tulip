@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Terminal as XTerm } from "@xterm/xterm";
+import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { loadFonts, WebFontsAddon } from "@xterm/addon-web-fonts";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -16,6 +18,10 @@ import { useFontSize } from "../utils/fontSize";
 import { loadSettings } from "../utils/settings";
 import type { EffectiveAppearance } from "../utils/appearance";
 import { buildTerminalTheme } from "../utils/terminalTheme";
+import {
+  detectTerminalLinks,
+  type DetectedTerminalLink,
+} from "../utils/terminalLinks";
 
 /// Historical cascade — preserved as the fallback when the user hasn't
 /// picked a specific family in Settings. Geist Mono is the bundled
@@ -76,6 +82,56 @@ interface Props {
   /// owning pane. Threaded in so live inheritance updates can repaint
   /// xterm without reconnecting the PTY.
   appearance: EffectiveAppearance;
+  /// Candidate roots for relative path links. Plain shells pass their
+  /// current cwd; agent/workspace sessions also include member worktrees.
+  linkBaseDirs: string[];
+}
+
+interface TerminalLinkOpenDetail {
+  kind: "url" | "path";
+  text: string;
+  target: string;
+  line: number | null;
+  column: number | null;
+  baseDirs: string[];
+}
+
+function openTerminalLink(detail: TerminalLinkOpenDetail): void {
+  const event = new CustomEvent<TerminalLinkOpenDetail>("rt:terminal-link-open", {
+    cancelable: true,
+    detail,
+  });
+  if (!window.dispatchEvent(event)) return;
+
+  if (detail.kind === "url") {
+    void invoke("open_url", { url: detail.target }).catch((err: unknown) => {
+      console.warn("open_url failed", detail.target, err);
+    });
+    return;
+  }
+
+  void invoke("open_path_in_vscode", {
+    path: detail.target,
+    baseDirs: detail.baseDirs,
+    line: detail.line,
+    column: detail.column,
+  }).catch((err: unknown) => {
+    console.warn("open_path_in_vscode failed", detail.target, err);
+  });
+}
+
+function terminalLinkDetail(
+  link: DetectedTerminalLink,
+  baseDirs: string[],
+): TerminalLinkOpenDetail {
+  return {
+    kind: link.kind,
+    text: link.text,
+    target: link.target,
+    line: link.line,
+    column: link.column,
+    baseDirs,
+  };
 }
 
 export default function Terminal({
@@ -87,6 +143,7 @@ export default function Terminal({
   agent,
   mode,
   appearance,
+  linkBaseDirs,
 }: Props) {
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -100,6 +157,8 @@ export default function Terminal({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const linkBaseDirsRef = useRef(linkBaseDirs);
+  linkBaseDirsRef.current = linkBaseDirs;
 
   const fontSize = useFontSize(tabId ?? null, appearance.terminal_font_size);
   const fontFamily = appearance.terminal_font_family;
@@ -277,6 +336,103 @@ export default function Terminal({
         return false;
       });
       cleanupFns.push(() => oscDisposable.dispose());
+
+      let terminalLinkMode = false;
+      const providedTerminalLinks = new Set<ILink>();
+      const setTerminalLinkMode = (active: boolean) => {
+        if (terminalLinkMode === active) return;
+        terminalLinkMode = active;
+        container.dataset["ctrlLinkMode"] = active ? "true" : "false";
+        for (const link of providedTerminalLinks) {
+          if (link.decorations) {
+            link.decorations.pointerCursor = active;
+            link.decorations.underline = active;
+          }
+        }
+        term.refresh(0, term.rows - 1);
+      };
+      const linkProvider: ILinkProvider = {
+        provideLinks(bufferLineNumber, callback) {
+          const line = term.buffer.active.getLine(bufferLineNumber - 1);
+          if (!line) {
+            callback(undefined);
+            return;
+          }
+          const links = detectTerminalLinks(line.translateToString(true)).map(
+            (link): ILink => {
+              const terminalLink: ILink = {
+                range: {
+                  start: { x: link.startIndex + 1, y: bufferLineNumber },
+                  end: { x: link.endIndex + 1, y: bufferLineNumber },
+                },
+                text: link.text,
+                decorations: {
+                  pointerCursor: terminalLinkMode,
+                  underline: terminalLinkMode,
+                },
+                activate(event) {
+                  if (!event.ctrlKey && !event.metaKey && !terminalLinkMode) {
+                    return;
+                  }
+                  event.preventDefault();
+                  openTerminalLink(
+                    terminalLinkDetail(link, linkBaseDirsRef.current),
+                  );
+                },
+                dispose() {
+                  providedTerminalLinks.delete(terminalLink);
+                },
+              };
+              providedTerminalLinks.add(terminalLink);
+              return terminalLink;
+            },
+          );
+          callback(links.length > 0 ? links : undefined);
+        },
+      };
+      const linkDisposable = term.registerLinkProvider(linkProvider);
+      cleanupFns.push(() => linkDisposable.dispose());
+
+      const onTerminalLinkModifier = (event: KeyboardEvent) => {
+        if (
+          event.type === "keydown" &&
+          (event.key === "Control" || event.key === "Meta")
+        ) {
+          setTerminalLinkMode(true);
+          return;
+        }
+        setTerminalLinkMode(event.ctrlKey || event.metaKey);
+      };
+      const onTerminalLinkPointerModifier = (event: MouseEvent) => {
+        setTerminalLinkMode(event.ctrlKey || event.metaKey);
+      };
+      const clearTerminalLinkMode = () => setTerminalLinkMode(false);
+      window.addEventListener("keydown", onTerminalLinkModifier);
+      window.addEventListener("keyup", onTerminalLinkModifier);
+      window.addEventListener("blur", clearTerminalLinkMode);
+      container.addEventListener("mousemove", onTerminalLinkPointerModifier, {
+        capture: true,
+      });
+      container.addEventListener("mousedown", onTerminalLinkPointerModifier, {
+        capture: true,
+      });
+      cleanupFns.push(() => {
+        window.removeEventListener("keydown", onTerminalLinkModifier);
+        window.removeEventListener("keyup", onTerminalLinkModifier);
+        window.removeEventListener("blur", clearTerminalLinkMode);
+        container.removeEventListener(
+          "mousemove",
+          onTerminalLinkPointerModifier,
+          { capture: true },
+        );
+        container.removeEventListener(
+          "mousedown",
+          onTerminalLinkPointerModifier,
+          { capture: true },
+        );
+        providedTerminalLinks.clear();
+        delete container.dataset["ctrlLinkMode"];
+      });
 
       // Spawn flow and pop-out windows mark the session id so the xterm
       // helper textarea grabs OS keyboard focus on mount — without this the

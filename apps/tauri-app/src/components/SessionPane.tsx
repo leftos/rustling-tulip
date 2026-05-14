@@ -188,6 +188,13 @@ export default function SessionPane({
     session,
   );
   const appearance = resolvedAppearance.values;
+  const terminalLinkBaseDirs = [
+    session.current_cwd,
+    ...session.members.map((m) => m.worktree_path),
+    ...session.worktree_paths,
+  ].filter((path, index, all): path is string => {
+    return path !== null && path.length > 0 && all.indexOf(path) === index;
+  });
   const accentColor = appearance.accent_color;
   const hasCustomFrame =
     appearance.terminal_frame_color !== BUILT_IN_APPEARANCE.terminal_frame_color;
@@ -467,6 +474,7 @@ export default function SessionPane({
               agent={session.agent}
               mode={session.mode}
               appearance={appearance}
+              linkBaseDirs={terminalLinkBaseDirs}
             />
           ) : session.status === "stopped" ? (
             <div
