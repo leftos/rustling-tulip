@@ -22,7 +22,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 enum ExistingDaemon {
     Compatible(DaemonHandshake),
     Incompatible(DaemonHandshake),
+    StaleBinary(DaemonHandshake),
     Missing,
+}
+
+struct CurrentDaemonBinary {
+    template: PathBuf,
+    cached: PathBuf,
 }
 
 /// Global lock around the "check + spawn" sequence. React 18 strict-mode
@@ -39,9 +45,13 @@ fn spawn_lock() -> &'static Mutex<()> {
 }
 
 pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, String> {
+    let current = resolve_current_daemon_binary()?;
+
     // Fast path: handshake already present, daemon is healthy, and this app
-    // can speak its protocol. No reason to serialize concurrent readers.
-    if let ExistingDaemon::Compatible(handshake) = classify_existing_daemon().await {
+    // can speak its protocol. Also verify the daemon executable matches the
+    // installed template so installer upgrades take effect without a protocol
+    // bump.
+    if let ExistingDaemon::Compatible(handshake) = classify_existing_daemon(&current.cached).await {
         info!(
             port = handshake.port,
             protocol_version = handshake.protocol_version,
@@ -55,7 +65,7 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
     // the handshake -- the caller ahead of us may have spawned the daemon
     // already.
     let _guard = spawn_lock().lock().await;
-    match classify_existing_daemon().await {
+    match classify_existing_daemon(&current.cached).await {
         ExistingDaemon::Compatible(handshake) => {
             info!(
                 port = handshake.port,
@@ -66,16 +76,25 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
         }
         ExistingDaemon::Incompatible(handshake) => {
             retire_daemon(&handshake, "protocol mismatch").await?;
-            spawn_current_daemon().await
+            spawn_current_daemon(&current).await
         }
-        ExistingDaemon::Missing => spawn_current_daemon().await,
+        ExistingDaemon::StaleBinary(handshake) => {
+            retire_daemon(&handshake, "daemon binary changed").await?;
+            spawn_current_daemon(&current).await
+        }
+        ExistingDaemon::Missing => spawn_current_daemon(&current).await,
     }
 }
 
-async fn spawn_current_daemon() -> Result<DaemonHandshake, String> {
+fn resolve_current_daemon_binary() -> Result<CurrentDaemonBinary, String> {
     let template = locate_daemon_binary()?;
-    let bin = cache_daemon_binary(&template).map_err(|e| e.to_string())?;
-    let cache_dir = bin
+    let cached = cache_daemon_binary(&template).map_err(|e| e.to_string())?;
+    Ok(CurrentDaemonBinary { template, cached })
+}
+
+async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> Result<DaemonHandshake, String> {
+    let cache_dir = current
+        .cached
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "cached daemon binary has no parent dir".to_string())?;
@@ -89,24 +108,40 @@ async fn spawn_current_daemon() -> Result<DaemonHandshake, String> {
     // Best-effort: failures log and don't block startup.
     reap_orphan_daemons(&cache_dir).await;
 
-    info!(template = ?template, cached = ?bin, "spawning daemon from cache");
+    info!(
+        template = ?current.template,
+        cached = ?current.cached,
+        "spawning daemon from cache"
+    );
     // The daemon needs to find rt-tracer.exe to spawn supervisors. Once we
     // start running it from the cache dir, the "sibling of current_exe()"
     // lookup no longer points at the install/target dir where rt-tracer is
     // shipped. Tell the daemon where the templates actually live.
-    let template_dir = template
+    let template_dir = current
+        .template
         .parent()
         .map(std::path::Path::to_path_buf)
         .ok_or_else(|| "template has no parent dir".to_string())?;
-    spawn_daemon(&bin, &template_dir)?;
+    spawn_daemon(&current.cached, &template_dir)?;
 
     wait_for_handshake().await
 }
 
-async fn classify_existing_daemon() -> ExistingDaemon {
+async fn classify_existing_daemon(current_daemon: &Path) -> ExistingDaemon {
     if let Some(handshake) = load_existing_if_alive().await {
         if daemon_protocol_is_supported(handshake.protocol_version) {
-            ExistingDaemon::Compatible(handshake)
+            if running_daemon_matches_current_binary(handshake.pid, current_daemon) {
+                ExistingDaemon::Compatible(handshake)
+            } else {
+                warn!(
+                    pid = handshake.pid,
+                    port = handshake.port,
+                    protocol_version = handshake.protocol_version,
+                    current_daemon = %current_daemon.display(),
+                    "running daemon binary is not current"
+                );
+                ExistingDaemon::StaleBinary(handshake)
+            }
         } else {
             warn!(
                 daemon_protocol = handshake.protocol_version,
@@ -124,6 +159,43 @@ async fn classify_existing_daemon() -> ExistingDaemon {
 
 fn daemon_protocol_is_supported(protocol_version: u32) -> bool {
     protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version)
+}
+
+fn running_daemon_matches_current_binary(pid: u32, expected: &Path) -> bool {
+    let Some(actual) = process_exe(pid) else {
+        warn!(pid, "could not inspect running daemon executable path");
+        return false;
+    };
+    let is_current = daemon_exe_matches_expected(&actual, expected);
+    if !is_current {
+        warn!(
+            pid,
+            actual = %actual.display(),
+            expected = %expected.display(),
+            "running daemon executable differs from current cached daemon"
+        );
+    }
+    is_current
+}
+
+fn process_exe(pid: u32) -> Option<PathBuf> {
+    let pid = sysinfo::Pid::from_u32(pid);
+    let process_refresh = sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always);
+    let mut sys = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::new().with_processes(process_refresh),
+    );
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        process_refresh,
+    );
+    sys.process(pid)
+        .and_then(|process| process.exe())
+        .map(Path::to_path_buf)
+}
+
+fn daemon_exe_matches_expected(actual: &Path, expected: &Path) -> bool {
+    normalize_process_path(actual) == normalize_process_path(expected)
 }
 
 async fn retire_daemon(handshake: &DaemonHandshake, reason: &str) -> Result<(), String> {
@@ -488,7 +560,10 @@ async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_protocol_is_supported, is_daemon_image, path_is_under, shutdown_url};
+    use super::{
+        daemon_exe_matches_expected, daemon_protocol_is_supported, is_daemon_image, path_is_under,
+        shutdown_url,
+    };
     use std::path::Path;
 
     #[test]
@@ -541,6 +616,24 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn daemon_exe_match_normalizes_windows_process_paths() {
+        assert!(daemon_exe_matches_expected(
+            Path::new(r"\\?\C:\rt\binaries\rustling-tulipd-aaaaaaaaaaaaaaaa.exe"),
+            Path::new(r"C:\rt\binaries\rustling-tulipd-aaaaaaaaaaaaaaaa.exe"),
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn daemon_exe_match_rejects_stale_cached_daemon() {
+        assert!(!daemon_exe_matches_expected(
+            Path::new(r"C:\rt\binaries\rustling-tulipd-aaaaaaaaaaaaaaaa.exe"),
+            Path::new(r"C:\rt\binaries\rustling-tulipd-bbbbbbbbbbbbbbbb.exe"),
+        ));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn path_scope_matches_only_cache_children() {
@@ -552,6 +645,15 @@ mod tests {
         assert!(!path_is_under(
             Path::new("/tmp/rt/.tmp/e2e/binaries-other/rustling-tulipd-hash"),
             root,
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn daemon_exe_match_rejects_stale_cached_daemon() {
+        assert!(!daemon_exe_matches_expected(
+            Path::new("/tmp/rt/binaries/rustling-tulipd-aaaaaaaaaaaaaaaa"),
+            Path::new("/tmp/rt/binaries/rustling-tulipd-bbbbbbbbbbbbbbbb"),
         ));
     }
 }
