@@ -5,10 +5,12 @@
  * noisy OSC title. User renames remain the explicit primary override.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { Buffer } from "node:buffer";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import { browser } from "@wdio/globals";
 import { expect } from "chai";
@@ -22,9 +24,14 @@ import type {
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
+const SESSION_OUTPUT_TIMEOUT = 15_000;
 const DEFAULT_BRANCH = "main";
-const NOISY_TERMINAL_TITLE = "C:\\Windows\\system32\\cmd.exe";
+const TERMINAL_TITLE = "Codex style title from slash command";
 const USER_LABEL = "My shell label";
+const WORKING_DOT_COLOR = "rgb(232, 165, 49)";
+const repoRoot = resolve(
+  fileURLToPath(new URL("../../../../..", import.meta.url)),
+);
 
 describe("session identity labels", function () {
   this.timeout(180_000);
@@ -84,8 +91,10 @@ describe("session identity labels", function () {
       (r: RepoEntry) =>
         r.path === fixtureRepo || r.path === fixtureRepo!.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
-    registeredRepoId = fixture!.id;
+    if (!fixture) {
+      throw new Error("fixture repo was not registered");
+    }
+    registeredRepoId = fixture.id;
     expectedDefaultLabel = `${repoName}: ${DEFAULT_BRANCH}`;
 
     const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 15_000 });
@@ -115,11 +124,44 @@ describe("session identity labels", function () {
 
     const sidebarRow = await sessionSidebarRow(spawnedSessionId);
     await sidebarRow.click();
-    const pane = await sessionPane(spawnedSessionId);
+    await sessionPane(spawnedSessionId);
     await assertRenderedLabel(spawnedSessionId, expectedDefaultLabel);
 
+    const banner = await waitForBufferText(
+      spawnedSessionId,
+      "[fake-claude] ready",
+      SESSION_OUTPUT_TIMEOUT,
+    );
+    expect(banner, "fake-claude banner in xterm buffer").to.include(
+      "[fake-claude] ready",
+    );
+
+    const titlePromise = ws.waitFor(
+      (m): m is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
+        isSessionUpdated(m) &&
+        m.session.id === spawnedSessionId &&
+        m.session.terminal_title === TERMINAL_TITLE,
+      { timeoutMs: 10_000 },
+    );
+    sendInput(ws, spawnedSessionId, `/rename ${TERMINAL_TITLE}\r`);
+    const titleUpdate = await titlePromise;
+    expect(titleUpdate.session.label).to.equal(expectedDefaultLabel);
+
+    await waitForBufferText(
+      spawnedSessionId,
+      `[fake-claude] renamed: ${TERMINAL_TITLE}`,
+      SESSION_OUTPUT_TIMEOUT,
+    );
     await assertRenderedLabel(spawnedSessionId, expectedDefaultLabel);
-    await assertLabelTooltipIncludes(spawnedSessionId, NOISY_TERMINAL_TITLE);
+    await assertLabelTooltipsInclude(spawnedSessionId, TERMINAL_TITLE);
+
+    sendInput(ws, spawnedSessionId, "/stream\r");
+    await assertWorkingDotIsOrangeAndPulsing(spawnedSessionId);
+    await waitForBufferText(
+      spawnedSessionId,
+      "[fake-claude] stream 20",
+      SESSION_OUTPUT_TIMEOUT,
+    );
 
     const renamePromise = ws.waitFor(
       (m): m is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
@@ -155,6 +197,14 @@ function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
+function sendInput(ws: DaemonWsClient, sessionId: string, input: string): void {
+  ws.send({
+    type: "send_input",
+    session_id: sessionId,
+    data_b64: Buffer.from(input, "utf8").toString("base64"),
+  });
+}
+
 async function sessionSidebarRow(sessionId: string) {
   const row = await browser.$(
     `[data-testid=sidebar-session][data-session-id="${sessionId}"]`,
@@ -188,19 +238,130 @@ async function assertRenderedLabel(
   );
 }
 
-async function assertLabelTooltipIncludes(
+async function assertWorkingDotIsOrangeAndPulsing(
+  sessionId: string,
+): Promise<void> {
+  await browser.waitUntil(
+    async () => {
+      const row = await sessionSidebarRow(sessionId);
+      const pane = await sessionPane(sessionId);
+      return (
+        (await row.getAttribute("data-session-status")) === "working" &&
+        (await pane.getAttribute("data-session-status")) === "working"
+      );
+    },
+    {
+      timeout: 10_000,
+      timeoutMsg: "session never entered working state",
+    },
+  );
+
+  await browser.waitUntil(
+    async () => {
+      const styles = await statusDotStyles(sessionId);
+      return styles.every(
+        (style) =>
+          style !== null &&
+          style.backgroundColor === WORKING_DOT_COLOR &&
+          style.animationName === "status-pulse" &&
+          style.animationDuration !== "0s",
+      );
+    },
+    {
+      timeout: 5_000,
+      timeoutMsg: "working status dots were not orange and pulsing",
+    },
+  );
+
+  await mkdir(join(repoRoot, ".tmp", "e2e"), { recursive: true });
+  await browser.saveScreenshot(
+    join(repoRoot, ".tmp", "e2e", "session-working-orange-dot.png"),
+  );
+}
+
+async function statusDotStyles(sessionId: string): Promise<
+  Array<{
+    backgroundColor: string;
+    animationName: string;
+    animationDuration: string;
+  } | null>
+> {
+  return (await browser.execute(
+    `
+    const sessionId = ${JSON.stringify(sessionId)};
+    const selectors = [
+      \`[data-testid=sidebar-session][data-session-id="\${sessionId}"] .status-dot\`,
+      \`[data-testid=session-pane][data-session-id="\${sessionId}"] .session-title .status-dot\`,
+    ];
+    return selectors.map((selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      return {
+        backgroundColor: style.backgroundColor,
+        animationName: style.animationName,
+        animationDuration: style.animationDuration,
+      };
+    });
+    `,
+  )) as unknown as Array<{
+    backgroundColor: string;
+    animationName: string;
+    animationDuration: string;
+  } | null>;
+}
+
+async function assertLabelTooltipsInclude(
   sessionId: string,
   expectedText: string,
 ): Promise<void> {
   await browser.waitUntil(
     async () => {
       const pane = await sessionPane(sessionId);
-      const tooltip = await (await pane.$(".session-title h2")).getAttribute("title");
-      return (tooltip ?? "").includes(expectedText);
+      const paneTooltip = await (await pane.$(".session-title h2")).getAttribute("title");
+      const sidebarTooltip = await (await (await sessionSidebarRow(sessionId)).$(".tree-label")).getAttribute(
+        "title",
+      );
+      return (
+        (paneTooltip ?? "").includes(expectedText) &&
+        (sidebarTooltip ?? "").includes(expectedText)
+      );
     },
     {
       timeout: 10_000,
-      timeoutMsg: `session label tooltip never included "${expectedText}"`,
+      timeoutMsg: `session label tooltips never included "${expectedText}"`,
     },
+  );
+}
+
+async function waitForBufferText(
+  sessionId: string,
+  needle: string,
+  timeoutMs: number,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeen = "";
+  while (Date.now() < deadline) {
+    const text = (await browser.execute(
+      `
+      const w = window;
+      const term = w.__rt_terms && w.__rt_terms.get(${JSON.stringify(sessionId)});
+      if (!term) return "";
+      const buf = term.buffer.active;
+      const lines = [];
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+      }
+      return lines.join("\\n");
+      `,
+    )) as unknown as string;
+    lastSeen = text;
+    if (text.includes(needle)) return text;
+    await delay(250);
+  }
+  throw new Error(
+    `xterm buffer for ${sessionId} never contained "${needle}" within ${timeoutMs}ms.\n` +
+      `Last seen (truncated to 500 chars):\n${lastSeen.slice(0, 500)}`,
   );
 }

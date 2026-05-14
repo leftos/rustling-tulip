@@ -16,6 +16,7 @@ type SessionUpdatedMessage = DaemonMessage & {
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
+const SESSION_OUTPUT_TIMEOUT = 20_000;
 const repoRoot = resolve(
   fileURLToPath(new URL("../../../../..", import.meta.url)),
 );
@@ -110,6 +111,11 @@ describe("standalone shell launch", function () {
       `[data-testid="session-pane"][data-session-id="${msg.session.id}"]`,
     );
     await pane.waitForExist({ timeout: 10_000 });
+    await waitForBufferText(
+      msg.session.id,
+      basename(shellDir),
+      SESSION_OUTPUT_TIMEOUT,
+    );
 
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "standalone-shell-after.png"),
@@ -154,6 +160,11 @@ describe("standalone shell launch", function () {
       `[data-testid="session-pane"][data-session-id="${msg.session.id}"]`,
     );
     await pane.waitForExist({ timeout: 10_000 });
+    await waitForBufferText(
+      msg.session.id,
+      basename(modalShellDir),
+      SESSION_OUTPUT_TIMEOUT,
+    );
   });
 });
 
@@ -212,6 +223,38 @@ async function setStandaloneShellDefault(path: string): Promise<void> {
       new scope.CustomEvent("rt:settings-changed", { detail: next }),
     );
   }, path);
+}
+
+async function waitForBufferText(
+  sessionId: string,
+  needle: string,
+  timeoutMs: number,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeen = "";
+  while (Date.now() < deadline) {
+    const text = (await browser.execute(
+      `
+      const w = window;
+      const term = w.__rt_terms && w.__rt_terms.get(${JSON.stringify(sessionId)});
+      if (!term) return "";
+      const buf = term.buffer.active;
+      const lines = [];
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+      }
+      return lines.join("\\n");
+      `,
+    )) as unknown as string;
+    lastSeen = text;
+    if (text.includes(needle)) return text;
+    await delay(250);
+  }
+  throw new Error(
+    `xterm buffer for ${sessionId} never contained "${needle}" within ${timeoutMs}ms.\n` +
+      `Last seen (truncated to 500 chars):\n${lastSeen.slice(0, 500)}`,
+  );
 }
 
 function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {

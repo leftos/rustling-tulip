@@ -9,6 +9,8 @@
  * Behavior:
  *   - Prints a stable banner the smoke test asserts on.
  *   - Echoes lines from stdin back so input from the harness is observable.
+ *   - Emits an OSC window-title update for "/rename <title>".
+ *   - Emits deterministic streaming output for "/stream".
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
@@ -43,10 +45,10 @@ let buffer = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
-  let nl;
-  while ((nl = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, nl).replace(/\r$/, "");
-    buffer = buffer.slice(nl + 1);
+  let lineBreak;
+  while ((lineBreak = findLineBreak(buffer)) !== -1) {
+    const line = buffer.slice(0, lineBreak);
+    buffer = buffer.slice(lineBreak + lineBreakLength(buffer, lineBreak));
     handleLine(line);
   }
 });
@@ -65,8 +67,87 @@ function handleLine(line) {
     process.stdout.write("[fake-claude] bye\r\n");
     process.exit(0);
   }
+  if (line.startsWith("/rename ")) {
+    const title = sanitizeOscTitle(line.slice("/rename ".length).trim());
+    if (title.length > 0) {
+      process.stdout.write(`\x1b]0;${title}\x07`);
+      process.stdout.write(`[fake-claude] renamed: ${title}\r\n`);
+    } else {
+      process.stdout.write("[fake-claude] rename ignored: empty title\r\n");
+    }
+    process.stdout.write(PROMPT);
+    return;
+  }
+  if (line === "/stream") {
+    emitStreamOutput();
+    return;
+  }
   process.stdout.write(`[fake-claude] echo: ${line}\r\n`);
   process.stdout.write(PROMPT);
+}
+
+function emitStreamOutput() {
+  let chunk = 0;
+  const interval = setInterval(() => {
+    chunk += 1;
+    process.stdout.write(
+      `[fake-claude] stream ${chunk.toString().padStart(2, "0")} ${"x".repeat(360)}\r\n`,
+    );
+    if (chunk >= 20) {
+      clearInterval(interval);
+      process.stdout.write(PROMPT);
+    }
+  }, 80);
+}
+
+/**
+ * @param {string} value
+ */
+function sanitizeOscTitle(value) {
+  let sanitized = "";
+  for (const char of value) {
+    const codePoint = char.codePointAt(0);
+    if (codePoint !== undefined && !isUnsafeTitleCodePoint(codePoint)) {
+      sanitized += char;
+    }
+  }
+  return sanitized.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+/**
+ * @param {number} codePoint
+ */
+function isUnsafeTitleCodePoint(codePoint) {
+  return (
+    codePoint < 0x20 ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    codePoint === 0x061c ||
+    codePoint === 0x200e ||
+    codePoint === 0x200f ||
+    (codePoint >= 0x202a && codePoint <= 0x202e) ||
+    (codePoint >= 0x2066 && codePoint <= 0x2069)
+  );
+}
+
+/**
+ * @param {string} value
+ */
+function findLineBreak(value) {
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (char === "\r" || char === "\n") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ */
+function lineBreakLength(value, index) {
+  return value[index] === "\r" && value[index + 1] === "\n" ? 2 : 1;
 }
 
 /**

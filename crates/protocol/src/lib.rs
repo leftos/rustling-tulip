@@ -67,7 +67,7 @@ pub struct DaemonHandshake {
 // Domain types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppearanceOverrides {
     /// Sidebar row + pane accent color. `None` inherits from the next
     /// appearance level.
@@ -88,19 +88,6 @@ pub struct AppearanceOverrides {
     /// Terminal normal text weight override.
     #[serde(default)]
     pub terminal_font_bold: Option<bool>,
-}
-
-impl Default for AppearanceOverrides {
-    fn default() -> Self {
-        Self {
-            accent_color: None,
-            terminal_background_color: None,
-            terminal_frame_color: None,
-            terminal_font_family: None,
-            terminal_font_size: None,
-            terminal_font_bold: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

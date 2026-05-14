@@ -981,14 +981,14 @@ button:focus-visible {
   transition: box-shadow var(--dur-base) var(--ease-out);
 }
 .status-working {
-  background: var(--accent);
-  /* Soft pulsing halo — signals "active right now" without animating
-   * the dot's own size (which would shift adjacent labels). 1.4s loop
-   * matches the cadence of Claude's typical token-stream chunks. */
+  background: var(--warn);
+  --status-pulse-color: rgba(232, 165, 49, 0.36);
+  /* Soft pulsing halo: signals active agent output without animating the
+   * dot's own size, which would shift adjacent labels. */
   animation: status-pulse 1.6s var(--ease-out) infinite;
 }
 @keyframes status-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--status-pulse-color, var(--accent-glow)); }
   50%      { box-shadow: 0 0 0 4px transparent; }
 }
 /* Spawning is in-flight bootstrap, distinct from working. Hollow ring so

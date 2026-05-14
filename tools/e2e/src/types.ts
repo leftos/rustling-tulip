@@ -136,6 +136,7 @@ export type ClientMessage =
   | { type: "spawn_session"; [k: string]: unknown }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
+  | { type: "send_input"; session_id: string; data_b64: string }
   | { type: "rename_session"; session_id: string; label: string | null }
   | {
       type: "set_repo_appearance";

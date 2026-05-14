@@ -33,6 +33,8 @@ use tracing::{debug, info, warn};
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const OUTPUT_SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTPUT_SUBSCRIBER_WAIT_INTERVAL: Duration = Duration::from_millis(5);
 const TRACER_PIPE_PREFIX_ENV: &str = "RUSTLING_TULIP_TRACER_PIPE_PREFIX";
 
 /// The result of spawning (or reattaching to) a tracer for a single session.
@@ -392,26 +394,29 @@ async fn handshake_and_wire(
     let output_for_reader = output_tx.clone();
     let session_id_for_reader = session_id.clone();
     tokio::spawn(async move {
+        let started = Instant::now();
         let mut waits = 0_u32;
         while output_for_reader.receiver_count() < expected_output_subscribers {
-            tokio::task::yield_now().await;
-            waits += 1;
-            if waits >= 1_000 {
+            if started.elapsed() >= OUTPUT_SUBSCRIBER_WAIT_TIMEOUT {
                 // Avoid deadlocking the session if a caller regresses and
                 // forgets to install one of the expected watchers.
                 tracing::warn!(
                     session_id = %session_id_for_reader,
                     expected_output_subscribers,
                     subscriber_count = output_for_reader.receiver_count(),
-                    "tracer_client: missing expected subscribers after 1000 yields; starting reader anyway",
+                    elapsed = ?started.elapsed(),
+                    "tracer_client: missing expected subscribers before timeout; starting reader anyway",
                 );
                 break;
             }
+            tokio::time::sleep(OUTPUT_SUBSCRIBER_WAIT_INTERVAL).await;
+            waits += 1;
         }
         tracing::debug!(
             session_id = %session_id_for_reader,
             waits,
             subscriber_count = output_for_reader.receiver_count(),
+            elapsed = ?started.elapsed(),
             "tracer_client: reader starting"
         );
         let exit_code = read_loop(reader, output_for_reader, &session_id_for_reader).await;
