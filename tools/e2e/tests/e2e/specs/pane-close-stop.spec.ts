@@ -142,12 +142,14 @@ describe("pane close stop cleanup", function () {
       "pane-close-dialog-close-session-delete-worktree",
     );
 
+    const paneId = await getGridPaneIdForSession(spawn.id);
     const removed = waitForSessionRemoved(ws, spawn.id);
     await clickDialogButton(dialog, "pane-close-dialog-close-session-keep-worktree");
     await removed;
     spawnedSessionIds.delete(spawn.id);
 
     await expectSessionRemovedFromSidebar(spawn.id);
+    await expectGridPaneRemoved(paneId);
   });
 
   it("offers separate session and worktree choices for worktree sessions", async function () {
@@ -185,12 +187,14 @@ describe("pane close stop cleanup", function () {
       "Close pane, don't keep session, delete worktree",
     );
 
+    const paneId = await getGridPaneIdForSession(spawn.id);
     const removed = waitForSessionRemoved(ws, spawn.id);
     await clickDialogButton(dialog, "pane-close-dialog-close-session-keep-worktree");
     await removed;
     spawnedSessionIds.delete(spawn.id);
 
     await expectSessionRemovedFromSidebar(spawn.id);
+    await expectGridPaneRemoved(paneId);
   });
 });
 
@@ -320,6 +324,35 @@ async function expectSessionRemovedFromSidebar(sessionId: string): Promise<void>
     {
       timeout: 5_000,
       timeoutMsg: "closed session remained in the sidebar",
+    },
+  );
+}
+
+async function getGridPaneIdForSession(sessionId: string): Promise<string> {
+  const result: unknown = await browser.execute(`
+    return (() => {
+      const sessionId = ${JSON.stringify(sessionId)};
+      const sessionPanes = Array.from(document.querySelectorAll('[data-testid="session-pane"]'));
+      const sessionPane = sessionPanes.find((candidate) =>
+        candidate.getAttribute('data-session-id') === sessionId
+      );
+      const gridPane = sessionPane?.closest('[data-pane-id]');
+      return gridPane?.getAttribute('data-pane-id') ?? null;
+    })()
+  `);
+  const paneId = typeof result === "string" ? result : null;
+  if (!paneId) {
+    throw new Error(`grid pane not found for session: ${sessionId}`);
+  }
+  return paneId;
+}
+
+async function expectGridPaneRemoved(paneId: string): Promise<void> {
+  await browser.waitUntil(
+    async () => !(await browser.$(`[data-pane-id="${paneId}"]`).isExisting()),
+    {
+      timeout: 5_000,
+      timeoutMsg: "closed pane remained in the grid",
     },
   );
 }

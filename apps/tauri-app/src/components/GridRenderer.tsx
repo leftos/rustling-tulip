@@ -350,6 +350,11 @@ function PaneChrome(props: PaneChromeProps) {
         repo_id: m.repo_id,
         remove_worktree: removeWorktree,
       }));
+      client.send({
+        type: "close_pane",
+        tab_id: tabId,
+        pane_id: node.pane_id,
+      });
       if (session.status !== "stopped" && session.status !== "error") {
         client.send({
           type: "stop_session",
@@ -366,7 +371,7 @@ function PaneChrome(props: PaneChromeProps) {
         cleanup,
       });
     },
-    [client, session],
+    [client, node.pane_id, session, tabId],
   );
 
   // Pane × button: empty pane closes immediately (nothing to protect);
