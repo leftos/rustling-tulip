@@ -56,7 +56,7 @@ pub struct LaunchArgs {
 
 pub async fn launch(hub: Hub, args: LaunchArgs) {
     let mut args = args;
-    args.job_id = normalize_job_id(args.job_id);
+    args.job_id = normalize_job_id(&args.job_id);
     let job_id = args.job_id.clone();
     let preset_id = args.preset_id.clone();
     let target = args.target.clone();
@@ -113,7 +113,7 @@ pub async fn launch(hub: Hub, args: LaunchArgs) {
     }
 }
 
-fn normalize_job_id(job_id: String) -> String {
+fn normalize_job_id(job_id: &str) -> String {
     let trimmed = job_id.trim();
     if trimmed.is_empty() {
         format!("preset-{}", Uuid::new_v4())
@@ -1124,10 +1124,13 @@ async fn orchestrate(
     orchestrate_with_spawner(hub, plan, total, cancel_rx, &mut spawner).await
 }
 
+#[cfg(test)]
+type FakePresetSpawner = Box<dyn FnMut(usize, &[String]) -> Result<String, LaunchFailure> + Send>;
+
 enum PresetSpawner {
     Real,
     #[cfg(test)]
-    Fake(Box<dyn FnMut(usize, &[String]) -> Result<String, LaunchFailure> + Send>),
+    Fake(FakePresetSpawner),
 }
 
 async fn orchestrate_with_spawner(

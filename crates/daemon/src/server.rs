@@ -2051,7 +2051,7 @@ pub(crate) async fn spawn_session(
             base_branch,
             use_worktree,
         } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?,
-        SpawnTarget::Standalone { cwd } => spawn_standalone_shell(cwd)?,
+        SpawnTarget::Standalone { cwd } => spawn_standalone_shell(cwd.as_deref())?,
     };
     info!(
         elapsed_ms = u64::try_from(t_resolve.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -2750,19 +2750,21 @@ fn spawn_headless_session(
     Ok(snap)
 }
 
+type SpawnResolution = (
+    SessionKind,
+    Vec<SessionMember>,
+    PathBuf,
+    String,
+    Option<String>,
+);
+
 async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
     branch_name: &str,
     base_branch: Option<String>,
     use_worktree: bool,
-) -> anyhow::Result<(
-    SessionKind,
-    Vec<SessionMember>,
-    PathBuf,
-    String,
-    Option<String>,
-)> {
+) -> anyhow::Result<SpawnResolution> {
     let repo = hub
         .state
         .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
@@ -2813,22 +2815,14 @@ async fn spawn_single(
     Ok((SessionKind::Single, vec![member], working_path, label, None))
 }
 
-fn spawn_standalone_shell(
-    cwd: Option<String>,
-) -> anyhow::Result<(
-    SessionKind,
-    Vec<SessionMember>,
-    PathBuf,
-    String,
-    Option<String>,
-)> {
+fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> {
     let cwd = resolve_standalone_cwd(cwd)?;
     let label = format!("Shell: {}", path_leaf_label(&cwd));
     Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
 }
 
-fn resolve_standalone_cwd(cwd: Option<String>) -> anyhow::Result<PathBuf> {
-    let path = match cwd.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+fn resolve_standalone_cwd(cwd: Option<&str>) -> anyhow::Result<PathBuf> {
+    let path = match cwd.map(str::trim).filter(|s| !s.is_empty()) {
         Some(path) => PathBuf::from(path),
         None => default_standalone_cwd()?,
     };
@@ -2855,8 +2849,7 @@ fn path_leaf_label(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| path.display().to_string())
+        .map_or_else(|| path.display().to_string(), str::to_string)
 }
 
 async fn spawn_workspace(
@@ -2865,13 +2858,7 @@ async fn spawn_workspace(
     branch_name: &str,
     base_branch: Option<String>,
     use_worktree: bool,
-) -> anyhow::Result<(
-    SessionKind,
-    Vec<SessionMember>,
-    PathBuf,
-    String,
-    Option<String>,
-)> {
+) -> anyhow::Result<SpawnResolution> {
     info!(
         workspace_id,
         branch_name, use_worktree, "spawn_workspace: begin"
@@ -3039,10 +3026,9 @@ async fn park_session(hub: &Hub, session_id: &str) {
 /// Remove a stopped or inactive session from the registry. Optionally removes
 /// per-member worktrees from disk. Does not kill a running session.
 async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::CleanupAction]) {
-    let (members, has_per_session_worktree) = hub
-        .sessions
-        .get(session_id)
-        .map(|rec| {
+    let (members, has_per_session_worktree) = hub.sessions.get(session_id).map_or_else(
+        || (Vec::new(), false),
+        |rec| {
             let guard = crate::sync::lock(&rec);
             let spawned_with_worktree =
                 guard
@@ -3057,8 +3043,8 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
                 guard.members.clone(),
                 spawned_with_worktree || !guard.worktree_paths.is_empty(),
             )
-        })
-        .unwrap_or_else(|| (Vec::new(), false));
+        },
+    );
 
     for action in cleanup {
         if !action.remove_worktree || !has_per_session_worktree {

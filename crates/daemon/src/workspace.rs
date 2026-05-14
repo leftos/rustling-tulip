@@ -67,11 +67,7 @@ pub async fn resolve_workspace(
     };
 
     let mut resolved = Vec::with_capacity(repos.len());
-    for ((repo, path), worktree_path) in repos
-        .into_iter()
-        .zip(member_paths.into_iter())
-        .zip(worktrees.into_iter())
-    {
+    for ((repo, path), worktree_path) in repos.into_iter().zip(member_paths).zip(worktrees) {
         info!(repo_id = %repo.id, repo_path = %repo.path, "resolve_workspace: listing branches for member");
         let exists = git::list_branches(&path)
             .await
