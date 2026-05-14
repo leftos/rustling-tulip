@@ -1495,12 +1495,15 @@ export default function App() {
     });
   }, []);
 
-  /// DaemonFooter — bring the daemon back. Two paths depending on the
+  /// DaemonFooter — bring the daemon back. Paths depend on the
   /// current state:
   ///   - Currently open / connecting / closed (transient): send a
   ///     graceful `shutdown` over the WS so the daemon persists state
   ///     before exiting; the existing auto-reconnect cycle then spawns a
   ///     fresh one.
+  ///   - Auth failed: the WS protocol did not negotiate, so force the
+  ///     supervisor path to re-run. It can use the daemon's HTTP shutdown
+  ///     endpoint before spawning a compatible daemon.
   ///   - Currently stopped (user-Stopped): the auto-reconnect cycle has
   ///     been suppressed and there's no live WS to send to. Clear the
   ///     stop flag and bump `connectionVersion` to force the connection
@@ -1509,6 +1512,24 @@ export default function App() {
     logToFile("info", "DaemonFooter: Restart daemon clicked");
     const client = clientRef.current;
     const wasStopRequested = stopRequestedRef.current;
+    const statusKind = latestStateRef.current?.status.kind;
+    if (statusKind === "auth_failed") {
+      logToFile(
+        "info",
+        "DaemonFooter: auth failed restart; forcing supervisor reconnect",
+      );
+      client?.close();
+      clientRef.current = null;
+      setState((s) => ({
+        ...s,
+        client: null,
+        daemonStopRequested: false,
+        handshake: null,
+        status: { kind: "connecting" },
+      }));
+      setConnectionVersion((v) => v + 1);
+      return;
+    }
     if (wasStopRequested || !client) {
       // No live WS — kick the connection effect.
       setState((s) => ({ ...s, daemonStopRequested: false }));

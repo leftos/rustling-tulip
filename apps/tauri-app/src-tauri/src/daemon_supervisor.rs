@@ -16,7 +16,14 @@ use tracing::{debug, info, warn};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+enum ExistingDaemon {
+    Compatible(DaemonHandshake),
+    Incompatible(DaemonHandshake),
+    Missing,
+}
 
 /// Global lock around the "check + spawn" sequence. React 18 strict-mode
 /// dev double-mounts the App component, which fires two
@@ -32,26 +39,40 @@ fn spawn_lock() -> &'static Mutex<()> {
 }
 
 pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, String> {
-    // Fast path: handshake already present and the daemon is healthy.
-    // No reason to serialize concurrent readers in that case.
-    if let Some(handshake) = load_existing_if_alive().await {
-        info!(port = handshake.port, "reusing running daemon");
-        return Ok(handshake);
-    }
-
-    // Slow path: a spawn might be needed. Take the global lock so
-    // concurrent callers serialize. Once we hold it, re-check the
-    // handshake -- the caller ahead of us may have spawned the daemon
-    // already.
-    let _guard = spawn_lock().lock().await;
-    if let Some(handshake) = load_existing_if_alive().await {
+    // Fast path: handshake already present, daemon is healthy, and this app
+    // can speak its protocol. No reason to serialize concurrent readers.
+    if let ExistingDaemon::Compatible(handshake) = classify_existing_daemon().await {
         info!(
             port = handshake.port,
-            "reusing daemon spawned by concurrent caller"
+            protocol_version = handshake.protocol_version,
+            "reusing running daemon"
         );
         return Ok(handshake);
     }
 
+    // Slow path: a spawn or graceful replacement might be needed. Take the
+    // global lock so concurrent callers serialize. Once we hold it, re-check
+    // the handshake -- the caller ahead of us may have spawned the daemon
+    // already.
+    let _guard = spawn_lock().lock().await;
+    match classify_existing_daemon().await {
+        ExistingDaemon::Compatible(handshake) => {
+            info!(
+                port = handshake.port,
+                protocol_version = handshake.protocol_version,
+                "reusing daemon spawned by concurrent caller"
+            );
+            Ok(handshake)
+        }
+        ExistingDaemon::Incompatible(handshake) => {
+            retire_daemon(&handshake, "protocol mismatch").await?;
+            spawn_current_daemon().await
+        }
+        ExistingDaemon::Missing => spawn_current_daemon().await,
+    }
+}
+
+async fn spawn_current_daemon() -> Result<DaemonHandshake, String> {
     let template = locate_daemon_binary()?;
     let bin = cache_daemon_binary(&template).map_err(|e| e.to_string())?;
     let cache_dir = bin
@@ -80,6 +101,123 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
     spawn_daemon(&bin, &template_dir)?;
 
     wait_for_handshake().await
+}
+
+async fn classify_existing_daemon() -> ExistingDaemon {
+    if let Some(handshake) = load_existing_if_alive().await {
+        if daemon_protocol_is_supported(handshake.protocol_version) {
+            ExistingDaemon::Compatible(handshake)
+        } else {
+            warn!(
+                daemon_protocol = handshake.protocol_version,
+                supported = ?protocol::SUPPORTED_PROTOCOL_VERSIONS,
+                port = handshake.port,
+                pid = handshake.pid,
+                "running daemon protocol is incompatible with this app"
+            );
+            ExistingDaemon::Incompatible(handshake)
+        }
+    } else {
+        ExistingDaemon::Missing
+    }
+}
+
+fn daemon_protocol_is_supported(protocol_version: u32) -> bool {
+    protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version)
+}
+
+async fn retire_daemon(handshake: &DaemonHandshake, reason: &str) -> Result<(), String> {
+    info!(
+        pid = handshake.pid,
+        port = handshake.port,
+        protocol_version = handshake.protocol_version,
+        supported = ?protocol::SUPPORTED_PROTOCOL_VERSIONS,
+        reason,
+        "retiring running daemon before spawning current version"
+    );
+
+    match request_graceful_shutdown(handshake).await {
+        Ok(()) => {
+            if wait_for_daemon_to_stop(handshake, SHUTDOWN_WAIT_TIMEOUT).await {
+                remove_matching_handshake_file(handshake).await;
+                return Ok(());
+            }
+            warn!(
+                pid = handshake.pid,
+                port = handshake.port,
+                "daemon did not exit after graceful shutdown request"
+            );
+        }
+        Err(err) => {
+            warn!(
+                ?err,
+                pid = handshake.pid,
+                port = handshake.port,
+                "graceful daemon shutdown request failed"
+            );
+        }
+    }
+
+    if !probe_health(handshake.port).await {
+        remove_matching_handshake_file(handshake).await;
+        return Ok(());
+    }
+
+    warn!(
+        pid = handshake.pid,
+        port = handshake.port,
+        "falling back to force-stopping daemon"
+    );
+    crate::kill_pid(handshake.pid).await?;
+    let _ = wait_for_daemon_to_stop(handshake, SHUTDOWN_WAIT_TIMEOUT).await;
+    remove_matching_handshake_file(handshake).await;
+    Ok(())
+}
+
+async fn request_graceful_shutdown(handshake: &DaemonHandshake) -> anyhow::Result<()> {
+    let url = shutdown_url(handshake.port);
+    let client = reqwest::Client::builder()
+        .timeout(HEALTH_TIMEOUT)
+        .build()
+        .context("building shutdown client")?;
+    let response = client
+        .post(url)
+        .bearer_auth(&handshake.auth_token)
+        .send()
+        .await
+        .context("sending shutdown request")?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(anyhow!("shutdown endpoint returned {status}"));
+    }
+    Ok(())
+}
+
+fn shutdown_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/shutdown")
+}
+
+async fn wait_for_daemon_to_stop(handshake: &DaemonHandshake, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if !probe_health(handshake.port).await {
+            return true;
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+    false
+}
+
+async fn remove_matching_handshake_file(expected: &DaemonHandshake) {
+    let Ok(path) = handshake_file() else {
+        return;
+    };
+    let Some(current) = try_load_handshake(&path).await else {
+        return;
+    };
+    if current.pid == expected.pid && current.port == expected.port {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 /// Find every `rustling-tulipd*` process launched from this instance's binary
@@ -350,8 +488,23 @@ async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_daemon_image, path_is_under};
+    use super::{daemon_protocol_is_supported, is_daemon_image, path_is_under, shutdown_url};
     use std::path::Path;
+
+    #[test]
+    fn current_protocol_is_supported() {
+        assert!(daemon_protocol_is_supported(protocol::PROTOCOL_VERSION));
+    }
+
+    #[test]
+    fn zero_protocol_is_not_supported() {
+        assert!(!daemon_protocol_is_supported(0));
+    }
+
+    #[test]
+    fn shutdown_url_targets_loopback_port() {
+        assert_eq!(shutdown_url(51418), "http://127.0.0.1:51418/shutdown");
+    }
 
     #[test]
     fn matches_template_names() {
