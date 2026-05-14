@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, warn};
 
+const MAX_PTY_INPUT_CHUNK_BYTES: usize = 2048;
+
 #[derive(Debug, Clone)]
 pub struct PtySpawnSpec {
     /// Session id used to derive the tracer pipe name and the orphan sidecar
@@ -69,7 +71,13 @@ impl PtyHandle {
     }
 
     pub fn write_input(&self, data: Vec<u8>) {
-        let _ = self.input_tx.send(data);
+        if data.len() <= MAX_PTY_INPUT_CHUNK_BYTES {
+            let _ = self.input_tx.send(data);
+            return;
+        }
+        for chunk in data.chunks(MAX_PTY_INPUT_CHUNK_BYTES) {
+            let _ = self.input_tx.send(chunk.to_vec());
+        }
     }
 
     #[must_use]
@@ -102,5 +110,77 @@ impl PtyHandle {
                 warn!(?err, "failed to kill PTY child");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoopKiller;
+
+    impl ChildKiller for NoopKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(NoopKiller)
+        }
+    }
+
+    #[test]
+    fn write_input_splits_large_payloads_into_bounded_chunks() {
+        let (output, _) = broadcast::channel(1);
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        let (_exit_tx, exit_rx) = oneshot::channel();
+        let handle = PtyHandle::from_parts(PtyHandleParts {
+            output,
+            input_tx,
+            resize_tx,
+            exit_rx,
+            killer: Box::new(NoopKiller),
+            pid: None,
+        });
+        let input = vec![b'x'; (MAX_PTY_INPUT_CHUNK_BYTES * 2) + 17];
+
+        handle.write_input(input.clone());
+
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = input_rx.try_recv() {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), MAX_PTY_INPUT_CHUNK_BYTES);
+        assert_eq!(chunks[1].len(), MAX_PTY_INPUT_CHUNK_BYTES);
+        assert_eq!(chunks[2].len(), 17);
+        assert_eq!(chunks.concat(), input);
+    }
+
+    #[test]
+    fn write_input_keeps_small_payloads_as_single_writes() {
+        let (output, _) = broadcast::channel(1);
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, _) = mpsc::unbounded_channel();
+        let (_exit_tx, exit_rx) = oneshot::channel();
+        let handle = PtyHandle::from_parts(PtyHandleParts {
+            output,
+            input_tx,
+            resize_tx,
+            exit_rx,
+            killer: Box::new(NoopKiller),
+            pid: None,
+        });
+        let input = vec![b'y'; MAX_PTY_INPUT_CHUNK_BYTES];
+
+        handle.write_input(input.clone());
+
+        let mut chunks = Vec::new();
+        while let Ok(chunk) = input_rx.try_recv() {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks, vec![input]);
     }
 }
