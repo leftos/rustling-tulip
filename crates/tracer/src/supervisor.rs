@@ -111,7 +111,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cmd.env(&k, &v);
         forwarded_env_count += 1;
     }
-    info!(forwarded_env_count, "supervisor: forwarded process env to child");
+    info!(
+        forwarded_env_count,
+        "supervisor: forwarded process env to child"
+    );
 
     let mut child = match cmd_spawn(pair.slave.as_ref(), cmd) {
         Ok(c) => c,
@@ -195,7 +198,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
                 Err(err) => {
-                    warn!(?err, total_bytes, read_count, "supervisor: PTY reader error; exiting");
+                    warn!(
+                        ?err,
+                        total_bytes, read_count, "supervisor: PTY reader error; exiting"
+                    );
                     break;
                 }
             }

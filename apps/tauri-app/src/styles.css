@@ -1845,6 +1845,8 @@ button.tree-tab-pill:hover {
 
 .session-pane {
   display: flex; flex-direction: column; flex: 1; min-height: 0;
+  --terminal-bg: var(--bg);
+  --terminal-frame-bg: var(--bg);
 }
 .session-pane.has-session-accent {
   box-shadow: inset 3px 0 0 var(--session-accent);
@@ -2024,21 +2026,6 @@ button.tree-tab-pill:hover {
   font-weight: 600;
   letter-spacing: 0.02em;
 }
-.session-color-picker {
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-  cursor: pointer;
-}
-.session-color-picker::-webkit-color-swatch-wrapper { padding: 2px; }
-.session-color-picker::-webkit-color-swatch {
-  border: 0;
-  border-radius: 3px;
-}
-
 .orphan-banner {
   padding: 8px 14px;
   background: var(--warn-soft);
@@ -2081,7 +2068,7 @@ button.tree-tab-pill:hover {
 
 .terminal-host {
   flex: 1; min-height: 0; padding: 4px 6px 6px;
-  background: var(--bg);
+  background: var(--terminal-frame-bg, var(--bg));
 }
 
 .headless-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -2267,9 +2254,7 @@ button.tree-tab-pill:hover {
 .diff-meta { color: var(--fg-muted); }
 .terminal-container {
   width: 100%; height: 100%;
-  /* Matches the xterm theme.background in Terminal.tsx so the canvas
-   * and the surrounding host share the exact same shade. */
-  background: var(--bg);
+  background: var(--terminal-bg, var(--bg));
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
@@ -2509,6 +2494,51 @@ button.tree-tab-pill:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.appearance-control-stack {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: min(320px, 100%);
+  max-width: 360px;
+}
+.appearance-control-stack select {
+  min-width: 180px;
+  max-width: 240px;
+}
+.appearance-control-stack input[type="color"] {
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+}
+.appearance-control-stack input[type="range"] {
+  width: 150px;
+  accent-color: var(--accent);
+}
+.appearance-swatch-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 170px;
+}
+.appearance-swatch {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.appearance-swatch:hover {
+  border-color: var(--fg-muted);
+  background: inherit;
+}
+.appearance-inherited {
+  align-self: flex-end;
+  margin-top: -4px;
+  text-align: right;
 }
 .settings-toggle {
   display: flex;
@@ -2785,58 +2815,6 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--fg);
   border-color: var(--accent);
 }
-.session-color-list {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 2px;
-}
-.context-menu .session-color-preset {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-left: 3px solid var(--session-accent);
-  background-image: linear-gradient(
-    to right,
-    color-mix(in srgb, var(--session-accent) 16%, transparent),
-    transparent 45%
-  );
-}
-.context-menu .session-color-preset:hover {
-  background:
-    linear-gradient(
-      to right,
-      color-mix(in srgb, var(--session-accent) 24%, transparent),
-      transparent 52%
-    ),
-    var(--bg-elev2);
-}
-.session-color-preview-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: var(--session-accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--session-accent) 45%, var(--border));
-}
-.session-color-preview-label {
-  flex: 1;
-}
-.session-color-custom {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 10px;
-  color: var(--fg);
-}
-.session-color-custom input {
-  width: 28px;
-  height: 22px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-}
-
 /* ------- Tabs and grid renderer ------- */
 
 .tab-bar {

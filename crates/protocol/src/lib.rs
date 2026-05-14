@@ -68,6 +68,42 @@ pub struct DaemonHandshake {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppearanceOverrides {
+    /// Sidebar row + pane accent color. `None` inherits from the next
+    /// appearance level.
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    /// Background color for xterm's canvas.
+    #[serde(default)]
+    pub terminal_background_color: Option<String>,
+    /// Background color for the shell frame/chrome around the terminal.
+    #[serde(default)]
+    pub terminal_frame_color: Option<String>,
+    /// Terminal font family. `None` inherits the next level's family.
+    #[serde(default)]
+    pub terminal_font_family: Option<String>,
+    /// Terminal font size in px.
+    #[serde(default)]
+    pub terminal_font_size: Option<u16>,
+    /// Terminal normal text weight override.
+    #[serde(default)]
+    pub terminal_font_bold: Option<bool>,
+}
+
+impl Default for AppearanceOverrides {
+    fn default() -> Self {
+        Self {
+            accent_color: None,
+            terminal_background_color: None,
+            terminal_frame_color: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
+            terminal_font_bold: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoEntry {
     pub id: String,
     pub name: String,
@@ -80,6 +116,9 @@ pub struct RepoEntry {
     /// carry this field yet.
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
+    /// Appearance defaults inherited by sessions spawned from this repo.
+    #[serde(default)]
+    pub appearance: AppearanceOverrides,
     /// Last agent spawned against this repo. Drives the spawn-dialog default
     /// so repeated launches don't force the user to re-pick. `None` for repos
     /// that have never been launched (or were last touched before this field
@@ -107,6 +146,9 @@ pub struct WorkspaceEntry {
     /// Persistent UI preference; see [`RepoEntry::default_use_worktree`].
     #[serde(default = "default_true")]
     pub default_use_worktree: bool,
+    /// Appearance defaults inherited by sessions spawned from this workspace.
+    #[serde(default)]
+    pub appearance: AppearanceOverrides,
     /// Full spawn config captured from the last successful workspace spawn.
     /// Drives "Launch last again" for the workspace row. `None` for
     /// workspaces that have never been launched.
@@ -257,10 +299,10 @@ pub struct SessionSnapshot {
     /// claude / codex) in that case.
     #[serde(default)]
     pub program_name: Option<String>,
-    /// Optional user-chosen accent color (`#RRGGBB`) applied to the session's
-    /// pane gutter and sidebar row. `None` means use the default theme accent.
+    /// Session-level appearance overrides. `None` fields inherit from the
+    /// owning repo/workspace, then the app default.
     #[serde(default)]
-    pub accent_color: Option<String>,
+    pub appearance: AppearanceOverrides,
     /// True when the session was launched with approvals/permission prompts
     /// bypassed (`--dangerously-skip-permissions` for Claude or `--yolo` for
     /// Codex). Clients use this to keep elevated authority visible after the
@@ -1063,11 +1105,22 @@ pub enum ClientMessage {
         session_id: String,
         label: Option<String>,
     },
-    /// Set or clear the user-chosen session accent color. Colors are accepted
-    /// as `#RRGGBB`; `None` or blank clears the override.
-    SetSessionColor {
+    /// Set appearance defaults inherited by sessions launched from this repo.
+    SetRepoAppearance {
+        repo_id: String,
+        appearance: AppearanceOverrides,
+    },
+    /// Set appearance defaults inherited by sessions launched from this
+    /// workspace.
+    SetWorkspaceAppearance {
+        workspace_id: String,
+        appearance: AppearanceOverrides,
+    },
+    /// Set session-level appearance overrides. `None` fields inherit from the
+    /// owning repo/workspace, then the app default.
+    SetSessionAppearance {
         session_id: String,
-        color: Option<String>,
+        appearance: AppearanceOverrides,
     },
     Attach {
         session_id: String,

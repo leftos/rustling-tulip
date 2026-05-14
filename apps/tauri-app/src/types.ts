@@ -9,12 +9,22 @@ export type Agent = "claude" | "codex";
 
 export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
 
+export interface AppearanceOverrides {
+  accent_color: string | null;
+  terminal_background_color: string | null;
+  terminal_frame_color: string | null;
+  terminal_font_family: string | null;
+  terminal_font_size: number | null;
+  terminal_font_bold: boolean | null;
+}
+
 export interface RepoEntry {
   id: string;
   name: string;
   path: string;
   default_branch: string | null;
   default_use_worktree: boolean;
+  appearance: AppearanceOverrides;
   // Last agent spawned against this repo. Drives the spawn-dialog default.
   // null for repos that have never been launched.
   last_agent: Agent | null;
@@ -30,6 +40,7 @@ export interface WorkspaceEntry {
   member_repo_ids: string[];
   linked_vscode_workspace: string | null;
   default_use_worktree: boolean;
+  appearance: AppearanceOverrides;
   // Full spawn config captured from the last successful workspace spawn.
   // Drives "Launch last again" on the workspace row. null until the user
   // has launched the workspace at least once.
@@ -105,9 +116,9 @@ export interface SessionSnapshot {
   // next to the session title. null when reattached from a daemon
   // sidecar written before this field existed.
   program_name: string | null;
-  // Optional user-chosen accent color (#RRGGBB) for the session pane gutter
-  // and sidebar row. null means the session uses the default theme accent.
-  accent_color: string | null;
+  // Session-level appearance overrides. null fields inherit from the
+  // owning repo/workspace, then the app default.
+  appearance: AppearanceOverrides;
   // True when the session was launched with approvals/permission prompts
   // bypassed. Drives visible trusted-launch badges after spawn.
   elevated_authority: boolean;
@@ -477,7 +488,21 @@ export type ClientMessage =
   | { type: "duplicate_session"; session_id: string }
   | { type: "get_spawn_config"; session_id: string }
   | { type: "rename_session"; session_id: string; label: string | null }
-  | { type: "set_session_color"; session_id: string; color: string | null }
+  | {
+      type: "set_repo_appearance";
+      repo_id: string;
+      appearance: AppearanceOverrides;
+    }
+  | {
+      type: "set_workspace_appearance";
+      workspace_id: string;
+      appearance: AppearanceOverrides;
+    }
+  | {
+      type: "set_session_appearance";
+      session_id: string;
+      appearance: AppearanceOverrides;
+    }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "send_input"; session_id: string; data_b64: string }

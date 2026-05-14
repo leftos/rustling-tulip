@@ -1,8 +1,8 @@
 /**
- * Session color customization coverage.
+ * Session appearance customization coverage.
  *
- * A named preset color should apply to both the session's sidebar tree row and
- * its pane gutter/header.
+ * Session-level appearance should apply live to the sidebar row and pane, and
+ * should survive an app reload through daemon session state.
  */
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -22,13 +22,15 @@ import type {
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
-const PRESET_COLOR = "#2f81f7";
-const CUSTOM_COLOR = "#22c55e";
+const PRESET_COLOR = "#111318";
+const CUSTOM_ACCENT = "#22c55e";
+const CUSTOM_BACKGROUND = "#0b1020";
+const CUSTOM_FRAME = "#1a1024";
 const repoRoot = resolve(
   fileURLToPath(new URL("../../../../..", import.meta.url)),
 );
 
-describe("session color customization", function () {
+describe("session appearance customization", function () {
   this.timeout(180_000);
 
   let ws: DaemonWsClient | null = null;
@@ -44,8 +46,8 @@ describe("session color customization", function () {
 
     const parent = join(repoRoot, ".tmp", "e2e");
     await mkdir(parent, { recursive: true });
-    fixtureRepo = await mkdtemp(join(parent, "rt-e2e-color-"));
-    await writeFile(join(fixtureRepo, "README.md"), "fixture for color e2e\n");
+    fixtureRepo = await mkdtemp(join(parent, "rt-e2e-appearance-"));
+    await writeFile(join(fixtureRepo, "README.md"), "fixture for appearance e2e\n");
     runGit(fixtureRepo, ["init", "-b", "main"]);
     runGit(fixtureRepo, ["config", "user.email", "e2e@rustling-tulip.test"]);
     runGit(fixtureRepo, ["config", "user.name", "rt-e2e"]);
@@ -56,7 +58,7 @@ describe("session color customization", function () {
     ws.send({
       type: "add_repo",
       path: fixtureRepo,
-      name: "rt-e2e-color-fixture",
+      name: "rt-e2e-appearance-fixture",
     });
     const repos = await reposPromise;
     const fixture = repos.repos.find(
@@ -99,13 +101,13 @@ describe("session color customization", function () {
     }
   });
 
-  it("applies a named preset color to the sidebar row and pane", async function () {
+  it("applies a preset accent to the sidebar row and pane", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 
-    const spawnedSessionId = await spawnColorSession(
+    const spawnedSessionId = await spawnAppearanceSession(
       ws,
       registeredRepoId,
-      "color-session",
+      "appearance-session",
     );
     spawnedSessionIds.push(spawnedSessionId);
 
@@ -113,30 +115,14 @@ describe("session color customization", function () {
     await row.click();
     await sessionPane(spawnedSessionId);
 
-    await row.click({ button: "right" });
-    await openContextSubmenu("session-context-color-menu");
-    const preset = await browser.$('[data-testid="session-context-color-0"]');
+    await openSessionAppearance(spawnedSessionId);
+    const preset = await browser.$('[data-testid="appearance-accent_color-graphite"]');
     await preset.waitForDisplayed({ timeout: 5_000 });
-    const presetButtons = await browser.$$(".session-color-preset");
-    expect(presetButtons.length).to.equal(12);
-    expect(await preset.getText()).to.include("Blue");
-    expect(await preset.getText()).to.include(PRESET_COLOR);
-    expect(await preset.getAttribute("data-session-color")).to.equal(PRESET_COLOR);
-    expect(await styleAttribute('[data-testid="session-context-color-0"]')).to.include(
-      `--session-accent: ${PRESET_COLOR}`,
-    );
     await preset.click();
 
-    await browser.waitUntil(
-      async () => {
-        const updatedRow = await sidebarRow(spawnedSessionId!);
-        const updatedPane = await sessionPane(spawnedSessionId!);
-        const rowColor = await updatedRow.getAttribute("data-session-color");
-        const paneColor = await updatedPane.getAttribute("data-session-color");
-        return rowColor === PRESET_COLOR && paneColor === PRESET_COLOR;
-      },
-      { timeout: 10_000, timeoutMsg: "session color never applied to row and pane" },
-    );
+    await waitForAppearance(spawnedSessionId, {
+      accent: PRESET_COLOR,
+    });
 
     expect(await styleAttribute(sidebarSelector(spawnedSessionId))).to.include(
       `--session-accent: ${PRESET_COLOR}`,
@@ -144,15 +130,16 @@ describe("session color customization", function () {
     expect(await styleAttribute(paneSelector(spawnedSessionId))).to.include(
       `--session-accent: ${PRESET_COLOR}`,
     );
+    await closeAppearanceModal();
   });
 
-  it("keeps a custom color after the app reloads session state", async function () {
+  it("keeps custom session appearance after the app reloads state", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 
-    const spawnedSessionId = await spawnColorSession(
+    const spawnedSessionId = await spawnAppearanceSession(
       ws,
       registeredRepoId,
-      "custom-color-session",
+      "custom-appearance-session",
     );
     spawnedSessionIds.push(spawnedSessionId);
 
@@ -160,28 +147,40 @@ describe("session color customization", function () {
     await row.click();
     await sessionPane(spawnedSessionId);
 
-    await row.click({ button: "right" });
-    await openContextSubmenu("session-context-color-menu");
-    const colorApplied = ws.waitFor(
+    await openSessionAppearance(spawnedSessionId);
+    const appearanceApplied = ws.waitFor(
       (msg): msg is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
         isSessionUpdated(msg) &&
         msg.session.id === spawnedSessionId &&
-        msg.session.accent_color === CUSTOM_COLOR,
+        msg.session.appearance?.accent_color === CUSTOM_ACCENT &&
+        msg.session.appearance.terminal_background_color === CUSTOM_BACKGROUND &&
+        msg.session.appearance.terminal_frame_color === CUSTOM_FRAME,
       { timeoutMs: 10_000 },
     );
-    await setCustomColor(CUSTOM_COLOR);
-    await colorApplied;
+    await setAppearanceColor("accent_color", CUSTOM_ACCENT);
+    await setAppearanceColor("terminal_background_color", CUSTOM_BACKGROUND);
+    await setAppearanceColor("terminal_frame_color", CUSTOM_FRAME);
+    await appearanceApplied;
 
-    await waitForColor(spawnedSessionId, CUSTOM_COLOR);
+    await waitForAppearance(spawnedSessionId, {
+      accent: CUSTOM_ACCENT,
+      background: CUSTOM_BACKGROUND,
+      frame: CUSTOM_FRAME,
+    });
+    await closeAppearanceModal();
 
     await browser.refresh();
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
     await waitForAppDaemonConnection();
-    await waitForColor(spawnedSessionId, CUSTOM_COLOR);
+    await waitForAppearance(spawnedSessionId, {
+      accent: CUSTOM_ACCENT,
+      background: CUSTOM_BACKGROUND,
+      frame: CUSTOM_FRAME,
+    });
 
     await browser.saveScreenshot(
-      join(repoRoot, ".tmp", "e2e", "session-color-custom-reload.png"),
+      join(repoRoot, ".tmp", "e2e", "session-appearance-custom-reload.png"),
     );
   });
 });
@@ -202,7 +201,7 @@ function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
-async function spawnColorSession(
+async function spawnAppearanceSession(
   ws: DaemonWsClient,
   repoId: string,
   label: string,
@@ -257,56 +256,81 @@ async function styleAttribute(selector: string): Promise<string> {
   return (await element.getAttribute("style")) ?? "";
 }
 
-async function setCustomColor(color: string): Promise<void> {
-  const input = await browser.$('[data-testid="session-context-color-custom"]');
+async function openSessionAppearance(sessionId: string): Promise<void> {
+  const row = await sidebarRow(sessionId);
+  await row.click({ button: "right" });
+  const item = await browser.$('[data-testid="session-context-appearance"]');
+  await item.waitForDisplayed({ timeout: 5_000 });
+  await item.click();
+  const modal = await browser.$('[data-testid="appearance-modal"]');
+  await modal.waitForDisplayed({ timeout: 5_000 });
+}
+
+async function setAppearanceColor(field: string, color: string): Promise<void> {
+  const selector = `[data-testid="appearance-${field}-custom"]`;
+  const input = await browser.$(selector);
   await input.waitForDisplayed({ timeout: 5_000 });
-  await browser.execute((nextColor: string) => {
-    type ColorInput = {
-      value: string;
-      dispatchEvent: (event: unknown) => boolean;
-    };
-    type BrowserScope = {
-      document: { querySelector: (selector: string) => ColorInput | null };
-      Event: new (type: string, init: { bubbles: boolean }) => unknown;
-    };
-    const scope = globalThis as unknown as BrowserScope;
-    const input = scope.document.querySelector(
-      '[data-testid="session-context-color-custom"]',
-    );
-    if (!input) {
-      throw new Error("custom color input not found");
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(input),
-      "value",
-    );
-    if (descriptor?.set) {
-      descriptor.set.call(input, nextColor);
-    } else {
-      input.value = nextColor;
-    }
-    input.dispatchEvent(new scope.Event("input", { bubbles: true }));
-    input.dispatchEvent(new scope.Event("change", { bubbles: true }));
-  }, color);
+  await browser.execute(
+    ({ inputSelector, nextColor }: { inputSelector: string; nextColor: string }) => {
+      type ColorInput = {
+        value: string;
+        dispatchEvent: (event: unknown) => boolean;
+      };
+      type BrowserScope = {
+        document: { querySelector: (selector: string) => ColorInput | null };
+        Event: new (type: string, init: { bubbles: boolean }) => unknown;
+      };
+      const scope = globalThis as unknown as BrowserScope;
+      const input = scope.document.querySelector(inputSelector);
+      if (!input) {
+        throw new Error(`appearance input not found: ${inputSelector}`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(input),
+        "value",
+      );
+      if (descriptor?.set) {
+        descriptor.set.call(input, nextColor);
+      } else {
+        input.value = nextColor;
+      }
+      input.dispatchEvent(new scope.Event("input", { bubbles: true }));
+      input.dispatchEvent(new scope.Event("change", { bubbles: true }));
+    },
+    { inputSelector: selector, nextColor: color },
+  );
 }
 
-async function openContextSubmenu(testId: string): Promise<void> {
-  const trigger = await browser.$(`[data-testid="${testId}"]`);
-  await trigger.waitForDisplayed({ timeout: 5_000 });
-  await trigger.moveTo();
-  await trigger.click();
+async function closeAppearanceModal(): Promise<void> {
+  const close = await browser.$('[data-testid="appearance-close"]');
+  await close.waitForDisplayed({ timeout: 5_000 });
+  await close.click();
 }
 
-async function waitForColor(sessionId: string, color: string): Promise<void> {
+async function waitForAppearance(
+  sessionId: string,
+  expected: {
+    accent?: string;
+    background?: string;
+    frame?: string;
+  },
+): Promise<void> {
   await browser.waitUntil(
     async () => {
       const row = await sidebarRow(sessionId);
       const pane = await sessionPane(sessionId);
       const rowColor = await row.getAttribute("data-session-color");
       const paneColor = await pane.getAttribute("data-session-color");
-      return rowColor === color && paneColor === color;
+      const background = await pane.getAttribute("data-terminal-background");
+      const frame = await pane.getAttribute("data-terminal-frame");
+      return (
+        (expected.accent === undefined ||
+          (rowColor === expected.accent && paneColor === expected.accent)) &&
+        (expected.background === undefined || background === expected.background) &&
+        (expected.frame === undefined || frame === expected.frame)
+      );
     },
-    { timeout: 10_000, timeoutMsg: "custom session color was not rendered" },
+    { timeout: 10_000, timeoutMsg: "session appearance was not rendered" },
   );
 }
 

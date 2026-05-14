@@ -1,20 +1,17 @@
 import { useEffect, useState } from "react";
-import { loadSettings } from "./settings";
 
-/// Persistent font-size overrides for terminal panes. The app-wide default
-/// lives in `Settings.terminal.font_size`; per-tab and per-session overrides
-/// live here in two small string→number maps because tab/session ids are
-/// dynamic and don't belong inside the settings JSON.
+/// Persistent font-size overrides for terminal panes. App / repo /
+/// workspace / session defaults live in appearance settings; tab overrides
+/// stay here because tabs are view layout, not session identity.
 ///
 /// Effective size for a Terminal mount is computed in
-/// `resolveFontSize(sessionId, tabId)` — the resolver walks
-/// session-override → tab-override → app-default in that order.
+/// `resolveFontSize(tabId, inheritedSize)` — the resolver walks
+/// tab-override → inherited appearance size.
 ///
 /// Writes broadcast a CustomEvent so any mounted Terminal can re-read
 /// without prop-drilling. Each Terminal subscribes via `useFontSize`.
 
 const TAB_OVERRIDES_KEY = "rt.terminal.font_size.tabs";
-const SESSION_OVERRIDES_KEY = "rt.terminal.font_size.sessions";
 const CHANGE_EVENT = "rt:font-size-changed";
 
 const MIN_SIZE = 8;
@@ -22,7 +19,6 @@ const MAX_SIZE = 32;
 
 interface OverrideMaps {
   byTab: Record<string, number>;
-  bySession: Record<string, number>;
 }
 
 function clamp(size: number): number {
@@ -33,7 +29,6 @@ function clamp(size: number): number {
 function loadOverrides(): OverrideMaps {
   return {
     byTab: readMap(TAB_OVERRIDES_KEY),
-    bySession: readMap(SESSION_OVERRIDES_KEY),
   };
 }
 
@@ -68,39 +63,22 @@ function broadcast(): void {
   window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }
 
-export function getAppDefaultFontSize(): number {
-  return clamp(loadSettings().terminal.font_size);
-}
-
 export function getTabFontSize(tabId: string): number | null {
   const map = readMap(TAB_OVERRIDES_KEY);
   return map[tabId] ?? null;
 }
 
-export function getSessionFontSize(sessionId: string): number | null {
-  const map = readMap(SESSION_OVERRIDES_KEY);
-  return map[sessionId] ?? null;
-}
-
 /// Resolve the effective font size for a Terminal mount. Walks
-/// session-override → tab-override (when `tabId` is non-null) →
-/// app-default. `tabId` may be `null` in pop-out windows where the
-/// per-tab override isn't accessible from the parent context — the
-/// pop-out still respects the session and app-wide values.
-export function resolveFontSize(
-  sessionId: string | null,
-  tabId: string | null,
-): number {
+/// tab-override (when `tabId` is non-null) → inherited appearance default.
+/// `tabId` may be `null` in pop-out windows where the per-tab override
+/// isn't accessible from the parent context.
+export function resolveFontSize(tabId: string | null, inheritedSize: number): number {
   const overrides = loadOverrides();
-  if (sessionId !== null) {
-    const s = overrides.bySession[sessionId];
-    if (typeof s === "number") return s;
-  }
   if (tabId !== null) {
     const t = overrides.byTab[tabId];
     if (typeof t === "number") return t;
   }
-  return getAppDefaultFontSize();
+  return clamp(inheritedSize);
 }
 
 export function setTabFontSize(tabId: string, size: number): void {
@@ -118,27 +96,12 @@ export function clearTabFontSize(tabId: string): void {
   broadcast();
 }
 
-export function setSessionFontSize(sessionId: string, size: number): void {
-  const map = readMap(SESSION_OVERRIDES_KEY);
-  map[sessionId] = clamp(size);
-  writeMap(SESSION_OVERRIDES_KEY, map);
-  broadcast();
-}
-
-export function clearSessionFontSize(sessionId: string): void {
-  const map = readMap(SESSION_OVERRIDES_KEY);
-  if (!(sessionId in map)) return;
-  delete map[sessionId];
-  writeMap(SESSION_OVERRIDES_KEY, map);
-  broadcast();
-}
-
 /// Drop overrides whose id is no longer in `liveTabIds` / `liveSessionIds`.
 /// Called periodically from App.tsx so the localStorage map doesn't grow
 /// unboundedly across long sessions.
 export function pruneOverrides(
   liveTabIds: Set<string>,
-  liveSessionIds: Set<string>,
+  _liveSessionIds: Set<string>,
 ): void {
   const overrides = loadOverrides();
   let changed = false;
@@ -147,27 +110,18 @@ export function pruneOverrides(
     if (liveTabIds.has(k)) tabOut[k] = v;
     else changed = true;
   }
-  const sessionOut: Record<string, number> = {};
-  for (const [k, v] of Object.entries(overrides.bySession)) {
-    if (liveSessionIds.has(k)) sessionOut[k] = v;
-    else changed = true;
-  }
   if (!changed) return;
   writeMap(TAB_OVERRIDES_KEY, tabOut);
-  writeMap(SESSION_OVERRIDES_KEY, sessionOut);
   broadcast();
 }
 
 /// Subscribe to font-size changes for a specific Terminal mount. Returns
 /// the resolved effective size; re-runs the resolver on every change
 /// event (app-default, tab-override, session-override, or settings).
-export function useFontSize(
-  sessionId: string | null,
-  tabId: string | null,
-): number {
-  const [size, setSize] = useState(() => resolveFontSize(sessionId, tabId));
+export function useFontSize(tabId: string | null, inheritedSize: number): number {
+  const [size, setSize] = useState(() => resolveFontSize(tabId, inheritedSize));
   useEffect(() => {
-    const recompute = () => setSize(resolveFontSize(sessionId, tabId));
+    const recompute = () => setSize(resolveFontSize(tabId, inheritedSize));
     recompute();
     window.addEventListener(CHANGE_EVENT, recompute);
     window.addEventListener("rt:settings-changed", recompute);
@@ -175,7 +129,7 @@ export function useFontSize(
       window.removeEventListener(CHANGE_EVENT, recompute);
       window.removeEventListener("rt:settings-changed", recompute);
     };
-  }, [sessionId, tabId]);
+  }, [tabId, inheritedSize]);
   return size;
 }
 

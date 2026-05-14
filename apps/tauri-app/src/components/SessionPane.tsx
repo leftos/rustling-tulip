@@ -1,7 +1,7 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot, TabEntry } from "../types";
+import type { RepoEntry, SessionSnapshot, TabEntry, WorkspaceEntry } from "../types";
 import {
   clearPanePoppedOut,
   markPanePoppedOut,
@@ -11,11 +11,9 @@ import {
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
-import {
-  DEFAULT_SESSION_COLOR,
-  normalizeSessionColor,
-  sessionAccentStyle,
-} from "../utils/sessionColor";
+import { sessionAccentStyle } from "../utils/sessionColor";
+import { resolveAppearance } from "../utils/appearance";
+import { useSettings } from "../utils/settings";
 import SessionContextMenu, {
   type SessionContextMenuState,
 } from "./SessionContextMenu";
@@ -43,6 +41,8 @@ interface Props {
   /// "Move to → <tab>" submenu. Threaded through GridRenderer from
   /// App.tsx. Empty arrays are fine; the menu just omits the entry.
   tabs: TabEntry[];
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
   /// Wired from GridRenderer so the entire session-header strip acts as
   /// the pane drag handle, not just the small ⠿ icon in the corner.
@@ -87,6 +87,8 @@ export default function SessionPane({
   session,
   client,
   tabs,
+  repos,
+  workspaces,
   subscribePty,
   onHeaderDragStart,
   tabId,
@@ -106,6 +108,7 @@ export default function SessionPane({
   const [confirming, setConfirming] = useState(false);
   const [sessionMenu, setSessionMenu] =
     useState<SessionContextMenuState | null>(null);
+  const [settings] = useSettings();
   const onHeaderContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -178,36 +181,43 @@ export default function SessionPane({
   const isPlainShell = session.mode === "plain_shell";
   const runtimeLabel = sessionRuntimeLabel(session);
   const modeSuffix = isHeadless ? " · headless" : "";
-  const accentColor = normalizeSessionColor(session.accent_color);
-  const sessionStyle = sessionAccentStyle(accentColor);
+  const resolvedAppearance = resolveAppearance(
+    settings,
+    repos,
+    workspaces,
+    session,
+  );
+  const appearance = resolvedAppearance.values;
+  const accentColor = appearance.accent_color;
+  const sessionStyle = {
+    ...sessionAccentStyle(accentColor),
+    "--terminal-bg": appearance.terminal_background_color,
+    "--terminal-frame-bg": appearance.terminal_frame_color,
+  } as CSSProperties;
   const headerClasses = [
     "session-header",
     onHeaderDragStart ? "session-header-draggable" : "",
     accentColor ? "has-session-accent" : "",
+    "has-terminal-frame",
   ]
     .filter(Boolean)
     .join(" ");
-  const setColor = useCallback(
-    (color: string | null) => {
-      if (!client) return;
-      client.send({
-        type: "set_session_color",
-        session_id: session.id,
-        color,
-      });
-    },
-    [client, session.id],
-  );
 
   return (
     <div
-      className={accentColor ? "session-pane has-session-accent" : "session-pane"}
+      className={
+        accentColor
+          ? "session-pane has-session-accent has-terminal-frame"
+          : "session-pane has-terminal-frame"
+      }
       style={sessionStyle}
       data-testid="session-pane"
       data-session-id={session.id}
       data-session-status={session.status}
       data-session-mode={session.mode}
       data-session-color={accentColor ?? ""}
+      data-terminal-background={appearance.terminal_background_color}
+      data-terminal-frame={appearance.terminal_frame_color}
       data-session-elevated={session.elevated_authority ? "true" : "false"}
     >
       {!hideHeader && (
@@ -273,17 +283,6 @@ export default function SessionPane({
             )}
             {modeSuffix && (
               <span className="session-meta">{modeSuffix}</span>
-            )}
-            {client && (
-              <input
-                type="color"
-                className="session-color-picker"
-                value={accentColor ?? DEFAULT_SESSION_COLOR}
-                title="Set session color"
-                aria-label="Set session color"
-                data-testid="session-color-picker"
-                onChange={(e) => setColor(e.currentTarget.value)}
-              />
             )}
           </div>
           <div className="session-actions">
@@ -424,6 +423,8 @@ export default function SessionPane({
         <SessionContextMenu
           state={sessionMenu}
           tabs={tabs}
+          repos={repos}
+          workspaces={workspaces}
           client={client}
           {...(paneId ? { preferredPaneId: paneId } : {})}
           {...(onTabsSnapshotUndo ? { onTabsSnapshotUndo } : {})}
@@ -466,6 +467,7 @@ export default function SessionPane({
               tabId={tabId ?? null}
               agent={session.agent}
               mode={session.mode}
+              appearance={appearance}
             />
           ) : session.status === "stopped" ? (
             <div

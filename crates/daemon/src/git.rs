@@ -142,9 +142,7 @@ pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)
             current_path = Some(PathBuf::from(line.trim_start_matches("worktree ")));
             current_branch = String::new();
         } else if let Some(branch_ref) = line.strip_prefix("branch ") {
-            current_branch = branch_ref
-                .trim_start_matches("refs/heads/")
-                .to_string();
+            current_branch = branch_ref.trim_start_matches("refs/heads/").to_string();
         }
     }
     if let Some(path) = current_path.take() {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot, TabEntry } from "../types";
+import type { RepoEntry, SessionSnapshot, TabEntry, WorkspaceEntry } from "../types";
 import { markForAutoFocus } from "../utils/autofocus";
 import { clearPanePoppedOut, markPanePoppedOut } from "../utils/poppedPanes";
 import {
@@ -16,6 +16,8 @@ interface Props {
   tab: TabEntry;
   paneId: string;
   tabs: TabEntry[];
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   client: DaemonClient;
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
@@ -29,6 +31,8 @@ export default function PaneWindow({
   tab,
   paneId,
   tabs,
+  repos,
+  workspaces,
   client,
   subscribePty,
 }: Props) {
@@ -141,6 +145,8 @@ export default function PaneWindow({
           session={session}
           client={client}
           tabs={tabs}
+          repos={repos}
+          workspaces={workspaces}
           subscribePty={subscribePty}
           tabId={tab.id}
           paneId={paneId}

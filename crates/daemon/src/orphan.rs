@@ -13,7 +13,7 @@
 use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
-use protocol::{Agent, SessionKind, SessionMember, SessionMode, SpawnConfig};
+use protocol::{Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMode, SpawnConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -88,10 +88,13 @@ pub struct OrphanMeta {
     /// watcher will repopulate it on the next title broadcast.
     #[serde(default)]
     pub terminal_title: Option<String>,
-    /// User-chosen accent color (`#rrggbb`) for the session UI. `None`
-    /// means the app uses its theme accent.
-    #[serde(default)]
+    /// Legacy user-chosen accent color (`#rrggbb`) for the session UI.
+    /// Loaded into `appearance.accent_color` and omitted on future writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent_color: Option<String>,
+    /// Session-level appearance overrides.
+    #[serde(default)]
+    pub appearance: AppearanceOverrides,
     /// Spawn-time configuration used to clone this session via
     /// [`protocol::ClientMessage::DuplicateSession`]. `None` for sidecars
     /// written by daemon versions before this field existed; reattached
@@ -392,6 +395,7 @@ pub fn meta_from_record(
         agent: Some(agent),
         terminal_title: None,
         accent_color: None,
+        appearance: AppearanceOverrides::default(),
         spawn_config,
         last_prompt,
         recent_actions_tail: Vec::new(),
@@ -473,28 +477,29 @@ pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str)
     }
 }
 
-pub fn update_accent_color(
+pub fn update_appearance(
     dirs: &Dirs,
     session_id: &str,
-    color: Option<&str>,
+    appearance: &AppearanceOverrides,
 ) -> anyhow::Result<()> {
     let path = meta_path(dirs, session_id);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for accent_color update"),
+        Err(err) => return Err(err).context("reading meta for appearance update"),
     };
-    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for accent_color update")?;
-    if meta.accent_color.as_deref() == color {
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for appearance update")?;
+    if meta.appearance == *appearance && meta.accent_color.is_none() {
         return Ok(());
     }
-    meta.accent_color = color.map(str::to_string);
+    meta.accent_color = None;
+    meta.appearance = appearance.clone();
     write_meta(dirs, &meta)
 }
 
-pub fn try_update_accent_color(dirs: &Dirs, session_id: &str, color: Option<&str>) {
-    if let Err(err) = update_accent_color(dirs, session_id, color) {
-        warn!(?err, %session_id, "failed to update orphan meta accent_color");
+pub fn try_update_appearance(dirs: &Dirs, session_id: &str, appearance: &AppearanceOverrides) {
+    if let Err(err) = update_appearance(dirs, session_id, appearance) {
+        warn!(?err, %session_id, "failed to update orphan meta appearance");
     }
 }
 
@@ -599,6 +604,10 @@ mod tests {
             agent: Some(Agent::Claude),
             terminal_title: None,
             accent_color: Some("#2f81f7".to_string()),
+            appearance: AppearanceOverrides {
+                accent_color: Some("#3fb950".to_string()),
+                ..AppearanceOverrides::default()
+            },
             spawn_config: None,
             last_prompt: None,
             recent_actions_tail: Vec::new(),
@@ -620,6 +629,7 @@ mod tests {
             Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe")
         );
         assert_eq!(decoded.accent_color.as_deref(), Some("#2f81f7"));
+        assert_eq!(decoded.appearance.accent_color.as_deref(), Some("#3fb950"));
     }
 
     #[test]

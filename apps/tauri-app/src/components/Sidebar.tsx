@@ -7,6 +7,7 @@ import {
 } from "../api";
 import {
   tabGrid,
+  type AppearanceOverrides,
   type ContainerRef,
   type PresetEntry,
   type PresetTarget,
@@ -23,11 +24,13 @@ import {
   sessionLabelTooltip,
   sessionRuntimeLabel,
 } from "../utils/sessionLabel";
-import { normalizeSessionColor, sessionAccentStyle } from "../utils/sessionColor";
+import { sessionAccentStyle } from "../utils/sessionColor";
 import { copyToClipboard } from "../utils/clipboard";
-import { saveSettings, useSettings } from "../utils/settings";
+import { saveSettings, useSettings, type Settings } from "../utils/settings";
+import { resolveAppearance, resolveAppearanceLayers } from "../utils/appearance";
 import DaemonFooter from "./DaemonFooter";
 import Icon from "./Icon";
+import { AppearanceModal } from "./AppearanceEditor";
 import SessionContextMenu, {
   type DuplicateTarget,
   type SessionContextMenuState,
@@ -197,6 +200,11 @@ interface ContextMenuState {
   container: TreeContainer;
 }
 
+interface AppearanceEditorState {
+  container: TreeContainer;
+  draft: AppearanceOverrides;
+}
+
 export default function Sidebar(props: Props) {
   // The current sidebar view is a per-window selection but it also serves
   // as the persisted default for the next window — same key, same value.
@@ -254,6 +262,8 @@ export default function Sidebar(props: Props) {
   const [sessionMenu, setSessionMenu] =
     useState<SessionContextMenuState | null>(null);
   const closeSessionMenu = () => setSessionMenu(null);
+  const [appearanceEditor, setAppearanceEditor] =
+    useState<AppearanceEditorState | null>(null);
 
   /// Tab-reorder drag-and-drop state, mirrored from TabBar's DragState.
   /// `text/x-rt-tab` is the shared MIME so a pill dragged from the
@@ -696,6 +706,9 @@ export default function Sidebar(props: Props) {
                 onToggle={() => toggle(c.key)}
                 tabs={props.tabs}
                 client={props.client}
+                repos={props.repos}
+                workspaces={props.workspaces}
+                settings={settings}
                 highlightedSessionIds={props.highlightedSessionIds}
                 attentionSessions={props.attentionSessions}
                 onSelectSession={props.onSelectSession}
@@ -755,6 +768,18 @@ export default function Sidebar(props: Props) {
             if (target) props.onEditLastSpawn(target);
             closeMenu();
           }}
+          onAppearance={() => {
+            const container = contextMenu.container;
+            const draft = appearanceForContainer(
+              container,
+              props.repos,
+              props.workspaces,
+            );
+            if (draft) {
+              setAppearanceEditor({ container, draft });
+            }
+            closeMenu();
+          }}
           onClose={closeMenu}
           onSpawn={() => {
             const c = contextMenu.container;
@@ -801,10 +826,40 @@ export default function Sidebar(props: Props) {
         />
       )}
 
+      {appearanceEditor && (
+        <AppearanceModal
+          title={`${appearanceEditor.container.name} appearance`}
+          value={appearanceEditor.draft}
+          inherited={resolveAppearanceLayers(null, null, settings.appearance)}
+          inheritLabel="Inherit app"
+          onChange={(appearance) => {
+            setAppearanceEditor((current) =>
+              current ? { ...current, draft: appearance } : current,
+            );
+            if (appearanceEditor.container.kind === "repo") {
+              props.client.send({
+                type: "set_repo_appearance",
+                repo_id: appearanceEditor.container.id,
+                appearance,
+              });
+            } else if (appearanceEditor.container.kind === "workspace") {
+              props.client.send({
+                type: "set_workspace_appearance",
+                workspace_id: appearanceEditor.container.id,
+                appearance,
+              });
+            }
+          }}
+          onClose={() => setAppearanceEditor(null)}
+        />
+      )}
+
       {sessionMenu && (
         <SessionContextMenu
           state={sessionMenu}
           tabs={props.tabs}
+          repos={props.repos}
+          workspaces={props.workspaces}
           client={props.client}
           onClose={closeSessionMenu}
           onDuplicate={(withDialog, target) => {
@@ -843,6 +898,9 @@ interface ContainerNodeProps {
   onToggle: () => void;
   tabs: TabEntry[];
   client: DaemonClient;
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
+  settings: Settings;
   highlightedSessionIds: Set<string>;
   attentionSessions: Set<string>;
   onSelectSession: (id: string) => void;
@@ -1239,6 +1297,9 @@ function ContainerNode(p: ContainerNodeProps) {
               session={s}
               tabs={p.tabs}
               client={p.client}
+              repos={p.repos}
+              workspaces={p.workspaces}
+              settings={p.settings}
               selected={p.highlightedSessionIds.has(s.id)}
               needsAttention={p.attentionSessions.has(s.id)}
               onSelect={p.onSelectSession}
@@ -1263,6 +1324,9 @@ interface SessionLeafProps {
   session: SessionSnapshot;
   tabs: TabEntry[];
   client: DaemonClient;
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
+  settings: Settings;
   selected: boolean;
   needsAttention: boolean;
   onSelect: (id: string) => void;
@@ -1285,7 +1349,12 @@ function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
   const isPlainShell = s.mode === "plain_shell";
   const isCodex = !isPlainShell && s.agent === "codex";
-  const accentColor = normalizeSessionColor(s.accent_color);
+  const accentColor = resolveAppearance(
+    p.settings,
+    p.repos,
+    p.workspaces,
+    s,
+  ).values.accent_color;
   const bindings = useMemo(
     () => sessionTabBindings(s.id, p.tabs),
     [s.id, p.tabs],
@@ -1552,6 +1621,7 @@ interface ContextMenuProps {
   lastSpawnSummary: string | null;
   onLaunchLast: (placement: LaunchLastPlacement) => void;
   onEditLastSpawn: () => void;
+  onAppearance: () => void;
   onClose: () => void;
   onSpawn: () => void;
   onRemove: () => void;
@@ -1565,6 +1635,7 @@ function ContainerContextMenu(p: ContextMenuProps) {
   const canReveal = c.fsPath !== null;
   const canLaunchPreset = c.kind === "repo" || c.kind === "workspace";
   const canLaunchLast = c.kind === "repo" || c.kind === "workspace";
+  const canCustomizeAppearance = c.kind === "repo" || c.kind === "workspace";
   const isTab = c.kind === "tab";
   const removeLabel =
     c.kind === "workspace" ? "Remove workspace" : "Remove repo";
@@ -1691,6 +1762,17 @@ function ContainerContextMenu(p: ContextMenuProps) {
         {!isTab && (
           <>
             <li className="context-menu-separator" aria-hidden="true" />
+            {canCustomizeAppearance && (
+              <li>
+                <button
+                  type="button"
+                  onClick={p.onAppearance}
+                  data-testid="container-context-appearance"
+                >
+                  Appearance...
+                </button>
+              </li>
+            )}
             {canLaunchPreset && (
               <PresetSubmenu
                 presets={p.presets}
@@ -1773,6 +1855,22 @@ function PresetSubmenu({
 function menuTarget(c: TreeContainer): PresetTarget | null {
   if (c.kind === "repo") return { kind: "repo", repo_id: c.id };
   if (c.kind === "workspace") return { kind: "workspace", workspace_id: c.id };
+  return null;
+}
+
+function appearanceForContainer(
+  c: TreeContainer,
+  repos: RepoEntry[],
+  workspaces: WorkspaceEntry[],
+): AppearanceOverrides | null {
+  if (c.kind === "repo") {
+    return repos.find((repo) => repo.id === c.id)?.appearance ?? null;
+  }
+  if (c.kind === "workspace") {
+    return (
+      workspaces.find((workspace) => workspace.id === c.id)?.appearance ?? null
+    );
+  }
   return null;
 }
 

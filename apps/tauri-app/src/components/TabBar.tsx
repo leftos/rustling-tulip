@@ -17,6 +17,8 @@ import {
   resolveFontSize,
   setTabFontSize,
 } from "../utils/fontSize";
+import { resolveAppearanceLayers } from "../utils/appearance";
+import { useSettings } from "../utils/settings";
 import Icon from "./Icon";
 
 interface Props {
@@ -65,6 +67,12 @@ export default function TabBar({
   onTabsSnapshotUndo,
 }: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
+  const [settings] = useSettings();
+  const appFontSize = resolveAppearanceLayers(
+    null,
+    null,
+    settings.appearance,
+  ).values.terminal_font_size;
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
@@ -493,7 +501,7 @@ export default function TabBar({
           onFontSizeBump={(delta) => {
             const cur =
               getTabFontSize(contextMenu.tabId) ??
-              resolveFontSize(null, contextMenu.tabId);
+              resolveFontSize(contextMenu.tabId, appFontSize);
             const next = Math.max(
               MIN_FONT_SIZE,
               Math.min(MAX_FONT_SIZE, cur + delta),
@@ -507,7 +515,7 @@ export default function TabBar({
           }}
           currentTabFontSize={
             getTabFontSize(contextMenu.tabId) ??
-            resolveFontSize(null, contextMenu.tabId)
+            resolveFontSize(contextMenu.tabId, appFontSize)
           }
           hasTabFontOverride={getTabFontSize(contextMenu.tabId) !== null}
           onMergeSelected={(layout) => {

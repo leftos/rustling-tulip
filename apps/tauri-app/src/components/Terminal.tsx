@@ -13,7 +13,9 @@ import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
 import { useFontSize } from "../utils/fontSize";
-import { loadSettings, useSettings } from "../utils/settings";
+import { loadSettings } from "../utils/settings";
+import type { EffectiveAppearance } from "../utils/appearance";
+import { buildTerminalTheme } from "../utils/terminalTheme";
 
 /// Historical cascade — preserved as the fallback when the user hasn't
 /// picked a specific family in Settings. Geist Mono is the bundled
@@ -70,6 +72,10 @@ interface Props {
   /// regardless of `agent` because `\\\r` is bash line-continuation;
   /// `\n` would just submit the partial command.
   mode: SessionMode;
+  /// Effective app/repo/workspace/session appearance resolved by the
+  /// owning pane. Threaded in so live inheritance updates can repaint
+  /// xterm without reconnecting the PTY.
+  appearance: EffectiveAppearance;
 }
 
 export default function Terminal({
@@ -80,6 +86,7 @@ export default function Terminal({
   tabId,
   agent,
   mode,
+  appearance,
 }: Props) {
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -94,10 +101,10 @@ export default function Terminal({
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
-  const fontSize = useFontSize(sessionId, tabId ?? null);
-  const [settings] = useSettings();
-  const fontFamily = settings.terminal.font_family;
-  const fontBold = settings.terminal.font_bold;
+  const fontSize = useFontSize(tabId ?? null, appearance.terminal_font_size);
+  const fontFamily = appearance.terminal_font_family;
+  const fontBold = appearance.terminal_font_bold;
+  const backgroundColor = appearance.terminal_background_color;
 
   /// Apply font-size changes to the live XTerm without remounting it —
   /// rebuilding the terminal on every size change would clear scrollback
@@ -147,6 +154,15 @@ export default function Terminal({
     });
   }, [fontFamily, fontBold, client, sessionId]);
 
+  /// Apply terminal palette changes independently from font changes. The
+  /// xterm options setter needs a fresh object reference for structured
+  /// options, so build a new theme each time the resolved background shifts.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.theme = buildTerminalTheme(backgroundColor);
+  }, [backgroundColor]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -178,38 +194,7 @@ export default function Terminal({
         fontFamily: buildFontFamily(fontFamily),
         fontWeight: fontBold ? "bold" : "normal",
         fontSize,
-        theme: {
-          // Mirrors the design-token palette in styles.css :root. Keeping
-          // these in sync means the terminal feels flush with the pane
-          // chrome instead of floating on a slightly different shade. If
-          // the tokens change, change these too.
-          background: "#08090b",
-          foreground: "#e5e6e8",
-          cursor: "#5b9bff",
-          cursorAccent: "#08090b",
-          selectionBackground: "rgba(91, 155, 255, 0.30)",
-          selectionForeground: "#f5f6f8",
-          // ANSI 16-color palette — tuned for the cool-neutral near-black
-          // background. Normal slots stay calm; bright slots add lightness
-          // for visible contrast without the saturation jump that makes
-          // default xterm palettes feel '90s.
-          black: "#16181d",
-          red: "#ef5c5c",
-          green: "#3fb96a",
-          yellow: "#e8a531",
-          blue: "#5b9bff",
-          magenta: "#b787f0",
-          cyan: "#5dd5e3",
-          white: "#e5e6e8",
-          brightBlack: "#656872",
-          brightRed: "#ff8585",
-          brightGreen: "#62d18a",
-          brightYellow: "#f5c267",
-          brightBlue: "#7eb4ff",
-          brightMagenta: "#d4abff",
-          brightCyan: "#8feaf3",
-          brightWhite: "#f5f6f8",
-        },
+        theme: buildTerminalTheme(backgroundColor),
         scrollback: 5000,
         convertEol: false,
       });
@@ -547,6 +532,7 @@ export default function Terminal({
     <div
       ref={containerRef}
       className="terminal-container"
+      style={{ backgroundColor }}
       data-testid="terminal-container"
       data-session-id={sessionId}
     />

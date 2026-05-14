@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
-import type { SessionSnapshot } from "../types";
+import type { RepoEntry, SessionSnapshot, WorkspaceEntry } from "../types";
 import { markForAutoFocus } from "../utils/autofocus";
 import {
   sessionDisplayLabel,
@@ -12,6 +12,8 @@ import SessionPane from "./SessionPane";
 
 interface Props {
   session: SessionSnapshot;
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   client: DaemonClient;
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
 }
@@ -22,6 +24,8 @@ interface Props {
 /// affect the daemon-side session — the main window still shows it.
 export default function SessionWindow({
   session,
+  repos,
+  workspaces,
   client,
   subscribePty,
 }: Props) {
@@ -113,6 +117,8 @@ export default function SessionWindow({
           session={session}
           client={client}
           tabs={[]}
+          repos={repos}
+          workspaces={workspaces}
           subscribePty={subscribePty}
           hideHeader
         />

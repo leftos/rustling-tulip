@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { DaemonClient } from "../api";
-import { tabGrid, type SessionSnapshot, type TabEntry } from "../types";
+import {
+  tabGrid,
+  type RepoEntry,
+  type SessionSnapshot,
+  type TabEntry,
+  type WorkspaceEntry,
+} from "../types";
 import { markForAutoFocus } from "../utils/autofocus";
 import { collectPanes } from "../utils/grid";
 import GridRenderer from "./GridRenderer";
@@ -11,6 +17,8 @@ interface Props {
   tab: TabEntry;
   client: DaemonClient;
   sessions: SessionSnapshot[];
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
   hasRepos: boolean;
 }
@@ -19,6 +27,8 @@ export default function TabWindow({
   tab,
   client,
   sessions,
+  repos,
+  workspaces,
   subscribePty,
   hasRepos,
 }: Props) {
@@ -109,6 +119,8 @@ export default function TabWindow({
           tabs={[]}
           client={client}
           sessions={sessions}
+          repos={repos}
+          workspaces={workspaces}
           subscribePty={subscribePty}
           focusedPaneId={focusedPaneId}
           onFocusPane={setFocusedPaneId}

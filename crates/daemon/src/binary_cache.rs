@@ -41,9 +41,13 @@ const HASH_PREFIX_LEN: usize = 16;
 /// Idempotent: if a cache entry with the matching hash already exists, no
 /// copy happens. The returned path is always absolute when `cache_dir` is
 /// absolute (which it is in production — see [`crate::paths::Dirs`]).
-pub fn ensure_cached(template: &Path, cache_dir: &Path, name_hint: &str) -> anyhow::Result<PathBuf> {
-    let bytes = fs::read(template)
-        .with_context(|| format!("reading template {}", template.display()))?;
+pub fn ensure_cached(
+    template: &Path,
+    cache_dir: &Path,
+    name_hint: &str,
+) -> anyhow::Result<PathBuf> {
+    let bytes =
+        fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
     let hash = hash_prefix(&bytes);
 
     let extension = template
@@ -82,9 +86,8 @@ pub fn ensure_cached(template: &Path, cache_dir: &Path, name_hint: &str) -> anyh
             );
             return Ok(cached);
         }
-        return Err(err).with_context(|| {
-            format!("renaming {} to {}", tmp.display(), cached.display())
-        });
+        return Err(err)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), cached.display()));
     }
 
     info!(

@@ -13,10 +13,12 @@ import {
   tabGrid,
   type GridNode,
   type PaneDropEdge,
+  type RepoEntry,
   type SessionSnapshot,
   type SplitDirection,
   type SplitPlace,
   type TabEntry,
+  type WorkspaceEntry,
 } from "../types";
 import { collectPanes } from "../utils/grid";
 import SessionPane from "./SessionPane";
@@ -34,6 +36,8 @@ interface Props {
   tabs: TabEntry[];
   client: DaemonClient;
   sessions: SessionSnapshot[];
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
   focusedPaneId: string | null;
   onFocusPane: (paneId: string) => void;
@@ -65,6 +69,8 @@ export default function GridRenderer({
   tabs,
   client,
   sessions,
+  repos,
+  workspaces,
   subscribePty,
   focusedPaneId,
   onFocusPane,
@@ -99,6 +105,8 @@ export default function GridRenderer({
         tabs={tabs}
         client={client}
         sessions={sessions}
+        repos={repos}
+        workspaces={workspaces}
         subscribePty={subscribePty}
         focusedPaneId={focusedPaneId}
         onFocusPane={onFocusPane}
@@ -122,6 +130,8 @@ interface NodeProps {
   tabs: TabEntry[];
   client: DaemonClient;
   sessions: SessionSnapshot[];
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
   subscribePty: (sessionId: string, cb: (b64: string) => void) => () => void;
   focusedPaneId: string | null;
   onFocusPane: (paneId: string) => void;
@@ -253,6 +263,8 @@ function PaneChrome(props: PaneChromeProps) {
     tabs,
     client,
     sessions,
+    repos,
+    workspaces,
     subscribePty,
     focusedPaneId,
     onTabsSnapshotUndo,
@@ -543,6 +555,8 @@ function PaneChrome(props: PaneChromeProps) {
             session={session}
             client={client}
             tabs={tabs}
+            repos={repos}
+            workspaces={workspaces}
             subscribePty={subscribePty}
             onTabsSnapshotUndo={onTabsSnapshotUndo}
             onHeaderDragStart={onDragStart}

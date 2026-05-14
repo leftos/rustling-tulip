@@ -8,8 +8,8 @@ use crate::scrollback;
 use crate::sync::{lock, read, write};
 use chrono::{DateTime, Utc};
 use protocol::{
-    Agent, SessionKind, SessionMember, SessionMetrics, SessionMode, SessionSnapshot, SessionStatus,
-    SpawnConfig,
+    Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionSnapshot, SessionStatus, SpawnConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -89,9 +89,8 @@ pub struct SessionRecord {
     /// [`crate::orphan::OrphanMeta::program_name`] so reattach restores
     /// the same chip after a daemon restart.
     pub program_name: Option<String>,
-    /// User-chosen accent color for the pane gutter and sidebar row. Stored
-    /// as `#rrggbb` after daemon validation.
-    pub accent_color: Option<String>,
+    /// Session-level appearance overrides. Stored after daemon validation.
+    pub appearance: AppearanceOverrides,
     /// Persisted spawn-time configuration used to clone this session via
     /// [`protocol::ClientMessage::DuplicateSession`]. Always `Some` for
     /// sessions spawned by daemons that know about this field; `None`
@@ -171,7 +170,7 @@ impl SessionRecord {
             agent: self.agent,
             terminal_title: self.terminal_title.clone(),
             program_name: self.program_name.clone(),
-            accent_color: self.accent_color.clone(),
+            appearance: self.appearance.clone(),
             elevated_authority,
             has_per_session_worktree,
             is_inactive: self.is_inactive,
@@ -373,6 +372,14 @@ fn resolve_labels_from_meta(meta: &OrphanMeta) -> (String, Option<String>, Strin
     (default_label, user_label, effective)
 }
 
+fn appearance_from_meta(meta: &OrphanMeta) -> AppearanceOverrides {
+    let mut appearance = meta.appearance.clone();
+    if appearance.accent_color.is_none() {
+        appearance.accent_color.clone_from(&meta.accent_color);
+    }
+    appearance
+}
+
 impl SessionRegistry {
     pub fn insert_orphan(&self, meta: &OrphanMeta) {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
@@ -395,7 +402,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
-            accent_color: meta.accent_color.clone(),
+            appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
             is_inactive: false,
@@ -433,7 +440,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
-            accent_color: meta.accent_color.clone(),
+            appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: false,
             is_inactive: false,
@@ -472,7 +479,7 @@ impl SessionRegistry {
             agent: meta.agent.unwrap_or_default(),
             terminal_title: meta.terminal_title.clone(),
             program_name: meta.program_name.clone(),
-            accent_color: meta.accent_color.clone(),
+            appearance: appearance_from_meta(meta),
             spawn_config: meta.spawn_config.clone(),
             is_abandoned: true,
             is_inactive: false,

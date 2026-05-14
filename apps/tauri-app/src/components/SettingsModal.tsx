@@ -7,8 +7,8 @@ import type { CodexSandbox, PermissionMode } from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { saveSettings, type Settings } from "../utils/settings";
-import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "../utils/fontSize";
-import { BUNDLED_FONTS, isBundledFont } from "../utils/bundledFonts";
+import { resolveAppearanceLayers } from "../utils/appearance";
+import { AppearanceFields } from "./AppearanceEditor";
 import Icon from "./Icon";
 
 interface Props {
@@ -307,62 +307,23 @@ export default function SettingsModal({ settings, onClose }: Props) {
             </div>
           </section>
 
+          <AppearanceFields
+            value={settings.appearance}
+            inherited={resolveAppearanceLayers(null, null, null)}
+            inheritLabel="Use built-in"
+            onChange={(appearance) =>
+              update((s) => ({
+                ...s,
+                appearance,
+              }))
+            }
+          />
+
           <section
             className="settings-section"
             data-testid="settings-section-terminal"
           >
-            <h3>Terminal</h3>
-            <TerminalFontFamilyControl
-              value={settings.terminal.font_family}
-              onChange={(family) =>
-                update((s) => ({
-                  ...s,
-                  terminal: { ...s.terminal, font_family: family },
-                }))
-              }
-            />
-            <Toggle
-              testid="settings-terminal-font-bold"
-              label="Render terminal text in bold"
-              checked={settings.terminal.font_bold}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  terminal: { ...s.terminal, font_bold: v },
-                }))
-              }
-            />
-            <div className="settings-row">
-              <span>Font size</span>
-              <div className="settings-row-control">
-                <input
-                  type="range"
-                  min={MIN_FONT_SIZE}
-                  max={MAX_FONT_SIZE}
-                  step={1}
-                  value={settings.terminal.font_size}
-                  onChange={(e) => {
-                    const v = Number.parseInt(e.target.value, 10);
-                    if (!Number.isFinite(v)) return;
-                    update((s) => ({
-                      ...s,
-                      terminal: { ...s.terminal, font_size: v },
-                    }));
-                  }}
-                  data-testid="settings-terminal-font-size"
-                  aria-label="Terminal font size"
-                />
-                <span className="muted small">
-                  {settings.terminal.font_size}px
-                </span>
-              </div>
-            </div>
-            <p className="settings-section-hint">
-              App-wide default. Per-tab and per-session overrides are set
-              from the tab and session right-click menus, or with
-              Ctrl+= / Ctrl+- (current tab) and Ctrl+Shift+= /
-              Ctrl+Shift+- (focused session).
-            </p>
+            <h3>Terminal behavior</h3>
             <Toggle
               testid="settings-terminal-copy-on-selection"
               label="Copy selection to clipboard automatically"
@@ -393,146 +354,6 @@ export default function SettingsModal({ settings, onClose }: Props) {
         </footer>
       </div>
     </div>
-  );
-}
-
-/// Minimal shape of the FontData entry returned by `queryLocalFonts()`.
-/// The TypeScript DOM lib doesn't ship the Local Font Access API yet so
-/// we declare just the field we read. Cast through `unknown` at the
-/// call site to avoid leaking the global type.
-interface LocalFontData {
-  family: string;
-}
-
-/// Window augmentation for the still-experimental Local Font Access API.
-/// Available in Chromium-based webviews (Edge WebView2, Tauri's default
-/// on Windows; Chrome on macOS via WebKit's polyfill stays absent — we
-/// gate the UI on this feature-detect).
-interface WindowWithLocalFonts {
-  queryLocalFonts?: () => Promise<LocalFontData[]>;
-}
-
-function TerminalFontFamilyControl({
-  value,
-  onChange,
-}: {
-  value: string | null;
-  onChange: (next: string | null) => void;
-}) {
-  // `null` selection = "use the default cascade in Terminal.tsx". We
-  // surface it as the first option so users can roll back any picked
-  // font without remembering its name.
-  const [systemFonts, setSystemFonts] = useState<string[] | null>(null);
-  const [systemFontsError, setSystemFontsError] = useState<string | null>(
-    null,
-  );
-  const canQueryLocalFonts =
-    typeof window !== "undefined" &&
-    typeof (window as WindowWithLocalFonts).queryLocalFonts === "function";
-
-  const loadSystemFonts = useCallback(async () => {
-    const w = window as WindowWithLocalFonts;
-    if (!w.queryLocalFonts) {
-      setSystemFontsError(
-        "Local Font Access API isn't available in this webview.",
-      );
-      return;
-    }
-    try {
-      const fonts = await w.queryLocalFonts();
-      // Dedupe by family — the API returns one entry per face (weight /
-      // style), but the user picks at the family granularity.
-      const families = Array.from(new Set(fonts.map((f) => f.family))).sort(
-        (a, b) => a.localeCompare(b),
-      );
-      setSystemFonts(families);
-      setSystemFontsError(null);
-    } catch (err) {
-      setSystemFontsError(String(err));
-    }
-  }, []);
-
-  const handleSelectChange = (next: string) => {
-    onChange(next === "" ? null : next);
-  };
-
-  // A current font that's neither bundled nor in the freshly fetched
-  // system list still has to render in the <select>; otherwise the
-  // displayed value silently snaps back to the default. We tag it as a
-  // "custom" option in its own optgroup.
-  const valueIsKnown =
-    value === null ||
-    isBundledFont(value) ||
-    (systemFonts?.includes(value) ?? false);
-
-  return (
-    <>
-      <div className="settings-row">
-        <span>Font family</span>
-        <div className="settings-row-control">
-          <select
-            value={value ?? ""}
-            onChange={(e) => handleSelectChange(e.target.value)}
-            data-testid="settings-terminal-font-family"
-            aria-label="Terminal font family"
-          >
-            <option value="">Default (system cascade)</option>
-            <optgroup label="Bundled">
-              {BUNDLED_FONTS.map((f) => (
-                <option key={f.family} value={f.family}>
-                  {f.label}
-                </option>
-              ))}
-            </optgroup>
-            {systemFonts && systemFonts.length > 0 && (
-              <optgroup label="System">
-                {systemFonts.map((family) => (
-                  <option key={`sys:${family}`} value={family}>
-                    {family}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {!valueIsKnown && value && (
-              <optgroup label="Current">
-                <option value={value}>{value} (saved)</option>
-              </optgroup>
-            )}
-          </select>
-        </div>
-      </div>
-      <div className="settings-row">
-        <span />
-        <div className="settings-row-control">
-          <button
-            type="button"
-            className="link"
-            disabled={!canQueryLocalFonts}
-            onClick={() => void loadSystemFonts()}
-            title={
-              canQueryLocalFonts
-                ? "List your OS fonts so you can pick one from the dropdown."
-                : "Your webview doesn't expose the Local Font Access API."
-            }
-            data-testid="settings-terminal-font-load-system"
-          >
-            {systemFonts === null
-              ? "Load system fonts…"
-              : `Refresh (${systemFonts.length} loaded)`}
-          </button>
-        </div>
-      </div>
-      {systemFontsError && (
-        <p className="settings-section-hint">
-          Couldn't load system fonts: {systemFontsError}
-        </p>
-      )}
-      <p className="settings-section-hint">
-        Bundled coding fonts ship with the app. Pick "Load system fonts"
-        to add your OS fonts to the list — the browser will ask for
-        permission the first time.
-      </p>
-    </>
   );
 }
 

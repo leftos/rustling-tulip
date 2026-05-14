@@ -6,7 +6,8 @@ use crate::pty::PtySpawnSpec;
 use crate::registry::{
     add_repo, persist_last_agent, persist_repo_last_spawn_config,
     persist_workspace_last_spawn_config, remove_repo, remove_workspace, reorder_containers,
-    set_repo_worktree_default, set_session_order, set_workspace_worktree_default, upsert_workspace,
+    set_repo_appearance, set_repo_worktree_default, set_session_order, set_workspace_appearance,
+    set_workspace_worktree_default, upsert_workspace,
 };
 use crate::scrollback;
 use crate::session::{
@@ -30,10 +31,11 @@ use chrono::Utc;
 use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    Agent, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake, DaemonMessage,
-    InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode, PresetLaunchJobSnapshot,
-    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    Agent, AppearanceOverrides, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake,
+    DaemonMessage, InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode,
+    PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember,
+    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -974,15 +976,36 @@ async fn dispatch(
                 );
             }
         }
-        ClientMessage::SetSessionColor { session_id, color } => {
-            let color = normalize_session_color(color)?;
+        ClientMessage::SetRepoAppearance {
+            repo_id,
+            appearance,
+        } => {
+            let appearance = normalize_appearance(appearance)?;
+            set_repo_appearance(&hub.state, &repo_id, appearance)?;
+            let repos = hub.state.with_persisted(|s| s.repos.clone());
+            let _ = hub.state_events.send(StateEvent::Repos(repos));
+        }
+        ClientMessage::SetWorkspaceAppearance {
+            workspace_id,
+            appearance,
+        } => {
+            let appearance = normalize_appearance(appearance)?;
+            set_workspace_appearance(&hub.state, &workspace_id, appearance)?;
+            let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
+            let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
+        }
+        ClientMessage::SetSessionAppearance {
+            session_id,
+            appearance,
+        } => {
+            let appearance = normalize_appearance(appearance)?;
             let mut applied = None;
             hub.sessions.update(&session_id, |guard| {
-                guard.accent_color.clone_from(&color);
-                applied = Some(guard.accent_color.clone());
+                guard.appearance.clone_from(&appearance);
+                applied = Some(guard.appearance.clone());
             });
-            if let Some(color) = applied {
-                orphan::try_update_accent_color(&hub.dirs, &session_id, color.as_deref());
+            if let Some(appearance) = applied {
+                orphan::try_update_appearance(&hub.dirs, &session_id, &appearance);
             }
         }
         ClientMessage::Attach { session_id } => {
@@ -1644,7 +1667,29 @@ async fn dispatch(
     Ok(())
 }
 
-fn normalize_session_color(color: Option<String>) -> anyhow::Result<Option<String>> {
+fn normalize_appearance(
+    mut appearance: AppearanceOverrides,
+) -> anyhow::Result<AppearanceOverrides> {
+    appearance.accent_color = normalize_color(appearance.accent_color, "accent color")?;
+    appearance.terminal_background_color = normalize_color(
+        appearance.terminal_background_color,
+        "terminal background color",
+    )?;
+    appearance.terminal_frame_color =
+        normalize_color(appearance.terminal_frame_color, "terminal frame color")?;
+    appearance.terminal_font_family = appearance.terminal_font_family.and_then(|family| {
+        let trimmed = family.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    if let Some(size) = appearance.terminal_font_size
+        && !(8..=32).contains(&size)
+    {
+        return Err(anyhow!("terminal font size must be between 8 and 32"));
+    }
+    Ok(appearance)
+}
+
+fn normalize_color(color: Option<String>, field_name: &str) -> anyhow::Result<Option<String>> {
     let Some(raw) = color else {
         return Ok(None);
     };
@@ -1653,10 +1698,10 @@ fn normalize_session_color(color: Option<String>) -> anyhow::Result<Option<Strin
         return Ok(None);
     }
     let Some(hex) = trimmed.strip_prefix('#') else {
-        return Err(anyhow!("session color must use #RRGGBB format"));
+        return Err(anyhow!("{field_name} must use #RRGGBB format"));
     };
     if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(anyhow!("session color must use #RRGGBB format"));
+        return Err(anyhow!("{field_name} must use #RRGGBB format"));
     }
     Ok(Some(format!("#{}", hex.to_ascii_lowercase())))
 }
@@ -2371,7 +2416,7 @@ async fn spawn_interactive_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
-        accent_color: None,
+        appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,
@@ -2523,7 +2568,7 @@ async fn spawn_plain_shell_session(
         agent: Agent::Claude,
         terminal_title: None,
         program_name: Some(shell_label.clone()),
-        accent_color: None,
+        appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,
@@ -2654,7 +2699,7 @@ fn spawn_headless_session(
         agent: cfg.agent,
         terminal_title: None,
         program_name: Some(cfg.agent.as_label().to_string()),
-        accent_color: None,
+        appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
         is_abandoned: false,
         is_inactive: false,

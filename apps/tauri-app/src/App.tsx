@@ -74,17 +74,15 @@ import {
 } from "./utils/poppedPanes";
 import { loadSettings, saveSettings, useSettings } from "./utils/settings";
 import {
-  clearSessionFontSize,
   clearTabFontSize,
-  getSessionFontSize,
   getTabFontSize,
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
   pruneOverrides,
   resolveFontSize,
-  setSessionFontSize,
   setTabFontSize,
 } from "./utils/fontSize";
+import { resolveAppearance, resolveAppearanceLayers } from "./utils/appearance";
 import { sessionDisplayLabel } from "./utils/sessionLabel";
 
 /// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
@@ -1716,9 +1714,8 @@ export default function App() {
     return focusedSession?.members[0]?.repo_id ?? null;
   }, [activeTab, focusedSession]);
 
-  // Session id of the focused pane (or null). Reused by the font-size
-  // shortcuts to know which session's override to bump when the user
-  // presses Ctrl+Shift+= / Ctrl+Shift+-.
+  // Session id of the focused pane (or null). Reused by keyboard
+  // shortcuts that update session-scoped appearance overrides.
   const focusedSessionId = useMemo<string | null>(
     () => focusedSession?.id ?? null,
     [focusedSession],
@@ -1817,28 +1814,43 @@ export default function App() {
         });
       }
     }
-    // Ctrl+= / Ctrl+- adjust the focused session's font size by 1.
+    // Ctrl+= / Ctrl+- adjust the focused session's appearance font size by 1.
     // Ctrl+Shift+= / Ctrl+Shift+- adjust the active tab's override
-    // (affects every session in the tab unless they have a per-session
-    // override of their own). Ctrl+0 resets the focused session +
-    // active tab back to the app default.
+    // (a view-level override applied after appearance inheritance).
+    // Ctrl+0 resets the focused session font-size override and the
+    // active tab override back to inheritance.
     //
     // We bind both "=" (the unshifted plus key on US layout) and "+"
     // so the shortcut works regardless of whether the user holds
     // shift to type the plus sign.
     const bumpSessionFont = (delta: number) => {
-      if (focusedSessionId === null) return;
-      const cur =
-        getSessionFontSize(focusedSessionId) ??
-        resolveFontSize(focusedSessionId, state.activeTabId);
+      if (!focusedSession || !state.client) return;
+      const cur = resolveAppearance(
+        settingsRef.current,
+        state.repos,
+        state.workspaces,
+        focusedSession,
+      ).values.terminal_font_size;
       const next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, cur + delta));
-      setSessionFontSize(focusedSessionId, next);
+      state.client.send({
+        type: "set_session_appearance",
+        session_id: focusedSession.id,
+        appearance: {
+          ...focusedSession.appearance,
+          terminal_font_size: next,
+        },
+      });
     };
     const bumpTabFont = (delta: number) => {
       if (!state.activeTabId) return;
+      const appFontSize = resolveAppearanceLayers(
+        null,
+        null,
+        settings.appearance,
+      ).values.terminal_font_size;
       const cur =
         getTabFontSize(state.activeTabId) ??
-        resolveFontSize(null, state.activeTabId);
+        resolveFontSize(state.activeTabId, appFontSize);
       const next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, cur + delta));
       setTabFontSize(state.activeTabId, next);
     };
@@ -1858,8 +1870,15 @@ export default function App() {
       list.push({
         key: "0",
         handler: () => {
-          if (focusedSessionId !== null) {
-            clearSessionFontSize(focusedSessionId);
+          if (focusedSession && state.client) {
+            state.client.send({
+              type: "set_session_appearance",
+              session_id: focusedSession.id,
+              appearance: {
+                ...focusedSession.appearance,
+                terminal_font_size: null,
+              },
+            });
           }
           if (state.activeTabId) {
             clearTabFontSize(state.activeTabId);
@@ -1871,10 +1890,13 @@ export default function App() {
   }, [
     anyModalOpen,
     state.client,
-    state.repos.length,
+    state.repos,
+    state.workspaces,
     state.tabs,
     state.activeTabId,
+    focusedSession,
     focusedSessionId,
+    settings.appearance,
     onActivateTab,
     onOpenSpawn,
     onOpenSettings,
@@ -1895,6 +1917,8 @@ export default function App() {
             tab={binding.tab}
             paneId={popoutPaneId}
             tabs={state.tabs}
+            repos={state.repos}
+            workspaces={state.workspaces}
             client={state.client}
             subscribePty={subscribePty}
           />
@@ -1923,6 +1947,8 @@ export default function App() {
             tab={popoutTab}
             client={state.client}
             sessions={state.sessions}
+            repos={state.repos}
+            workspaces={state.workspaces}
             subscribePty={subscribePty}
             hasRepos={state.repos.length > 0}
           />
@@ -1949,6 +1975,8 @@ export default function App() {
         {state.client && popoutSession ? (
           <SessionWindow
             session={popoutSession}
+            repos={state.repos}
+            workspaces={state.workspaces}
             client={state.client}
             subscribePty={subscribePty}
           />
@@ -2059,6 +2087,8 @@ export default function App() {
                 tabs={state.tabs}
                 client={state.client}
                 sessions={state.sessions}
+                repos={state.repos}
+                workspaces={state.workspaces}
                 subscribePty={subscribePty}
                 focusedPaneId={state.focusedPaneId}
                 onFocusPane={onFocusPane}

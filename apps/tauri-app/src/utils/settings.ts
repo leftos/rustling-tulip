@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CodexSandbox, PermissionMode } from "../types";
+import type { AppearanceOverrides, CodexSandbox, PermissionMode } from "../types";
 
 const DISABLE_NOTIFICATIONS = import.meta.env["VITE_RT_E2E"] === "1";
 
@@ -43,23 +43,8 @@ export interface Settings {
     /// lets the daemon choose its platform default.
     standalone_shell_default_dir: string | null;
   };
+  appearance: AppearanceOverrides;
   terminal: {
-    /// App-wide default font size in pixels. Per-tab and per-session
-    /// overrides live in separate localStorage keys (see
-    /// `utils/fontSize.ts`) because they're keyed by ephemeral ids.
-    /// Clamped to [8, 32] by the UI.
-    font_size: number;
-    /// App-wide terminal font family. `null` keeps the historical
-    /// `'Geist Mono', 'Cascadia Mono', Consolas, …` cascade defined in
-    /// Terminal.tsx. Bundled families (Fira Code, JetBrains Mono,
-    /// Cascadia Code) and system-picked families both stash a plain
-    /// family-name string here; xterm resolves it against
-    /// `document.fonts`.
-    font_family: string | null;
-    /// Render normal-weight text at the bold weight. xterm's
-    /// `fontWeight` option — independent from selection / ANSI bold,
-    /// which always use `fontWeightBold`.
-    font_bold: boolean;
     /// Auto-copy any non-empty terminal selection to the system
     /// clipboard. Opt-out — defaults to `true` because most users
     /// expect PuTTY / GNOME-terminal style selection-copy. Bare Ctrl+C
@@ -85,10 +70,15 @@ export const DEFAULT_SETTINGS: Settings = {
     default_codex_sandbox: null,
     standalone_shell_default_dir: null,
   },
+  appearance: {
+    accent_color: null,
+    terminal_background_color: null,
+    terminal_frame_color: null,
+    terminal_font_family: null,
+    terminal_font_size: 13,
+    terminal_font_bold: false,
+  },
   terminal: {
-    font_size: 13,
-    font_family: null,
-    font_bold: false,
     copy_on_selection: true,
   },
 };
@@ -119,7 +109,13 @@ export function loadSettings(): Settings {
       saveSettings(seeded);
       return seeded;
     }
-    const parsed = JSON.parse(raw) as Partial<Settings>;
+    const parsed = JSON.parse(raw) as Partial<Settings> & {
+      terminal?: Partial<Settings["terminal"]> & {
+        font_size?: unknown;
+        font_family?: unknown;
+        font_bold?: unknown;
+      };
+    };
     return mergeWithDefaults(parsed);
   } catch {
     // Corrupted JSON or storage unavailable — fall back to defaults
@@ -163,8 +159,39 @@ export function useSettings(): [Settings, (next: Settings) => void] {
 /// defaults. Keeps known fields the caller supplied, fills missing
 /// ones from the default. Doesn't attempt deep version migration yet
 /// — when `version` advances, add a switch here.
-function mergeWithDefaults(partial: Partial<Settings>): Settings {
+function mergeWithDefaults(
+  partial: Partial<Settings> & {
+    terminal?: Partial<Settings["terminal"]> & {
+      font_size?: unknown;
+      font_family?: unknown;
+      font_bold?: unknown;
+    };
+  },
+): Settings {
   const def = DEFAULT_SETTINGS;
+  const appearance = {
+    ...def.appearance,
+    ...partial.appearance,
+  };
+  if (
+    partial.appearance?.terminal_font_size === undefined &&
+    typeof partial.terminal?.font_size === "number"
+  ) {
+    appearance.terminal_font_size = partial.terminal.font_size;
+  }
+  if (
+    partial.appearance?.terminal_font_family === undefined &&
+    (typeof partial.terminal?.font_family === "string" ||
+      partial.terminal?.font_family === null)
+  ) {
+    appearance.terminal_font_family = partial.terminal.font_family;
+  }
+  if (
+    partial.appearance?.terminal_font_bold === undefined &&
+    typeof partial.terminal?.font_bold === "boolean"
+  ) {
+    appearance.terminal_font_bold = partial.terminal.font_bold;
+  }
   return {
     version: 1,
     notifications: {
@@ -180,9 +207,12 @@ function mergeWithDefaults(partial: Partial<Settings>): Settings {
       ...def.spawn,
       ...partial.spawn,
     },
+    appearance,
     terminal: {
       ...def.terminal,
       ...partial.terminal,
+      copy_on_selection:
+        partial.terminal?.copy_on_selection ?? def.terminal.copy_on_selection,
     },
   };
 }

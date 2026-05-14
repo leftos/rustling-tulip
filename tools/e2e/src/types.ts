@@ -12,6 +12,16 @@ export interface RepoEntry {
   path: string;
   default_branch: string | null;
   default_use_worktree: boolean;
+  appearance: AppearanceOverrides;
+}
+
+export interface AppearanceOverrides {
+  accent_color: string | null;
+  terminal_background_color: string | null;
+  terminal_frame_color: string | null;
+  terminal_font_family: string | null;
+  terminal_font_size: number | null;
+  terminal_font_bold: boolean | null;
 }
 
 export type SessionStatus =
@@ -51,7 +61,7 @@ export interface SessionSnapshot {
   is_orphan: boolean;
   workspace_id: string | null;
   terminal_title?: string | null;
-  accent_color?: string | null;
+  appearance?: AppearanceOverrides;
   elevated_authority?: boolean;
 }
 
@@ -127,7 +137,21 @@ export type ClientMessage =
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
   | { type: "rename_session"; session_id: string; label: string | null }
-  | { type: "set_session_color"; session_id: string; color: string | null }
+  | {
+      type: "set_repo_appearance";
+      repo_id: string;
+      appearance: AppearanceOverrides;
+    }
+  | {
+      type: "set_workspace_appearance";
+      workspace_id: string;
+      appearance: AppearanceOverrides;
+    }
+  | {
+      type: "set_session_appearance";
+      session_id: string;
+      appearance: AppearanceOverrides;
+    }
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
   | { type: "discard_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }

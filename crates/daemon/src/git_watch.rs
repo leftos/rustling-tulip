@@ -530,10 +530,7 @@ mod tests {
     #[test]
     fn objects_writes_are_ignored() {
         assert_eq!(
-            classify_event(
-                &repo(),
-                &p(&[".git", "objects", "ab", "cdef0123456789"])
-            ),
+            classify_event(&repo(), &p(&[".git", "objects", "ab", "cdef0123456789"])),
             None
         );
         assert_eq!(
@@ -547,30 +544,18 @@ mod tests {
         // logs/HEAD fires on every commit but doesn't change status
         // output beyond what `.git/HEAD` + the new commit ref already
         // covered.
-        assert_eq!(
-            classify_event(&repo(), &p(&[".git", "logs", "HEAD"])),
-            None
-        );
+        assert_eq!(classify_event(&repo(), &p(&[".git", "logs", "HEAD"])), None);
     }
 
     #[test]
     fn fetch_head_is_ignored() {
-        assert_eq!(
-            classify_event(&repo(), &p(&[".git", "FETCH_HEAD"])),
-            None
-        );
+        assert_eq!(classify_event(&repo(), &p(&[".git", "FETCH_HEAD"])), None);
     }
 
     #[test]
     fn lock_files_are_ignored() {
-        assert_eq!(
-            classify_event(&repo(), &p(&[".git", "index.lock"])),
-            None
-        );
-        assert_eq!(
-            classify_event(&repo(), &p(&[".git", "HEAD.lock"])),
-            None
-        );
+        assert_eq!(classify_event(&repo(), &p(&[".git", "index.lock"])), None);
+        assert_eq!(classify_event(&repo(), &p(&[".git", "HEAD.lock"])), None);
     }
 
     #[test]

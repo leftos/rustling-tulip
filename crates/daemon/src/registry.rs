@@ -4,7 +4,7 @@ use crate::git;
 use crate::paths::simplify_path;
 use crate::state::{AppState, PersistedState};
 use anyhow::{Context as _, anyhow};
-use protocol::{Agent, ContainerRef, RepoEntry, SpawnConfig, WorkspaceEntry};
+use protocol::{Agent, AppearanceOverrides, ContainerRef, RepoEntry, SpawnConfig, WorkspaceEntry};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -65,6 +65,7 @@ pub async fn add_repo(
         path: canonical_str,
         default_branch,
         default_use_worktree: true,
+        appearance: AppearanceOverrides::default(),
         last_agent: None,
         last_spawn_config: None,
     };
@@ -84,6 +85,18 @@ pub fn set_repo_worktree_default(
     state.mutate(|s| {
         if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
             repo.default_use_worktree = value;
+        }
+    })
+}
+
+pub fn set_repo_appearance(
+    state: &AppState,
+    repo_id: &str,
+    appearance: AppearanceOverrides,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id) {
+            repo.appearance = appearance;
         }
     })
 }
@@ -142,6 +155,18 @@ pub fn set_workspace_worktree_default(
     })
 }
 
+pub fn set_workspace_appearance(
+    state: &AppState,
+    workspace_id: &str,
+    appearance: AppearanceOverrides,
+) -> anyhow::Result<()> {
+    state.mutate(|s| {
+        if let Some(ws) = s.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+            ws.appearance = appearance;
+        }
+    })
+}
+
 pub fn remove_repo(state: &AppState, repo_id: &str) -> anyhow::Result<()> {
     state.mutate(|s| {
         s.repos.retain(|r| r.id != repo_id);
@@ -181,20 +206,26 @@ pub fn upsert_workspace(
     }
     // Preserve the existing worktree-default and the last-spawn-config when
     // updating an existing workspace; only first-time upserts start fresh.
-    let (prior_default_use_worktree, prior_last_spawn_config) = state.with_persisted(|s| {
-        s.workspaces
-            .iter()
-            .find(|w| w.id == id)
-            .map_or((None, None), |w| {
-                (Some(w.default_use_worktree), w.last_spawn_config.clone())
-            })
-    });
+    let (prior_default_use_worktree, prior_appearance, prior_last_spawn_config) = state
+        .with_persisted(|s| {
+            s.workspaces
+                .iter()
+                .find(|w| w.id == id)
+                .map_or((None, None, None), |w| {
+                    (
+                        Some(w.default_use_worktree),
+                        Some(w.appearance.clone()),
+                        w.last_spawn_config.clone(),
+                    )
+                })
+        });
     let entry = WorkspaceEntry {
         id: id.clone(),
         name: trimmed_name,
         member_repo_ids,
         linked_vscode_workspace,
         default_use_worktree: prior_default_use_worktree.unwrap_or(true),
+        appearance: prior_appearance.unwrap_or_default(),
         last_spawn_config: prior_last_spawn_config,
     };
     state.mutate(|s| {
@@ -227,7 +258,10 @@ pub fn reorder_containers(
     let (known_repos, known_workspaces) = state.with_persisted(|s| {
         (
             s.repos.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
-            s.workspaces.iter().map(|w| w.id.clone()).collect::<Vec<_>>(),
+            s.workspaces
+                .iter()
+                .map(|w| w.id.clone())
+                .collect::<Vec<_>>(),
         )
     });
     for entry in &ordered {
