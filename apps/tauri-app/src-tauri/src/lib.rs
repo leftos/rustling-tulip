@@ -307,6 +307,30 @@ async fn open_path_in_vscode(
     spawn_vscode(&resolved, line, column)
 }
 
+/// Open one or more folders/files in a single VS Code window. The first path
+/// is the primary target; remaining paths are added via `--add`, which gives
+/// the user a multi-root workspace window when called with multiple repo
+/// paths (the workspace context-menu fallback when no `.code-workspace`
+/// file is linked).
+#[tauri::command]
+async fn open_folders_in_vscode(paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("no paths to open".to_string());
+    }
+    let mut resolved = Vec::with_capacity(paths.len());
+    for p in &paths {
+        let pb = PathBuf::from(p);
+        if !pb.exists() {
+            return Err(format!("path does not exist: {p}"));
+        }
+        resolved.push(
+            pb.canonicalize()
+                .map_err(|e| format!("canonicalize {p}: {e}"))?,
+        );
+    }
+    spawn_vscode_multi(&resolved)
+}
+
 fn validate_http_url(url: &str) -> Result<&str, String> {
     if url.trim() != url || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err("URL contains whitespace or control characters".to_string());
@@ -389,6 +413,34 @@ fn spawn_vscode(path: &Path, line: Option<u32>, column: Option<u32>) -> Result<(
             child.arg("-g");
         }
         child.arg(&target);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            child.creation_flags(CREATE_NO_WINDOW);
+        }
+        match child.spawn() {
+            Ok(_) => return Ok(()),
+            Err(err) => last_error = Some(format!("{}: {err}", command.display())),
+        }
+    }
+    Err(format!(
+        "failed to launch VS Code{}",
+        last_error.map_or_else(String::new, |err| format!(" ({err})"))
+    ))
+}
+
+fn spawn_vscode_multi(paths: &[PathBuf]) -> Result<(), String> {
+    let Some((first, rest)) = paths.split_first() else {
+        return Err("no paths to open".to_string());
+    };
+    let mut last_error = None;
+    for command in vscode_commands() {
+        let mut child = Command::new(&command);
+        child.arg(first);
+        for extra in rest {
+            child.arg("--add").arg(extra);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
@@ -638,6 +690,7 @@ pub fn run() {
             reveal_in_explorer,
             open_url,
             open_path_in_vscode,
+            open_folders_in_vscode,
             log_message,
             quit_app
         ])

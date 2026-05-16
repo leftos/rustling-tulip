@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   listPresets,
   type ConnectionState,
@@ -858,6 +859,18 @@ export default function Sidebar(props: Props) {
             if (path) props.onRevealInExplorer(path);
             closeMenu();
           }}
+          onOpenInVscode={() => {
+            openContainerInVscode(
+              contextMenu.container,
+              props.repos,
+              props.workspaces,
+            );
+            closeMenu();
+          }}
+          canOpenInVscode={canOpenContainerInVscode(
+            contextMenu.container,
+            props.workspaces,
+          )}
           onCopyPath={() => {
             const path = contextMenu.container.fsPath;
             if (path) void copyToClipboard(path, "path").catch(() => {});
@@ -1750,6 +1763,8 @@ interface ContextMenuProps {
   onSpawn: () => void;
   onRemove: () => void;
   onReveal: () => void;
+  onOpenInVscode: () => void;
+  canOpenInVscode: boolean;
   onCopyPath: () => void;
   onLaunchPreset: (preset: PresetEntry) => void;
 }
@@ -1909,6 +1924,15 @@ function ContainerContextMenu(p: ContextMenuProps) {
               </button>
             </li>
             <li>
+              <button
+                type="button"
+                onClick={p.onOpenInVscode}
+                disabled={!p.canOpenInVscode}
+              >
+                Open in VS Code
+              </button>
+            </li>
+            <li>
               <button type="button" onClick={p.onCopyPath} disabled={!canReveal}>
                 Copy path
               </button>
@@ -1980,6 +2004,62 @@ function menuTarget(c: TreeContainer): PresetTarget | null {
   if (c.kind === "repo") return { kind: "repo", repo_id: c.id };
   if (c.kind === "workspace") return { kind: "workspace", workspace_id: c.id };
   return null;
+}
+
+/// "Open in VS Code" target resolution. For repos: the repo path. For
+/// workspaces: the linked `.code-workspace` file when present, otherwise
+/// all member repo paths opened as a multi-root window via `--add`.
+function canOpenContainerInVscode(
+  c: TreeContainer,
+  workspaces: WorkspaceEntry[],
+): boolean {
+  if (c.kind === "repo") return c.fsPath !== null;
+  if (c.kind === "workspace") {
+    const ws = workspaces.find((w) => w.id === c.id);
+    if (!ws) return false;
+    return (
+      ws.linked_vscode_workspace !== null || ws.member_repo_ids.length > 0
+    );
+  }
+  return false;
+}
+
+function openContainerInVscode(
+  c: TreeContainer,
+  repos: RepoEntry[],
+  workspaces: WorkspaceEntry[],
+): void {
+  if (c.kind === "repo") {
+    if (!c.fsPath) return;
+    void invoke("open_path_in_vscode", {
+      path: c.fsPath,
+      baseDirs: [],
+    }).catch((err: unknown) => {
+      console.error("open_path_in_vscode failed", err);
+    });
+    return;
+  }
+  if (c.kind !== "workspace") return;
+  const ws = workspaces.find((w) => w.id === c.id);
+  if (!ws) return;
+  if (ws.linked_vscode_workspace) {
+    void invoke("open_path_in_vscode", {
+      path: ws.linked_vscode_workspace,
+      baseDirs: [],
+    }).catch((err: unknown) => {
+      console.error("open_path_in_vscode failed", err);
+    });
+    return;
+  }
+  const memberPaths = ws.member_repo_ids
+    .map((id) => repos.find((r) => r.id === id)?.path)
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
+  if (memberPaths.length === 0) return;
+  void invoke("open_folders_in_vscode", { paths: memberPaths }).catch(
+    (err: unknown) => {
+      console.error("open_folders_in_vscode failed", err);
+    },
+  );
 }
 
 function appearanceForContainer(
