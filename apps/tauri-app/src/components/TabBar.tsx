@@ -4,7 +4,7 @@ import type { DaemonClient } from "../api";
 import type { RearrangeLayout, TabEntry } from "../types";
 import { clampMenuCoord, useEscape } from "../utils/a11y";
 import {
-  collectPanes,
+  pickBalancedDropTarget,
   tabHasBoundSessions,
   tabPaneCount,
 } from "../utils/grid";
@@ -272,13 +272,12 @@ export default function TabBar({
   const onDrop = useCallback(
     (tabId: string, e: React.DragEvent) => {
       e.preventDefault();
-      // Pane drop on a tab pill: route through `move_pane` with the
-      // target tab's first leaf pane as the destination + edge=right
-      // so the source becomes a new sibling pane on the right side.
-      // Previously the pill activated the target tab on dragenter but
-      // silently dropped the gesture — users had to drag through the
-      // pill to a pane in the activated tab, which was awkward when
-      // the target tab was crowded or had no visible drop edge.
+      // Pane drop on a tab pill: route through `move_pane` with a
+      // smart-balanced destination so the source lands next to the
+      // largest pane along its longer axis — matching the auto-add
+      // behavior for new sessions. An empty placeholder pane absorbs
+      // the drop in place; otherwise the layout grows toward a grid
+      // instead of always slicing the leftmost pane.
       const panePayload = e.dataTransfer.getData("text/x-rt-pane");
       if (panePayload) {
         setDragState(null);
@@ -289,19 +288,14 @@ export default function TabBar({
         const targetTab = tabs.find((t) => t.id === tabId);
         if (!targetTab) return;
         const targetGrid = tabGrid(targetTab);
-        const targetPanes = targetGrid ? collectPanes(targetGrid) : [];
         // Diff tabs (and any future non-grid kinds) have no leaf panes.
-        if (targetPanes.length === 0) return;
-        // Prefer absorbing an empty placeholder pane over splitting next
-        // to it — otherwise dropping a session onto an empty Tab 2's pill
-        // leaves the placeholder visible alongside the dropped session.
-        const emptyPane = targetPanes.find((p) => p.session_id === null);
-        const dst = emptyPane ?? targetPanes[0];
+        if (!targetGrid) return;
+        const dst = pickBalancedDropTarget(targetGrid);
         if (!dst) return;
         // Pane-into-self-target no-op (the same pane is already the
-        // destination's first leaf — moving it to its own right edge
-        // would just collapse-and-re-create the parent split).
-        if (srcTab === tabId && srcPane === dst.pane_id) return;
+        // destination — moving it to its own edge would just collapse
+        // and re-create the parent split).
+        if (srcTab === tabId && srcPane === dst.paneId) return;
         const sourceTab = tabs.find((t) => t.id === srcTab) ?? null;
         if (sourceTab) {
           onTabsSnapshotUndo([sourceTab, targetTab], "Moved pane", srcPane);
@@ -311,8 +305,8 @@ export default function TabBar({
           src_tab_id: srcTab,
           src_pane_id: srcPane,
           dst_tab_id: tabId,
-          dst_pane_id: dst.pane_id,
-          edge: emptyPane ? "replace" : "right",
+          dst_pane_id: dst.paneId,
+          edge: dst.edge,
         });
         return;
       }

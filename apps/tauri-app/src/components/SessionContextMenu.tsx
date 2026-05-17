@@ -10,7 +10,7 @@ import {
   type WorkspaceEntry,
 } from "../types";
 import { clampMenuCoord } from "../utils/a11y";
-import { collectPanes, sessionTabBindings } from "../utils/grid";
+import { pickBalancedDropTarget, sessionTabBindings } from "../utils/grid";
 import {
   clearPanePoppedOut,
   markPanePoppedOut,
@@ -37,6 +37,10 @@ export type DuplicateTarget = "new_tab" | { tabId: string };
 interface Props {
   state: SessionContextMenuState;
   tabs: TabEntry[];
+  /// Currently-active main-window tab. Drives the "Add to <name>" entry
+  /// for unbound sessions — the entry is disabled when the active tab
+  /// can't host a pane (diff tab, no active tab).
+  activeTabId: string | null;
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
@@ -64,6 +68,7 @@ type RenameMode = null | { value: string };
 export default function SessionContextMenu({
   state,
   tabs,
+  activeTabId,
   repos,
   workspaces,
   client,
@@ -216,16 +221,45 @@ export default function SessionContextMenu({
     onClose();
   };
 
+  /// "Add to current tab" entry for unbound sessions. The dispatch path
+  /// runs through App.tsx (which knows the smart-placement logic and the
+  /// `latestStateRef`) — same pattern as the duplicate-session events.
+  const activeTabForAdd = activeTabId
+    ? (tabs.find((t) => t.id === activeTabId) ?? null)
+    : null;
+  const canAddToActive =
+    sourceBinding === null && activeTabForAdd !== null
+      ? tabGrid(activeTabForAdd) !== null
+      : false;
+  const addToActiveLabel = activeTabForAdd
+    ? `Add to "${activeTabForAdd.name}"`
+    : "Add to current tab";
+  const sendAddToActive = () => {
+    if (!canAddToActive) return;
+    window.dispatchEvent(
+      new CustomEvent("rt:add_session_to_active_tab", { detail: s.id }),
+    );
+    onClose();
+  };
+  const sendOpenInNewTab = () => {
+    client.send({
+      type: "create_tab",
+      name: null,
+      initial_session_id: s.id,
+    });
+    onClose();
+  };
+
   const onMoveTo = (dstTab: TabEntry) => {
     if (!sourceBinding) return;
     const dstGrid = tabGrid(dstTab);
-    const dstPanes = dstGrid ? collectPanes(dstGrid) : [];
-    // Prefer absorbing an empty placeholder pane over splitting next to
-    // it — otherwise "Move to Tab 2" on a fresh Tab 2 leaves the empty
-    // pane visible alongside the moved session, which feels broken.
-    const emptyPane = dstPanes.find((p) => p.session_id === null);
-    const dstPane = emptyPane ?? dstPanes[0];
-    if (!dstPane) return;
+    if (!dstGrid) return;
+    // Smart-balanced destination: an empty pane absorbs the move in
+    // place; otherwise the largest pane in the destination splits along
+    // its longer axis. Mirrors the auto-add behavior for spawned
+    // sessions and the tab-pill drag-drop path.
+    const dst = pickBalancedDropTarget(dstGrid);
+    if (!dst) return;
     const sourceTab = tabs.find((t) => t.id === sourceBinding.tab_id) ?? null;
     if (onTabsSnapshotUndo && sourceTab) {
       onTabsSnapshotUndo([sourceTab, dstTab], "Moved pane", sourceBinding.pane_id);
@@ -235,8 +269,8 @@ export default function SessionContextMenu({
       src_tab_id: sourceBinding.tab_id,
       src_pane_id: sourceBinding.pane_id,
       dst_tab_id: dstTab.id,
-      dst_pane_id: dstPane.pane_id,
-      edge: emptyPane ? "replace" : "right",
+      dst_pane_id: dst.paneId,
+      edge: dst.edge,
     });
     onClose();
   };
@@ -370,6 +404,36 @@ export default function SessionContextMenu({
                   </li>
                 ))}
               </MenuSubmenu>
+            )}
+
+            {sourceBinding === null && (
+              <>
+                <li>
+                  <button
+                    type="button"
+                    onClick={sendAddToActive}
+                    disabled={!canAddToActive}
+                    title={
+                      canAddToActive
+                        ? `Add this session as a pane in "${activeTabForAdd?.name}"`
+                        : "No active tab can host a new pane"
+                    }
+                    data-testid="session-context-add-to-active-tab"
+                  >
+                    {addToActiveLabel}
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={sendOpenInNewTab}
+                    title="Open this session in a fresh tab"
+                    data-testid="session-context-open-in-new-tab"
+                  >
+                    Open in new tab
+                  </button>
+                </li>
+              </>
             )}
 
             <li className="context-menu-separator" aria-hidden="true" />

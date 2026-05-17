@@ -429,6 +429,7 @@ export default function SessionPane({
         <SessionContextMenu
           state={sessionMenu}
           tabs={tabs}
+          activeTabId={tabId ?? null}
           repos={repos}
           workspaces={workspaces}
           client={client}

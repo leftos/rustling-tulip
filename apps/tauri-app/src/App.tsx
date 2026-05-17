@@ -21,12 +21,15 @@ import {
   tabGrid,
   type ContainerRef,
   type DaemonMessage,
+  type GridNode,
   type PresetEntry,
   type PresetLaunchJobSnapshot,
   type PresetTarget,
   type RepoEntry,
   type SessionSnapshot,
   type SpawnConfig,
+  type SplitDirection,
+  type SplitPlace,
   type TabEntry,
   type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
@@ -64,9 +67,12 @@ import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
 import { randomWorktreeBranchName } from "./utils/randomName";
 import {
+  balanceSplitDirection,
   collectPanes,
   findPaneBinding,
   findTabContainingSession,
+  paneRect,
+  pickBalancedSplitTarget,
   resolveTabFocus,
 } from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
@@ -85,7 +91,6 @@ import {
   setTabFontSize,
 } from "./utils/fontSize";
 import { resolveAppearance, resolveAppearanceLayers } from "./utils/appearance";
-import { sessionDisplayLabel } from "./utils/sessionLabel";
 import { computeWindowTitle } from "./utils/windowTitle";
 
 /// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
@@ -572,11 +577,12 @@ export default function App() {
     // way around would put `client.send(...)` inside a state updater, which
     // StrictMode would double-invoke in dev — hence the two-tabs-per-spawn bug.
     //
-    // Resolution order:
-    //   1. If the session is already shown in some tab → activate that tab
-    //      (and focus its pane). No new tab, no daemon round-trip.
-    //   2. Else if the active tab has a focused empty pane → fill that pane.
-    //   3. Else → open the session in a fresh tab.
+    // Resolution: if the session is already shown in some tab → activate
+    // that tab (and focus its pane). No new tab, no daemon round-trip.
+    // Unbound sessions are left alone here — the explicit recovery paths
+    // (double-click → add to active tab; context menu → add / open in new
+    // tab) avoid creating tabs by accident when the user just wanted to
+    // browse the sidebar.
     const s = latestStateRef.current;
     const client = s?.client;
     if (!client) {
@@ -609,79 +615,63 @@ export default function App() {
       });
       return;
     }
-    let openInNewTab = true;
-    let bindUndoEntry: UndoEntry | null = null;
-    const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
-    const activeGrid = activeTab ? tabGrid(activeTab) : null;
-    if (activeTab && activeGrid) {
-      const panes = collectPanes(activeGrid);
-      const focusedPane = panes.find((p) => p.pane_id === s.focusedPaneId);
-      if (focusedPane && focusedPane.session_id === null) {
-        const session = s.sessions.find((candidate) => candidate.id === sessionId);
-        bindUndoEntry = {
-          id: newUndoId(),
-          kind: "restore_tabs",
-          message: session
-            ? `Bound session "${sessionDisplayLabel(session)}"`
-            : "Bound session",
-          actionLabel: "Undo",
-          tabs: [
-            {
-              tab: cloneTab(activeTab),
-              index: Math.max(
-                0,
-                s.tabs.findIndex((existingTab) => existingTab.id === activeTab.id),
-              ),
-              restoreActive: true,
-              restoreFocusedPaneId: focusedPane.pane_id,
-            },
-          ],
-          expiresAt: Date.now() + UNDO_TTL_MS,
-        };
-        client.send({
-          type: "replace_pane_session",
-          tab_id: activeTab.id,
-          pane_id: focusedPane.pane_id,
-          session_id: sessionId,
-        });
-        openInNewTab = false;
-      }
-    }
-    if (openInNewTab) {
-      client.send({
-        type: "create_tab",
-        name: null,
-        initial_session_id: sessionId,
-      });
-    }
+    // Unbound session: left-click is a no-op (matches user preference —
+    // recovery happens via double-click → add to current tab, or via the
+    // context menu's "Add to current tab" / "Open in new tab" entries).
+    // Still clear attention/spotlight so the click visibly acknowledges
+    // the session.
     setState((cur) => {
+      if (
+        !cur.attentionSessions.has(sessionId) &&
+        cur.spotlightSessionIds.size === 0
+      ) {
+        return cur;
+      }
       const next = new Set(cur.attentionSessions);
       next.delete(sessionId);
-      const nextState = openInNewTab
-        ? {
-            ...cur,
-            attentionSessions: next,
-            pendingTabActivate: cur.pendingTabActivate + 1,
-            spotlightSessionIds: new Set<string>(),
-          }
-        : { ...cur, attentionSessions: next, spotlightSessionIds: new Set<string>() };
-      if (!bindUndoEntry) {
-        return nextState;
-      }
-      const affectedTabIds = new Set(
-        bindUndoEntry.tabs.map((snapshot) => snapshot.tab.id),
-      );
       return {
-        ...nextState,
-        undoEntries: [
-          bindUndoEntry,
-          ...cur.undoEntries.filter(
-            (existingUndo) => !undoTouches(existingUndo, affectedTabIds),
-          ),
-        ].slice(0, UNDO_LIMIT),
+        ...cur,
+        attentionSessions: next,
+        spotlightSessionIds: new Set<string>(),
       };
     });
   }, []);
+
+  /// Bring an unbound session into a pane in `tabId` using the smart
+  /// placement logic. Used by the sidebar's double-click handler and the
+  /// session context menu's "Add to current tab" entry. No-op when the
+  /// target tab can't host (diff tab) or the session is already bound to
+  /// that tab.
+  const onAddSessionToTab = useCallback(
+    (sessionId: string, tabId: string) => {
+      const s = latestStateRef.current;
+      const client = s?.client;
+      if (!client) return;
+      const tab = s.tabs.find((t) => t.id === tabId);
+      const grid = tab ? tabGrid(tab) : null;
+      if (!grid) return;
+      const alreadyBound = collectPanes(grid).some(
+        (p) => p.session_id === sessionId,
+      );
+      if (alreadyBound) {
+        setState((cur) => ({
+          ...cur,
+          activeTabId: tabId,
+          focusedPaneId:
+            cur.focusedPaneByTab[tabId] ?? cur.focusedPaneId,
+        }));
+        return;
+      }
+      const session = s.sessions.find((candidate) => candidate.id === sessionId);
+      if (!session) return;
+      sendAddSessionToTab(client, tabId, session, latestStateRef);
+      setState((cur) => ({
+        ...cur,
+        activeTabId: tabId,
+      }));
+    },
+    [],
+  );
 
   const onSpawnInPane = useCallback(
     (paneId: string) => {
@@ -933,6 +923,23 @@ export default function App() {
     window.addEventListener("rt:duplicate_session", handler);
     return () => window.removeEventListener("rt:duplicate_session", handler);
   }, [onDuplicateSession]);
+
+  // Add an unbound session to the active tab via smart placement. Fired by
+  // the sidebar's session row on double-click and by the session context
+  // menu's "Add to current tab" entry. Routed here so neither surface has
+  // to know the active tab id — App reads it from its own state.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const sid = (ev as CustomEvent<string>).detail;
+      if (typeof sid !== "string" || sid.length === 0) return;
+      const tabId = latestStateRef.current?.activeTabId;
+      if (!tabId) return;
+      onAddSessionToTab(sid, tabId);
+    };
+    window.addEventListener("rt:add_session_to_active_tab", handler);
+    return () =>
+      window.removeEventListener("rt:add_session_to_active_tab", handler);
+  }, [onAddSessionToTab]);
 
   // Restart-in-place from a stopped session's pane. Sequence matters: the
   // daemon processes WS messages in order, so duplicate_session reads the
@@ -2329,8 +2336,10 @@ type PendingSpawnIntent =
   | null;
 
 /// Add the freshly spawned session to the existing `tabId`. Prefers a pane
-/// beside sessions from the same repo/workspace before falling back to the
-/// first empty pane or first pane split.
+/// beside sessions from the same repo/workspace; when a split is needed,
+/// targets the largest pane and bisects along its longer axis so the
+/// resulting layout stays balanced (a 2+1 column grid becomes a 2x2 grid
+/// on the 4th pane instead of slicing the top-left in two).
 function sendAddSessionToTab(
   client: DaemonClient | null,
   tabId: string,
@@ -2342,9 +2351,8 @@ function sendAddSessionToTab(
   const tab = tabs.find((t) => t.id === tabId);
   const grid = tab ? tabGrid(tab) : null;
   if (!grid) return;
-  const panes = collectPanes(grid);
   const sessions = latestStateRef.current?.sessions ?? [];
-  const target = paneTargetForSession(panes, sessions, session);
+  const target = paneTargetForSession(grid, sessions, session);
   if (!target) return;
   if (target.kind === "replace") {
     client.send({
@@ -2359,21 +2367,27 @@ function sendAddSessionToTab(
     type: "split_pane",
     tab_id: tabId,
     pane_id: target.paneId,
-    direction: "horizontal",
-    place: "second",
+    direction: target.direction,
+    place: target.place,
     new_session_id: session.id,
   });
 }
 
 type PanePlacementTarget =
   | { kind: "replace"; paneId: string }
-  | { kind: "split"; paneId: string };
+  | {
+      kind: "split";
+      paneId: string;
+      direction: SplitDirection;
+      place: SplitPlace;
+    };
 
 function paneTargetForSession(
-  panes: Array<{ pane_id: string; session_id: string | null }>,
+  grid: GridNode,
   sessions: SessionSnapshot[],
   session: SessionSnapshot,
 ): PanePlacementTarget | null {
+  const panes = collectPanes(grid);
   const sessionKey = sessionParentKey(session);
   if (sessionKey) {
     const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
@@ -2399,7 +2413,23 @@ function paneTargetForSession(
     const lastMatch = matchingIndexes.at(-1);
     if (lastMatch !== undefined) {
       const pane = panes[lastMatch];
-      if (pane) return { kind: "split", paneId: pane.pane_id };
+      if (pane) {
+        // Split the matching pane along its longer axis so the new sibling
+        // doesn't squeeze a tall column into a skinny strip (or a wide row
+        // into a flat sliver). Falls back to horizontal when the rect lookup
+        // misses, which can only happen if the tree shifted between snapshot
+        // and split — the daemon will reject the split anyway in that case.
+        const rect = paneRect(grid, pane.pane_id);
+        const direction: SplitDirection = rect
+          ? balanceSplitDirection(rect)
+          : "horizontal";
+        return {
+          kind: "split",
+          paneId: pane.pane_id,
+          direction,
+          place: "second",
+        };
+      }
     }
   }
 
@@ -2407,8 +2437,14 @@ function paneTargetForSession(
   if (emptyPane) {
     return { kind: "replace", paneId: emptyPane.pane_id };
   }
-  const anchor = panes[0];
-  return anchor ? { kind: "split", paneId: anchor.pane_id } : null;
+  const balanced = pickBalancedSplitTarget(grid);
+  if (!balanced) return null;
+  return {
+    kind: "split",
+    paneId: balanced.paneId,
+    direction: balanced.direction,
+    place: balanced.place,
+  };
 }
 
 function sessionParentKey(session: SessionSnapshot): string | null {

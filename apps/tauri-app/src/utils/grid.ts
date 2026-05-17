@@ -1,4 +1,10 @@
-import type { GridNode, TabEntry } from "../types";
+import type {
+  GridNode,
+  PaneDropEdge,
+  SplitDirection,
+  SplitPlace,
+  TabEntry,
+} from "../types";
 import { tabGrid } from "../types";
 
 /**
@@ -144,4 +150,120 @@ export function resolveTabFocus(
     return remembered;
   }
   return panes[0]?.pane_id ?? null;
+}
+
+/// Normalized rectangle of a pane within the tab (each axis in 0..1).
+/// Computed by walking the split tree and multiplying each split's ratio
+/// against the running width/height — the same model `SplitRenderer` uses
+/// for its CSS `fr` units, so this matches what the user actually sees.
+export interface PaneRect {
+  paneId: string;
+  sessionId: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/// Compute the normalized rectangle for every pane in `grid`. Order matches
+/// `collectPanes` (left-to-right walk).
+export function paneRects(grid: GridNode): PaneRect[] {
+  const out: PaneRect[] = [];
+  walkRect(grid, 0, 0, 1, 1, out);
+  return out;
+}
+
+function walkRect(
+  node: GridNode,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  out: PaneRect[],
+) {
+  if (node.kind === "pane") {
+    out.push({
+      paneId: node.pane_id,
+      sessionId: node.session_id,
+      x,
+      y,
+      width: w,
+      height: h,
+    });
+    return;
+  }
+  const r = node.ratio;
+  if (node.direction === "horizontal") {
+    walkRect(node.first, x, y, w * r, h, out);
+    walkRect(node.second, x + w * r, y, w * (1 - r), h, out);
+  } else {
+    walkRect(node.first, x, y, w, h * r, out);
+    walkRect(node.second, x, y + h * r, w, h * (1 - r), out);
+  }
+}
+
+/// Look up a single pane's rectangle. `null` if the pane id is unknown.
+export function paneRect(grid: GridNode, paneId: string): PaneRect | null {
+  return paneRects(grid).find((r) => r.paneId === paneId) ?? null;
+}
+
+/// Pick the split direction that bisects `rect` along its longer axis.
+/// Splitting a wide pane horizontally (vertical divider) and a tall pane
+/// vertically (horizontal divider) keeps the resulting children closer to
+/// square, which is the rule that lets the auto-placer turn a 2+1 column
+/// layout into a 2x2 grid on the 4th pane.
+export function balanceSplitDirection(rect: {
+  width: number;
+  height: number;
+}): SplitDirection {
+  return rect.width >= rect.height ? "horizontal" : "vertical";
+}
+
+/// Pick the pane to split for a new auto-placed pane, plus the split
+/// direction that keeps the resulting layout balanced. Returns the largest
+/// pane (by rendered area) and the direction from `balanceSplitDirection`,
+/// with the new sibling on the `second` (right/bottom) side. Returns `null`
+/// for an empty grid.
+export function pickBalancedSplitTarget(grid: GridNode): {
+  paneId: string;
+  direction: SplitDirection;
+  place: SplitPlace;
+} | null {
+  const rects = paneRects(grid);
+  let best: PaneRect | null = null;
+  for (const r of rects) {
+    if (!best || r.width * r.height > best.width * best.height) {
+      best = r;
+    }
+  }
+  if (!best) return null;
+  return {
+    paneId: best.paneId,
+    direction: balanceSplitDirection(best),
+    place: "second",
+  };
+}
+
+/// Pick a destination pane + edge for a `move_pane` that targets an entire
+/// tab (the user dropped a pane on a tab pill, or chose "Move to" from a
+/// context menu without picking a specific drop edge). Mirrors the
+/// auto-placement rules used for spawning: an empty pane absorbs the drop
+/// in place; otherwise the largest pane is bisected along its longer axis,
+/// with the moved pane landing as the right/bottom sibling. Returns `null`
+/// for an empty grid.
+export function pickBalancedDropTarget(grid: GridNode): {
+  paneId: string;
+  edge: PaneDropEdge;
+} | null {
+  const panes = collectPanes(grid);
+  const emptyPane = panes.find((p) => p.session_id === null);
+  if (emptyPane) {
+    return { paneId: emptyPane.pane_id, edge: "replace" };
+  }
+  const balanced = pickBalancedSplitTarget(grid);
+  if (!balanced) return null;
+  return {
+    paneId: balanced.paneId,
+    edge: balanced.direction === "horizontal" ? "right" : "bottom",
+  };
 }

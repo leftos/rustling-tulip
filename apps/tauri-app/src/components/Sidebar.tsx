@@ -916,6 +916,7 @@ export default function Sidebar(props: Props) {
         <SessionContextMenu
           state={sessionMenu}
           tabs={props.tabs}
+          activeTabId={props.activeTabId}
           repos={props.repos}
           workspaces={props.workspaces}
           client={props.client}
@@ -1534,6 +1535,17 @@ function SessionLeaf(p: SessionLeafProps) {
       initial_session_id: s.id,
     });
   };
+  /// Double-click on an unbound session row → add it to the active tab
+  /// using smart placement. App.tsx routes the event because the leaf
+  /// doesn't know the active tab id. For bound sessions the gesture is
+  /// a no-op (single click already activates the tab).
+  const onDoubleClick = (e: React.MouseEvent) => {
+    if (bindings.length > 0) return;
+    e.stopPropagation();
+    window.dispatchEvent(
+      new CustomEvent("rt:add_session_to_active_tab", { detail: s.id }),
+    );
+  };
   const classes = [
     "tree-row",
     "tree-leaf",
@@ -1558,6 +1570,7 @@ function SessionLeaf(p: SessionLeafProps) {
         className={classes}
         style={sessionAccentStyle(accentColor)}
         onClick={() => p.onSelect(s.id)}
+        onDoubleClick={onDoubleClick}
         role="button"
         tabIndex={0}
         aria-label={`Session ${sessionDisplayLabel(s)}`}
