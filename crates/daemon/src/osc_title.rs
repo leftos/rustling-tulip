@@ -8,13 +8,16 @@
 //! - `ESC ] 1 ; <title> BEL`  (icon only — most terminals also surface this as the title)
 //! - `ESC ] 2 ; <title> BEL`  (window title only)
 //! - `ESC ] 7 ; file://<host>/<cwd> BEL`  (current working directory)
-//! - `0x9D <0|1|2|7> ; <payload> 0x9C`  (8-bit C1 OSC/ST form)
 //! - for plain shells only, visible `PS <cwd>` prompt text as a fallback for
 //!   sessions that were spawned before the prompt hook emitted OSC 7.
 //!
-//! Either `BEL` (`0x07`) or `ST` (`ESC \`) terminates the string. Title bytes
-//! are decoded as UTF-8 lossily — non-UTF-8 bytes turn into U+FFFD rather than
-//! dropping the whole title.
+//! Either `BEL` (`0x07`) or `ST` (`ESC \`) terminates the string. The 8-bit C1
+//! forms (`0x9D` to open, `0x9C` to terminate) are intentionally NOT recognized:
+//! both bytes are valid UTF-8 continuation bytes that appear inside common
+//! multi-byte characters (e.g. `"` U+201C = `0xE2 0x80 0x9C`), so accepting
+//! them as control plane would truncate titles mid-character. Titles whose
+//! bytes are not valid UTF-8 are dropped rather than emitted with U+FFFD
+//! replacement characters.
 //!
 //! Defensive caps:
 //! - Titles longer than [`MAX_TITLE_BYTES`] are dropped at emit time.
@@ -36,8 +39,6 @@ const MAX_BUFFER_BYTES: usize = 4096;
 const MAX_PROMPT_TAIL_BYTES: usize = 8192;
 const BEL: u8 = 0x07;
 const ESC: u8 = 0x1B;
-const OSC_C1: u8 = 0x9D;
-const ST_C1: u8 = 0x9C;
 
 #[derive(Debug)]
 enum State {
@@ -90,11 +91,6 @@ impl Parser {
                 State::Normal => {
                     if b == ESC {
                         self.state = State::AfterEsc;
-                    } else if b == OSC_C1 {
-                        self.state = State::OscParam {
-                            param: 0,
-                            had_digit: false,
-                        };
                     }
                 }
                 State::AfterEsc => {
@@ -131,7 +127,7 @@ impl Parser {
                     }
                 }
                 State::OscString { param } => {
-                    if b == BEL || b == ST_C1 {
+                    if b == BEL {
                         if let Some(event) = self.emit(param) {
                             events.push(event);
                         }
@@ -182,7 +178,10 @@ impl Parser {
         if bytes.is_empty() || bytes.len() > max_bytes_for_param(param) {
             return None;
         }
-        let value = String::from_utf8_lossy(&bytes).trim().to_string();
+        let Ok(decoded) = std::str::from_utf8(&bytes) else {
+            return None;
+        };
+        let value = decoded.trim().to_string();
         if value.is_empty() {
             return None;
         }
@@ -293,51 +292,41 @@ fn strip_terminal_sequences(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            ESC => {
-                i += 1;
-                if i >= bytes.len() {
-                    break;
-                }
-                if bytes[i] == b'[' {
-                    i += 1;
-                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    i = (i + 1).min(bytes.len());
-                } else if bytes[i] == b']' {
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == BEL {
-                            i += 1;
-                            break;
-                        }
-                        if bytes[i] == ESC && bytes.get(i + 1) == Some(&b'\\') {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
-                }
+        if bytes[i] == ESC {
+            i += 1;
+            if i >= bytes.len() {
+                break;
             }
-            OSC_C1 => {
+            if bytes[i] == b'[' {
                 i += 1;
-                while i < bytes.len() && bytes[i] != ST_C1 {
+                while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
                     i += 1;
                 }
                 i = (i + 1).min(bytes.len());
-            }
-            _ => {
-                let Some(ch) = input[i..].chars().next() else {
-                    break;
-                };
-                if !ch.is_control() || ch == '\r' || ch == '\n' || ch == '\t' {
-                    out.push(ch);
+            } else if bytes[i] == b']' {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == BEL {
+                        i += 1;
+                        break;
+                    }
+                    if bytes[i] == ESC && bytes.get(i + 1) == Some(&b'\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
                 }
-                i += ch.len_utf8();
+            } else {
+                i += 1;
             }
+        } else {
+            let Some(ch) = input[i..].chars().next() else {
+                break;
+            };
+            if !ch.is_control() || ch == '\r' || ch == '\n' || ch == '\t' {
+                out.push(ch);
+            }
+            i += ch.len_utf8();
         }
     }
     out
@@ -454,13 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn c1_osc_and_st() {
-        let mut p = Parser::new(false);
-        let titles = feed_all(&mut p, &[b"\x9d0;c1-title\x9c"]);
-        assert_eq!(titles, vec![title("c1-title")]);
-    }
-
-    #[test]
     fn split_across_chunks() {
         let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"prefix\x1b]0;part", b"ial-then\x07rest"]);
@@ -503,6 +485,41 @@ mod tests {
         // After the runaway, a fresh sequence should still parse.
         let titles = feed_all(&mut p, &[b"\x1b]0;ok\x07"]);
         assert_eq!(titles, vec![title("ok")]);
+    }
+
+    #[test]
+    fn title_with_curly_double_quote_round_trips() {
+        // U+201C LEFT DOUBLE QUOTATION MARK = 0xE2 0x80 0x9C.
+        // The 0x9C used to be misread as C1 ST and truncated the title mid-char.
+        let mut p = Parser::new(false);
+        let titles = feed_all(&mut p, &[b"\x1b]0;\xe2\x80\x9chello\xe2\x80\x9d\x07"]);
+        assert_eq!(titles, vec![title("\u{201c}hello\u{201d}")]);
+    }
+
+    #[test]
+    fn title_with_six_pointed_star_round_trips() {
+        // U+273B SIX POINTED BLACK STAR = 0xE2 0x9C 0xBB.
+        // Reproduces the Claude-CLI title bug where 0x9C terminated mid-glyph.
+        let mut p = Parser::new(false);
+        let titles = feed_all(&mut p, &[b"\x1b]2;\xe2\x9c\xbb Claude\x07"]);
+        assert_eq!(titles, vec![title("\u{273b} Claude")]);
+    }
+
+    #[test]
+    fn title_with_u_umlaut_round_trips() {
+        // U+00DC LATIN CAPITAL LETTER U WITH DIAERESIS = 0xC3 0x9C.
+        let mut p = Parser::new(false);
+        let titles = feed_all(&mut p, &[b"\x1b]0;\xc3\x9cber\x07"]);
+        assert_eq!(titles, vec![title("\u{00dc}ber")]);
+    }
+
+    #[test]
+    fn invalid_utf8_title_is_dropped() {
+        // 0xFE is never valid in UTF-8. Old behavior: emit a U+FFFD-only title.
+        // New behavior: drop it entirely so a real follow-up can win.
+        let mut p = Parser::new(false);
+        let titles = feed_all(&mut p, &[b"\x1b]0;\xfe\xfe\x07"]);
+        assert!(titles.is_empty(), "got titles: {titles:?}");
     }
 
     #[test]
