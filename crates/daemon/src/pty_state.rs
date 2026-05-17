@@ -22,26 +22,30 @@ const SCROLLBACK_BYTES: usize = 8 * 1024;
 /// Sliding window used to compare input vs output byte volume. Chosen to be
 /// long enough to smooth out inter-keystroke timing for slow typists, short
 /// enough that the dot reacts to model output within a fraction of a second.
-const VOLUME_WINDOW: Duration = Duration::from_millis(500);
+const VOLUME_WINDOW: Duration = Duration::from_millis(750);
 
 /// Output bytes per input byte that we still consider "echo / TUI redraw"
 /// rather than model output. One keystroke in codex/Claude's input box can
 /// emit cursor moves, color resets, and a full line redraw — easily a few
 /// hundred bytes. Picked generously so a fast typist never trips Working;
 /// the model's streaming output dwarfs this budget within one window.
-const ECHO_BUDGET_PER_INPUT_BYTE: u64 = 512;
+const ECHO_BUDGET_PER_INPUT_BYTE: u64 = 1024;
 
 /// Minimum excess (output above echo budget) before we flip to Working.
 /// Stops a stray cursor-position report or title escape from blipping the
 /// dot blue between keystrokes.
-const MIN_WORKING_EXCESS: u64 = 64;
+const MIN_WORKING_EXCESS: u64 = 192;
 
 /// Shells echo commands and prompts, but a real command's output should
-/// outpace that echo quickly. Keep this tighter than the agent TUI budget so
-/// short shell commands visibly pulse without treating normal typing as work.
-const SHELL_ECHO_BUDGET_PER_INPUT_BYTE: u64 = 8;
-const SHELL_MIN_WORKING_OUTPUT: u64 = 160;
-const SHELL_MIN_WORKING_EXCESS: u64 = 96;
+/// outpace that echo quickly. PowerShell's `PSReadLine` drives this — one
+/// keystroke can repaint the current line with syntax-highlighted colors,
+/// emitting cursor-position escapes, color resets, and the redrawn line
+/// (easily 60–200 bytes per char). Keep this looser than the agent TUI
+/// budget for `ls`-class commands but generous enough that typing doesn't
+/// flap the status dot.
+const SHELL_ECHO_BUDGET_PER_INPUT_BYTE: u64 = 64;
+const SHELL_MIN_WORKING_OUTPUT: u64 = 320;
+const SHELL_MIN_WORKING_EXCESS: u64 = 256;
 
 pub struct AttentionEvent {
     pub session_id: String,
@@ -84,6 +88,16 @@ pub fn watch(
                     Ok(bytes) => {
                         let now = Instant::now();
                         last_output = now;
+                        // Drain any input pulses that landed in our channel before
+                        // (or alongside) this output chunk so the echo budget is
+                        // computed against the right input volume. Without this,
+                        // tokio::select polling can resolve the output arm before
+                        // the input arm for a near-simultaneous keystroke, leaving
+                        // in_sum at zero when we classify a TUI redraw caused by
+                        // that keystroke.
+                        while let Ok(n) = input_pulses.try_recv() {
+                            push_window(&mut in_window, now, n);
+                        }
                         append_scrollback(&mut scrollback, &bytes);
                         push_window(&mut out_window, now, bytes.len());
                         trim_window(&mut in_window, now);
@@ -170,6 +184,13 @@ pub fn watch_plain_shell(
                     Ok(bytes) => {
                         let now = Instant::now();
                         last_output = now;
+                        // See watcher in `watch` for the rationale — drain
+                        // pending input pulses before classifying so a fast
+                        // typist's keystroke doesn't race ahead of its own
+                        // echo into the Working state.
+                        while let Ok(n) = input_pulses.try_recv() {
+                            push_window(&mut in_window, now, n);
+                        }
                         push_window(&mut out_window, now, bytes.len());
                         trim_window(&mut in_window, now);
                         trim_window(&mut out_window, now);
@@ -391,6 +412,13 @@ mod tests {
     #[test]
     fn shell_echo_budget_suppresses_typed_input_redraws() {
         assert!(!shell_output_is_working(32, 220));
+    }
+
+    #[test]
+    fn pwsh_syntax_highlight_burst_does_not_mark_working() {
+        // Typing 4 chars into PSReadLine: ~100 bytes of redraw per char,
+        // including cursor moves, color sets, and the re-emitted line tail.
+        assert!(!shell_output_is_working(4, 400));
     }
 
     #[test]

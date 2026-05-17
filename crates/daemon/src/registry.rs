@@ -101,6 +101,27 @@ pub fn set_repo_appearance(
     })
 }
 
+/// Lazily fill in a repo's `default_branch` when it's still None on the
+/// persisted entry (initial detection failed, was added by an older build,
+/// etc.). Idempotent — does nothing if the value is already set or if the
+/// caller's freshly-detected value is also None. Returns the resolved
+/// branch name so callers can use it without re-reading state.
+pub fn ensure_default_branch(
+    state: &AppState,
+    repo_id: &str,
+    detected: Option<String>,
+) -> Option<String> {
+    detected.as_ref()?;
+    let _ = state.mutate(|s| {
+        if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id)
+            && repo.default_branch.is_none()
+        {
+            repo.default_branch.clone_from(&detected);
+        }
+    });
+    detected
+}
+
 /// Record which agent was last spawned against a given repo. Drives the
 /// spawn-dialog default so repeated launches don't force the user to re-pick.
 /// Silently no-ops if `repo_id` does not match any registered repo.

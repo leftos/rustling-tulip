@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   isPermissionGranted,
   requestPermission,
@@ -18,6 +18,26 @@ interface Props {
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
 
+type SettingsTabKey =
+  | "general"
+  | "notifications"
+  | "spawn"
+  | "appearance"
+  | "title";
+
+interface SettingsTabDef {
+  key: SettingsTabKey;
+  label: string;
+}
+
+const SETTINGS_TABS: SettingsTabDef[] = [
+  { key: "general", label: "General" },
+  { key: "notifications", label: "Notifications" },
+  { key: "spawn", label: "Spawn defaults" },
+  { key: "appearance", label: "Appearance" },
+  { key: "title", label: "App Title" },
+];
+
 /// Settings modal — a thin localStorage-backed configuration surface.
 /// State persistence runs through `saveSettings` in `utils/settings.ts`,
 /// which writes localStorage AND fires a `rt:settings-changed` window event
@@ -26,6 +46,8 @@ export default function SettingsModal({ settings, onClose }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
   useFocusReturn();
+
+  const [activeTab, setActiveTab] = useState<SettingsTabKey>("general");
 
   // Edit-in-place: we mutate a local copy and call `saveSettings` on each
   // change so the user sees instant feedback without a separate Save /
@@ -36,35 +58,6 @@ export default function SettingsModal({ settings, onClose }: Props) {
     },
     [settings],
   );
-
-  const [permission, setPermission] = useState<PermissionState>("unknown");
-  const [permissionPending, setPermissionPending] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const granted = await isPermissionGranted();
-      if (cancelled) return;
-      setPermission(granted ? "granted" : "default");
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const onRequestPermission = useCallback(() => {
-    setPermissionPending(true);
-    void (async () => {
-      try {
-        const result = await requestPermission();
-        setPermission(result as PermissionState);
-        logToFile("info", `settings: requestPermission -> ${result}`);
-      } catch (err) {
-        logToFile("error", `settings: requestPermission threw: ${String(err)}`);
-      } finally {
-        setPermissionPending(false);
-      }
-    })();
-  }, []);
 
   // Focus the Close button by default — Settings is a non-destructive
   // surface and we don't have a single "primary" action to autofocus.
@@ -97,249 +90,64 @@ export default function SettingsModal({ settings, onClose }: Props) {
             <Icon name="close" />
           </button>
         </header>
-        <div className="modal-body settings-body">
-          <section
-            className="settings-section"
-            data-testid="settings-section-notifications"
+        <div className="settings-layout">
+          <nav
+            className="settings-tablist"
+            role="tablist"
+            aria-label="Settings sections"
           >
-            <h3>Notifications</h3>
-            <div className="settings-row">
-              <span>Permission</span>
-              <div className="settings-row-control">
-                <PermissionBadge state={permission} />
-                <button
-                  type="button"
-                  onClick={onRequestPermission}
-                  disabled={permissionPending || permission === "granted"}
-                  data-testid="settings-permission-request"
-                  title={
-                    permission === "granted"
-                      ? "Already granted — managed by the OS now. Toggle via System Settings if you need to revoke."
-                      : "Re-request OS notification permission"
-                  }
-                >
-                  {permissionPending
-                    ? "Requesting…"
-                    : permission === "granted"
-                      ? "Granted"
-                      : "Request permission"}
-                </button>
-              </div>
-            </div>
-            <p className="settings-section-hint">
-              Fire an OS notification when a session transitions to:
-            </p>
-            <Toggle
-              testid="settings-notify-awaiting-input"
-              label="Awaiting input"
-              checked={settings.notifications.awaiting_input}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  notifications: { ...s.notifications, awaiting_input: v },
-                }))
-              }
-            />
-            <Toggle
-              testid="settings-notify-stopped"
-              label="Stopped"
-              checked={settings.notifications.stopped}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  notifications: { ...s.notifications, stopped: v },
-                }))
-              }
-            />
-            <Toggle
-              testid="settings-notify-error"
-              label="Errored"
-              checked={settings.notifications.error}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  notifications: { ...s.notifications, error: v },
-                }))
-              }
-            />
-          </section>
-
-          <section
-            className="settings-section"
-            data-testid="settings-section-sidebar"
-          >
-            <h3>Sidebar</h3>
-            <div className="settings-row">
-              <span>Default view</span>
-              <div
-                className="sidebar-view-toggle"
-                role="radiogroup"
-                aria-label="Default sidebar view"
+            {SETTINGS_TABS.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                id={`settings-tab-${tab.key}`}
+                aria-controls={`settings-panel-${tab.key}`}
+                aria-selected={activeTab === tab.key}
+                className={
+                  activeTab === tab.key
+                    ? "settings-tab settings-tab-active"
+                    : "settings-tab"
+                }
+                onClick={() => setActiveTab(tab.key)}
+                data-testid={`settings-tab-${tab.key}`}
               >
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={
-                    settings.sidebar.default_view === "container"
-                  }
-                  className={
-                    settings.sidebar.default_view === "container"
-                      ? "active"
-                      : ""
-                  }
-                  onClick={() =>
-                    update((s) => ({
-                      ...s,
-                      sidebar: { default_view: "container" },
-                    }))
-                  }
-                  data-testid="settings-sidebar-view-container"
-                >
-                  Repos
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={settings.sidebar.default_view === "tab"}
-                  className={
-                    settings.sidebar.default_view === "tab" ? "active" : ""
-                  }
-                  onClick={() =>
-                    update((s) => ({
-                      ...s,
-                      sidebar: { default_view: "tab" },
-                    }))
-                  }
-                  data-testid="settings-sidebar-view-tab"
-                >
-                  Tabs
-                </button>
-              </div>
-            </div>
-            <p className="settings-section-hint">
-              Applied on a fresh window. The in-window toggle in the sidebar
-              header still works per-session.
-            </p>
-          </section>
-
-          <section
-            className="settings-section"
-            data-testid="settings-section-spawn"
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+          <div
+            className="modal-body settings-body"
+            role="tabpanel"
+            id={`settings-panel-${activeTab}`}
+            aria-labelledby={`settings-tab-${activeTab}`}
           >
-            <h3>Spawn defaults</h3>
-            <p className="settings-section-hint">
-              Pre-fill these in the spawn dialog. You can override on every
-              spawn.
-            </p>
-            <Toggle
-              testid="settings-spawn-skip-permissions"
-              label="Trusted launch by default"
-              checked={settings.spawn.skip_permissions_default}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  spawn: { ...s.spawn, skip_permissions_default: v },
-                }))
-              }
-            />
-            <p className="settings-section-hint">
-              When enabled, new Claude and Codex sessions bypass approval
-              prompts. Codex also bypasses sandboxing.
-            </p>
-            <div className="settings-row">
-              <span>Claude approval mode</span>
-              <select
-                value={settings.spawn.default_permission_mode ?? ""}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  const next: PermissionMode | null =
-                    value === ""
-                      ? null
-                      : (value as PermissionMode);
+            {activeTab === "general" && (
+              <GeneralPanel settings={settings} update={update} />
+            )}
+            {activeTab === "notifications" && (
+              <NotificationsPanel settings={settings} update={update} />
+            )}
+            {activeTab === "spawn" && (
+              <SpawnPanel settings={settings} update={update} />
+            )}
+            {activeTab === "appearance" && (
+              <AppearanceFields
+                value={settings.appearance}
+                inherited={resolveAppearanceLayers(null, null, null)}
+                inheritLabel="Use built-in"
+                onChange={(appearance) =>
                   update((s) => ({
                     ...s,
-                    spawn: { ...s.spawn, default_permission_mode: next },
-                  }));
-                }}
-                disabled={settings.spawn.skip_permissions_default}
-                data-testid="settings-spawn-permission-mode"
-                title={
-                  settings.spawn.skip_permissions_default
-                    ? "Ignored while trusted launch is on"
-                    : ""
+                    appearance,
+                  }))
                 }
-              >
-                <option value="">(none — claude's default)</option>
-                <option value="default">default</option>
-                <option value="accept_edits">accept edits</option>
-                <option value="bypass_permissions">bypass permissions</option>
-                <option value="plan">plan</option>
-              </select>
-            </div>
-            <div className="settings-row">
-              <span>Codex sandbox mode</span>
-              <select
-                value={settings.spawn.default_codex_sandbox ?? ""}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  const next: CodexSandbox | null =
-                    value === ""
-                      ? null
-                      : (value as CodexSandbox);
-                  update((s) => ({
-                    ...s,
-                    spawn: { ...s.spawn, default_codex_sandbox: next },
-                  }));
-                }}
-                disabled={settings.spawn.skip_permissions_default}
-                data-testid="settings-spawn-codex-sandbox"
-                title={
-                  settings.spawn.skip_permissions_default
-                    ? "Ignored while trusted launch is on"
-                    : ""
-                }
-              >
-                <option value="">(none — codex's default)</option>
-                <option value="read-only">read-only</option>
-                <option value="workspace-write">workspace-write</option>
-                <option value="danger-full-access">danger-full-access</option>
-              </select>
-            </div>
-          </section>
-
-          <AppearanceFields
-            value={settings.appearance}
-            inherited={resolveAppearanceLayers(null, null, null)}
-            inheritLabel="Use built-in"
-            onChange={(appearance) =>
-              update((s) => ({
-                ...s,
-                appearance,
-              }))
-            }
-          />
-
-          <section
-            className="settings-section"
-            data-testid="settings-section-terminal"
-          >
-            <h3>Terminal behavior</h3>
-            <Toggle
-              testid="settings-terminal-copy-on-selection"
-              label="Copy selection to clipboard automatically"
-              checked={settings.terminal.copy_on_selection}
-              onChange={(v) =>
-                update((s) => ({
-                  ...s,
-                  terminal: { ...s.terminal, copy_on_selection: v },
-                }))
-              }
-            />
-            <p className="settings-section-hint">
-              Off: select to highlight, copy explicitly with Ctrl+C
-              (when there's a selection) or Ctrl+Shift+C.
-            </p>
-          </section>
+              />
+            )}
+            {activeTab === "title" && (
+              <TitlePanel settings={settings} update={update} />
+            )}
+          </div>
         </div>
         <footer className="modal-footer">
           <button
@@ -354,6 +162,339 @@ export default function SettingsModal({ settings, onClose }: Props) {
         </footer>
       </div>
     </div>
+  );
+}
+
+interface PanelProps {
+  settings: Settings;
+  update: (mut: (s: Settings) => Settings) => void;
+}
+
+function GeneralPanel({ settings, update }: PanelProps) {
+  return (
+    <>
+      <section
+        className="settings-section"
+        data-testid="settings-section-sidebar"
+      >
+        <h3>Sidebar</h3>
+        <div className="settings-row">
+          <span>Default view</span>
+          <div
+            className="sidebar-view-toggle"
+            role="radiogroup"
+            aria-label="Default sidebar view"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={settings.sidebar.default_view === "container"}
+              className={
+                settings.sidebar.default_view === "container" ? "active" : ""
+              }
+              onClick={() =>
+                update((s) => ({
+                  ...s,
+                  sidebar: { default_view: "container" },
+                }))
+              }
+              data-testid="settings-sidebar-view-container"
+            >
+              Repos
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={settings.sidebar.default_view === "tab"}
+              className={
+                settings.sidebar.default_view === "tab" ? "active" : ""
+              }
+              onClick={() =>
+                update((s) => ({
+                  ...s,
+                  sidebar: { default_view: "tab" },
+                }))
+              }
+              data-testid="settings-sidebar-view-tab"
+            >
+              Tabs
+            </button>
+          </div>
+        </div>
+        <p className="settings-section-hint">
+          Applied on a fresh window. The in-window toggle in the sidebar
+          header still works per-session.
+        </p>
+      </section>
+
+      <section
+        className="settings-section"
+        data-testid="settings-section-terminal"
+      >
+        <h3>Terminal behavior</h3>
+        <Toggle
+          testid="settings-terminal-copy-on-selection"
+          label="Copy selection to clipboard automatically"
+          checked={settings.terminal.copy_on_selection}
+          onChange={(v) =>
+            update((s) => ({
+              ...s,
+              terminal: { ...s.terminal, copy_on_selection: v },
+            }))
+          }
+        />
+        <p className="settings-section-hint">
+          Off: select to highlight, copy explicitly with Ctrl+C
+          (when there's a selection) or Ctrl+Shift+C.
+        </p>
+      </section>
+    </>
+  );
+}
+
+function NotificationsPanel({ settings, update }: PanelProps) {
+  const [permission, setPermission] = useState<PermissionState>("unknown");
+  const [permissionPending, setPermissionPending] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const granted = await isPermissionGranted();
+      if (cancelled) return;
+      setPermission(granted ? "granted" : "default");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onRequestPermission = useCallback(() => {
+    setPermissionPending(true);
+    void (async () => {
+      try {
+        const result = await requestPermission();
+        setPermission(result as PermissionState);
+        logToFile("info", `settings: requestPermission -> ${result}`);
+      } catch (err) {
+        logToFile("error", `settings: requestPermission threw: ${String(err)}`);
+      } finally {
+        setPermissionPending(false);
+      }
+    })();
+  }, []);
+
+  return (
+    <section
+      className="settings-section"
+      data-testid="settings-section-notifications"
+    >
+      <h3>Notifications</h3>
+      <div className="settings-row">
+        <span>Permission</span>
+        <div className="settings-row-control">
+          <PermissionBadge state={permission} />
+          <button
+            type="button"
+            onClick={onRequestPermission}
+            disabled={permissionPending || permission === "granted"}
+            data-testid="settings-permission-request"
+            title={
+              permission === "granted"
+                ? "Already granted — managed by the OS now. Toggle via System Settings if you need to revoke."
+                : "Re-request OS notification permission"
+            }
+          >
+            {permissionPending
+              ? "Requesting…"
+              : permission === "granted"
+                ? "Granted"
+                : "Request permission"}
+          </button>
+        </div>
+      </div>
+      <p className="settings-section-hint">
+        Fire an OS notification when a session transitions to:
+      </p>
+      <Toggle
+        testid="settings-notify-awaiting-input"
+        label="Awaiting input"
+        checked={settings.notifications.awaiting_input}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            notifications: { ...s.notifications, awaiting_input: v },
+          }))
+        }
+      />
+      <Toggle
+        testid="settings-notify-stopped"
+        label="Stopped"
+        checked={settings.notifications.stopped}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            notifications: { ...s.notifications, stopped: v },
+          }))
+        }
+      />
+      <Toggle
+        testid="settings-notify-error"
+        label="Errored"
+        checked={settings.notifications.error}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            notifications: { ...s.notifications, error: v },
+          }))
+        }
+      />
+    </section>
+  );
+}
+
+function SpawnPanel({ settings, update }: PanelProps) {
+  return (
+    <section
+      className="settings-section"
+      data-testid="settings-section-spawn"
+    >
+      <h3>Spawn defaults</h3>
+      <p className="settings-section-hint">
+        Pre-fill these in the spawn dialog. You can override on every spawn.
+      </p>
+      <Toggle
+        testid="settings-spawn-skip-permissions"
+        label="Trusted launch by default"
+        checked={settings.spawn.skip_permissions_default}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            spawn: { ...s.spawn, skip_permissions_default: v },
+          }))
+        }
+      />
+      <p className="settings-section-hint">
+        When enabled, new Claude and Codex sessions bypass approval
+        prompts. Codex also bypasses sandboxing.
+      </p>
+      <div className="settings-row">
+        <span>Claude approval mode</span>
+        <select
+          value={settings.spawn.default_permission_mode ?? ""}
+          onChange={(e) => {
+            const value = e.target.value;
+            const next: PermissionMode | null =
+              value === "" ? null : (value as PermissionMode);
+            update((s) => ({
+              ...s,
+              spawn: { ...s.spawn, default_permission_mode: next },
+            }));
+          }}
+          disabled={settings.spawn.skip_permissions_default}
+          data-testid="settings-spawn-permission-mode"
+          title={
+            settings.spawn.skip_permissions_default
+              ? "Ignored while trusted launch is on"
+              : ""
+          }
+        >
+          <option value="">(none — claude's default)</option>
+          <option value="default">default</option>
+          <option value="accept_edits">accept edits</option>
+          <option value="bypass_permissions">bypass permissions</option>
+          <option value="plan">plan</option>
+        </select>
+      </div>
+      <div className="settings-row">
+        <span>Codex sandbox mode</span>
+        <select
+          value={settings.spawn.default_codex_sandbox ?? ""}
+          onChange={(e) => {
+            const value = e.target.value;
+            const next: CodexSandbox | null =
+              value === "" ? null : (value as CodexSandbox);
+            update((s) => ({
+              ...s,
+              spawn: { ...s.spawn, default_codex_sandbox: next },
+            }));
+          }}
+          disabled={settings.spawn.skip_permissions_default}
+          data-testid="settings-spawn-codex-sandbox"
+          title={
+            settings.spawn.skip_permissions_default
+              ? "Ignored while trusted launch is on"
+              : ""
+          }
+        >
+          <option value="">(none — codex's default)</option>
+          <option value="read-only">read-only</option>
+          <option value="workspace-write">workspace-write</option>
+          <option value="danger-full-access">danger-full-access</option>
+        </select>
+      </div>
+    </section>
+  );
+}
+
+function TitlePanel({ settings, update }: PanelProps) {
+  const preview = useMemo(() => {
+    const busyPrefix = settings.title.show_busy_count ? "(1/3) " : "";
+    const suffix = settings.title.show_product_suffix
+      ? " — rustling-tulip"
+      : "";
+    return `${busyPrefix}Tab name${suffix}`;
+  }, [settings.title]);
+
+  return (
+    <section
+      className="settings-section"
+      data-testid="settings-section-title"
+    >
+      <h3>App title</h3>
+      <p className="settings-section-hint">
+        Controls what the OS window title bar shows for the main window.
+        Pop-out windows always show just the tab / session name.
+      </p>
+      <Toggle
+        testid="settings-title-busy-count"
+        label="Show busy/total terminal count"
+        checked={settings.title.show_busy_count}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            title: { ...s.title, show_busy_count: v },
+          }))
+        }
+      />
+      <p className="settings-section-hint">
+        Renders <code>(M/N)</code> before the tab name where M is the number
+        of non-idle terminals in the active tab and N is the total terminal
+        count. Hidden when the tab has no terminals.
+      </p>
+      <Toggle
+        testid="settings-title-product-suffix"
+        label={"Append “ — rustling-tulip” suffix"}
+        checked={settings.title.show_product_suffix}
+        onChange={(v) =>
+          update((s) => ({
+            ...s,
+            title: { ...s.title, show_product_suffix: v },
+          }))
+        }
+      />
+      <p className="settings-section-hint">
+        Keeps OS taskbars grouping rustling-tulip windows together. Turn off
+        for a tighter title.
+      </p>
+      <div className="settings-row">
+        <span>Preview</span>
+        <code
+          className="settings-title-preview"
+          data-testid="settings-title-preview"
+        >
+          {preview || "(empty)"}
+        </code>
+      </div>
+    </section>
   );
 }
 

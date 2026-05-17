@@ -4,7 +4,7 @@ use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
-    add_repo, persist_last_agent, persist_repo_last_spawn_config,
+    add_repo, ensure_default_branch, persist_last_agent, persist_repo_last_spawn_config,
     persist_workspace_last_spawn_config, remove_repo, remove_workspace, reorder_containers,
     set_repo_appearance, set_repo_worktree_default, set_session_order, set_workspace_appearance,
     set_workspace_worktree_default, upsert_workspace,
@@ -2803,12 +2803,31 @@ async fn spawn_single(
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
     let repo_path = PathBuf::from(&repo.path);
 
-    // The base used when the branch needs to be created. Explicit caller
-    // value wins; otherwise we fall back to the repo's recorded default,
-    // then to "main" as a last resort.
-    let base_for_create = base_branch
-        .or_else(|| repo.default_branch.clone())
-        .unwrap_or_else(|| "main".to_string());
+    // Resolve the base branch used when the target needs to be *created*.
+    // Priority: explicit caller value → repo's persisted default → lazy
+    // re-detection (covers entries that registered before detection
+    // succeeded) → the repo's current branch → "main" as a last resort.
+    // A literal "main" fallback was the historical default, but repos with
+    // only "master" / "trunk" never have main as a ref and the create-from
+    // step would fail outright; falling back to the current branch always
+    // yields a real, resolvable ref.
+    let base_for_create = if let Some(b) = base_branch {
+        b
+    } else if let Some(b) = repo.default_branch.clone() {
+        b
+    } else {
+        let detected = git::default_branch(&repo_path).await;
+        ensure_default_branch(&hub.state, &repo.id, detected.clone());
+        if let Some(b) = detected {
+            b
+        } else {
+            git::current_branch(&repo_path)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "main".to_string())
+        }
+    };
 
     let working_path = if use_worktree {
         let mut paths = git::workspace_worktree_paths(

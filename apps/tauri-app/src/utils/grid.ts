@@ -125,3 +125,23 @@ export function firstLeafPane(
   const panes = collectPanes(grid);
   return panes[0] ?? null;
 }
+
+/**
+ * Resolve which pane should be focused when activating `tab`. Prefers the
+ * caller's remembered pane id (per-tab focus memory) when it still exists
+ * in the grid; otherwise falls back to the first leaf pane. Returns null
+ * for tabs that don't carry a grid (e.g. diff tabs).
+ */
+export function resolveTabFocus(
+  tab: TabEntry | undefined,
+  remembered: string | undefined,
+): string | null {
+  if (!tab) return null;
+  const grid = tabGrid(tab);
+  if (!grid) return null;
+  const panes = collectPanes(grid);
+  if (remembered && panes.some((p) => p.pane_id === remembered)) {
+    return remembered;
+  }
+  return panes[0]?.pane_id ?? null;
+}

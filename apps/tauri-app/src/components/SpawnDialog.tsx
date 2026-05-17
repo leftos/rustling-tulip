@@ -299,6 +299,20 @@ export default function SpawnDialog({
             <EmptyRepoState onAddRepo={onAddRepo} onClose={onClose} />
           ) : (
             <>
+              {initialTarget !== undefined && target ? (
+                <ImpliedTargetLabel
+                  target={target}
+                  repos={repos}
+                  workspaces={workspaces}
+                />
+              ) : (
+                <TargetPicker
+                  value={target}
+                  repos={repos}
+                  workspaces={workspaces}
+                  onChange={setTarget}
+                />
+              )}
               <AgentPicker
                 agent={agent}
                 runMode={runMode}
@@ -312,12 +326,6 @@ export default function SpawnDialog({
                 tabs={tabs}
                 activeTabId={activeTabId}
                 onChange={setSpawnPlacement}
-              />
-              <TargetPicker
-                value={target}
-                repos={repos}
-                workspaces={workspaces}
-                onChange={setTarget}
               />
 
               {target?.kind === "repo" ? (
@@ -777,6 +785,37 @@ function AgentPicker({
   );
 }
 
+/// Read-only target chip shown when the dialog was opened from a
+/// repo/workspace context menu — the target is implied by where the user
+/// invoked the dialog, so the picker is replaced by a name label. The
+/// label still occupies the leading slot in the form so users have a
+/// confirmation of which container they're spawning into before they
+/// commit.
+function ImpliedTargetLabel({
+  target,
+  repos,
+  workspaces,
+}: {
+  target: TargetSelection;
+  repos: RepoEntry[];
+  workspaces: WorkspaceEntry[];
+}) {
+  const label =
+    target.kind === "repo"
+      ? (repos.find((r) => r.id === target.id)?.name ?? target.id)
+      : (workspaces.find((w) => w.id === target.id)?.name ?? target.id);
+  const kindTag = target.kind === "repo" ? "[REPO]" : "[WS]";
+  return (
+    <div className="field" data-testid="spawn-target-implied">
+      <span>Target</span>
+      <div className="spawn-target-implied-value">
+        <span className="muted small">{kindTag}</span>
+        <strong>{label}</strong>
+      </div>
+    </div>
+  );
+}
+
 function TargetPicker({
   value,
   repos,
@@ -1067,20 +1106,31 @@ function SingleForm({
   }, [repo?.id, restoreLastSpawnDefaults]);
 
   const [knownBranches, setKnownBranches] = useState<string[]>([]);
+  const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   useEffect(() => {
     if (!repoId) return;
     setKnownBranches([]);
+    setCurrentBranch(null);
     client.send({ type: "list_branches", repo_id: repoId });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "branches" || detail.repo_id !== repoId) return;
       setKnownBranches(detail.branches);
+      setCurrentBranch(detail.current);
     };
     window.addEventListener("rt:branches", handler);
     return () => window.removeEventListener("rt:branches", handler);
   }, [repoId, client]);
 
-  const defaultBranch = repo?.default_branch ?? "main";
+  // Fallback chain for the in-place / base-branch field: repo's persisted
+  // default → freshly-reported current branch → first known branch → "main"
+  // literal. The literal is only reached when both the daemon and `git`
+  // couldn't tell us anything; historically we landed here for repos whose
+  // initial default-detection failed and stuck with `default_branch=null`,
+  // which then crashed `git checkout -b main main` because the base ref
+  // didn't exist.
+  const defaultBranch =
+    repo?.default_branch ?? currentBranch ?? knownBranches[0] ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(
     () => prefillTarget?.use_worktree ?? true,
   );

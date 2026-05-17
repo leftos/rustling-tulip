@@ -2,6 +2,7 @@
 //! paths, and rendering preview rows.
 
 use crate::git;
+use crate::registry::ensure_default_branch;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
 use protocol::{MemberSpawnPreview, RepoEntry, WorkspaceEntry};
@@ -77,12 +78,26 @@ pub async fn resolve_workspace(
         let base = if exists {
             None
         } else {
-            Some(
-                explicit_base
-                    .map(String::from)
-                    .or_else(|| repo.default_branch.clone())
-                    .unwrap_or_else(|| "main".to_string()),
-            )
+            // Same lazy-fallback chain as spawn_single: explicit caller →
+            // persisted default → re-detect (and persist) → current
+            // branch → "main" literal as a last resort.
+            let resolved_base = if let Some(b) = explicit_base.map(String::from) {
+                b
+            } else if let Some(b) = repo.default_branch.clone() {
+                b
+            } else {
+                let detected = git::default_branch(&path).await;
+                ensure_default_branch(state, &repo.id, detected.clone());
+                match detected {
+                    Some(b) => b,
+                    None => git::current_branch(&path)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| "main".to_string()),
+                }
+            };
+            Some(resolved_base)
         };
         resolved.push(ResolvedMember {
             repo,

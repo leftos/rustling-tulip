@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   isPermissionGranted,
   requestPermission,
@@ -66,6 +67,7 @@ import {
   collectPanes,
   findPaneBinding,
   findTabContainingSession,
+  resolveTabFocus,
 } from "./utils/grid";
 import { useKeyboardShortcuts, type KeyboardShortcut } from "./utils/a11y";
 import {
@@ -84,6 +86,7 @@ import {
 } from "./utils/fontSize";
 import { resolveAppearance, resolveAppearanceLayers } from "./utils/appearance";
 import { sessionDisplayLabel } from "./utils/sessionLabel";
+import { computeWindowTitle } from "./utils/windowTitle";
 
 /// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
 /// `?tab=<id>` (per-tab pop-out), or `?session=<id>` (legacy single-session
@@ -119,6 +122,12 @@ interface AppState {
   tabs: TabEntry[];
   activeTabId: string | null;
   focusedPaneId: string | null;
+  /// Per-tab last-focused pane id. When activating a tab, the resolver
+  /// restores the entry here (if the pane still exists in the grid) so
+  /// switching tabs preserves focus instead of dropping to "no active
+  /// pane". Entries are pruned when their tab is removed or when the
+  /// referenced pane is no longer in the tab's grid.
+  focusedPaneByTab: Record<string, string>;
   spawnOpen: boolean;
   standaloneShellOpen: boolean;
   standaloneShellInitial: string | null;
@@ -200,6 +209,7 @@ export default function App() {
     tabs: [],
     activeTabId: loadActiveTab(),
     focusedPaneId: null,
+    focusedPaneByTab: {},
     spawnOpen: false,
     standaloneShellOpen: false,
     standaloneShellInitial: null,
@@ -467,11 +477,25 @@ export default function App() {
   );
 
   const onActivateTab = useCallback((tabId: string) => {
-    setState((s) => ({ ...s, activeTabId: tabId, focusedPaneId: null }));
+    setState((s) => {
+      const tab = s.tabs.find((t) => t.id === tabId);
+      const focusedPaneId = resolveTabFocus(tab, s.focusedPaneByTab[tabId]);
+      return { ...s, activeTabId: tabId, focusedPaneId };
+    });
   }, []);
 
   const onFocusPane = useCallback((paneId: string) => {
-    setState((s) => (s.focusedPaneId === paneId ? s : { ...s, focusedPaneId: paneId }));
+    setState((s) => {
+      if (s.focusedPaneId === paneId) return s;
+      const next: AppState = { ...s, focusedPaneId: paneId };
+      if (s.activeTabId) {
+        next.focusedPaneByTab = {
+          ...s.focusedPaneByTab,
+          [s.activeTabId]: paneId,
+        };
+      }
+      return next;
+    });
   }, []);
 
   /// Arm the App-level pending-activate-next-new-tab flag. Tab merges and
@@ -576,6 +600,10 @@ export default function App() {
           attentionSessions: nextAttention,
           activeTabId: existing.tabId,
           focusedPaneId: existing.paneId,
+          focusedPaneByTab: {
+            ...cur.focusedPaneByTab,
+            [existing.tabId]: existing.paneId,
+          },
           spotlightSessionIds: new Set<string>(),
         };
       });
@@ -670,6 +698,9 @@ export default function App() {
         spawnInitial: undefined,
         spawnPrefill: undefined,
         focusedPaneId: paneId,
+        focusedPaneByTab: s.activeTabId
+          ? { ...s.focusedPaneByTab, [s.activeTabId]: paneId }
+          : s.focusedPaneByTab,
       }));
     },
     [],
@@ -1191,14 +1222,26 @@ export default function App() {
     const currentTabs = latestStateRef.current?.tabs ?? [];
     const activeSnapshot =
       entry.tabs.find((snapshot) => snapshot.restoreActive) ?? null;
-    setState((s) => ({
-      ...s,
-      undoEntries: s.undoEntries.filter((e) => e.id !== id),
-      activeTabId: activeSnapshot ? activeSnapshot.tab.id : s.activeTabId,
-      focusedPaneId: activeSnapshot
-        ? activeSnapshot.restoreFocusedPaneId
-        : s.focusedPaneId,
-    }));
+    setState((s) => {
+      const next: AppState = {
+        ...s,
+        undoEntries: s.undoEntries.filter((e) => e.id !== id),
+        activeTabId: activeSnapshot ? activeSnapshot.tab.id : s.activeTabId,
+        focusedPaneId: activeSnapshot
+          ? activeSnapshot.restoreFocusedPaneId
+          : s.focusedPaneId,
+      };
+      if (
+        activeSnapshot &&
+        activeSnapshot.restoreFocusedPaneId !== null
+      ) {
+        next.focusedPaneByTab = {
+          ...s.focusedPaneByTab,
+          [activeSnapshot.tab.id]: activeSnapshot.restoreFocusedPaneId,
+        };
+      }
+      return next;
+    });
     for (const snapshot of [...entry.tabs].sort((a, b) => a.index - b.index)) {
       const tabExists = currentTabs.some((tab) => tab.id === snapshot.tab.id);
       if (tabExists) {
@@ -1601,6 +1644,23 @@ export default function App() {
     () => state.tabs.find((t) => t.id === state.activeTabId) ?? null,
     [state.tabs, state.activeTabId],
   );
+
+  /// Dynamic OS-window title for the main window. Pop-out windows manage
+  /// their own titles via PaneWindow / TabWindow / SessionWindow, so we
+  /// only touch this when no popout query param is set. The actual
+  /// `setTitle` call is debounced so rapid working ↔ idle oscillation
+  /// during a streaming response doesn't flicker the OS taskbar entry.
+  const windowTitle = useMemo(
+    () => computeWindowTitle(activeTab, state.sessions, settings.title),
+    [activeTab, state.sessions, settings.title],
+  );
+  useEffect(() => {
+    if (popoutPaneId || popoutSessionId || popoutTabId) return;
+    const handle = window.setTimeout(() => {
+      void getCurrentWebviewWindow().setTitle(windowTitle);
+    }, 350);
+    return () => window.clearTimeout(handle);
+  }, [windowTitle]);
 
   const spawnCurrentTab = useMemo(() => {
     const targetTabId =
@@ -2484,6 +2544,10 @@ function handleMessage(
             attentionSessions: attention,
             activeTabId: intent.tabId,
             focusedPaneId: intent.paneId,
+            focusedPaneByTab: {
+              ...s.focusedPaneByTab,
+              [intent.tabId]: intent.paneId,
+            },
           };
         }
         if (intent?.kind === "addToTab") {
@@ -2552,10 +2616,23 @@ function handleMessage(
           s.activeTabId && ids.has(s.activeTabId)
             ? s.activeTabId
             : (msg.tabs[0]?.id ?? null);
+        const activeTab = active
+          ? msg.tabs.find((t) => t.id === active)
+          : undefined;
+        const focusedPaneId = active
+          ? resolveTabFocus(activeTab, s.focusedPaneByTab[active])
+          : null;
+        // Prune memory for tabs the daemon no longer reports.
+        const focusedPaneByTab: Record<string, string> = {};
+        for (const [tabId, paneId] of Object.entries(s.focusedPaneByTab)) {
+          if (ids.has(tabId)) focusedPaneByTab[tabId] = paneId;
+        }
         return {
           ...s,
           tabs: msg.tabs,
           activeTabId: active,
+          focusedPaneId,
+          focusedPaneByTab,
         };
       });
       return;
@@ -2575,6 +2652,7 @@ function handleMessage(
           // instead of only the first.
           if (pendingTabActivate > 0) pendingTabActivate -= 1;
         }
+        let focusedPaneByTab = s.focusedPaneByTab;
         // Post-split focus: if a split armed pendingPaneFocusRef for this
         // tab, diff the new grid against the snapshot and focus the new
         // pane. Disarms after the first matching update so a stale arm
@@ -2588,9 +2666,33 @@ function handleMessage(
             const fresh = collectPanes(grid).find(
               (p) => !arm.knownPaneIds.has(p.pane_id),
             );
-            if (fresh) focusedPaneId = fresh.pane_id;
+            if (fresh) {
+              focusedPaneId = fresh.pane_id;
+              focusedPaneByTab = {
+                ...focusedPaneByTab,
+                [msg.tab.id]: fresh.pane_id,
+              };
+            }
           }
           pendingPaneFocusRef.current = null;
+        }
+        // If this is the active tab, re-resolve focus against the new
+        // grid: pane closes / moves can invalidate the previously-focused
+        // pane id, and we want to fall back to the first leaf rather than
+        // sit on a stale id.
+        if (active === msg.tab.id) {
+          const remembered = focusedPaneByTab[msg.tab.id] ?? focusedPaneId ?? undefined;
+          const resolved = resolveTabFocus(msg.tab, remembered ?? undefined);
+          focusedPaneId = resolved;
+          if (resolved) {
+            focusedPaneByTab = {
+              ...focusedPaneByTab,
+              [msg.tab.id]: resolved,
+            };
+          } else if (msg.tab.id in focusedPaneByTab) {
+            const { [msg.tab.id]: _gone, ...rest } = focusedPaneByTab;
+            focusedPaneByTab = rest;
+          }
         }
         return {
           ...s,
@@ -2598,6 +2700,7 @@ function handleMessage(
           activeTabId: active,
           pendingTabActivate,
           focusedPaneId,
+          focusedPaneByTab,
         };
       });
       return;
@@ -2608,7 +2711,23 @@ function handleMessage(
           s.activeTabId === msg.tab_id
             ? (next[0]?.id ?? null)
             : s.activeTabId;
-        return { ...s, tabs: next, activeTabId: active };
+        const { [msg.tab_id]: _gone, ...focusedPaneByTab } = s.focusedPaneByTab;
+        let focusedPaneId = s.focusedPaneId;
+        if (active !== s.activeTabId) {
+          const activeTab = active
+            ? next.find((t) => t.id === active)
+            : undefined;
+          focusedPaneId = active
+            ? resolveTabFocus(activeTab, focusedPaneByTab[active])
+            : null;
+        }
+        return {
+          ...s,
+          tabs: next,
+          activeTabId: active,
+          focusedPaneId,
+          focusedPaneByTab,
+        };
       });
       return;
     case "tabs_reordered":

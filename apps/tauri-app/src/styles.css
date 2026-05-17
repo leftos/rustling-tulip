@@ -2514,10 +2514,51 @@ button.tree-tab-pill:hover {
   flex: 1;
 }
 
-/* Settings modal — sectioned forms. Each `.settings-section`
- * is a logical grouping (Notifications / Sidebar / Spawn defaults) and
- * gets a dashed top divider after the first to keep the modal visually
- * scannable without per-section <fieldset> chrome. */
+/* Settings modal — tabbed layout. A left-rail tablist switches between
+ * panels; each panel hosts a stack of `.settings-section` blocks. The
+ * dashed divider between sections keeps individual panels scannable
+ * without per-section <fieldset> chrome. */
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(160px, 200px) 1fr;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.settings-tablist {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev1);
+  overflow-y: auto;
+}
+.settings-tab {
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-tab:hover {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.settings-tab-active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  color: var(--fg);
+}
+.settings-title-preview {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
 .settings-body { gap: 16px; }
 .settings-section { display: flex; flex-direction: column; gap: 6px; }
 .settings-section + .settings-section {
@@ -2737,6 +2778,16 @@ button.tree-tab-pill:hover {
 .field > legend { color: var(--fg-muted); font-size: 11px; padding: 0 4px; }
 fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; flex-direction: row; gap: 14px; }
 .radio, .checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.spawn-target-implied-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev1);
+}
+.spawn-target-implied-value strong { font-weight: 600; }
 .spawn-authority-toggle {
   align-self: flex-start;
   padding: 6px 8px;

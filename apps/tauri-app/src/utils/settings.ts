@@ -55,6 +55,15 @@ export interface Settings {
     /// when nothing is selected) regardless of this setting.
     copy_on_selection: boolean;
   };
+  title: {
+    /// Show "(M/N)" busy/total count prefix in the OS window title where
+    /// M is the number of non-idle terminals in the active tab and N is
+    /// the total terminal count. Off renders just `TAB — rustling-tulip`.
+    show_busy_count: boolean;
+    /// Append " — rustling-tulip" so OS taskbars can group windows by
+    /// product. Off renders just the tab + busy prefix.
+    show_product_suffix: boolean;
+  };
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -84,6 +93,10 @@ export const DEFAULT_SETTINGS: Settings = {
   appearance_recent_colors: [],
   terminal: {
     copy_on_selection: true,
+  },
+  title: {
+    show_busy_count: true,
+    show_product_suffix: true,
   },
 };
 
@@ -233,6 +246,10 @@ function mergeWithDefaults(
       ...partial.terminal,
       copy_on_selection:
         partial.terminal?.copy_on_selection ?? def.terminal.copy_on_selection,
+    },
+    title: {
+      ...def.title,
+      ...partial.title,
     },
   };
 }
