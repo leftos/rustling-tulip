@@ -164,6 +164,22 @@ export default function Terminal({
   const fontFamily = appearance.terminal_font_family;
   const fontBold = appearance.terminal_font_bold;
   const backgroundColor = appearance.terminal_background_color;
+  /// Read by the buffer-change handler (registered once at mount) so it
+  /// always rebuilds the theme against the latest background color
+  /// without needing to re-register every time the user changes it.
+  const backgroundColorRef = useRef(backgroundColor);
+  backgroundColorRef.current = backgroundColor;
+
+  /// Rebuild xterm's theme using the live buffer type. When a TUI is in
+  /// alt-screen mode it paints its own cursor indicator, so we hide
+  /// xterm's native cursor to stop the two from competing. Plain shells
+  /// stay on the normal buffer and keep a visible (non-blinking) cursor.
+  const applyTheme = (term: XTerm) => {
+    const hideCursor = term.buffer.active.type === "alternate";
+    term.options.theme = buildTerminalTheme(backgroundColorRef.current, {
+      hideCursor,
+    });
+  };
 
   /// Apply font-size changes to the live XTerm without remounting it —
   /// rebuilding the terminal on every size change would clear scrollback
@@ -216,10 +232,15 @@ export default function Terminal({
   /// Apply terminal palette changes independently from font changes. The
   /// xterm options setter needs a fresh object reference for structured
   /// options, so build a new theme each time the resolved background shifts.
+  /// `applyTheme` reads the live buffer type so the alt-screen cursor-hide
+  /// stays in effect across palette changes.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.theme = buildTerminalTheme(backgroundColor);
+    applyTheme(term);
+    // applyTheme reads backgroundColorRef.current which is kept in sync
+    // above; listing only backgroundColor here keeps the effect honest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backgroundColor]);
 
   useEffect(() => {
@@ -241,7 +262,12 @@ export default function Terminal({
       if (cancelled) return;
 
       const term = new XTerm({
-        cursorBlink: true,
+        // Steady (non-blinking) cursor — TUIs like claude / codex paint
+        // their own blinking input indicator, and an additional blinking
+        // xterm cursor at the real ANSI position looks like flicker
+        // beside it. Plain shells still show a visible cursor, just not
+        // pulsing.
+        cursorBlink: false,
         // Geist Mono first (vendored as /public/fonts/GeistMono-Variable.woff2,
         // pulled in via @font-face in styles.css). Cascadia/Consolas fall back
         // when the variable woff2 hasn't finished loading yet so the very
@@ -302,6 +328,17 @@ export default function Terminal({
 
       termRef.current = term;
       fitRef.current = fit;
+
+      // Buffer-change listener — TUIs that paint their own cursor
+      // (claude, codex, vim, less, top, …) switch to the alternate
+      // screen buffer via `\e[?1049h`. When that happens we hide
+      // xterm's native cursor so it doesn't compete with the TUI's
+      // own input indicator. Restored when the TUI exits back to the
+      // normal buffer.
+      const bufferChangeDisposable = term.buffer.onBufferChange(() => {
+        applyTheme(term);
+      });
+      cleanupFns.push(() => bufferChangeDisposable.dispose());
 
       // OSC 52 observer — fires the clipboard-copy event whenever a TUI
       // running in this terminal pushes text to the system clipboard via

@@ -49,7 +49,18 @@ interface Rgb {
   b: number;
 }
 
-export function buildTerminalTheme(background: string): ITheme {
+export interface TerminalThemeOptions {
+  /// When true, xterm's own cursor is rendered transparent and the cell
+  /// underneath keeps its normal foreground color. Used in alt-screen
+  /// mode so TUIs that paint their own cursor (claude, codex, vim, …)
+  /// aren't visually fighting xterm's native cursor for the same cell.
+  hideCursor?: boolean;
+}
+
+export function buildTerminalTheme(
+  background: string,
+  options?: TerminalThemeOptions,
+): ITheme {
   const bg = normalizeHex(background) ?? "#08090b";
   const foreground = ensureContrast(
     luminance(hexToRgb(bg)) < 0.5 ? BASE_THEME.foreground : "#1a1c22",
@@ -57,12 +68,13 @@ export function buildTerminalTheme(background: string): ITheme {
     7,
   );
   const cursor = ensureContrast(BASE_THEME.cursor, bg, 3);
+  const hideCursor = options?.hideCursor === true;
   const theme: ITheme = {
     ...BASE_THEME,
     background: bg,
     foreground,
-    cursor,
-    cursorAccent: bg,
+    cursor: hideCursor ? "rgba(0, 0, 0, 0)" : cursor,
+    cursorAccent: hideCursor ? foreground : bg,
     selectionBackground: rgba(cursor, 0.3),
     selectionForeground: foreground,
   };
