@@ -188,6 +188,21 @@ export default function SessionContextMenu({
         session_id: s.id,
         cleanup,
       });
+    } else if (sourceBinding === null) {
+      // Unbound running session: leaving it in `stopped` state would
+      // strand a no-pane entry in the sidebar that the user has to
+      // remove via a second right-click. Park it (worktree retained,
+      // recoverable via Resume) or discard it outright when there's
+      // nothing to keep.
+      if (s.has_per_session_worktree) {
+        client.send({ type: "park_session", session_id: s.id });
+      } else {
+        client.send({
+          type: "discard_session",
+          session_id: s.id,
+          cleanup: [],
+        });
+      }
     }
     onClose();
   };
