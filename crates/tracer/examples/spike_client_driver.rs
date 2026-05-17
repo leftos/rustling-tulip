@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     drop(c1);
 
     // Mimic daemon restart: pause, then reconnect.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let mut c2 = ClientOptions::new().open(PIPE_NAME)?;
     c2.write_all(b"phase-2-hello\n").await?;

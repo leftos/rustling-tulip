@@ -340,8 +340,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let _ = reader_handle.join();
 
-    let ring_bytes = shared.lock().map(|s| s.ring.len()).unwrap_or(0);
-    let overflowed = shared.lock().map(|s| s.ring.overflowed()).unwrap_or(false);
+    let ring_bytes = shared.lock().map_or(0, |s| s.ring.len());
+    let overflowed = shared.lock().is_ok_and(|s| s.ring.overflowed());
     info!(
         session_id = %cfg.session_id,
         exit_code,
@@ -584,7 +584,7 @@ async fn handle_client(
                 let frame = TracerResponse::Status {
                     child_pid,
                     child_alive: true,
-                    ring_bytes: shared.lock().map(|s| s.ring.len()).unwrap_or(0),
+                    ring_bytes: shared.lock().map_or(0, |s| s.ring.len()),
                 };
                 if let Err(err) = write_frame(&mut writer, &frame).await {
                     debug!(?err, "supervisor: keepalive write failed; client gone");
