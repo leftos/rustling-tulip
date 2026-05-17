@@ -516,12 +516,16 @@ export default function Terminal({
         w.__rt_terms = map;
       }
 
-      const decoder = new TextDecoder();
       let scrollbackCancelled = false;
 
       // Replay persisted scrollback first so users see their history before
       // any live PTY chunks arrive. The attach + subscribe happen after the
       // replay completes (or times out) to keep ordering correct.
+      //
+      // `term.write` accepts `Uint8Array` directly and runs xterm's own
+      // streaming UTF-8 decoder, which handles multi-byte sequences split
+      // across chunks. Passing bytes skips a JS-side `TextDecoder.decode`
+      // pass that would just be undone by xterm's internal re-encode.
       void (async () => {
         const sb = await loadScrollback(client, sessionId);
         if (scrollbackCancelled) return;
@@ -529,9 +533,7 @@ export default function Terminal({
           if (sb.truncated) {
             term.writeln("\x1b[33m[earlier output discarded]\x1b[0m");
           }
-          term.write(
-            decoder.decode(base64ToBytes(sb.data_b64), { stream: true }),
-          );
+          term.write(base64ToBytes(sb.data_b64));
         }
         requestAnimationFrame(() => {
           fit.fit();
@@ -546,8 +548,7 @@ export default function Terminal({
       })();
 
       const unsubPty = subscribePty(sessionId, (b64) => {
-        const bytes = base64ToBytes(b64);
-        term.write(decoder.decode(bytes, { stream: true }));
+        term.write(base64ToBytes(b64));
       });
 
       const onDataHandler = term.onData((data) => {

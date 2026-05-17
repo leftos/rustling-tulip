@@ -626,9 +626,18 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
-export function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
+// Native `Uint8Array.fromBase64` (TC39 Stage 3, Chromium 133+) does the
+// decode in a single C++ pass; the atob+charCodeAt fallback is two JS
+// passes per chunk and shows up in profiles on heavy PTY output.
+const nativeFromBase64 = (
+  Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array }
+).fromBase64;
+
+export const base64ToBytes: (b64: string) => Uint8Array = nativeFromBase64
+  ? (b64) => nativeFromBase64(b64)
+  : (b64) => {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    };
