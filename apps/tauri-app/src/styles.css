@@ -1937,6 +1937,129 @@ button.tree-tab-pill:hover {
   border-radius: 3px;
   font-family: var(--font-mono);
 }
+
+/* Worktrees Manager modal: list of wt.<branch>/ groups under the
+ * worktrees root. Each row carries a status badge + the wt path, a
+ * metadata strip (branch / size / mtime / optional session id), an
+ * expandable members list, and a Delete button. Pre-style, the row
+ * fields ran together with no spacing — `StaleC:\...Size: 7.17 GBModified...`.
+ */
+.worktrees-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+.worktrees-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.worktrees-row-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.worktrees-row-path {
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+  min-width: 0;
+}
+.worktrees-status {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: var(--bg-elev2);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+}
+.worktrees-status-active {
+  background: rgba(80, 200, 120, 0.15);
+  color: #6fdc9a;
+  border-color: rgba(80, 200, 120, 0.4);
+}
+.worktrees-status-detached {
+  background: rgba(245, 165, 36, 0.15);
+  color: var(--warn);
+  border-color: rgba(245, 165, 36, 0.4);
+}
+.worktrees-status-stale {
+  background: rgba(160, 160, 170, 0.12);
+  color: var(--fg-muted);
+  border-color: var(--border);
+}
+.worktrees-status-unknown {
+  background: rgba(200, 80, 80, 0.15);
+  color: #ff7a7a;
+  border-color: rgba(200, 80, 80, 0.4);
+}
+.worktrees-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: var(--text-small);
+  color: var(--fg-muted);
+}
+.worktrees-row-meta > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.worktrees-row-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+  background: var(--bg-elev2);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.worktrees-row-members {
+  font-size: var(--text-small);
+  color: var(--fg-muted);
+}
+.worktrees-row-members summary {
+  cursor: pointer;
+  padding: 2px 0;
+}
+.worktrees-row-members summary:hover {
+  color: var(--fg);
+}
+.worktrees-row-members ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.worktrees-row-members code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+}
+.worktrees-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .headless-show-all {
   display: block; width: 100%; text-align: center;
   padding: 6px 8px; margin-bottom: 6px;
@@ -2490,7 +2613,7 @@ button.tree-tab-pill:hover {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 8px;
-  width: 480px; max-width: 90vw;
+  width: 640px; max-width: 90vw;
   display: flex; flex-direction: column;
   max-height: 85vh;
 }
@@ -2575,7 +2698,7 @@ button.tree-tab-pill:hover {
   display: flex; justify-content: flex-end; gap: 8px; padding-top: 4px;
 }
 .modal-narrow { width: 420px; }
-.modal-wide { width: 560px; }
+.modal-wide { width: 880px; }
 .path-input-row {
   display: flex;
   gap: 8px;
