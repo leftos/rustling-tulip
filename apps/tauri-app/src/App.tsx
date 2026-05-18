@@ -37,7 +37,9 @@ import {
 import ActivityBar, {
   type ActivitySection,
   readActivitySection,
+  readSidebarCollapsed,
   writeActivitySection,
+  writeSidebarCollapsed,
 } from "./components/ActivityBar";
 import Sidebar, {
   type LaunchLastPlacement,
@@ -1729,9 +1731,37 @@ export default function App() {
   const [activitySection, setActivitySection] = useState<ActivitySection>(
     () => readActivitySection(),
   );
-  const onSelectActivity = useCallback((next: ActivitySection) => {
-    setActivitySection(next);
-    writeActivitySection(next);
+  // Whether the sidebar pane is collapsed. Clicking the active activity
+  // button toggles; clicking a different section while collapsed expands
+  // and switches. Ctrl+B also toggles. Persisted to localStorage.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(
+    () => readSidebarCollapsed(),
+  );
+  const onSelectActivity = useCallback(
+    (next: ActivitySection) => {
+      if (next === activitySection) {
+        setSidebarCollapsed((c) => {
+          const nextCollapsed = !c;
+          writeSidebarCollapsed(nextCollapsed);
+          return nextCollapsed;
+        });
+        return;
+      }
+      setActivitySection(next);
+      writeActivitySection(next);
+      if (sidebarCollapsed) {
+        setSidebarCollapsed(false);
+        writeSidebarCollapsed(false);
+      }
+    },
+    [activitySection, sidebarCollapsed],
+  );
+  const onToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((c) => {
+      const nextCollapsed = !c;
+      writeSidebarCollapsed(nextCollapsed);
+      return nextCollapsed;
+    });
   }, []);
 
   const onSelectPresetLaunchSessions = useCallback((sessionIds: string[]) => {
@@ -1860,6 +1890,9 @@ export default function App() {
       return [];
     }
     const list: KeyboardShortcut[] = [];
+    // Ctrl+B: toggle the sidebar pane. Matches the VSCode chord.
+    // Always available — works even before the daemon is connected.
+    list.push({ key: "b", handler: onToggleSidebar });
     if (state.client) {
       list.push({
         key: "t",
@@ -2008,6 +2041,7 @@ export default function App() {
     onActivateTab,
     onOpenSpawn,
     onOpenSettings,
+    onToggleSidebar,
   ]);
   useKeyboardShortcuts(shortcuts);
 
@@ -2104,10 +2138,61 @@ export default function App() {
     );
   }
 
+  const mainPaneContent = (
+    <main className="main-pane">
+      <TabBar
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        client={state.client!}
+        onActivate={onActivateTab}
+        onArmNextNewTab={onArmNextNewTab}
+        onLocalReorder={onLocalReorder}
+        onTabWillClose={onTabWillClose}
+        onTabsSnapshotUndo={onTabsSnapshotUndo}
+      />
+      {activeTab && state.client ? (
+        activeTab.content.kind === "diff" ? (
+          <DiffPane
+            client={state.client}
+            repoId={activeTab.content.repo_id}
+            path={activeTab.content.path}
+            against={activeTab.content.against}
+          />
+        ) : (
+          <GridRenderer
+            tab={activeTab}
+            tabs={state.tabs}
+            client={state.client}
+            sessions={state.sessions}
+            repos={state.repos}
+            workspaces={state.workspaces}
+            subscribePty={subscribePty}
+            focusedPaneId={state.focusedPaneId}
+            onFocusPane={onFocusPane}
+            onSpawnInPane={onSpawnInPane}
+            hasRepos={state.repos.length > 0}
+            onArmNextNewTab={onArmNextNewTab}
+            onArmFocusNewPane={onArmFocusNewPane}
+            onTabsSnapshotUndo={onTabsSnapshotUndo}
+          />
+        )
+      ) : (
+        <EmptyState
+          onOpenSpawn={() => onOpenSpawn()}
+          onLaunchShell={onLaunchStandaloneShellDefault}
+          onAddRepo={onAddRepo}
+          hasRepos={state.repos.length > 0}
+          hasTabs={state.tabs.length > 0}
+        />
+      )}
+    </main>
+  );
+
   return (
     <div className="app-root" data-testid="app-root">
       <ActivityBar
         active={activitySection}
+        collapsed={sidebarCollapsed}
         onSelect={onSelectActivity}
         sourceControlBadge={sourceControlBadgeTotal}
       />
@@ -2116,6 +2201,7 @@ export default function App() {
         defaultSize={280}
         minSize={200}
         direction="horizontal"
+        firstHidden={sidebarCollapsed}
       >
         {activitySection === "sessions" ? (
           <Sidebar
@@ -2171,53 +2257,7 @@ export default function App() {
             onActivateTab={onActivateTab}
           />
         )}
-        <main className="main-pane">
-          <TabBar
-            tabs={state.tabs}
-            activeTabId={state.activeTabId}
-            client={state.client!}
-            onActivate={onActivateTab}
-            onArmNextNewTab={onArmNextNewTab}
-            onLocalReorder={onLocalReorder}
-            onTabWillClose={onTabWillClose}
-            onTabsSnapshotUndo={onTabsSnapshotUndo}
-          />
-          {activeTab && state.client ? (
-            activeTab.content.kind === "diff" ? (
-              <DiffPane
-                client={state.client}
-                repoId={activeTab.content.repo_id}
-                path={activeTab.content.path}
-                against={activeTab.content.against}
-              />
-            ) : (
-              <GridRenderer
-                tab={activeTab}
-                tabs={state.tabs}
-                client={state.client}
-                sessions={state.sessions}
-                repos={state.repos}
-                workspaces={state.workspaces}
-                subscribePty={subscribePty}
-                focusedPaneId={state.focusedPaneId}
-                onFocusPane={onFocusPane}
-                onSpawnInPane={onSpawnInPane}
-                hasRepos={state.repos.length > 0}
-                onArmNextNewTab={onArmNextNewTab}
-                onArmFocusNewPane={onArmFocusNewPane}
-                onTabsSnapshotUndo={onTabsSnapshotUndo}
-              />
-            )
-          ) : (
-            <EmptyState
-              onOpenSpawn={() => onOpenSpawn()}
-              onLaunchShell={onLaunchStandaloneShellDefault}
-              onAddRepo={onAddRepo}
-              hasRepos={state.repos.length > 0}
-              hasTabs={state.tabs.length > 0}
-            />
-          )}
-        </main>
+        {mainPaneContent}
       </ResizableSplit>
       {state.spawnOpen && state.client && (
         <SpawnDialog

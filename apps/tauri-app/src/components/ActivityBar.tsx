@@ -12,6 +12,7 @@ import Icon, { type IconName } from "./Icon";
 export type ActivitySection = "sessions" | "source-control";
 
 export const ACTIVITY_STORAGE_KEY = "rt.activity";
+export const SIDEBAR_COLLAPSED_STORAGE_KEY = "rt.sidebar-collapsed";
 
 export function readActivitySection(): ActivitySection {
   try {
@@ -30,8 +31,27 @@ export function writeActivitySection(section: ActivitySection): void {
   }
 }
 
+export function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+  } catch {
+    /* localStorage unavailable — best-effort */
+  }
+}
+
 interface Props {
   active: ActivitySection;
+  /// True when the sidebar pane is hidden. The active section still
+  /// renders as highlighted (matches VSCode); clicking it expands.
+  collapsed: boolean;
   onSelect: (s: ActivitySection) => void;
   /// Total uncommitted file count across all registered repos. Renders as
   /// a VSCode-style numeric badge on the source-control button when > 0.
@@ -41,6 +61,7 @@ interface Props {
 
 export default function ActivityBar({
   active,
+  collapsed,
   onSelect,
   sourceControlBadge,
 }: Props) {
@@ -55,6 +76,7 @@ export default function ActivityBar({
       <ActivityButton
         section="sessions"
         active={active}
+        collapsed={collapsed}
         onSelect={onSelect}
         label="Sessions"
         icon="sessions"
@@ -63,6 +85,7 @@ export default function ActivityBar({
       <ActivityButton
         section="source-control"
         active={active}
+        collapsed={collapsed}
         onSelect={onSelect}
         label="Source control"
         icon="sourceControl"
@@ -75,6 +98,7 @@ export default function ActivityBar({
 interface ActivityButtonProps {
   section: ActivitySection;
   active: ActivitySection;
+  collapsed: boolean;
   onSelect: (s: ActivitySection) => void;
   label: string;
   icon: IconName;
@@ -84,6 +108,7 @@ interface ActivityButtonProps {
 function ActivityButton({
   section,
   active,
+  collapsed,
   onSelect,
   label,
   icon,
@@ -92,13 +117,23 @@ function ActivityButton({
   const isActive = section === active;
   const hasBadge = badge > 0;
   const badgeText = hasBadge ? (badge > 99 ? "99+" : String(badge)) : null;
-  const fullLabel = hasBadge ? `${label} (${badge} uncommitted)` : label;
+  const baseLabel = hasBadge ? `${label} (${badge} uncommitted)` : label;
+  const action =
+    isActive && !collapsed
+      ? "collapse sidebar"
+      : isActive && collapsed
+        ? "expand sidebar"
+        : collapsed
+          ? "open"
+          : "show";
+  const fullLabel = `${baseLabel} — click to ${action} (Ctrl+B)`;
   return (
     <button
       type="button"
       role="tab"
       className={isActive ? "activity-btn active" : "activity-btn"}
       aria-selected={isActive}
+      aria-expanded={isActive ? !collapsed : undefined}
       aria-label={fullLabel}
       title={fullLabel}
       data-testid={`activity-btn-${section}`}

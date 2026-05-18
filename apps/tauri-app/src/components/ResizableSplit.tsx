@@ -10,6 +10,10 @@ interface Props {
   /** "horizontal" = vertical divider between two columns;
    *  "vertical"   = horizontal divider between two rows. */
   direction?: "horizontal" | "vertical";
+  /** Hide the first pane and the divider entirely; the second pane fills
+   *  the container. The first pane stays mounted (kept in the DOM) so
+   *  any stateful children retain their state across collapse/expand. */
+  firstHidden?: boolean;
   children: [React.ReactNode, React.ReactNode];
 }
 
@@ -20,6 +24,7 @@ export default function ResizableSplit({
   defaultSize,
   minSize = 120,
   direction = "horizontal",
+  firstHidden = false,
   children,
 }: Props) {
   const [size, setSize] = useState<number>(() => loadSize(storageKey, defaultSize));
@@ -64,16 +69,18 @@ export default function ResizableSplit({
   );
 
   const isHorizontal = direction === "horizontal";
+  const firstTrack = firstHidden ? "0" : `${size}px`;
+  const dividerTrack = firstHidden ? "0" : "4px";
   const gridStyle: React.CSSProperties = isHorizontal
     ? {
         display: "grid",
-        gridTemplateColumns: `${size}px 4px 1fr`,
+        gridTemplateColumns: `${firstTrack} ${dividerTrack} 1fr`,
         height: "100%",
         minHeight: 0,
       }
     : {
         display: "grid",
-        gridTemplateRows: `${size}px 4px 1fr`,
+        gridTemplateRows: `${firstTrack} ${dividerTrack} 1fr`,
         width: "100%",
         minWidth: 0,
       };
@@ -81,18 +88,21 @@ export default function ResizableSplit({
   return (
     <div
       ref={containerRef}
-      className={`split split-${direction}`}
+      className={`split split-${direction}${firstHidden ? " split-first-hidden" : ""}`}
       style={gridStyle}
     >
-      <div className="split-pane">{children[0]}</div>
+      <div className="split-pane" inert={firstHidden ? true : undefined}>
+        {children[0]}
+      </div>
       <div
         className={`split-divider divider-${direction}`}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerDown={firstHidden ? undefined : onPointerDown}
+        onPointerMove={firstHidden ? undefined : onPointerMove}
+        onPointerUp={firstHidden ? undefined : onPointerUp}
+        onPointerCancel={firstHidden ? undefined : onPointerUp}
         role="separator"
         aria-orientation={isHorizontal ? "vertical" : "horizontal"}
+        inert={firstHidden ? true : undefined}
       />
       <div className="split-pane">{children[1]}</div>
     </div>
