@@ -1409,7 +1409,7 @@ async fn dispatch(
         ClientMessage::DeleteWorktreeAt { path } => {
             let root = hub.state.worktrees_dir();
             let target = std::path::PathBuf::from(&path);
-            crate::worktrees_admin::delete_group(&root, &target, &hub.sessions)?;
+            crate::worktrees_admin::delete_group(&root, &target, &hub.sessions).await?;
             // Push a fresh snapshot only to the requesting client. Other
             // windows with the modal open can refresh on demand.
             let is_override = hub.state.worktrees_root_is_override();
@@ -3143,6 +3143,26 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
         },
     );
 
+    // Brief grace period before touching the filesystem. The typical
+    // call sequence is stop_session → discard_session back-to-back, and
+    // stop_session's pty.kill() is fire-and-forget — the actual
+    // TerminateProcess hop runs through the tracer pipe asynchronously.
+    // Without this pause, `git worktree remove --force` races the still-
+    // dying child's file handles and fails on Windows. 250 ms covers
+    // the typical kill propagation; the fs fallback in
+    // `worktree_cleanup::remove_member` handles the rest.
+    let wants_removal = cleanup
+        .iter()
+        .any(|a| a.remove_worktree && has_per_session_worktree);
+    if wants_removal {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Track which wt.<branch-slug>/ wrapper dirs were touched so we can
+    // finalize them once all members of the group have been processed.
+    // A `HashSet` would dedupe in O(1), but the typical N is 1–3 members
+    // so a Vec scan is cheaper and keeps allocations bounded.
+    let mut wrappers_touched: Vec<PathBuf> = Vec::new();
     for action in cleanup {
         if !action.remove_worktree || !has_per_session_worktree {
             continue;
@@ -3160,9 +3180,24 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
             continue;
         };
         let worktree_path = PathBuf::from(&member.worktree_path);
-        if let Err(err) = git::worktree_remove(Path::new(&repo_path), &worktree_path).await {
-            warn!(?err, "discard_session: worktree remove failed");
+        match crate::worktree_cleanup::remove_member(Path::new(&repo_path), &worktree_path).await {
+            crate::worktree_cleanup::CleanupOutcome::Removed => {}
+            crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
+                warn!(
+                    %reason,
+                    member = %worktree_path.display(),
+                    "discard_session: worktree cleanup failed; member dir still on disk"
+                );
+            }
         }
+        if let Some(parent) = worktree_path.parent()
+            && !wrappers_touched.iter().any(|p| p == parent)
+        {
+            wrappers_touched.push(parent.to_path_buf());
+        }
+    }
+    for wrapper in &wrappers_touched {
+        crate::worktree_cleanup::finalize_wrapper(wrapper);
     }
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);

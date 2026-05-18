@@ -181,6 +181,14 @@ pub async fn worktree_remove(repo: &Path, target_path: &Path) -> anyhow::Result<
         .map(|_| ())
 }
 
+/// `git -C <repo> worktree prune`. Drops orphaned
+/// `.git/worktrees/<name>/` admin dirs whose target on disk is gone.
+/// Used by [`crate::worktree_cleanup`] after a member removal so the
+/// originating repo's worktree registry stays in sync with the disk.
+pub async fn worktree_prune(repo: &Path) -> anyhow::Result<()> {
+    run_git(repo, &["worktree", "prune"]).await.map(|_| ())
+}
+
 pub async fn changed_files(worktree: &Path) -> anyhow::Result<Vec<String>> {
     let stdout = run_git(worktree, &["status", "--porcelain=1"]).await?;
     Ok(stdout

@@ -23,6 +23,7 @@ mod tabs;
 mod tracer_client;
 mod vscode;
 mod workspace;
+mod worktree_cleanup;
 mod worktrees_admin;
 
 use anyhow::Context as _;

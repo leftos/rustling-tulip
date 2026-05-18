@@ -87,22 +87,21 @@ pub fn scan_root(root: &Path, sessions: &SessionRegistry) -> Vec<RootWorktreeEnt
 
 /// Delete a `wt.<branch>/` group from disk. Refuses if any member is
 /// referenced by a non-stopped, non-abandoned session (the user must
-/// stop the session first). For each member tries
-/// `git -C <repo> worktree remove --force <member>` and falls back to
-/// `fs::remove_dir_all` if the originating repo is unreachable or the
-/// command fails. After all members are removed, removes the wt.* dir
-/// itself and emits a `git worktree prune` on every repo touched to
-/// drop dangling refs.
-pub fn delete_group(
+/// stop the session first). Each member is run through
+/// [`crate::worktree_cleanup::remove_member`] which tries
+/// `git -C <repo> worktree remove --force`, retries once after a brief
+/// delay (covers transient Windows file locks), falls back to
+/// `fs::remove_dir_all`, and runs `git worktree prune` on success.
+/// After every member is processed, the wrapper dir itself is removed.
+pub async fn delete_group(
     root: &Path,
     target: &Path,
     sessions: &SessionRegistry,
 ) -> anyhow::Result<()> {
     let target = validate_target(root, target)?;
     assert_no_live_session(&target, sessions)?;
-    let touched_repos = delete_members(&target)?;
+    delete_members(&target).await?;
     finalize_group_dir(&target)?;
-    prune_touched_repos(&touched_repos);
     Ok(())
 }
 
@@ -162,13 +161,12 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
     Ok(())
 }
 
-/// Per-member: try `git worktree remove --force` first (keeps the
-/// originating repo's worktree list clean), fall back to
-/// `fs::remove_dir_all` if the repo is unreachable or git fails.
-/// Returns the unique list of originating repo paths so the caller can
-/// `git worktree prune` them after.
-fn delete_members(target: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut touched_repos: Vec<PathBuf> = Vec::new();
+/// Walk every member dir under the group and hand each to the shared
+/// robust cleanup helper. The originating repo (read from the member's
+/// `.git` gitfile) is looked up per member so that members from
+/// different repos in a workspace session each get their own
+/// `git worktree prune` after deletion.
+async fn delete_members(target: &Path) -> anyhow::Result<()> {
     let members = std::fs::read_dir(target)
         .with_context(|| format!("reading {}", target.display()))?
         .flatten()
@@ -179,48 +177,31 @@ fn delete_members(target: &Path) -> anyhow::Result<Vec<PathBuf>> {
         }
         let member_path = member_ent.path();
         let repo_path = repo_path_for_worktree(&member_path);
-        delete_one_member(&member_path, repo_path.as_deref(), &mut touched_repos)?;
-        if let Some(repo) = repo_path
-            && !touched_repos.contains(&repo)
-        {
-            touched_repos.push(repo);
-        }
-    }
-    Ok(touched_repos)
-}
-
-/// Remove a single member dir. Caller threads `touched_repos` so the
-/// successful-git-remove path can record the repo without re-scanning.
-fn delete_one_member(
-    member_path: &Path,
-    repo_path: Option<&Path>,
-    touched_repos: &mut Vec<PathBuf>,
-) -> anyhow::Result<()> {
-    if let Some(repo) = repo_path {
-        match git_worktree_remove(repo, member_path) {
-            Ok(()) => {
-                if !touched_repos.iter().any(|p| p == repo) {
-                    touched_repos.push(repo.to_path_buf());
+        if let Some(repo) = repo_path.as_deref() {
+            match crate::worktree_cleanup::remove_member(repo, &member_path).await {
+                crate::worktree_cleanup::CleanupOutcome::Removed => {}
+                crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
+                    return Err(anyhow!(
+                        "could not remove member {}: {reason}",
+                        member_path.display()
+                    ));
                 }
-                return Ok(());
             }
-            Err(err) => {
-                warn!(
-                    ?err,
-                    repo = %repo.display(),
-                    member = %member_path.display(),
-                    "git worktree remove failed; falling back to filesystem delete"
-                );
-            }
+        } else {
+            // No reachable originating repo (stale .git gitfile, repo
+            // moved, etc.) — skip the git remove attempt and go straight
+            // to the filesystem delete. This is the "stale wt entry left
+            // over from a deleted repo" case the management modal exists
+            // to clean up.
+            std::fs::remove_dir_all(&member_path)
+                .or_else(|err| match err.kind() {
+                    std::io::ErrorKind::NotFound => Ok(()),
+                    _ => Err(err),
+                })
+                .with_context(|| format!("removing member dir {}", member_path.display()))?;
         }
     }
-    match std::fs::remove_dir_all(member_path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => {
-            Err(err).with_context(|| format!("removing member dir {}", member_path.display()))
-        }
-    }
+    Ok(())
 }
 
 /// Drop the `wt.*` dir itself. If it's not empty (foreign content left
@@ -236,20 +217,6 @@ fn finalize_group_dir(target: &Path) -> anyhow::Result<()> {
                 target.display()
             )
         }),
-    }
-}
-
-/// Best-effort `git worktree prune` for every repo that owned a deleted
-/// member. A prune failure is logged but doesn't fail the parent delete.
-fn prune_touched_repos(repos: &[PathBuf]) {
-    for repo in repos {
-        if let Err(err) = git_worktree_prune(repo) {
-            warn!(
-                ?err,
-                repo = %repo.display(),
-                "git worktree prune failed after delete"
-            );
-        }
     }
 }
 
@@ -400,39 +367,3 @@ fn group_size_and_mtime(root: &Path) -> (Option<u64>, Option<i64>) {
     (Some(total), latest)
 }
 
-fn git_worktree_remove(repo: &Path, member: &Path) -> anyhow::Result<()> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "remove", "--force"])
-        .arg(member)
-        .output()
-        .with_context(|| format!("spawning git worktree remove for {}", member.display()))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Err(anyhow!(
-        "git worktree remove failed (status {}): {}",
-        output.status,
-        stderr.trim()
-    ))
-}
-
-fn git_worktree_prune(repo: &Path) -> anyhow::Result<()> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "prune"])
-        .output()
-        .with_context(|| format!("spawning git worktree prune in {}", repo.display()))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    Err(anyhow!(
-        "git worktree prune failed (status {}): {}",
-        output.status,
-        stderr.trim()
-    ))
-}
