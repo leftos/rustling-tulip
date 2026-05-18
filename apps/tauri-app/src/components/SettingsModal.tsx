@@ -3,6 +3,8 @@ import {
   isPermissionGranted,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import type { DaemonClient } from "../api";
 import type { CodexSandbox, PermissionMode } from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
@@ -14,6 +16,17 @@ import Icon from "./Icon";
 interface Props {
   settings: Settings;
   onClose: () => void;
+  /// Daemon connection for sending `set_worktrees_root` mutations from
+  /// the Worktrees panel. `null` while disconnected — the panel disables
+  /// its mutation buttons in that state.
+  client: DaemonClient | null;
+  /// Active worktrees root + override flag, mirrored from the daemon's
+  /// `worktrees_root_changed` broadcast. `null` only before the initial
+  /// state push lands; the panel renders a placeholder until then.
+  worktreesRoot: { path: string; isOverride: boolean } | null;
+  /// Open the worktrees-management modal. Owned by the parent so it
+  /// lives at the App level (matches the SettingsModal own placement).
+  onOpenWorktreesManager: () => void;
 }
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
@@ -22,6 +35,7 @@ type SettingsTabKey =
   | "general"
   | "notifications"
   | "spawn"
+  | "worktrees"
   | "appearance"
   | "title";
 
@@ -34,6 +48,7 @@ const SETTINGS_TABS: SettingsTabDef[] = [
   { key: "general", label: "General" },
   { key: "notifications", label: "Notifications" },
   { key: "spawn", label: "Spawn defaults" },
+  { key: "worktrees", label: "Worktrees" },
   { key: "appearance", label: "Appearance" },
   { key: "title", label: "App Title" },
 ];
@@ -42,7 +57,13 @@ const SETTINGS_TABS: SettingsTabDef[] = [
 /// State persistence runs through `saveSettings` in `utils/settings.ts`,
 /// which writes localStorage AND fires a `rt:settings-changed` window event
 /// so cross-component subscribers re-read on every write without prop-drilling.
-export default function SettingsModal({ settings, onClose }: Props) {
+export default function SettingsModal({
+  settings,
+  onClose,
+  client,
+  worktreesRoot,
+  onOpenWorktreesManager,
+}: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
   useFocusReturn();
@@ -130,6 +151,13 @@ export default function SettingsModal({ settings, onClose }: Props) {
             )}
             {activeTab === "spawn" && (
               <SpawnPanel settings={settings} update={update} />
+            )}
+            {activeTab === "worktrees" && (
+              <WorktreesPanel
+                client={client}
+                worktreesRoot={worktreesRoot}
+                onOpenManager={onOpenWorktreesManager}
+              />
             )}
             {activeTab === "appearance" && (
               <AppearanceFields
@@ -541,5 +569,157 @@ function PermissionBadge({ state }: { state: PermissionState }) {
     <span className={cls} data-testid="settings-permission-state">
       {label}
     </span>
+  );
+}
+
+interface WorktreesPanelProps {
+  client: DaemonClient | null;
+  worktreesRoot: { path: string; isOverride: boolean } | null;
+  onOpenManager: () => void;
+}
+
+/// Worktrees-root setting + entry point for the management modal. The
+/// daemon is the source of truth for the active root (it pushes
+/// `worktrees_root_changed` on connect and on every override mutation);
+/// this panel just edits a local draft and pushes `set_worktrees_root`
+/// on Save. The draft re-syncs whenever the daemon broadcast updates so
+/// concurrent changes from another window propagate without manual
+/// refresh.
+function WorktreesPanel({
+  client,
+  worktreesRoot,
+  onOpenManager,
+}: WorktreesPanelProps) {
+  const isOverride = worktreesRoot?.isOverride ?? false;
+  const currentPath = worktreesRoot?.path ?? null;
+  const [draft, setDraft] = useState<string>(isOverride ? currentPath ?? "" : "");
+  const [savingState, setSavingState] = useState<"idle" | "saving" | "saved">(
+    "idle",
+  );
+
+  // Re-sync the input when the daemon's known value changes. Only echo
+  // back the override path — leaving the input empty when the daemon is
+  // on default makes Save mean "set this as override" rather than
+  // "set the default path as override".
+  useEffect(() => {
+    setDraft(isOverride ? currentPath ?? "" : "");
+    setSavingState("idle");
+  }, [isOverride, currentPath]);
+
+  const onBrowse = useCallback(() => {
+    void (async () => {
+      try {
+        const seed = draft || currentPath;
+        const result = await openDialog({
+          directory: true,
+          multiple: false,
+          title: "Choose worktrees root",
+          ...(seed ? { defaultPath: seed } : {}),
+        });
+        if (typeof result === "string" && result.length > 0) {
+          setDraft(result);
+        }
+      } catch (err) {
+        logToFile("warn", `settings: worktrees Browse threw: ${String(err)}`);
+      }
+    })();
+  }, [draft, currentPath]);
+
+  const onSave = useCallback(() => {
+    if (!client) return;
+    const trimmed = draft.trim();
+    setSavingState("saving");
+    client.send({
+      type: "set_worktrees_root",
+      path: trimmed.length === 0 ? null : trimmed,
+    });
+    // No request/reply contract — the daemon's `worktrees_root_changed`
+    // broadcast is the confirmation, which fires the useEffect above and
+    // resets savingState back to "idle". We tag "saved" optimistically
+    // so the user sees feedback even on transient broadcast delays.
+    setSavingState("saved");
+  }, [client, draft]);
+
+  const onReset = useCallback(() => {
+    if (!client) return;
+    setSavingState("saving");
+    client.send({ type: "set_worktrees_root", path: null });
+    setDraft("");
+  }, [client]);
+
+  const disabled = !client;
+  const draftMatchesCurrent = isOverride
+    ? draft.trim() === (currentPath ?? "")
+    : draft.trim().length === 0;
+  return (
+    <section
+      className="settings-section"
+      data-testid="settings-section-worktrees"
+    >
+      <h3>Worktrees root</h3>
+      <p className="settings-section-hint">
+        Per-session git worktrees land under this directory. Changes take
+        effect for new sessions only — sessions already spawned keep
+        their existing worktree paths.
+      </p>
+      <div className="settings-row">
+        <label htmlFor="worktrees-root-input">Path</label>
+        <input
+          id="worktrees-root-input"
+          type="text"
+          value={draft}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setSavingState("idle");
+          }}
+          placeholder={isOverride ? "" : currentPath ?? "(daemon not connected)"}
+          spellCheck={false}
+          autoComplete="off"
+          disabled={disabled}
+          data-testid="settings-worktrees-root-input"
+        />
+        <button
+          type="button"
+          onClick={onBrowse}
+          disabled={disabled}
+          data-testid="settings-worktrees-root-browse"
+        >
+          Browse…
+        </button>
+      </div>
+      <p className="settings-section-hint">
+        Active: <code>{currentPath ?? "(daemon not connected)"}</code>
+        {isOverride
+          ? " — user override"
+          : " — default (env or platform fallback)"}
+      </p>
+      <div className="settings-row">
+        <button
+          type="button"
+          className="primary"
+          onClick={onSave}
+          disabled={disabled || draftMatchesCurrent}
+          data-testid="settings-worktrees-root-save"
+        >
+          {savingState === "saved" && draftMatchesCurrent ? "Saved" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={disabled || !isOverride}
+          data-testid="settings-worktrees-root-reset"
+        >
+          Reset to default
+        </button>
+        <button
+          type="button"
+          onClick={onOpenManager}
+          disabled={disabled}
+          data-testid="settings-worktrees-open-manager"
+        >
+          Manage worktrees…
+        </button>
+      </div>
+    </section>
   );
 }

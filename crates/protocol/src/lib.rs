@@ -1372,6 +1372,34 @@ pub enum ClientMessage {
         workspace_id: String,
         value: bool,
     },
+    /// Override the worktrees root path. `path = None` clears the user
+    /// override and reverts to the env-or-default location (see the
+    /// daemon's `resolve_worktrees_dir`). Takes effect immediately for
+    /// *new* sessions; already-spawned sessions keep their existing
+    /// worktree paths. The daemon validates the path is creatable +
+    /// writable, persists it on `PersistedState`, then broadcasts
+    /// [`DaemonMessage::WorktreesRootChanged`] to every connected client.
+    SetWorktreesRoot {
+        path: Option<String>,
+    },
+    /// Scan the current worktrees root and report every `wt.<branch>/`
+    /// group found under it, cross-referenced against the live and
+    /// abandoned session registries. Daemon replies with
+    /// [`DaemonMessage::WorktreesRootSnapshot`].
+    InspectWorktreesRoot,
+    /// Delete a worktree group on disk. `path` is the absolute path of
+    /// the `wt.<branch>/` directory as reported by
+    /// [`DaemonMessage::WorktreesRootSnapshot`]. The daemon refuses to
+    /// delete a group whose status is `Active` (a session is using it
+    /// right now); the client must stop the session first. For each
+    /// member directory the daemon tries `git -C <repo> worktree remove
+    /// --force <member>` first; if the originating repo is gone or the
+    /// command fails, it falls back to `fs::remove_dir_all` and (where
+    /// possible) prunes the originating repo's stale worktree refs.
+    /// Daemon emits a fresh `WorktreesRootSnapshot` on success.
+    DeleteWorktreeAt {
+        path: String,
+    },
     /// Request the full tab list. Also delivered automatically after
     /// [`DaemonMessage::Welcome`].
     ListTabs,
@@ -1581,6 +1609,80 @@ pub struct WorktreeInfo {
     pub is_active: bool,
 }
 
+/// Status of one `wt.<branch>/` group as discovered by
+/// [`ClientMessage::InspectWorktreesRoot`].
+///
+/// New variants must default-deserialize through `#[serde(other)] Unknown`
+/// so a client speaking an older protocol still decodes the snapshot
+/// (containing message keeps decoding, single entry's status renders as
+/// "Unknown" in the UI).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RootWorktreeStatus {
+    /// At least one live (non-stopped, non-abandoned) session is using a
+    /// member of this group. Deletion is refused.
+    Active,
+    /// A session record references this group but is currently stopped
+    /// or abandoned. Safe to delete after explicit user confirm — the
+    /// session can be Resumed before deletion if the user changes their
+    /// mind.
+    Detached,
+    /// No session in the registry references this group. Safe to delete
+    /// without further consequences. This is the bucket that the bulk
+    /// "Delete all stale" action targets.
+    Stale,
+    /// Forward-compat absorber for clients that decode a newer status
+    /// kind we don't recognize yet. Treat as "Detached" for the purpose
+    /// of bulk-delete safety.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One member within a `wt.<branch>/` group: the on-disk worktree path
+/// plus the originating repo's working-tree path (resolved from the
+/// member's `.git` gitfile), used by the daemon to invoke
+/// `git -C <repo> worktree remove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RootWorktreeMember {
+    pub worktree_path: String,
+    /// Absolute path of the originating repo's working tree. `None` when
+    /// the gitfile inside the worktree is unreadable, points at a
+    /// non-existent repo, or has been corrupted. Deletion falls back to
+    /// plain `fs::remove_dir_all` in that case.
+    pub repo_path: Option<String>,
+    /// Best-effort display name (leaf component of `repo_path` when
+    /// known; otherwise leaf component of `worktree_path`).
+    pub repo_name_hint: String,
+}
+
+/// One `wt.<branch>/` group under the worktrees root.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RootWorktreeEntry {
+    /// Absolute path of the `wt.<branch>/` directory itself. This is
+    /// the address `DeleteWorktreeAt` operates on.
+    pub path: String,
+    /// Parent directory name (the "anchor" — common-ancestor prefix of
+    /// member repo parents, sanitized). Pure display field.
+    pub anchor: String,
+    /// Branch slug (`<wt.>` prefix already stripped).
+    pub branch_slug: String,
+    /// One entry per child member directory under `wt.<branch>/`.
+    /// A single-repo session has one member; a workspace session has
+    /// one per workspace member.
+    pub members: Vec<RootWorktreeMember>,
+    pub status: RootWorktreeStatus,
+    /// Session id referencing this group, if any. For Active and
+    /// Detached statuses this points at the owning session. None for
+    /// Stale.
+    pub session_id: Option<String>,
+    /// Total bytes used by all member directories under this group.
+    /// Best-effort: `None` if the walk fails (permission errors, etc.).
+    pub size_bytes: Option<u64>,
+    /// Most recent modified timestamp (unix seconds) across the group's
+    /// member directories. `None` if no readable metadata.
+    pub last_modified_unix: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
@@ -1632,6 +1734,24 @@ pub enum DaemonMessage {
     Worktrees {
         repo_id: String,
         worktrees: Vec<WorktreeInfo>,
+    },
+    /// Broadcast whenever the worktrees root changes — fired both in
+    /// response to [`ClientMessage::SetWorktreesRoot`] and at first
+    /// `Welcome` so a freshly-connected client knows the current value
+    /// without polling. `is_override` is true iff the active path came
+    /// from the user setting (vs the env/default fallback).
+    WorktreesRootChanged {
+        root: String,
+        is_override: bool,
+    },
+    /// Reply to [`ClientMessage::InspectWorktreesRoot`]. Carries every
+    /// `wt.<branch>/` group discovered under the current root, plus a
+    /// snapshot of the root path itself so the client can reconcile
+    /// against any concurrent root change.
+    WorktreesRootSnapshot {
+        root: String,
+        is_override: bool,
+        entries: Vec<RootWorktreeEntry>,
     },
     Sessions {
         sessions: Vec<SessionSnapshot>,

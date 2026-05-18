@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use protocol::{ContainerRef, RepoEntry, TabEntry, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -31,6 +31,15 @@ pub struct PersistedState {
     /// and ignored on merge. Old state.json files default to empty.
     #[serde(default)]
     pub session_order: HashMap<String, Vec<String>>,
+    /// User-customized worktrees root, persisted across daemon restarts.
+    /// `None` means "use the env/platform default from `Dirs`". Old
+    /// state.json files without this field deserialize cleanly.
+    /// Mutated by `ClientMessage::SetWorktreesRoot` via
+    /// [`AppState::set_worktrees_root`]. Read by every spawn path via
+    /// [`AppState::worktrees_dir`] so a freshly-saved override takes
+    /// effect on the next session without a daemon restart.
+    #[serde(default)]
+    pub worktrees_root_override: Option<String>,
 }
 
 #[derive(Debug)]
@@ -91,6 +100,53 @@ impl AppState {
         std::fs::write(&tmp, &bytes).context("writing state tmp")?;
         std::fs::rename(&tmp, &self.dirs.state_file).context("renaming state.json")?;
         Ok(result)
+    }
+
+    /// Effective worktrees root path: the user override from
+    /// `PersistedState::worktrees_root_override` when set, else the
+    /// resolved-at-startup default from `Dirs` (which already honors
+    /// `RUSTLING_TULIP_WORKTREES_DIR` and platform defaults). Every
+    /// spawn path that needs to compute member worktree paths must call
+    /// this — never read `dirs.worktrees_dir` directly, or a freshly
+    /// saved override won't take effect until daemon restart.
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.with_persisted(|s| s.worktrees_root_override.clone())
+            .map_or_else(|| self.dirs.worktrees_dir.clone(), PathBuf::from)
+    }
+
+    /// True iff the active worktrees root came from the user setting
+    /// (`worktrees_root_override`). False when falling back to the
+    /// env/platform default. Used to drive the Settings UI's
+    /// "currently overridden" indicator + the Reset-to-default button.
+    pub fn worktrees_root_is_override(&self) -> bool {
+        self.with_persisted(|s| s.worktrees_root_override.is_some())
+    }
+
+    /// Persist a worktrees-root override and create the directory if it
+    /// doesn't exist. `None` clears the override, reverting to the
+    /// env/platform default. Returns the new effective path + whether
+    /// it's an override so the caller can broadcast the change.
+    pub fn set_worktrees_root(
+        &self,
+        path: Option<String>,
+    ) -> anyhow::Result<(PathBuf, bool)> {
+        let normalized = if let Some(raw) = path {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                let pb = PathBuf::from(trimmed);
+                std::fs::create_dir_all(&pb)
+                    .with_context(|| format!("creating worktrees root {}", pb.display()))?;
+                Some(pb.to_string_lossy().into_owned())
+            }
+        } else {
+            None
+        };
+        self.mutate(|s| {
+            s.worktrees_root_override = normalized;
+        })?;
+        Ok((self.worktrees_dir(), self.worktrees_root_is_override()))
     }
 }
 

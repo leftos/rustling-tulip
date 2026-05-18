@@ -134,6 +134,14 @@ pub enum StateEvent {
         repo_id: String,
         stashes: Vec<protocol::GitStash>,
     },
+    /// Broadcast whenever the user-customized worktrees root changes (or
+    /// the user clears the override and reverts to default). Lets every
+    /// connected client refresh its Settings UI and any open worktree-
+    /// management modal without polling.
+    WorktreesRootChanged {
+        root: String,
+        is_override: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -577,6 +585,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::Stashes { repo_id, stashes }) => {
                     let _ = out_tx.send(DaemonMessage::Stashes { repo_id, stashes });
                 }
+                Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
+                    let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                 }
@@ -785,6 +796,10 @@ fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) 
         sessions: hub.sessions.snapshots(),
     });
     let _ = out_tx.send(DaemonMessage::Tabs { tabs });
+    let _ = out_tx.send(DaemonMessage::WorktreesRootChanged {
+        root: hub.state.worktrees_dir().to_string_lossy().into_owned(),
+        is_override: hub.state.worktrees_root_is_override(),
+    });
 }
 
 #[expect(
@@ -885,7 +900,7 @@ async fn dispatch(
             // doesn't change preview output meaningfully.
             let (_, resolved) = ws::resolve_workspace(
                 &hub.state,
-                &hub.dirs.worktrees_dir,
+                &hub.state.worktrees_dir(),
                 &workspace_id,
                 &branch_name,
                 base_branch.as_deref(),
@@ -1373,6 +1388,37 @@ async fn dispatch(
             set_workspace_worktree_default(&hub.state, &workspace_id, value)?;
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
+        }
+        ClientMessage::SetWorktreesRoot { path } => {
+            let (resolved, is_override) = hub.state.set_worktrees_root(path)?;
+            let _ = hub.state_events.send(StateEvent::WorktreesRootChanged {
+                root: resolved.to_string_lossy().into_owned(),
+                is_override,
+            });
+        }
+        ClientMessage::InspectWorktreesRoot => {
+            let root = hub.state.worktrees_dir();
+            let is_override = hub.state.worktrees_root_is_override();
+            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions);
+            let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
+                root: root.to_string_lossy().into_owned(),
+                is_override,
+                entries,
+            });
+        }
+        ClientMessage::DeleteWorktreeAt { path } => {
+            let root = hub.state.worktrees_dir();
+            let target = std::path::PathBuf::from(&path);
+            crate::worktrees_admin::delete_group(&root, &target, &hub.sessions)?;
+            // Push a fresh snapshot only to the requesting client. Other
+            // windows with the modal open can refresh on demand.
+            let is_override = hub.state.worktrees_root_is_override();
+            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions);
+            let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
+                root: root.to_string_lossy().into_owned(),
+                is_override,
+                entries,
+            });
         }
         ClientMessage::ListTabs => {
             let tabs = hub.state.with_persisted(|s| s.tabs.clone());
@@ -2831,7 +2877,7 @@ async fn spawn_single(
 
     let working_path = if use_worktree {
         let mut paths = git::workspace_worktree_paths(
-            &hub.dirs.worktrees_dir,
+            &hub.state.worktrees_dir(),
             &[repo_path.as_path()],
             branch_name,
         );
@@ -2916,7 +2962,7 @@ async fn spawn_workspace(
     );
     let (workspace, resolved) = ws::resolve_workspace(
         &hub.state,
-        &hub.dirs.worktrees_dir,
+        &hub.state.worktrees_dir(),
         workspace_id,
         branch_name,
         base_branch.as_deref(),

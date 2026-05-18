@@ -374,6 +374,47 @@ export interface WorktreeInfo {
   is_active: boolean;
 }
 
+// Status of one `wt.<branch>/` group reported by InspectWorktreesRoot.
+// Mirrors `protocol::RootWorktreeStatus`. New backend variants we don't
+// recognize fall into "unknown" — the modal renders them with a dimmed
+// badge but does NOT include them in bulk "Delete all stale".
+export type RootWorktreeStatus =
+  | { kind: "active" }
+  | { kind: "detached" }
+  | { kind: "stale" }
+  | { kind: "unknown" };
+
+export interface RootWorktreeMember {
+  worktree_path: string;
+  // Null when the gitfile inside the worktree is unreadable, points at a
+  // non-existent repo, or has been corrupted. The daemon falls back to
+  // plain `fs::remove_dir_all` for these.
+  repo_path: string | null;
+  // Best-effort display name: leaf component of repo_path when known,
+  // else leaf component of worktree_path.
+  repo_name_hint: string;
+}
+
+export interface RootWorktreeEntry {
+  // Absolute path of the `wt.<branch>/` directory. This is the address
+  // DeleteWorktreeAt operates on.
+  path: string;
+  // Display-only parent directory name (the sanitized "anchor").
+  anchor: string;
+  // Branch slug (the `wt.` prefix already stripped).
+  branch_slug: string;
+  members: RootWorktreeMember[];
+  status: RootWorktreeStatus;
+  // Session id referencing this group when status is "active" or
+  // "detached". Null for "stale".
+  session_id: string | null;
+  // Total bytes used by all member directories. Null if the walk failed.
+  size_bytes: number | null;
+  // Most-recent modified timestamp across the group's contents, unix
+  // seconds. Null if no readable metadata.
+  last_modified_unix: number | null;
+}
+
 export interface MemberSpawnPreview {
   repo_id: string;
   repo_name: string;
@@ -591,6 +632,17 @@ export type ClientMessage =
       workspace_id: string;
       value: boolean;
     }
+  // path: null clears the user override and reverts to the env/platform
+  // default. Daemon validates + creates the directory; broadcasts
+  // `worktrees_root_changed` on success.
+  | { type: "set_worktrees_root"; path: string | null }
+  // Scan the worktrees root and cross-reference against the session
+  // registry. Reply: `worktrees_root_snapshot`.
+  | { type: "inspect_worktrees_root" }
+  // Delete one `wt.<branch>/` group on disk. `path` is taken from a
+  // prior `worktrees_root_snapshot` entry. Daemon refuses if the group
+  // is in Active status and replies with a fresh snapshot on success.
+  | { type: "delete_worktree_at"; path: string }
   | { type: "list_tabs" }
   | {
       type: "create_tab";
@@ -704,6 +756,17 @@ export type DaemonMessage =
       type: "worktrees";
       repo_id: string;
       worktrees: WorktreeInfo[];
+    }
+  | {
+      type: "worktrees_root_changed";
+      root: string;
+      is_override: boolean;
+    }
+  | {
+      type: "worktrees_root_snapshot";
+      root: string;
+      is_override: boolean;
+      entries: RootWorktreeEntry[];
     }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }

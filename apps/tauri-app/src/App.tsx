@@ -58,6 +58,7 @@ import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import SettingsModal from "./components/SettingsModal";
+import WorktreesManagerModal from "./components/WorktreesManagerModal";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
 import DiffPane from "./components/DiffPane";
@@ -191,6 +192,16 @@ interface AppState {
   /// or tab id. Synced from `sessions_reordered` broadcasts; also
   /// updated optimistically on drag so the drop position sticks.
   sessionOrder: Map<string, string[]>;
+  /// Active worktrees root path + whether it came from the user setting
+  /// (true) or the env/platform default (false). Populated from the
+  /// daemon's `worktrees_root_changed` broadcast — first delivery
+  /// arrives inside the initial-state push after Welcome, then on
+  /// every `set_worktrees_root` mutation. `null` only until that first
+  /// broadcast lands.
+  worktreesRoot: { path: string; isOverride: boolean } | null;
+  /// True while the worktrees-management modal is open. Triggered from
+  /// SettingsModal's "Manage worktrees…" button.
+  worktreesManagerOpen: boolean;
 }
 
 function lastSpawnConfigForTarget(
@@ -238,6 +249,8 @@ export default function App() {
     daemonStopRequested: false,
     containerOrder: [],
     sessionOrder: new Map(),
+    worktreesRoot: null,
+    worktreesManagerOpen: false,
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -2260,7 +2273,24 @@ export default function App() {
         />
       )}
       {state.settingsOpen && (
-        <SettingsModal settings={settings} onClose={onCloseSettings} />
+        <SettingsModal
+          settings={settings}
+          onClose={onCloseSettings}
+          client={state.client}
+          worktreesRoot={state.worktreesRoot}
+          onOpenWorktreesManager={() =>
+            setState((s) => ({ ...s, worktreesManagerOpen: true }))
+          }
+        />
+      )}
+      {state.worktreesManagerOpen && (
+        <WorktreesManagerModal
+          client={state.client}
+          worktreesRoot={state.worktreesRoot}
+          onClose={() =>
+            setState((s) => ({ ...s, worktreesManagerOpen: false }))
+          }
+        />
       )}
       {state.exitConfirmOpen && (
         <ExitConfirmDialog
@@ -2835,6 +2865,22 @@ function handleMessage(
       window.dispatchEvent(new CustomEvent("rt:attention", { detail: msg }));
       return;
     }
+    case "worktrees_root_changed":
+      setState((s) => ({
+        ...s,
+        worktreesRoot: { path: msg.root, isOverride: msg.is_override },
+      }));
+      window.dispatchEvent(
+        new CustomEvent(`rt:${msg.type}`, { detail: msg }),
+      );
+      return;
+    case "worktrees_root_snapshot":
+      // Ephemeral — no AppState slot. The WorktreesManager modal
+      // subscribes via the side-channel event.
+      window.dispatchEvent(
+        new CustomEvent(`rt:${msg.type}`, { detail: msg }),
+      );
+      return;
     case "branches":
     case "worktrees":
     case "workspace_spawn_preview":
