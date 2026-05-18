@@ -27,3 +27,15 @@ anyhow = { workspace = true }
 base64 = "0.22"
 portable-pty = "0.9"
 clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+# Job objects: bundle the child + every descendant into one kill scope
+# so killing the PTY child (or the tracer exiting) also takes out node,
+# cargo, pnpm, dev servers, etc. Without this, those grandchildren keep
+# files locked inside the worktree and break the cleanup path.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

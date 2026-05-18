@@ -135,6 +135,40 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let child_pid = child.process_id();
     info!(?child_pid, "supervisor: child spawned");
 
+    // Bind the child (and every descendant) to a Job object with
+    // KILL_ON_JOB_CLOSE so killing the PTY child — or the tracer just
+    // exiting — takes out the entire process tree. Without this, claude
+    // grandchildren (node.exe from pnpm install, cargo from a build,
+    // dev servers, the user's editor opened through `code .`) survive
+    // TerminateProcess on the PTY child and pin worktree files open,
+    // breaking the worktree cleanup path. Best-effort: if anything
+    // here fails we still proceed without the job (legacy behavior).
+    // The job handle is kept alive in `_job_guard` for the lifetime of
+    // this fn — when the tracer process exits, the OS closes the
+    // handle, KILL_ON_JOB_CLOSE fires, and every descendant goes with
+    // it.
+    #[cfg(windows)]
+    let _job_guard = if let Some(pid) = child_pid {
+        match crate::job_object::assign_kill_on_close(pid) {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    ?pid,
+                    "supervisor: could not bind child to kill-on-close job; \
+                     grandchildren may survive kill"
+                );
+                None
+            }
+        }
+    } else {
+        tracing::warn!(
+            "supervisor: portable-pty returned no child pid; \
+             skipping job-object grouping"
+        );
+        None
+    };
+
     let mut reader = pair
         .master
         .try_clone_reader()

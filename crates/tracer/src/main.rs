@@ -16,6 +16,8 @@ use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
+#[cfg(windows)]
+mod job_object;
 mod ring;
 mod supervisor;
 
