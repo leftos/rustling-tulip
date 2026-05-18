@@ -1490,48 +1490,6 @@ button.tree-tab-pill:hover {
   }
 }
 
-/* Boot intro — chip flashes once on app start so first-time users learn
- * where copy confirmations appear. Holds at full opacity for ~80% of the
- * duration, fades out, no shadow ring (the ring is reserved for real
- * copies so the two states feel distinct). */
-.copy-pulse.is-intro {
-  animation: copy-pulse-intro 5000ms ease-out forwards;
-}
-@keyframes copy-pulse-intro {
-  0% {
-    opacity: 0;
-    transform: translate(-50%, 6px) scale(0.94);
-  }
-  6% {
-    opacity: 1;
-    transform: translate(-50%, 0) scale(1);
-  }
-  80% {
-    opacity: 1;
-    transform: translate(-50%, 0) scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: translate(-50%, 0) scale(1);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .copy-pulse.is-intro {
-    animation: copy-pulse-intro-reduced 5000ms linear forwards;
-  }
-  @keyframes copy-pulse-intro-reduced {
-    0%,
-    85% {
-      opacity: 1;
-      transform: translate(-50%, 0);
-    }
-    100% {
-      opacity: 0;
-      transform: translate(-50%, 0);
-    }
-  }
-}
-
 /* ---------------------------------------------------------------------------
  * DaemonFooter — persistent status row + troubleshooting flyout at the
  * bottom of the sidebar. Replaces the header connection badge + the

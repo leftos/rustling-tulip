@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal as XTerm } from "@xterm/xterm";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
 import { loadFonts, WebFontsAddon } from "@xterm/addon-web-fonts";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -14,6 +15,7 @@ import {
 import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
+import { RtClipboardProvider } from "./clipboardProvider";
 import { useFontSize } from "../utils/fontSize";
 import { loadSettings } from "../utils/settings";
 import type { EffectiveAppearance } from "../utils/appearance";
@@ -337,6 +339,18 @@ export default function Terminal({
         );
       }
 
+      // Clipboard addon — handles OSC 52 writes from in-terminal TUIs
+      // (Claude's own selection-on-drag, vim's `clipboard=unnamedplus`,
+      // tmux's `set-clipboard external`, etc.) by base64-decoding the
+      // payload and handing the text to RtClipboardProvider, which
+      // routes it through `copyToClipboard` so the CopyPulse fires
+      // exactly once per confirmed write. Read requests are silently
+      // answered with an empty clipboard — see clipboardProvider.ts for
+      // the security reasoning.
+      const clipboard = new ClipboardAddon(undefined, new RtClipboardProvider());
+      term.loadAddon(clipboard);
+      cleanupFns.push(() => clipboard.dispose());
+
       termRef.current = term;
       fitRef.current = fit;
 
@@ -359,40 +373,6 @@ export default function Terminal({
         applyTheme(term);
       });
       cleanupFns.push(() => bufferChangeDisposable.dispose());
-
-      // OSC 52 observer — fires the clipboard-copy event whenever a TUI
-      // running in this terminal pushes text to the system clipboard via
-      // the standard ESC]52;<Pc>;<Pd>BEL sequence. Claude Code, codex,
-      // tmux, vim and friends use this to implement copy-on-select while
-      // mouse-tracking is enabled (which prevents xterm's local
-      // selection from firing onSelectionChange). We're a passive
-      // observer: return false so xterm's native handling (when
-      // allowProposedApi is on) is unaffected, and we never write to the
-      // clipboard ourselves — the OSC sequence already did that.
-      //
-      // Format: <Pc>;<Pd> where Pc is the selection target ("c" for
-      // clipboard, "p"/"s" for primary/select, etc.) and Pd is base64
-      // payload OR "?" for a query. We ignore queries.
-      const oscDisposable = term.parser.registerOscHandler(52, (data) => {
-        const sep = data.indexOf(";");
-        if (sep === -1) return false;
-        const payload = data.substring(sep + 1);
-        if (payload === "?" || payload.length === 0) return false;
-        let length = 0;
-        try {
-          length = atob(payload).length;
-        } catch {
-          // Malformed base64 — still surface the pulse but with length 0
-          // so the user gets feedback that *something* tried to write.
-        }
-        window.dispatchEvent(
-          new CustomEvent("rt:clipboard-copy", {
-            detail: { source: "OSC52", length },
-          }),
-        );
-        return false;
-      });
-      cleanupFns.push(() => oscDisposable.dispose());
 
       let terminalLinkMode = false;
       const providedTerminalLinks = new Set<ILink>();

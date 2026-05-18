@@ -29,6 +29,9 @@ importers:
       '@tauri-apps/plugin-shell':
         specifier: ^2.3.5
         version: 2.3.5
+      '@xterm/addon-clipboard':
+        specifier: 0.3.0-beta.219
+        version: 0.3.0-beta.219(@xterm/xterm@6.1.0-beta.219)
       '@xterm/addon-fit':
         specifier: 0.12.0-beta.219
         version: 0.12.0-beta.219(@xterm/xterm@6.1.0-beta.219)
@@ -701,6 +704,11 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0 || ^8.0.0
+
+  '@xterm/addon-clipboard@0.3.0-beta.219':
+    resolution: {integrity: sha512-KKN1BFJJbHoKKd1YZaq5Fjn85hv6/nu7Sbsobd0rhK0Ei6UBCaX+Q7xO+CtxatcOT/zaRGcCFsRvwSv92Hmk0w==}
+    peerDependencies:
+      '@xterm/xterm': ^6.1.0-beta.219
 
   '@xterm/addon-fit@0.12.0-beta.219':
     resolution: {integrity: sha512-ve9MP+xSfkcFG+l4GoWHurO+r97vh2U52J392Is246Cd2/EWkE9Q/KwpLqEdILTBQl7XVwTuuJzNv9IfndfnfQ==}
@@ -1388,6 +1396,10 @@ snapshots:
       vite: 7.3.3(@types/node@22.19.18)
     transitivePeerDependencies:
       - supports-color
+
+  '@xterm/addon-clipboard@0.3.0-beta.219(@xterm/xterm@6.1.0-beta.219)':
+    dependencies:
+      '@xterm/xterm': 6.1.0-beta.219
 
   '@xterm/addon-fit@0.12.0-beta.219(@xterm/xterm@6.1.0-beta.219)':
     dependencies:

@@ -13,11 +13,6 @@ interface PulseState {
   length: number;
 }
 
-/// How long the boot intro stays on screen. Long enough that someone
-/// glancing across the window catches it, short enough that it doesn't
-/// linger as clutter. The CSS keyframe must match.
-const INTRO_DURATION_MS = 5000;
-
 /// Tiny "copied" chip that fades in/out near the bottom of the sidebar
 /// whenever `copyToClipboard` succeeds anywhere in the app. The
 /// component is presentation-only: it subscribes to the
@@ -27,12 +22,13 @@ const INTRO_DURATION_MS = 5000;
 /// which is the surface the user is looking at when triggering most
 /// copies anyway.
 ///
-/// On mount the chip flashes a one-shot intro so a first-time user
-/// learns where to look. A real copy fired during the intro pre-empts it
-/// and runs the normal pulse animation.
+/// The chip must fire only on confirmed `navigator.clipboard.writeText`
+/// success — every emitter of `rt:clipboard-copy` is responsible for
+/// performing a real write before dispatching. There is no boot-intro
+/// chip or other self-triggering path: a pulse means "you can paste
+/// this right now", period.
 export default function CopyPulse() {
   const [pulse, setPulse] = useState<PulseState | null>(null);
-  const [intro, setIntro] = useState(true);
 
   useEffect(() => {
     let counter = 0;
@@ -40,9 +36,6 @@ export default function CopyPulse() {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<ClipboardCopyDetail>).detail;
       counter += 1;
-      // Real copy wins over the intro — dismiss the intro chip so the
-      // pulse animation has a clean canvas to play on.
-      setIntro(false);
       setPulse({
         id: counter,
         source: detail.source,
@@ -63,49 +56,24 @@ export default function CopyPulse() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!intro) return;
-    const t = window.setTimeout(() => setIntro(false), INTRO_DURATION_MS);
-    return () => window.clearTimeout(t);
-  }, [intro]);
+  if (pulse === null) return null;
 
-  if (pulse !== null) {
-    return (
+  return (
+    <div
+      className="copy-pulse-host"
+      aria-live="polite"
+      data-testid="copy-pulse"
+    >
       <div
-        className="copy-pulse-host"
-        aria-live="polite"
-        data-testid="copy-pulse"
+        className="copy-pulse"
+        key={pulse.id}
+        title={`copied ${pulse.length} chars`}
       >
-        <div
-          className="copy-pulse"
-          key={pulse.id}
-          title={`copied ${pulse.length} chars`}
-        >
-          <span className="copy-pulse-check" aria-hidden="true">
-            ✓
-          </span>
-          <span className="copy-pulse-label">copied</span>
-        </div>
+        <span className="copy-pulse-check" aria-hidden="true">
+          ✓
+        </span>
+        <span className="copy-pulse-label">copied</span>
       </div>
-    );
-  }
-
-  if (intro) {
-    return (
-      <div
-        className="copy-pulse-host"
-        aria-hidden="true"
-        data-testid="copy-pulse-intro"
-      >
-        <div className="copy-pulse is-intro">
-          <span className="copy-pulse-check" aria-hidden="true">
-            ✓
-          </span>
-          <span className="copy-pulse-label">copies appear here</span>
-        </div>
-      </div>
-    );
-  }
-
-  return null;
+    </div>
+  );
 }
