@@ -720,6 +720,16 @@ pub enum InjectorStep {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptInjector {
     pub steps: Vec<InjectorStep>,
+    /// Optional substring (case-insensitive) the daemon expects to see in
+    /// the rendered TUI after the pre-input portion of `steps` runs. When
+    /// set, the daemon re-sends the pre-input keystrokes if the marker
+    /// doesn't appear in a short window. Copied from
+    /// [`InjectorTemplate::verify_mode_marker`] by `build_injector`. The
+    /// pre-input portion is identified at runtime as the contiguous run
+    /// of steps after the leading startup `Delay` (if any) and before the
+    /// prompt-text `Text` step.
+    #[serde(default)]
+    pub verify_mode_marker: Option<String>,
 }
 
 /// Template form of [`PromptInjector`] used inside a [`PresetEntry`]. The
@@ -737,6 +747,15 @@ pub struct InjectorTemplate {
     /// Steps sent after the prompt text. Typical use: a small delay then
     /// `{ kind: "text", content: "", newline: true }` to submit.
     pub post_input: Vec<InjectorStep>,
+    /// Optional substring (case-insensitive) the daemon expects to see in
+    /// the rendered TUI after `pre_input` runs. When set, the injector
+    /// scans PTY output for the marker; if absent within a short window,
+    /// it re-sends `pre_input` and checks again (up to a few attempts)
+    /// before falling through. Lets a Plan-Mode preset self-heal when
+    /// the Shift+Tab keystrokes are dropped because Claude wasn't yet
+    /// listening. `None` (or absent in JSON) disables verification.
+    #[serde(default)]
+    pub verify_mode_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2179,6 +2198,7 @@ mod tests {
                     content: String::new(),
                     newline: true,
                 }],
+                verify_mode_marker: None,
             },
             stagger_ms: 3000,
         }
@@ -2452,6 +2472,7 @@ mod tests {
                         newline: false,
                     },
                 ],
+                verify_mode_marker: None,
             }),
         };
         let json = serde_json::to_string(&req).expect("serialize");

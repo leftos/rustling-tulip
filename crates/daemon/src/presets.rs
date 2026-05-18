@@ -797,7 +797,10 @@ fn build_injector(template: &InjectorTemplate, prompt_text: &str) -> PromptInjec
         newline: false,
     });
     steps.extend(template.post_input.iter().cloned());
-    PromptInjector { steps }
+    PromptInjector {
+        steps,
+        verify_mode_marker: template.verify_mode_marker.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,7 +1144,7 @@ async fn orchestrate_with_spawner(
     spawner: &mut PresetSpawner,
 ) -> Result<(), LaunchFailure> {
     let mut session_ids: Vec<String> = Vec::new();
-    let stagger = Duration::from_millis(u64::from(plan.preset.stagger_ms));
+    let base_stagger_ms = plan.preset.stagger_ms;
     let last_idx = plan.raw_prompts.len() - 1;
 
     if *cancel_rx.borrow() {
@@ -1208,6 +1211,12 @@ async fn orchestrate_with_spawner(
         });
 
         if i < last_idx {
+            // The gap we wait next leads into session (i+2) — 1-indexed.
+            // First 6 sessions keep base stagger; the ramp adds +500 ms
+            // per group of 2 starting at session 7 to relieve FS / IO
+            // contention during longer burst launches.
+            let next_session = u32::try_from(i + 2).unwrap_or(u32::MAX);
+            let stagger = stagger_for(next_session, base_stagger_ms);
             let cancelled = wait_for_stagger_or_cancel(stagger, &mut cancel_rx).await;
             if cancelled {
                 send_cancelled_job_update(hub, &plan, total, &session_ids);
@@ -1232,6 +1241,25 @@ async fn orchestrate_with_spawner(
     );
     info!(preset_id = %plan.preset.id, count = total, "preset launch complete");
     Ok(())
+}
+
+/// Stagger schedule for spawning the Nth session of a preset (1-indexed).
+/// The first 6 sessions use `base_ms` as-is; from session 7 onward we add
+/// 500 ms per group of 2 (so sessions 7-8 use base + 500, 9-10 use
+/// base + 1000, 11-12 use base + 1500, ...). Relieves FS / IO contention
+/// during longer burst launches where successive spawns pile up and slow
+/// each other down.
+///
+/// Returns the gap to wait **before** spawning the given session — i.e.
+/// the gap between session N-1 and session N. Callers compute the gap
+/// after spawning session N-1 by passing N here.
+fn stagger_for(next_session_one_indexed: u32, base_ms: u32) -> Duration {
+    let extra_ms = if next_session_one_indexed <= 6 {
+        0
+    } else {
+        500 + ((next_session_one_indexed - 7) / 2) * 500
+    };
+    Duration::from_millis(u64::from(base_ms).saturating_add(u64::from(extra_ms)))
 }
 
 async fn wait_for_stagger_or_cancel(
@@ -1591,6 +1619,39 @@ mod tests {
     }
 
     #[test]
+    fn stagger_for_first_six_sessions_uses_base() {
+        let base = 3000_u32;
+        // Sessions 2..=6 all use the base — session 1 has no preceding
+        // stagger, so the helper is only called for sessions >= 2.
+        for n in 2..=6 {
+            assert_eq!(
+                stagger_for(n, base),
+                Duration::from_secs(3),
+                "session {n} should use base"
+            );
+        }
+    }
+
+    #[test]
+    fn stagger_for_ramps_after_six() {
+        let base = 3000_u32;
+        assert_eq!(stagger_for(7, base), Duration::from_millis(3500));
+        assert_eq!(stagger_for(8, base), Duration::from_millis(3500));
+        assert_eq!(stagger_for(9, base), Duration::from_secs(4));
+        assert_eq!(stagger_for(10, base), Duration::from_secs(4));
+        assert_eq!(stagger_for(11, base), Duration::from_millis(4500));
+        assert_eq!(stagger_for(12, base), Duration::from_millis(4500));
+        assert_eq!(stagger_for(13, base), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn stagger_for_respects_zero_base() {
+        // Pure ramp contribution when caller passes zero base.
+        assert_eq!(stagger_for(7, 0), Duration::from_millis(500));
+        assert_eq!(stagger_for(13, 0), Duration::from_secs(2));
+    }
+
+    #[test]
     fn build_injector_sandwiches_prompt_text() {
         let template = InjectorTemplate {
             startup_delay_ms: 100,
@@ -1601,6 +1662,7 @@ mod tests {
                 content: String::new(),
                 newline: true,
             }],
+            verify_mode_marker: None,
         };
         let injector = build_injector(&template, "hello");
         assert_eq!(injector.steps.len(), 4);
@@ -1625,6 +1687,7 @@ mod tests {
             startup_delay_ms: 0,
             pre_input: vec![],
             post_input: vec![],
+            verify_mode_marker: None,
         };
         let injector = build_injector(&template, "x");
         assert_eq!(injector.steps.len(), 1);
@@ -2077,6 +2140,7 @@ mod tests {
                     startup_delay_ms: 0,
                     pre_input: Vec::new(),
                     post_input: Vec::new(),
+                    verify_mode_marker: None,
                 },
                 stagger_ms,
             },

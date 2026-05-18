@@ -3720,6 +3720,7 @@ mod tests {
                 content: "injected".to_string(),
                 newline: true,
             }],
+            verify_mode_marker: None,
         });
         let args = build_codex_args(&c, &members, Some("ignored"));
         assert!(!args.iter().any(|a| a == "ignored"));

@@ -211,12 +211,22 @@ export type InjectorStep =
 
 export interface PromptInjector {
   steps: InjectorStep[];
+  // Optional substring (case-insensitive) the daemon expects to see in the
+  // TUI after the pre-input keystrokes. When set and not seen, the daemon
+  // re-sends the pre-input portion. Copied from
+  // InjectorTemplate.verify_mode_marker by the preset launcher.
+  verify_mode_marker?: string | null;
 }
 
 export interface InjectorTemplate {
   startup_delay_ms: number;
   pre_input: InjectorStep[];
   post_input: InjectorStep[];
+  // Optional substring the daemon expects to see in the rendered TUI after
+  // pre_input runs (case-insensitive). When set and the marker doesn't show
+  // up, the daemon re-sends pre_input a few times before giving up. Used to
+  // self-heal dropped Shift+Tab keystrokes when entering Plan Mode.
+  verify_mode_marker?: string | null;
 }
 
 export type PresetTarget =

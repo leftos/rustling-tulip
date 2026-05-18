@@ -20,7 +20,7 @@
       "tab_name_template": "smoke test {date}"
     },
     "injector": {
-      "startup_delay_ms": 6000,
+      "startup_delay_ms": 15000,
       "pre_input": [
         { "kind": "write", "data_b64": "G1ta" },
         { "kind": "delay", "ms": 200 },
@@ -34,7 +34,8 @@
       "post_input": [
         { "kind": "delay", "ms": 500 },
         { "kind": "text", "content": "", "newline": true }
-      ]
+      ],
+      "verify_mode_marker": "plan mode"
     },
     "stagger_ms": 3000
   }
