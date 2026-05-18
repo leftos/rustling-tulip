@@ -1097,7 +1097,14 @@ async fn dispatch(
             session_id,
             cleanup,
         } => {
-            discard_session(hub, &session_id, &cleanup).await;
+            discard_session(hub, &session_id, &cleanup, out_tx).await;
+        }
+        ClientMessage::RetryWorktreeCleanup {
+            session_id,
+            kill_pids,
+            targets,
+        } => {
+            retry_worktree_cleanup(hub, &session_id, &kill_pids, &targets, out_tx).await;
         }
         ClientMessage::ResumeAllAbandoned => {
             resume_all_abandoned(hub, out_tx).await;
@@ -3122,26 +3129,38 @@ async fn park_session(hub: &Hub, session_id: &str) {
 
 /// Remove a stopped or inactive session from the registry. Optionally removes
 /// per-member worktrees from disk. Does not kill a running session.
-async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::CleanupAction]) {
-    let (members, has_per_session_worktree) = hub.sessions.get(session_id).map_or_else(
-        || (Vec::new(), false),
-        |rec| {
-            let guard = crate::sync::lock(&rec);
-            let spawned_with_worktree =
-                guard
-                    .spawn_config
-                    .as_ref()
-                    .is_some_and(|cfg| match &cfg.target {
-                        SpawnTarget::Single { use_worktree, .. }
-                        | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
-                        SpawnTarget::Standalone { .. } => false,
-                    });
-            (
-                guard.members.clone(),
-                spawned_with_worktree || !guard.worktree_paths.is_empty(),
-            )
-        },
-    );
+///
+/// On cleanup failure (member dir still on disk after git remove + retry +
+/// fs fallback), emits [`DaemonMessage::WorktreeCleanupFailed`] back to the
+/// requesting client with the list of processes holding the dir open so the
+/// user can decide whether to kill them and retry.
+async fn discard_session(
+    hub: &Hub,
+    session_id: &str,
+    cleanup: &[protocol::CleanupAction],
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let (members, has_per_session_worktree, session_label) =
+        hub.sessions.get(session_id).map_or_else(
+            || (Vec::new(), false, session_id.to_string()),
+            |rec| {
+                let guard = crate::sync::lock(&rec);
+                let spawned_with_worktree =
+                    guard
+                        .spawn_config
+                        .as_ref()
+                        .is_some_and(|cfg| match &cfg.target {
+                            SpawnTarget::Single { use_worktree, .. }
+                            | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                            SpawnTarget::Standalone { .. } => false,
+                        });
+                (
+                    guard.members.clone(),
+                    spawned_with_worktree || !guard.worktree_paths.is_empty(),
+                    guard.label.clone(),
+                )
+            },
+        );
 
     // Brief grace period before touching the filesystem. The typical
     // call sequence is stop_session → discard_session back-to-back, and
@@ -3163,6 +3182,7 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
     // A `HashSet` would dedupe in O(1), but the typical N is 1–3 members
     // so a Vec scan is cheaper and keeps allocations bounded.
     let mut wrappers_touched: Vec<PathBuf> = Vec::new();
+    let mut failures: Vec<protocol::WorktreeCleanupFailure> = Vec::new();
     for action in cleanup {
         if !action.remove_worktree || !has_per_session_worktree {
             continue;
@@ -3188,6 +3208,13 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
                     member = %worktree_path.display(),
                     "discard_session: worktree cleanup failed; member dir still on disk"
                 );
+                let locking_processes = probe_locking_processes(&worktree_path);
+                failures.push(protocol::WorktreeCleanupFailure {
+                    member_path: worktree_path.to_string_lossy().into_owned(),
+                    repo_path: repo_path.clone(),
+                    reason,
+                    locking_processes,
+                });
             }
         }
         if let Some(parent) = worktree_path.parent()
@@ -3203,6 +3230,116 @@ async fn discard_session(hub: &Hub, session_id: &str, cleanup: &[protocol::Clean
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
     prune_session_from_tabs(hub, session_id);
+
+    if !failures.is_empty() {
+        let _ = out_tx.send(DaemonMessage::WorktreeCleanupFailed {
+            session_id: session_id.to_string(),
+            session_label,
+            failures,
+        });
+    }
+}
+
+/// Convert the per-platform [`crate::lock_finder`] output into the wire
+/// protocol's `WorktreeLockingProcess` shape. Returned list is empty on
+/// non-Windows platforms (the `lock_finder` stub returns an empty Vec).
+fn probe_locking_processes(member_path: &Path) -> Vec<protocol::WorktreeLockingProcess> {
+    crate::lock_finder::processes_holding(&[member_path])
+        .into_iter()
+        .map(|p| protocol::WorktreeLockingProcess {
+            pid: p.pid,
+            name: p.name,
+            cmdline: p.cmdline,
+        })
+        .collect()
+}
+
+/// Handler for [`ClientMessage::RetryWorktreeCleanup`]. Kills the listed
+/// pids (graceful Restart Manager shutdown first, then hard kill), then
+/// re-runs the robust cleanup against each target. Re-emits
+/// [`DaemonMessage::WorktreeCleanupFailed`] for any member that's still
+/// wedged so the user can iterate.
+async fn retry_worktree_cleanup(
+    hub: &Hub,
+    session_id: &str,
+    kill_pids: &[u32],
+    targets: &[protocol::RetryWorktreeTarget],
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    // Defence: refuse any target that isn't under the configured
+    // worktrees root. A crafted message could otherwise be made to
+    // delete an arbitrary directory the daemon has write access to.
+    let root = hub.state.worktrees_dir();
+    let root_canon = std::fs::canonicalize(&root).ok();
+    let mut valid_targets: Vec<&protocol::RetryWorktreeTarget> = Vec::new();
+    for target in targets {
+        let canon = std::fs::canonicalize(&target.member_path).ok();
+        let ok = match (&canon, &root_canon) {
+            (Some(c), Some(r)) => c.starts_with(r),
+            // If the path is gone already, count as success — nothing to do.
+            (None, _) => {
+                continue;
+            }
+            _ => false,
+        };
+        if !ok {
+            warn!(
+                target = %target.member_path,
+                "retry_worktree_cleanup: refusing target outside worktrees root"
+            );
+            continue;
+        }
+        valid_targets.push(target);
+    }
+
+    if !kill_pids.is_empty() {
+        let target_paths: Vec<&Path> = valid_targets
+            .iter()
+            .map(|t| Path::new(t.member_path.as_str()))
+            .collect();
+        crate::lock_finder::terminate_processes(&target_paths, kill_pids).await;
+        // Brief grace period for the OS to release file handles after
+        // the kill — without this, the immediate retry races handle
+        // teardown the same way the original cleanup raced the kill.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let mut wrappers_touched: Vec<PathBuf> = Vec::new();
+    let mut failures: Vec<protocol::WorktreeCleanupFailure> = Vec::new();
+    for target in &valid_targets {
+        let member = PathBuf::from(&target.member_path);
+        match crate::worktree_cleanup::remove_member(Path::new(&target.repo_path), &member).await {
+            crate::worktree_cleanup::CleanupOutcome::Removed => {}
+            crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
+                let locking_processes = probe_locking_processes(&member);
+                failures.push(protocol::WorktreeCleanupFailure {
+                    member_path: target.member_path.clone(),
+                    repo_path: target.repo_path.clone(),
+                    reason,
+                    locking_processes,
+                });
+            }
+        }
+        if let Some(parent) = member.parent()
+            && !wrappers_touched.iter().any(|p| p == parent)
+        {
+            wrappers_touched.push(parent.to_path_buf());
+        }
+    }
+    for wrapper in &wrappers_touched {
+        crate::worktree_cleanup::finalize_wrapper(wrapper);
+    }
+
+    if !failures.is_empty() {
+        let _ = out_tx.send(DaemonMessage::WorktreeCleanupFailed {
+            session_id: session_id.to_string(),
+            // Session is already discarded; we don't have a label here.
+            // Frontend should retain the original label from the first
+            // failure event and reuse it across retries.
+            session_label: session_id.to_string(),
+            failures,
+        });
+    }
 }
 
 async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {

@@ -415,6 +415,40 @@ export interface RootWorktreeEntry {
   last_modified_unix: number | null;
 }
 
+// Surfaced inside WorktreeCleanupFailed: one process holding open file
+// handles inside a worktree dir the daemon couldn't remove. Populated
+// from the daemon's Restart Manager probe on Windows; on other
+// platforms the daemon always returns an empty array.
+export interface WorktreeLockingProcess {
+  pid: number;
+  // Friendly process name (typically the .exe leaf — "node.exe",
+  // "Code.exe", etc.).
+  name: string;
+  // Full command line joined by spaces. Null when the process exited
+  // between RM's snapshot and the per-pid cmdline enrichment.
+  cmdline: string | null;
+}
+
+// One member worktree that survived every cleanup attempt during a
+// discard. The modal lets the user kill the locking processes and
+// retry, open the parent dir in Explorer, or ignore.
+export interface WorktreeCleanupFailure {
+  member_path: string;
+  // Repo path the daemon needs for the retry's `git worktree remove`.
+  repo_path: string;
+  // Final error chain from the last cleanup attempt.
+  reason: string;
+  locking_processes: WorktreeLockingProcess[];
+}
+
+// One cleanup target inside a RetryWorktreeCleanup request. The daemon
+// re-validates these against the configured worktrees root before
+// touching anything.
+export interface RetryWorktreeTarget {
+  member_path: string;
+  repo_path: string;
+}
+
 export interface MemberSpawnPreview {
   repo_id: string;
   repo_name: string;
@@ -643,6 +677,17 @@ export type ClientMessage =
   // prior `worktrees_root_snapshot` entry. Daemon refuses if the group
   // is in Active status and replies with a fresh snapshot on success.
   | { type: "delete_worktree_at"; path: string }
+  // Sent from the WorktreeCleanupFailedDialog. Daemon attempts a polite
+  // Restart Manager shutdown of `kill_pids` first, then hard-kills any
+  // survivor and re-runs the robust cleanup for each `targets` member.
+  // If any member is still wedged the daemon re-emits
+  // `worktree_cleanup_failed` so the user can iterate.
+  | {
+      type: "retry_worktree_cleanup";
+      session_id: string;
+      kill_pids: number[];
+      targets: RetryWorktreeTarget[];
+    }
   | { type: "list_tabs" }
   | {
       type: "create_tab";
@@ -767,6 +812,17 @@ export type DaemonMessage =
       root: string;
       is_override: boolean;
       entries: RootWorktreeEntry[];
+    }
+  // Emitted by `discard_session` (and its retry) when one or more
+  // member worktrees survived every cleanup attempt (git remove + retry
+  // + fs::remove_dir_all all failed). The frontend shows a modal listing
+  // the locking processes and lets the user kill them and retry, open
+  // the parent dir in Explorer, or ignore.
+  | {
+      type: "worktree_cleanup_failed";
+      session_id: string;
+      session_label: string;
+      failures: WorktreeCleanupFailure[];
     }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }

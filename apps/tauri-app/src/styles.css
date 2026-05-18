@@ -1847,6 +1847,77 @@ button.tree-tab-pill:hover {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+
+.worktree-cleanup-failed-modal {
+  max-width: 720px;
+  width: 90vw;
+}
+.worktree-cleanup-failures {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.worktree-cleanup-failure {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--bg);
+}
+.worktree-cleanup-failure-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.worktree-cleanup-failure-header .path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+}
+.worktree-cleanup-failure-reason {
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+.worktree-cleanup-failure-processes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.worktree-cleanup-locker {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.worktree-cleanup-locker:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.worktree-cleanup-locker-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.worktree-cleanup-locker-name {
+  font-weight: 500;
+  color: var(--fg);
+}
+.worktree-cleanup-locker-pid {
+  margin-left: auto;
+}
+.worktree-cleanup-locker-cmdline {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-left: 24px;
+  word-break: break-all;
+}
 .exit-confirm-footer button {
   white-space: normal;
 }

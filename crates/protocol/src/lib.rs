@@ -1400,6 +1400,21 @@ pub enum ClientMessage {
     DeleteWorktreeAt {
         path: String,
     },
+    /// User chose "Kill processes & retry" from the
+    /// [`DaemonMessage::WorktreeCleanupFailed`] modal. Daemon attempts a
+    /// Restart Manager graceful shutdown of the listed pids first (so an
+    /// editor with unsaved buffers can prompt to save), then hard-kills
+    /// any survivors and re-runs the robust worktree cleanup against
+    /// each [`RetryWorktreeTarget`]. On still-stuck members the daemon
+    /// emits another `WorktreeCleanupFailed` so the user can iterate.
+    RetryWorktreeCleanup {
+        /// Echoes the session id from the original failure for UI
+        /// correlation. The session itself is already gone from the
+        /// registry by this point — the id is purely a key.
+        session_id: String,
+        kill_pids: Vec<u32>,
+        targets: Vec<RetryWorktreeTarget>,
+    },
     /// Request the full tab list. Also delivered automatically after
     /// [`DaemonMessage::Welcome`].
     ListTabs,
@@ -1683,6 +1698,52 @@ pub struct RootWorktreeEntry {
     pub last_modified_unix: Option<i64>,
 }
 
+/// One process holding open handles inside a worktree directory that
+/// `discard_session` failed to remove. Populated by the daemon's
+/// Restart Manager probe on Windows; empty list on other platforms.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeLockingProcess {
+    pub pid: u32,
+    /// Friendly process name (typically the exe leaf, e.g. `node.exe`).
+    pub name: String,
+    /// Full command line joined with spaces. `None` when the process
+    /// exited between the lock probe and the cmdline enrichment.
+    #[serde(default)]
+    pub cmdline: Option<String>,
+}
+
+/// One member worktree that survived every cleanup attempt during
+/// `discard_session` (or its retry). Surfaced inside
+/// [`DaemonMessage::WorktreeCleanupFailed`] so the frontend modal can
+/// show the path, why it failed, and which processes are blocking it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupFailure {
+    /// Absolute path of the member worktree dir that's still on disk.
+    pub member_path: String,
+    /// Absolute path of the originating repo. Sent so the retry handler
+    /// can re-run `git worktree remove` without the frontend needing to
+    /// look up which repo owns the worktree.
+    pub repo_path: String,
+    /// Concatenated error chain from the final cleanup attempt
+    /// (e.g. `git worktree remove (retry): ...; fs::remove_dir_all: ...`).
+    pub reason: String,
+    /// Processes holding open handles inside `member_path`. Empty if
+    /// the Restart Manager probe didn't return anything or the daemon
+    /// is running on a non-Windows host.
+    #[serde(default)]
+    pub locking_processes: Vec<WorktreeLockingProcess>,
+}
+
+/// One cleanup target inside a [`ClientMessage::RetryWorktreeCleanup`]
+/// request. The daemon validates `member_path` is under the configured
+/// worktrees root before touching anything (defence against a
+/// confused-deputy attack via a crafted message).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetryWorktreeTarget {
+    pub member_path: String,
+    pub repo_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
@@ -1752,6 +1813,23 @@ pub enum DaemonMessage {
         root: String,
         is_override: bool,
         entries: Vec<RootWorktreeEntry>,
+    },
+    /// Emitted by `discard_session` (and by the retry handler) when one
+    /// or more member worktrees survived every cleanup attempt — git
+    /// remove failed, the retry failed, and `fs::remove_dir_all` also
+    /// failed (the directory is wedged by open handles, almost always
+    /// from grandchild processes the PTY kill didn't reach: dev servers,
+    /// build subprocesses, the user's editor, etc.). The frontend shows
+    /// the list of locking processes (Restart Manager API on Windows;
+    /// empty list elsewhere) and offers Kill-and-retry / Open-in-Explorer
+    /// / Ignore. See [`ClientMessage::RetryWorktreeCleanup`].
+    WorktreeCleanupFailed {
+        session_id: String,
+        /// Human-readable label for the discarded session (e.g. the
+        /// branch name) so the modal can identify which session this is
+        /// about without the frontend having to look it up.
+        session_label: String,
+        failures: Vec<WorktreeCleanupFailure>,
     },
     Sessions {
         sessions: Vec<SessionSnapshot>,

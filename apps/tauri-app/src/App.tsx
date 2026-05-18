@@ -33,6 +33,7 @@ import {
   type TabEntry,
   type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
+  type WorktreeCleanupFailure,
 } from "./types";
 import ActivityBar, {
   type ActivitySection,
@@ -54,6 +55,7 @@ import StandaloneShellDialog from "./components/StandaloneShellDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
+import WorktreeCleanupFailedDialog from "./components/WorktreeCleanupFailedDialog";
 import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
 import RepoRemoveDialog from "./components/RepoRemoveDialog";
 import type { RepoRemoveIntent } from "./components/Sidebar";
@@ -210,6 +212,17 @@ interface AppState {
   /// transient drops use the normal in-app reconnect UX instead. Reset
   /// only when the user explicitly stops the daemon (DaemonFooter Stop).
   hasEverConnected: boolean;
+  /// Queue of `WorktreeCleanupFailed` events. The
+  /// WorktreeCleanupFailedDialog renders the head entry; user actions
+  /// (kill & retry, ignore) dequeue. A second failure for the same
+  /// session id replaces the queued entry — that's the retry result.
+  worktreeCleanupQueue: WorktreeCleanupQueueEntry[];
+}
+
+interface WorktreeCleanupQueueEntry {
+  session_id: string;
+  session_label: string;
+  failures: WorktreeCleanupFailure[];
 }
 
 function lastSpawnConfigForTarget(
@@ -260,6 +273,7 @@ export default function App() {
     worktreesRoot: null,
     worktreesManagerOpen: false,
     hasEverConnected: false,
+    worktreeCleanupQueue: [],
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -1890,7 +1904,8 @@ export default function App() {
     state.exitConfirmOpen ||
     state.repoRemove !== null ||
     state.settingsOpen ||
-    state.vscodeQueue.length > 0;
+    state.vscodeQueue.length > 0 ||
+    state.worktreeCleanupQueue.length > 0;
   const shortcuts = useMemo<KeyboardShortcut[]>(() => {
     if (
       anyModalOpen ||
@@ -2337,6 +2352,36 @@ export default function App() {
           suggestion={state.vscodeQueue[0]}
           client={state.client}
           onDismiss={onDismissVscodeSuggestion}
+        />
+      )}
+      {state.worktreeCleanupQueue[0] && (
+        <WorktreeCleanupFailedDialog
+          sessionId={state.worktreeCleanupQueue[0].session_id}
+          sessionLabel={state.worktreeCleanupQueue[0].session_label}
+          failures={state.worktreeCleanupQueue[0].failures}
+          onKillAndRetry={(kill_pids, targets) => {
+            const entry = state.worktreeCleanupQueue[0];
+            if (!entry) return;
+            state.client?.send({
+              type: "retry_worktree_cleanup",
+              session_id: entry.session_id,
+              kill_pids,
+              targets,
+            });
+            // Drop the head entry — a re-emitted failure will push a
+            // fresh entry back onto the queue if retry didn't fully
+            // succeed.
+            setState((s) => ({
+              ...s,
+              worktreeCleanupQueue: s.worktreeCleanupQueue.slice(1),
+            }));
+          }}
+          onIgnore={() => {
+            setState((s) => ({
+              ...s,
+              worktreeCleanupQueue: s.worktreeCleanupQueue.slice(1),
+            }));
+          }}
         />
       )}
       {state.settingsOpen && (
@@ -2947,6 +2992,23 @@ function handleMessage(
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );
+      return;
+    case "worktree_cleanup_failed":
+      // Queue the failure so the modal can show it. Multiple discards
+      // in quick succession just stack here; the modal dequeues one at
+      // a time. A second failure for the same session id replaces the
+      // queued entry (the latest retry result is the relevant one).
+      setState((s) => {
+        const queue = s.worktreeCleanupQueue.filter(
+          (e) => e.session_id !== msg.session_id,
+        );
+        queue.push({
+          session_id: msg.session_id,
+          session_label: msg.session_label,
+          failures: msg.failures,
+        });
+        return { ...s, worktreeCleanupQueue: queue };
+      });
       return;
     case "branches":
     case "worktrees":

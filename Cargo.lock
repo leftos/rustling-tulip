@@ -802,6 +802,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
+ "windows 0.61.3",
 ]
 
 [[package]]

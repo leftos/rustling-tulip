@@ -44,3 +44,12 @@ notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"
 sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+# Restart Manager API for locating processes holding handles inside the
+# worktrees directory after a `git worktree remove` fails. 0.61 matches
+# the version already pulled transitively by the existing dep graph.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_RestartManager",
+] }
