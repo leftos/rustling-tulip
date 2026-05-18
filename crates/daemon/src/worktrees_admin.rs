@@ -29,51 +29,10 @@ pub fn scan_root(root: &Path, sessions: &SessionRegistry) -> Vec<RootWorktreeEnt
     let xref = build_session_xref(&snapshots);
 
     let mut entries: Vec<RootWorktreeEntry> = Vec::new();
-    let anchor_dirs = match std::fs::read_dir(root) {
-        Ok(rd) => rd,
-        Err(err) => {
-            // Root doesn't exist yet (fresh install, user just changed it,
-            // etc.). Empty snapshot is the right answer.
-            if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(?err, root = %root.display(), "scan_root: read root failed");
-            }
-            return entries;
-        }
-    };
-
-    for anchor_ent in anchor_dirs.flatten() {
-        let anchor_path = anchor_ent.path();
-        if !is_dir(&anchor_ent) {
-            continue;
-        }
-        let anchor_name = anchor_ent.file_name().to_string_lossy().into_owned();
-        let wt_dirs = match std::fs::read_dir(&anchor_path) {
-            Ok(rd) => rd,
-            Err(err) => {
-                warn!(?err, anchor = %anchor_path.display(), "scan_root: read anchor failed");
-                continue;
-            }
-        };
-        for wt_ent in wt_dirs.flatten() {
-            if !is_dir(&wt_ent) {
-                continue;
-            }
-            let wt_name = wt_ent.file_name().to_string_lossy().into_owned();
-            let Some(branch_slug) = wt_name.strip_prefix("wt.") else {
-                // Not a managed worktree dir; skip. (Other tooling may
-                // have left foreign content under the anchor.)
-                continue;
-            };
-            let wt_path = wt_ent.path();
-            let entry = build_entry(
-                &wt_path,
-                &anchor_name,
-                branch_slug,
-                &xref,
-            );
-            entries.push(entry);
-        }
+    if !root.exists() {
+        return entries;
     }
+    walk_for_wt_dirs(root, root, &xref, &mut entries, 0);
 
     // Stable ordering: anchor asc, then branch asc — so the modal renders
     // deterministically across consecutive scans.
@@ -83,6 +42,66 @@ pub fn scan_root(root: &Path, sessions: &SessionRegistry) -> Vec<RootWorktreeEnt
             .then_with(|| a.branch_slug.cmp(&b.branch_slug))
     });
     entries
+}
+
+/// Maximum nesting depth `scan_root` will descend from the worktrees
+/// root before giving up. The anchor depth is the number of path
+/// components in `sanitize_anchor`'s output; on Windows that's typically
+/// 2 (drive letter + first dir) and on Unix 1–3. 8 is comfortably above
+/// any realistic anchor without risking runaway walks if the user
+/// points the worktrees root at something pathological.
+const MAX_SCAN_DEPTH: usize = 8;
+
+/// Recursive descent looking for `wt.<branch-slug>/` directories.
+///
+/// Why this exists: `sanitize_anchor` splits the originating-repo
+/// parent path into per-component dirs under the worktrees root
+/// (`X:\dev` → `<root>/X/dev/`). The pre-fix `scan_root` only descended
+/// one level, so any Windows anchor — which always has at least
+/// `<drive>/<dir>` — was invisible to the manager modal and the user
+/// saw "No managed worktrees" while 34 GB sat on disk.
+fn walk_for_wt_dirs(
+    root: &Path,
+    cur: &Path,
+    xref: &HashMap<PathBuf, (String, bool)>,
+    entries: &mut Vec<RootWorktreeEntry>,
+    depth: usize,
+) {
+    if depth > MAX_SCAN_DEPTH {
+        return;
+    }
+    let rd = match std::fs::read_dir(cur) {
+        Ok(rd) => rd,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(?err, dir = %cur.display(), "scan_root: read failed");
+            }
+            return;
+        }
+    };
+    for ent in rd.flatten() {
+        if !is_dir(&ent) {
+            continue;
+        }
+        let path = ent.path();
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if let Some(branch_slug) = name.strip_prefix("wt.") {
+            // Anchor display = the relative path from the worktrees root
+            // to this wt dir's parent. For `<root>/X/dev/wt.foo`, the
+            // anchor displays as `X/dev` (joined with the platform's
+            // separator), matching the on-disk layout the user sees.
+            let anchor_rel = path
+                .parent()
+                .and_then(|p| p.strip_prefix(root).ok())
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            entries.push(build_entry(&path, &anchor_rel, branch_slug, xref));
+            // Don't descend INTO a wt dir — its children are member
+            // worktrees, not nested groups.
+            continue;
+        }
+        walk_for_wt_dirs(root, &path, xref, entries, depth + 1);
+    }
 }
 
 /// Delete a `wt.<branch>/` group from disk. Refuses if any member is
@@ -367,3 +386,165 @@ fn group_size_and_mtime(root: &Path) -> (Option<u64>, Option<i64>) {
     (Some(total), latest)
 }
 
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::print_stderr,
+    clippy::cast_precision_loss,
+    clippy::map_unwrap_or,
+    reason = "tests assert preconditions with unwrap; the live-disk probe \
+              prints scan results to stderr so the operator can read them"
+)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// Lightweight `tempdir` stand-in — same pattern as `binary_cache::tests`
+    /// to avoid adding a dep just for tests.
+    struct Scratch {
+        path: PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rt-worktrees-admin-{}",
+                Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Build an empty `SessionRegistry` pointed at a temp config dir.
+    /// The xref it produces is empty, so every wt group `scan_root`
+    /// returns shows `RootWorktreeStatus::Stale` — useful for tests
+    /// that just want to verify the walker reaches the right dirs.
+    fn empty_registry(tmp: &std::path::Path) -> Arc<SessionRegistry> {
+        let dirs = crate::paths::Dirs {
+            config: tmp.to_path_buf(),
+            state_file: tmp.join("state.json"),
+            handshake_file: tmp.join("daemon.json"),
+            sessions_dir: tmp.join("sessions"),
+            worktrees_dir: tmp.join("worktrees"),
+            binaries_dir: tmp.join("binaries"),
+        };
+        SessionRegistry::new(dirs)
+    }
+
+    fn touch(p: &std::path::Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"").unwrap();
+    }
+
+    #[test]
+    fn scan_root_walks_through_multi_segment_anchor() {
+        // Mirrors the on-disk layout `sanitize_anchor("X:/dev")`
+        // produces: <root>/X/dev/wt.<slug>/<member>/.git. The
+        // pre-walker code only descended one level, so it missed
+        // every Windows-style two-segment anchor.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt_dir = root.join("X").join("dev").join("wt.feature-foo");
+        let member = wt_dir.join("repo1");
+        touch(&member.join(".git"));
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        assert_eq!(entries.len(), 1, "expected one wt group, got {entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.branch_slug, "feature-foo");
+        assert_eq!(entry.anchor, "X/dev");
+        assert_eq!(entry.path, wt_dir.to_string_lossy());
+        // No live session, so it's stale.
+        assert!(matches!(entry.status, RootWorktreeStatus::Stale));
+    }
+
+    #[test]
+    fn scan_root_finds_groups_at_multiple_depths() {
+        // Mix of depths: one wt at depth 1 (unix-style anchor) and
+        // another at depth 2 (windows-style). The walker should find
+        // both without confusion.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        touch(&root.join("flat-anchor").join("wt.foo").join("repo").join(".git"));
+        touch(&root.join("X").join("dev").join("wt.bar").join("repo").join(".git"));
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        let slugs: Vec<&str> = entries.iter().map(|e| e.branch_slug.as_str()).collect();
+        assert_eq!(slugs, vec!["bar", "foo"]); // sorted by anchor asc
+        let anchors: Vec<&str> = entries.iter().map(|e| e.anchor.as_str()).collect();
+        assert_eq!(anchors, vec!["X/dev", "flat-anchor"]);
+    }
+
+    #[test]
+    fn scan_root_does_not_descend_into_wt_dirs() {
+        // A wt dir whose member happens to start with `wt.` must not
+        // be mistaken for a nested group. (Hypothetical: branch slug
+        // could in principle look like one but the walker stops at
+        // the first wt.<slug> match anyway.)
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt_dir = root.join("X").join("wt.outer");
+        touch(&wt_dir.join("wt.inner-looking-member").join(".git"));
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].branch_slug, "outer");
+    }
+
+    /// Probe-style test that scans whatever directory `RT_SCAN_PATH`
+    /// points at and prints every entry's anchor + slug + status + size.
+    /// Skipped by default (no env var set); run with
+    /// `cargo test -p daemon scan_user_dir -- --include-ignored --nocapture
+    /// RT_SCAN_PATH=...` to point at a real worktrees root.
+    #[test]
+    #[ignore = "live-disk probe — needs RT_SCAN_PATH to point at a worktrees root"]
+    fn scan_user_dir_probe() {
+        let Ok(raw) = std::env::var("RT_SCAN_PATH") else {
+            eprintln!("RT_SCAN_PATH not set; nothing to probe");
+            return;
+        };
+        let path = PathBuf::from(&raw);
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&path, &sessions);
+        eprintln!("=== scan_root({}) ===", path.display());
+        eprintln!("found {} group(s):", entries.len());
+        for e in &entries {
+            let size_mb = e
+                .size_bytes
+                .map(|b| (b as f64) / (1024.0 * 1024.0))
+                .unwrap_or(0.0);
+            eprintln!(
+                "  [{:?}] anchor={} slug={} size={:.1}MB members={} path={}",
+                e.status,
+                e.anchor,
+                e.branch_slug,
+                size_mb,
+                e.members.len(),
+                e.path,
+            );
+        }
+    }
+}
