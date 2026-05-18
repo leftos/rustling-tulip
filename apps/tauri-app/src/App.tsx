@@ -204,6 +204,12 @@ interface AppState {
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
+  /// True once the WS has reached `kind: "open"` at least once this app
+  /// lifetime. Drives the "Connecting to daemon…" overlay that blocks
+  /// the entire UI on cold boot — once the daemon has answered once,
+  /// transient drops use the normal in-app reconnect UX instead. Reset
+  /// only when the user explicitly stops the daemon (DaemonFooter Stop).
+  hasEverConnected: boolean;
 }
 
 function lastSpawnConfigForTarget(
@@ -253,6 +259,7 @@ export default function App() {
     sessionOrder: new Map(),
     worktreesRoot: null,
     worktreesManagerOpen: false,
+    hasEverConnected: false,
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -372,7 +379,11 @@ export default function App() {
         client = connectDaemon(handshake);
         clientRef.current = client;
         client.onConnectionChange((next) => {
-          setState((s) => ({ ...s, status: next }));
+          setState((s) => ({
+            ...s,
+            status: next,
+            hasEverConnected: s.hasEverConnected || next.kind === "open",
+          }));
           // Schedule a reconnect when the socket drops unexpectedly.
           // auth_failed is terminal (config issue, retrying won't help).
           // Reset the backoff counter when we successfully reach `open`.
@@ -2138,6 +2149,22 @@ export default function App() {
     );
   }
 
+  // Cold-boot gate: block the whole UI until the WS has reached `open`
+  // at least once this app lifetime. Without this, the user can click
+  // Spawn (and many other actions) while the daemon is still warming up
+  // and the click silently no-ops because the gating dialogs require
+  // state.client to be non-null. After first connect, transient drops
+  // fall back to the DaemonFooter + in-app reconnect UX.
+  if (
+    !state.hasEverConnected
+    && state.status.kind !== "auth_failed"
+    && state.status.kind !== "error"
+  ) {
+    return (
+      <ConnectingOverlay status={state.status} onRestart={onRestartDaemon} />
+    );
+  }
+
   const mainPaneContent = (
     <main className="main-pane">
       <TabBar
@@ -3120,6 +3147,44 @@ function findSession(
     return s;
   });
   return found;
+}
+
+/// Cold-boot full-screen overlay shown until the daemon WS reaches
+/// `open` for the first time this app lifetime. Replaces every other
+/// surface so spawn/tab/preset clicks can't silently no-op while the
+/// daemon is still warming up. Once the user has been connected once,
+/// the overlay never returns — transient drops fall back to the
+/// DaemonFooter's in-app status display.
+function ConnectingOverlay({
+  status,
+  onRestart,
+}: {
+  status: AppState["status"];
+  onRestart: () => void;
+}) {
+  const label = status.kind === "init"
+    ? "Starting daemon…"
+    : status.kind === "connecting"
+      ? "Connecting to daemon…"
+      : status.kind === "closed"
+        ? "Daemon dropped — reconnecting…"
+        : "Waiting for daemon…";
+  return (
+    <div className="connecting-overlay" data-testid="connecting-overlay">
+      <div className="connecting-overlay-card">
+        <div className="connecting-overlay-spinner" aria-hidden="true" />
+        <div className="connecting-overlay-label">{label}</div>
+        <button
+          type="button"
+          className="link connecting-overlay-restart"
+          onClick={onRestart}
+          data-testid="connecting-overlay-restart"
+        >
+          Restart daemon
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /// Used only by the pop-out tab/session "not found" error states (which

@@ -1765,6 +1765,49 @@ button.tree-tab-pill:hover {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   height: 100%; gap: 16px; padding: 32px;
 }
+
+.connecting-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  z-index: 9999;
+}
+.connecting-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 32px 40px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  min-width: 280px;
+}
+.connecting-overlay-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: connecting-overlay-spin 0.9s linear infinite;
+}
+@keyframes connecting-overlay-spin {
+  to { transform: rotate(360deg); }
+}
+.connecting-overlay-label {
+  font-size: var(--text-body);
+  color: var(--fg);
+}
+.connecting-overlay-restart {
+  font-size: var(--text-small);
+  color: var(--fg-muted);
+}
+.connecting-overlay-restart:hover {
+  color: var(--fg);
+}
 .empty-state h1 { margin: 0; font-weight: 500; }
 .empty-state h3 { margin: 0; font-weight: 500; }
 .empty-state p { margin: 0; max-width: 40ch; text-align: center; line-height: 1.5; }
