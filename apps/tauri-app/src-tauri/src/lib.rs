@@ -325,6 +325,7 @@ async fn open_folders_in_vscode(paths: Vec<String>) -> Result<(), String> {
         }
         resolved.push(
             pb.canonicalize()
+                .map(|p| simplify_path(&p))
                 .map_err(|e| format!("canonicalize {p}: {e}"))?,
         );
     }
@@ -393,10 +394,38 @@ fn resolve_existing_terminal_path(path: &str, base_dirs: &[String]) -> Result<Pa
         if candidate.exists() {
             return candidate
                 .canonicalize()
+                .map(|p| simplify_path(&p))
                 .map_err(|e| format!("canonicalize {}: {e}", candidate.display()));
         }
     }
     Err(format!("path does not exist: {path}"))
+}
+
+/// Strip the Windows verbatim (`\\?\`) prefix from a canonicalized path.
+/// `std::fs::canonicalize` on Windows always returns the verbatim form, which
+/// the filesystem accepts but most other tooling does not — VS Code opens the
+/// workspace under that literal path, and language-server clients (notably
+/// Ruff) then build `file://` URIs by URL-encoding the `?`, producing
+/// `file://%3F/...` which their URI parsers reject as an invalid IDN.
+///
+/// The daemon crate has the authoritative copy in `crates/daemon/src/paths.rs`;
+/// this is duplicated here because the Tauri-app crate intentionally stays
+/// decoupled from the daemon crate (it's a thin client). Keep the two in sync.
+#[must_use]
+fn simplify_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\")
+            && rest.chars().nth(1) == Some(':')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 fn spawn_vscode(path: &Path, line: Option<u32>, column: Option<u32>) -> Result<(), String> {
@@ -489,8 +518,10 @@ fn vscode_commands() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_existing_terminal_path, validate_http_url};
+    use super::{resolve_existing_terminal_path, simplify_path, validate_http_url};
     use std::fs;
+    #[cfg(windows)]
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -512,9 +543,20 @@ mod tests {
         let resolved =
             resolve_existing_terminal_path("src/main.rs", &[root.to_string_lossy().into_owned()])?;
 
-        let expected = file.canonicalize().map_err(|e| e.to_string())?;
+        let expected = simplify_path(&file.canonicalize().map_err(|e| e.to_string())?);
         fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
         assert_eq!(resolved, expected);
+        #[cfg(windows)]
+        {
+            // VS Code launched with a `\\?\…` path produces `file://%3F/…`
+            // URIs that break LSP clients (Ruff in particular). The resolved
+            // path must be in normal form before it hits the command line.
+            assert!(
+                !resolved.to_string_lossy().starts_with(r"\\?\"),
+                "resolved path retains verbatim prefix: {}",
+                resolved.display()
+            );
+        }
         Ok(())
     }
 
@@ -522,6 +564,27 @@ mod tests {
     fn resolve_existing_terminal_path_rejects_missing_paths() {
         let result = resolve_existing_terminal_path("missing.rs", &[]);
         assert!(result.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_path_strips_drive_verbatim_prefix() {
+        let out = simplify_path(Path::new(r"\\?\C:\Users\foo\repo"));
+        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_path_converts_unc_verbatim() {
+        let out = simplify_path(Path::new(r"\\?\UNC\server\share\dir"));
+        assert_eq!(out, PathBuf::from(r"\\server\share\dir"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_path_leaves_normal_paths_alone() {
+        let out = simplify_path(Path::new(r"C:\Users\foo\repo"));
+        assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
     }
 
     fn unique_temp_dir(label: &str) -> Result<std::path::PathBuf, String> {

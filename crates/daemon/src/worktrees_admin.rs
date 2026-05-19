@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
+use crate::paths::simplify_path;
 use crate::session::SessionRegistry;
 
 /// Walk the worktrees root and return one [`RootWorktreeEntry`] per
@@ -129,12 +130,16 @@ pub async fn delete_group(
 /// path. The two early-bail checks block accidental deletion of arbitrary
 /// directories should a bad path arrive over the wire.
 fn validate_target(root: &Path, target: &Path) -> anyhow::Result<PathBuf> {
-    let target = target
-        .canonicalize()
-        .with_context(|| format!("canonicalizing {}", target.display()))?;
-    let root_canon = root
-        .canonicalize()
-        .with_context(|| format!("canonicalizing root {}", root.display()))?;
+    let target = simplify_path(
+        &target
+            .canonicalize()
+            .with_context(|| format!("canonicalizing {}", target.display()))?,
+    );
+    let root_canon = simplify_path(
+        &root
+            .canonicalize()
+            .with_context(|| format!("canonicalizing root {}", root.display()))?,
+    );
     if !target.starts_with(&root_canon) {
         return Err(anyhow!(
             "refusing to delete {}: not under worktrees root {}",
@@ -165,7 +170,7 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
         }
         for member_path in &snap.worktree_paths {
             if let Some(parent) = Path::new(member_path).parent()
-                && let Ok(parent_canon) = parent.canonicalize()
+                && let Ok(parent_canon) = parent.canonicalize().map(|p| simplify_path(&p))
                 && parent_canon == target
             {
                 return Err(anyhow!(
@@ -251,7 +256,7 @@ fn build_session_xref(
         for member_path in &snap.worktree_paths {
             if let Some(parent) = Path::new(member_path).parent() {
                 let key = std::fs::canonicalize(parent)
-                    .unwrap_or_else(|_| parent.to_path_buf());
+                    .map_or_else(|_| parent.to_path_buf(), |p| simplify_path(&p));
                 // Keep the most-active record per group: if any session
                 // member of this group is live, the group is Active.
                 map.entry(key)
@@ -273,7 +278,8 @@ fn build_entry(
     branch_slug: &str,
     xref: &HashMap<PathBuf, (String, bool)>,
 ) -> RootWorktreeEntry {
-    let key = std::fs::canonicalize(wt_path).unwrap_or_else(|_| wt_path.to_path_buf());
+    let key = std::fs::canonicalize(wt_path)
+        .map_or_else(|_| wt_path.to_path_buf(), |p| simplify_path(&p));
     let (session_id, status) = match xref.get(&key) {
         Some((sid, true)) => (Some(sid.clone()), RootWorktreeStatus::Active),
         Some((sid, false)) => (Some(sid.clone()), RootWorktreeStatus::Detached),
