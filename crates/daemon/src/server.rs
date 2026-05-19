@@ -3434,8 +3434,8 @@ fn agent_program(agent: Agent) -> String {
 /// portable-pty can actually launch. Returns `(program, prepended_args)`.
 ///
 /// On Windows, agent CLIs distributed via npm (e.g. codex from
-/// `@openai/codex`) land on PATH as `.cmd` shims. Two layers of fixup
-/// matter here:
+/// `@openai/codex`, claude from `@anthropic-ai/claude-code`) land on
+/// PATH as `.cmd` shims. Two layers of fixup matter here:
 ///
 /// 1. `CreateProcess` does NOT execute `.cmd` or `.bat` directly, so
 ///    a raw `.cmd` path passed to portable-pty silently fails (the
@@ -3443,20 +3443,23 @@ fn agent_program(agent: Agent) -> String {
 /// 2. Even wrapping with `cmd.exe /d /c <shim>.cmd` is enough for the
 ///    process to launch — but inside portable-pty's pseudo-console
 ///    that chain (cmd.exe → npm shim → node.exe → real binary) ends
-///    up swallowing the child's stdout: codex.exe never renders. The
-///    same `cmd.exe /d /c codex.cmd …` argv works fine in a real
-///    Windows console and from `PowerShell`, so it's specific to the
+///    up swallowing the child's stdout: the agent never renders, and
+///    flags like `--dangerously-skip-permissions` look like they're
+///    being ignored because the user sees no output at all. The same
+///    `cmd.exe /d /c <shim>.cmd …` argv works fine in a real Windows
+///    console and from `PowerShell`, so it's specific to the
 ///    portable-pty + cmd.exe boundary.
 ///
-/// We dodge both by, when the `.cmd` is an npm-style shim, finding
-/// the underlying `node_modules/.../bin/<name>.js` entry and spawning
-/// `node.exe <entry> <args>` directly. That removes cmd.exe from the
-/// chain entirely and the JS launcher still does its
-/// platform-detection / PATH-augmentation work as usual.
+/// We dodge both by, when the `.cmd` is an npm-style shim, peeking
+/// into the sibling `node_modules/.../bin/` directory and spawning
+/// either the native `<stem>.exe` (newer claude-code distribution) or
+/// `node.exe <stem>.js` (codex, older claude) directly. That removes
+/// cmd.exe from the chain entirely.
 ///
 /// Order of preference for a `.cmd` shim:
-///   1. npm shim → `(node.exe, [<js-entry>, ...])`.
-///   2. Fallback → `(cmd.exe, ["/d", "/c", <shim-path>, ...])`.
+///   1. native binary → `(<bin>/<stem>.exe, [...])`.
+///   2. JS entrypoint → `(node.exe, [<bin>/<stem>.js, ...])`.
+///   3. Fallback     → `(cmd.exe, ["/d", "/c", <shim-path>, ...])`.
 ///
 /// Native `.exe`s and anything else flow through with the resolved
 /// path unchanged. When `which` can't find the program at all (custom
@@ -3476,12 +3479,9 @@ fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
             .and_then(|s| s.to_str())
             .map(str::to_ascii_lowercase);
         if matches!(ext.as_deref(), Some("cmd" | "bat"))
-            && let Some((node, js)) = npm_shim_to_node_entry(&path)
+            && let Some((program, prepend)) = npm_shim_to_native_program(&path)
         {
-            return (
-                node.to_string_lossy().into_owned(),
-                vec![js.to_string_lossy().into_owned()],
-            );
+            return (program.to_string_lossy().into_owned(), prepend);
         }
         if matches!(ext.as_deref(), Some("cmd" | "bat")) {
             return (
@@ -3494,28 +3494,38 @@ fn resolve_agent_program(name: &str) -> (String, Vec<String>) {
 }
 
 /// For a `.cmd` path that looks like an npm-generated shim, locate
-/// the JS entrypoint it ultimately invokes (`<dir>/node_modules/<pkg>/
-/// bin/<stem>.js`, where `<pkg>` may be scoped as `@org/name`). Also
-/// resolves a `node.exe` to run it with: prefers a sibling next to
-/// the shim (nvm-style install layout) over a PATH-resolved one, so
-/// node-version managers stay self-consistent.
+/// the underlying program the shim ultimately invokes. Two layouts
+/// are supported, in this order of preference:
 ///
-/// Returns `None` if the shim doesn't match the npm pattern (custom
-/// wrapper `.cmd`, non-Node CLI, etc.) — caller falls back to
+/// - Native binary distribution (`@anthropic-ai/claude-code` since
+///   ~2026): `<dir>/node_modules/<pkg>/bin/<stem>.exe`. Returned as
+///   `(<exe>, [])` — no node prefix.
+/// - JS entrypoint (codex, older claude): `<dir>/node_modules/<pkg>/
+///   bin/<stem>.js`. Returned as `(node.exe, [<js>])`. The `node.exe`
+///   resolution prefers a sibling next to the shim (nvm-style install
+///   layout) over a PATH-resolved one, so node-version managers stay
+///   self-consistent.
+///
+/// `<pkg>` may be scoped as `@org/name`.
+///
+/// Returns `None` if the shim doesn't match either pattern (custom
+/// wrapper `.cmd`, non-npm CLI, etc.) — caller falls back to
 /// `cmd.exe /d /c <shim>`.
 #[cfg(windows)]
-fn npm_shim_to_node_entry(shim: &Path) -> Option<(PathBuf, PathBuf)> {
+fn npm_shim_to_native_program(shim: &Path) -> Option<(PathBuf, Vec<String>)> {
     let dir = shim.parent()?;
     let stem = shim.file_stem()?.to_str()?;
     let nm = dir.join("node_modules");
     if !nm.is_dir() {
         return None;
     }
-    let target_filename = format!("{stem}.js");
 
-    let entries = std::fs::read_dir(&nm).ok()?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
+    let exe_filename = format!("{stem}.exe");
+    let js_filename = format!("{stem}.js");
+
+    let mut exe_candidates: Vec<PathBuf> = Vec::new();
+    let mut js_candidates: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&nm).ok()?.flatten() {
         let p = entry.path();
         if !p.is_dir() {
             continue;
@@ -3526,25 +3536,31 @@ fn npm_shim_to_node_entry(shim: &Path) -> Option<(PathBuf, PathBuf)> {
             // Scoped: walk one more level (e.g. node_modules/@openai/codex/bin/codex.js).
             if let Ok(inner) = std::fs::read_dir(&p) {
                 for sub in inner.flatten() {
-                    candidates.push(sub.path().join("bin").join(&target_filename));
+                    let bin = sub.path().join("bin");
+                    exe_candidates.push(bin.join(&exe_filename));
+                    js_candidates.push(bin.join(&js_filename));
                 }
             }
         } else {
-            // Unscoped: node_modules/<pkg>/bin/<stem>.js.
-            candidates.push(p.join("bin").join(&target_filename));
+            // Unscoped: node_modules/<pkg>/bin/<stem>.{exe,js}.
+            let bin = p.join("bin");
+            exe_candidates.push(bin.join(&exe_filename));
+            js_candidates.push(bin.join(&js_filename));
         }
     }
 
-    let js = candidates.into_iter().find(|c| c.is_file())?;
+    if let Some(exe) = exe_candidates.into_iter().find(|c| c.is_file()) {
+        return Some((exe, Vec::new()));
+    }
 
+    let js = js_candidates.into_iter().find(|c| c.is_file())?;
     let sibling_node = dir.join("node.exe");
     let node = if sibling_node.is_file() {
         sibling_node
     } else {
         which::which("node").ok()?
     };
-
-    Some((node, js))
+    Some((node, vec![js.to_string_lossy().into_owned()]))
 }
 
 #[derive(Debug, Clone)]
@@ -3768,6 +3784,11 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "tests assert preconditions with expect/unwrap; failure messages aid debugging"
+)]
 mod tests {
     use super::*;
     use protocol::{InjectorStep, PromptInjector};
@@ -3950,5 +3971,134 @@ mod tests {
         let c = cfg(Agent::Codex);
         let args = build_codex_args(&c, &members, None);
         assert!(args.is_empty(), "expected empty args, got {args:?}");
+    }
+
+    #[cfg(windows)]
+    mod npm_shim {
+        use super::super::npm_shim_to_native_program;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use uuid::Uuid;
+
+        /// RAII scratch dir under the OS temp root (drop removes the tree).
+        /// Mirrors the `Scratch` helper in `binary_cache.rs` rather than
+        /// pulling in `tempfile` just for tests.
+        struct Scratch {
+            path: PathBuf,
+        }
+
+        impl Scratch {
+            fn new(label: &str) -> Self {
+                let path = std::env::temp_dir()
+                    .join(format!("rt-npm-shim-{label}-{}", Uuid::new_v4().simple()));
+                fs::create_dir_all(&path).unwrap();
+                Self { path }
+            }
+
+            fn path(&self) -> &Path {
+                &self.path
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.path);
+            }
+        }
+
+        fn touch(path: &Path) {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, b"").unwrap();
+        }
+
+        /// Mirrors the `@anthropic-ai/claude-code` native-binary layout
+        /// (the package that triggered the original bug — the resolver
+        /// fell through to `cmd.exe /d /c claude.cmd` because it only
+        /// knew about `bin/<stem>.js`, and the portable-pty + cmd.exe
+        /// boundary then swallowed claude's stdout).
+        #[test]
+        fn scoped_native_exe_is_preferred_over_js() {
+            let scratch = Scratch::new("scoped-exe");
+            let dir = scratch.path();
+            let shim = dir.join("claude.cmd");
+            touch(&shim);
+            let pkg = dir
+                .join("node_modules")
+                .join("@anthropic-ai")
+                .join("claude-code")
+                .join("bin");
+            let exe = pkg.join("claude.exe");
+            let js = pkg.join("claude.js");
+            touch(&exe);
+            touch(&js);
+
+            let (program, prepend) =
+                npm_shim_to_native_program(&shim).expect("resolver should find the native exe");
+            assert_eq!(program, exe);
+            assert!(
+                prepend.is_empty(),
+                "native exe should not need a node prefix, got {prepend:?}"
+            );
+        }
+
+        /// Codex's layout (and older claude installs): no native exe,
+        /// just the JS entry. Resolver should fall back to running it
+        /// under `node.exe`.
+        #[test]
+        fn scoped_js_entry_resolved_via_node() {
+            let scratch = Scratch::new("scoped-js");
+            let dir = scratch.path();
+            let shim = dir.join("codex.cmd");
+            touch(&shim);
+            let js = dir
+                .join("node_modules")
+                .join("@openai")
+                .join("codex")
+                .join("bin")
+                .join("codex.js");
+            touch(&js);
+            // Sibling node.exe so the test doesn't depend on a
+            // PATH-resolved `node` being installed on the runner.
+            let sibling_node = dir.join("node.exe");
+            touch(&sibling_node);
+
+            let (program, prepend) = npm_shim_to_native_program(&shim)
+                .expect("resolver should fall back to node + js entry");
+            assert_eq!(program, sibling_node);
+            assert_eq!(prepend.len(), 1, "expected single js arg, got {prepend:?}");
+            assert_eq!(PathBuf::from(&prepend[0]), js);
+        }
+
+        #[test]
+        fn unscoped_native_exe_is_resolved() {
+            let scratch = Scratch::new("unscoped-exe");
+            let dir = scratch.path();
+            let shim = dir.join("mytool.cmd");
+            touch(&shim);
+            let exe = dir
+                .join("node_modules")
+                .join("mytool")
+                .join("bin")
+                .join("mytool.exe");
+            touch(&exe);
+
+            let (program, prepend) = npm_shim_to_native_program(&shim)
+                .expect("resolver should find unscoped native exe");
+            assert_eq!(program, exe);
+            assert!(prepend.is_empty());
+        }
+
+        /// A `.cmd` that isn't an npm shim (no sibling `node_modules`)
+        /// should return `None` so the caller can fall back to the
+        /// `cmd.exe /d /c <shim>` path.
+        #[test]
+        fn non_npm_shim_returns_none() {
+            let scratch = Scratch::new("non-npm");
+            let shim = scratch.path().join("randomtool.cmd");
+            touch(&shim);
+            assert!(npm_shim_to_native_program(&shim).is_none());
+        }
     }
 }
