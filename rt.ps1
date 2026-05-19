@@ -19,6 +19,9 @@
                  frontend bundle, and `rustling-tulip-app.exe`).
       installer  Run `pnpm tauri build` to produce installer bundles
                  (`target\release\bundle\msi\*.msi` and `nsis\*.exe`).
+      setup      Install/check Windows build prerequisites via winget:
+                 Git, Node.js LTS, pnpm, Rust/rustup, Visual Studio C++
+                 Build Tools, WebView2, and frontend dependencies.
       stop       Kill any running daemon process(es) and clean the stale
                  handshake file. No-op when nothing is running.
       restart    `stop` followed by `launch`. Use this for "fresh dev loop"
@@ -61,6 +64,7 @@
     .\rt.ps1 build -Release
     .\rt.ps1 launch -NoBuild
     .\rt.ps1 launch -Release
+    .\rt.ps1 setup
     .\rt.ps1 installer
     .\rt.ps1 installer -Fast
     .\rt.ps1 stop
@@ -80,7 +84,7 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'installer', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'help')]
+    [ValidateSet('', 'build', 'launch', 'installer', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
@@ -114,6 +118,7 @@ $SidecarStageDir = Join-Path $AppDir 'src-tauri\binaries'
 # resulting path is missing -- so we stage binaries with the same suffix
 # whether we're in debug, release, or installer mode.
 $script:HostTriple = $null
+$script:SetupRestartNeeded = $false
 
 function Get-DaemonBin {
     # `$Profile` is a PowerShell automatic variable for the user's profile
@@ -142,12 +147,137 @@ function Test-Tool {
     }
 }
 
+function Test-CommandAvailable {
+    param([string]$Name)
+    return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Update-ProcessPath {
+    [CmdletBinding()]
+    param()
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($scope in @('Process', 'Machine', 'User')) {
+        $value = [Environment]::GetEnvironmentVariable('Path', $scope)
+        if (-not $value) { continue }
+        foreach ($part in ($value -split ';')) {
+            $trimmed = $part.Trim()
+            if ($trimmed -and $seen.Add($trimmed)) {
+                [void]$parts.Add($trimmed)
+            }
+        }
+    }
+    $env:Path = $parts -join ';'
+}
+
+function Invoke-WingetInstall {
+    [CmdletBinding()]
+    param(
+        [string]$Id,
+        [string]$Name,
+        [string[]]$ExtraArgs = @()
+    )
+
+    Test-Tool 'winget' 'Install App Installer from the Microsoft Store, then rerun `.\rt.ps1 setup`.'
+
+    Write-Host "==> Installing $Name..." -ForegroundColor Cyan
+    $args = @(
+        'install',
+        '--id', $Id,
+        '--exact',
+        '--source', 'winget',
+        '--accept-package-agreements',
+        '--accept-source-agreements',
+        '--disable-interactivity',
+        '--silent'
+    )
+    $args += $ExtraArgs
+
+    & winget @args
+    if ($LASTEXITCODE -eq 3010 -or $LASTEXITCODE -eq 1641) {
+        $script:SetupRestartNeeded = $true
+        Write-Host "    $Name installed; Windows reported a restart is needed." -ForegroundColor Yellow
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "$Name install failed (exit $LASTEXITCODE)"
+    }
+
+    Update-ProcessPath
+}
+
+function Get-VsWherePath {
+    $cmd = Get-Command 'vswhere.exe' -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $defaultPath = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $defaultPath) { return $defaultPath }
+    return $null
+}
+
+function Get-MsvcInstallPath {
+    $vswhere = Get-VsWherePath
+    if (-not $vswhere) { return $null }
+
+    $args = @(
+        '-latest',
+        '-products', '*',
+        '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+        '-property', 'installationPath'
+    )
+    $installPath = & $vswhere @args
+    if ($LASTEXITCODE -ne 0 -or -not $installPath) { return $null }
+    return ($installPath | Select-Object -First 1).Trim()
+}
+
+function Test-MsvcBuildTools {
+    return $null -ne (Get-MsvcInstallPath)
+}
+
+function Initialize-MsvcEnvironment {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([switch]$Quiet)
+
+    if (-not $IsWindows) { return $true }
+    if (Test-CommandAvailable 'link.exe') { return $true }
+
+    $installPath = Get-MsvcInstallPath
+    if (-not $installPath) { return $false }
+
+    $vsDevCmd = Join-Path $installPath 'Common7\Tools\VsDevCmd.bat'
+    if (-not (Test-Path $vsDevCmd)) { return $false }
+
+    if (-not $Quiet) {
+        Write-Host '==> Loading MSVC build environment...' -ForegroundColor Cyan
+    }
+
+    $cmd = "`"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
+    $lines = & cmd.exe /d /s /c $cmd
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    foreach ($line in $lines) {
+        if ($line -match '^([^=]+)=(.*)$') {
+            [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+        }
+    }
+
+    return (Test-CommandAvailable 'link.exe')
+}
+
+function Assert-MsvcLinker {
+    if (-not $IsWindows) { return }
+    if (-not (Initialize-MsvcEnvironment -Quiet)) {
+        throw 'MSVC linker link.exe not found. Run `.\rt.ps1 setup` to install Visual Studio C++ Build Tools, then open a new PowerShell if setup requested it.'
+    }
+}
+
 function Assert-Tooling {
     [CmdletBinding()]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
         Justification = 'Asserts presence of multiple tools; plural noun is accurate.')]
     param()
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
+    Assert-MsvcLinker
     Test-Tool 'pnpm'  'Install pnpm via https://pnpm.io/installation or `npm install -g pnpm`.'
 }
 
@@ -336,6 +466,120 @@ function Initialize-FrontendDeps {
         } finally {
             Pop-Location
         }
+    }
+}
+
+function Test-WebView2Runtime {
+    if (-not $IsWindows) { return $true }
+
+    $clientId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    $roots = @(
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients',
+        'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients'
+    )
+    foreach ($root in $roots) {
+        $path = Join-Path $root $clientId
+        if (-not (Test-Path $path)) { continue }
+        $props = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue
+        if ($props -and $props.pv) { return $true }
+    }
+    return $false
+}
+
+function Install-CommandDependency {
+    [CmdletBinding()]
+    param(
+        [string]$CommandName,
+        [string]$WingetId,
+        [string]$DisplayName
+    )
+
+    if (Test-CommandAvailable $CommandName) {
+        Write-Host "==> $DisplayName already available." -ForegroundColor DarkGray
+        return
+    }
+    Invoke-WingetInstall -Id $WingetId -Name $DisplayName
+}
+
+function Install-MsvcBuildTools {
+    if (Test-MsvcBuildTools) {
+        Write-Host '==> Visual Studio C++ Build Tools already available.' -ForegroundColor DarkGray
+        return
+    }
+
+    $override = '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+    Invoke-WingetInstall `
+        -Id 'Microsoft.VisualStudio.2022.BuildTools' `
+        -Name 'Visual Studio 2022 Build Tools with Desktop development with C++' `
+        -ExtraArgs @('--override', $override)
+
+    if (-not (Test-MsvcBuildTools) -and $script:SetupRestartNeeded) {
+        throw 'Visual Studio Build Tools installed, but Windows requested a restart before the C++ toolchain can be detected. Restart, then rerun `.\rt.ps1 setup`.'
+    }
+    if (-not (Test-MsvcBuildTools)) {
+        throw 'Visual Studio Build Tools installed, but the C++ toolchain was not detected. Open Visual Studio Installer and add "Desktop development with C++", then rerun `.\rt.ps1 setup`.'
+    }
+}
+
+function Initialize-RustToolchain {
+    Test-Tool 'rustup' 'Run `.\rt.ps1 setup` to install Rust via rustup.'
+
+    Write-Host '==> Selecting the stable MSVC Rust toolchain...' -ForegroundColor Cyan
+    & rustup default stable-msvc
+    Test-CargoExitOk 'rustup default stable-msvc'
+
+    Write-Host '==> Ensuring rustfmt and clippy are installed...' -ForegroundColor Cyan
+    & rustup component add rustfmt clippy
+    Test-CargoExitOk 'rustup component add rustfmt clippy'
+}
+
+function Invoke-Setup {
+    if (-not $IsWindows) {
+        throw 'The setup command currently supports Windows only. Install Rust, Node.js, pnpm, and the platform Tauri prerequisites manually on this OS.'
+    }
+
+    Test-Tool 'winget' 'Install App Installer from the Microsoft Store, then rerun `.\rt.ps1 setup`.'
+
+    Write-Host '==> Installing/checking Windows build prerequisites...' -ForegroundColor Cyan
+    Install-CommandDependency -CommandName 'git' -WingetId 'Git.Git' -DisplayName 'Git'
+    Install-CommandDependency -CommandName 'node' -WingetId 'OpenJS.NodeJS.LTS' -DisplayName 'Node.js LTS'
+    Install-CommandDependency -CommandName 'pnpm' -WingetId 'pnpm.pnpm' -DisplayName 'pnpm'
+
+    if ((Test-CommandAvailable 'cargo') -and (Test-CommandAvailable 'rustup')) {
+        Write-Host '==> Rust/rustup already available.' -ForegroundColor DarkGray
+    } else {
+        Invoke-WingetInstall -Id 'Rustlang.Rustup' -Name 'Rustup'
+    }
+    Update-ProcessPath
+
+    Install-MsvcBuildTools
+    if (-not (Initialize-MsvcEnvironment)) {
+        throw 'Could not load the MSVC environment after installing Build Tools. Open a new PowerShell and rerun `.\rt.ps1 setup`.'
+    }
+
+    Initialize-RustToolchain
+
+    if (Test-WebView2Runtime) {
+        Write-Host '==> Microsoft Edge WebView2 Runtime already available.' -ForegroundColor DarkGray
+    } else {
+        Invoke-WingetInstall -Id 'Microsoft.EdgeWebView2Runtime' -Name 'Microsoft Edge WebView2 Runtime'
+    }
+
+    Write-Host '==> Installing frontend dependencies...' -ForegroundColor Cyan
+    Push-Location $AppDir
+    try {
+        & pnpm install
+        Test-CargoExitOk 'pnpm install'
+    } finally {
+        Pop-Location
+    }
+
+    Assert-Tooling
+    if ($script:SetupRestartNeeded) {
+        Write-Host '==> Setup complete. Restart Windows, then run `.\rt.ps1 installer`.' -ForegroundColor Yellow
+    } else {
+        Write-Host '==> Setup complete. You can run `.\rt.ps1 installer` next.' -ForegroundColor Green
     }
 }
 
@@ -694,6 +938,8 @@ Commands:
              the standalone-app release artifacts.
   installer  `pnpm tauri build` -- produces installer bundles under
              target\release\bundle\.
+  setup      Install/check Windows build prerequisites via winget, then
+             install frontend dependencies. Run once after cloning.
   stop       Kill any running daemon and remove the stale handshake.
   restart    stop + launch. Fresh dev loop after the daemon misbehaves.
   test       `cargo test` across the workspace.
@@ -719,6 +965,7 @@ Flags:
 Examples:
   .\rt.ps1                       # build + launch dev
   .\rt.ps1 build -Release        # release artifacts, no launch
+  .\rt.ps1 setup                 # install/check build prerequisites
   .\rt.ps1 launch -NoBuild       # launch existing debug binaries
   .\rt.ps1 launch -Release       # build + launch release exe
   .\rt.ps1 installer             # build installer bundle (shippable)
@@ -739,6 +986,7 @@ switch ($effective) {
     'build'     { Invoke-Build }
     'launch'    { Invoke-Launch }
     'installer' { Invoke-Installer }
+    'setup'     { Invoke-Setup }
     'stop'      { Invoke-Stop }
     'restart'   { Invoke-Restart }
     'test'      { Invoke-Test }
