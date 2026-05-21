@@ -512,7 +512,16 @@ export interface GitStash {
 
 export type SplitDirection = "horizontal" | "vertical";
 export type SplitPlace = "first" | "second";
-export type PaneDropEdge = "left" | "right" | "top" | "bottom" | "replace";
+export type PaneDropEdge =
+  | "left"
+  | "right"
+  | "top"
+  | "bottom"
+  | "replace"
+  | "outer_left"
+  | "outer_right"
+  | "outer_top"
+  | "outer_bottom";
 export type MergeLayout = "tile_horizontal" | "tile_vertical";
 
 export type GridNode =

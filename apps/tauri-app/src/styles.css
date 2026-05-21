@@ -3417,6 +3417,25 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .grid-drop-right  { top: 0; bottom: 0; right: 0;  width: 50%; }
 .grid-drop-top    { left: 0; right: 0; top: 0;    height: 50%; }
 .grid-drop-bottom { left: 0; right: 0; bottom: 0; height: 50%; }
+
+/* Outer-edge drop targets — visible when the cursor is in the narrow
+ * outermost band of a pane that's flush against that side of the whole
+ * tab grid. Dropping here promotes the pane to a sibling of the entire
+ * grid at the topmost split level. Rendered as a slim, fully-saturated
+ * bar at the very edge so it reads as "splits the whole tab" rather
+ * than the half-pane preview the regular left/right/top/bottom uses. */
+.grid-drop-outer_left,
+.grid-drop-outer_right,
+.grid-drop-outer_top,
+.grid-drop-outer_bottom {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.grid-drop-outer_left   { top: 0; bottom: 0; left: 0;   width: 14%; }
+.grid-drop-outer_right  { top: 0; bottom: 0; right: 0;  width: 14%; }
+.grid-drop-outer_top    { left: 0; right: 0; top: 0;    height: 14%; }
+.grid-drop-outer_bottom { left: 0; right: 0; bottom: 0; height: 14%; }
 .grid-drop-replace {
   top: 12%; left: 12%;
   right: 12%; bottom: 12%;

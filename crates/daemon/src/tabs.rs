@@ -459,11 +459,43 @@ pub fn insert_adjacent(
     edge: PaneDropEdge,
     source: GridNode,
 ) -> anyhow::Result<()> {
+    // Outer-edge variants wrap the entire root rather than nesting under
+    // `dst_target`. The frontend only emits an outer variant when the
+    // hovered pane actually touches that outer edge of the grid; the
+    // daemon trusts that decision and ignores `dst_target` here.
+    if let Some((direction, source_first)) = outer_edge_layout(edge) {
+        let existing = std::mem::replace(grid, placeholder());
+        let (first, second) = if source_first {
+            (Box::new(source), Box::new(existing))
+        } else {
+            (Box::new(existing), Box::new(source))
+        };
+        *grid = GridNode::Split {
+            direction,
+            ratio: DEFAULT_RATIO,
+            first,
+            second,
+        };
+        return Ok(());
+    }
     if !pane_exists(grid, dst_target) {
         return Err(anyhow!("destination pane not found: {dst_target}"));
     }
     insert_in(grid, dst_target, edge, source);
     Ok(())
+}
+
+/// Translate a `PaneDropEdge::Outer*` into the split direction + which
+/// side the source goes on. Returns `None` for non-outer edges so the
+/// caller falls through to the per-pane insertion path.
+fn outer_edge_layout(edge: PaneDropEdge) -> Option<(SplitDirection, bool)> {
+    match edge {
+        PaneDropEdge::OuterLeft => Some((SplitDirection::Horizontal, true)),
+        PaneDropEdge::OuterRight => Some((SplitDirection::Horizontal, false)),
+        PaneDropEdge::OuterTop => Some((SplitDirection::Vertical, true)),
+        PaneDropEdge::OuterBottom => Some((SplitDirection::Vertical, false)),
+        _ => None,
+    }
 }
 
 fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: GridNode) {
@@ -483,21 +515,21 @@ fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: Grid
                     session_id: src_sid,
                 };
             }
-            edge => {
+            PaneDropEdge::Left
+            | PaneDropEdge::Right
+            | PaneDropEdge::Top
+            | PaneDropEdge::Bottom => {
                 let direction = match edge {
                     PaneDropEdge::Left | PaneDropEdge::Right => SplitDirection::Horizontal,
                     PaneDropEdge::Top | PaneDropEdge::Bottom => SplitDirection::Vertical,
-                    PaneDropEdge::Replace => unreachable!("handled above"),
+                    _ => unreachable!("outer arm above"),
                 };
                 let existing = std::mem::replace(node, placeholder());
                 let (first, second) = match edge {
                     PaneDropEdge::Left | PaneDropEdge::Top => {
                         (Box::new(source), Box::new(existing))
                     }
-                    PaneDropEdge::Right | PaneDropEdge::Bottom => {
-                        (Box::new(existing), Box::new(source))
-                    }
-                    PaneDropEdge::Replace => unreachable!("handled above"),
+                    _ => (Box::new(existing), Box::new(source)),
                 };
                 *node = GridNode::Split {
                     direction,
@@ -505,6 +537,15 @@ fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: Grid
                     first,
                     second,
                 };
+            }
+            PaneDropEdge::OuterLeft
+            | PaneDropEdge::OuterRight
+            | PaneDropEdge::OuterTop
+            | PaneDropEdge::OuterBottom => {
+                // Caller `insert_adjacent` intercepts outer variants and
+                // wraps the entire root, so this arm is structurally
+                // unreachable. Bail silently rather than panicking if the
+                // invariant breaks — the prior topology is preserved.
             }
         }
         return;
@@ -1114,6 +1155,82 @@ mod tests {
         assert_eq!(direction, Vertical);
         assert!(matches!(&*first, GridNode::Pane { pane_id, .. } if pane_id == "src"));
         assert!(matches!(&*second, GridNode::Pane { pane_id, .. } if pane_id == "dst"));
+    }
+
+    #[test]
+    fn insert_adjacent_outer_right_wraps_entire_root() {
+        // Start with a 2-column row. Dropping on the outer-right band of
+        // the right pane should wrap the whole row, not nest under that
+        // pane — so the source ends up as a full-height column on the
+        // right at the topmost split level.
+        let mut grid = split(
+            Horizontal,
+            0.5,
+            pane("a", Some("sa")),
+            pane("b", Some("sb")),
+        );
+        insert_adjacent(
+            &mut grid,
+            "b",
+            PaneDropEdge::OuterRight,
+            pane("src", Some("ss")),
+        )
+        .expect("insert");
+        let GridNode::Split {
+            direction,
+            first,
+            second,
+            ..
+        } = grid
+        else {
+            panic!("expected outer Split at root");
+        };
+        assert_eq!(direction, Horizontal);
+        // Existing 2-col row is on the left side intact.
+        assert!(matches!(&*first, GridNode::Split { direction: Horizontal, .. }));
+        // Source pane is the full-height right column.
+        assert!(matches!(&*second, GridNode::Pane { pane_id, .. } if pane_id == "src"));
+    }
+
+    #[test]
+    fn insert_adjacent_outer_top_wraps_root_into_vertical_split() {
+        let mut grid = pane("dst", Some("sd"));
+        insert_adjacent(
+            &mut grid,
+            "dst",
+            PaneDropEdge::OuterTop,
+            pane("src", Some("ss")),
+        )
+        .expect("insert");
+        let GridNode::Split {
+            direction,
+            first,
+            second,
+            ..
+        } = grid
+        else {
+            panic!("expected Split");
+        };
+        assert_eq!(direction, Vertical);
+        assert!(matches!(&*first, GridNode::Pane { pane_id, .. } if pane_id == "src"));
+        assert!(matches!(&*second, GridNode::Pane { pane_id, .. } if pane_id == "dst"));
+    }
+
+    #[test]
+    fn insert_adjacent_outer_ignores_missing_dst_pane() {
+        // Outer-edge variants don't depend on `dst_target` — the source
+        // wraps the entire root regardless of what pane id the caller
+        // passes. The frontend always picks a real pane id, but the
+        // daemon shouldn't fail the move if it's stale.
+        let mut grid = pane("real", Some("sr"));
+        insert_adjacent(
+            &mut grid,
+            "does-not-exist",
+            PaneDropEdge::OuterLeft,
+            pane("src", Some("ss")),
+        )
+        .expect("insert");
+        assert!(matches!(&grid, GridNode::Split { direction: Horizontal, .. }));
     }
 
     #[test]

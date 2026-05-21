@@ -117,10 +117,29 @@ export default function GridRenderer({
         onTabsSnapshotUndo={onTabsSnapshotUndo}
         knownPaneIds={knownPaneIds}
         inPopout={inPopout ?? false}
+        outerEdges={ALL_OUTER_EDGES}
       />
     </div>
   );
 }
+
+/// Which outer edges of the entire tab grid a node is flush against.
+/// Threaded down through SplitRenderer so PaneChrome can offer "promote
+/// to topmost split" drop targets on the outermost band of the pane only
+/// when the pane really does touch that outer edge of the grid.
+interface OuterEdges {
+  left: boolean;
+  right: boolean;
+  top: boolean;
+  bottom: boolean;
+}
+
+const ALL_OUTER_EDGES: OuterEdges = {
+  left: true,
+  right: true,
+  top: true,
+  bottom: true,
+};
 
 interface NodeProps {
   node: GridNode;
@@ -146,6 +165,7 @@ interface NodeProps {
   ) => void;
   knownPaneIds: Set<string>;
   inPopout: boolean;
+  outerEdges: OuterEdges;
 }
 
 function NodeRenderer(props: NodeProps) {
@@ -231,7 +251,12 @@ function SplitRenderer(props: SplitProps) {
       className={isHorizontal ? "grid-split grid-split-h" : "grid-split grid-split-v"}
       style={style}
     >
-      <NodeRenderer {...props} node={node.first} path={[...path, 0]} />
+      <NodeRenderer
+        {...props}
+        node={node.first}
+        path={[...path, 0]}
+        outerEdges={childOuterEdges(props.outerEdges, isHorizontal, true)}
+      />
       <div
         className={dividerClass}
         onPointerDown={onPointerDown}
@@ -241,9 +266,33 @@ function SplitRenderer(props: SplitProps) {
         role="separator"
         aria-orientation={isHorizontal ? "vertical" : "horizontal"}
       />
-      <NodeRenderer {...props} node={node.second} path={[...path, 1]} />
+      <NodeRenderer
+        {...props}
+        node={node.second}
+        path={[...path, 1]}
+        outerEdges={childOuterEdges(props.outerEdges, isHorizontal, false)}
+      />
     </div>
   );
+}
+
+/// Narrow `outerEdges` for a split's child: the first child loses the
+/// "trailing" outer edge along the split's axis (right for horizontal,
+/// bottom for vertical) because its sibling now sits between it and that
+/// edge; the second child correspondingly loses the leading edge.
+function childOuterEdges(
+  parent: OuterEdges,
+  parentHorizontal: boolean,
+  isFirstChild: boolean,
+): OuterEdges {
+  if (parentHorizontal) {
+    return isFirstChild
+      ? { ...parent, right: false }
+      : { ...parent, left: false };
+  }
+  return isFirstChild
+    ? { ...parent, bottom: false }
+    : { ...parent, top: false };
 }
 
 interface PaneChromeProps extends Omit<NodeProps, "node"> {
@@ -405,6 +454,7 @@ function PaneChrome(props: PaneChromeProps) {
     [tabId, node.pane_id],
   );
 
+  const outerEdges = props.outerEdges;
   const onDragOver = useCallback(
     (e: React.DragEvent) => {
       // Only accept our own pane-drag payload; ignore other DnD activity.
@@ -415,11 +465,11 @@ function PaneChrome(props: PaneChromeProps) {
       if (!rect) return;
       const x = (e.clientX - rect.left) / Math.max(1, rect.width);
       const y = (e.clientY - rect.top) / Math.max(1, rect.height);
-      const next = computeEdge(x, y);
+      const next = computeEdge(x, y, outerEdges);
       dropEdgeRef.current = next;
       setDropEdge((prev) => (prev === next ? prev : next));
     },
-    [],
+    [outerEdges],
   );
 
   const onDragLeave = useCallback((e: React.DragEvent) => {
@@ -674,7 +724,33 @@ function PoppedOutPaneCard({
   );
 }
 
-function computeEdge(x: number, y: number): PaneDropEdge {
+/// Width of the outermost band, as a fraction of the pane, that maps to
+/// the "promote to outer split" drop targets. Kept narrow so the inner
+/// per-pane left/right/top/bottom zones aren't crowded out.
+const OUTER_BAND = 0.12;
+
+function computeEdge(
+  x: number,
+  y: number,
+  outerEdges: OuterEdges,
+): PaneDropEdge {
+  // Outer-edge promotion: when the cursor is in the narrow outermost
+  // band along an edge the pane shares with the grid boundary, return
+  // the matching `outer_*` variant instead of nesting. If two outer
+  // edges qualify (corner of the grid), the closer one wins.
+  const distances: Array<[number, PaneDropEdge]> = [];
+  if (outerEdges.left && x < OUTER_BAND) distances.push([x, "outer_left"]);
+  if (outerEdges.right && 1 - x < OUTER_BAND) {
+    distances.push([1 - x, "outer_right"]);
+  }
+  if (outerEdges.top && y < OUTER_BAND) distances.push([y, "outer_top"]);
+  if (outerEdges.bottom && 1 - y < OUTER_BAND) {
+    distances.push([1 - y, "outer_bottom"]);
+  }
+  if (distances.length > 0) {
+    distances.sort((a, b) => a[0] - b[0]);
+    return distances[0]![1];
+  }
   if (x > 0.35 && x < 0.65 && y > 0.35 && y < 0.65) return "replace";
   const dx = Math.abs(x - 0.5);
   const dy = Math.abs(y - 0.5);

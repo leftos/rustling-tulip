@@ -558,6 +558,17 @@ pub enum PaneDropEdge {
     /// Replace the destination pane's `session_id` with the source pane's
     /// `session_id`; topology is unchanged and the source pane is removed.
     Replace,
+    /// Promote source to a full-edge sibling of the *entire* destination
+    /// tab grid, on the named outer edge. Emitted when the cursor drops in
+    /// the narrow outermost band of a pane that touches that outer edge of
+    /// the grid — bypasses per-pane nesting so the source becomes a
+    /// full-height (Left/Right) or full-width (Top/Bottom) column/row at
+    /// the topmost split level. `dst_pane_id` is ignored for these
+    /// variants; the daemon wraps the destination tab's root.
+    OuterLeft,
+    OuterRight,
+    OuterTop,
+    OuterBottom,
 }
 
 /// Layout used when merging multiple tabs into a single new tab.
@@ -2306,6 +2317,10 @@ mod tests {
             (PaneDropEdge::Top, "top"),
             (PaneDropEdge::Bottom, "bottom"),
             (PaneDropEdge::Replace, "replace"),
+            (PaneDropEdge::OuterLeft, "outer_left"),
+            (PaneDropEdge::OuterRight, "outer_right"),
+            (PaneDropEdge::OuterTop, "outer_top"),
+            (PaneDropEdge::OuterBottom, "outer_bottom"),
         ];
         for (variant, expected) in cases {
             let json = serde_json::to_string(&variant).expect("serialize");
