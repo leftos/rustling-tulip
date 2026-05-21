@@ -3757,6 +3757,16 @@ fn ensure_zsh_dotdir(dirs: &Dirs) -> anyhow::Result<PathBuf> {
 /// only); the frontend falls back to scraping the command text out of the
 /// terminal buffer.
 fn powershell_prompt_script_with_integration() -> String {
+    // Architecture follows VSCode's shellIntegration.ps1 (MIT):
+    // - Wrap `PSConsoleHostReadLine` (PSReadLine's host hook) so every
+    //   committed line emits OSC 633;E + OSC 133;C and flips a flag.
+    //   This fires for ALL commands, including duplicates that
+    //   `AddToHistoryHandler` skips when `HistoryNoDuplicates=$true`.
+    // - In `prompt`, if the flag was set, emit OSC 133;D with `[int]!$?`
+    //   as the exit code. Sidesteps `$LASTEXITCODE` sticky behavior
+    //   entirely by using only PowerShell's last-statement success bit.
+    // - Re-emit a soft error before calling the original prompt so its
+    //   own `$?` check still reflects the user's command outcome.
     [
         // Capture or stub the original prompt function.
         "$global:__rt_original_prompt = if (Test-Path function:\\prompt) {",
@@ -3765,9 +3775,7 @@ fn powershell_prompt_script_with_integration() -> String {
         "{ \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" }",
         "};",
         "$global:__rt_in_command = $false;",
-        // Last history id we've reported on, so a repeat prompt (e.g.
-        // Ctrl+C cancel after a real command) doesn't double-report.
-        "$global:__rt_last_history_id = -1;",
+        "$global:__rt_orig_psreadline = $null;",
         // Escape per VSCode's OSC 633 spec: \\, semicolons, newlines.
         "function global:__rt_esc {",
         "param([string]$s)",
@@ -3787,36 +3795,24 @@ fn powershell_prompt_script_with_integration() -> String {
         "}",
         "} catch { Write-Debug $_ };",
         "};",
-        // Compute the exit code for the just-finished command. Prefer
-        // Get-History's ExecutionStatus (Completed/Failed/Stopped) over
-        // $LASTEXITCODE — the latter is sticky from the last external
-        // process and misreports cmdlet failures after a successful
-        // exe. Returns $null when the history id matches what we've
-        // already reported (re-entrant prompt cycle without a new
-        // command), so the prompt skips the D mark.
-        "function global:__rt_compute_exit {",
-        "$ok = $?;",
-        "try {",
-        "$last = Microsoft.PowerShell.Core\\Get-History -Count 1 -ErrorAction Stop;",
-        "if ($null -eq $last) { return $(if ($ok) { 0 } else { 1 }) };",
-        "if ($last.Id -eq $global:__rt_last_history_id) { return $null };",
-        "$global:__rt_last_history_id = $last.Id;",
-        "switch ($last.ExecutionStatus) {",
-        "'Completed' { if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 } }",
-        "'Failed'    { if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 } }",
-        "'Stopped'   { 130 }",
-        "default     { 0 }",
-        "}",
-        "} catch { if ($ok) { 0 } else { 1 } }",
-        "};",
-        // Prompt function: D for previous command (if any), A before prompt,
-        // B after prompt. Returns a single composed string so the marks land
-        // in the right visual position relative to the visible prompt text.
+        // Prompt function: emit D for the just-finished command (when
+        // the PSConsoleHostReadLine wrapper set the in-command flag),
+        // then A + the original prompt text + B. Returns one composed
+        // string so PowerShell prints the marks in the right visual
+        // position relative to the visible prompt.
         "function global:prompt {",
         "$rt_exit = $null;",
         "if ($global:__rt_in_command) {",
-        "$rt_exit = global:__rt_compute_exit;",
+        // [int]!$? is 0 for success, 1 for failure. Simple and not
+        // poisoned by $LASTEXITCODE staleness; matches VSCode's
+        // approach. Real native-process exit codes aren't reported,
+        // but a binary success/failure signal is enough for the chip.
+        "$rt_exit = [int]!$global:?;",
         "$global:__rt_in_command = $false;",
+        // Re-set $? to its pre-prompt value so the user's own prompt
+        // function sees the correct success state for the last
+        // command. Writing an ignored soft error flips $? to false.
+        "if ($rt_exit -ne 0) { Write-Error 'command failed' -ErrorAction Ignore };",
         "};",
         "global:__rt_emit_cwd;",
         "$esc = [char]27; $bel = [char]7;",
@@ -3826,21 +3822,27 @@ fn powershell_prompt_script_with_integration() -> String {
         "$orig = try { & $global:__rt_original_prompt } catch { 'PS> ' };",
         "\"$marks$orig$esc]133;B$bel\"",
         "};",
-        // PSReadLine hook — fires the instant Enter commits a command, so
-        // OSC 133;C marks the true output-start and OSC 633;E carries the
-        // literal command text. Wrapped in try/catch so a missing or
-        // version-skewed PSReadLine never breaks the prompt.
+        // Wrap PSConsoleHostReadLine — PSReadLine's host entry point
+        // for line editing. The wrapper fires for every committed line
+        // including duplicates that AddToHistoryHandler skips when
+        // HistoryNoDuplicates=$true. Empty/whitespace input is filtered
+        // so a bare Enter doesn't produce a phantom chip.
         "try {",
         "if (Get-Module -ListAvailable PSReadLine) {",
-        "Import-Module PSReadLine -ErrorAction SilentlyContinue;",
-        "Set-PSReadLineOption -AddToHistoryHandler {",
-        "param($cmd)",
+        "Import-Module PSReadLine -ErrorAction SilentlyContinue",
+        "};",
+        "if (Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue) {",
+        "$global:__rt_orig_psreadline = $function:PSConsoleHostReadLine;",
+        "function global:PSConsoleHostReadLine {",
+        "$cmd = $global:__rt_orig_psreadline.Invoke();",
+        "if (-not [string]::IsNullOrWhiteSpace($cmd)) {",
         "$esc = [char]27; $bel = [char]7;",
         "$escaped = global:__rt_esc $cmd;",
         "[Console]::Out.Write(\"$esc]633;E;$escaped$bel\");",
         "[Console]::Out.Write(\"$esc]133;C$bel\");",
         "$global:__rt_in_command = $true;",
-        "'MemoryAndFile'",
+        "};",
+        "$cmd",
         "}",
         "}",
         "} catch { Write-Debug $_ };",
