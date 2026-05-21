@@ -2594,14 +2594,22 @@ async fn spawn_plain_shell_session(
         ));
     }
 
-    let shell = resolve_shell_program()?;
+    let shell = resolve_shell_program(&hub.dirs)?;
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
+    let mut env = merged_env(&cfg.extra_env);
+    for (k, v) in shell.extra_env {
+        if let Some(slot) = env.iter_mut().find(|(existing, _)| existing == &k) {
+            slot.1 = v;
+        } else {
+            env.push((k, v));
+        }
+    }
     let spec = PtySpawnSpec {
         session_id: session_id.clone(),
         program: shell.program,
         args: shell.args,
         cwd: primary_cwd,
-        env: merged_env(&cfg.extra_env),
+        env,
         cols: 120,
         rows: 32,
     };
@@ -3568,25 +3576,30 @@ struct ShellProgram {
     program: String,
     args: Vec<String>,
     label: String,
+    extra_env: Vec<(String, String)>,
 }
 
 /// Pick a shell executable for [`SessionMode::PlainShell`] spawns. `program`
 /// is what we pass to `CommandBuilder` (resolved on PATH if it has no
-/// separator); `label` is the short token shown in the UI; `args` installs a
-/// prompt hook for shells whose cwd changes are otherwise invisible to the
-/// containing terminal app.
+/// separator); `label` is the short token shown in the UI; `args` and
+/// `extra_env` together install the shell-integration init script for shells
+/// that support it (PowerShell / bash / zsh) — emits OSC 7 for cwd and
+/// OSC 133 + OSC 633 marks the frontend parses for the per-command chip UI.
+/// cmd.exe gets a minimal OSC 7 prompt hook only (no command tracking).
 ///
 /// Resolution order:
 /// - `RUSTLING_TULIP_SHELL` env override (any platform);
 /// - Windows: `pwsh.exe` → `powershell.exe` → `cmd.exe`;
 /// - Unix: `$SHELL` → `bash` → `sh`.
-fn resolve_shell_program() -> anyhow::Result<ShellProgram> {
+fn resolve_shell_program(dirs: &Dirs) -> anyhow::Result<ShellProgram> {
     if let Ok(p) = std::env::var("RUSTLING_TULIP_SHELL") {
         let label = shell_label_from_path(&p);
+        let (args, extra_env) = plain_shell_args(dirs, &label)?;
         return Ok(ShellProgram {
             program: p,
-            args: plain_shell_args(&label),
+            args,
             label,
+            extra_env,
         });
     }
     #[cfg(windows)]
@@ -3598,10 +3611,12 @@ fn resolve_shell_program() -> anyhow::Result<ShellProgram> {
         ] {
             if which::which(candidate).is_ok() {
                 let label = label.to_string();
+                let (args, extra_env) = plain_shell_args(dirs, &label)?;
                 return Ok(ShellProgram {
                     program: candidate.to_string(),
-                    args: plain_shell_args(&label),
+                    args,
                     label,
+                    extra_env,
                 });
             }
         }
@@ -3611,23 +3626,27 @@ fn resolve_shell_program() -> anyhow::Result<ShellProgram> {
     {
         if let Ok(p) = std::env::var("SHELL") {
             let label = shell_label_from_path(&p);
+            let (args, extra_env) = plain_shell_args(dirs, &label)?;
             return Ok(ShellProgram {
                 program: p,
-                args: plain_shell_args(&label),
+                args,
                 label,
+                extra_env,
             });
         }
-        for (candidate, label) in [("bash", "bash"), ("sh", "sh")] {
+        for (candidate, label) in [("bash", "bash"), ("zsh", "zsh"), ("sh", "sh")] {
             if which::which(candidate).is_ok() {
                 let label = label.to_string();
+                let (args, extra_env) = plain_shell_args(dirs, &label)?;
                 return Ok(ShellProgram {
                     program: candidate.to_string(),
-                    args: plain_shell_args(&label),
+                    args,
                     label,
+                    extra_env,
                 });
             }
         }
-        anyhow::bail!("no shell on PATH (tried bash, sh)")
+        anyhow::bail!("no shell on PATH (tried bash, zsh, sh)")
     }
 }
 
@@ -3638,22 +3657,178 @@ fn shell_label_from_path(path: &str) -> String {
         .map_or_else(|| "shell".to_string(), str::to_lowercase)
 }
 
-fn plain_shell_args(label: &str) -> Vec<String> {
-    match label {
-        "pwsh" | "powershell" => vec![
-            "-NoExit".to_string(),
-            "-Command".to_string(),
-            powershell_cwd_prompt_script(),
-        ],
-        "cmd" => vec![
-            "/K".to_string(),
-            "prompt $E]7;file:///$P$E\\$P$G".to_string(),
-        ],
-        _ => Vec::new(),
+/// True iff shell integration (OSC 133 + OSC 633 hooks) should be injected.
+/// Defaulted on; set `RUSTLING_TULIP_SHELL_INTEGRATION=0` to disable for
+/// debugging or when the user ships their own integration in `.bashrc` etc.
+fn shell_integration_enabled() -> bool {
+    match std::env::var("RUSTLING_TULIP_SHELL_INTEGRATION") {
+        Ok(v) => !matches!(v.trim(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
     }
 }
 
-fn powershell_cwd_prompt_script() -> String {
+type ShellLaunchExtras = (Vec<String>, Vec<(String, String)>);
+
+fn plain_shell_args(dirs: &Dirs, label: &str) -> anyhow::Result<ShellLaunchExtras> {
+    let integrate = shell_integration_enabled();
+    match label {
+        "pwsh" | "powershell" => {
+            let script = if integrate {
+                powershell_prompt_script_with_integration()
+            } else {
+                powershell_cwd_prompt_script_minimal()
+            };
+            Ok((
+                vec!["-NoExit".to_string(), "-Command".to_string(), script],
+                Vec::new(),
+            ))
+        }
+        "cmd" => Ok((
+            vec![
+                "/K".to_string(),
+                "prompt $E]7;file:///$P$E\\$P$G".to_string(),
+            ],
+            Vec::new(),
+        )),
+        "bash" => {
+            if !integrate {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let path = ensure_bash_rcfile(dirs)?;
+            Ok((
+                vec![
+                    "--rcfile".to_string(),
+                    path.to_string_lossy().into_owned(),
+                    "-i".to_string(),
+                ],
+                Vec::new(),
+            ))
+        }
+        "zsh" => {
+            if !integrate {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let zdotdir = ensure_zsh_dotdir(dirs)?;
+            let mut env = vec![(
+                "ZDOTDIR".to_string(),
+                zdotdir.to_string_lossy().into_owned(),
+            )];
+            // Preserve the user's original ZDOTDIR so our .zshrc can source
+            // the right rc file. Falls back to $HOME inside the script.
+            if let Ok(orig) = std::env::var("ZDOTDIR") {
+                env.push(("RUSTLING_TULIP_ZSH_USER_ZDOTDIR".to_string(), orig));
+            }
+            Ok((Vec::new(), env))
+        }
+        _ => Ok((Vec::new(), Vec::new())),
+    }
+}
+
+/// Directory used to stage shell-integration init scripts (bash rcfile,
+/// zsh ZDOTDIR). Lives under the config root so it survives reboots; the
+/// content is regenerated on demand whenever the daemon writes a script.
+fn shell_init_dir(dirs: &Dirs) -> PathBuf {
+    dirs.config.join("shell-init")
+}
+
+fn ensure_bash_rcfile(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    let dir = shell_init_dir(dirs);
+    std::fs::create_dir_all(&dir).context("creating shell-init dir")?;
+    let path = dir.join("bash-init.sh");
+    std::fs::write(&path, BASH_INIT_SCRIPT).context("writing bash-init.sh")?;
+    Ok(path)
+}
+
+fn ensure_zsh_dotdir(dirs: &Dirs) -> anyhow::Result<PathBuf> {
+    let dir = shell_init_dir(dirs).join("zsh-dotdir");
+    std::fs::create_dir_all(&dir).context("creating zsh ZDOTDIR")?;
+    let path = dir.join(".zshrc");
+    std::fs::write(&path, ZSH_INIT_SCRIPT).context("writing zsh .zshrc")?;
+    Ok(dir)
+}
+
+/// PowerShell prompt-wrapper script — emits OSC 7 (cwd), plus OSC 133;A/B/D
+/// and OSC 633;E for the frontend's per-command chip UI. The previous
+/// command's exit code is read from `$LASTEXITCODE` / `$?` inside the
+/// prompt function, which PowerShell calls between commands. OSC 133;C and
+/// OSC 633;E are emitted from a `PSReadLine` `AddToHistoryHandler` so
+/// they land the instant the user presses Enter, before the command starts
+/// running. If `PSReadLine` isn't loaded the chip still works (D + A marks
+/// only); the frontend falls back to scraping the command text out of the
+/// terminal buffer.
+fn powershell_prompt_script_with_integration() -> String {
+    [
+        // Capture or stub the original prompt function.
+        "$global:__rt_original_prompt = if (Test-Path function:\\prompt) {",
+        "(Get-Command prompt).ScriptBlock",
+        "} else {",
+        "{ \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" }",
+        "};",
+        "$global:__rt_in_command = $false;",
+        // Escape per VSCode's OSC 633 spec: \\, semicolons, newlines.
+        "function global:__rt_esc {",
+        "param([string]$s)",
+        "if ($null -eq $s) { return '' };",
+        "$s = $s -replace '\\\\', '\\\\\\\\';",
+        "$s = $s -replace ';', '\\x3b';",
+        "$s = $s -replace \"`n\", '\\x0a';",
+        "$s",
+        "};",
+        // OSC 7 cwd emitter — kept for cwd tracking outside shell integration.
+        "function global:__rt_emit_cwd {",
+        "try {",
+        "$path = (Get-Location).ProviderPath;",
+        "if ($path) {",
+        "$uri = [System.Uri]::new($path).AbsoluteUri;",
+        "[Console]::Out.Write([char]27 + ']7;' + $uri + [char]7)",
+        "}",
+        "} catch { Write-Debug $_ };",
+        "};",
+        // Prompt function: D for previous command (if any), A before prompt,
+        // B after prompt. Returns a single composed string so the marks land
+        // in the right visual position relative to the visible prompt text.
+        "function global:prompt {",
+        "$rt_exit = $null;",
+        "if ($global:__rt_in_command) {",
+        "if ($null -ne $LASTEXITCODE) { $rt_exit = $LASTEXITCODE }",
+        "elseif ($?) { $rt_exit = 0 } else { $rt_exit = 1 };",
+        "$global:__rt_in_command = $false;",
+        "};",
+        "global:__rt_emit_cwd;",
+        "$esc = [char]27; $bel = [char]7;",
+        "$marks = '';",
+        "if ($null -ne $rt_exit) { $marks += \"$esc]133;D;$rt_exit$bel\" };",
+        "$marks += \"$esc]133;A$bel\";",
+        "$orig = try { & $global:__rt_original_prompt } catch { 'PS> ' };",
+        "\"$marks$orig$esc]133;B$bel\"",
+        "};",
+        // PSReadLine hook — fires the instant Enter commits a command, so
+        // OSC 133;C marks the true output-start and OSC 633;E carries the
+        // literal command text. Wrapped in try/catch so a missing or
+        // version-skewed PSReadLine never breaks the prompt.
+        "try {",
+        "if (Get-Module -ListAvailable PSReadLine) {",
+        "Import-Module PSReadLine -ErrorAction SilentlyContinue;",
+        "Set-PSReadLineOption -AddToHistoryHandler {",
+        "param($cmd)",
+        "$esc = [char]27; $bel = [char]7;",
+        "$escaped = global:__rt_esc $cmd;",
+        "[Console]::Out.Write(\"$esc]633;E;$escaped$bel\");",
+        "[Console]::Out.Write(\"$esc]133;C$bel\");",
+        "$global:__rt_in_command = $true;",
+        "'MemoryAndFile'",
+        "}",
+        "}",
+        "} catch { Write-Debug $_ };",
+        "global:__rt_emit_cwd",
+    ]
+    .join(" ")
+}
+
+/// PowerShell prompt wrapper without OSC 133/633 — used when
+/// `RUSTLING_TULIP_SHELL_INTEGRATION=0`. Keeps the OSC 7 cwd emitter so the
+/// session sidebar still tracks `cd` changes.
+fn powershell_cwd_prompt_script_minimal() -> String {
     [
         "$global:__rt_original_prompt = if (Test-Path function:\\prompt) {",
         "(Get-Command prompt).ScriptBlock",
@@ -3677,6 +3852,9 @@ fn powershell_cwd_prompt_script() -> String {
     ]
     .join(" ")
 }
+
+const BASH_INIT_SCRIPT: &str = include_str!("../shell-init/bash-init.sh");
+const ZSH_INIT_SCRIPT: &str = include_str!("../shell-init/zsh-init.zshrc");
 
 fn scan_vscode_workspaces(hub: &Hub, repo_path: &str) -> Vec<VscodeWorkspaceSuggestion> {
     scan_vscode_workspace_files(hub, repo_path, true)

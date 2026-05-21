@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal as XTerm } from "@xterm/xterm";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
@@ -16,6 +16,11 @@ import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
 import { RtClipboardProvider } from "./clipboardProvider";
+import {
+  attachShellIntegration,
+  type CommandRecord,
+} from "./shellIntegration";
+import ShellCommandMenu from "./ShellCommandMenu";
 import { useFontSize } from "../utils/fontSize";
 import { loadSettings } from "../utils/settings";
 import type { EffectiveAppearance } from "../utils/appearance";
@@ -161,6 +166,45 @@ export default function Terminal({
   const fitRef = useRef<FitAddon | null>(null);
   const linkBaseDirsRef = useRef(linkBaseDirs);
   linkBaseDirsRef.current = linkBaseDirs;
+
+  // Shell-integration chip menu state. Set when the user clicks a
+  // gutter dot; cleared on outside-click / Escape / scroll. The ref is
+  // exposed to the xterm setup IIFE via `openChipMenuRef` so the OSC
+  // 133 handler can trigger the menu without re-rendering the whole
+  // Terminal each time a record arrives.
+  const [chipMenu, setChipMenu] = useState<{
+    record: CommandRecord;
+    anchor: HTMLElement;
+  } | null>(null);
+  const openChipMenuRef = useRef<
+    ((record: CommandRecord, anchor: HTMLElement) => void) | null
+  >(null);
+  openChipMenuRef.current = useCallback(
+    (record: CommandRecord, anchor: HTMLElement) => {
+      setChipMenu({ record, anchor });
+    },
+    [],
+  );
+  const closeChipMenu = useCallback(() => setChipMenu(null), []);
+  // Re-run handler: write the command bytes back to the PTY without a
+  // trailing newline so the user confirms with Enter (matches VSCode's
+  // "Re-run" behavior).
+  const handleRerun = useCallback(
+    (cmd: string) => {
+      if (statusRef.current === "stopped" || statusRef.current === "error") {
+        return;
+      }
+      if (cmd.length === 0) return;
+      const enc = new TextEncoder();
+      client.send({
+        type: "send_input",
+        session_id: sessionId,
+        data_b64: bytesToBase64(enc.encode(cmd)),
+      });
+      termRef.current?.focus();
+    },
+    [client, sessionId],
+  );
 
   const fontSize = useFontSize(tabId ?? null, appearance.terminal_font_size);
   const fontFamily = appearance.terminal_font_family;
@@ -337,6 +381,21 @@ export default function Terminal({
           "WebGL renderer unavailable, falling back to DOM",
           err,
         );
+      }
+
+      // Shell-integration parser — registers OSC 133 + OSC 633 handlers
+      // on xterm's parser so the daemon-injected prompt hooks (PowerShell
+      // / bash / zsh) drive per-command chip decorations in the left
+      // gutter. Plain-shell sessions only — interactive Claude/Codex
+      // PTYs don't emit shell-integration marks and the alt-screen flips
+      // in TUIs would create spurious records.
+      if (modeRef.current === "plain_shell") {
+        const integration = attachShellIntegration(term, {
+          onChipClick: ({ record, anchor }) => {
+            openChipMenuRef.current?.(record, anchor);
+          },
+        });
+        cleanupFns.push(() => integration.dispose());
       }
 
       // Clipboard addon — handles OSC 52 writes from in-terminal TUIs
@@ -723,12 +782,22 @@ export default function Terminal({
   }, [sessionId, client, subscribePty]);
 
   return (
-    <div
-      ref={containerRef}
-      className="terminal-container"
-      style={{ backgroundColor }}
-      data-testid="terminal-container"
-      data-session-id={sessionId}
-    />
+    <>
+      <div
+        ref={containerRef}
+        className="terminal-container"
+        style={{ backgroundColor }}
+        data-testid="terminal-container"
+        data-session-id={sessionId}
+      />
+      {chipMenu ? (
+        <ShellCommandMenu
+          record={chipMenu.record}
+          anchor={chipMenu.anchor}
+          onClose={closeChipMenu}
+          onRerun={handleRerun}
+        />
+      ) : null}
+    </>
   );
 }

@@ -3601,3 +3601,80 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   background: var(--bg-elev2);
   color: var(--fg);
 }
+
+/* Shell-integration per-command chip — small coloured dot painted in the
+ * left gutter of each prompt line for plain-shell sessions. Click opens
+ * a floating menu with copy + re-run actions; hover surfaces a native
+ * title-attr tooltip with exit code + duration. */
+.rt-shell-chip {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  cursor: pointer;
+  overflow: visible;
+}
+.rt-shell-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  margin-left: 2px;
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  transition: background-color 120ms ease;
+}
+.rt-shell-chip[data-status="running"] .rt-shell-chip-dot {
+  background: var(--fg-muted);
+  opacity: 0.6;
+}
+.rt-shell-chip[data-status="success"] .rt-shell-chip-dot {
+  background: #4ec9b0;
+}
+.rt-shell-chip[data-status="failure"] .rt-shell-chip-dot {
+  background: #f48771;
+}
+.rt-shell-chip:hover .rt-shell-chip-dot {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+
+.rt-shell-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 200px;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  font-size: 13px;
+  color: var(--fg);
+}
+.rt-shell-menu-info {
+  padding: 6px 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.rt-shell-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.rt-shell-menu-item:hover,
+.rt-shell-menu-item:focus-visible {
+  background: var(--bg-elev3, color-mix(in srgb, var(--fg) 8%, transparent));
+  outline: none;
+}
+.rt-shell-menu-item:disabled {
+  color: var(--fg-muted);
+  cursor: not-allowed;
+}
