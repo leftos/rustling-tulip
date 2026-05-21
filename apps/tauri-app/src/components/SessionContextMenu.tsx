@@ -9,7 +9,7 @@ import {
   type TabEntry,
   type WorkspaceEntry,
 } from "../types";
-import { clampMenuCoord } from "../utils/a11y";
+import { useClampedMenuPosition } from "../utils/a11y";
 import { pickBalancedDropTarget, sessionTabBindings } from "../utils/grid";
 import {
   clearPanePoppedOut,
@@ -116,6 +116,8 @@ export default function SessionContextMenu({
     () => s.appearance,
   );
   const [settings] = useSettings();
+  const { ref: menuRef, position: menuPos } =
+    useClampedMenuPosition<HTMLUListElement>({ x: state.x, y: state.y });
 
   const sendRename = (raw: string) => {
     const trimmed = raw.trim();
@@ -331,11 +333,9 @@ export default function SessionContextMenu({
       }}
     >
       <ul
+        ref={menuRef}
         className="context-menu"
-        style={{
-          left: clampMenuCoord(state.x, 260),
-          top: clampMenuCoord(state.y, 320, "height"),
-        }}
+        style={{ left: menuPos.left, top: menuPos.top }}
         onClick={(e) => e.stopPropagation()}
       >
         {closeMode === "confirming" ? (

@@ -19,7 +19,7 @@ import {
   type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
 } from "../types";
-import { clampMenuCoord, useEscape } from "../utils/a11y";
+import { useClampedMenuPosition, useEscape } from "../utils/a11y";
 import { collectPanes, sessionTabBindings } from "../utils/grid";
 import {
   sessionDisplayLabel,
@@ -1800,13 +1800,15 @@ function ContainerContextMenu(p: ContextMenuProps) {
     : "No saved spawn config — launch the spawn dialog at least once first.";
   useEscape(p.onClose);
 
-  // Clamp the menu against the window so a right-click near the
-  // bottom-right corner doesn't render the menu beyond the viewport.
-  // Estimates: menus average ~200px wide, ~300px tall (presets push higher
-  // — overlap-safe, viewport-stable beats pixel-perfect). The 12px margin
-  // keeps the menu off the edge.
-  const clampedLeft = clampMenuCoord(p.state.x, 200);
-  const clampedTop = clampMenuCoord(p.state.y, isTab ? 60 : 400, "height");
+  // useLayoutEffect-based clamp: measures the menu's real DOM size and
+  // pulls it back into the viewport before the first paint, so a
+  // right-click near the bottom-right corner can't render the menu
+  // beyond the window edge. Replaces a previous static-estimate clamp
+  // that under-counted preset-heavy menus.
+  const { ref: menuRef, position } = useClampedMenuPosition<HTMLUListElement>({
+    x: p.state.x,
+    y: p.state.y,
+  });
   return (
     <div
       className="context-menu-backdrop"
@@ -1817,8 +1819,9 @@ function ContainerContextMenu(p: ContextMenuProps) {
       }}
     >
       <ul
+        ref={menuRef}
         className="context-menu"
-        style={{ left: clampedLeft, top: clampedTop }}
+        style={{ left: position.left, top: position.top }}
         onClick={(e) => e.stopPropagation()}
       >
         <li>

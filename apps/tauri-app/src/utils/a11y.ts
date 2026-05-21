@@ -1,23 +1,70 @@
-import { useEffect, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+
+/** Pixel margin between a clamped menu and the viewport edge. */
+const MENU_VIEWPORT_MARGIN = 8;
 
 /**
- * Clamp a context-menu coordinate so the menu stays in the viewport. Without
- * this, right-clicking near the bottom-right corner can render the menu
- * partially off-screen (the browser clips it but doesn't reflow).
+ * Clamp a floating menu's position to the viewport using its real measured
+ * size. Returns a ref to attach to the menu's outermost positioned element
+ * and the (left, top) to apply via inline `style`. Position updates run in
+ * `useLayoutEffect` so the menu reaches its final coordinates before paint,
+ * eliminating the one-frame jump that an `useEffect`-based clamp would
+ * produce.
  *
- * `size` is the menu's estimated extent along the axis. `axis` defaults to
- * `"width"`; pass `"height"` for the vertical clamp. The 12px margin keeps
- * the menu from hugging the window edge.
+ * Re-measures on window resize so a menu doesn't get stranded off-screen
+ * when the user shrinks the window while it's open. Doesn't track scroll
+ * — long-lived menus should close on scroll separately (most do).
+ *
+ * Usage:
+ * ```tsx
+ * const { ref, position } = useClampedMenuPosition({ x: ev.clientX, y: ev.clientY });
+ * return <div ref={ref} style={{ position: "fixed", ...position }}>...</div>;
+ * ```
  */
-export function clampMenuCoord(
-  raw: number,
-  size: number,
-  axis: "width" | "height" = "width",
-): number {
-  const windowSize =
-    axis === "width" ? window.innerWidth : window.innerHeight;
-  const max = Math.max(12, windowSize - size - 12);
-  return Math.min(Math.max(12, raw), max);
+export function useClampedMenuPosition<
+  T extends HTMLElement = HTMLDivElement,
+>(desired: { x: number; y: number }): {
+  ref: RefObject<T | null>;
+  position: { left: number; top: number };
+} {
+  const ref = useRef<T | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number }>({
+    left: desired.x,
+    top: desired.y,
+  });
+
+  // Recompute on mount + whenever the desired anchor moves. The effect
+  // body is idempotent for stable inputs (`setPosition` no-ops when
+  // values match), so the optional resize subscription below can call it
+  // freely without churning state.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const reflow = () => {
+      const node = ref.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      const margin = MENU_VIEWPORT_MARGIN;
+      const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+      const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+      const left = Math.min(Math.max(margin, desired.x), maxLeft);
+      const top = Math.min(Math.max(margin, desired.y), maxTop);
+      setPosition((prev) =>
+        prev.left === left && prev.top === top ? prev : { left, top },
+      );
+    };
+    reflow();
+    window.addEventListener("resize", reflow);
+    return () => window.removeEventListener("resize", reflow);
+  }, [desired.x, desired.y]);
+
+  return { ref, position };
 }
 
 /**

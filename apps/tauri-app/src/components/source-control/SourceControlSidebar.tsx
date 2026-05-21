@@ -14,7 +14,7 @@ import type {
   GitFileChange,
   RepoEntry,
 } from "../../types";
-import { clampMenuCoord, useEscape } from "../../utils/a11y";
+import { useClampedMenuPosition, useEscape } from "../../utils/a11y";
 import Icon from "../Icon";
 import ResizableSplit from "../ResizableSplit";
 import ChangesTree, { type RowAction } from "./ChangesTree";
@@ -626,6 +626,10 @@ function FileContextMenu({
     action();
     onClose();
   };
+  const { ref: menuRef, position } = useClampedMenuPosition<HTMLUListElement>({
+    x: state.x,
+    y: state.y,
+  });
   return (
     <div
       className="context-menu-backdrop"
@@ -636,15 +640,9 @@ function FileContextMenu({
       }}
     >
       <ul
+        ref={menuRef}
         className="context-menu"
-        style={{
-          left: clampMenuCoord(state.x, 220),
-          top: clampMenuCoord(
-            state.y,
-            state.bucket === "worktree" ? 140 : 100,
-            "height",
-          ),
-        }}
+        style={{ left: position.left, top: position.top }}
         onClick={(e) => e.stopPropagation()}
         data-testid="source-control-file-context-menu"
       >

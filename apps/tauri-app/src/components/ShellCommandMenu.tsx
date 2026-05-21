@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import type { CommandRecord } from "./shellIntegration";
 import { copyToClipboard } from "../utils/clipboard";
+import { useClampedMenuPosition } from "../utils/a11y";
 
 interface Props {
   record: CommandRecord;
@@ -25,15 +26,16 @@ export default function ShellCommandMenu({
   onClose,
   onRerun,
 }: Props) {
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  // Compute initial position from the anchor's bounding rect. The menu
-  // is fixed-positioned so further scroll/resize closes the menu
-  // instead of chasing the anchor.
-  const position = useMemo(() => {
+  // Compute desired anchor position from the chip's bounding rect; the
+  // useClampedMenuPosition hook then measures the menu after mount and
+  // pulls it back into the viewport if the bottom-or-right corner would
+  // spill. The menu is fixed-positioned, so the scroll handler below
+  // closes it rather than chasing the anchor.
+  const desired = useMemo(() => {
     const rect = anchor.getBoundingClientRect();
-    return { top: rect.bottom + 4, left: rect.left };
+    return { x: rect.right + 4, y: rect.top };
   }, [anchor]);
+  const { ref: menuRef, position } = useClampedMenuPosition(desired);
 
   useEffect(() => {
     const onDocClick = (ev: MouseEvent) => {
@@ -61,7 +63,7 @@ export default function ShellCommandMenu({
       window.removeEventListener("resize", onScroll);
       window.removeEventListener("scroll", onScroll, { capture: true });
     };
-  }, [onClose]);
+  }, [onClose, menuRef]);
 
   const resolveCommand = (): string => {
     return record.command ?? record.readCommandFromBuffer();
@@ -101,7 +103,7 @@ export default function ShellCommandMenu({
     <div
       ref={menuRef}
       className="rt-shell-menu"
-      style={{ top: position.top, left: position.left }}
+      style={{ position: "fixed", top: position.top, left: position.left }}
       role="menu"
     >
       <div className="rt-shell-menu-info">

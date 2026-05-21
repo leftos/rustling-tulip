@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
 import type { RearrangeLayout, TabEntry } from "../types";
-import { clampMenuCoord, useEscape } from "../utils/a11y";
+import { useClampedMenuPosition, useEscape } from "../utils/a11y";
 import {
   pickBalancedDropTarget,
   tabHasBoundSessions,
@@ -594,6 +594,10 @@ interface ContextMenuProps {
 
 function TabContextMenu(p: ContextMenuProps) {
   useEscape(p.onClose);
+  const { ref, position } = useClampedMenuPosition<HTMLUListElement>({
+    x: p.state.x,
+    y: p.state.y,
+  });
   return (
     <div
       className="context-menu-backdrop"
@@ -604,11 +608,9 @@ function TabContextMenu(p: ContextMenuProps) {
       }}
     >
       <ul
+        ref={ref}
         className="context-menu"
-        style={{
-          left: clampMenuCoord(p.state.x, 220),
-          top: clampMenuCoord(p.state.y, 320, "height"),
-        }}
+        style={{ left: position.left, top: position.top }}
         onClick={(e) => e.stopPropagation()}
       >
         <li>

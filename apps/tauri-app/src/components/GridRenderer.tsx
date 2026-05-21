@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Window } from "@tauri-apps/api/window";
 import type { DaemonClient } from "../api";
-import { clampMenuCoord } from "../utils/a11y";
+import { useClampedMenuPosition } from "../utils/a11y";
 import {
   clearPanePoppedOut,
   isPanePoppedOut,
@@ -779,6 +779,10 @@ interface PaneContextMenuProps {
 }
 
 function PaneContextMenu(p: PaneContextMenuProps) {
+  const { ref, position } = useClampedMenuPosition<HTMLUListElement>({
+    x: p.state.x,
+    y: p.state.y,
+  });
   return (
     <div
       className="context-menu-backdrop"
@@ -789,11 +793,9 @@ function PaneContextMenu(p: PaneContextMenuProps) {
       }}
     >
       <ul
+        ref={ref}
         className="context-menu"
-        style={{
-          left: clampMenuCoord(p.state.x, 200),
-          top: clampMenuCoord(p.state.y, 200, "height"),
-        }}
+        style={{ left: position.left, top: position.top }}
         onClick={(e) => e.stopPropagation()}
       >
         <li>
