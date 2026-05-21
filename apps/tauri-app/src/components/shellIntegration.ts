@@ -48,6 +48,10 @@ interface InternalRecord extends CommandRecord {
   promptMarker: IMarker;
   outputMarker: IMarker | null;
   endLine: number | null;
+  /// Wall-clock time the prompt was rendered (OSC 133;A fired). Used as
+  /// a fallback start-time when OSC 133;C never arrives — better an
+  /// over-estimate that includes user typing time than a null duration.
+  promptShownAt: number;
   startedAt: number | null;
   endedAt: number | null;
   decoration: IDecoration | null;
@@ -162,16 +166,24 @@ export function attachShellIntegration(
     });
   };
 
+  const dropCurrent = () => {
+    // Discard an in-flight record entirely — no chip is ever shown for
+    // it. Triggered when a new OSC 133;A arrives before D fires (empty
+    // Enter cycles, Ctrl+C cancels, or any other shell-induced re-prompt
+    // that doesn't represent a real command). Better than synthesising
+    // a phantom "exit 130" chip that the user has to mentally filter out.
+    if (!current) return;
+    current.promptMarker.dispose();
+    current.outputMarker?.dispose();
+    current = null;
+  };
+
   const startRecord = () => {
-    // OSC 133;A — start a new prompt. Abandons any in-flight record
-    // (no D arrived before the next A — usually means the user hit
-    // Ctrl+C or the shell printed an extra prompt without running a
-    // command).
-    if (current && current.status === "running") {
-      current.status = "failure";
-      current.exitCode = current.exitCode ?? 130;
-      setDotStatus(current);
-    }
+    // OSC 133;A — a new prompt was just rendered. We do NOT mount a chip
+    // here: the chip only appears once OSC 133;D arrives with a final
+    // exit code, so the user never sees a transient grey "running" dot
+    // sitting on the live prompt line.
+    dropCurrent();
     const marker = term.registerMarker(0);
     if (!marker) {
       current = null;
@@ -186,6 +198,7 @@ export function attachShellIntegration(
       promptMarker: marker,
       outputMarker: null,
       endLine: null,
+      promptShownAt: performance.now(),
       startedAt: null,
       endedAt: null,
       decoration: null,
@@ -193,9 +206,7 @@ export function attachShellIntegration(
       readCommandFromBuffer: () => readCommandFromBuffer(term, rec),
       readOutput: () => readOutput(term, rec),
     };
-    records.push(rec);
     current = rec;
-    mountDecoration(rec);
   };
 
   const handleOsc133 = (payload: string): boolean => {
@@ -212,14 +223,13 @@ export function attachShellIntegration(
         // we already started the record on A.
         return true;
       case "C": {
-        // Command output starts.
+        // Command output starts. Capture the marker + timestamp so the
+        // D handler can compute an accurate duration; no chip is
+        // mounted yet — that happens on D.
         if (!current) return true;
         const marker = term.registerMarker(0);
         if (marker) current.outputMarker = marker;
         current.startedAt = performance.now();
-        // Don't mount decoration yet on running commands? Already
-        // mounted on A — keep neutral colour until D arrives.
-        setDotStatus(current);
         return true;
       }
       case "D": {
@@ -228,15 +238,24 @@ export function attachShellIntegration(
         current.exitCode = Number.isFinite(exit) ? exit : null;
         current.endLine = term.buffer.active.baseY + term.buffer.active.cursorY;
         current.endedAt = performance.now();
-        if (current.startedAt != null) {
-          current.durationMs = Math.max(
-            0,
-            current.endedAt - current.startedAt,
-          );
-        }
+        // Prefer the C-mark timestamp (true command start) when we have
+        // it; otherwise fall back to the prompt-render timestamp from A.
+        // The A fallback over-counts by the user's typing time, but a
+        // wall-clock estimate is more useful than an em-dash when the
+        // shell didn't manage to emit C (PSReadLine unavailable, some
+        // commands that bypass the AddToHistoryHandler, etc.).
+        const startRef = current.startedAt ?? current.promptShownAt;
+        current.durationMs = Math.max(0, current.endedAt - startRef);
         current.status = current.exitCode === 0 ? "success" : "failure";
+        // Push to history and mount the chip now — the user only ever
+        // sees chips for completed commands, never a grey "running" dot
+        // on the live prompt line.
+        records.push(current);
+        mountDecoration(current);
         setDotStatus(current);
-        // Don't null `current` — the next A will close out and replace.
+        // Detach `current` so the next A starts a clean record without
+        // any in-flight reference to the just-completed one.
+        current = null;
         return true;
       }
       default:
@@ -276,7 +295,11 @@ export function attachShellIntegration(
         rec.outputMarker?.dispose();
       }
       records.length = 0;
-      current = null;
+      if (current) {
+        current.promptMarker.dispose();
+        current.outputMarker?.dispose();
+        current = null;
+      }
     },
   };
 }

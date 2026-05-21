@@ -3621,25 +3621,36 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   color: var(--fg);
 }
 
-/* Shell-integration per-command chip — small coloured dot painted in the
- * left gutter of each prompt line for plain-shell sessions. Click opens
+/* Shell-integration per-command chip — small coloured dot painted in a
+ * narrow gutter to the LEFT of each prompt line for plain-shell
+ * sessions. The gutter is carved out of the container's left padding so
+ * the dot never overlaps terminal text; the xterm decoration container
+ * is allowed to overflow so the dot can sit in that gutter. Click opens
  * a floating menu with copy + re-run actions; hover surfaces a native
  * title-attr tooltip with exit code + duration. */
+.terminal-container[data-shell-integration="true"] {
+  padding-left: 14px;
+}
+.terminal-container[data-shell-integration="true"] .xterm-decoration-container,
+.terminal-container[data-shell-integration="true"] .xterm-screen,
+.terminal-container[data-shell-integration="true"] .xterm {
+  overflow: visible;
+}
 .rt-shell-chip {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
+  display: block;
   cursor: pointer;
   overflow: visible;
 }
 .rt-shell-chip-dot {
+  position: absolute;
+  top: 50%;
+  left: -10px;
+  transform: translateY(-50%);
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--fg-muted);
-  margin-left: 2px;
-  pointer-events: none;
+  pointer-events: auto;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
   transition: background-color 120ms ease;
 }

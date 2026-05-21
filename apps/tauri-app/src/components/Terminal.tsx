@@ -789,6 +789,7 @@ export default function Terminal({
         style={{ backgroundColor }}
         data-testid="terminal-container"
         data-session-id={sessionId}
+        data-shell-integration={mode === "plain_shell" ? "true" : undefined}
       />
       {chipMenu ? (
         <ShellCommandMenu

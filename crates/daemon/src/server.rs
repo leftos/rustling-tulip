@@ -3765,6 +3765,9 @@ fn powershell_prompt_script_with_integration() -> String {
         "{ \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" }",
         "};",
         "$global:__rt_in_command = $false;",
+        // Last history id we've reported on, so a repeat prompt (e.g.
+        // Ctrl+C cancel after a real command) doesn't double-report.
+        "$global:__rt_last_history_id = -1;",
         // Escape per VSCode's OSC 633 spec: \\, semicolons, newlines.
         "function global:__rt_esc {",
         "param([string]$s)",
@@ -3784,14 +3787,35 @@ fn powershell_prompt_script_with_integration() -> String {
         "}",
         "} catch { Write-Debug $_ };",
         "};",
+        // Compute the exit code for the just-finished command. Prefer
+        // Get-History's ExecutionStatus (Completed/Failed/Stopped) over
+        // $LASTEXITCODE — the latter is sticky from the last external
+        // process and misreports cmdlet failures after a successful
+        // exe. Returns $null when the history id matches what we've
+        // already reported (re-entrant prompt cycle without a new
+        // command), so the prompt skips the D mark.
+        "function global:__rt_compute_exit {",
+        "$ok = $?;",
+        "try {",
+        "$last = Microsoft.PowerShell.Core\\Get-History -Count 1 -ErrorAction Stop;",
+        "if ($null -eq $last) { return $(if ($ok) { 0 } else { 1 }) };",
+        "if ($last.Id -eq $global:__rt_last_history_id) { return $null };",
+        "$global:__rt_last_history_id = $last.Id;",
+        "switch ($last.ExecutionStatus) {",
+        "'Completed' { if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 } }",
+        "'Failed'    { if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 } }",
+        "'Stopped'   { 130 }",
+        "default     { 0 }",
+        "}",
+        "} catch { if ($ok) { 0 } else { 1 } }",
+        "};",
         // Prompt function: D for previous command (if any), A before prompt,
         // B after prompt. Returns a single composed string so the marks land
         // in the right visual position relative to the visible prompt text.
         "function global:prompt {",
         "$rt_exit = $null;",
         "if ($global:__rt_in_command) {",
-        "if ($null -ne $LASTEXITCODE) { $rt_exit = $LASTEXITCODE }",
-        "elseif ($?) { $rt_exit = 0 } else { $rt_exit = 1 };",
+        "$rt_exit = global:__rt_compute_exit;",
         "$global:__rt_in_command = $false;",
         "};",
         "global:__rt_emit_cwd;",
