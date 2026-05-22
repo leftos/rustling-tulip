@@ -126,10 +126,7 @@ impl AppState {
     /// doesn't exist. `None` clears the override, reverting to the
     /// env/platform default. Returns the new effective path + whether
     /// it's an override so the caller can broadcast the change.
-    pub fn set_worktrees_root(
-        &self,
-        path: Option<String>,
-    ) -> anyhow::Result<(PathBuf, bool)> {
+    pub fn set_worktrees_root(&self, path: Option<String>) -> anyhow::Result<(PathBuf, bool)> {
         let normalized = if let Some(raw) = path {
             let trimmed = raw.trim();
             if trimmed.is_empty() {

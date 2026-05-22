@@ -515,10 +515,7 @@ fn insert_in(node: &mut GridNode, target: &str, edge: PaneDropEdge, source: Grid
                     session_id: src_sid,
                 };
             }
-            PaneDropEdge::Left
-            | PaneDropEdge::Right
-            | PaneDropEdge::Top
-            | PaneDropEdge::Bottom => {
+            PaneDropEdge::Left | PaneDropEdge::Right | PaneDropEdge::Top | PaneDropEdge::Bottom => {
                 let direction = match edge {
                     PaneDropEdge::Left | PaneDropEdge::Right => SplitDirection::Horizontal,
                     PaneDropEdge::Top | PaneDropEdge::Bottom => SplitDirection::Vertical,
@@ -1187,7 +1184,13 @@ mod tests {
         };
         assert_eq!(direction, Horizontal);
         // Existing 2-col row is on the left side intact.
-        assert!(matches!(&*first, GridNode::Split { direction: Horizontal, .. }));
+        assert!(matches!(
+            &*first,
+            GridNode::Split {
+                direction: Horizontal,
+                ..
+            }
+        ));
         // Source pane is the full-height right column.
         assert!(matches!(&*second, GridNode::Pane { pane_id, .. } if pane_id == "src"));
     }
@@ -1230,7 +1233,13 @@ mod tests {
             pane("src", Some("ss")),
         )
         .expect("insert");
-        assert!(matches!(&grid, GridNode::Split { direction: Horizontal, .. }));
+        assert!(matches!(
+            &grid,
+            GridNode::Split {
+                direction: Horizontal,
+                ..
+            }
+        ));
     }
 
     #[test]

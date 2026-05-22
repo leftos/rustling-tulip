@@ -247,9 +247,7 @@ fn finalize_group_dir(target: &Path) -> anyhow::Result<()> {
 /// Build a per-wt-group cross-reference from `worktree_path.parent()` to
 /// `(session_id, status_kind)`. `status_kind` is `(is_live, snapshot)`
 /// so the caller can pick Active vs Detached without re-deriving.
-fn build_session_xref(
-    snapshots: &[SessionSnapshot],
-) -> HashMap<PathBuf, (String, bool)> {
+fn build_session_xref(snapshots: &[SessionSnapshot]) -> HashMap<PathBuf, (String, bool)> {
     let mut map: HashMap<PathBuf, (String, bool)> = HashMap::new();
     for snap in snapshots {
         let live = is_session_live(snap);
@@ -415,10 +413,8 @@ mod tests {
 
     impl Scratch {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "rt-worktrees-admin-{}",
-                Uuid::new_v4().simple()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("rt-worktrees-admin-{}", Uuid::new_v4().simple()));
             std::fs::create_dir_all(&path).unwrap();
             Self { path }
         }
@@ -487,8 +483,21 @@ mod tests {
         // both without confusion.
         let tmp = Scratch::new();
         let root = tmp.path().join("worktrees");
-        touch(&root.join("flat-anchor").join("wt.foo").join("repo").join(".git"));
-        touch(&root.join("X").join("dev").join("wt.bar").join("repo").join(".git"));
+        touch(
+            &root
+                .join("flat-anchor")
+                .join("wt.foo")
+                .join("repo")
+                .join(".git"),
+        );
+        touch(
+            &root
+                .join("X")
+                .join("dev")
+                .join("wt.bar")
+                .join("repo")
+                .join(".git"),
+        );
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());

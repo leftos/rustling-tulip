@@ -294,10 +294,10 @@ export default function PresetLaunchDialog({
           <h2>
             Launch preset · {preset.name}{" "}
             <span
-              className={`agent-badge agent-badge-${preset.agent}`}
-              title={`Spawns ${preset.agent} sessions`}
+              className={`agent-badge agent-badge-${preset.agent_options.kind}`}
+              title={`Spawns ${preset.agent_options.kind} sessions`}
             >
-              {preset.agent}
+              {preset.agent_options.kind}
             </span>
           </h2>
           <button

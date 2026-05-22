@@ -21,8 +21,8 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 use tracing::{debug, warn};
 use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::RestartManager::{
-    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
-    RmShutdown, RmStartSession,
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmShutdown,
+    RmStartSession,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -42,9 +42,8 @@ pub fn processes_holding(paths: &[&Path]) -> Vec<LockingProcess> {
     let mut session_key = [0u16; (CCH_RM_SESSION_KEY + 1) as usize];
     // SAFETY: out-pointer for session handle; PWSTR over a stack
     // buffer sized to the documented CCH_RM_SESSION_KEY + 1.
-    let start_err = unsafe {
-        RmStartSession(&raw mut handle, None, PWSTR(session_key.as_mut_ptr()))
-    };
+    let start_err =
+        unsafe { RmStartSession(&raw mut handle, None, PWSTR(session_key.as_mut_ptr())) };
     if start_err != ERROR_SUCCESS {
         debug!(err = start_err.0, "RmStartSession failed");
         return Vec::new();
@@ -82,7 +81,11 @@ fn register(handle: u32, paths: &[&Path]) -> Result<(), WIN32_ERROR> {
     // for the duration of the call (wide and ptrs live until function
     // return). No applications/services are registered.
     let err = unsafe { RmRegisterResources(handle, Some(&ptrs), None, None) };
-    if err == ERROR_SUCCESS { Ok(()) } else { Err(err) }
+    if err == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 fn collect(handle: u32) -> Result<Vec<RM_PROCESS_INFO>, WIN32_ERROR> {
@@ -157,20 +160,18 @@ fn enrich(infos: Vec<RM_PROCESS_INFO>) -> Vec<LockingProcess> {
     for info in infos {
         let pid = info.Process.dwProcessId;
         let name = wide_to_string(&info.strAppName);
-        let cmdline = sys
-            .process(sysinfo::Pid::from_u32(pid))
-            .and_then(|proc| {
-                let parts: Vec<String> = proc
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .collect();
-                if parts.is_empty() {
-                    None
-                } else {
-                    Some(parts.join(" "))
-                }
-            });
+        let cmdline = sys.process(sysinfo::Pid::from_u32(pid)).and_then(|proc| {
+            let parts: Vec<String> = proc
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        });
         out.push(LockingProcess { pid, name, cmdline });
     }
     if out.is_empty() {
@@ -211,11 +212,13 @@ fn graceful_shutdown(paths: &[&Path]) {
     let mut session_key = [0u16; (CCH_RM_SESSION_KEY + 1) as usize];
     // SAFETY: out-pointer for handle; PWSTR over a stack buffer sized
     // to CCH_RM_SESSION_KEY + 1.
-    let start_err = unsafe {
-        RmStartSession(&raw mut handle, None, PWSTR(session_key.as_mut_ptr()))
-    };
+    let start_err =
+        unsafe { RmStartSession(&raw mut handle, None, PWSTR(session_key.as_mut_ptr())) };
     if start_err != ERROR_SUCCESS {
-        debug!(err = start_err.0, "graceful_shutdown: RmStartSession failed");
+        debug!(
+            err = start_err.0,
+            "graceful_shutdown: RmStartSession failed"
+        );
         return;
     }
 

@@ -30,9 +30,7 @@ use windows::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 use windows::core::PCWSTR;
 
 /// RAII guard that owns the job-object handle. Drop closes the
@@ -112,10 +110,9 @@ pub fn assign_kill_on_close(child_pid: u32) -> io::Result<JobGuard> {
     // wrap it in a small RAII shim (defined above so it precedes
     // statements per Clippy's items_after_statements lint) so an
     // early return doesn't leak it.
-    let child_handle = unsafe {
-        OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, child_pid)
-    }
-    .map_err(|e| io::Error::other(format!("OpenProcess({child_pid}): {e}")))?;
+    let child_handle =
+        unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, child_pid) }
+            .map_err(|e| io::Error::other(format!("OpenProcess({child_pid}): {e}")))?;
     let child_handle = ChildHandle(child_handle);
 
     // SAFETY: both handles are live (guard not yet dropped, ChildHandle

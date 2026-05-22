@@ -6,6 +6,7 @@ import { randomWorktreeBranchName } from "../utils/randomName";
 import { loadSettings } from "../utils/settings";
 import type {
   Agent,
+  AgentOptions,
   CodexSandbox,
   DaemonMessage,
   MemberSpawnPreview,
@@ -110,41 +111,55 @@ function defaultRunModeFromLastSpawn(config: SpawnConfig | null): RunMode {
 /// Hydrate the advanced-section state from a duplicate's SpawnConfig.
 /// Mirrors the wire-vs-form translation in advancedToWire (above) but
 /// in the reverse direction — env vars come back as a row list so the
-/// add/remove controls work without special-casing.
+/// add/remove controls work without special-casing. The agent-specific
+/// `permissionMode` / `codexSandbox` slots populate from whichever variant
+/// of `agent_options` is present; the other slot stays null and is
+/// presented blank if the user later flips the radio.
 function advancedFromConfig(cfg: SpawnConfig): AdvancedConfig {
+  const opts = cfg.agent_options;
   return {
     model: cfg.model,
-    permissionMode: cfg.permission_mode,
-    codexSandbox: cfg.codex_sandbox,
+    permissionMode: opts.kind === "claude" ? opts.permission_mode : null,
+    codexSandbox: opts.kind === "codex" ? opts.sandbox : null,
     envRows: cfg.extra_env.map(([key, value]) => ({ key, value })),
+  };
+}
+
+/// Build the `AgentOptions` discriminated union the daemon expects on the
+/// wire. Trusted launches and plain-shell spawns drop the agent-specific
+/// inner field so the daemon's fail-fast validation sees a clean shape.
+function buildAgentOptions(
+  agent: Agent,
+  cfg: AdvancedConfig,
+  skipPerms: boolean,
+  isPlainShell: boolean,
+): AgentOptions {
+  if (agent === "claude") {
+    return {
+      kind: "claude",
+      permission_mode: isPlainShell || skipPerms ? null : cfg.permissionMode,
+    };
+  }
+  return {
+    kind: "codex",
+    sandbox: isPlainShell || skipPerms ? null : cfg.codexSandbox,
   };
 }
 
 function advancedToWire(
   cfg: AdvancedConfig,
-  skipPerms: boolean,
   runMode: RunMode,
-  agent: Agent,
 ): {
   model: string | null;
-  permission_mode: PermissionMode | null;
-  codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
   prompt_injector: null;
 } {
   const isPlainShell = runMode === "plain_shell";
-  const isCodex = agent === "codex";
   return {
-    // Plain shell ignores claude/codex-only fields; the daemon fail-fast checks
-    // that they are unset, so force them to null on the wire even if the
+    // Plain shell ignores agent-specific fields; the daemon fail-fast checks
+    // that they are unset, so force model to null on the wire even if the
     // user left stale state from a previous run mode.
     model: isPlainShell ? null : cfg.model,
-    // Permission mode is claude-only. Trusted launch also wins over it.
-    permission_mode:
-      isPlainShell || skipPerms || isCodex ? null : cfg.permissionMode,
-    // Codex sandbox is codex-only. Trusted launch wins over it too.
-    codex_sandbox:
-      isPlainShell || skipPerms || !isCodex ? null : cfg.codexSandbox,
     extra_env: cfg.envRows
       .filter((r) => r.key.trim().length > 0)
       .map<[string, string]>((r) => [r.key.trim(), r.value]),
@@ -218,7 +233,7 @@ export default function SpawnDialog({
       loadSettings().spawn.skip_permissions_default,
   );
   const [agent, setAgent] = useState<Agent>(
-    () => spawnPrefill?.agent ?? "claude",
+    () => spawnPrefill?.agent_options.kind ?? "claude",
   );
   const [advanced, setAdvanced] = useState<AdvancedConfig>(() =>
     spawnPrefill ? advancedFromConfig(spawnPrefill) : emptyAdvanced(),
@@ -1098,7 +1113,9 @@ function SingleForm({
   useEffect(() => {
     if (repo && restoreLastSpawnDefaults) {
       onAgentChange(
-        repo.last_spawn_config?.agent ?? repo.last_agent ?? "claude",
+        repo.last_spawn_config?.agent_options.kind ??
+          repo.last_agent ??
+          "claude",
       );
       onRunModeChange(defaultRunModeFromLastSpawn(repo.last_spawn_config));
     }
@@ -1254,8 +1271,13 @@ function SingleForm({
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions:
         runMode === "plain_shell" ? false : skipPerms,
-      agent,
-      ...advancedToWire(advanced, skipPerms, runMode, agent),
+      agent_options: buildAgentOptions(
+        agent,
+        advanced,
+        skipPerms,
+        runMode === "plain_shell",
+      ),
+      ...advancedToWire(advanced, runMode),
     });
     onSpawned(spawnPlacement);
     onClose();
@@ -1453,7 +1475,7 @@ function WorkspaceForm({
   useEffect(() => {
     if (restoreLastSpawnDefaults && (workspace || firstMember)) {
       onAgentChange(
-        workspace?.last_spawn_config?.agent ??
+        workspace?.last_spawn_config?.agent_options.kind ??
           firstMember?.last_agent ??
           "claude",
       );
@@ -1575,8 +1597,13 @@ function WorkspaceForm({
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
       dangerously_skip_permissions:
         runMode === "plain_shell" ? false : skipPerms,
-      agent,
-      ...advancedToWire(advanced, skipPerms, runMode, agent),
+      agent_options: buildAgentOptions(
+        agent,
+        advanced,
+        skipPerms,
+        runMode === "plain_shell",
+      ),
+      ...advancedToWire(advanced, runMode),
     });
     onSpawned(spawnPlacement);
     onClose();

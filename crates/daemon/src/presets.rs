@@ -1341,10 +1341,8 @@ async fn spawn_one(
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: plan.preset.dangerously_skip_permissions,
-        agent: plan.preset.agent,
+        agent_options: plan.preset.agent_options.clone(),
         model: plan.preset.model.clone(),
-        permission_mode: plan.preset.permission_mode,
-        codex_sandbox: plan.preset.codex_sandbox,
         extra_env: Vec::new(),
         prompt_injector: Some(injector),
     };
@@ -2132,9 +2130,9 @@ mod tests {
                 default_use_worktree: Some(false),
                 dangerously_skip_permissions: false,
                 model: None,
-                permission_mode: None,
-                agent: protocol::Agent::Claude,
-                codex_sandbox: None,
+                agent_options: protocol::AgentOptions::Claude {
+                    permission_mode: None,
+                },
                 tab_grouping: TabGroupingConfig::None,
                 injector: InjectorTemplate {
                     startup_delay_ms: 0,

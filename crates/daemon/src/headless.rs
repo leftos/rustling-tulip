@@ -1,23 +1,23 @@
-//! Headless `claude --print --output-format stream-json` driver.
+//! Headless (`--print` / structured-JSON) driver.
 //!
-//! Unlike interactive mode, headless sessions do not need a PTY — Claude Code
-//! emits structured JSON over stdout. We line-buffer the stream, parse each
-//! event, and update the session record's `metrics` + `recent_actions`.
+//! Generic over the agent: each [`crate::agents::AgentBackend`] owns its own
+//! line parser via [`crate::agents::AgentBackend::handle_headless_line`].
+//! `headless::spawn` wires stdout into that parser and stderr into
+//! `recent_actions`; the rest is agent-agnostic.
 
 use crate::orphan;
 use crate::paths::Dirs;
 use crate::scrollback;
 use crate::session::{SessionRegistry, push_recent_action};
 use anyhow::{Context as _, anyhow};
-use protocol::SessionStatus;
-use serde::Deserialize;
+use protocol::{Agent, SessionStatus};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{debug, warn};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct HeadlessSpec {
@@ -25,6 +25,9 @@ pub struct HeadlessSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    /// Agent kind. Drives which backend's `handle_headless_line` parses
+    /// stdout — claude's stream-json, codex's exec-json, etc.
+    pub agent: Agent,
 }
 
 pub struct HeadlessHandle {
@@ -82,11 +85,13 @@ pub fn spawn(
         pid,
     });
 
-    // stdout: parse stream-json line by line. Also persist each line to the
-    // scrollback file so the headless event log can be replayed on reattach.
+    // stdout: parse the agent's headless output line by line. Also persist
+    // each line to the scrollback file so the headless event log can be
+    // replayed on reattach.
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
     let dirs_for_stdout = dirs.clone();
+    let backend = crate::agents::backend_for(spec.agent);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         loop {
@@ -98,7 +103,7 @@ pub fn spawn(
                     let mut chunk = line.clone().into_bytes();
                     chunk.push(b'\n');
                     scrollback::append(&dirs_for_stdout, &session_for_stdout, &chunk);
-                    handle_stream_event(&registry_for_stdout, &session_for_stdout, &line);
+                    backend.handle_headless_line(&registry_for_stdout, &session_for_stdout, &line);
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -154,107 +159,5 @@ pub fn spawn(
     Ok(handle)
 }
 
-fn handle_stream_event(registry: &SessionRegistry, session_id: &str, raw_line: &str) {
-    let parsed = match serde_json::from_str::<StreamEvent>(raw_line) {
-        Ok(p) => p,
-        Err(err) => {
-            debug!(?err, line = raw_line, "unrecognized stream-json event");
-            return;
-        }
-    };
-    registry.update(session_id, |rec| match parsed {
-        StreamEvent::System { subtype, .. } => {
-            rec.status = SessionStatus::Working;
-            push_recent_action(rec, format!("system: {subtype}"));
-        }
-        StreamEvent::Assistant { message } => {
-            if let Some(content) = message.and_then(|m| m.content) {
-                for block in content {
-                    match block {
-                        ContentBlock::ToolUse { name, .. } => {
-                            push_recent_action(rec, format!("tool: {name}"));
-                        }
-                        ContentBlock::Text { text } => {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                let snippet = trimmed.chars().take(120).collect::<String>();
-                                push_recent_action(rec, format!("assistant: {snippet}"));
-                            }
-                        }
-                        ContentBlock::Other => {}
-                    }
-                }
-            }
-        }
-        StreamEvent::Result {
-            total_cost_usd,
-            usage,
-            subtype,
-            ..
-        } => {
-            if let Some(cost) = total_cost_usd {
-                rec.metrics.cost_usd = cost;
-            }
-            if let Some(u) = usage {
-                rec.metrics.input_tokens = u.input_tokens.unwrap_or(0);
-                rec.metrics.output_tokens = u.output_tokens.unwrap_or(0);
-            }
-            rec.status = SessionStatus::Stopped;
-            push_recent_action(rec, format!("result: {subtype}"));
-        }
-        StreamEvent::User {} | StreamEvent::Other => {}
-    });
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum StreamEvent {
-    System {
-        #[serde(default)]
-        subtype: String,
-    },
-    Assistant {
-        #[serde(default)]
-        message: Option<AssistantMessage>,
-    },
-    User {},
-    Result {
-        #[serde(default)]
-        subtype: String,
-        #[serde(default)]
-        total_cost_usd: Option<f64>,
-        #[serde(default)]
-        usage: Option<UsageInfo>,
-    },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-struct AssistantMessage {
-    #[serde(default)]
-    content: Option<Vec<ContentBlock>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ContentBlock {
-    Text {
-        #[serde(default)]
-        text: String,
-    },
-    ToolUse {
-        #[serde(default)]
-        name: String,
-    },
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Deserialize)]
-struct UsageInfo {
-    #[serde(default)]
-    input_tokens: Option<u64>,
-    #[serde(default)]
-    output_tokens: Option<u64>,
-}
+// stream-json parsing lives in `crate::agents::claude`. Other agents'
+// headless parsers will live in their own backend modules.

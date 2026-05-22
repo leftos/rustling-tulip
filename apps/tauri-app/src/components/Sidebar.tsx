@@ -2129,7 +2129,7 @@ function lastSpawnConfigFor(
 function spawnConfigSummary(config: SpawnConfig | null): string | null {
   if (!config) return null;
   const parts = [
-    config.agent === "claude" ? "Claude" : "Codex",
+    config.agent_options.kind === "claude" ? "Claude" : "Codex",
     sessionModeLabel(config.mode),
   ];
   const target = spawnTargetSummary(config);
@@ -2160,12 +2160,13 @@ function spawnTargetSummary(config: SpawnConfig): string | null {
 }
 
 function authoritySettingSummary(config: SpawnConfig): string | null {
-  if (config.agent === "claude") {
-    if (config.permission_mode === "accept_edits") return "accept edits";
-    if (config.permission_mode === "bypass_permissions") return "bypass permissions";
-    return config.permission_mode;
+  const opts = config.agent_options;
+  if (opts.kind === "claude") {
+    if (opts.permission_mode === "accept_edits") return "accept edits";
+    if (opts.permission_mode === "bypass_permissions") return "bypass permissions";
+    return opts.permission_mode;
   }
-  return config.codex_sandbox;
+  return opts.sandbox;
 }
 
 function targetCacheKey(target: PresetTarget): string {

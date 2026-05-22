@@ -9,6 +9,23 @@ export type Agent = "claude" | "codex";
 
 export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
 
+// Per-agent options. Mirrors `protocol::AgentOptions`. The discriminant
+// (`kind`) doubles as the agent selector — `agentFromOptions(opts)` returns
+// the matching `Agent` value. Each variant carries only the fields that
+// apply to that agent's CLI.
+export type AgentOptions =
+  | { kind: "claude"; permission_mode: PermissionMode | null }
+  | { kind: "codex"; sandbox: CodexSandbox | null };
+
+export function agentFromOptions(opts: AgentOptions): Agent {
+  return opts.kind === "claude" ? "claude" : "codex";
+}
+
+export const DEFAULT_CLAUDE_OPTIONS: AgentOptions = {
+  kind: "claude",
+  permission_mode: null,
+};
+
 export interface AppearanceOverrides {
   accent_color: string | null;
   terminal_background_color: string | null;
@@ -173,13 +190,12 @@ export interface SpawnRequest {
   // For agent === "claude": claude's --dangerously-skip-permissions.
   // For agent === "codex": codex's --yolo (--dangerously-bypass-approvals-and-sandbox).
   dangerously_skip_permissions: boolean;
-  // Which CLI to spawn.
-  agent: Agent;
+  // Per-agent options. The variant tag doubles as the agent selector —
+  // `agentFromOptions(agent_options)` yields the Agent kind that drives
+  // executable resolution. Each variant carries only the fields that apply
+  // to that agent's CLI.
+  agent_options: AgentOptions;
   model: string | null;
-  // Claude-only. Ignored when agent === "codex".
-  permission_mode: PermissionMode | null;
-  // Codex-only. Ignored when agent === "claude" or when dangerously_skip_permissions is true.
-  codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
   prompt_injector: PromptInjector | null;
 }
@@ -192,10 +208,8 @@ export interface SpawnConfig {
   target: SpawnTarget;
   mode: SessionMode;
   dangerously_skip_permissions: boolean;
-  agent: Agent;
+  agent_options: AgentOptions;
   model: string | null;
-  permission_mode: PermissionMode | null;
-  codex_sandbox: CodexSandbox | null;
   extra_env: Array<[string, string]>;
 }
 
@@ -351,12 +365,10 @@ export interface PresetEntry {
   default_use_worktree: boolean | null;
   dangerously_skip_permissions: boolean;
   model: string | null;
-  permission_mode: PermissionMode | null;
-  // Which CLI a preset launches. Defaults to "claude" for preset files that
-  // pre-date the codex field.
-  agent: Agent;
-  // Codex sandbox policy. Ignored when agent !== "codex".
-  codex_sandbox: CodexSandbox | null;
+  // Per-agent options. Mirrors PresetEntry on the Rust side. Older preset
+  // files that carry flat `agent` / `permission_mode` / `codex_sandbox`
+  // fields are normalized into this shape by the daemon's custom Deserialize.
+  agent_options: AgentOptions;
   tab_grouping: TabGroupingConfig;
   injector: InjectorTemplate;
   stagger_ms: number;

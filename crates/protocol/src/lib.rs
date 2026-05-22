@@ -31,6 +31,56 @@ impl Agent {
             Self::Codex => "codex",
         }
     }
+
+    /// All agents the daemon knows how to spawn. Used by callers that need to
+    /// iterate (e.g. orphan liveness checks that match the executable name
+    /// against every known agent's program name).
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[Self::Claude, Self::Codex]
+    }
+}
+
+/// Per-agent configuration carried on [`SpawnRequest`], [`SpawnConfig`], and
+/// [`PresetEntry`]. The discriminant doubles as the agent selector — its
+/// `agent()` accessor returns the matching [`Agent`] variant — so callers do
+/// not need to thread `Agent` separately. Adding a new agent means adding a
+/// variant here and an [`Agent`] variant; the wire shape stays the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentOptions {
+    Claude {
+        /// Claude's `--permission-mode <value>` flag. Ignored (and the flag
+        /// omitted) when [`SpawnRequest::dangerously_skip_permissions`] is true.
+        #[serde(default)]
+        permission_mode: Option<PermissionMode>,
+    },
+    Codex {
+        /// Codex's `--sandbox <value>` flag. Ignored when
+        /// [`SpawnRequest::dangerously_skip_permissions`] is true (yolo
+        /// overrides sandbox).
+        #[serde(default)]
+        sandbox: Option<CodexSandbox>,
+    },
+}
+
+impl AgentOptions {
+    /// Which [`Agent`] this variant selects. Derived from the variant tag.
+    #[must_use]
+    pub fn agent(&self) -> Agent {
+        match self {
+            Self::Claude { .. } => Agent::Claude,
+            Self::Codex { .. } => Agent::Codex,
+        }
+    }
+}
+
+impl Default for AgentOptions {
+    fn default() -> Self {
+        Self::Claude {
+            permission_mode: None,
+        }
+    }
 }
 
 /// Codex sandbox policy. Maps to `codex --sandbox <value>`.
@@ -397,21 +447,14 @@ pub struct SpawnRequest {
     /// `--dangerously-skip-permissions`. For `agent == Codex`: corresponds to
     /// codex's `--yolo` (`--dangerously-bypass-approvals-and-sandbox`).
     pub dangerously_skip_permissions: bool,
-    /// Which CLI to spawn. Drives both the executable resolution
-    /// (`RUSTLING_TULIP_CLAUDE` vs `RUSTLING_TULIP_CODEX`) and the per-agent
-    /// arg builder.
-    pub agent: Agent,
+    /// Per-agent options. The variant tag doubles as the agent selector —
+    /// `agent_options.agent()` yields the [`Agent`] kind that drives executable
+    /// resolution. Each variant carries only the fields that apply to that
+    /// agent's CLI.
+    pub agent_options: AgentOptions,
     /// Optional model override. When `None`, the CLI's default applies.
     /// Sent as `--model <id>` to both claude and codex.
     pub model: Option<String>,
-    /// Claude-only permission mode. Ignored (and `--permission-mode` omitted)
-    /// when `dangerously_skip_permissions` is true. Ignored entirely when
-    /// `agent == Codex`.
-    pub permission_mode: Option<PermissionMode>,
-    /// Codex-only sandbox policy. Maps to `codex --sandbox <value>`. Ignored
-    /// when `dangerously_skip_permissions` is true (yolo overrides sandbox)
-    /// and ignored entirely when `agent == Claude`.
-    pub codex_sandbox: Option<CodexSandbox>,
     /// Extra environment variables merged on top of the daemon's keep-list.
     /// Later entries override the keep-list on key collision so users can
     /// override values like `ANTHROPIC_API_KEY`.
@@ -425,6 +468,14 @@ pub struct SpawnRequest {
     pub prompt_injector: Option<PromptInjector>,
 }
 
+impl SpawnRequest {
+    /// Convenience accessor — the agent kind selected by `agent_options`.
+    #[must_use]
+    pub fn agent(&self) -> Agent {
+        self.agent_options.agent()
+    }
+}
+
 /// Subset of [`SpawnRequest`] that fully describes "what kind of session
 /// this was launched as", minus identifiers and one-shot kickoff fields.
 /// Daemon persists this on each session record + orphan sidecar so a
@@ -434,17 +485,65 @@ pub struct SpawnRequest {
 /// - `label`: a duplicate auto-generates a fresh `<repo>:<branch>` label.
 /// - `initial_prompt`: kickoff messages are one-shot, not part of identity.
 /// - `prompt_injector`: same — injectors deliver kickoff content.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Decoding accepts both the current shape (with `agent_options`) and the
+/// legacy v18 shape (with flat `agent` / `permission_mode` / `codex_sandbox`).
+/// Serialization always emits the current shape, so `state.json` entries
+/// rewritten by the daemon are upgraded transparently.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpawnConfig {
     pub target: SpawnTarget,
     pub mode: SessionMode,
     pub dangerously_skip_permissions: bool,
-    pub agent: Agent,
+    pub agent_options: AgentOptions,
     pub model: Option<String>,
-    pub permission_mode: Option<PermissionMode>,
-    pub codex_sandbox: Option<CodexSandbox>,
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+}
+
+impl<'de> Deserialize<'de> for SpawnConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            target: SpawnTarget,
+            mode: SessionMode,
+            dangerously_skip_permissions: bool,
+            model: Option<String>,
+            #[serde(default)]
+            extra_env: Vec<(String, String)>,
+            #[serde(default)]
+            agent_options: Option<AgentOptions>,
+            #[serde(default)]
+            agent: Option<Agent>,
+            #[serde(default)]
+            permission_mode: Option<PermissionMode>,
+            #[serde(default)]
+            codex_sandbox: Option<CodexSandbox>,
+        }
+        let helper = Helper::deserialize(deserializer)?;
+        let agent_options =
+            helper
+                .agent_options
+                .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
+                    Agent::Claude => AgentOptions::Claude {
+                        permission_mode: helper.permission_mode,
+                    },
+                    Agent::Codex => AgentOptions::Codex {
+                        sandbox: helper.codex_sandbox,
+                    },
+                });
+        Ok(Self {
+            target: helper.target,
+            mode: helper.mode,
+            dangerously_skip_permissions: helper.dangerously_skip_permissions,
+            agent_options,
+            model: helper.model,
+            extra_env: helper.extra_env,
+        })
+    }
 }
 
 impl SpawnConfig {
@@ -456,10 +555,8 @@ impl SpawnConfig {
             target: req.target.clone(),
             mode: req.mode,
             dangerously_skip_permissions: req.dangerously_skip_permissions,
-            agent: req.agent,
+            agent_options: req.agent_options.clone(),
             model: req.model.clone(),
-            permission_mode: req.permission_mode,
-            codex_sandbox: req.codex_sandbox,
             extra_env: req.extra_env.clone(),
         }
     }
@@ -476,13 +573,17 @@ impl SpawnConfig {
             mode: self.mode,
             initial_prompt: None,
             dangerously_skip_permissions: self.dangerously_skip_permissions,
-            agent: self.agent,
+            agent_options: self.agent_options.clone(),
             model: self.model.clone(),
-            permission_mode: self.permission_mode,
-            codex_sandbox: self.codex_sandbox,
             extra_env: self.extra_env.clone(),
             prompt_injector: None,
         }
+    }
+
+    /// Convenience accessor — the agent kind selected by `agent_options`.
+    #[must_use]
+    pub fn agent(&self) -> Agent {
+        self.agent_options.agent()
     }
 }
 
@@ -989,7 +1090,12 @@ pub enum TabGroupingConfig {
 /// Preset definition. Lives on disk in a repo's `.rustling-tulip/presets.json`
 /// (as a JSON array of these); the daemon parses + ships to clients via the
 /// [`DaemonMessage::Presets`] response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Decoding accepts both the current shape (with `agent_options`) and the
+/// legacy v18 shape (with flat `agent` / `permission_mode` / `codex_sandbox`).
+/// Serialization always emits the current shape, so files re-saved by the
+/// daemon are upgraded transparently. See the manual `Deserialize` impl below.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PresetEntry {
     /// Stable id within a repo (author-chosen). Used by `LaunchPreset` to
     /// reference this preset.
@@ -1026,21 +1132,97 @@ pub struct PresetEntry {
     pub dangerously_skip_permissions: bool,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
-    pub permission_mode: Option<PermissionMode>,
-    /// Which CLI to spawn for sessions created from this preset. Defaults to
-    /// `Agent::Claude` for preset files that pre-date the codex field.
-    #[serde(default)]
-    pub agent: Agent,
-    /// Codex sandbox policy. Ignored when `agent != Codex`.
-    #[serde(default)]
-    pub codex_sandbox: Option<CodexSandbox>,
+    /// Per-agent options. See [`AgentOptions`].
+    pub agent_options: AgentOptions,
     pub tab_grouping: TabGroupingConfig,
     pub injector: InjectorTemplate,
     /// Pause between successive session spawns. Default 3000ms matches
     /// yaat's pacing; the value avoids overlapping git worktree adds.
     #[serde(default = "default_stagger_ms")]
     pub stagger_ms: u32,
+}
+
+impl<'de> Deserialize<'de> for PresetEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Helper holds every field accepted on the wire, including the legacy
+        // flat fields (`agent` / `permission_mode` / `codex_sandbox`) that
+        // pre-v19 preset files may carry. After decode we normalize into the
+        // canonical `agent_options` shape.
+        #[derive(Deserialize)]
+        struct Helper {
+            id: String,
+            name: String,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            source_repo_id: String,
+            prompt_sources: Vec<PresetPromptSource>,
+            prompt_template: String,
+            #[serde(default)]
+            context_footer_lines: Vec<FooterLine>,
+            #[serde(default)]
+            variables: Vec<PresetVariable>,
+            branch_template: String,
+            #[serde(default)]
+            session_label_template: Option<String>,
+            #[serde(default)]
+            default_use_worktree: Option<bool>,
+            #[serde(default)]
+            dangerously_skip_permissions: bool,
+            #[serde(default)]
+            model: Option<String>,
+            // Canonical (v19+) shape.
+            #[serde(default)]
+            agent_options: Option<AgentOptions>,
+            // Legacy (≤v18) flat fields. Read-only; ignored when
+            // `agent_options` is present.
+            #[serde(default)]
+            agent: Option<Agent>,
+            #[serde(default)]
+            permission_mode: Option<PermissionMode>,
+            #[serde(default)]
+            codex_sandbox: Option<CodexSandbox>,
+            tab_grouping: TabGroupingConfig,
+            injector: InjectorTemplate,
+            #[serde(default = "default_stagger_ms")]
+            stagger_ms: u32,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+        let agent_options =
+            helper
+                .agent_options
+                .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
+                    Agent::Claude => AgentOptions::Claude {
+                        permission_mode: helper.permission_mode,
+                    },
+                    Agent::Codex => AgentOptions::Codex {
+                        sandbox: helper.codex_sandbox,
+                    },
+                });
+        Ok(Self {
+            id: helper.id,
+            name: helper.name,
+            description: helper.description,
+            source_repo_id: helper.source_repo_id,
+            prompt_sources: helper.prompt_sources,
+            prompt_template: helper.prompt_template,
+            context_footer_lines: helper.context_footer_lines,
+            variables: helper.variables,
+            branch_template: helper.branch_template,
+            session_label_template: helper.session_label_template,
+            default_use_worktree: helper.default_use_worktree,
+            dangerously_skip_permissions: helper.dangerously_skip_permissions,
+            model: helper.model,
+            agent_options,
+            tab_grouping: helper.tab_grouping,
+            injector: helper.injector,
+            stagger_ms: helper.stagger_ms,
+        })
+    }
 }
 
 fn default_stagger_ms() -> u32 {
@@ -2391,9 +2573,9 @@ mod tests {
             default_use_worktree: Some(true),
             dangerously_skip_permissions: true,
             model: None,
-            permission_mode: None,
-            agent: Agent::Claude,
-            codex_sandbox: None,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
             tab_grouping: TabGroupingConfig::NewTab {
                 layout: TabLayout::BalancedHorizontal,
                 max_panes_per_tab: Some(6),
@@ -2652,8 +2834,12 @@ mod tests {
         assert!(preset.variables.is_empty());
         assert!(preset.context_footer_lines.is_empty());
         assert_eq!(preset.default_use_worktree, None);
-        assert_eq!(preset.agent, Agent::Claude);
-        assert_eq!(preset.codex_sandbox, None);
+        assert_eq!(
+            preset.agent_options,
+            AgentOptions::Claude {
+                permission_mode: None,
+            }
+        );
     }
 
     #[test]
@@ -2669,10 +2855,10 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: true,
-            agent: Agent::Claude,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
             model: None,
-            permission_mode: None,
-            codex_sandbox: None,
             extra_env: vec![],
             prompt_injector: Some(PromptInjector {
                 steps: vec![
@@ -2706,18 +2892,19 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: Some("refactor authentication".to_string()),
             dangerously_skip_permissions: false,
-            agent: Agent::Codex,
+            agent_options: AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::WorkspaceWrite),
+            },
             model: Some("gpt-5.1-codex".to_string()),
-            permission_mode: None,
-            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
             extra_env: vec![],
             prompt_injector: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, decoded);
-        assert!(json.contains(r#""agent":"codex""#));
-        assert!(json.contains(r#""codex_sandbox":"workspace-write""#));
+        assert_eq!(req.agent(), Agent::Codex);
+        assert!(json.contains(r#""kind":"codex""#));
+        assert!(json.contains(r#""sandbox":"workspace-write""#));
     }
 
     #[test]
@@ -2730,10 +2917,10 @@ mod tests {
             mode: SessionMode::PlainShell,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent: Agent::Claude,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
             model: None,
-            permission_mode: None,
-            codex_sandbox: None,
             extra_env: vec![],
             prompt_injector: None,
         };
@@ -2742,6 +2929,44 @@ mod tests {
         assert_eq!(req, decoded);
         assert!(json.contains(r#""kind":"standalone""#));
         assert!(json.contains(r#""mode":"plain_shell""#));
+    }
+
+    #[test]
+    fn spawn_config_decodes_legacy_v18_shape() {
+        // Pre-v19 `state.json` carried flat `agent` + `permission_mode` +
+        // `codex_sandbox` instead of `agent_options`. The custom Deserialize
+        // must convert old entries transparently so existing state files
+        // load on the first run of a v19 daemon.
+        let legacy = r#"{
+            "target": {
+                "kind": "single",
+                "repo_id": "r1",
+                "branch_name": "bug/1",
+                "base_branch": null,
+                "use_worktree": true
+            },
+            "mode": "interactive",
+            "dangerously_skip_permissions": false,
+            "agent": "codex",
+            "model": "gpt-5",
+            "permission_mode": null,
+            "codex_sandbox": "workspace-write",
+            "extra_env": []
+        }"#;
+        let cfg: SpawnConfig = serde_json::from_str(legacy).expect("decode legacy");
+        assert_eq!(cfg.agent_options.agent(), Agent::Codex);
+        assert_eq!(
+            cfg.agent_options,
+            AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::WorkspaceWrite),
+            }
+        );
+
+        // Re-encoding emits the new shape; decoding round-trips.
+        let json = serde_json::to_string(&cfg).expect("serialize new shape");
+        assert!(json.contains(r#""agent_options""#));
+        let decoded: SpawnConfig = serde_json::from_str(&json).expect("decode new shape");
+        assert_eq!(cfg, decoded);
     }
 
     #[test]
@@ -2998,8 +3223,10 @@ mod tests {
 
     #[test]
     fn preset_entry_decodes_without_agent() {
-        // User-edited `.rustling-tulip/presets.json` files lack `agent`; the
-        // serde default keeps them loadable as claude presets.
+        // User-edited `.rustling-tulip/presets.json` files may lack any agent
+        // information at all (pre-v17). With no `agent_options`, no flat
+        // `agent`, and no `permission_mode`, the legacy fallback chooses the
+        // default Claude variant with no permission mode.
         let legacy = r#"{
             "id": "smoke",
             "name": "Smoke",
@@ -3010,7 +3237,42 @@ mod tests {
             "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
         }"#;
         let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
-        assert_eq!(preset.agent, Agent::Claude);
-        assert_eq!(preset.codex_sandbox, None);
+        assert_eq!(
+            preset.agent_options,
+            AgentOptions::Claude {
+                permission_mode: None,
+            }
+        );
+    }
+
+    #[test]
+    fn preset_entry_decodes_legacy_v18_codex_shape() {
+        // v17–v18 preset files carried flat `agent: "codex"` + `codex_sandbox`.
+        // The custom Deserialize must map them onto `agent_options` so old
+        // presets keep working on a v19 daemon.
+        let legacy = r#"{
+            "id": "yolo",
+            "name": "Yolo",
+            "prompt_sources": [{"kind":"inline"}],
+            "prompt_template": "{prompt}",
+            "branch_template": "tmp/{index}",
+            "tab_grouping": {"kind":"none"},
+            "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []},
+            "agent": "codex",
+            "codex_sandbox": "danger-full-access"
+        }"#;
+        let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
+        assert_eq!(
+            preset.agent_options,
+            AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::DangerFullAccess),
+            }
+        );
+
+        // Re-serialization always emits the new shape; the legacy fields
+        // never appear.
+        let json = serde_json::to_string(&preset).expect("serialize");
+        assert!(json.contains(r#""agent_options""#));
+        assert!(!json.contains(r#""codex_sandbox""#));
     }
 }

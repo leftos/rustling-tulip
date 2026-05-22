@@ -1,5 +1,6 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
+use crate::agents::CommonSpawnFields;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
@@ -31,11 +32,10 @@ use chrono::Utc;
 use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    Agent, AppearanceOverrides, AttentionReason, ClientMessage, CodexSandbox, DaemonHandshake,
-    DaemonMessage, InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PermissionMode,
-    PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember,
-    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
-    VscodeWorkspaceSuggestion,
+    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, DaemonHandshake,
+    DaemonMessage, InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PresetLaunchJobSnapshot,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
@@ -2074,13 +2074,12 @@ pub(crate) async fn spawn_session(
         mode,
         initial_prompt,
         dangerously_skip_permissions,
-        agent,
+        agent_options,
         model,
-        permission_mode,
-        codex_sandbox,
         extra_env,
         prompt_injector,
     } = req;
+    let agent = agent_options.agent();
     info!(
         ?mode,
         agent = agent.as_label(),
@@ -2096,9 +2095,10 @@ pub(crate) async fn spawn_session(
             "standalone targets only support plain_shell sessions"
         ));
     }
-    if mode == SessionMode::Headless && agent == Agent::Codex {
+    if mode == SessionMode::Headless && !crate::agents::backend_for(agent).supports_headless() {
         return Err(anyhow!(
-            "headless mode is not yet supported for codex; use interactive mode"
+            "headless mode is not yet supported for {}; use interactive mode",
+            agent.as_label()
         ));
     }
 
@@ -2129,10 +2129,8 @@ pub(crate) async fn spawn_session(
     let label = label.unwrap_or(default_label);
     let cfg = SpawnArgs {
         dangerously_skip_permissions,
-        agent,
+        agent_options,
         model,
-        permission_mode,
-        codex_sandbox,
         extra_env,
         prompt_injector,
     };
@@ -2261,17 +2259,13 @@ fn expected_output_subscribers(mode: SessionMode) -> usize {
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
+/// The agent kind is carried inside `agent_options` — call
+/// `cfg.agent_options.agent()` to dispatch through [`crate::agents::backend_for`].
 struct SpawnArgs {
     dangerously_skip_permissions: bool,
-    /// Which CLI to spawn. Drives both [`agent_program`] resolution and the
-    /// per-agent arg builder branching in [`spawn_interactive_session`].
-    agent: Agent,
+    /// Per-agent options. The variant tag doubles as the agent selector.
+    agent_options: AgentOptions,
     model: Option<String>,
-    /// Claude-only. Ignored for codex.
-    permission_mode: Option<PermissionMode>,
-    /// Codex-only. Ignored for claude. Overridden by `dangerously_skip_permissions`
-    /// (yolo replaces sandbox).
-    codex_sandbox: Option<CodexSandbox>,
     extra_env: Vec<(String, String)>,
     /// Scripted PTY input driven post-spawn for interactive sessions. When
     /// `Some`, the interactive spawn path omits the prompt CLI flag — the
@@ -2281,106 +2275,19 @@ struct SpawnArgs {
 }
 
 impl SpawnArgs {
-    /// Append claude's `--model`, `--permission-mode`, and
-    /// `--dangerously-skip-permissions` args. The claude CLI rejects
-    /// `--permission-mode` together with `--dangerously-skip-permissions`, so
-    /// the latter wins when both are set.
-    fn extend_claude_args(&self, args: &mut Vec<String>) {
-        if let Some(model) = &self.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
-        if self.dangerously_skip_permissions {
-            args.push("--dangerously-skip-permissions".to_string());
-        } else if let Some(mode) = self.permission_mode {
-            args.push("--permission-mode".to_string());
-            args.push(mode.as_cli_arg().to_string());
-        }
+    /// Which agent this spawn targets. Derived from `agent_options`.
+    fn agent(&self) -> Agent {
+        self.agent_options.agent()
     }
-}
 
-/// Build a workspace-context note for the agent. Returns `Some` only when
-/// the session has 2+ members (i.e. it's a workspace spawn). The note maps
-/// each member's repo name to the actual worktree path used for THIS
-/// session, so the agent doesn't try to navigate to original-repo paths
-/// referenced in `CLAUDE.md` / `AGENTS.md` that no longer match where the
-/// session is rooted.
-///
-/// Delivered as `--append-system-prompt` to claude (invisible to the user)
-/// and prepended to the positional prompt for codex (codex doesn't have a
-/// system-prompt flag, so the trade-off is one extra user turn).
-fn build_workspace_prelude(members: &[SessionMember]) -> Option<String> {
-    if members.len() < 2 {
-        return None;
-    }
-    let mut out = String::from(
-        "Workspace member paths for this session (use these for cross-repo \
-         file access — they override any absolute paths referenced in \
-         CLAUDE.md / AGENTS.md):\n",
-    );
-    let name_width = members.iter().map(|m| m.repo_name.len()).max().unwrap_or(0);
-    for m in members {
-        use std::fmt::Write as _;
-        // Width-padded for visual alignment in the agent's view; failure
-        // here would mean OOM during string formatting, which we treat as
-        // unreachable for a few dozen members at most.
-        let _ = writeln!(
-            out,
-            "  {name:<width$}  ->  {path}",
-            name = m.repo_name,
-            width = name_width,
-            path = m.worktree_path,
-        );
-    }
-    Some(out)
-}
-
-/// Build the codex CLI argv for an interactive session. Factored out of
-/// [`spawn_interactive_session`] so it can be unit-tested without spawning.
-///
-/// Layout:
-/// - `--add-dir <path>` for every extra member after the primary cwd
-/// - `--model <id>` when [`SpawnArgs::model`] is set
-/// - permission/sandbox: `--yolo` overrides everything; otherwise
-///   `--sandbox <value>` when [`SpawnArgs::codex_sandbox`] is set
-/// - trailing positional `<prompt>` when no `prompt_injector` is attached;
-///   carries `<workspace_prelude>\n\n<initial_prompt>` for workspace spawns,
-///   or just `<initial_prompt>`, or just `<workspace_prelude>`, depending
-///   on which are present. Codex doesn't expose a system-prompt flag so
-///   the prelude rides along on the user's first message slot.
-fn build_codex_args(
-    cfg: &SpawnArgs,
-    members: &[SessionMember],
-    initial_prompt: Option<&str>,
-) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
-    for extra in members.iter().skip(1) {
-        args.push("--add-dir".to_string());
-        args.push(extra.worktree_path.clone());
-    }
-    if let Some(model) = &cfg.model {
-        args.push("--model".to_string());
-        args.push(model.clone());
-    }
-    if cfg.dangerously_skip_permissions {
-        args.push("--yolo".to_string());
-    } else if let Some(sandbox) = cfg.codex_sandbox {
-        args.push("--sandbox".to_string());
-        args.push(sandbox.as_cli_arg().to_string());
-    }
-    if cfg.prompt_injector.is_none() {
-        let prelude = build_workspace_prelude(members);
-        let combined = match (prelude, initial_prompt) {
-            (Some(pre), Some(user)) => Some(format!("{pre}\n{user}")),
-            (Some(pre), None) => Some(pre),
-            (None, Some(user)) => Some(user.to_string()),
-            (None, None) => None,
-        };
-        if let Some(text) = combined {
-            args.push(text);
+    /// Build the borrowed [`CommonSpawnFields`] view backends consume.
+    fn common(&self) -> CommonSpawnFields<'_> {
+        CommonSpawnFields {
+            dangerously_skip_permissions: self.dangerously_skip_permissions,
+            model: self.model.as_deref(),
+            has_prompt_injector: self.prompt_injector.is_some(),
         }
     }
-    args
 }
 
 #[expect(
@@ -2401,42 +2308,20 @@ async fn spawn_interactive_session(
     stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
-    let args = match cfg.agent {
-        Agent::Codex => build_codex_args(cfg, &members, initial_prompt.as_deref()),
-        Agent::Claude => {
-            let mut args: Vec<String> = Vec::new();
-            for extra in members.iter().skip(1) {
-                args.push("--add-dir".to_string());
-                args.push(extra.worktree_path.clone());
-            }
-            // Workspace-context prelude rides on --append-system-prompt
-            // so it's invisible to the user but the model sees it. Only
-            // emitted for 2+ member sessions (where the worktree-vs-
-            // original-path mismatch actually matters).
-            if let Some(prelude) = build_workspace_prelude(&members) {
-                args.push("--append-system-prompt".to_string());
-                args.push(prelude);
-            }
-            cfg.extend_claude_args(&mut args);
-            // When a prompt injector is attached, it carries the prompt as
-            // scripted PTY input — passing `-p` would race the injector and
-            // disable plan mode. The injector path takes over.
-            if cfg.prompt_injector.is_none()
-                && let Some(prompt) = initial_prompt
-            {
-                args.push("-p".to_string());
-                args.push(prompt);
-            }
-            args
-        }
-    };
+    let backend = crate::agents::backend_for(cfg.agent());
+    let args = backend.build_interactive_args(
+        &cfg.agent_options,
+        &cfg.common(),
+        &members,
+        initial_prompt.as_deref(),
+    );
 
-    let raw_program = agent_program(cfg.agent);
+    let raw_program = backend.resolve_program();
     let (program, prepend_args) = resolve_agent_program(&raw_program);
     let mut final_args = prepend_args;
     final_args.extend(args);
     info!(
-        agent = cfg.agent.as_label(),
+        agent = cfg.agent().as_label(),
         raw = %raw_program,
         program = %program,
         argc = final_args.len(),
@@ -2460,7 +2345,7 @@ async fn spawn_interactive_session(
         expected_output_subscribers(SessionMode::Interactive),
     )
     .await
-    .with_context(|| format!("spawning {} via tracer", cfg.agent.as_label()))?;
+    .with_context(|| format!("spawning {} via tracer", cfg.agent().as_label()))?;
     let pty = tracer_spawn.handle;
     let tracer_pid = tracer_spawn.tracer_pid;
     let tracer_pipe = tracer_spawn.pipe_name;
@@ -2484,9 +2369,9 @@ async fn spawn_interactive_session(
         pty: Some(Arc::clone(&pty)),
         headless: None,
         workspace_id: workspace_id.clone(),
-        agent: cfg.agent,
+        agent: cfg.agent(),
         terminal_title: None,
-        program_name: Some(cfg.agent.as_label().to_string()),
+        program_name: Some(cfg.agent().as_label().to_string()),
         current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
@@ -2519,7 +2404,7 @@ async fn spawn_interactive_session(
             started_at,
             workspace_id,
             Some("rt-tracer".to_string()),
-            cfg.agent,
+            cfg.agent(),
             Some(stored_config),
             last_prompt,
             Some(initial_cwd),
@@ -2583,10 +2468,18 @@ async fn spawn_plain_shell_session(
     if cfg.model.is_some() {
         return Err(anyhow!("plain shell sessions do not accept a model"));
     }
-    if cfg.permission_mode.is_some() {
-        return Err(anyhow!(
-            "plain shell sessions do not accept a permission_mode"
-        ));
+    match &cfg.agent_options {
+        AgentOptions::Claude {
+            permission_mode: Some(_),
+        } => {
+            return Err(anyhow!(
+                "plain shell sessions do not accept a permission_mode"
+            ));
+        }
+        AgentOptions::Codex { sandbox: Some(_) } => {
+            return Err(anyhow!("plain shell sessions do not accept a sandbox"));
+        }
+        AgentOptions::Claude { .. } | AgentOptions::Codex { .. } => {}
     }
     if cfg.dangerously_skip_permissions {
         return Err(anyhow!(
@@ -2740,34 +2633,20 @@ fn spawn_headless_session(
     cfg: &SpawnArgs,
     stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
-    // The dispatcher already rejects `agent == Codex` for headless mode; if
-    // we got here, claude is the only valid agent.
-    debug_assert!(matches!(cfg.agent, Agent::Claude));
+    // The dispatcher already rejects headless mode for backends that don't
+    // support it; if we got here, the backend can build headless args.
+    let backend = crate::agents::backend_for(cfg.agent());
+    debug_assert!(backend.supports_headless());
     let last_prompt = Some(prompt.clone());
-    let mut args: Vec<String> = vec![
-        "--print".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-    ];
-    for extra in members.iter().skip(1) {
-        args.push("--add-dir".to_string());
-        args.push(extra.worktree_path.clone());
-    }
-    if let Some(prelude) = build_workspace_prelude(&members) {
-        args.push("--append-system-prompt".to_string());
-        args.push(prelude);
-    }
-    cfg.extend_claude_args(&mut args);
-    args.push("-p".to_string());
-    args.push(prompt);
+    let args = backend.build_headless_args(&cfg.agent_options, &cfg.common(), &members, &prompt);
 
     let initial_cwd = primary_cwd.to_string_lossy().into_owned();
     let spec = headless::HeadlessSpec {
-        program: agent_program(cfg.agent),
+        program: backend.resolve_program(),
         args,
         cwd: primary_cwd,
         env: merged_env(&cfg.extra_env),
+        agent: cfg.agent(),
     };
 
     let started_at = Utc::now();
@@ -2787,9 +2666,9 @@ fn spawn_headless_session(
         pty: None,
         headless: None,
         workspace_id: workspace_id.clone(),
-        agent: cfg.agent,
+        agent: cfg.agent(),
         terminal_title: None,
-        program_name: Some(cfg.agent.as_label().to_string()),
+        program_name: Some(cfg.agent().as_label().to_string()),
         current_cwd: Some(initial_cwd.clone()),
         appearance: AppearanceOverrides::default(),
         spawn_config: Some(stored_config.clone()),
@@ -2803,7 +2682,7 @@ fn spawn_headless_session(
     hub.sessions.insert(record);
 
     let handle = headless::spawn(&spec, &hub.sessions, session_id.clone(), hub.dirs.clone())
-        .context("spawning headless claude")?;
+        .with_context(|| format!("spawning headless {}", cfg.agent().as_label()))?;
 
     if let Some(pid) = handle.pid()
         && let Ok(meta) = orphan::meta_from_record(
@@ -2817,7 +2696,7 @@ fn spawn_headless_session(
             workspace_id,
             // Same as interactive: the child is a node shim on Windows.
             None,
-            cfg.agent,
+            cfg.agent(),
             Some(stored_config),
             last_prompt,
             Some(initial_cwd),
@@ -3427,17 +3306,6 @@ fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
     }
 }
 
-fn agent_program(agent: Agent) -> String {
-    match agent {
-        Agent::Claude => {
-            std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "claude".to_string())
-        }
-        Agent::Codex => {
-            std::env::var("RUSTLING_TULIP_CODEX").unwrap_or_else(|_| "codex".to_string())
-        }
-    }
-}
-
 /// Resolve an agent-program name into something `CreateProcess` /
 /// portable-pty can actually launch. Returns `(program, prepended_args)`.
 ///
@@ -3995,28 +3863,6 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
 )]
 mod tests {
     use super::*;
-    use protocol::{InjectorStep, PromptInjector};
-
-    fn member(repo: &str, path: &str) -> SessionMember {
-        SessionMember {
-            repo_id: repo.to_string(),
-            repo_name: repo.to_string(),
-            branch: "main".to_string(),
-            worktree_path: path.to_string(),
-        }
-    }
-
-    fn cfg(agent: Agent) -> SpawnArgs {
-        SpawnArgs {
-            dangerously_skip_permissions: false,
-            agent,
-            model: None,
-            permission_mode: None,
-            codex_sandbox: None,
-            extra_env: Vec::new(),
-            prompt_injector: None,
-        }
-    }
 
     #[test]
     fn negotiate_picks_highest_match_from_range() {
@@ -4053,129 +3899,8 @@ mod tests {
         assert_eq!(result, Some(v));
     }
 
-    #[test]
-    fn codex_single_repo_sandbox_workspace_write_with_prompt() {
-        let members = vec![member("r1", "X:/worktree/r1")];
-        let mut c = cfg(Agent::Codex);
-        c.codex_sandbox = Some(CodexSandbox::WorkspaceWrite);
-        let args = build_codex_args(&c, &members, Some("hello"));
-        assert_eq!(args, vec!["--sandbox", "workspace-write", "hello"]);
-    }
-
-    #[test]
-    fn codex_workspace_emits_add_dir_per_extra_member() {
-        let members = vec![
-            member("r1", "X:/wt/yaat"),
-            member("r2", "X:/wt/yaat-server"),
-            member("r3", "X:/wt/yaat-shared"),
-        ];
-        let c = cfg(Agent::Codex);
-        let args = build_codex_args(&c, &members, None);
-        // No user prompt + 3 members → positional is the workspace
-        // prelude alone.
-        assert_eq!(args[0], "--add-dir");
-        assert_eq!(args[1], "X:/wt/yaat-server");
-        assert_eq!(args[2], "--add-dir");
-        assert_eq!(args[3], "X:/wt/yaat-shared");
-        assert_eq!(
-            args.len(),
-            5,
-            "expected 4 add-dir args + 1 prelude positional"
-        );
-        let prelude = &args[4];
-        assert!(prelude.contains("Workspace member paths"));
-        assert!(prelude.contains("r1"));
-        assert!(prelude.contains("X:/wt/yaat-server"));
-    }
-
-    #[test]
-    fn build_workspace_prelude_skips_single_member() {
-        let members = vec![member("r1", "X:/wt/r1")];
-        assert!(build_workspace_prelude(&members).is_none());
-    }
-
-    #[test]
-    fn build_workspace_prelude_lists_each_member() {
-        let members = vec![
-            member("yaat", "X:/wt/yaat"),
-            member("yaat-server", "X:/wt/yaat-server"),
-        ];
-        let prelude = build_workspace_prelude(&members).unwrap_or_default();
-        assert!(
-            !prelude.is_empty(),
-            "prelude should be present for 2 members"
-        );
-        // Each member name maps to its worktree path on its own line.
-        // Width padding aligns them — assert on the parts, not the exact
-        // column count, so this test won't churn if formatting evolves.
-        assert!(prelude.contains("yaat"));
-        assert!(prelude.contains("X:/wt/yaat\n"));
-        assert!(prelude.contains("yaat-server"));
-        assert!(prelude.contains("X:/wt/yaat-server\n"));
-        assert!(prelude.contains("->"));
-    }
-
-    #[test]
-    fn codex_workspace_with_user_prompt_concatenates() {
-        let members = vec![member("r1", "X:/wt/r1"), member("r2", "X:/wt/r2")];
-        let c = cfg(Agent::Codex);
-        let args = build_codex_args(&c, &members, Some("do the thing"));
-        let positional = args.last().cloned().unwrap_or_default();
-        assert!(positional.starts_with("Workspace member paths"));
-        assert!(positional.ends_with("do the thing"));
-    }
-
-    #[test]
-    fn codex_yolo_overrides_sandbox() {
-        let members = vec![member("r1", "X:/wt/r1")];
-        let mut c = cfg(Agent::Codex);
-        c.dangerously_skip_permissions = true;
-        c.codex_sandbox = Some(CodexSandbox::ReadOnly);
-        let args = build_codex_args(&c, &members, Some("go"));
-        assert_eq!(args, vec!["--yolo", "go"]);
-        assert!(!args.iter().any(|a| a == "--sandbox"));
-    }
-
-    #[test]
-    fn codex_model_flag_precedes_sandbox() {
-        let members = vec![member("r1", "X:/wt/r1")];
-        let mut c = cfg(Agent::Codex);
-        c.model = Some("gpt-5.1-codex".to_string());
-        c.codex_sandbox = Some(CodexSandbox::DangerFullAccess);
-        let args = build_codex_args(&c, &members, None);
-        assert_eq!(
-            args,
-            vec![
-                "--model",
-                "gpt-5.1-codex",
-                "--sandbox",
-                "danger-full-access"
-            ]
-        );
-    }
-
-    #[test]
-    fn codex_prompt_injector_suppresses_positional_prompt() {
-        let members = vec![member("r1", "X:/wt/r1")];
-        let mut c = cfg(Agent::Codex);
-        c.prompt_injector = Some(PromptInjector {
-            steps: vec![InjectorStep::Text {
-                content: "injected".to_string(),
-                newline: true,
-            }],
-            verify_mode_marker: None,
-        });
-        let args = build_codex_args(&c, &members, Some("ignored"));
-        assert!(!args.iter().any(|a| a == "ignored"));
-    }
-
-    #[test]
-    fn codex_no_sandbox_no_yolo_omits_permission_flags() {
-        let members = vec![member("r1", "X:/wt/r1")];
-        let c = cfg(Agent::Codex);
-        let args = build_codex_args(&c, &members, None);
-        assert!(args.is_empty(), "expected empty args, got {args:?}");
-    }
+    // Per-agent argv builders + workspace-prelude tests live in the
+    // `crate::agents` submodules now.
 
     #[cfg(windows)]
     mod npm_shim {

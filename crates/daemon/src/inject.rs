@@ -163,12 +163,7 @@ pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector) {
     });
 }
 
-async fn execute_step(
-    session_id: &str,
-    pty: &Arc<PtyHandle>,
-    idx: usize,
-    step: &InjectorStep,
-) {
+async fn execute_step(session_id: &str, pty: &Arc<PtyHandle>, idx: usize, step: &InjectorStep) {
     match step {
         InjectorStep::Delay { ms } => {
             debug!(session_id = %session_id, step = idx, ms, "injector delay");

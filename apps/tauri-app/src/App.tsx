@@ -18,6 +18,7 @@ import {
   type DaemonHandshake,
 } from "./api";
 import {
+  DEFAULT_CLAUDE_OPTIONS,
   tabGrid,
   type ContainerRef,
   type DaemonMessage,
@@ -864,10 +865,8 @@ export default function App() {
         mode: config.mode,
         initial_prompt: null,
         dangerously_skip_permissions: config.dangerously_skip_permissions,
-        agent: config.agent,
+        agent_options: config.agent_options,
         model: config.model,
-        permission_mode: config.permission_mode,
-        codex_sandbox: config.codex_sandbox,
         extra_env: config.extra_env,
         prompt_injector: null,
       });
@@ -1108,10 +1107,8 @@ export default function App() {
         mode: "plain_shell",
         initial_prompt: null,
         dangerously_skip_permissions: false,
-        agent: "claude",
+        agent_options: DEFAULT_CLAUDE_OPTIONS,
         model: null,
-        permission_mode: null,
-        codex_sandbox: null,
         extra_env: [],
         prompt_injector: null,
       });

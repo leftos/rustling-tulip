@@ -124,4 +124,3 @@ async fn prune_repo(repo: &Path) {
         );
     }
 }
-
