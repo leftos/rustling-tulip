@@ -545,16 +545,40 @@ async fn try_load_handshake(path: &std::path::Path) -> Option<DaemonHandshake> {
 
 async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
     let path = handshake_file()?;
-    let deadline = tokio::time::Instant::now() + SPAWN_WAIT_TIMEOUT;
+    let started = tokio::time::Instant::now();
+    let deadline = started + SPAWN_WAIT_TIMEOUT;
+    let mut next_progress = started + Duration::from_secs(1);
     while tokio::time::Instant::now() < deadline {
         if let Some(parsed) = try_load_handshake(&path).await
             && probe_health(parsed.port).await
         {
+            info!(
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                port = parsed.port,
+                protocol_version = parsed.protocol_version,
+                "wait_for_handshake: daemon ready"
+            );
             return Ok(parsed);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= next_progress {
+            // One-line tick per second so we can see exactly how long the
+            // supervisor waited vs when the daemon actually appeared. Without
+            // this the only signal was a single failure message at timeout.
+            let handshake_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+            debug!(
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                handshake_exists, "wait_for_handshake: still waiting"
+            );
+            next_progress = now + Duration::from_secs(1);
         }
         sleep(POLL_INTERVAL).await;
     }
-    warn!("daemon never reported handshake");
+    warn!(
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        timeout_secs = SPAWN_WAIT_TIMEOUT.as_secs(),
+        "daemon never reported handshake"
+    );
     Err("daemon failed to start within the timeout".to_string())
 }
 

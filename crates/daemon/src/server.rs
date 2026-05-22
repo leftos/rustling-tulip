@@ -196,7 +196,12 @@ async fn reattach_orphans(
     orphans: Vec<OrphanMeta>,
     abandoned: Vec<OrphanMeta>,
 ) {
+    let total_start = std::time::Instant::now();
+    let orphan_count = orphans.len();
+    let abandoned_count = abandoned.len();
+    info!(orphan_count, abandoned_count, "reattach_orphans: begin");
     for meta in orphans {
+        let session_start = std::time::Instant::now();
         match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
             (Some(pipe), Some(tracer_pid)) => {
                 match tracer_client::reattach(
@@ -211,6 +216,7 @@ async fn reattach_orphans(
                         info!(
                             session_id = %meta.session_id,
                             tracer_pid,
+                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             "tracer reattach succeeded"
                         );
                         sessions.insert_reattached(&meta, Arc::clone(&pty));
@@ -253,6 +259,7 @@ async fn reattach_orphans(
                             ?err,
                             session_id = %meta.session_id,
                             tracer_pid,
+                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             "tracer reattach failed; routing to abandoned"
                         );
                         sessions.insert_abandoned(&meta);
@@ -267,6 +274,12 @@ async fn reattach_orphans(
     for meta in abandoned {
         sessions.insert_abandoned(&meta);
     }
+    info!(
+        orphan_count,
+        abandoned_count,
+        elapsed_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "reattach_orphans: done"
+    );
 }
 
 pub async fn run(
@@ -275,6 +288,7 @@ pub async fn run(
     orphans: Vec<OrphanMeta>,
     abandoned: Vec<OrphanMeta>,
 ) -> anyhow::Result<()> {
+    let run_start = std::time::Instant::now();
     let auth_token: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(48)
@@ -283,8 +297,6 @@ pub async fn run(
 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
-
-    reattach_orphans(&sessions, &dirs, &attention_tx, orphans, abandoned).await;
 
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
@@ -311,6 +323,26 @@ pub async fn run(
     // 0 — see `crates/daemon/src/git_watch.rs`.
     crate::git_watch::start(&state, &state_events, client_count_rx);
 
+    // Reattach in the background so the WS server can start listening
+    // immediately. Sessions surface via the SessionEvent broadcast as each
+    // one wires up; clients that connect during reattach see whatever has
+    // landed so far and the rest stream in. Without this the supervisor's
+    // handshake-wait can lose its race against per-session pipe-connect
+    // timeouts (PIPE_CONNECT_TIMEOUT defaults to 10s in tracer_client).
+    let reattach_sessions = Arc::clone(&sessions);
+    let reattach_dirs = dirs.clone();
+    let reattach_attention_tx = attention_tx.clone();
+    tokio::spawn(async move {
+        reattach_orphans(
+            &reattach_sessions,
+            &reattach_dirs,
+            &reattach_attention_tx,
+            orphans,
+            abandoned,
+        )
+        .await;
+    });
+
     let hub = Hub {
         state,
         sessions,
@@ -331,14 +363,24 @@ pub async fn run(
         .route("/shutdown", post(shutdown_handler))
         .with_state(hub);
 
+    let bind_start = std::time::Instant::now();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("binding loopback listener")?;
     let bound = listener.local_addr().context("local addr")?;
-    info!(port = bound.port(), "rustling-tulipd listening");
+    info!(
+        port = bound.port(),
+        bind_elapsed_ms = u64::try_from(bind_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "rustling-tulipd listening"
+    );
 
     write_handshake(&dirs, bound.port(), &auth_token)?;
+    info!(
+        run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "handshake file written; daemon ready for clients"
+    );
 
     let shutdown_signal = async move {
         // Returns once the Shutdown handler flips the watch to `true`. A

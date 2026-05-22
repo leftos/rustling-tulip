@@ -368,11 +368,30 @@ async fn connect_with_retry(pipe: &str) -> anyhow::Result<NamedPipeClient> {
         Busy,
     }
 
+    impl PendingPipeState {
+        fn as_str(&self) -> &'static str {
+            match self {
+                Self::Missing => "missing",
+                Self::Busy => "busy",
+            }
+        }
+    }
+
     let started = Instant::now();
     let mut pending: PendingPipeState;
+    let mut iterations = 0_u32;
     loop {
+        iterations += 1;
         match ClientOptions::new().open(pipe) {
-            Ok(c) => return Ok(c),
+            Ok(c) => {
+                tracing::info!(
+                    pipe,
+                    iterations,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "connect_with_retry: pipe opened"
+                );
+                return Ok(c);
+            }
             Err(err) if err.raw_os_error() == Some(2) => {
                 // ERROR_FILE_NOT_FOUND — tracer hasn't created the pipe yet.
                 // Retry until the timeout.
@@ -386,6 +405,13 @@ async fn connect_with_retry(pipe: &str) -> anyhow::Result<NamedPipeClient> {
             Err(err) => return Err(err).context(format!("opening tracer pipe {pipe}")),
         }
         if started.elapsed() >= PIPE_CONNECT_TIMEOUT {
+            tracing::warn!(
+                pipe,
+                iterations,
+                final_state = pending.as_str(),
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "connect_with_retry: timeout"
+            );
             return match pending {
                 PendingPipeState::Missing => Err(anyhow!(
                     "tracer pipe {pipe} did not appear within {PIPE_CONNECT_TIMEOUT:?}"
