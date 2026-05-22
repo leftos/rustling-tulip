@@ -477,6 +477,59 @@ export default function SessionPane({
               appearance={appearance}
               linkBaseDirs={terminalLinkBaseDirs}
             />
+          ) : session.is_abandoned ? (
+            // Abandoned sessions share `status: Stopped` with naturally-exited
+            // ones, so the abandoned branch has to live before the exited
+            // branch. The Resume / Dismiss buttons mirror the sidebar's
+            // affordances so users don't have to dig into the sidebar to
+            // recover from a daemon-restart reattach failure.
+            <div
+              className="terminal-placeholder session-exited-placeholder"
+              data-testid="session-abandoned"
+            >
+              <div className="session-exited-message">
+                Session abandoned during daemon restart.
+                {session.last_prompt && (
+                  <>
+                    {" "}
+                    <span className="muted small">
+                      Last prompt: {session.last_prompt}
+                    </span>
+                  </>
+                )}
+              </div>
+              {client && (
+                <div className="session-exited-actions">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      client.send({
+                        type: "resume_abandoned",
+                        session_id: session.id,
+                      })
+                    }
+                    data-testid="session-resume-abandoned"
+                    title="Spawn a fresh session from the captured config and replay the prompt"
+                  >
+                    Resume
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() =>
+                      client.send({
+                        type: "discard_abandoned",
+                        session_id: session.id,
+                      })
+                    }
+                    data-testid="session-discard-abandoned"
+                    title="Dismiss this abandoned session without resuming"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </div>
           ) : session.status === "stopped" ? (
             <div
               className="terminal-placeholder session-exited-placeholder"
