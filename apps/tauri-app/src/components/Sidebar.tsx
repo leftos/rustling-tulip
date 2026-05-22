@@ -2131,7 +2131,7 @@ function lastSpawnConfigFor(
 function spawnConfigSummary(config: SpawnConfig | null): string | null {
   if (!config) return null;
   const parts = [
-    config.agent_options.kind === "claude" ? "Claude" : "Codex",
+    agentDisplayName(config.agent_options.kind),
     sessionModeLabel(config.mode),
   ];
   const target = spawnTargetSummary(config);
@@ -2144,6 +2144,17 @@ function spawnConfigSummary(config: SpawnConfig | null): string | null {
   if (config.dangerously_skip_permissions) parts.push("trusted");
   if (config.extra_env.length > 0) parts.push(`${config.extra_env.length} env`);
   return parts.join(" · ");
+}
+
+function agentDisplayName(kind: SpawnConfig["agent_options"]["kind"]): string {
+  switch (kind) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "cursor":
+      return "Cursor";
+  }
 }
 
 function sessionModeLabel(mode: SpawnConfig["mode"]): string {
