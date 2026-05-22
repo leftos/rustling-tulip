@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
@@ -267,37 +267,6 @@ export default function SpawnDialog({
     }
   }, [agent, runMode]);
 
-  // Cursor's `--workspace` accepts a single directory; multi-repo workspaces
-  // aren't supported. Two wrappers resolve the conflict symmetrically by
-  // honouring the click the user just made:
-  //   - Picking cursor with a workspace selected snaps the target down to
-  //     the workspace's first member repo (preserves the user's cursor
-  //     pick instead of silently flipping back to claude).
-  //   - Picking a workspace while cursor is selected snaps the agent to
-  //     claude so the workspace stays usable.
-  const selectAgent = useCallback(
-    (next: Agent) => {
-      if (next === "cursor" && target?.kind === "workspace") {
-        const ws = workspaces.find((w) => w.id === target.id);
-        const firstMemberId = ws?.member_repo_ids[0];
-        if (firstMemberId) {
-          setTarget({ kind: "repo", id: firstMemberId });
-        }
-      }
-      setAgent(next);
-    },
-    [target, workspaces],
-  );
-  const selectTarget = useCallback(
-    (next: TargetSelection | null) => {
-      if (next?.kind === "workspace" && agent === "cursor") {
-        setAgent("claude");
-      }
-      setTarget(next);
-    },
-    [agent],
-  );
-
   useEffect(() => {
     if (!canUseCurrentTab && spawnPlacement.kind === "current_tab") {
       setSpawnPlacement({ kind: "new_tab" });
@@ -372,13 +341,13 @@ export default function SpawnDialog({
                   value={target}
                   repos={repos}
                   workspaces={workspaces}
-                  onChange={selectTarget}
+                  onChange={setTarget}
                 />
               )}
               <AgentPicker
                 agent={agent}
                 runMode={runMode}
-                onAgentChange={selectAgent}
+                onAgentChange={setAgent}
                 onRunModeChange={setRunMode}
               />
               <SpawnPlacementPicker

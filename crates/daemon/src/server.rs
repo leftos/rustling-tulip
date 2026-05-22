@@ -2102,12 +2102,6 @@ pub(crate) async fn spawn_session(
             agent.as_label()
         ));
     }
-    if matches!(&target, SpawnTarget::Workspace { .. }) && !backend.supports_workspace() {
-        return Err(anyhow!(
-            "{} doesn't support multi-repo workspaces; pick a single repo target",
-            agent.as_label()
-        ));
-    }
 
     let t_resolve = std::time::Instant::now();
     let (kind, members, primary_cwd, default_label, workspace_id) = match target {

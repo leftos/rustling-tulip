@@ -47,14 +47,6 @@ pub trait AgentBackend: Send + Sync {
         false
     }
 
-    /// Whether this CLI accepts a multi-repo workspace (cwd + extra dirs).
-    /// Defaults to `true` (claude + codex both support `--add-dir`). Cursor
-    /// has only a single `--workspace <path>` and overrides this to `false`;
-    /// the dispatcher then rejects workspace-target spawns up front.
-    fn supports_workspace(&self) -> bool {
-        true
-    }
-
     /// Build the argv passed to the CLI for an interactive (PTY-attached)
     /// session. Does not include the executable name itself — that is
     /// resolved by [`Self::resolve_program`].

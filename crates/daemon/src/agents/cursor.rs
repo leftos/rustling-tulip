@@ -1,10 +1,14 @@
 //! Cursor (`cursor-agent` CLI from cursor.com) backend.
 //!
 //! Interactive-only in PR1. Cursor's `--workspace` flag takes a single
-//! directory and has no `--add-dir` equivalent, so the dispatcher rejects
-//! workspace targets up front (see [`AgentBackend::supports_workspace`]).
+//! directory and has no `--add-dir` equivalent. When spawned against a
+//! multi-repo workspace target, the daemon still creates worktrees for
+//! every member but cursor only sees the first member's worktree as cwd;
+//! the user is on their own (or can prompt cursor explicitly) about the
+//! other member directories.
+//!
 //! Headless via `cursor-agent --print --output-format stream-json` is
-//! straightforward but deferred to a follow-up alongside codex headless.
+//! straightforward but deferred to a follow-up.
 
 use super::{AgentBackend, CommonSpawnFields};
 use protocol::{AgentOptions, CursorSandbox, SessionMember};
@@ -18,10 +22,6 @@ impl AgentBackend for CursorBackend {
 
     fn default_program(&self) -> &'static str {
         "cursor-agent"
-    }
-
-    fn supports_workspace(&self) -> bool {
-        false
     }
 
     fn build_interactive_args(
