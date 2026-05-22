@@ -86,6 +86,36 @@ export default function TabBar({
   const [confirmingCloseOthers, setConfirmingCloseOthers] = useState(false);
   const lastClickedRef = useRef<string | null>(null);
 
+  // While a tab's close button is armed for confirm, listen for any
+  // pointer-down or Escape outside the armed button and reset the arm.
+  // Without this, the checkmark stays stuck after the user moves on,
+  // forcing them to either click it (closing the tab) or close another
+  // tab to clear the state.
+  useEffect(() => {
+    if (confirmingCloseId === null) return;
+    const onPointer = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      // If the pointer-down is on the armed button (or any descendant),
+      // let the button's own click handler perform the confirm — the
+      // armed-state reset happens there.
+      if (
+        target?.closest?.('[data-testid="tab-pill-close"][data-confirming="true"]')
+      ) {
+        return;
+      }
+      setConfirmingCloseId(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConfirmingCloseId(null);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [confirmingCloseId]);
+
   // Drop selection entries when those tabs go away (e.g. close after merge).
   useEffect(() => {
     setSelectedTabIds((prev) => {
