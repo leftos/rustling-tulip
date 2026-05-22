@@ -298,6 +298,17 @@ pub async fn run(
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
 
+    // Reattach orphans BEFORE binding the WS server. Doing the reattach
+    // off-thread caused a regression where bytes from the tracer's ring
+    // snapshot flowed through `attach_lifecycle → fan_out_pty` before the
+    // client mounted its Terminal and sent `Attach`, so the per-client
+    // `attached` filter dropped them and reattached panes appeared frozen.
+    // Keeping reattach on the critical path means clients only see
+    // sessions once they're fully wired up, at the cost of delaying the
+    // handshake by `reattach_orphans`'s elapsed time. The supervisor's
+    // SPAWN_WAIT_TIMEOUT is sized to absorb a worst-case PIPE_CONNECT_TIMEOUT.
+    reattach_orphans(&sessions, &dirs, &attention_tx, orphans, abandoned).await;
+
     // Forward attention events through the registry's broadcast so all
     // attached clients see them via the same SessionEvent channel they
     // already subscribe to.
@@ -322,26 +333,6 @@ pub async fn run(
     // and removing one stops it. Refreshers park while `client_count` is
     // 0 — see `crates/daemon/src/git_watch.rs`.
     crate::git_watch::start(&state, &state_events, client_count_rx);
-
-    // Reattach in the background so the WS server can start listening
-    // immediately. Sessions surface via the SessionEvent broadcast as each
-    // one wires up; clients that connect during reattach see whatever has
-    // landed so far and the rest stream in. Without this the supervisor's
-    // handshake-wait can lose its race against per-session pipe-connect
-    // timeouts (PIPE_CONNECT_TIMEOUT defaults to 10s in tracer_client).
-    let reattach_sessions = Arc::clone(&sessions);
-    let reattach_dirs = dirs.clone();
-    let reattach_attention_tx = attention_tx.clone();
-    tokio::spawn(async move {
-        reattach_orphans(
-            &reattach_sessions,
-            &reattach_dirs,
-            &reattach_attention_tx,
-            orphans,
-            abandoned,
-        )
-        .await;
-    });
 
     let hub = Hub {
         state,
