@@ -258,10 +258,11 @@ export default function SpawnDialog({
   );
   const restoreLastSpawnDefaults = spawnPrefill === undefined;
 
-  // Headless mode isn't supported for codex or cursor yet — snap back to
-  // interactive when the user picks one of them while headless was selected.
+  // Headless mode isn't supported for cursor yet — snap back to interactive
+  // when the user picks cursor while headless was selected. Codex and claude
+  // both speak headless (claude via stream-json, codex via exec --json).
   useEffect(() => {
-    if ((agent === "codex" || agent === "cursor") && runMode === "headless") {
+    if (agent === "cursor" && runMode === "headless") {
       setRunMode("interactive");
     }
   }, [agent, runMode]);
@@ -482,11 +483,10 @@ function Footer({
   const isPlainShell = runMode === "plain_shell";
   const isCodex = agent === "codex";
   const isCursor = agent === "cursor";
-  const headlessDisabledReason =
-    isCodex || isCursor
-      ? `headless mode is not yet supported for ${agent}`
-      : undefined;
-  const headlessLocked = isCodex || isCursor;
+  const headlessDisabledReason = isCursor
+    ? "headless mode is not yet supported for cursor"
+    : undefined;
+  const headlessLocked = isCursor;
   const useYolo = isCodex || isCursor;
   const authorityFlag = useYolo ? "--yolo" : "--dangerously-skip-permissions";
   const authorityDetail = useYolo
