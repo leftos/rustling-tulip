@@ -20,6 +20,7 @@ pub enum Agent {
     #[default]
     Claude,
     Codex,
+    Cursor,
 }
 
 impl Agent {
@@ -29,6 +30,7 @@ impl Agent {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -37,7 +39,7 @@ impl Agent {
     /// against every known agent's program name).
     #[must_use]
     pub fn all() -> &'static [Self] {
-        &[Self::Claude, Self::Codex]
+        &[Self::Claude, Self::Codex, Self::Cursor]
     }
 }
 
@@ -62,6 +64,17 @@ pub enum AgentOptions {
         #[serde(default)]
         sandbox: Option<CodexSandbox>,
     },
+    Cursor {
+        /// When `true`, cursor spawns with `--plan` (read-only / planning
+        /// mode). Ignored when [`SpawnRequest::dangerously_skip_permissions`]
+        /// is true (yolo bypasses sandboxing entirely).
+        #[serde(default)]
+        plan_mode: bool,
+        /// Cursor's `--sandbox enabled|disabled` flag. Ignored when
+        /// `dangerously_skip_permissions` is true.
+        #[serde(default)]
+        sandbox: Option<CursorSandbox>,
+    },
 }
 
 impl AgentOptions {
@@ -71,6 +84,7 @@ impl AgentOptions {
         match self {
             Self::Claude { .. } => Agent::Claude,
             Self::Codex { .. } => Agent::Codex,
+            Self::Cursor { .. } => Agent::Cursor,
         }
     }
 }
@@ -100,6 +114,25 @@ impl CodexSandbox {
             Self::ReadOnly => "read-only",
             Self::WorkspaceWrite => "workspace-write",
             Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// Cursor sandbox policy. Maps to `cursor-agent --sandbox <value>`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorSandbox {
+    Enabled,
+    Disabled,
+}
+
+impl CursorSandbox {
+    /// CLI value as expected by `cursor-agent --sandbox <X>`.
+    #[must_use]
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
         }
     }
 }
@@ -533,6 +566,14 @@ impl<'de> Deserialize<'de> for SpawnConfig {
                     },
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
+                    },
+                    // Cursor was introduced in v20 alongside `agent_options`,
+                    // so legacy (v18) JSON should never carry `agent: "cursor"`.
+                    // If it somehow does (manually-edited state file), fall
+                    // back to the default Cursor variant.
+                    Agent::Cursor => AgentOptions::Cursor {
+                        plan_mode: false,
+                        sandbox: None,
                     },
                 });
         Ok(Self {
@@ -1201,6 +1242,14 @@ impl<'de> Deserialize<'de> for PresetEntry {
                     },
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
+                    },
+                    // Cursor was introduced in v20 alongside `agent_options`,
+                    // so legacy (v18) JSON should never carry `agent: "cursor"`.
+                    // If it somehow does (manually-edited state file), fall
+                    // back to the default Cursor variant.
+                    Agent::Cursor => AgentOptions::Cursor {
+                        plan_mode: false,
+                        sandbox: None,
                     },
                 });
         Ok(Self {
@@ -2905,6 +2954,36 @@ mod tests {
         assert_eq!(req.agent(), Agent::Codex);
         assert!(json.contains(r#""kind":"codex""#));
         assert!(json.contains(r#""sandbox":"workspace-write""#));
+    }
+
+    #[test]
+    fn spawn_request_round_trip_cursor() {
+        let req = SpawnRequest {
+            label: Some("cursor-test".to_string()),
+            target: SpawnTarget::Single {
+                repo_id: "r1".to_string(),
+                branch_name: "feat/y".to_string(),
+                base_branch: None,
+                use_worktree: true,
+            },
+            mode: SessionMode::Interactive,
+            initial_prompt: Some("investigate".to_string()),
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Cursor {
+                plan_mode: true,
+                sandbox: Some(CursorSandbox::Enabled),
+            },
+            model: Some("sonnet-4".to_string()),
+            extra_env: vec![],
+            prompt_injector: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, decoded);
+        assert_eq!(req.agent(), Agent::Cursor);
+        assert!(json.contains(r#""kind":"cursor""#));
+        assert!(json.contains(r#""plan_mode":true"#));
+        assert!(json.contains(r#""sandbox":"enabled""#));
     }
 
     #[test]

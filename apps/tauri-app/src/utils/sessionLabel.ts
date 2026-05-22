@@ -36,9 +36,9 @@ export function sessionLabelTooltip(s: SessionSnapshot): string {
   return lines.join("\n");
 }
 
-/// Short token identifying the user-facing runtime: "claude" / "codex" for
-/// agent sessions, "pwsh" / "powershell" / "cmd" / "bash" / "sh" for plain
-/// shells.
+/// Short token identifying the user-facing runtime: "claude" / "codex" /
+/// "cursor" for agent sessions, "pwsh" / "powershell" / "cmd" / "bash" /
+/// "sh" for plain shells.
 export function sessionRuntimeLabel(s: SessionSnapshot): string | null {
   if (s.mode !== "plain_shell") return s.agent;
   if (s.program_name) return s.program_name;

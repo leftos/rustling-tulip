@@ -5,9 +5,11 @@ import protocolVersion from "../../../protocol-version.json";
 export const PROTOCOL_VERSION: number = protocolVersion.version;
 export const SUPPORTED_PROTOCOL_VERSIONS: readonly number[] = protocolVersion.supported;
 
-export type Agent = "claude" | "codex";
+export type Agent = "claude" | "codex" | "cursor";
 
 export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
+
+export type CursorSandbox = "enabled" | "disabled";
 
 // Per-agent options. Mirrors `protocol::AgentOptions`. The discriminant
 // (`kind`) doubles as the agent selector — `agentFromOptions(opts)` returns
@@ -15,10 +17,13 @@ export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access
 // apply to that agent's CLI.
 export type AgentOptions =
   | { kind: "claude"; permission_mode: PermissionMode | null }
-  | { kind: "codex"; sandbox: CodexSandbox | null };
+  | { kind: "codex"; sandbox: CodexSandbox | null }
+  | { kind: "cursor"; plan_mode: boolean; sandbox: CursorSandbox | null };
 
 export function agentFromOptions(opts: AgentOptions): Agent {
-  return opts.kind === "claude" ? "claude" : "codex";
+  if (opts.kind === "claude") return "claude";
+  if (opts.kind === "codex") return "codex";
+  return "cursor";
 }
 
 export const DEFAULT_CLAUDE_OPTIONS: AgentOptions = {

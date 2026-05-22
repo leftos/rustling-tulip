@@ -2095,9 +2095,16 @@ pub(crate) async fn spawn_session(
             "standalone targets only support plain_shell sessions"
         ));
     }
-    if mode == SessionMode::Headless && !crate::agents::backend_for(agent).supports_headless() {
+    let backend = crate::agents::backend_for(agent);
+    if mode == SessionMode::Headless && !backend.supports_headless() {
         return Err(anyhow!(
             "headless mode is not yet supported for {}; use interactive mode",
+            agent.as_label()
+        ));
+    }
+    if matches!(&target, SpawnTarget::Workspace { .. }) && !backend.supports_workspace() {
+        return Err(anyhow!(
+            "{} doesn't support multi-repo workspaces; pick a single repo target",
             agent.as_label()
         ));
     }
@@ -2476,10 +2483,18 @@ async fn spawn_plain_shell_session(
                 "plain shell sessions do not accept a permission_mode"
             ));
         }
-        AgentOptions::Codex { sandbox: Some(_) } => {
+        AgentOptions::Codex { sandbox: Some(_) }
+        | AgentOptions::Cursor {
+            sandbox: Some(_), ..
+        } => {
             return Err(anyhow!("plain shell sessions do not accept a sandbox"));
         }
-        AgentOptions::Claude { .. } | AgentOptions::Codex { .. } => {}
+        AgentOptions::Cursor {
+            plan_mode: true, ..
+        } => {
+            return Err(anyhow!("plain shell sessions do not accept a plan_mode"));
+        }
+        AgentOptions::Claude { .. } | AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {}
     }
     if cfg.dangerously_skip_permissions {
         return Err(anyhow!(

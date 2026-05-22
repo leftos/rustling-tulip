@@ -1497,6 +1497,7 @@ function SessionLeaf(p: SessionLeafProps) {
   const s = p.session;
   const isPlainShell = s.mode === "plain_shell";
   const isCodex = !isPlainShell && s.agent === "codex";
+  const isCursor = !isPlainShell && s.agent === "cursor";
   const accentColor = resolveAppearance(
     p.settings,
     p.repos,
@@ -1555,6 +1556,7 @@ function SessionLeaf(p: SessionLeafProps) {
     s.is_inactive ? "is-inactive" : "",
     isPlainShell ? "is-shell" : "",
     isCodex ? "is-codex" : "",
+    isCursor ? "is-cursor" : "",
     accentColor ? "has-session-accent" : "",
     s.elevated_authority ? "has-elevated-authority" : "",
     paneDraggable ? "is-draggable" : "",

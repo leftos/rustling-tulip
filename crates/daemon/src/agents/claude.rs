@@ -34,7 +34,7 @@ impl AgentBackend for ClaudeBackend {
     ) -> Vec<String> {
         let permission_mode = match opts {
             AgentOptions::Claude { permission_mode } => *permission_mode,
-            AgentOptions::Codex { .. } => {
+            AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
                 debug_assert!(false, "claude backend invoked with non-claude options");
                 None
             }
@@ -74,7 +74,7 @@ impl AgentBackend for ClaudeBackend {
     ) -> Vec<String> {
         let permission_mode = match opts {
             AgentOptions::Claude { permission_mode } => *permission_mode,
-            AgentOptions::Codex { .. } => {
+            AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
                 debug_assert!(false, "claude backend invoked with non-claude options");
                 None
             }

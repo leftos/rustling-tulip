@@ -223,7 +223,7 @@ export default function Terminal({
   /// moves to during a redraw, which reads as flicker.
   ///
   /// Two cases:
-  ///   - Interactive agent sessions (claude / codex): Ink-based TUIs
+  ///   - Interactive agent sessions (claude / codex / cursor): Ink-based TUIs
   ///     that render inline on the *normal* buffer (no `\e[?1049h`),
   ///     redrawing by cursor movement. Always hide xterm's cursor.
   ///   - Plain shells: cursor stays visible during normal shell use,

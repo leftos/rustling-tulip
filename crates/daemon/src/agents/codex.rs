@@ -28,7 +28,7 @@ impl AgentBackend for CodexBackend {
     ) -> Vec<String> {
         let sandbox = match opts {
             AgentOptions::Codex { sandbox } => *sandbox,
-            AgentOptions::Claude { .. } => {
+            AgentOptions::Claude { .. } | AgentOptions::Cursor { .. } => {
                 debug_assert!(false, "codex backend invoked with non-codex options");
                 None
             }

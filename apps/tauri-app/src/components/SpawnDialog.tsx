@@ -8,6 +8,7 @@ import type {
   Agent,
   AgentOptions,
   CodexSandbox,
+  CursorSandbox,
   DaemonMessage,
   MemberSpawnPreview,
   PermissionMode,
@@ -86,6 +87,8 @@ interface AdvancedConfig {
   model: string | null;
   permissionMode: PermissionMode | null;
   codexSandbox: CodexSandbox | null;
+  cursorSandbox: CursorSandbox | null;
+  cursorPlanMode: boolean;
   envRows: EnvRow[];
 }
 
@@ -98,6 +101,8 @@ function emptyAdvanced(): AdvancedConfig {
     model: null,
     permissionMode: settings.spawn.default_permission_mode,
     codexSandbox: settings.spawn.default_codex_sandbox,
+    cursorSandbox: null,
+    cursorPlanMode: false,
     envRows: [],
   };
 }
@@ -121,28 +126,38 @@ function advancedFromConfig(cfg: SpawnConfig): AdvancedConfig {
     model: cfg.model,
     permissionMode: opts.kind === "claude" ? opts.permission_mode : null,
     codexSandbox: opts.kind === "codex" ? opts.sandbox : null,
+    cursorSandbox: opts.kind === "cursor" ? opts.sandbox : null,
+    cursorPlanMode: opts.kind === "cursor" ? opts.plan_mode : false,
     envRows: cfg.extra_env.map(([key, value]) => ({ key, value })),
   };
 }
 
 /// Build the `AgentOptions` discriminated union the daemon expects on the
 /// wire. Trusted launches and plain-shell spawns drop the agent-specific
-/// inner field so the daemon's fail-fast validation sees a clean shape.
+/// inner fields so the daemon's fail-fast validation sees a clean shape.
 function buildAgentOptions(
   agent: Agent,
   cfg: AdvancedConfig,
   skipPerms: boolean,
   isPlainShell: boolean,
 ): AgentOptions {
+  const suppressInner = isPlainShell || skipPerms;
   if (agent === "claude") {
     return {
       kind: "claude",
-      permission_mode: isPlainShell || skipPerms ? null : cfg.permissionMode,
+      permission_mode: suppressInner ? null : cfg.permissionMode,
+    };
+  }
+  if (agent === "codex") {
+    return {
+      kind: "codex",
+      sandbox: suppressInner ? null : cfg.codexSandbox,
     };
   }
   return {
-    kind: "codex",
-    sandbox: isPlainShell || skipPerms ? null : cfg.codexSandbox,
+    kind: "cursor",
+    plan_mode: isPlainShell ? false : cfg.cursorPlanMode,
+    sandbox: suppressInner ? null : cfg.cursorSandbox,
   };
 }
 
@@ -243,13 +258,23 @@ export default function SpawnDialog({
   );
   const restoreLastSpawnDefaults = spawnPrefill === undefined;
 
-  // Headless mode isn't supported for codex yet — snap back to interactive
-  // when the user picks codex while headless was selected.
+  // Headless mode isn't supported for codex or cursor yet — snap back to
+  // interactive when the user picks one of them while headless was selected.
   useEffect(() => {
-    if (agent === "codex" && runMode === "headless") {
+    if ((agent === "codex" || agent === "cursor") && runMode === "headless") {
       setRunMode("interactive");
     }
   }, [agent, runMode]);
+
+  // Cursor's `--workspace` accepts a single directory; multi-repo workspaces
+  // aren't supported. When the user picks a workspace target while cursor
+  // is selected, snap the agent back to claude so the spawn submit doesn't
+  // hit the daemon's hard reject.
+  useEffect(() => {
+    if (agent === "cursor" && target?.kind === "workspace") {
+      setAgent("claude");
+    }
+  }, [agent, target]);
 
   useEffect(() => {
     if (!canUseCurrentTab && spawnPlacement.kind === "current_tab") {
@@ -333,6 +358,7 @@ export default function SpawnDialog({
                 runMode={runMode}
                 onAgentChange={setAgent}
                 onRunModeChange={setRunMode}
+                disableCursor={target?.kind === "workspace"}
               />
               <SpawnPlacementPicker
                 value={spawnPlacement}
@@ -455,12 +481,16 @@ function Footer({
 }) {
   const isPlainShell = runMode === "plain_shell";
   const isCodex = agent === "codex";
-  const headlessDisabledReason = isCodex
-    ? "headless mode is not yet supported for codex"
-    : undefined;
-  const authorityFlag = isCodex ? "--yolo" : "--dangerously-skip-permissions";
-  const authorityDetail = isCodex
-    ? "Codex approvals and sandboxing are bypassed for this session."
+  const isCursor = agent === "cursor";
+  const headlessDisabledReason =
+    isCodex || isCursor
+      ? `headless mode is not yet supported for ${agent}`
+      : undefined;
+  const headlessLocked = isCodex || isCursor;
+  const useYolo = isCodex || isCursor;
+  const authorityFlag = useYolo ? "--yolo" : "--dangerously-skip-permissions";
+  const authorityDetail = useYolo
+    ? `${agent} approvals and sandboxing are bypassed for this session.`
     : "Claude approval prompts are bypassed for this session.";
   return (
     <>
@@ -477,13 +507,13 @@ function Footer({
             Interactive
           </label>
           <label
-            className={`radio${isCodex ? " radio-disabled" : ""}`}
+            className={`radio${headlessLocked ? " radio-disabled" : ""}`}
             title={headlessDisabledReason}
           >
             <input
               type="radio"
               checked={runMode === "headless"}
-              disabled={isCodex}
+              disabled={headlessLocked}
               onChange={() => onRunModeChange("headless")}
               data-testid="spawn-runmode-headless"
             />
@@ -564,9 +594,14 @@ function AdvancedSection({
     onAdvancedChange({ ...advanced, permissionMode });
   const setCodexSandbox = (codexSandbox: CodexSandbox | null) =>
     onAdvancedChange({ ...advanced, codexSandbox });
+  const setCursorSandbox = (cursorSandbox: CursorSandbox | null) =>
+    onAdvancedChange({ ...advanced, cursorSandbox });
+  const setCursorPlanMode = (cursorPlanMode: boolean) =>
+    onAdvancedChange({ ...advanced, cursorPlanMode });
   const setEnvRows = (envRows: EnvRow[]) =>
     onAdvancedChange({ ...advanced, envRows });
   const isCodex = agent === "codex";
+  const isCursor = agent === "cursor";
   const trustedLaunchLabel = "trusted launch";
 
   return (
@@ -586,16 +621,16 @@ function AdvancedSection({
               </option>
             ))}
           </select>
-          {isCodex && (
+          {(isCodex || isCursor) && (
             <span className="muted small">
-              Model list is claude-named; type a codex model id manually if
+              Model list is claude-named; type a {agent} model id manually if
               none of these fit.
             </span>
           )}
         </label>
       )}
 
-      {!isPlainShell && !isCodex && (
+      {!isPlainShell && !isCodex && !isCursor && (
         <label className="field">
           <span>Claude approval mode</span>
           <select
@@ -652,6 +687,48 @@ function AdvancedSection({
             </span>
           )}
         </label>
+      )}
+
+      {!isPlainShell && isCursor && (
+        <>
+          <label
+            className="checkbox"
+            data-testid="spawn-cursor-plan-mode"
+            title="Start cursor in --plan mode (read-only / planning)"
+          >
+            <input
+              type="checkbox"
+              checked={advanced.cursorPlanMode}
+              onChange={(e) => setCursorPlanMode(e.target.checked)}
+            />
+            <span>Plan mode (read-only / planning)</span>
+          </label>
+          <label className="field">
+            <span>Cursor sandbox</span>
+            <select
+              value={advanced.cursorSandbox ?? ""}
+              onChange={(e) =>
+                setCursorSandbox(
+                  e.target.value === ""
+                    ? null
+                    : (e.target.value as CursorSandbox),
+                )
+              }
+              disabled={skipPerms}
+            >
+              <option value="">CLI default</option>
+              <option value="enabled">enabled</option>
+              <option value="disabled">disabled</option>
+            </select>
+            {skipPerms && (
+              <span className="muted small">
+                Ignored while {trustedLaunchLabel} is on. Cursor will run with
+                --yolo, which overrides sandbox mode. The dropdown value is
+                preserved for when you toggle {trustedLaunchLabel} off.
+              </span>
+            )}
+          </label>
+        </>
       )}
 
       <fieldset className="field">
@@ -752,11 +829,13 @@ function AgentPicker({
   runMode,
   onAgentChange,
   onRunModeChange,
+  disableCursor,
 }: {
   agent: Agent;
   runMode: RunMode;
   onAgentChange: (a: Agent) => void;
   onRunModeChange: (m: RunMode) => void;
+  disableCursor: boolean;
 }) {
   const isPlainShell = runMode === "plain_shell";
   const selectAgent = (next: Agent) => {
@@ -786,6 +865,23 @@ function AgentPicker({
           data-testid="spawn-agent-codex"
         />
         codex
+      </label>
+      <label
+        className={`radio${disableCursor ? " radio-disabled" : ""}`}
+        title={
+          disableCursor
+            ? "Cursor doesn't support multi-repo workspaces yet"
+            : undefined
+        }
+      >
+        <input
+          type="radio"
+          checked={!isPlainShell && agent === "cursor"}
+          disabled={disableCursor}
+          onChange={() => selectAgent("cursor")}
+          data-testid="spawn-agent-cursor"
+        />
+        cursor
       </label>
       <label className="radio">
         <input

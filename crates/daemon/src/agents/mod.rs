@@ -11,6 +11,7 @@
 //! and extend [`backend_for`] / [`Agent::all`] to dispatch to it.
 mod claude;
 mod codex;
+mod cursor;
 
 use crate::session::SessionRegistry;
 use protocol::{Agent, AgentOptions, SessionMember};
@@ -44,6 +45,14 @@ pub trait AgentBackend: Send + Sync {
     /// PR1: only claude returns `true`.
     fn supports_headless(&self) -> bool {
         false
+    }
+
+    /// Whether this CLI accepts a multi-repo workspace (cwd + extra dirs).
+    /// Defaults to `true` (claude + codex both support `--add-dir`). Cursor
+    /// has only a single `--workspace <path>` and overrides this to `false`;
+    /// the dispatcher then rejects workspace-target spawns up front.
+    fn supports_workspace(&self) -> bool {
+        true
     }
 
     /// Build the argv passed to the CLI for an interactive (PTY-attached)
@@ -91,6 +100,7 @@ pub trait AgentBackend: Send + Sync {
 
 static CLAUDE: claude::ClaudeBackend = claude::ClaudeBackend;
 static CODEX: codex::CodexBackend = codex::CodexBackend;
+static CURSOR: cursor::CursorBackend = cursor::CursorBackend;
 
 /// Look up the backend instance for a given [`Agent`] variant. Always
 /// returns a static reference (backends are stateless).
@@ -99,6 +109,7 @@ pub fn backend_for(agent: Agent) -> &'static dyn AgentBackend {
     match agent {
         Agent::Claude => &CLAUDE,
         Agent::Codex => &CODEX,
+        Agent::Cursor => &CURSOR,
     }
 }
 
