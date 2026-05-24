@@ -13,7 +13,7 @@ use protocol::{
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -36,15 +36,28 @@ pub enum SessionEvent {
     /// every other variant of this enum that big too.
     Updated(Box<SessionSnapshot>),
     Removed(String),
-    PtyOutput {
-        session_id: String,
-        data: Vec<u8>,
-    },
     Attention {
         session_id: String,
         reason: protocol::AttentionReason,
     },
 }
+
+/// Atomic snapshot returned by `attach_lifecycle`'s task when a client requests
+/// it via the `scrollback_snapshot_req` channel. `live` is positioned at the
+/// first PTY chunk NOT yet appended to `data`, so a freshly-spawned forwarder
+/// task reading from `live` produces exactly the bytes after the snapshot —
+/// no overlap with `data`, no gap.
+#[derive(Debug)]
+pub struct ScrollbackSnapshot {
+    pub data: Vec<u8>,
+    pub truncated: bool,
+    pub live: broadcast::Receiver<Vec<u8>>,
+}
+
+/// Per-session sender side of the snapshot-request channel. Cloned by the
+/// `LoadScrollback` handler each time it needs an atomic snapshot. Stored on
+/// the `SessionRecord` so the handler can find it via the registry.
+pub type ScrollbackSnapshotReq = mpsc::UnboundedSender<oneshot::Sender<ScrollbackSnapshot>>;
 
 pub struct SessionRecord {
     pub id: String,
@@ -128,6 +141,15 @@ pub struct SessionRecord {
     /// for headless, orphaned, or stopped sessions. Cleared by the exit
     /// watcher when the child dies.
     pub input_notifier: Option<mpsc::UnboundedSender<usize>>,
+    /// Sender for the `attach_lifecycle` task's snapshot-request channel.
+    /// `Some` for PTY sessions whose lifecycle task is running. The
+    /// `LoadScrollback` handler uses this to ask the lifecycle task for an
+    /// atomic (scrollback bytes, live-receiver) pair, ensuring the per-client
+    /// forwarder picks up exactly where the persisted scrollback left off.
+    /// `None` for headless, orphaned, or abandoned sessions (no live PTY) —
+    /// in those cases `LoadScrollback` falls back to a direct file read with
+    /// no live forwarder.
+    pub scrollback_snapshot_req: Option<ScrollbackSnapshotReq>,
 }
 
 impl SessionRecord {
@@ -218,14 +240,26 @@ impl SessionRegistry {
     }
 
     pub fn insert(&self, record: SessionRecord) {
+        self.insert_pending(record).publish();
+    }
+
+    /// Put `record` into the registry map WITHOUT firing `SessionUpdated`. The
+    /// returned [`PendingInsert`] hands back the `Arc<Mutex<SessionRecord>>` so
+    /// the caller can patch fields (typically `scrollback_snapshot_req` and
+    /// `input_notifier`, which depend on infrastructure spawned after the
+    /// record is in the map) before publishing. Calling `publish()` fires the
+    /// snapshot exactly once, so clients see the record fully wired up.
+    pub fn insert_pending(&self, record: SessionRecord) -> PendingInsert<'_> {
         let id = record.id.clone();
         let arc = Arc::new(Mutex::new(record));
         {
             let mut guard = write(&self.by_id);
             guard.insert(id, arc.clone());
         }
-        let snap = lock(&arc).snapshot();
-        let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
+        PendingInsert {
+            registry: self,
+            arc,
+        }
     }
 
     pub fn remove(&self, id: &str) {
@@ -257,17 +291,34 @@ impl SessionRegistry {
         let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
     }
 
-    pub fn fan_out_pty(&self, session_id: &str, data: Vec<u8>) {
-        let _ = self.events.send(SessionEvent::PtyOutput {
-            session_id: session_id.to_string(),
-            data,
-        });
-    }
-
     pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
         let _ = self
             .events
             .send(SessionEvent::Attention { session_id, reason });
+    }
+}
+
+/// Two-stage insert: caller patches the record (via `arc()`) and then calls
+/// `publish()` to fire `SessionEvent::Updated`. Required when fields like
+/// `scrollback_snapshot_req` need to be set by infrastructure that's only
+/// available after the record is reachable in the registry — calling the
+/// regular `insert()` would publish a half-wired snapshot first.
+pub struct PendingInsert<'a> {
+    registry: &'a SessionRegistry,
+    arc: Arc<Mutex<SessionRecord>>,
+}
+
+impl PendingInsert<'_> {
+    pub fn arc(&self) -> &Arc<Mutex<SessionRecord>> {
+        &self.arc
+    }
+
+    pub fn publish(self) {
+        let snap = lock(&self.arc).snapshot();
+        let _ = self
+            .registry
+            .events
+            .send(SessionEvent::Updated(Box::new(snap)));
     }
 }
 
@@ -300,37 +351,107 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
     rec.metrics.last_activity_at = Some(Utc::now());
 }
 
-/// Wires up the lifecycle tasks for a freshly-spawned PTY session: copies
-/// output to the registry's broadcast and updates state when the child exits.
-/// `dirs` is `Some` for normal spawns so the orphan-meta sidecar gets cleaned
-/// up on exit; pass `None` for reattached orphans where the sidecar is owned
-/// by the original spawner.
+/// Wires up the lifecycle tasks for a PTY session and returns the snapshot-
+/// request sender the caller must store on the `SessionRecord`. The lifecycle
+/// task:
+///   - persists each PTY chunk to scrollback when `dirs.is_some()`
+///   - handles snapshot requests atomically: reads the scrollback file and
+///     resubscribes to `pty.output` in the same `tokio::select!` arm, so the
+///     returned `ScrollbackSnapshot.live` is positioned at the next chunk NOT
+///     in `data` — no overlap, no gap. This lets a freshly-spawned per-client
+///     forwarder pick up exactly where the persisted scrollback left off.
+///
+/// `dirs` is `Some` for normal spawns + reattaches so the orphan-meta sidecar
+/// gets cleaned up on exit and scrollback gets persisted; pass `None` for
+/// callers that don't own the persistence (no current caller does, but the
+/// option is preserved for symmetry with the previous signature).
+///
+/// Callers must invoke `attach_lifecycle` AFTER `insert_pending` so the exit
+/// watcher's `registry.update` finds the session record. The returned
+/// `snap_tx` should be patched onto the record's `scrollback_snapshot_req`
+/// field before calling `PendingInsert::publish`.
 pub fn attach_lifecycle(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     pty: &Arc<PtyHandle>,
     dirs: Option<Dirs>,
-) {
-    // Output forwarder. Also persists each chunk to scrollback when dirs is
-    // provided (i.e. for normal spawns, not reattached orphans which don't
-    // own a stream to capture from).
+) -> ScrollbackSnapshotReq {
+    let (snap_tx, mut snap_rx) = mpsc::unbounded_channel::<oneshot::Sender<ScrollbackSnapshot>>();
     let mut output = pty.output.subscribe();
-    let registry_for_output = Arc::clone(registry);
-    let session_for_output = session_id.clone();
-    let dirs_for_output = dirs.clone();
+    let session_for_task = session_id.clone();
+    let dirs_for_task = dirs.clone();
     tokio::spawn(async move {
+        // Tracks whether snap_rx is still open. When all senders drop the
+        // record's `scrollback_snapshot_req` (typically on session exit), the
+        // receiver's `recv()` would return None on every poll — without the
+        // guard the select! arm would spin.
+        let mut snap_open = true;
         loop {
-            match output.recv().await {
-                Ok(bytes) => {
-                    if let Some(d) = &dirs_for_output {
-                        scrollback::append(d, &session_for_output, &bytes);
+            tokio::select! {
+                msg = output.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            if let Some(d) = &dirs_for_task {
+                                scrollback::append(d, &session_for_task, &bytes);
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(session_id = %session_for_task, lagged = n, "pty output lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    registry_for_output.fan_out_pty(&session_for_output, bytes);
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(session_id = %session_for_output, lagged = n, "pty output lagged");
+                req = snap_rx.recv(), if snap_open => {
+                    match req {
+                        Some(reply) => {
+                            // Drain any bytes the broadcast already holds
+                            // into scrollback BEFORE snapshotting. Without
+                            // this, messages queued between our last
+                            // `output.recv()` and the current tail would
+                            // land in scrollback later (via the output arm
+                            // on a subsequent iteration) but NOT in the
+                            // `live` receiver returned below — so the
+                            // client would miss them entirely until the
+                            // next reattach.
+                            loop {
+                                match output.try_recv() {
+                                    Ok(bytes) => {
+                                        if let Some(d) = &dirs_for_task {
+                                            scrollback::append(d, &session_for_task, &bytes);
+                                        }
+                                    }
+                                    Err(
+                                        broadcast::error::TryRecvError::Empty
+                                        | broadcast::error::TryRecvError::Closed,
+                                    ) => break,
+                                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                        warn!(
+                                            session_id = %session_for_task,
+                                            lagged = n,
+                                            "pty output lagged during snapshot drain"
+                                        );
+                                    }
+                                }
+                            }
+                            let (data, truncated) = if let Some(d) = &dirs_for_task {
+                                scrollback::load(d, &session_for_task)
+                            } else {
+                                (Vec::new(), false)
+                            };
+                            // `resubscribe` positions the new receiver at
+                            // the current tail. With the drain above, the
+                            // output receiver is also at the tail, so any
+                            // future message reaches both: this task writes
+                            // it to scrollback, and the per-client forwarder
+                            // sends it on the wire.
+                            let live = output.resubscribe();
+                            let _ = reply.send(ScrollbackSnapshot { data, truncated, live });
+                        }
+                        None => {
+                            snap_open = false;
+                        }
+                    }
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -346,6 +467,7 @@ pub fn attach_lifecycle(
                 rec.exit_code = Some(code);
                 rec.pty = None;
                 rec.input_notifier = None;
+                rec.scrollback_snapshot_req = None;
                 push_recent_action(rec, format!("exited with code {code}"));
             });
             registry_for_exit
@@ -355,6 +477,8 @@ pub fn attach_lifecycle(
             }
         });
     }
+
+    snap_tx
 }
 
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
@@ -415,6 +539,7 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            scrollback_snapshot_req: None,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -425,7 +550,11 @@ impl SessionRegistry {
     /// tracer's pipe — input, output, resize, and kill all work as if the
     /// daemon had spawned it directly. Surfaced with `is_abandoned = false`
     /// and the same overall shape as a fresh spawn.
-    pub fn insert_reattached(&self, meta: &OrphanMeta, pty: Arc<PtyHandle>) {
+    ///
+    /// Returns a [`PendingInsert`] so the caller can patch
+    /// `scrollback_snapshot_req` (produced by [`attach_lifecycle`]) onto the
+    /// record before publishing the `SessionUpdated` snapshot.
+    pub fn insert_reattached(&self, meta: &OrphanMeta, pty: Arc<PtyHandle>) -> PendingInsert<'_> {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
@@ -454,12 +583,13 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            scrollback_snapshot_req: None,
         };
         push_recent_action(
             &mut record,
             "reattached to live tracer after daemon restart".to_string(),
         );
-        self.insert(record);
+        self.insert_pending(record)
     }
 
     /// Reattach a sidecar whose recorded pid is no longer alive: the previous
@@ -494,6 +624,7 @@ impl SessionRegistry {
             worktree_paths: Vec::new(),
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
+            scrollback_snapshot_req: None,
         };
         push_recent_action(
             &mut record,

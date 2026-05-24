@@ -57,7 +57,7 @@ try {
     $bmp.Save($SourcePng, [System.Drawing.Imaging.ImageFormat]::Png)
 } finally { $bmp.Dispose() }
 
-Write-Host "==> Wrote source PNG: $SourcePng" -ForegroundColor Cyan
+Write-Information "==> Wrote source PNG: $SourcePng" -InformationAction Continue
 
 Push-Location $AppDir
 try {
@@ -66,4 +66,4 @@ try {
 }
 finally { Pop-Location }
 
-Write-Host "==> Icons regenerated under $IconsDir" -ForegroundColor Green
+Write-Information "==> Icons regenerated under $IconsDir" -InformationAction Continue

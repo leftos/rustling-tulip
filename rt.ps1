@@ -154,6 +154,11 @@ function Test-CommandAvailable {
 
 function Update-ProcessPath {
     [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions',
+        '',
+        Justification = 'Internal helper that refreshes the in-process PATH from the registry; no -WhatIf surface needed.'
+    )]
     param()
 
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -182,7 +187,7 @@ function Invoke-WingetInstall {
     Test-Tool 'winget' 'Install App Installer from the Microsoft Store, then rerun `.\rt.ps1 setup`.'
 
     Write-Host "==> Installing $Name..." -ForegroundColor Cyan
-    $args = @(
+    $wingetArgs = @(
         'install',
         '--id', $Id,
         '--exact',
@@ -192,9 +197,9 @@ function Invoke-WingetInstall {
         '--disable-interactivity',
         '--silent'
     )
-    $args += $ExtraArgs
+    $wingetArgs += $ExtraArgs
 
-    & winget @args
+    & winget @wingetArgs
     if ($LASTEXITCODE -eq 3010 -or $LASTEXITCODE -eq 1641) {
         $script:SetupRestartNeeded = $true
         Write-Host "    $Name installed; Windows reported a restart is needed." -ForegroundColor Yellow
@@ -218,18 +223,24 @@ function Get-MsvcInstallPath {
     $vswhere = Get-VsWherePath
     if (-not $vswhere) { return $null }
 
-    $args = @(
+    $vsWhereArgs = @(
         '-latest',
         '-products', '*',
         '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
         '-property', 'installationPath'
     )
-    $installPath = & $vswhere @args
+    $installPath = & $vswhere @vsWhereArgs
     if ($LASTEXITCODE -ne 0 -or -not $installPath) { return $null }
     return ($installPath | Select-Object -First 1).Trim()
 }
 
 function Test-MsvcBuildTools {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseSingularNouns',
+        '',
+        Justification = '"Build Tools" is the proper product name for Visual Studio Build Tools.'
+    )]
+    param()
     return $null -ne (Get-MsvcInstallPath)
 }
 
@@ -503,6 +514,12 @@ function Install-CommandDependency {
 }
 
 function Install-MsvcBuildTools {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseSingularNouns',
+        '',
+        Justification = '"Build Tools" is the proper product name for Visual Studio Build Tools.'
+    )]
+    param()
     if (Test-MsvcBuildTools) {
         Write-Host '==> Visual Studio C++ Build Tools already available.' -ForegroundColor DarkGray
         return
@@ -596,7 +613,9 @@ function Invoke-DebugBuild {
     Write-Host '==> Building daemon + tracer (debug)...' -ForegroundColor Cyan
     $cargoArgs = @('build', '-p', 'daemon', '-p', 'tracer')
 
-    $exit = Invoke-CargoCapture -CargoArgs $cargoArgs
+    # Exit code lives in $LASTEXITCODE after the pipeline returns;
+    # Test-CargoExitOk reads it directly, so the return value is dropped.
+    $null = Invoke-CargoCapture -CargoArgs $cargoArgs
     $output = $script:CargoLines
     # The lock-retry path is gone (binary cache eliminates the file lock),
     # so a running daemon is never killed by the build. The caller's

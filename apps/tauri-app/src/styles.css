@@ -2166,6 +2166,10 @@ button.tree-tab-pill:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  /* Expand to fill the row up to the action buttons; basis 0 keeps the
+   * wrap algorithm chip-driven (the title never contributes to the
+   * overflow that pushes chips onto their own line). */
+  flex: 1 1 0;
 }
 .session-meta {
   color: var(--fg-muted);

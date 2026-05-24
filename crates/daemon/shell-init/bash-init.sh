@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # rustling-tulip shell-integration init for bash.
 #
 # Loaded via `bash --rcfile <this-file> -i` from the daemon. Sources the

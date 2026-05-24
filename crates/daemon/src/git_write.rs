@@ -154,6 +154,11 @@ pub async fn stash_push(repo: &Path, message: &str) -> anyhow::Result<()> {
 /// (matching `git stash list`'s native order — `stash@{0}` is the most
 /// recent push).
 pub async fn stash_list(repo: &Path) -> anyhow::Result<Vec<GitStash>> {
+    // Non-git folders registered as repos have no stashes; short-circuit
+    // so the sidebar gets an empty list instead of a git error.
+    if !repo.join(".git").exists() {
+        return Ok(Vec::new());
+    }
     let stdout = run_git(repo, &["stash", "list", "--format=%gd%x1f%gs%x1f%aI"]).await?;
     Ok(stdout.lines().filter_map(parse_stash_line).collect())
 }

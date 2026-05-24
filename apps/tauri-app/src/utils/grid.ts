@@ -152,6 +152,41 @@ export function resolveTabFocus(
   return panes[0]?.pane_id ?? null;
 }
 
+/**
+ * Walk `grid` to find `paneId`'s immediate split sibling subtree, then return
+ * the first session-bound pane in that subtree (left-to-right). Used by the
+ * empty-pane "spawn here" path to pre-select the repo/ws of the pane the user
+ * just split off of. Returns `null` when `paneId` has no parent split (root
+ * pane) or no sibling pane carries a session.
+ */
+export function findSplitSiblingSession(
+  grid: GridNode,
+  paneId: string,
+): string | null {
+  return walkForSibling(grid, paneId);
+}
+
+function walkForSibling(node: GridNode, paneId: string): string | null {
+  if (node.kind === "pane") return null;
+  if (node.first.kind === "pane" && node.first.pane_id === paneId) {
+    return firstSessionInSubtree(node.second);
+  }
+  if (node.second.kind === "pane" && node.second.pane_id === paneId) {
+    return firstSessionInSubtree(node.first);
+  }
+  return (
+    walkForSibling(node.first, paneId) ??
+    walkForSibling(node.second, paneId)
+  );
+}
+
+function firstSessionInSubtree(node: GridNode): string | null {
+  for (const p of collectPanes(node)) {
+    if (p.session_id !== null) return p.session_id;
+  }
+  return null;
+}
+
 /// Normalized rectangle of a pane within the tab (each axis in 0..1).
 /// Computed by walking the split tree and multiplying each split's ratio
 /// against the running width/height — the same model `SplitRenderer` uses

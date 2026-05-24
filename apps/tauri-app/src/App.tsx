@@ -76,6 +76,7 @@ import {
   balanceSplitDirection,
   collectPanes,
   findPaneBinding,
+  findSplitSiblingSession,
   findTabContainingSession,
   paneRect,
   pickBalancedSplitTarget,
@@ -143,6 +144,12 @@ interface AppState {
   standaloneShellOpen: boolean;
   standaloneShellInitial: string | null;
   spawnInitial: SpawnInitialTarget | undefined;
+  /// When true, `spawnInitial` locks the dialog's target picker (sidebar
+  /// context menu, launch-last, duplicate-session). When false, the
+  /// target is only pre-selected and the user can still pick a
+  /// different repo/workspace (empty-pane "spawn here" inferred from a
+  /// split sibling). Irrelevant when `spawnInitial` is undefined.
+  spawnInitialLocked: boolean;
   /// Full SpawnConfig to seed the spawn dialog from (used by "Duplicate
   /// session → Shift-click → open dialog pre-filled"). When set, the
   /// dialog hydrates agent, run mode, trusted-launch state, model, permission mode,
@@ -237,6 +244,40 @@ function lastSpawnConfigForTarget(
         ?.last_spawn_config ?? null);
 }
 
+/// Derive a SpawnInitialTarget from a session snapshot — workspace sessions
+/// resolve to their workspace, single-repo sessions to the first member's
+/// repo. Returns null for standalone sessions (no repo/workspace anchor).
+function spawnTargetFromSession(
+  session: SessionSnapshot,
+): SpawnInitialTarget | null {
+  if (session.workspace_id) {
+    return { kind: "workspace", workspace_id: session.workspace_id };
+  }
+  const member = session.members[0];
+  if (member) {
+    return { kind: "repo", repo_id: member.repo_id };
+  }
+  return null;
+}
+
+/// Most recently spawned session's repo/workspace, used as the fallback
+/// preselect for an empty pane's "spawn here" when no sibling pane carries
+/// a session (e.g. the pane became empty because the user stopped its
+/// session). Walks `sessions` ordered by `started_at` descending; skips
+/// standalone sessions, which have no anchor.
+function lastSpawnedTarget(
+  sessions: SessionSnapshot[],
+): SpawnInitialTarget | null {
+  const sorted = [...sessions].sort((a, b) =>
+    b.started_at.localeCompare(a.started_at),
+  );
+  for (const s of sorted) {
+    const target = spawnTargetFromSession(s);
+    if (target) return target;
+  }
+  return null;
+}
+
 export default function App() {
   const [state, setState] = useState<AppState>({
     client: null,
@@ -252,6 +293,7 @@ export default function App() {
     standaloneShellOpen: false,
     standaloneShellInitial: null,
     spawnInitial: undefined,
+    spawnInitialLocked: true,
     spawnPrefill: undefined,
     pendingTabActivate: 0,
     workspaceCreatorOpen: false,
@@ -723,10 +765,36 @@ export default function App() {
       if (cur?.activeTabId) {
         spawnTargetPaneRef.current = { tabId: cur.activeTabId, paneId };
       }
+
+      // Preselect repo/ws: prefer the session of the pane this empty pane
+      // was split from, otherwise fall back to the most recently spawned
+      // session's anchor. Not locked — the user can still pick a
+      // different target before submitting.
+      let preselect: SpawnInitialTarget | undefined;
+      if (cur) {
+        const activeTab = cur.tabs.find((t) => t.id === cur.activeTabId);
+        const grid = activeTab ? tabGrid(activeTab) : null;
+        const siblingSessionId = grid
+          ? findSplitSiblingSession(grid, paneId)
+          : null;
+        if (siblingSessionId) {
+          const session = cur.sessions.find((s) => s.id === siblingSessionId);
+          if (session) {
+            const t = spawnTargetFromSession(session);
+            if (t) preselect = t;
+          }
+        }
+        if (!preselect) {
+          const fallback = lastSpawnedTarget(cur.sessions);
+          if (fallback) preselect = fallback;
+        }
+      }
+
       setState((s) => ({
         ...s,
         spawnOpen: true,
-        spawnInitial: undefined,
+        spawnInitial: preselect,
+        spawnInitialLocked: false,
         spawnPrefill: undefined,
         focusedPaneId: paneId,
         focusedPaneByTab: s.activeTabId
@@ -746,6 +814,7 @@ export default function App() {
       ...s,
       spawnOpen: true,
       spawnInitial: initial,
+      spawnInitialLocked: true,
       spawnPrefill: undefined,
     }));
   }, []);
@@ -761,6 +830,7 @@ export default function App() {
       ...s,
       spawnOpen: true,
       spawnInitial: undefined,
+      spawnInitialLocked: true,
       spawnPrefill: undefined,
     }));
   }, []);
@@ -772,6 +842,7 @@ export default function App() {
       ...s,
       spawnOpen: false,
       spawnInitial: undefined,
+      spawnInitialLocked: true,
       spawnPrefill: undefined,
     }));
   }, []);
@@ -825,6 +896,7 @@ export default function App() {
           ...state,
           spawnOpen: true,
           spawnInitial: target,
+          spawnInitialLocked: true,
           spawnPrefill: config,
         }));
         pushToast(setState, {
@@ -889,6 +961,7 @@ export default function App() {
       ...state,
       spawnOpen: true,
       spawnInitial: target,
+      spawnInitialLocked: true,
       spawnPrefill:
         config && config.target.kind !== "standalone" ? config : undefined,
     }));
@@ -928,6 +1001,7 @@ export default function App() {
         ...s,
         spawnOpen: true,
         spawnInitial: initial,
+        spawnInitialLocked: true,
         spawnPrefill: config ?? undefined,
       }));
     });
@@ -2304,6 +2378,7 @@ export default function App() {
           workspaces={state.workspaces}
           client={state.client}
           initialTarget={state.spawnInitial}
+          lockInitialTarget={state.spawnInitialLocked}
           spawnPrefill={state.spawnPrefill}
           canUseCurrentTab={canUseSpawnCurrentTab}
           currentTabName={

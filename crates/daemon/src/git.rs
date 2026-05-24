@@ -98,6 +98,15 @@ pub async fn current_branch(repo: &Path) -> anyhow::Result<Option<String>> {
     Ok((!trimmed.is_empty() && trimmed != "HEAD").then(|| trimmed.to_string()))
 }
 
+/// Whether `repo` is a usable git working tree — i.e. it has both a `.git`
+/// entry AND at least one commit. Folders that are not git repos, or were
+/// just `git init`'d without an initial commit, return `false`. Callers use
+/// this to decide whether to run branch/worktree operations or treat the
+/// path as a plain directory.
+pub async fn is_initialized(repo: &Path) -> bool {
+    run_git(repo, &["rev-parse", "--verify", "HEAD"]).await.is_ok()
+}
+
 pub async fn default_branch(repo: &Path) -> Option<String> {
     let candidates = ["main", "master", "trunk"];
     for c in candidates {

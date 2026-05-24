@@ -58,9 +58,6 @@ interface InternalRecord extends CommandRecord {
   dotEl: HTMLElement | null;
 }
 
-const BEL = String.fromCharCode(7);
-const ST = String.fromCharCode(27, 92);
-
 /// Decode the VSCode OSC 633 escape encoding the daemon scripts apply
 /// before sending the literal command text: `\\` for backslash, `\x3b`
 /// for `;`, `\x0a` for newline. Anything else passes through unchanged.

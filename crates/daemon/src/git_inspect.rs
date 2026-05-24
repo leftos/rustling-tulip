@@ -154,6 +154,12 @@ pub async fn file_diff(repo: &Path, path: &str, against: Option<&str>) -> anyhow
 /// for the index entry, Y for the worktree entry); untracked files (`??`)
 /// land in `worktree_changes` only with `status = "?"`.
 pub async fn repo_status(repo: &Path) -> anyhow::Result<(Vec<GitFileChange>, Vec<GitFileChange>)> {
+    // Plain folders (no `.git`) registered as repos have no status to
+    // report. Treat them as clean so the source-control sidebar can render
+    // an empty list instead of bubbling up a "not a git repository" error.
+    if !repo.join(".git").exists() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let stdout = run_git(repo, &["status", "--porcelain=1", "-z"]).await?;
     Ok(parse_porcelain_z(&stdout))
 }

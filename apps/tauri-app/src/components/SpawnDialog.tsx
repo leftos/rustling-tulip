@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
@@ -25,6 +25,14 @@ interface Props {
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
   initialTarget?: SpawnInitialTarget | undefined;
+  /// When true, `initialTarget` locks the picker into an
+  /// `ImpliedTargetLabel`. When false (or unset), `initialTarget` only
+  /// seeds the picker and the user can still pick a different
+  /// repo/workspace. Defaults to true to preserve the sidebar
+  /// context-menu / launch-last behavior where the caller has already
+  /// committed to a container. The empty-pane "spawn here" path opts
+  /// out so the inferred sibling target stays editable.
+  lockInitialTarget?: boolean;
   /// Full SpawnConfig used to seed the dialog when invoked as
   /// "Duplicate session → Shift-click → open dialog pre-filled". When
   /// set, hydrates agent, run mode, trusted-launch state, model, permission mode,
@@ -211,6 +219,7 @@ export default function SpawnDialog({
   workspaces,
   client,
   initialTarget,
+  lockInitialTarget = true,
   spawnPrefill,
   canUseCurrentTab,
   currentTabName,
@@ -258,6 +267,66 @@ export default function SpawnDialog({
   );
   const restoreLastSpawnDefaults = spawnPrefill === undefined;
 
+  // Track whether the user has manually changed agent / run mode. Once
+  // touched, the auto-default-from-last_spawn_config effect below stops
+  // overriding their choice on subsequent target changes. Refs (not
+  // state) so flipping a flag doesn't itself re-trigger any effect.
+  const agentTouchedRef = useRef(false);
+  const runModeTouchedRef = useRef(false);
+  const handleAgentChange = useCallback((next: Agent) => {
+    agentTouchedRef.current = true;
+    setAgent(next);
+  }, []);
+  const handleRunModeChange = useCallback((next: RunMode) => {
+    runModeTouchedRef.current = true;
+    setRunMode(next);
+  }, []);
+
+  // When the user picks a different repo/workspace, default the agent
+  // and run mode from that container's last_spawn_config — unless they've
+  // already explicitly set one of those fields, in which case their
+  // choice wins. Replaces per-form effects that snapped these back to
+  // the new target's defaults on every switch, blowing away a manual
+  // shell-type change made earlier in the same dialog.
+  useEffect(() => {
+    if (!restoreLastSpawnDefaults) return;
+    if (!target) return;
+    let nextAgent: Agent | null = null;
+    let nextRunMode: RunMode | null = null;
+    if (target.kind === "repo") {
+      const repo = repos.find((r) => r.id === target.id);
+      if (!repo) return;
+      nextAgent =
+        repo.last_spawn_config?.agent_options.kind ??
+        repo.last_agent ??
+        "claude";
+      nextRunMode = defaultRunModeFromLastSpawn(repo.last_spawn_config);
+    } else {
+      const workspace = workspaces.find((w) => w.id === target.id);
+      if (!workspace) return;
+      const firstMember = workspace.member_repo_ids
+        .map((id) => repos.find((r) => r.id === id))
+        .find((r): r is RepoEntry => !!r);
+      nextAgent =
+        workspace.last_spawn_config?.agent_options.kind ??
+        firstMember?.last_agent ??
+        "claude";
+      nextRunMode = defaultRunModeFromLastSpawn(
+        workspace.last_spawn_config ?? null,
+      );
+    }
+    if (nextAgent !== null && !agentTouchedRef.current) {
+      setAgent(nextAgent);
+    }
+    if (nextRunMode !== null && !runModeTouchedRef.current) {
+      setRunMode(nextRunMode);
+    }
+    // `repos` / `workspaces` are not listed: the auto-default should
+    // re-fire only when the user picks a different target, not when an
+    // unrelated session_updated broadcast rebuilds those arrays.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target?.kind, target?.id, restoreLastSpawnDefaults]);
+
   // Headless mode isn't supported for cursor yet — snap back to interactive
   // when the user picks cursor while headless was selected. Codex and claude
   // both speak headless (claude via stream-json, codex via exec --json).
@@ -289,7 +358,7 @@ export default function SpawnDialog({
       skipPerms={skipPerms}
       onSkipPermsChange={setSkipPerms}
       runMode={runMode}
-      onRunModeChange={setRunMode}
+      onRunModeChange={handleRunModeChange}
       headlessPrompt={headlessPrompt}
       onHeadlessPromptChange={setHeadlessPrompt}
       advanced={advanced}
@@ -330,7 +399,7 @@ export default function SpawnDialog({
             <EmptyRepoState onAddRepo={onAddRepo} onClose={onClose} />
           ) : (
             <>
-              {initialTarget !== undefined && target ? (
+              {initialTarget !== undefined && lockInitialTarget && target ? (
                 <ImpliedTargetLabel
                   target={target}
                   repos={repos}
@@ -347,8 +416,8 @@ export default function SpawnDialog({
               <AgentPicker
                 agent={agent}
                 runMode={runMode}
-                onAgentChange={setAgent}
-                onRunModeChange={setRunMode}
+                onAgentChange={handleAgentChange}
+                onRunModeChange={handleRunModeChange}
               />
               <SpawnPlacementPicker
                 value={spawnPlacement}
@@ -370,9 +439,6 @@ export default function SpawnDialog({
                   headlessPrompt={headlessPrompt}
                   advanced={advanced}
                   agent={agent}
-                  onAgentChange={setAgent}
-                  onRunModeChange={setRunMode}
-                  restoreLastSpawnDefaults={restoreLastSpawnDefaults}
                   spawnPrefill={spawnPrefill}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
@@ -391,9 +457,6 @@ export default function SpawnDialog({
                   headlessPrompt={headlessPrompt}
                   advanced={advanced}
                   agent={agent}
-                  onAgentChange={setAgent}
-                  onRunModeChange={setRunMode}
-                  restoreLastSpawnDefaults={restoreLastSpawnDefaults}
                   spawnPrefill={spawnPrefill}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
@@ -1139,9 +1202,6 @@ function SingleForm({
   headlessPrompt,
   advanced,
   agent,
-  onAgentChange,
-  onRunModeChange,
-  restoreLastSpawnDefaults,
   spawnPrefill,
   spawnPlacement,
   onClose,
@@ -1159,9 +1219,6 @@ function SingleForm({
   headlessPrompt: string;
   advanced: AdvancedConfig;
   agent: Agent;
-  onAgentChange: (a: Agent) => void;
-  onRunModeChange: (m: RunMode) => void;
-  restoreLastSpawnDefaults: boolean;
   spawnPrefill: SpawnConfig | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
@@ -1183,19 +1240,6 @@ function SingleForm({
     spawnPrefill.target.repo_id === repoId
       ? spawnPrefill.target
       : null;
-
-  // Default runtime controls to whatever this repo was last launched with.
-  useEffect(() => {
-    if (repo && restoreLastSpawnDefaults) {
-      onAgentChange(
-        repo.last_spawn_config?.agent_options.kind ??
-          repo.last_agent ??
-          "claude",
-      );
-      onRunModeChange(defaultRunModeFromLastSpawn(repo.last_spawn_config));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo?.id, restoreLastSpawnDefaults]);
 
   const [knownBranches, setKnownBranches] = useState<string[]>([]);
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
@@ -1495,9 +1539,6 @@ function WorkspaceForm({
   headlessPrompt,
   advanced,
   agent,
-  onAgentChange,
-  onRunModeChange,
-  restoreLastSpawnDefaults,
   spawnPrefill,
   spawnPlacement,
   onClose,
@@ -1514,9 +1555,6 @@ function WorkspaceForm({
   headlessPrompt: string;
   advanced: AdvancedConfig;
   agent: Agent;
-  onAgentChange: (a: Agent) => void;
-  onRunModeChange: (m: RunMode) => void;
-  restoreLastSpawnDefaults: boolean;
   spawnPrefill: SpawnConfig | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
@@ -1545,21 +1583,6 @@ function WorkspaceForm({
     }
     return null;
   }, [workspace, repos]);
-
-  // Default runtime controls to the workspace's last spawn when available.
-  useEffect(() => {
-    if (restoreLastSpawnDefaults && (workspace || firstMember)) {
-      onAgentChange(
-        workspace?.last_spawn_config?.agent_options.kind ??
-          firstMember?.last_agent ??
-          "claude",
-      );
-      onRunModeChange(
-        defaultRunModeFromLastSpawn(workspace?.last_spawn_config ?? null),
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace?.id, firstMember?.id, restoreLastSpawnDefaults]);
 
   const prefillTarget =
     spawnPrefill?.target.kind === "workspace" &&

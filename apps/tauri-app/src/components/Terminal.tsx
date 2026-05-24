@@ -557,14 +557,32 @@ export default function Terminal({
 
       let scrollbackCancelled = false;
 
-      // Replay persisted scrollback first so users see their history before
-      // any live PTY chunks arrive. The attach + subscribe happen after the
-      // replay completes (or times out) to keep ordering correct.
+      // Scrollback-first ordering: render the persisted history, then any
+      // live PTY chunks that streamed in while scrollback was loading.
+      //
+      // The daemon's LoadScrollback handler atomically (a) reads the
+      // scrollback file and (b) subscribes a per-client forwarder positioned
+      // exactly at the next un-persisted PTY chunk, so future pty_output
+      // messages for this session start flowing as soon as the daemon
+      // processes our LoadScrollback request. If those bytes arrive before
+      // we've rendered scrollback, we buffer them here and drain after.
       //
       // `term.write` accepts `Uint8Array` directly and runs xterm's own
       // streaming UTF-8 decoder, which handles multi-byte sequences split
       // across chunks. Passing bytes skips a JS-side `TextDecoder.decode`
       // pass that would just be undone by xterm's internal re-encode.
+      let scrollbackRendered = false;
+      const liveBuffer: Uint8Array[] = [];
+
+      const unsubPty = subscribePty(sessionId, (b64) => {
+        const bytes = base64ToBytes(b64);
+        if (scrollbackRendered) {
+          term.write(bytes);
+        } else {
+          liveBuffer.push(bytes);
+        }
+      });
+
       void (async () => {
         const sb = await loadScrollback(client, sessionId);
         if (scrollbackCancelled) return;
@@ -574,6 +592,13 @@ export default function Terminal({
           }
           term.write(base64ToBytes(sb.data_b64));
         }
+        // Drain any pty_output that landed during the loadScrollback await
+        // so the user sees them right after history.
+        for (const bytes of liveBuffer) {
+          term.write(bytes);
+        }
+        liveBuffer.length = 0;
+        scrollbackRendered = true;
         requestAnimationFrame(() => {
           fit.fit();
           client.send({
@@ -582,13 +607,8 @@ export default function Terminal({
             cols: term.cols,
             rows: term.rows,
           });
-          client.send({ type: "attach", session_id: sessionId });
         });
       })();
-
-      const unsubPty = subscribePty(sessionId, (b64) => {
-        term.write(base64ToBytes(b64));
-      });
 
       const onDataHandler = term.onData((data) => {
         // Skip when the latest known status is terminal — there's a small

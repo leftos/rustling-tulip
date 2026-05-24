@@ -35,9 +35,9 @@ pub async fn add_repo(
     if !path.is_dir() {
         return Err(anyhow!("path is not a directory: {path_str}"));
     }
-    if !path.join(".git").exists() {
-        return Err(anyhow!("not a git repo (no .git): {path_str}"));
-    }
+    // Non-git folders (no `.git`, or `git init` with no commits yet) are
+    // accepted: the spawn path skips worktree + branch ops when the folder
+    // isn't a usable git working tree.
     let canonical =
         simplify_path(&std::fs::canonicalize(path).context("canonicalizing repo path")?);
     let canonical_str = canonical.to_string_lossy().into_owned();

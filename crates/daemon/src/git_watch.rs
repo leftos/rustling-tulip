@@ -185,14 +185,28 @@ fn classify_git_internal(tail: &[&str]) -> Option<RefreshFlags> {
 /// `UnboundedSender<RefreshFlags>`, so dropping the debouncer drops the
 /// sender, which makes the refresher's `recv()` return `None` and the
 /// task exits.
-struct RepoWatcher {
+///
+/// Two flavors exist:
+/// - `Active` — full recursive watcher + refresher task. Used once the
+///   repo path has a `.git` entry.
+/// - `Init` — cheap non-recursive watcher on the repo root that only
+///   listens for `.git` creation. When `.git` shows up (e.g. the user
+///   runs `git init` inside the folder we previously registered as a
+///   plain directory), the watcher promotes itself to `Active` via
+///   `promote_tx`. There's no refresher task in this mode.
+enum RepoWatcher {
     /// `Box<dyn Any + Send + Sync>` so we can store debouncers without
     /// naming their generic parameters in the field type. The concrete
     /// type is `Debouncer<RecommendedWatcher, RecommendedCache>` but the
     /// public signature changes between platforms and pinning it in a
     /// struct is noise.
-    _debouncer: Box<dyn std::any::Any + Send + Sync>,
-    _refresher: tokio::task::JoinHandle<()>,
+    Active {
+        _debouncer: Box<dyn std::any::Any + Send + Sync>,
+        _refresher: tokio::task::JoinHandle<()>,
+    },
+    Init {
+        _debouncer: Box<dyn std::any::Any + Send + Sync>,
+    },
 }
 
 /// Public entry point. Spawns the supervisor task that owns the per-repo
@@ -205,6 +219,12 @@ pub fn start(
 ) {
     let handles = Arc::new(AsyncMutex::new(HashMap::<String, RepoWatcher>::new()));
 
+    // `promote_tx` is held by every init-flavored watcher and used to ask
+    // the supervisor to upgrade it once `.git` appears in the watched
+    // folder. A separate task drains the channel so the upgrade isn't
+    // gated behind `StateEvent` traffic.
+    let (promote_tx, mut promote_rx) = mpsc::unbounded_channel::<String>();
+
     // Seed initial watchers from the current registry. Doing this here
     // (instead of waiting for the first broadcast) means a freshly
     // started daemon picks up file changes immediately.
@@ -212,6 +232,7 @@ pub fn start(
     let handles_for_seed = Arc::clone(&handles);
     let state_events_for_seed = state_events.clone();
     let client_count_for_seed = client_count.clone();
+    let promote_tx_for_seed = promote_tx.clone();
     tokio::spawn(async move {
         let mut guard = handles_for_seed.lock().await;
         for repo in initial {
@@ -219,6 +240,7 @@ pub fn start(
                 &repo,
                 &state_events_for_seed,
                 &client_count_for_seed,
+                &promote_tx_for_seed,
                 &mut guard,
             );
         }
@@ -229,12 +251,21 @@ pub fn start(
     // sync the handle set against the new registry.
     let mut rx = state_events.subscribe();
     let state_events_for_sync = state_events.clone();
+    let handles_for_sync = Arc::clone(&handles);
+    let client_count_for_sync = client_count.clone();
+    let promote_tx_for_sync = promote_tx.clone();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(StateEvent::Repos(repos)) => {
-                    let mut guard = handles.lock().await;
-                    sync_handles(&repos, &state_events_for_sync, &client_count, &mut guard);
+                    let mut guard = handles_for_sync.lock().await;
+                    sync_handles(
+                        &repos,
+                        &state_events_for_sync,
+                        &client_count_for_sync,
+                        &promote_tx_for_sync,
+                        &mut guard,
+                    );
                 }
                 Ok(_) => {
                     // We don't care about Workspaces / RepoStatus / Stashes
@@ -248,6 +279,40 @@ pub fn start(
         }
         info!("git_watch: supervisor exiting (channel closed)");
     });
+
+    // Promotion supervisor: when an init watcher reports that `.git`
+    // appeared, look the repo up in the registry, drop the init watcher,
+    // and install the full one. If the repo is no longer registered (was
+    // removed while we waited), just drop the request.
+    let state_for_promote = Arc::clone(state);
+    let state_events_for_promote = state_events.clone();
+    tokio::spawn(async move {
+        while let Some(repo_id) = promote_rx.recv().await {
+            // Acquire the handle lock BEFORE re-reading the registry, so
+            // the read can't race with a `sync_handles` run that removes
+            // this repo's handle. (Both code paths take the same lock.)
+            let mut guard = handles.lock().await;
+            let repo = state_for_promote
+                .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned());
+            let Some(repo) = repo else { continue };
+            // Drop the init watcher first so the OS handle is released
+            // before we attempt to install the recursive one. If the
+            // handle is already Active (a duplicate promote event raced
+            // past the first one), the existence check at the top of
+            // `spawn_watcher` would still re-install correctly.
+            if let Some(prev) = guard.remove(&repo_id) {
+                drop(prev);
+            }
+            spawn_watcher(
+                &repo,
+                &state_events_for_promote,
+                &client_count,
+                &promote_tx,
+                &mut guard,
+            );
+            info!(repo_id, "git_watch: promoted init watcher to active");
+        }
+    });
 }
 
 /// Add watchers for newly-added repos and drop watchers for repos that
@@ -258,6 +323,7 @@ fn sync_handles(
     repos: &[RepoEntry],
     state_events: &broadcast::Sender<StateEvent>,
     client_count: &watch::Receiver<usize>,
+    promote_tx: &mpsc::UnboundedSender<String>,
     handles: &mut HashMap<String, RepoWatcher>,
 ) {
     let current_ids: std::collections::HashSet<&str> =
@@ -271,7 +337,7 @@ fn sync_handles(
     });
     for repo in repos {
         if !handles.contains_key(&repo.id) {
-            spawn_watcher(repo, state_events, client_count, handles);
+            spawn_watcher(repo, state_events, client_count, promote_tx, handles);
         }
     }
 }
@@ -283,12 +349,21 @@ fn spawn_watcher(
     repo: &RepoEntry,
     state_events: &broadcast::Sender<StateEvent>,
     client_count: &watch::Receiver<usize>,
+    promote_tx: &mpsc::UnboundedSender<String>,
     handles: &mut HashMap<String, RepoWatcher>,
 ) {
     let repo_path = PathBuf::from(&repo.path);
     let repo_id = repo.id.clone();
     if !repo_path.is_dir() {
         warn!(repo_id, path = %repo.path, "git_watch: repo path not a directory; skipping watcher");
+        return;
+    }
+    // Non-git folders get the cheap init-mode watcher instead of the full
+    // recursive one. Once `.git` appears (e.g. the user runs `git init` in
+    // the registered folder), the init watcher promotes itself to a full
+    // recursive watcher via `promote_tx`.
+    if !repo_path.join(".git").exists() {
+        spawn_init_watcher(repo, promote_tx, handles);
         return;
     }
 
@@ -358,9 +433,78 @@ fn spawn_watcher(
     info!(repo_id, path = %repo.path, "git_watch: watching repo");
     handles.insert(
         repo_id,
-        RepoWatcher {
+        RepoWatcher::Active {
             _debouncer: Box::new(debouncer),
             _refresher: refresher,
+        },
+    );
+}
+
+/// Install the lightweight non-recursive watcher used while a registered
+/// folder doesn't yet have a `.git` entry. The watcher only listens for
+/// the appearance of `<repo_path>/.git` and, when it sees it, sends the
+/// `repo_id` to the promotion supervisor (see `start`), which swaps this
+/// handle out for a regular `Active` watcher.
+fn spawn_init_watcher(
+    repo: &RepoEntry,
+    promote_tx: &mpsc::UnboundedSender<String>,
+    handles: &mut HashMap<String, RepoWatcher>,
+) {
+    let repo_path = PathBuf::from(&repo.path);
+    let repo_id = repo.id.clone();
+    let git_target = repo_path.join(".git");
+    let callback_repo_id = repo_id.clone();
+    let callback_promote_tx = promote_tx.clone();
+    // Short debounce: the user is waiting for the sidebar to come alive
+    // after `git init`, so coalescing a 750 ms burst here just adds dead
+    // time. There's also very little burstiness on this code path — a
+    // single `.git/` directory creation, then quiet.
+    let debouncer_result = new_debouncer(
+        Duration::from_millis(100),
+        None,
+        move |result: notify_debouncer_full::DebounceEventResult| {
+            let Ok(events) = result else { return };
+            let mut saw_git = false;
+            for ev in events {
+                if ev.paths.iter().any(|p| p == &git_target) {
+                    saw_git = true;
+                    break;
+                }
+            }
+            // Confirm with a stat — notify can fire on `.git` removal or
+            // on a temp file with a similar name, and we only want to
+            // promote when the directory is really there now.
+            if saw_git && git_target.exists() {
+                let _ = callback_promote_tx.send(callback_repo_id.clone());
+            }
+        },
+    );
+    let mut debouncer = match debouncer_result {
+        Ok(d) => d,
+        Err(err) => {
+            warn!(repo_id, ?err, "git_watch: failed to create init debouncer");
+            return;
+        }
+    };
+    if let Err(err) = debouncer.watch(&repo_path, RecursiveMode::NonRecursive) {
+        warn!(repo_id, ?err, "git_watch: failed to start init watcher");
+        return;
+    }
+    // Race guard: `.git` may have appeared between the caller's existence
+    // check and the OS handle install. Trigger an immediate promote so we
+    // don't sit on an init watcher pointing at an already-initialized repo.
+    if repo_path.join(".git").exists() {
+        let _ = promote_tx.send(repo_id.clone());
+    }
+    info!(
+        repo_id,
+        path = %repo.path,
+        "git_watch: init watcher — waiting for .git to appear"
+    );
+    handles.insert(
+        repo_id,
+        RepoWatcher::Init {
+            _debouncer: Box::new(debouncer),
         },
     );
 }

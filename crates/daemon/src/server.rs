@@ -39,10 +39,11 @@ use protocol::{
 };
 use rand::Rng as _;
 use rand::distributions::Alphanumeric;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -219,16 +220,18 @@ async fn reattach_orphans(
                             elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
                             "tracer reattach succeeded"
                         );
-                        sessions.insert_reattached(&meta, Arc::clone(&pty));
-                        attach_lifecycle(
+                        let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
+                        let snap_tx = attach_lifecycle(
                             sessions,
                             meta.session_id.clone(),
                             &pty,
                             Some(dirs.clone()),
                         );
                         let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                        if let Some(arc) = sessions.get(&meta.session_id) {
-                            crate::sync::lock(&arc).input_notifier = Some(in_tx);
+                        {
+                            let mut guard = crate::sync::lock(pending.arc());
+                            guard.scrollback_snapshot_req = Some(snap_tx);
+                            guard.input_notifier = Some(in_tx);
                         }
                         if meta.mode == SessionMode::PlainShell {
                             pty_state::watch_plain_shell(
@@ -253,6 +256,7 @@ async fn reattach_orphans(
                             dirs.clone(),
                             meta.mode == SessionMode::PlainShell,
                         );
+                        pending.publish();
                     }
                     Err(err) => {
                         warn!(
@@ -497,12 +501,28 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         }
     };
 
-    let attached = Arc::new(AsyncMutex::new(HashSet::<String>::new()));
+    // Per-session PTY forwarder tasks. Each task subscribes directly to a
+    // session's `pty.output` broadcast and pumps bytes into this client's
+    // `out_tx`. Bypasses the registry's global SessionEvent channel for the
+    // PTY stream — that single 256-msg channel could saturate under heavy
+    // TUI redraw bursts, dropping output for every client (see daemon log
+    // `client event stream lagged`). One forwarder per (client, session)
+    // pair gives each session its own backpressure boundary.
+    //
+    // Lifetimes:
+    //   - Spawned by `LoadScrollback` handler (atomically with the scrollback
+    //     snapshot read so the live receiver starts at exactly the byte after
+    //     the snapshot).
+    //   - Aborted by `Detach` handler when the client unmounts a session's
+    //     Terminal, and on client_session teardown below.
+    let pty_forwarders = Arc::new(AsyncMutex::new(HashMap::<
+        String,
+        tokio::task::JoinHandle<()>,
+    >::new()));
 
-    // Subscribe to global session events; forward only those relevant to this
-    // client (registry-wide updates always; PTY only for attached sessions).
+    // Subscribe to global session events. After splitting PtyOutput out, this
+    // channel only carries low-volume control events.
     let mut events_rx = hub.sessions.subscribe();
-    let attached_for_events = Arc::clone(&attached);
     let out_for_events = out_tx.clone();
     let event_task = tokio::spawn(async move {
         loop {
@@ -512,15 +532,6 @@ async fn client_session(hub: Hub, socket: WebSocket) {
                 }
                 Ok(SessionEvent::Removed(id)) => {
                     let _ = out_for_events.send(DaemonMessage::SessionRemoved { session_id: id });
-                }
-                Ok(SessionEvent::PtyOutput { session_id, data }) => {
-                    if attached_for_events.lock().await.contains(&session_id) {
-                        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        let _ = out_for_events.send(DaemonMessage::PtyOutput {
-                            session_id,
-                            data_b64,
-                        });
-                    }
                 }
                 Ok(SessionEvent::Attention { session_id, reason }) => {
                     let _ = out_for_events.send(DaemonMessage::Attention { session_id, reason });
@@ -542,9 +553,15 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // Send initial state snapshots.
     push_initial_state(&hub, &out_tx);
 
-    recv_loop(&hub, &mut receiver, &out_tx, &attached).await;
+    recv_loop(&hub, &mut receiver, &out_tx, &pty_forwarders).await;
 
     info!("client_session: recv_loop returned; tearing down");
+    {
+        let mut forwarders = pty_forwarders.lock().await;
+        for (_, handle) in forwarders.drain() {
+            handle.abort();
+        }
+    }
     drop(out_tx);
     event_task.abort();
     tab_event_task.abort();
@@ -689,7 +706,7 @@ async fn recv_loop(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    attached: &Arc<AsyncMutex<HashSet<String>>>,
+    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 ) {
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
@@ -734,7 +751,7 @@ async fn recv_loop(
                         continue;
                     }
                 };
-                if let Err(err) = dispatch(hub, parsed, out_tx, attached).await {
+                if let Err(err) = dispatch(hub, parsed, out_tx, pty_forwarders).await {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                     });
@@ -844,11 +861,15 @@ async fn dispatch(
     hub: &Hub,
     msg: ClientMessage,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    attached: &Arc<AsyncMutex<HashSet<String>>>,
+    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 ) -> anyhow::Result<()> {
     match msg {
-        ClientMessage::Hello { .. } => {
-            // Already consumed by handshake; ignore subsequent ones.
+        ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
+            // Hello: already consumed by handshake; ignore subsequent ones.
+            // Attach: no-op — PTY forwarders are started by LoadScrollback
+            // so the live subscription is atomic with the scrollback
+            // snapshot read. Kept in the protocol for back-compat with
+            // older clients that send it.
         }
         ClientMessage::ListRepos => {
             let repos = hub.state.with_persisted(|s| s.repos.clone());
@@ -1068,11 +1089,11 @@ async fn dispatch(
                 orphan::try_update_appearance(&hub.dirs, &session_id, &appearance);
             }
         }
-        ClientMessage::Attach { session_id } => {
-            attached.lock().await.insert(session_id);
-        }
         ClientMessage::Detach { session_id } => {
-            attached.lock().await.remove(&session_id);
+            let mut forwarders = pty_forwarders.lock().await;
+            if let Some(handle) = forwarders.remove(&session_id) {
+                handle.abort();
+            }
         }
         ClientMessage::SendInput {
             session_id,
@@ -1376,13 +1397,7 @@ async fn dispatch(
             }
         }
         ClientMessage::LoadScrollback { session_id } => {
-            let (data, truncated) = scrollback::load(&hub.dirs, &session_id);
-            let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-            let _ = out_tx.send(DaemonMessage::Scrollback {
-                session_id,
-                data_b64,
-                truncated,
-            });
+            load_scrollback_and_attach_forwarder(hub, &session_id, out_tx, pty_forwarders).await;
         }
         ClientMessage::Shutdown { drain } => {
             info!(drain, "dispatch: ClientMessage::Shutdown received");
@@ -2292,6 +2307,114 @@ fn expected_output_subscribers(mode: SessionMode) -> usize {
     }
 }
 
+/// How long the `LoadScrollback` handler waits for `attach_lifecycle`'s task
+/// to reply with the atomic snapshot before falling back to a direct
+/// scrollback file read. In normal operation the reply arrives within a
+/// single task tick; the timeout protects against a hung lifecycle task
+/// (which would otherwise block this client forever).
+const SCROLLBACK_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Atomic `LoadScrollback`: pull the scrollback bytes AND the
+/// `broadcast::Receiver` positioned at the next un-persisted PTY chunk from
+/// `attach_lifecycle`'s task, spawn a per-client forwarder using that receiver
+/// (so future PTY bytes for this session reach this WS client), and finally
+/// reply with the Scrollback frame. Doing all three in one handler closes the
+/// window in which output emitted between `Attach` and the file read would be
+/// dropped or duplicated.
+///
+/// Sessions without an active PTY (orphans, abandoned, headless) have
+/// `scrollback_snapshot_req == None`; the helper falls back to a direct file
+/// read in that case and does NOT spawn a forwarder.
+async fn load_scrollback_and_attach_forwarder(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+) {
+    let snap_tx = hub
+        .sessions
+        .get(session_id)
+        .and_then(|arc| crate::sync::lock(&arc).scrollback_snapshot_req.clone());
+
+    let snapshot = if let Some(snap_tx) = snap_tx {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if snap_tx.send(reply_tx).is_ok() {
+            match tokio::time::timeout(SCROLLBACK_SNAPSHOT_TIMEOUT, reply_rx).await {
+                Ok(Ok(snap)) => Some(snap),
+                Ok(Err(_recv_err)) => {
+                    warn!(
+                        %session_id,
+                        "load_scrollback: lifecycle task dropped snapshot reply"
+                    );
+                    None
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        %session_id,
+                        "load_scrollback: timed out waiting for snapshot from lifecycle task"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (data, truncated) = if let Some(snap) = snapshot {
+        // Replace any existing forwarder for this session (e.g. a previous
+        // Terminal mount in the same WS session that didn't get a clean
+        // Detach). Abort first, then spawn the fresh one.
+        let mut forwarders = pty_forwarders.lock().await;
+        if let Some(old) = forwarders.remove(session_id) {
+            old.abort();
+        }
+        let mut live = snap.live;
+        let out = out_tx.clone();
+        let sid = session_id.to_string();
+        let handle = tokio::spawn(async move {
+            loop {
+                match live.recv().await {
+                    Ok(bytes) => {
+                        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        if out
+                            .send(DaemonMessage::PtyOutput {
+                                session_id: sid.clone(),
+                                data_b64,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            session_id = %sid,
+                            lagged = n,
+                            "per-client pty forwarder lagged"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        forwarders.insert(session_id.to_string(), handle);
+        (snap.data, snap.truncated)
+    } else {
+        // No live PTY (orphan/abandoned/headless) — direct file read.
+        scrollback::load(&hub.dirs, session_id)
+    };
+
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+    let _ = out_tx.send(DaemonMessage::Scrollback {
+        session_id: session_id.to_string(),
+        data_b64,
+        truncated,
+    });
+}
+
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
 /// The agent kind is carried inside `agent_options` — call
 /// `cfg.agent_options.agent()` to dispatch through [`crate::agents::backend_for`].
@@ -2414,14 +2537,46 @@ async fn spawn_interactive_session(
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
         input_notifier: None,
+        scrollback_snapshot_req: None,
     };
     push_recent_action(&mut record, "session started".to_string());
-    hub.sessions.insert(record);
-    let snap = hub
-        .sessions
-        .get(&session_id)
-        .map(|rec| crate::sync::lock(&rec).snapshot())
-        .ok_or_else(|| anyhow!("session vanished"))?;
+
+    // Two-stage insert: put the record in the registry first so attach_lifecycle's
+    // exit watcher can find it, then patch the lifecycle channels onto the record
+    // before publishing SessionUpdated. Publishing earlier would race with the
+    // client's LoadScrollback request — the client could see the session and
+    // request scrollback before scrollback_snapshot_req is wired up, fall through
+    // to a direct file read (empty before first output), and miss any output that
+    // streams in before the per-client forwarder is started.
+    let pending = hub.sessions.insert_pending(record);
+    let snap_tx = attach_lifecycle(
+        &hub.sessions,
+        session_id.clone(),
+        &pty,
+        Some(hub.dirs.clone()),
+    );
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    {
+        let mut guard = crate::sync::lock(pending.arc());
+        guard.scrollback_snapshot_req = Some(snap_tx);
+        guard.input_notifier = Some(in_tx);
+    }
+    pty_state::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        in_rx,
+        hub.attention_tx.clone(),
+    );
+    osc_title::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        hub.dirs.clone(),
+        false,
+    );
+    let snap = crate::sync::lock(pending.arc()).snapshot();
+    pending.publish();
 
     // Post-C.3 the direct daemon child is rt-tracer.exe, not the agent CLI.
     // Sidecar's `pid` + `program_name` therefore describe the tracer; the
@@ -2450,30 +2605,6 @@ async fn spawn_interactive_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
-    attach_lifecycle(
-        &hub.sessions,
-        session_id.clone(),
-        &pty,
-        Some(hub.dirs.clone()),
-    );
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-    if let Some(arc) = hub.sessions.get(&session_id) {
-        crate::sync::lock(&arc).input_notifier = Some(in_tx);
-    }
-    pty_state::watch(
-        &hub.sessions,
-        session_id.clone(),
-        pty.output.subscribe(),
-        in_rx,
-        hub.attention_tx.clone(),
-    );
-    osc_title::watch(
-        &hub.sessions,
-        session_id.clone(),
-        pty.output.subscribe(),
-        hub.dirs.clone(),
-        false,
-    );
     if let Some(injector) = cfg.prompt_injector.clone() {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
     }
@@ -2592,17 +2723,46 @@ async fn spawn_plain_shell_session(
         // Plain shells never carry a kickoff prompt.
         last_prompt: None,
         input_notifier: None,
+        scrollback_snapshot_req: None,
     };
     push_recent_action(
         &mut record,
         format!("session started: {}", shell.label.as_str()),
     );
-    hub.sessions.insert(record);
-    let snap = hub
-        .sessions
-        .get(&session_id)
-        .map(|rec| crate::sync::lock(&rec).snapshot())
-        .ok_or_else(|| anyhow!("session vanished"))?;
+
+    // Two-stage insert — see spawn_interactive_session for the same pattern
+    // and rationale.
+    let pending = hub.sessions.insert_pending(record);
+    let snap_tx = attach_lifecycle(
+        &hub.sessions,
+        session_id.clone(),
+        &pty,
+        Some(hub.dirs.clone()),
+    );
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+    {
+        let mut guard = crate::sync::lock(pending.arc());
+        guard.scrollback_snapshot_req = Some(snap_tx);
+        guard.input_notifier = Some(in_tx);
+    }
+    pty_state::watch_plain_shell(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        in_rx,
+    );
+    // Keep `osc_title::watch` so window-title escape sequences (which pwsh
+    // emits by default) are recorded as `terminal_title` annotations; the
+    // canonical session `label` stays whatever the spawn pipeline assigned.
+    osc_title::watch(
+        &hub.sessions,
+        session_id.clone(),
+        pty.output.subscribe(),
+        hub.dirs.clone(),
+        true,
+    );
+    let snap = crate::sync::lock(pending.arc()).snapshot();
+    pending.publish();
 
     if let Some(pid) = pid
         && let Ok(meta) = orphan::meta_from_record(
@@ -2628,32 +2788,6 @@ async fn spawn_plain_shell_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
-    attach_lifecycle(
-        &hub.sessions,
-        session_id.clone(),
-        &pty,
-        Some(hub.dirs.clone()),
-    );
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-    if let Some(arc) = hub.sessions.get(&session_id) {
-        crate::sync::lock(&arc).input_notifier = Some(in_tx);
-    }
-    pty_state::watch_plain_shell(
-        &hub.sessions,
-        session_id.clone(),
-        pty.output.subscribe(),
-        in_rx,
-    );
-    // Keep `osc_title::watch` so window-title escape sequences (which pwsh
-    // emits by default) are recorded as `terminal_title` annotations; the
-    // canonical session `label` stays whatever the spawn pipeline assigned.
-    osc_title::watch(
-        &hub.sessions,
-        session_id.clone(),
-        pty.output.subscribe(),
-        hub.dirs.clone(),
-        true,
-    );
     Ok(snap)
 }
 
@@ -2719,6 +2853,7 @@ fn spawn_headless_session(
         worktree_paths: worktree_paths_for_config(&stored_config, &members),
         last_prompt: last_prompt.clone(),
         input_notifier: None,
+        scrollback_snapshot_req: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     hub.sessions.insert(record);
@@ -2784,6 +2919,22 @@ async fn spawn_single(
         .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
         .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
     let repo_path = PathBuf::from(&repo.path);
+
+    // Non-git folder (no `.git`, or `git init` with no commits): skip
+    // worktree/branch ops entirely and spawn directly in the folder. The
+    // caller-supplied `branch_name` is still recorded on the member so the
+    // session label and sidebar grouping stay coherent, but no branch is
+    // created or checked out.
+    if !git::is_initialized(&repo_path).await {
+        let member = SessionMember {
+            repo_id: repo.id.clone(),
+            repo_name: repo.name.clone(),
+            branch: branch_name.to_string(),
+            worktree_path: repo_path.to_string_lossy().into_owned(),
+        };
+        let label = format!("{}: {branch_name}", repo.name);
+        return Ok((SessionKind::Single, vec![member], repo_path, label, None));
+    }
 
     // Resolve the base branch used when the target needs to be *created*.
     // Priority: explicit caller value → repo's persisted default → lazy
