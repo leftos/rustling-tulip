@@ -558,6 +558,7 @@ export type TabContent =
       repo_id: string;
       path: string;
       against: string | null;
+      worktree_path?: string | null;
     };
 
 export interface TabEntry {
@@ -647,6 +648,8 @@ export type ClientMessage =
       limit: number;
       // Maps to `git log --skip`. Defaults to 0 server-side.
       offset?: number;
+      // Session worktree path. Omit / null = registered repo's main tree.
+      worktree_path?: string | null;
     }
   | { type: "get_commit"; repo_id: string; sha: string }
   | {
@@ -654,24 +657,66 @@ export type ClientMessage =
       repo_id: string;
       path: string;
       against: string | null;
+      worktree_path?: string | null;
     }
   | { type: "get_remote_url"; repo_id: string }
-  | { type: "repo_status"; repo_id: string }
-  | { type: "stage_files"; repo_id: string; paths: string[] }
-  | { type: "unstage_files"; repo_id: string; paths: string[] }
-  | { type: "commit_repo"; repo_id: string; message: string }
-  | { type: "discard_changes"; repo_id: string; paths: string[] }
-  | { type: "stash_push"; repo_id: string; message: string }
-  | { type: "list_stashes"; repo_id: string }
-  | { type: "stash_pop"; repo_id: string; stash_id: string }
-  | { type: "stash_apply"; repo_id: string; stash_id: string }
-  | { type: "stash_drop"; repo_id: string; stash_id: string }
+  | { type: "repo_status"; repo_id: string; worktree_path?: string | null }
+  | {
+      type: "stage_files";
+      repo_id: string;
+      paths: string[];
+      worktree_path?: string | null;
+    }
+  | {
+      type: "unstage_files";
+      repo_id: string;
+      paths: string[];
+      worktree_path?: string | null;
+    }
+  | {
+      type: "commit_repo";
+      repo_id: string;
+      message: string;
+      worktree_path?: string | null;
+    }
+  | {
+      type: "discard_changes";
+      repo_id: string;
+      paths: string[];
+      worktree_path?: string | null;
+    }
+  | {
+      type: "stash_push";
+      repo_id: string;
+      message: string;
+      worktree_path?: string | null;
+    }
+  | { type: "list_stashes"; repo_id: string; worktree_path?: string | null }
+  | {
+      type: "stash_pop";
+      repo_id: string;
+      stash_id: string;
+      worktree_path?: string | null;
+    }
+  | {
+      type: "stash_apply";
+      repo_id: string;
+      stash_id: string;
+      worktree_path?: string | null;
+    }
+  | {
+      type: "stash_drop";
+      repo_id: string;
+      stash_id: string;
+      worktree_path?: string | null;
+    }
   | {
       type: "open_diff_tab";
       id: string;
       repo_id: string;
       path: string;
       against: string | null;
+      worktree_path?: string | null;
     }
   | {
       type: "get_file_snapshot";
@@ -679,6 +724,7 @@ export type ClientMessage =
       repo_id: string;
       path: string;
       against: string | null;
+      worktree_path?: string | null;
     }
   | { type: "load_scrollback"; session_id: string }
   // `drain` defaults to true server-side. Pass `drain: false` to retain
@@ -885,6 +931,9 @@ export type DaemonMessage =
       commits: GitCommit[];
       // Echoed from the request: 0 = fresh listing, >0 = append batch.
       offset: number;
+      // Echoed from the request so the sidebar can route to the right
+      // workspace section.
+      worktree_path?: string | null;
     }
   | { type: "commit_detail"; repo_id: string; detail: GitCommitDetail }
   | {
@@ -893,6 +942,7 @@ export type DaemonMessage =
       path: string;
       against: string | null;
       diff: string;
+      worktree_path?: string | null;
     }
   | ({ type: "remote_url" } & GitRemoteUrl)
   | {
@@ -900,20 +950,28 @@ export type DaemonMessage =
       repo_id: string;
       index_changes: GitFileChange[];
       worktree_changes: GitFileChange[];
+      worktree_path?: string | null;
     }
   | {
       type: "commit_ok";
       repo_id: string;
       sha: string;
       short_sha: string;
+      worktree_path?: string | null;
     }
   | {
       type: "git_write_error";
       repo_id: string;
       operation: string;
       error: string;
+      worktree_path?: string | null;
     }
-  | { type: "stashes"; repo_id: string; stashes: GitStash[] }
+  | {
+      type: "stashes";
+      repo_id: string;
+      stashes: GitStash[];
+      worktree_path?: string | null;
+    }
   | { type: "diff_tab_opened"; id: string; tab_id: string }
   | {
       type: "file_snapshot";
@@ -924,6 +982,7 @@ export type DaemonMessage =
       old: string;
       new: string;
       language: string;
+      worktree_path?: string | null;
     }
   | {
       type: "file_snapshot_error";
@@ -932,6 +991,7 @@ export type DaemonMessage =
       path: string;
       against: string | null;
       error: string;
+      worktree_path?: string | null;
     }
   | {
       type: "scrollback";

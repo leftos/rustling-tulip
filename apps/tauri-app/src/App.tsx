@@ -2366,6 +2366,7 @@ export default function App() {
           <SourceControlSidebar
             repos={state.repos}
             focusedRepoId={focusedRepoId}
+            focusedSession={focusedSession}
             client={state.client!}
             onActivateTab={onActivateTab}
           />

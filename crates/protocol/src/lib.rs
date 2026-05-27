@@ -760,9 +760,11 @@ pub enum TabContent {
     Grid {
         grid: GridNode,
     },
-    /// A Monaco-backed diff view. Identified by the (repo, path, against)
-    /// tuple so clicking the same file in the source-control sidebar twice
-    /// just focuses the existing tab instead of opening a duplicate.
+    /// A Monaco-backed diff view. Identified by the
+    /// (`repo`, `path`, `against`, `worktree_path`) tuple so clicking the
+    /// same file in the source-control sidebar twice just focuses the
+    /// existing tab instead of opening a duplicate, while two different
+    /// worktrees of the same repo get their own tabs.
     Diff {
         repo_id: String,
         path: String,
@@ -772,6 +774,11 @@ pub enum TabContent {
         /// STAGED bucket), `Some(sha)` = that commit's content as the old
         /// side.
         against: Option<String>,
+        /// `None` = the registered repo's main tree; `Some(path)` = a
+        /// session worktree. Two diff tabs for the same (`repo_id`, `path`,
+        /// `against`) but different `worktree_path` values are separate tabs.
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
 }
 
@@ -1456,13 +1463,19 @@ pub enum ClientMessage {
     },
     /// Recent commits for a repo. `branch` defaults to current. `offset`
     /// (default 0) maps to `git log --skip`, so the source-control sidebar
-    /// can request successive batches for "load more" pagination.
+    /// can request successive batches for "load more" pagination. When
+    /// `worktree_path` is `Some`, `git log` runs at that worktree (so its
+    /// HEAD position is honored) instead of the registered repo's main tree.
     ListCommits {
         repo_id: String,
         branch: Option<String>,
         limit: u32,
         #[serde(default)]
         offset: u32,
+        /// Optional session worktree path. When omitted the daemon uses the
+        /// registered repo path.
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Full detail (subject, body, parents, file list) for one commit.
     GetCommit {
@@ -1471,10 +1484,14 @@ pub enum ClientMessage {
     },
     /// Unified diff for a single file. `against` is `None` for working-tree
     /// vs index, `Some("HEAD")` for index vs HEAD, or a sha for that commit.
+    /// When `worktree_path` is `Some`, the diff is computed in that worktree
+    /// so its on-disk file content (and HEAD) are honored.
     GetFileDiff {
         repo_id: String,
         path: String,
         against: Option<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Resolve the repo's `origin` remote URL and parse it into a forge link
     /// for "Open in GitHub" actions.
@@ -1485,23 +1502,32 @@ pub enum ClientMessage {
     /// non-session-scoped repo view. Daemon replies with
     /// [`DaemonMessage::RepoStatus`], which splits results into staged
     /// (index vs HEAD) and unstaged (worktree vs index) buckets so the UI
-    /// can render VSCode-style STAGED + CHANGES sections.
+    /// can render VSCode-style STAGED + CHANGES sections. When
+    /// `worktree_path` is `Some`, status is computed against that worktree
+    /// instead of the registered repo's main tree.
     RepoStatus {
         repo_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Stage one or more paths in `repo_id` (`git add -- <path>`...). On
     /// success the daemon broadcasts a fresh [`DaemonMessage::RepoStatus`]
     /// to every connected client. Failure surfaces as
-    /// [`DaemonMessage::GitWriteError`].
+    /// [`DaemonMessage::GitWriteError`]. `worktree_path = Some(...)` targets
+    /// a session worktree instead of the registered repo's main tree.
     StageFiles {
         repo_id: String,
         paths: Vec<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Unstage one or more paths (`git restore --staged -- <path>`...).
     /// Same response shape as [`StageFiles`].
     UnstageFiles {
         repo_id: String,
         paths: Vec<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Commit the current index. The daemon shells out to
     /// `git commit -m <message>` with no `--amend`, no `--no-verify`. On
@@ -1511,6 +1537,8 @@ pub enum ClientMessage {
     CommitRepo {
         repo_id: String,
         message: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Discard unstaged worktree changes for the named paths
     /// (`git restore -- <path>`...). Index entries are untouched; callers
@@ -1521,6 +1549,8 @@ pub enum ClientMessage {
     DiscardChanges {
         repo_id: String,
         paths: Vec<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Push a new stash. Empty `message` is allowed — git falls back to its
     /// default "WIP on <branch>" subject. Always run with `-u` so untracked
@@ -1529,27 +1559,37 @@ pub enum ClientMessage {
     StashPush {
         repo_id: String,
         message: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Request the current stash list. Daemon replies with
     /// [`DaemonMessage::Stashes`].
     ListStashes {
         repo_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// `git stash pop <stash_id>` — apply and drop. Broadcasts fresh
     /// `RepoStatus` + `Stashes` on success.
     StashPop {
         repo_id: String,
         stash_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// `git stash apply <stash_id>` — apply without dropping.
     StashApply {
         repo_id: String,
         stash_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// `git stash drop <stash_id>` — drop without applying.
     StashDrop {
         repo_id: String,
         stash_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Open (or focus, if one already exists) a diff tab for the given
     /// (repo, path, against) triple. The daemon broadcasts a `TabUpdated`
@@ -1563,6 +1603,8 @@ pub enum ClientMessage {
         repo_id: String,
         path: String,
         against: Option<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Fetch the OLD and NEW file contents that back a Monaco diff view.
     /// Single round-trip (atomic snapshot) — see
@@ -1574,6 +1616,8 @@ pub enum ClientMessage {
         repo_id: String,
         path: String,
         against: Option<String>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Request the persisted scrollback for a session, replayed on attach.
     /// The daemon answers with [`DaemonMessage::Scrollback`].
@@ -2112,6 +2156,10 @@ pub enum DaemonMessage {
         /// list).
         #[serde(default)]
         offset: u32,
+        /// Echoed from the request so the sidebar can route the response
+        /// to the correct workspace section.
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     CommitDetail {
         repo_id: String,
@@ -2122,6 +2170,8 @@ pub enum DaemonMessage {
         path: String,
         against: Option<String>,
         diff: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     RemoteUrl(GitRemoteUrl),
     RepoStatus {
@@ -2133,12 +2183,19 @@ pub enum DaemonMessage {
         /// `status` is the porcelain Y column. Untracked files appear here
         /// with `status = "?"`.
         worktree_changes: Vec<GitFileChange>,
+        /// `None` = registered repo's main tree; `Some(path)` = the session
+        /// worktree the status was computed against. The sidebar uses this
+        /// to route events to the correct workspace section.
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Successful response to [`ClientMessage::CommitRepo`].
     CommitOk {
         repo_id: String,
         sha: String,
         short_sha: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Failure response to a stage/unstage/commit/discard/stash request.
     /// `operation` is one of `"stage"`, `"unstage"`, `"commit"`,
@@ -2148,6 +2205,8 @@ pub enum DaemonMessage {
         repo_id: String,
         operation: String,
         error: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Response to [`ClientMessage::ListStashes`] and a broadcast after any
     /// successful stash push/pop/drop. Carries the full current stash list
@@ -2155,6 +2214,8 @@ pub enum DaemonMessage {
     Stashes {
         repo_id: String,
         stashes: Vec<GitStash>,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Response to [`ClientMessage::OpenDiffTab`]. Carries the tab id (new
     /// or pre-existing) so the requesting client can activate it.
@@ -2175,6 +2236,8 @@ pub enum DaemonMessage {
         old: String,
         new: String,
         language: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Failure response to [`ClientMessage::GetFileSnapshot`].
     FileSnapshotError {
@@ -2183,6 +2246,8 @@ pub enum DaemonMessage {
         path: String,
         against: Option<String>,
         error: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
     },
     /// Persisted scrollback bytes (raw PTY output for interactive sessions,
     /// raw stream-json lines for headless), base64-encoded. `truncated` is

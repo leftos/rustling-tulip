@@ -123,9 +123,11 @@ pub enum StateEvent {
     },
     /// Broadcast after a successful stage/unstage/commit/discard so every
     /// connected source-control sidebar refreshes without each window having
-    /// to re-request explicitly.
+    /// to re-request explicitly. `worktree_path = None` means the registered
+    /// repo's main tree; `Some(...)` is a per-session worktree.
     RepoStatus {
         repo_id: String,
+        worktree_path: Option<String>,
         index_changes: Vec<protocol::GitFileChange>,
         worktree_changes: Vec<protocol::GitFileChange>,
     },
@@ -133,6 +135,7 @@ pub enum StateEvent {
     /// STASHES section stays in sync across multiple client windows.
     Stashes {
         repo_id: String,
+        worktree_path: Option<String>,
         stashes: Vec<protocol::GitStash>,
     },
     /// Broadcast whenever the user-customized worktrees root changes (or
@@ -336,7 +339,7 @@ pub async fn run(
     // add/remove broadcasts, so adding a repo at runtime spawns a watcher
     // and removing one stops it. Refreshers park while `client_count` is
     // 0 — see `crates/daemon/src/git_watch.rs`.
-    crate::git_watch::start(&state, &state_events, client_count_rx);
+    crate::git_watch::start(&state, &sessions, &state_events, &client_count_rx);
 
     let hub = Hub {
         state,
@@ -623,17 +626,27 @@ fn spawn_state_forwarder(
                 }
                 Ok(StateEvent::RepoStatus {
                     repo_id,
+                    worktree_path,
                     index_changes,
                     worktree_changes,
                 }) => {
                     let _ = out_tx.send(DaemonMessage::RepoStatus {
                         repo_id,
+                        worktree_path,
                         index_changes,
                         worktree_changes,
                     });
                 }
-                Ok(StateEvent::Stashes { repo_id, stashes }) => {
-                    let _ = out_tx.send(DaemonMessage::Stashes { repo_id, stashes });
+                Ok(StateEvent::Stashes {
+                    repo_id,
+                    worktree_path,
+                    stashes,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::Stashes {
+                        repo_id,
+                        worktree_path,
+                        stashes,
+                    });
                 }
                 Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
                     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
@@ -1226,14 +1239,16 @@ async fn dispatch(
             branch,
             limit,
             offset,
+            worktree_path,
         } => {
-            let path = repo_path_or_err(hub, &repo_id)?;
+            let path = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             let commits =
                 git_inspect::list_commits(&path, branch.as_deref(), limit, offset).await?;
             let _ = out_tx.send(DaemonMessage::Commits {
                 repo_id,
                 commits,
                 offset,
+                worktree_path,
             });
         }
         ClientMessage::GetCommit { repo_id, sha } => {
@@ -1245,14 +1260,16 @@ async fn dispatch(
             repo_id,
             path,
             against,
+            worktree_path,
         } => {
-            let repo = repo_path_or_err(hub, &repo_id)?;
+            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             let diff = git_inspect::file_diff(&repo, &path, against.as_deref()).await?;
             let _ = out_tx.send(DaemonMessage::FileDiff {
                 repo_id,
                 path,
                 against,
                 diff,
+                worktree_path,
             });
         }
         ClientMessage::GetRemoteUrl { repo_id } => {
@@ -1260,62 +1277,129 @@ async fn dispatch(
             let info = git_inspect::remote_url(&repo_id, &repo).await?;
             let _ = out_tx.send(DaemonMessage::RemoteUrl(info));
         }
-        ClientMessage::RepoStatus { repo_id } => {
-            let repo = repo_path_or_err(hub, &repo_id)?;
+        ClientMessage::RepoStatus {
+            repo_id,
+            worktree_path,
+        } => {
+            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             let (index_changes, worktree_changes) = git_inspect::repo_status(&repo).await?;
             let _ = out_tx.send(DaemonMessage::RepoStatus {
                 repo_id,
                 index_changes,
                 worktree_changes,
+                worktree_path,
             });
         }
-        ClientMessage::StageFiles { repo_id, paths } => {
-            handle_git_write(hub, out_tx, &repo_id, "stage", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::stage(&repo, &paths).await?;
-                Ok(None)
-            })
+        ClientMessage::StageFiles {
+            repo_id,
+            paths,
+            worktree_path,
+        } => {
+            handle_git_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "stage",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::stage(&repo, &paths).await?;
+                    Ok(None)
+                },
+            )
             .await;
         }
-        ClientMessage::UnstageFiles { repo_id, paths } => {
-            handle_git_write(hub, out_tx, &repo_id, "unstage", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::unstage(&repo, &paths).await?;
-                Ok(None)
-            })
+        ClientMessage::UnstageFiles {
+            repo_id,
+            paths,
+            worktree_path,
+        } => {
+            handle_git_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "unstage",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::unstage(&repo, &paths).await?;
+                    Ok(None)
+                },
+            )
             .await;
         }
-        ClientMessage::CommitRepo { repo_id, message } => {
-            handle_git_write(hub, out_tx, &repo_id, "commit", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                let (sha, short_sha) = git_write::commit(&repo, &message).await?;
-                Ok(Some(DaemonMessage::CommitOk {
-                    repo_id: repo_id.clone(),
-                    sha,
-                    short_sha,
-                }))
-            })
+        ClientMessage::CommitRepo {
+            repo_id,
+            message,
+            worktree_path,
+        } => {
+            handle_git_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "commit",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    let (sha, short_sha) = git_write::commit(&repo, &message).await?;
+                    Ok(Some(DaemonMessage::CommitOk {
+                        repo_id: repo_id.clone(),
+                        sha,
+                        short_sha,
+                        worktree_path: worktree_path.clone(),
+                    }))
+                },
+            )
             .await;
         }
-        ClientMessage::DiscardChanges { repo_id, paths } => {
-            handle_git_write(hub, out_tx, &repo_id, "discard", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::discard(&repo, &paths).await?;
-                Ok(None)
-            })
+        ClientMessage::DiscardChanges {
+            repo_id,
+            paths,
+            worktree_path,
+        } => {
+            handle_git_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "discard",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::discard(&repo, &paths).await?;
+                    Ok(None)
+                },
+            )
             .await;
         }
-        ClientMessage::StashPush { repo_id, message } => {
-            handle_stash_write(hub, out_tx, &repo_id, "stash_push", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::stash_push(&repo, &message).await
-            })
+        ClientMessage::StashPush {
+            repo_id,
+            message,
+            worktree_path,
+        } => {
+            handle_stash_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "stash_push",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::stash_push(&repo, &message).await
+                },
+            )
             .await;
         }
-        ClientMessage::ListStashes { repo_id } => match repo_path_or_err(hub, &repo_id) {
+        ClientMessage::ListStashes {
+            repo_id,
+            worktree_path,
+        } => match repo_target_or_err(hub, &repo_id, worktree_path.as_deref()) {
             Ok(repo) => match git_write::stash_list(&repo).await {
                 Ok(stashes) => {
-                    let _ = out_tx.send(DaemonMessage::Stashes { repo_id, stashes });
+                    let _ = out_tx.send(DaemonMessage::Stashes {
+                        repo_id,
+                        stashes,
+                        worktree_path,
+                    });
                 }
                 Err(err) => {
                     warn!(?err, repo_id, "stash_list failed");
@@ -1330,25 +1414,58 @@ async fn dispatch(
                 });
             }
         },
-        ClientMessage::StashPop { repo_id, stash_id } => {
-            handle_stash_write(hub, out_tx, &repo_id, "stash_pop", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::stash_pop(&repo, &stash_id).await
-            })
+        ClientMessage::StashPop {
+            repo_id,
+            stash_id,
+            worktree_path,
+        } => {
+            handle_stash_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "stash_pop",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::stash_pop(&repo, &stash_id).await
+                },
+            )
             .await;
         }
-        ClientMessage::StashApply { repo_id, stash_id } => {
-            handle_stash_write(hub, out_tx, &repo_id, "stash_apply", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::stash_apply(&repo, &stash_id).await
-            })
+        ClientMessage::StashApply {
+            repo_id,
+            stash_id,
+            worktree_path,
+        } => {
+            handle_stash_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "stash_apply",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::stash_apply(&repo, &stash_id).await
+                },
+            )
             .await;
         }
-        ClientMessage::StashDrop { repo_id, stash_id } => {
-            handle_stash_write(hub, out_tx, &repo_id, "stash_drop", async {
-                let repo = repo_path_or_err(hub, &repo_id)?;
-                git_write::stash_drop(&repo, &stash_id).await
-            })
+        ClientMessage::StashDrop {
+            repo_id,
+            stash_id,
+            worktree_path,
+        } => {
+            handle_stash_write(
+                hub,
+                out_tx,
+                &repo_id,
+                worktree_path.as_deref(),
+                "stash_drop",
+                async {
+                    let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                    git_write::stash_drop(&repo, &stash_id).await
+                },
+            )
             .await;
         }
         ClientMessage::OpenDiffTab {
@@ -1356,8 +1473,15 @@ async fn dispatch(
             repo_id,
             path,
             against,
+            worktree_path,
         } => {
-            let outcome = open_diff_tab(hub, &repo_id, &path, against.as_deref())?;
+            let outcome = open_diff_tab(
+                hub,
+                &repo_id,
+                &path,
+                against.as_deref(),
+                worktree_path.as_deref(),
+            )?;
             if let Some(new_tab) = outcome.created {
                 let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
             }
@@ -1371,8 +1495,9 @@ async fn dispatch(
             repo_id,
             path,
             against,
+            worktree_path,
         } => {
-            let repo = repo_path_or_err(hub, &repo_id)?;
+            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             match git_inspect::file_snapshot(&repo, &path, against.as_deref()).await {
                 Ok((old, new)) => {
                     let _ = out_tx.send(DaemonMessage::FileSnapshot {
@@ -1383,6 +1508,7 @@ async fn dispatch(
                         old,
                         new,
                         language: git_inspect::language_for_path(&path).to_string(),
+                        worktree_path,
                     });
                 }
                 Err(err) => {
@@ -1392,6 +1518,7 @@ async fn dispatch(
                         path,
                         against,
                         error: format!("{err:#}"),
+                        worktree_path,
                     });
                 }
             }
@@ -1908,8 +2035,10 @@ fn open_diff_tab(
     repo_id: &str,
     path: &str,
     against: Option<&str>,
+    worktree_path: Option<&str>,
 ) -> anyhow::Result<OpenDiffOutcome> {
     let against_owned = against.map(str::to_string);
+    let worktree_path_owned = worktree_path.map(str::to_string);
     let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate(|s| {
         if let Some(existing) = s.tabs.iter().find(|t| {
             matches!(
@@ -1918,7 +2047,8 @@ fn open_diff_tab(
                     repo_id: r,
                     path: p,
                     against: a,
-                } if r == repo_id && p == path && a.as_deref() == against
+                    worktree_path: w,
+                } if r == repo_id && p == path && a.as_deref() == against && w.as_deref() == worktree_path
             )
         }) {
             return Ok(OpenDiffOutcome {
@@ -1933,6 +2063,7 @@ fn open_diff_tab(
                 repo_id: repo_id.to_string(),
                 path: path.to_string(),
                 against: against_owned.clone(),
+                worktree_path: worktree_path_owned.clone(),
             },
             created_at: chrono::Utc::now(),
         };
@@ -1980,6 +2111,37 @@ fn worktree_paths_for_config(
 }
 
 fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
+    repo_target_or_err(hub, repo_id, None)
+}
+
+/// Resolve the working directory git operations should target for
+/// `(repo_id, worktree_path)`. `worktree_path = None` falls back to the
+/// registered repo path (current behavior). `worktree_path = Some(...)`
+/// uses that path after validating (a) the repo is registered and (b)
+/// the supplied path is under the daemon's worktrees root, so a malicious
+/// client can't redirect git invocations to arbitrary directories.
+fn repo_target_or_err(
+    hub: &Hub,
+    repo_id: &str,
+    worktree_path: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    if let Some(wt) = worktree_path {
+        let registered = hub
+            .state
+            .with_persisted(|s| s.repos.iter().any(|r| r.id == repo_id));
+        if !registered {
+            return Err(anyhow!("unknown repo: {repo_id}"));
+        }
+        let wt_buf = PathBuf::from(wt);
+        let wt_root = hub.state.worktrees_dir();
+        if !wt_buf.starts_with(&wt_root) {
+            return Err(anyhow!(
+                "worktree_path {wt} is not under the worktrees root {}",
+                wt_root.display()
+            ));
+        }
+        return Ok(wt_buf);
+    }
     hub.state
         .with_persisted(|s| {
             s.repos
@@ -2000,6 +2162,7 @@ async fn handle_git_write<F>(
     hub: &Hub,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     repo_id: &str,
+    worktree_path: Option<&str>,
     operation: &str,
     body: F,
 ) where
@@ -2008,11 +2171,12 @@ async fn handle_git_write<F>(
     let outcome = body.await;
     match outcome {
         Ok(follow_up) => {
-            match repo_path_or_err(hub, repo_id) {
+            match repo_target_or_err(hub, repo_id, worktree_path) {
                 Ok(repo) => match git_inspect::repo_status(&repo).await {
                     Ok((index_changes, worktree_changes)) => {
                         let _ = hub.state_events.send(StateEvent::RepoStatus {
                             repo_id: repo_id.to_string(),
+                            worktree_path: worktree_path.map(str::to_owned),
                             index_changes,
                             worktree_changes,
                         });
@@ -2035,6 +2199,7 @@ async fn handle_git_write<F>(
                 repo_id: repo_id.to_string(),
                 operation: operation.to_string(),
                 error: format!("{err:#}"),
+                worktree_path: worktree_path.map(str::to_owned),
             });
         }
     }
@@ -2047,6 +2212,7 @@ async fn handle_stash_write<F>(
     hub: &Hub,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     repo_id: &str,
+    worktree_path: Option<&str>,
     operation: &str,
     body: F,
 ) where
@@ -2054,12 +2220,13 @@ async fn handle_stash_write<F>(
 {
     let outcome = body.await;
     match outcome {
-        Ok(()) => match repo_path_or_err(hub, repo_id) {
+        Ok(()) => match repo_target_or_err(hub, repo_id, worktree_path) {
             Ok(repo) => {
                 match git_inspect::repo_status(&repo).await {
                     Ok((index_changes, worktree_changes)) => {
                         let _ = hub.state_events.send(StateEvent::RepoStatus {
                             repo_id: repo_id.to_string(),
+                            worktree_path: worktree_path.map(str::to_owned),
                             index_changes,
                             worktree_changes,
                         });
@@ -2075,6 +2242,7 @@ async fn handle_stash_write<F>(
                     Ok(stashes) => {
                         let _ = hub.state_events.send(StateEvent::Stashes {
                             repo_id: repo_id.to_string(),
+                            worktree_path: worktree_path.map(str::to_owned),
                             stashes,
                         });
                     }
@@ -2093,6 +2261,7 @@ async fn handle_stash_write<F>(
                 repo_id: repo_id.to_string(),
                 operation: operation.to_string(),
                 error: format!("{err:#}"),
+                worktree_path: worktree_path.map(str::to_owned),
             });
         }
     }

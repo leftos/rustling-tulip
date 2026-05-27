@@ -711,6 +711,47 @@ button:focus-visible {
   flex-direction: column;
 }
 
+/* Stacked-section layout used in workspace mode. Each member's
+   `.source-control-changes-full` lives inside `.source-control-sections`
+   so they all share the top half of the sidebar split (above History) and
+   scroll as a single column. */
+.source-control-sections {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.source-control-sections > .source-control-changes-full {
+  flex: 0 0 auto;
+  overflow-y: visible;
+  border-bottom: 1px solid var(--border);
+}
+.source-control-sections > .source-control-changes-full:last-child {
+  border-bottom: 0;
+}
+.source-control-section-header {
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--bg-elevated, transparent);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-control-section-header strong {
+  font-weight: 600;
+  color: var(--fg);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .source-control-history-panel {
   display: flex;
   flex-direction: column;

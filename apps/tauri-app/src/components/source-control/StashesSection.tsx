@@ -4,6 +4,11 @@ import type { DaemonMessage, GitStash } from "../../types";
 
 interface Props {
   repoId: string;
+  // `null` = the registered repo's main tree. `string` = a session worktree
+  // path; all stash mutations target that worktree's index, and event
+  // filtering compares this exact value to the `worktree_path` field on
+  // incoming `stashes` messages.
+  worktreePath: string | null;
   client: DaemonClient;
 }
 
@@ -17,7 +22,7 @@ interface Props {
  * Each stash row exposes Pop / Apply / Drop actions; the Push button + input
  * sit in the section header so a user can stash without leaving the sidebar.
  */
-export default function StashesSection({ repoId, client }: Props) {
+export default function StashesSection({ repoId, worktreePath, client }: Props) {
   const [stashes, setStashes] = useState<GitStash[] | null>(null);
   const [collapsed, setCollapsed] = useState(true);
   const [pushMessage, setPushMessage] = useState("");
@@ -26,16 +31,21 @@ export default function StashesSection({ repoId, client }: Props) {
   useEffect(() => {
     setStashes(null);
     setPending(null);
-    void listStashes(client, repoId).then((list) => setStashes(list));
+    void listStashes(client, repoId, worktreePath).then((list) => setStashes(list));
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (detail.type !== "stashes" || detail.repo_id !== repoId) return;
+      if (
+        detail.type !== "stashes" ||
+        detail.repo_id !== repoId ||
+        (detail.worktree_path ?? null) !== worktreePath
+      )
+        return;
       setStashes(detail.stashes);
       setPending(null);
     };
     window.addEventListener("rt:stashes", handler);
     return () => window.removeEventListener("rt:stashes", handler);
-  }, [client, repoId]);
+  }, [client, repoId, worktreePath]);
 
   const sendPush = () => {
     setPending("stash_push");
@@ -43,20 +53,36 @@ export default function StashesSection({ repoId, client }: Props) {
       type: "stash_push",
       repo_id: repoId,
       message: pushMessage.trim(),
+      worktree_path: worktreePath,
     });
     setPushMessage("");
   };
   const sendPop = (stashId: string) => {
     setPending("stash_pop");
-    client.send({ type: "stash_pop", repo_id: repoId, stash_id: stashId });
+    client.send({
+      type: "stash_pop",
+      repo_id: repoId,
+      stash_id: stashId,
+      worktree_path: worktreePath,
+    });
   };
   const sendApply = (stashId: string) => {
     setPending("stash_apply");
-    client.send({ type: "stash_apply", repo_id: repoId, stash_id: stashId });
+    client.send({
+      type: "stash_apply",
+      repo_id: repoId,
+      stash_id: stashId,
+      worktree_path: worktreePath,
+    });
   };
   const sendDrop = (stashId: string) => {
     setPending("stash_drop");
-    client.send({ type: "stash_drop", repo_id: repoId, stash_id: stashId });
+    client.send({
+      type: "stash_drop",
+      repo_id: repoId,
+      stash_id: stashId,
+      worktree_path: worktreePath,
+    });
   };
 
   const count = stashes?.length ?? 0;

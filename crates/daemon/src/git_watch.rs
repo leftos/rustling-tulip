@@ -38,12 +38,13 @@
 //! design).
 
 use crate::server::StateEvent;
+use crate::session::{SessionEvent, SessionRegistry};
 use crate::state::AppState;
 use crate::{git_inspect, git_write};
 use notify::RecursiveMode;
 use notify_debouncer_full::new_debouncer;
 use protocol::RepoEntry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,12 +213,24 @@ enum RepoWatcher {
 /// Public entry point. Spawns the supervisor task that owns the per-repo
 /// watcher set; the returned handle is only used to keep the supervisor
 /// alive for the daemon's lifetime.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Spawns four parallel supervisor tasks (initial seed, repo-event \
+              sync, init-promotion, session-worktree sync). Extracting each into \
+              its own helper would require threading the four channels + arcs \
+              through five function signatures for no readability gain."
+)]
 pub fn start(
     state: &Arc<AppState>,
+    sessions: &Arc<SessionRegistry>,
     state_events: &broadcast::Sender<StateEvent>,
-    client_count: watch::Receiver<usize>,
+    client_count: &watch::Receiver<usize>,
 ) {
     let handles = Arc::new(AsyncMutex::new(HashMap::<String, RepoWatcher>::new()));
+    // Worktree watchers are keyed by the worktree's absolute path string
+    // (unique across all sessions); the value carries the originating
+    // repo_id so refresher tasks can stamp the StateEvent correctly.
+    let worktree_handles = Arc::new(AsyncMutex::new(HashMap::<String, WorktreeWatcher>::new()));
 
     // `promote_tx` is held by every init-flavored watcher and used to ask
     // the supervisor to upgrade it once `.git` appears in the watched
@@ -286,6 +299,8 @@ pub fn start(
     // removed while we waited), just drop the request.
     let state_for_promote = Arc::clone(state);
     let state_events_for_promote = state_events.clone();
+    let client_count_for_promote = client_count.clone();
+    let promote_tx_for_promote = promote_tx.clone();
     tokio::spawn(async move {
         while let Some(repo_id) = promote_rx.recv().await {
             // Acquire the handle lock BEFORE re-reading the registry, so
@@ -306,13 +321,271 @@ pub fn start(
             spawn_watcher(
                 &repo,
                 &state_events_for_promote,
-                &client_count,
-                &promote_tx,
+                &client_count_for_promote,
+                &promote_tx_for_promote,
                 &mut guard,
             );
             info!(repo_id, "git_watch: promoted init watcher to active");
         }
     });
+
+    // Session-worktree supervisor: every active session's member worktrees
+    // gets its own filesystem watcher so source-control updates fire live
+    // for the on-disk tree the agent is editing — not just the registered
+    // repo's main tree. Seeds from the current snapshot, then syncs on
+    // every SessionEvent (Updated / Removed).
+    let sessions_for_wt = Arc::clone(sessions);
+    let state_events_for_wt = state_events.clone();
+    let client_count_for_wt = client_count.clone();
+    let worktree_handles_for_wt = Arc::clone(&worktree_handles);
+    tokio::spawn(async move {
+        // Initial seed
+        {
+            let targets = collect_session_worktree_targets(&sessions_for_wt);
+            let mut guard = worktree_handles_for_wt.lock().await;
+            sync_worktree_handles(
+                &targets,
+                &state_events_for_wt,
+                &client_count_for_wt,
+                &mut guard,
+            );
+        }
+        let mut session_rx = sessions_for_wt.subscribe();
+        loop {
+            match session_rx.recv().await {
+                Ok(SessionEvent::Updated(_) | SessionEvent::Removed(_)) => {
+                    let targets = collect_session_worktree_targets(&sessions_for_wt);
+                    let mut guard = worktree_handles_for_wt.lock().await;
+                    sync_worktree_handles(
+                        &targets,
+                        &state_events_for_wt,
+                        &client_count_for_wt,
+                        &mut guard,
+                    );
+                }
+                Ok(SessionEvent::Attention { .. }) => {
+                    // Attention events don't change the set of worktrees.
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "git_watch: session event stream lagged");
+                    // Re-sync to be safe.
+                    let targets = collect_session_worktree_targets(&sessions_for_wt);
+                    let mut guard = worktree_handles_for_wt.lock().await;
+                    sync_worktree_handles(
+                        &targets,
+                        &state_events_for_wt,
+                        &client_count_for_wt,
+                        &mut guard,
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        info!("git_watch: session-worktree supervisor exiting (channel closed)");
+    });
+}
+
+/// Flatten every live session's member list into `(repo_id, worktree_path)`
+/// pairs. Stopped or errored sessions are excluded — their worktrees may
+/// have been removed by the cleanup pipeline, and watching a missing dir
+/// just churns log spam.
+fn collect_session_worktree_targets(sessions: &SessionRegistry) -> Vec<(String, String)> {
+    use protocol::SessionStatus;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for snap in sessions.snapshots() {
+        if matches!(snap.status, SessionStatus::Stopped | SessionStatus::Error) {
+            continue;
+        }
+        for member in &snap.members {
+            if seen.insert(member.worktree_path.clone()) {
+                out.push((member.repo_id.clone(), member.worktree_path.clone()));
+            }
+        }
+    }
+    out
+}
+
+enum WorktreeWatcher {
+    Active {
+        _debouncer: Box<dyn std::any::Any + Send + Sync>,
+        _refresher: tokio::task::JoinHandle<()>,
+    },
+}
+
+/// Reconcile the worktree-watcher set against the freshly-derived list of
+/// `(repo_id, worktree_path)` targets: spawn watchers for any new ones,
+/// drop watchers for paths that no longer have a live session.
+fn sync_worktree_handles(
+    targets: &[(String, String)],
+    state_events: &broadcast::Sender<StateEvent>,
+    client_count: &watch::Receiver<usize>,
+    handles: &mut HashMap<String, WorktreeWatcher>,
+) {
+    let current: HashSet<&str> = targets.iter().map(|(_, p)| p.as_str()).collect();
+    handles.retain(|path, _| {
+        let keep = current.contains(path.as_str());
+        if !keep {
+            debug!(
+                worktree = path,
+                "git_watch: stopping watcher for retired session worktree"
+            );
+        }
+        keep
+    });
+    for (repo_id, worktree_path) in targets {
+        if handles.contains_key(worktree_path) {
+            continue;
+        }
+        spawn_worktree_watcher(repo_id, worktree_path, state_events, client_count, handles);
+    }
+}
+
+/// Create the debouncer + refresher pair for one session worktree. The
+/// emitted [`StateEvent::RepoStatus`] / [`StateEvent::Stashes`] events
+/// carry `worktree_path = Some(path)` so the source-control sidebar can
+/// route them to the matching workspace section instead of conflating
+/// them with the registered repo's main-tree status.
+fn spawn_worktree_watcher(
+    repo_id: &str,
+    worktree_path: &str,
+    state_events: &broadcast::Sender<StateEvent>,
+    client_count: &watch::Receiver<usize>,
+    handles: &mut HashMap<String, WorktreeWatcher>,
+) {
+    let wt_path = PathBuf::from(worktree_path);
+    if !wt_path.is_dir() {
+        warn!(
+            repo_id,
+            worktree = worktree_path,
+            "git_watch: worktree path not a directory; skipping watcher"
+        );
+        return;
+    }
+    let (tx, rx) = mpsc::unbounded_channel::<RefreshFlags>();
+    let callback_path = wt_path.clone();
+    let callback_repo_id = repo_id.to_string();
+    let debouncer_result = new_debouncer(
+        Duration::from_millis(DEBOUNCE_MS),
+        None,
+        move |result: notify_debouncer_full::DebounceEventResult| match result {
+            Ok(events) => {
+                let mut merged = RefreshFlags::default();
+                for ev in events {
+                    for path in &ev.paths {
+                        if let Some(flags) = classify_event(&callback_path, path) {
+                            merged = merged.merge(flags);
+                            if merged == RefreshFlags::BOTH {
+                                break;
+                            }
+                        }
+                    }
+                    if merged == RefreshFlags::BOTH {
+                        break;
+                    }
+                }
+                if !merged.is_empty() {
+                    let _ = tx.send(merged);
+                }
+            }
+            Err(errs) => {
+                for e in errs {
+                    warn!(
+                        repo_id = %callback_repo_id,
+                        error = %e,
+                        "git_watch: worktree debouncer error"
+                    );
+                }
+            }
+        },
+    );
+    let mut debouncer = match debouncer_result {
+        Ok(d) => d,
+        Err(err) => {
+            warn!(
+                repo_id,
+                worktree = worktree_path,
+                ?err,
+                "git_watch: failed to create worktree debouncer"
+            );
+            return;
+        }
+    };
+    if let Err(err) = debouncer.watch(&wt_path, RecursiveMode::Recursive) {
+        warn!(
+            repo_id,
+            worktree = worktree_path,
+            ?err,
+            "git_watch: failed to start worktree watcher"
+        );
+        return;
+    }
+    let refresher = tokio::spawn(worktree_refresher_task(
+        wt_path.clone(),
+        repo_id.to_string(),
+        worktree_path.to_string(),
+        state_events.clone(),
+        client_count.clone(),
+        rx,
+    ));
+    info!(
+        repo_id,
+        worktree = worktree_path,
+        "git_watch: watching session worktree"
+    );
+    handles.insert(
+        worktree_path.to_string(),
+        WorktreeWatcher::Active {
+            _debouncer: Box::new(debouncer),
+            _refresher: refresher,
+        },
+    );
+}
+
+/// Worktree analog of `refresher_task`. Same parking / coalescing logic;
+/// runs `refresh_target` with the worktree path so the emitted events
+/// carry `worktree_path = Some(...)`.
+async fn worktree_refresher_task(
+    target_path: PathBuf,
+    repo_id: String,
+    worktree_path: String,
+    state_events: broadcast::Sender<StateEvent>,
+    mut client_count: watch::Receiver<usize>,
+    mut rx: mpsc::UnboundedReceiver<RefreshFlags>,
+) {
+    loop {
+        let has_clients = *client_count.borrow_and_update() > 0;
+        if has_clients {
+            tokio::select! {
+                res = client_count.changed() => {
+                    if res.is_err() { break; }
+                }
+                maybe = rx.recv() => {
+                    let Some(first) = maybe else { break };
+                    let mut flags = first;
+                    while let Ok(more) = rx.try_recv() {
+                        flags = flags.merge(more);
+                    }
+                    refresh_target(&target_path, &repo_id, Some(&worktree_path), &state_events, flags).await;
+                }
+            }
+        } else {
+            tokio::select! {
+                res = client_count.changed() => {
+                    if res.is_err() { break; }
+                    if *client_count.borrow() > 0 {
+                        while rx.try_recv().is_ok() {}
+                        refresh_target(&target_path, &repo_id, Some(&worktree_path), &state_events, RefreshFlags::BOTH).await;
+                    }
+                }
+                maybe = rx.recv() => {
+                    if maybe.is_none() { break; }
+                    while rx.try_recv().is_ok() {}
+                }
+            }
+        }
+    }
+    debug!(repo_id, worktree = %worktree_path, "git_watch: worktree refresher exiting");
 }
 
 /// Add watchers for newly-added repos and drop watchers for repos that
@@ -574,11 +847,27 @@ async fn refresh(
     state_events: &broadcast::Sender<StateEvent>,
     flags: RefreshFlags,
 ) {
+    refresh_target(repo_path, repo_id, None, state_events, flags).await;
+}
+
+/// Refresh logic shared by the registered-repo watcher and the per-session
+/// worktree watcher. `worktree_path = None` is the main tree of the
+/// registered repo; `Some(path)` is the session worktree the watcher is
+/// tracking. The emitted events carry the same `worktree_path` so the
+/// sidebar can route them to the correct workspace section.
+async fn refresh_target(
+    target_path: &Path,
+    repo_id: &str,
+    worktree_path: Option<&str>,
+    state_events: &broadcast::Sender<StateEvent>,
+    flags: RefreshFlags,
+) {
     if flags.status {
-        match git_inspect::repo_status(repo_path).await {
+        match git_inspect::repo_status(target_path).await {
             Ok((index_changes, worktree_changes)) => {
                 let _ = state_events.send(StateEvent::RepoStatus {
                     repo_id: repo_id.to_string(),
+                    worktree_path: worktree_path.map(str::to_owned),
                     index_changes,
                     worktree_changes,
                 });
@@ -589,10 +878,11 @@ async fn refresh(
         }
     }
     if flags.stash {
-        match git_write::stash_list(repo_path).await {
+        match git_write::stash_list(target_path).await {
             Ok(stashes) => {
                 let _ = state_events.send(StateEvent::Stashes {
                     repo_id: repo_id.to_string(),
+                    worktree_path: worktree_path.map(str::to_owned),
                     stashes,
                 });
             }

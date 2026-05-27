@@ -1,9 +1,19 @@
 /**
  * Global Source Control sidebar.
  *
- * Tracks the focused pane's repo; manual override is available when more
- * than one repo is registered. The sidebar exposes staged/unstaged changes,
- * history, and write actions; error reporting is via toast.
+ * Two modes:
+ * - **Workspace mode** (a session is focused and it has 1+ members): renders
+ *   one stacked Changes section per session member, each bound to that
+ *   member's worktree path. The History view at the bottom follows the
+ *   focused pane's member (or falls back to the first member).
+ * - **Registered-repo mode** (no session focused): renders a single Changes
+ *   section for the active registered repo's main tree, with manual repo
+ *   override available when 2+ repos are registered.
+ *
+ * In workspace mode, every status/history/stash/commit request carries the
+ * member's `worktree_path`, so pending changes and the timeline reflect the
+ * actual on-disk tree the agent is editing, not the registered repo's main
+ * worktree.
  */
 import { useEffect, useMemo, useState } from "react";
 import { open as openInShell } from "@tauri-apps/plugin-shell";
@@ -13,6 +23,7 @@ import type {
   GitCommit,
   GitFileChange,
   RepoEntry,
+  SessionSnapshot,
 } from "../../types";
 import { useClampedMenuPosition, useEscape } from "../../utils/a11y";
 import Icon from "../Icon";
@@ -24,9 +35,28 @@ import StashesSection from "./StashesSection";
 const COMMIT_PAGE_SIZE = 50;
 const STORAGE_KEY = "rt.sourceControl.repoOverride";
 
+/// One stacked section in the sidebar. In workspace mode there's one per
+/// session member; in registered-repo mode there's exactly one for the
+/// active registered repo (with `worktreePath = null`).
+interface SectionDescriptor {
+  /// React key — `repo_id` is sufficient for registered-repo mode, but for
+  /// workspace mode different members of the same repo would collide on
+  /// `repo_id` alone, so we compose with the worktree path.
+  key: string;
+  repoId: string;
+  repoName: string;
+  /// `null` = the registered repo's main tree. Otherwise the session
+  /// member's worktree path; all git operations target this directory.
+  worktreePath: string | null;
+  /// Optional sub-label rendered to the right of the section header, e.g.
+  /// the session-member branch in workspace mode.
+  branchLabel?: string;
+}
+
 interface Props {
   repos: RepoEntry[];
   focusedRepoId: string | null;
+  focusedSession: SessionSnapshot | null;
   client: DaemonClient;
   /// Called with the freshly opened diff tab's id so the host can switch to
   /// it. Passed through to `ChangesView` for the per-row click handler.
@@ -51,6 +81,7 @@ interface FileContextMenuState {
 export default function SourceControlSidebar({
   repos,
   focusedRepoId,
+  focusedSession,
   client,
   onActivateTab,
 }: Props) {
@@ -77,28 +108,63 @@ export default function SourceControlSidebar({
     }
   };
 
-  const activeRepoId = useMemo(() => {
-    if (override && repos.some((r) => r.id === override)) return override;
-    if (focusedRepoId && repos.some((r) => r.id === focusedRepoId)) {
-      return focusedRepoId;
+  /// In workspace mode we never honor `override` — the user is looking at a
+  /// specific session and wants its worktrees. Override is only meaningful
+  /// in registered-repo mode.
+  const workspaceMode = focusedSession !== null && focusedSession.members.length > 0;
+
+  const sections = useMemo<SectionDescriptor[]>(() => {
+    if (workspaceMode && focusedSession) {
+      return focusedSession.members.map((m) => ({
+        key: `${m.repo_id}::${m.worktree_path}`,
+        repoId: m.repo_id,
+        repoName: m.repo_name,
+        worktreePath: m.worktree_path,
+        branchLabel: m.branch,
+      }));
     }
-    return repos[0]?.id ?? null;
-  }, [override, focusedRepoId, repos]);
-  const activeRepo = repos.find((r) => r.id === activeRepoId) ?? null;
+    // Registered-repo fallback: pick the override, or focused pane's repo,
+    // or the first registered repo.
+    const pickedId =
+      (override && repos.some((r) => r.id === override) ? override : null) ??
+      (focusedRepoId && repos.some((r) => r.id === focusedRepoId)
+        ? focusedRepoId
+        : null) ??
+      repos[0]?.id ??
+      null;
+    const picked = pickedId ? repos.find((r) => r.id === pickedId) : null;
+    if (!picked) return [];
+    return [
+      {
+        key: `registered::${picked.id}`,
+        repoId: picked.id,
+        repoName: picked.name,
+        worktreePath: null,
+      },
+    ];
+  }, [workspaceMode, focusedSession, override, focusedRepoId, repos]);
+
+  /// The History view binds to a single section at a time. In workspace
+  /// mode we prefer the section matching the focused pane's repo, else the
+  /// first member. In registered-repo mode there's exactly one section.
+  const historySection = useMemo<SectionDescriptor | null>(() => {
+    if (sections.length === 0) return null;
+    if (workspaceMode && focusedRepoId) {
+      const match = sections.find((s) => s.repoId === focusedRepoId);
+      if (match) return match;
+    }
+    return sections[0] ?? null;
+  }, [sections, workspaceMode, focusedRepoId]);
+
   const isAuto = override === null;
-  const followingFocus = isAuto && focusedRepoId !== null;
-  // Auto mode has two sub-states: actively following a focused pane,
-  // or sitting on the fallback (first repo) because no pane is focused.
-  // The user complaint was that "Follow focused pane" reads as if there
-  // is always a focused pane to follow — surface the fallback state too.
-  // Only meaningful when 2+ repos exist; in the single-repo case the
-  // picker is hidden anyway and there's nothing to fall back from.
-  const autoNoActive = isAuto && focusedRepoId === null && repos.length > 1;
+  const followingFocus = !workspaceMode && isAuto && focusedRepoId !== null;
+  const autoNoActive =
+    !workspaceMode && isAuto && focusedRepoId === null && repos.length > 1;
 
   useEffect(() => {
     setChangesNeedSpace(false);
     setHistoryCollapsed(false);
-  }, [activeRepoId]);
+  }, [historySection?.key]);
 
   useEffect(() => {
     setHistoryCollapsed(changesNeedSpace);
@@ -135,7 +201,7 @@ export default function SourceControlSidebar({
             >
               <Icon name="refresh" />
             </button>
-            {repos.length > 1 && (
+            {!workspaceMode && repos.length > 1 && (
               <select
                 className="repo-picker"
                 value={override ?? ""}
@@ -155,13 +221,26 @@ export default function SourceControlSidebar({
             )}
           </div>
         </div>
-        {activeRepo && (
+        {workspaceMode && focusedSession && (
           <div
             className="source-control-active-repo"
-            title={activeRepo.path}
+            title={`Session: ${focusedSession.label}`}
+            data-testid="source-control-active-session"
+          >
+            <strong>{focusedSession.label}</strong>
+            <span className="muted small inline-note">
+              · {focusedSession.members.length} repo
+              {focusedSession.members.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        )}
+        {!workspaceMode && sections[0] && (
+          <div
+            className="source-control-active-repo"
+            title={repos.find((r) => r.id === sections[0]?.repoId)?.path ?? ""}
             data-testid="source-control-active-repo"
           >
-            <strong>{activeRepo.name}</strong>
+            <strong>{sections[0].repoName}</strong>
             {followingFocus && (
               <span className="muted small inline-note">
                 · following active pane
@@ -178,7 +257,7 @@ export default function SourceControlSidebar({
           </div>
         )}
       </header>
-      {activeRepoId && (
+      {sections.length > 0 && (
         <div
           className={
             historyCollapsed
@@ -192,23 +271,33 @@ export default function SourceControlSidebar({
             minSize={180}
             direction="vertical"
           >
-            <ChangesView
-              activeRepoId={activeRepoId}
-              activeRepoName={activeRepo?.name ?? ""}
-              client={client}
-              refreshSeq={refreshSeq}
-              selectedChange={selectedChange}
-              onSelectedChange={setSelectedChange}
-              onActivateTab={onActivateTab}
-              onChangesNeedSpace={setChangesNeedSpace}
-            />
-            <HistoryView
-              activeRepoId={activeRepoId}
-              client={client}
-              collapsed={historyCollapsed}
-              refreshSeq={refreshSeq}
-              onCollapsedChange={setHistoryCollapsed}
-            />
+            <div className="source-control-sections">
+              {sections.map((section) => (
+                <ChangesView
+                  key={section.key}
+                  section={section}
+                  showSectionHeader={workspaceMode}
+                  client={client}
+                  refreshSeq={refreshSeq}
+                  selectedChange={selectedChange}
+                  onSelectedChange={setSelectedChange}
+                  onActivateTab={onActivateTab}
+                  onChangesNeedSpace={setChangesNeedSpace}
+                />
+              ))}
+            </div>
+            {historySection ? (
+              <HistoryView
+                section={historySection}
+                showSectionHeader={workspaceMode}
+                client={client}
+                collapsed={historyCollapsed}
+                refreshSeq={refreshSeq}
+                onCollapsedChange={setHistoryCollapsed}
+              />
+            ) : (
+              <div />
+            )}
           </ResizableSplit>
         </div>
       )}
@@ -219,8 +308,11 @@ export default function SourceControlSidebar({
 // ---------- Changes ----------
 
 interface ChangesViewProps {
-  activeRepoId: string;
-  activeRepoName: string;
+  section: SectionDescriptor;
+  /// In workspace mode each section gets a header (member name + branch).
+  /// In registered-repo mode the section info is already shown in the
+  /// sidebar header so we skip the per-section header to avoid duplication.
+  showSectionHeader: boolean;
   client: DaemonClient;
   refreshSeq: number;
   selectedChange: SelectedChange | null;
@@ -230,8 +322,8 @@ interface ChangesViewProps {
 }
 
 function ChangesView({
-  activeRepoId,
-  activeRepoName,
+  section,
+  showSectionHeader,
   client,
   refreshSeq,
   selectedChange,
@@ -239,6 +331,9 @@ function ChangesView({
   onActivateTab,
   onChangesNeedSpace,
 }: ChangesViewProps) {
+  const activeRepoId = section.repoId;
+  const activeRepoName = section.repoName;
+  const worktreePath = section.worktreePath;
   const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
   const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
@@ -254,12 +349,16 @@ function ChangesView({
     setErrorBanner(null);
     setCommitMessage("");
     onChangesNeedSpace(false);
-  }, [activeRepoId, onChangesNeedSpace]);
+  }, [activeRepoId, worktreePath, onChangesNeedSpace]);
 
   useEffect(() => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (detail.type !== "repo_status" || detail.repo_id !== activeRepoId)
+      if (
+        detail.type !== "repo_status" ||
+        detail.repo_id !== activeRepoId ||
+        (detail.worktree_path ?? null) !== worktreePath
+      )
         return;
       setIndexChanges(detail.index_changes);
       setWorktreeChanges(detail.worktree_changes);
@@ -269,9 +368,13 @@ function ChangesView({
       setPendingOp((op) => (op === "commit" ? op : null));
     };
     window.addEventListener("rt:repo_status", handler);
-    client.send({ type: "repo_status", repo_id: activeRepoId });
+    client.send({
+      type: "repo_status",
+      repo_id: activeRepoId,
+      worktree_path: worktreePath,
+    });
     return () => window.removeEventListener("rt:repo_status", handler);
-  }, [activeRepoId, client, onChangesNeedSpace, refreshSeq]);
+  }, [activeRepoId, worktreePath, client, onChangesNeedSpace, refreshSeq]);
 
   // Listen for write errors + commit confirmation across the lifetime of
   // this view.
@@ -280,7 +383,8 @@ function ChangesView({
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (
         detail.type !== "git_write_error" ||
-        detail.repo_id !== activeRepoId
+        detail.repo_id !== activeRepoId ||
+        (detail.worktree_path ?? null) !== worktreePath
       )
         return;
       setPendingOp(null);
@@ -288,7 +392,11 @@ function ChangesView({
     };
     const onOk = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (detail.type !== "commit_ok" || detail.repo_id !== activeRepoId)
+      if (
+        detail.type !== "commit_ok" ||
+        detail.repo_id !== activeRepoId ||
+        (detail.worktree_path ?? null) !== worktreePath
+      )
         return;
       setPendingOp(null);
       setCommitMessage("");
@@ -300,7 +408,7 @@ function ChangesView({
       window.removeEventListener("rt:git_write_error", onError);
       window.removeEventListener("rt:commit_ok", onOk);
     };
-  }, [activeRepoId]);
+  }, [activeRepoId, worktreePath]);
 
   const openDiff = (path: string, bucket: ChangeBucket) => {
     onSelectedChange({ repoId: activeRepoId, path, bucket });
@@ -308,6 +416,7 @@ function ChangesView({
       repoId: activeRepoId,
       path,
       against: bucket === "index" ? "HEAD" : null,
+      worktreePath,
     }).then((tabId) => {
       if (tabId) onActivateTab(tabId);
     });
@@ -333,12 +442,22 @@ function ChangesView({
   const sendStage = (paths: string[]) => {
     if (paths.length === 0) return;
     setPendingOp("stage");
-    client.send({ type: "stage_files", repo_id: activeRepoId, paths });
+    client.send({
+      type: "stage_files",
+      repo_id: activeRepoId,
+      paths,
+      worktree_path: worktreePath,
+    });
   };
   const sendUnstage = (paths: string[]) => {
     if (paths.length === 0) return;
     setPendingOp("unstage");
-    client.send({ type: "unstage_files", repo_id: activeRepoId, paths });
+    client.send({
+      type: "unstage_files",
+      repo_id: activeRepoId,
+      paths,
+      worktree_path: worktreePath,
+    });
   };
   const sendCommit = () => {
     const trimmed = commitMessage.trim();
@@ -348,6 +467,7 @@ function ChangesView({
       type: "commit_repo",
       repo_id: activeRepoId,
       message: trimmed,
+      worktree_path: worktreePath,
     });
   };
   const requestDiscard = (paths: string[]) => {
@@ -364,6 +484,7 @@ function ChangesView({
       type: "discard_changes",
       repo_id: activeRepoId,
       paths: pendingDiscard,
+      worktree_path: worktreePath,
     });
     setPendingDiscard(null);
   };
@@ -401,7 +522,23 @@ function ChangesView({
     <div
       className="git-list source-control-list source-control-changes-full"
       data-testid="source-control-changes-list"
+      data-repo-id={activeRepoId}
+      data-worktree-path={worktreePath ?? ""}
     >
+      {showSectionHeader && (
+        <div
+          className="source-control-section-header"
+          data-testid="source-control-section-header"
+          title={worktreePath ?? activeRepoName}
+        >
+          <strong>{activeRepoName}</strong>
+          {section.branchLabel && (
+            <span className="muted small inline-note">
+              · {section.branchLabel}
+            </span>
+          )}
+        </div>
+      )}
       {showCommitBox && (
         <div className="source-control-commit">
           <textarea
@@ -529,7 +666,11 @@ function ChangesView({
             )}
           </>
         )}
-        <StashesSection repoId={activeRepoId} client={client} />
+        <StashesSection
+          repoId={activeRepoId}
+          worktreePath={worktreePath}
+          client={client}
+        />
         <div className="git-meta">
           {activeRepoName}
           <button
@@ -704,7 +845,8 @@ function FileContextMenu({
 // ---------- History ----------
 
 interface HistoryViewProps {
-  activeRepoId: string;
+  section: SectionDescriptor;
+  showSectionHeader: boolean;
   client: DaemonClient;
   collapsed: boolean;
   refreshSeq: number;
@@ -712,12 +854,15 @@ interface HistoryViewProps {
 }
 
 function HistoryView({
-  activeRepoId,
+  section,
+  showSectionHeader,
   client,
   collapsed,
   refreshSeq,
   onCollapsedChange,
 }: HistoryViewProps) {
+  const activeRepoId = section.repoId;
+  const worktreePath = section.worktreePath;
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detailDiff, setDetailDiff] = useState<string | null>(null);
@@ -734,7 +879,12 @@ function HistoryView({
     setLoadingMore(false);
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (detail.type !== "commits" || detail.repo_id !== activeRepoId) return;
+      if (
+        detail.type !== "commits" ||
+        detail.repo_id !== activeRepoId ||
+        (detail.worktree_path ?? null) !== worktreePath
+      )
+        return;
       setExhausted(detail.commits.length < COMMIT_PAGE_SIZE);
       setLoadingMore(false);
       if (detail.offset === 0) {
@@ -763,9 +913,10 @@ function HistoryView({
       branch: null,
       limit: COMMIT_PAGE_SIZE,
       offset: 0,
+      worktree_path: worktreePath,
     });
     return () => window.removeEventListener("rt:commits", handler);
-  }, [activeRepoId, client, refreshSeq]);
+  }, [activeRepoId, worktreePath, client, refreshSeq]);
 
   const loadMore = () => {
     if (!commits || loadingMore || exhausted) return;
@@ -776,6 +927,7 @@ function HistoryView({
       branch: null,
       limit: COMMIT_PAGE_SIZE,
       offset: commits.length,
+      worktree_path: worktreePath,
     });
   };
 
@@ -823,7 +975,16 @@ function HistoryView({
           <span className="tree-caret" aria-hidden="true">
             {collapsed ? "▸" : "▾"}
           </span>
-          <span>History</span>
+          <span>
+            History
+            {showSectionHeader && (
+              <span className="muted small inline-note">
+                {" · "}
+                {section.repoName}
+                {section.branchLabel ? ` · ${section.branchLabel}` : ""}
+              </span>
+            )}
+          </span>
           <span className="bucket-count">{commits?.length ?? 0}</span>
         </button>
       </div>

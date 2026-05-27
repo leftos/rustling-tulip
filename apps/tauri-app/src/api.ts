@@ -468,7 +468,12 @@ export function getRemoteUrl(
  */
 export function openDiffTab(
   client: DaemonClient,
-  args: { repoId: string; path: string; against: string | null },
+  args: {
+    repoId: string;
+    path: string;
+    against: string | null;
+    worktreePath?: string | null;
+  },
 ): Promise<string | null> {
   return new Promise((resolve) => {
     const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -493,6 +498,7 @@ export function openDiffTab(
       repo_id: args.repoId,
       path: args.path,
       against: args.against,
+      worktree_path: args.worktreePath ?? null,
     });
   });
 }
@@ -597,11 +603,17 @@ export function branchUrl(
 export function listStashes(
   client: DaemonClient,
   repoId: string,
+  worktreePath?: string | null,
 ): Promise<GitStash[]> {
   return new Promise((resolve) => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
-      if (detail.type !== "stashes" || detail.repo_id !== repoId) return;
+      if (
+        detail.type !== "stashes" ||
+        detail.repo_id !== repoId ||
+        (detail.worktree_path ?? null) !== (worktreePath ?? null)
+      )
+        return;
       cleanup();
       resolve(detail.stashes);
     };
@@ -614,7 +626,11 @@ export function listStashes(
       window.clearTimeout(timer);
     };
     window.addEventListener("rt:stashes", handler);
-    client.send({ type: "list_stashes", repo_id: repoId });
+    client.send({
+      type: "list_stashes",
+      repo_id: repoId,
+      worktree_path: worktreePath ?? null,
+    });
   });
 }
 
