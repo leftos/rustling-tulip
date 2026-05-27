@@ -334,6 +334,7 @@ pub fn start(
     // for the on-disk tree the agent is editing — not just the registered
     // repo's main tree. Seeds from the current snapshot, then syncs on
     // every SessionEvent (Updated / Removed).
+    let state_for_wt = Arc::clone(state);
     let sessions_for_wt = Arc::clone(sessions);
     let state_events_for_wt = state_events.clone();
     let client_count_for_wt = client_count.clone();
@@ -341,7 +342,7 @@ pub fn start(
     tokio::spawn(async move {
         // Initial seed
         {
-            let targets = collect_session_worktree_targets(&sessions_for_wt);
+            let targets = collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
             let mut guard = worktree_handles_for_wt.lock().await;
             sync_worktree_handles(
                 &targets,
@@ -354,7 +355,8 @@ pub fn start(
         loop {
             match session_rx.recv().await {
                 Ok(SessionEvent::Updated(_) | SessionEvent::Removed(_)) => {
-                    let targets = collect_session_worktree_targets(&sessions_for_wt);
+                    let targets =
+                        collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
                     let mut guard = worktree_handles_for_wt.lock().await;
                     sync_worktree_handles(
                         &targets,
@@ -369,7 +371,8 @@ pub fn start(
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "git_watch: session event stream lagged");
                     // Re-sync to be safe.
-                    let targets = collect_session_worktree_targets(&sessions_for_wt);
+                    let targets =
+                        collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
                     let mut guard = worktree_handles_for_wt.lock().await;
                     sync_worktree_handles(
                         &targets,
@@ -388,9 +391,21 @@ pub fn start(
 /// Flatten every live session's member list into `(repo_id, worktree_path)`
 /// pairs. Stopped or errored sessions are excluded — their worktrees may
 /// have been removed by the cleanup pipeline, and watching a missing dir
-/// just churns log spam.
-fn collect_session_worktree_targets(sessions: &SessionRegistry) -> Vec<(String, String)> {
+/// just churns log spam. Members whose `worktree_path` equals the registered
+/// repo's path (i.e. non-worktree sessions) are also skipped — the
+/// registered-repo watcher already covers that directory, and spawning a
+/// duplicate would double every refresh.
+fn collect_session_worktree_targets(
+    state: &AppState,
+    sessions: &SessionRegistry,
+) -> Vec<(String, String)> {
     use protocol::SessionStatus;
+    let registered_paths: HashMap<String, String> = state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .map(|r| (r.id.clone(), r.path.clone()))
+            .collect()
+    });
     let mut out: Vec<(String, String)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for snap in sessions.snapshots() {
@@ -398,6 +413,9 @@ fn collect_session_worktree_targets(sessions: &SessionRegistry) -> Vec<(String, 
             continue;
         }
         for member in &snap.members {
+            if registered_paths.get(&member.repo_id) == Some(&member.worktree_path) {
+                continue;
+            }
             if seen.insert(member.worktree_path.clone()) {
                 out.push((member.repo_id.clone(), member.worktree_path.clone()));
             }

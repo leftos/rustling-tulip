@@ -115,13 +115,23 @@ export default function SourceControlSidebar({
 
   const sections = useMemo<SectionDescriptor[]>(() => {
     if (workspaceMode && focusedSession) {
-      return focusedSession.members.map((m) => ({
-        key: `${m.repo_id}::${m.worktree_path}`,
-        repoId: m.repo_id,
-        repoName: m.repo_name,
-        worktreePath: m.worktree_path,
-        branchLabel: m.branch,
-      }));
+      return focusedSession.members.map((m) => {
+        // A non-worktree session member's `worktree_path` literally equals
+        // the registered repo's path. Normalize that case to `null` so the
+        // section binds to the registered repo's main tree (the daemon's
+        // existing registered-repo watcher already emits live events for
+        // that path with `worktree_path = None`).
+        const registered = repos.find((r) => r.id === m.repo_id);
+        const isWorktree =
+          registered !== undefined && registered.path !== m.worktree_path;
+        return {
+          key: `${m.repo_id}::${m.worktree_path}`,
+          repoId: m.repo_id,
+          repoName: m.repo_name,
+          worktreePath: isWorktree ? m.worktree_path : null,
+          branchLabel: m.branch,
+        };
+      });
     }
     // Registered-repo fallback: pick the override, or focused pane's repo,
     // or the first registered repo.

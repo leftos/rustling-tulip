@@ -2118,39 +2118,44 @@ fn repo_path_or_err(hub: &Hub, repo_id: &str) -> anyhow::Result<PathBuf> {
 /// `(repo_id, worktree_path)`. `worktree_path = None` falls back to the
 /// registered repo path (current behavior). `worktree_path = Some(...)`
 /// uses that path after validating (a) the repo is registered and (b)
-/// the supplied path is under the daemon's worktrees root, so a malicious
-/// client can't redirect git invocations to arbitrary directories.
+/// the supplied path is either under the daemon's worktrees root *or*
+/// equal to the registered repo's own path. The repo-path equality case
+/// is what makes non-worktree sessions work: their `SessionMember::
+/// worktree_path` literally equals the registered repo path, and the
+/// sidebar passes that through verbatim. Allowing both forms keeps the
+/// security invariant (no redirecting git to arbitrary directories)
+/// while not breaking the natural data flow.
 fn repo_target_or_err(
     hub: &Hub,
     repo_id: &str,
     worktree_path: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
-    if let Some(wt) = worktree_path {
-        let registered = hub
-            .state
-            .with_persisted(|s| s.repos.iter().any(|r| r.id == repo_id));
-        if !registered {
-            return Err(anyhow!("unknown repo: {repo_id}"));
-        }
-        let wt_buf = PathBuf::from(wt);
-        let wt_root = hub.state.worktrees_dir();
-        if !wt_buf.starts_with(&wt_root) {
-            return Err(anyhow!(
-                "worktree_path {wt} is not under the worktrees root {}",
-                wt_root.display()
-            ));
-        }
+    let registered_path = hub.state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .map(|r| r.path.clone())
+    });
+    let Some(registered_path) = registered_path else {
+        return Err(anyhow!("unknown repo: {repo_id}"));
+    };
+    let Some(wt) = worktree_path else {
+        return Ok(PathBuf::from(registered_path));
+    };
+    let wt_buf = PathBuf::from(wt);
+    let registered_buf = PathBuf::from(&registered_path);
+    if wt_buf == registered_buf {
         return Ok(wt_buf);
     }
-    hub.state
-        .with_persisted(|s| {
-            s.repos
-                .iter()
-                .find(|r| r.id == repo_id)
-                .map(|r| r.path.clone())
-        })
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))
+    let wt_root = hub.state.worktrees_dir();
+    if wt_buf.starts_with(&wt_root) {
+        return Ok(wt_buf);
+    }
+    Err(anyhow!(
+        "worktree_path {wt} is not under the worktrees root {} and \
+         does not match the registered repo path",
+        wt_root.display()
+    ))
 }
 
 /// Runs a stage/unstage/commit body, then on success broadcasts the fresh
