@@ -579,7 +579,7 @@ async fn handle_client(
     }
 
     // Input loop: read lines from the pipe, dispatch to PTY/resize/stop/status.
-    let input_task = tokio::spawn(async move {
+    let mut input_task = tokio::spawn(async move {
         let mut line = String::new();
         loop {
             line.clear();
@@ -635,7 +635,13 @@ async fn handle_client(
 
     // Output loop: forward bytes from the ring-fed channel as Output frames.
     // Also watch for child exit so we can emit a final Exited frame before
-    // closing.
+    // closing. The `input_task` JoinHandle is selected on so an EOF or read
+    // error on the read half terminates the handler immediately — without
+    // this branch, an idle session (no PTY output to forward) wouldn't
+    // notice the daemon's disconnect until the next 30 s keepalive write
+    // failed, leaving the pipe occupied long enough for the next daemon's
+    // reattach attempt to time out (the "always exactly one abandoned
+    // session" pattern observed in tracer logs).
     loop {
         tokio::select! {
             biased;
@@ -665,9 +671,30 @@ async fn handle_client(
                 }
                 break;
             }
+            // Input task ended — either EOF on the read half (daemon
+            // disconnected) or a read error. Either way, this client is
+            // gone; break so the accept loop can grab the next one.
+            join_res = &mut input_task => {
+                match join_res {
+                    Ok(Ok(())) => info!(
+                        "supervisor: input task ended cleanly (daemon disconnected); exiting handler"
+                    ),
+                    Ok(Err(err)) => info!(
+                        ?err,
+                        "supervisor: input task ended with error; exiting handler"
+                    ),
+                    Err(err) => warn!(
+                        ?err,
+                        "supervisor: input task join failed; exiting handler"
+                    ),
+                }
+                break;
+            }
             // Periodic ping so write errors during long idle periods surface
             // quickly enough that the attached-state clears for the next
-            // daemon to attach.
+            // daemon to attach. With the input_task branch above this is
+            // mostly a belt-and-suspenders backstop, but still useful to
+            // detect a half-closed pipe (read half alive but writes failing).
             () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
                 let ring_bytes = shared.lock().map_or(0, |s| s.ring.len());
                 let frame = TracerResponse::Status {
