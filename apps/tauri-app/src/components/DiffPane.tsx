@@ -15,7 +15,7 @@
  * disposed when the component unmounts or the props change, since
  * Monaco won't garbage-collect them automatically.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import type { DaemonClient } from "../api";
 import type { DaemonMessage } from "../types";
@@ -42,6 +42,11 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
   } | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Live count of diff hunks Monaco has computed for the current models.
+  // `null` while no diff has been reported yet (models still loading); `0`
+  // once Monaco has reported "no changes". Used to disable nav buttons
+  // and surface the change count to the user.
+  const [diffCount, setDiffCount] = useState<number | null>(null);
 
   // Fetch snapshot from the daemon.
   useEffect(() => {
@@ -117,8 +122,79 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
     const original = monaco.editor.createModel(snapshot.old, snapshot.language);
     const modified = monaco.editor.createModel(snapshot.new, snapshot.language);
     modelsRef.current = { original, modified };
+    setDiffCount(null);
     editor.setModel({ original, modified });
   }, [snapshot]);
+
+  // Keep `diffCount` in sync with Monaco's computed diff so the nav
+  // buttons enable as soon as the diff is ready and accurately reflect
+  // mid-session updates (e.g. an ignoreTrimWhitespace toggle in the
+  // future). `onDidUpdateDiff` is the canonical signal that the diff
+  // computation finished for the current model pair.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const disposable = editor.onDidUpdateDiff(() => {
+      const changes = editor.getLineChanges() ?? [];
+      setDiffCount(changes.length);
+    });
+    return () => disposable.dispose();
+  }, [snapshot]);
+
+  /// Jump to a given diff hunk and place the cursor on its first changed
+  /// line in the modified editor. `idx` is clamped to the valid range.
+  const goToDiff = useCallback((idx: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const changes = editor.getLineChanges();
+    if (!changes || changes.length === 0) return;
+    const clamped = Math.max(0, Math.min(idx, changes.length - 1));
+    const change = changes[clamped];
+    if (!change) return;
+    const modified = editor.getModifiedEditor();
+    // `modifiedStartLineNumber` is 0 when the change is a pure deletion
+    // (no modified-side line). Fall back to the next line so we still
+    // reveal something meaningful.
+    const line = Math.max(1, change.modifiedStartLineNumber || 1);
+    modified.revealLineInCenter(line);
+    modified.setPosition({ lineNumber: line, column: 1 });
+    modified.focus();
+  }, []);
+
+  const goToPrevDiff = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const changes = editor.getLineChanges();
+    if (!changes || changes.length === 0) return;
+    const cur = editor.getModifiedEditor().getPosition()?.lineNumber ?? 0;
+    // Scan from the end so we pick the LAST change whose start line is
+    // strictly less than the cursor (the immediate predecessor). If none,
+    // wrap to the last change.
+    let target = changes.length - 1;
+    for (let i = changes.length - 1; i >= 0; i -= 1) {
+      const c = changes[i];
+      if (c && (c.modifiedStartLineNumber || 1) < cur) {
+        target = i;
+        break;
+      }
+    }
+    goToDiff(target);
+  }, [goToDiff]);
+
+  const goToNextDiff = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const changes = editor.getLineChanges();
+    if (!changes || changes.length === 0) return;
+    const cur = editor.getModifiedEditor().getPosition()?.lineNumber ?? 0;
+    const idx = changes.findIndex(
+      (c) => (c.modifiedStartLineNumber || 1) > cur,
+    );
+    // If no change starts past the cursor, wrap to the first.
+    goToDiff(idx === -1 ? 0 : idx);
+  }, [goToDiff]);
+
+  const hasDiffs = diffCount !== null && diffCount > 0;
 
   if (error) {
     return (
@@ -138,6 +214,68 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
         <span className="muted small">
           {against === null ? "worktree vs index" : `vs ${against}`}
         </span>
+        <div
+          className="diff-pane-nav"
+          data-testid="diff-pane-nav"
+          role="toolbar"
+          aria-label="Diff navigation"
+        >
+          <span
+            className="muted small diff-pane-nav-count"
+            data-testid="diff-pane-nav-count"
+            aria-live="polite"
+          >
+            {diffCount === null
+              ? "…"
+              : diffCount === 0
+                ? "no diffs"
+                : `${diffCount} diff${diffCount === 1 ? "" : "s"}`}
+          </span>
+          <button
+            type="button"
+            className="diff-pane-nav-button"
+            onClick={() => goToDiff(0)}
+            disabled={!hasDiffs}
+            aria-label="Go to first diff"
+            title="Go to first diff"
+            data-testid="diff-pane-nav-first"
+          >
+            ⏮
+          </button>
+          <button
+            type="button"
+            className="diff-pane-nav-button"
+            onClick={goToPrevDiff}
+            disabled={!hasDiffs}
+            aria-label="Go to previous diff"
+            title="Go to previous diff"
+            data-testid="diff-pane-nav-prev"
+          >
+            ◀
+          </button>
+          <button
+            type="button"
+            className="diff-pane-nav-button"
+            onClick={goToNextDiff}
+            disabled={!hasDiffs}
+            aria-label="Go to next diff"
+            title="Go to next diff"
+            data-testid="diff-pane-nav-next"
+          >
+            ▶
+          </button>
+          <button
+            type="button"
+            className="diff-pane-nav-button"
+            onClick={() => goToDiff(Number.MAX_SAFE_INTEGER)}
+            disabled={!hasDiffs}
+            aria-label="Go to last diff"
+            title="Go to last diff"
+            data-testid="diff-pane-nav-last"
+          >
+            ⏭
+          </button>
+        </div>
       </header>
       <div
         ref={hostRef}

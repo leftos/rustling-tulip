@@ -669,6 +669,32 @@ button:focus-visible {
   font-family: var(--font-mono);
   color: var(--fg);
 }
+.diff-pane-nav {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.diff-pane-nav-count {
+  margin-right: 4px;
+}
+.diff-pane-nav-button {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.diff-pane-nav-button:hover:not(:disabled) {
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.05));
+}
+.diff-pane-nav-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .diff-pane-editor {
   flex: 1 1 auto;
   min-height: 0;
