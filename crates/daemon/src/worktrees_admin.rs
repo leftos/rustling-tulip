@@ -3,11 +3,17 @@
 //!
 //! Layout assumption (see `crates/daemon/src/git.rs::workspace_worktree_paths`
 //! and CLAUDE.md "Where things live on disk"): every per-session worktree
-//! lives at `<root>/<sanitized-anchor>/wt.<branch-slug>/<rel-to-anchor>`.
-//! Each `wt.<branch-slug>/` directory is one *group* — one row in the
-//! management modal — and may contain one member (single-repo session) or
-//! several (workspace session). The functions here always reason at the
-//! group level and let the caller turn each group into one `RootWorktreeEntry`.
+//! lives at `<root>/wt.<branch-slug>/<sanitized-anchor>/<rel-to-anchor>`.
+//! `wt.<branch-slug>/` is a direct child of the worktrees root, and members
+//! sit nested under the sanitized anchor inside it. Each `wt.<branch-slug>/`
+//! directory is one *group* — one row in the management modal — and may
+//! contain one member (single-repo session) or several (workspace session).
+//!
+//! For backward compatibility, the scanner also detects pre-rename leftovers
+//! laid out as `<root>/<sanitized-anchor>/wt.<branch-slug>/<member>` (wt dir
+//! buried under an anchor prefix) so the modal can still manage them after
+//! the layout change. Old-layout groups disappear naturally as their
+//! originating sessions stop and clean up via their persisted paths.
 
 use anyhow::{Context as _, anyhow};
 use protocol::{
@@ -55,12 +61,18 @@ const MAX_SCAN_DEPTH: usize = 8;
 
 /// Recursive descent looking for `wt.<branch-slug>/` directories.
 ///
-/// Why this exists: `sanitize_anchor` splits the originating-repo
-/// parent path into per-component dirs under the worktrees root
-/// (`X:\dev` → `<root>/X/dev/`). The pre-fix `scan_root` only descended
-/// one level, so any Windows anchor — which always has at least
-/// `<drive>/<dir>` — was invisible to the manager modal and the user
-/// saw "No managed worktrees" while 34 GB sat on disk.
+/// Two layouts are supported:
+/// - **New layout** (current): `wt.<branch-slug>/` sits at depth 0 of the
+///   worktrees root, with members nested under the sanitized anchor inside
+///   it. When the walker matches `wt.<slug>` at depth 0 it descends INSIDE
+///   to discover the member dirs (any directory containing a `.git` file
+///   or subdir) and derives the displayed anchor from the longest common
+///   path-prefix of those members' parents relative to the wt dir.
+/// - **Old layout** (pre-rename leftovers): `wt.<branch-slug>/` was buried
+///   under the sanitized anchor (e.g., `<root>/X/dev/wt.foo/repo`). When
+///   the walker matches `wt.<slug>` at depth ≥1 it treats the wt dir's
+///   direct children as members and derives the anchor from the path
+///   between the root and the wt dir's parent.
 fn walk_for_wt_dirs(
     root: &Path,
     cur: &Path,
@@ -87,22 +99,110 @@ fn walk_for_wt_dirs(
         let path = ent.path();
         let name = ent.file_name().to_string_lossy().into_owned();
         if let Some(branch_slug) = name.strip_prefix("wt.") {
-            // Anchor display = the relative path from the worktrees root
-            // to this wt dir's parent. For `<root>/X/dev/wt.foo`, the
-            // anchor displays as `X/dev` (joined with the platform's
-            // separator), matching the on-disk layout the user sees.
-            let anchor_rel = path
-                .parent()
-                .and_then(|p| p.strip_prefix(root).ok())
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            entries.push(build_entry(&path, &anchor_rel, branch_slug, xref));
+            let (anchor_rel, member_paths) = if depth == 0 {
+                // New layout: walk inside to discover members; anchor is
+                // the longest common parent prefix of those members
+                // relative to the wt dir.
+                let members = find_member_dirs(&path);
+                let anchor = anchor_from_member_parents(&members, &path);
+                (anchor, members)
+            } else {
+                // Old layout: anchor is path between root and wt's parent;
+                // members are direct children of the wt dir.
+                let anchor = path
+                    .parent()
+                    .and_then(|p| p.strip_prefix(root).ok())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let members = direct_child_dirs(&path);
+                (anchor, members)
+            };
+            entries.push(build_entry(
+                &path,
+                &anchor_rel,
+                branch_slug,
+                &member_paths,
+                xref,
+            ));
             // Don't descend INTO a wt dir — its children are member
             // worktrees, not nested groups.
             continue;
         }
         walk_for_wt_dirs(root, &path, xref, entries, depth + 1);
     }
+}
+
+/// Walk inside a new-layout `wt.<slug>/` directory and return every
+/// `.git`-bearing subdirectory found. Stops descending once a dir is
+/// identified as a member (its inner structure is the member's own
+/// content, not nested groups). Best-effort — I/O failures inside the
+/// walk are silently skipped.
+fn find_member_dirs(wt_path: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(wt_path.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_SCAN_DEPTH {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for ent in rd.flatten() {
+            if !is_dir(&ent) {
+                continue;
+            }
+            let path = ent.path();
+            if path.join(".git").exists() {
+                out.push(path);
+            } else {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// Direct child directories of `wt_path`. Used to enumerate old-layout
+/// members where each member is a direct child of the wt dir.
+fn direct_child_dirs(wt_path: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(wt_path) else {
+        return Vec::new();
+    };
+    rd.flatten().filter(is_dir).map(|ent| ent.path()).collect()
+}
+
+/// Anchor display for a new-layout group: longest common path-prefix of
+/// each member's parent directory, relative to `wt_path`. For a workspace
+/// laid out at `<root>/wt.foo/X/dev/{a,b}`, the anchor is `X/dev`. For a
+/// single-member layout `<root>/wt.foo/X/dev/repo`, also `X/dev`. Empty
+/// when there are no members or the members share no common parent.
+fn anchor_from_member_parents(members: &[PathBuf], wt_path: &Path) -> String {
+    let rel_parents: Vec<Vec<String>> = members
+        .iter()
+        .filter_map(|m| m.parent())
+        .filter_map(|p| p.strip_prefix(wt_path).ok())
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect()
+        })
+        .collect();
+    let Some((first, rest)) = rel_parents.split_first() else {
+        return String::new();
+    };
+    let mut prefix = first.clone();
+    for other in rest {
+        let n = prefix
+            .iter()
+            .zip(other.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        prefix.truncate(n);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix.join("/")
 }
 
 /// Delete a `wt.<branch>/` group from disk. Refuses if any member is
@@ -161,7 +261,10 @@ fn validate_target(root: &Path, target: &Path) -> anyhow::Result<PathBuf> {
 }
 
 /// Reject the delete if any live (non-stopped, non-abandoned) session has
-/// a member path whose parent is the canonical target.
+/// a member path that lives anywhere under the canonical target wt dir.
+/// Uses `starts_with` rather than `parent ==` so it catches both new-layout
+/// members (nested under an anchor inside the wt dir) and old-layout
+/// members (direct children of the wt dir).
 fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::Result<()> {
     let snapshots = sessions.snapshots();
     for snap in &snapshots {
@@ -169,10 +272,11 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
             continue;
         }
         for member_path in &snap.worktree_paths {
-            if let Some(parent) = Path::new(member_path).parent()
-                && let Ok(parent_canon) = parent.canonicalize().map(|p| simplify_path(&p))
-                && parent_canon == target
-            {
+            let mp = Path::new(member_path);
+            let mp_canon = mp
+                .canonicalize()
+                .map_or_else(|_| mp.to_path_buf(), |p| simplify_path(&p));
+            if mp_canon.starts_with(target) {
                 return Err(anyhow!(
                     "refusing to delete {}: live session {} ({}) is using it",
                     target.display(),
@@ -189,17 +293,12 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
 /// robust cleanup helper. The originating repo (read from the member's
 /// `.git` gitfile) is looked up per member so that members from
 /// different repos in a workspace session each get their own
-/// `git worktree prune` after deletion.
+/// `git worktree prune` after deletion. Uses `find_member_dirs` so it
+/// works for both new-layout (members nested under anchor inside the wt
+/// dir) and old-layout (members as direct children) groups.
 async fn delete_members(target: &Path) -> anyhow::Result<()> {
-    let members = std::fs::read_dir(target)
-        .with_context(|| format!("reading {}", target.display()))?
-        .flatten()
-        .collect::<Vec<_>>();
-    for member_ent in members {
-        if !is_dir(&member_ent) {
-            continue;
-        }
-        let member_path = member_ent.path();
+    let member_paths = find_member_dirs(target);
+    for member_path in member_paths {
         let repo_path = repo_path_for_worktree(&member_path);
         if let Some(repo) = repo_path.as_deref() {
             match crate::worktree_cleanup::remove_member(repo, &member_path).await {
@@ -244,17 +343,20 @@ fn finalize_group_dir(target: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Build a per-wt-group cross-reference from `worktree_path.parent()` to
-/// `(session_id, status_kind)`. `status_kind` is `(is_live, snapshot)`
-/// so the caller can pick Active vs Detached without re-deriving.
+/// Build a per-wt-group cross-reference from the canonical wt-dir path
+/// to `(session_id, is_live)`. The wt dir is found by walking up from
+/// each member path to the nearest ancestor whose file name starts with
+/// `wt.` — which handles both the new layout (wt dir at depth 0 of the
+/// worktrees root) and old-layout leftovers (wt dir buried under an
+/// anchor prefix).
 fn build_session_xref(snapshots: &[SessionSnapshot]) -> HashMap<PathBuf, (String, bool)> {
     let mut map: HashMap<PathBuf, (String, bool)> = HashMap::new();
     for snap in snapshots {
         let live = is_session_live(snap);
         for member_path in &snap.worktree_paths {
-            if let Some(parent) = Path::new(member_path).parent() {
-                let key = std::fs::canonicalize(parent)
-                    .map_or_else(|_| parent.to_path_buf(), |p| simplify_path(&p));
+            if let Some(wt_dir) = wt_dir_for_member(Path::new(member_path)) {
+                let key = std::fs::canonicalize(&wt_dir)
+                    .map_or_else(|_| wt_dir.clone(), |p| simplify_path(&p));
                 // Keep the most-active record per group: if any session
                 // member of this group is live, the group is Active.
                 map.entry(key)
@@ -270,10 +372,29 @@ fn build_session_xref(snapshots: &[SessionSnapshot]) -> HashMap<PathBuf, (String
     map
 }
 
+/// Walk up from `member_path` to the nearest ancestor directory whose
+/// file name starts with `wt.`. Returns `None` if no such ancestor
+/// exists. Works for both layouts because the wt dir is always somewhere
+/// above the member in the on-disk tree.
+fn wt_dir_for_member(member_path: &Path) -> Option<PathBuf> {
+    let mut cur = member_path.parent()?;
+    loop {
+        if cur
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.starts_with("wt."))
+        {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
 fn build_entry(
     wt_path: &Path,
     anchor_name: &str,
     branch_slug: &str,
+    member_paths: &[PathBuf],
     xref: &HashMap<PathBuf, (String, bool)>,
 ) -> RootWorktreeEntry {
     let key = std::fs::canonicalize(wt_path)
@@ -284,26 +405,20 @@ fn build_entry(
         None => (None, RootWorktreeStatus::Stale),
     };
 
-    let mut members: Vec<RootWorktreeMember> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(wt_path) {
-        for ent in rd.flatten() {
-            if !is_dir(&ent) {
-                continue;
-            }
-            let member_path = ent.path();
-            let repo_path = repo_path_for_worktree(&member_path);
-            let repo_name_hint = repo_path
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .or_else(|| member_path.file_name())
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            members.push(RootWorktreeMember {
-                worktree_path: member_path.to_string_lossy().into_owned(),
-                repo_path: repo_path.map(|p| p.to_string_lossy().into_owned()),
-                repo_name_hint,
-            });
-        }
+    let mut members: Vec<RootWorktreeMember> = Vec::with_capacity(member_paths.len());
+    for member_path in member_paths {
+        let repo_path = repo_path_for_worktree(member_path);
+        let repo_name_hint = repo_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .or_else(|| member_path.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        members.push(RootWorktreeMember {
+            worktree_path: member_path.to_string_lossy().into_owned(),
+            repo_path: repo_path.map(|p| p.to_string_lossy().into_owned()),
+            repo_name_hint,
+        });
     }
     members.sort_by(|a, b| a.repo_name_hint.cmp(&b.repo_name_hint));
 
@@ -526,6 +641,105 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch_slug, "outer");
+    }
+
+    #[test]
+    fn scan_root_new_layout_single_member() {
+        // New layout: `<root>/wt.<slug>/<sanitized-anchor>/<member>/.git`.
+        // Anchor is computed from the path between the wt dir and the
+        // member's parent, not from anything above the wt dir.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt_dir = root.join("wt.feature-foo");
+        let member = wt_dir.join("X").join("dev").join("repo1");
+        touch(&member.join(".git"));
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        assert_eq!(entries.len(), 1, "expected one wt group, got {entries:?}");
+        let entry = &entries[0];
+        assert_eq!(entry.branch_slug, "feature-foo");
+        assert_eq!(entry.anchor, "X/dev");
+        assert_eq!(entry.path, wt_dir.to_string_lossy());
+        assert_eq!(entry.members.len(), 1);
+        assert_eq!(entry.members[0].worktree_path, member.to_string_lossy());
+        assert!(matches!(entry.status, RootWorktreeStatus::Stale));
+    }
+
+    #[test]
+    fn scan_root_new_layout_multi_member_workspace() {
+        // New layout workspace: two members sharing an anchor inside the
+        // wt dir. Anchor display is the common path prefix of member
+        // parents relative to the wt dir.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt_dir = root.join("wt.main");
+        touch(&wt_dir.join("X").join("dev").join("yaat").join(".git"));
+        touch(
+            &wt_dir
+                .join("X")
+                .join("dev")
+                .join("yaat-server")
+                .join(".git"),
+        );
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.branch_slug, "main");
+        assert_eq!(entry.anchor, "X/dev");
+        assert_eq!(entry.members.len(), 2);
+        let hints: Vec<&str> = entry
+            .members
+            .iter()
+            .map(|m| m.repo_name_hint.as_str())
+            .collect();
+        assert_eq!(hints, vec!["yaat", "yaat-server"]);
+    }
+
+    #[test]
+    fn scan_root_mixed_new_and_old_layouts() {
+        // One new-layout group at depth 0 and one old-layout group at
+        // depth ≥1 should both surface. Verifies the walker handles
+        // transitional disk state (some leftovers from before the
+        // layout rename, some new spawns after).
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        // New layout: wt at depth 0
+        touch(
+            &root
+                .join("wt.alpha")
+                .join("X")
+                .join("dev")
+                .join("repo")
+                .join(".git"),
+        );
+        // Old layout: wt buried under an anchor
+        touch(
+            &root
+                .join("Y")
+                .join("dev")
+                .join("wt.beta")
+                .join("repo")
+                .join(".git"),
+        );
+
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions);
+
+        assert_eq!(entries.len(), 2);
+        let pairs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|e| (e.anchor.as_str(), e.branch_slug.as_str()))
+            .collect();
+        // Sorted by anchor asc.
+        assert_eq!(pairs, vec![("X/dev", "alpha"), ("Y/dev", "beta")]);
     }
 
     /// Probe-style test that scans whatever directory `RT_SCAN_PATH`

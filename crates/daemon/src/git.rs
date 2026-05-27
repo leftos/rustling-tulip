@@ -104,7 +104,9 @@ pub async fn current_branch(repo: &Path) -> anyhow::Result<Option<String>> {
 /// this to decide whether to run branch/worktree operations or treat the
 /// path as a plain directory.
 pub async fn is_initialized(repo: &Path) -> bool {
-    run_git(repo, &["rev-parse", "--verify", "HEAD"]).await.is_ok()
+    run_git(repo, &["rev-parse", "--verify", "HEAD"])
+        .await
+        .is_ok()
 }
 
 pub async fn default_branch(repo: &Path) -> Option<String> {
@@ -304,13 +306,13 @@ fn sanitize_anchor(anchor: &Path) -> PathBuf {
 /// (using parents — not the repos themselves — so a member that's an
 /// ancestor of another member doesn't collide with the shared `wt.<slug>/`
 /// folder). Each member's worktree is at
-/// `<worktrees_root>/<sanitized-anchor>/wt.<slug>/<rel-to-anchor>`, where
+/// `<worktrees_root>/wt.<slug>/<sanitized-anchor>/<rel-to-anchor>`, where
 /// `rel-to-anchor` mirrors the member's offset from the anchor in source
 /// space — preserving inter-member relative paths (`../repo2` etc.).
 ///
 /// Cross-drive members (no common ancestor with the first member, e.g. one
 /// on `X:\` and another on `Y:\` on Windows) cannot preserve relativity.
-/// They fall back to leaf-name placement under the anchor's `wt.<slug>/`,
+/// They fall back to leaf-name placement under `wt.<slug>/<sanitized-anchor>/`,
 /// with `-2`, `-3`, … suffixes appended to avoid leaf collisions.
 ///
 /// Single-member callers (e.g. non-workspace sessions) pass a one-element
@@ -340,7 +342,7 @@ pub fn workspace_worktree_paths(
     }
 
     let sanitized = sanitize_anchor(&anchor);
-    let wt_root = worktrees_root.join(sanitized).join(format!("wt.{slug}"));
+    let wt_root = worktrees_root.join(format!("wt.{slug}")).join(sanitized);
 
     // Names taken at the first level under `wt_root` so cross-drive members
     // can avoid collisions with anchor-matching member subtrees.
@@ -432,7 +434,7 @@ mod tests {
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\dev\foo"]);
         let got = workspace_worktree_paths(&root, &refs(&members), "main");
-        assert_eq!(got, vec![PathBuf::from(r"C:\wt\X\dev\wt.main\foo")]);
+        assert_eq!(got, vec![PathBuf::from(r"C:\wt\wt.main\X\dev\foo")]);
     }
 
     #[cfg(windows)]
@@ -444,8 +446,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\X\dev\wt.feature-x\repo1"),
-                PathBuf::from(r"C:\wt\X\dev\wt.feature-x\repo2"),
+                PathBuf::from(r"C:\wt\wt.feature-x\X\dev\repo1"),
+                PathBuf::from(r"C:\wt\wt.feature-x\X\dev\repo2"),
             ]
         );
     }
@@ -459,8 +461,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\X\dev\wt.main\a\repo1"),
-                PathBuf::from(r"C:\wt\X\dev\wt.main\b\repo2"),
+                PathBuf::from(r"C:\wt\wt.main\X\dev\a\repo1"),
+                PathBuf::from(r"C:\wt\wt.main\X\dev\b\repo2"),
             ]
         );
     }
@@ -477,8 +479,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\X\dev\wt.main\repo1"),
-                PathBuf::from(r"C:\wt\X\dev\wt.main\repo1\sub"),
+                PathBuf::from(r"C:\wt\wt.main\X\dev\repo1"),
+                PathBuf::from(r"C:\wt\wt.main\X\dev\repo1\sub"),
             ]
         );
     }
@@ -492,8 +494,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\X\wt.main\foo"),
-                PathBuf::from(r"C:\wt\X\wt.main\bar"),
+                PathBuf::from(r"C:\wt\wt.main\X\foo"),
+                PathBuf::from(r"C:\wt\wt.main\X\bar"),
             ]
         );
     }
@@ -508,8 +510,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\X\team-a\wt.main\api"),
-                PathBuf::from(r"C:\wt\X\team-a\wt.main\api-2"),
+                PathBuf::from(r"C:\wt\wt.main\X\team-a\api"),
+                PathBuf::from(r"C:\wt\wt.main\X\team-a\api-2"),
             ]
         );
     }
@@ -523,8 +525,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                PathBuf::from("/wt/home/u/wt.main/r1"),
-                PathBuf::from("/wt/home/u/wt.main/r2"),
+                PathBuf::from("/wt/wt.main/home/u/r1"),
+                PathBuf::from("/wt/wt.main/home/u/r2"),
             ]
         );
     }
@@ -535,6 +537,6 @@ mod tests {
         let root = PathBuf::from("/wt");
         let members = paths(&["/home/u/foo"]);
         let got = workspace_worktree_paths(&root, &refs(&members), "feature/x");
-        assert_eq!(got, vec![PathBuf::from("/wt/home/u/wt.feature-x/foo")]);
+        assert_eq!(got, vec![PathBuf::from("/wt/wt.feature-x/home/u/foo")]);
     }
 }
