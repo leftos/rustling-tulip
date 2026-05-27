@@ -22,6 +22,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{broadcast, mpsc};
@@ -399,7 +400,17 @@ struct PipeAcceptConfig {
 
 async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
     let mut first = true;
+    let mut iteration: u32 = 0;
+    // Time the previous client disconnect happened (or supervisor start, if
+    // no client has yet connected). Used to log "ready window" durations,
+    // which is the key diagnostic for "tracer pipe stayed busy" reattach
+    // failures: a non-zero ready window means the tracer was waiting on
+    // ConnectNamedPipe (so the BUSY came from somewhere else); a near-zero
+    // ready window means the previous client was still draining.
+    let mut last_disconnect = Instant::now();
     loop {
+        iteration = iteration.saturating_add(1);
+        let create_started = Instant::now();
         let server = if first {
             ServerOptions::new()
                 .first_pipe_instance(true)
@@ -415,8 +426,11 @@ async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
         let server = match server {
             Ok(s) => s,
             Err(err) => {
+                let raw = err.raw_os_error();
                 error!(
                     ?err,
+                    raw_os_error = ?raw,
+                    iteration,
                     pipe = %cfg.pipe_name,
                     "supervisor: pipe create failed; ending accept loop"
                 );
@@ -424,14 +438,39 @@ async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
             }
         };
         first = false;
+        let create_elapsed_ms =
+            u64::try_from(create_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let since_last_disconnect_ms =
+            u64::try_from(last_disconnect.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        info!(pipe = %cfg.pipe_name, "supervisor: awaiting client");
+        info!(
+            iteration,
+            create_elapsed_ms,
+            since_last_disconnect_ms,
+            pipe = %cfg.pipe_name,
+            "supervisor: awaiting client"
+        );
+        let wait_started = Instant::now();
         if let Err(err) = server.connect().await {
-            warn!(?err, "supervisor: pipe connect failed; retrying");
+            warn!(
+                ?err,
+                iteration,
+                wait_elapsed_ms = u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "supervisor: pipe connect failed; retrying"
+            );
+            last_disconnect = Instant::now();
             continue;
         }
-        info!(session_id = %cfg.session_id, "supervisor: client connected");
+        let wait_elapsed_ms =
+            u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        info!(
+            iteration,
+            wait_elapsed_ms,
+            session_id = %cfg.session_id,
+            "supervisor: client connected"
+        );
 
+        let handle_started = Instant::now();
         let res = handle_client(
             server,
             Arc::clone(&cfg.shared),
@@ -449,10 +488,22 @@ async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
             state.attached = None;
         }
 
+        let session_elapsed_ms =
+            u64::try_from(handle_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match res {
-            Ok(()) => info!("supervisor: client disconnected cleanly"),
-            Err(err) => warn!(?err, "supervisor: client handler ended with error"),
+            Ok(()) => info!(
+                iteration,
+                session_elapsed_ms,
+                "supervisor: client disconnected cleanly"
+            ),
+            Err(err) => warn!(
+                ?err,
+                iteration,
+                session_elapsed_ms,
+                "supervisor: client handler ended with error"
+            ),
         }
+        last_disconnect = Instant::now();
     }
 }
 
@@ -534,12 +585,12 @@ async fn handle_client(
             line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) => {
-                    debug!("supervisor: pipe input EOF");
+                    info!("supervisor: pipe input EOF — daemon disconnected");
                     return Ok::<(), anyhow::Error>(());
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    debug!(?err, "supervisor: pipe input read error");
+                    info!(?err, "supervisor: pipe input read error — exiting input loop");
                     return Err(err.into());
                 }
             }
@@ -592,11 +643,14 @@ async fn handle_client(
                 if let Some(bytes) = chunk {
                     let frame = TracerResponse::Output { data_b64: B64.encode(&bytes) };
                     if let Err(err) = write_frame(&mut writer, &frame).await {
-                        debug!(?err, "supervisor: pipe write failed; client likely gone");
+                        info!(
+                            ?err,
+                            "supervisor: pipe write failed on Output; client gone — exiting handler"
+                        );
                         break;
                     }
                 } else {
-                    debug!("supervisor: output channel closed");
+                    info!("supervisor: output channel closed; exiting handler");
                     break;
                 }
             }
@@ -615,14 +669,27 @@ async fn handle_client(
             // quickly enough that the attached-state clears for the next
             // daemon to attach.
             () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                let ring_bytes = shared.lock().map_or(0, |s| s.ring.len());
                 let frame = TracerResponse::Status {
                     child_pid,
                     child_alive: true,
-                    ring_bytes: shared.lock().map_or(0, |s| s.ring.len()),
+                    ring_bytes,
                 };
-                if let Err(err) = write_frame(&mut writer, &frame).await {
-                    debug!(?err, "supervisor: keepalive write failed; client gone");
-                    break;
+                match write_frame(&mut writer, &frame).await {
+                    Ok(()) => {
+                        debug!(
+                            ring_bytes,
+                            child_pid = ?child_pid,
+                            "supervisor: keepalive write succeeded"
+                        );
+                    }
+                    Err(err) => {
+                        info!(
+                            ?err,
+                            "supervisor: keepalive write failed; client gone — exiting handler"
+                        );
+                        break;
+                    }
                 }
             }
         }

@@ -31,7 +31,7 @@ use tracer_protocol::{
 use tracing::{debug, info, warn};
 
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
-const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 const OUTPUT_SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_SUBSCRIBER_WAIT_INTERVAL: Duration = Duration::from_millis(5);
