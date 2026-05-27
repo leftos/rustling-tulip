@@ -669,8 +669,19 @@ button:focus-visible {
   font-family: var(--font-mono);
   color: var(--fg);
 }
-.diff-pane-nav {
+.diff-pane-whitespace-toggle {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.diff-pane-whitespace-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.diff-pane-nav {
   display: flex;
   align-items: center;
   gap: 4px;

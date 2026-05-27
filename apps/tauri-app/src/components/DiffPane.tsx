@@ -33,6 +33,11 @@ interface Snapshot {
   language: string;
 }
 
+/// localStorage key for the "include whitespace diffs" toggle. Persisted
+/// once at the global app level (not per-tab) so a user's preferred diff
+/// style follows them across worktrees and sessions.
+const WHITESPACE_STORAGE_KEY = "rt.diffPane.includeWhitespace";
+
 export default function DiffPane({ client, repoId, path, against }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
@@ -47,6 +52,27 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
   // once Monaco has reported "no changes". Used to disable nav buttons
   // and surface the change count to the user.
   const [diffCount, setDiffCount] = useState<number | null>(null);
+  // Persistent "include whitespace diffs" toggle. `true` (default) maps to
+  // Monaco's `ignoreTrimWhitespace: false`, so whitespace-only hunks show
+  // up. Unchecking it asks Monaco to ignore trailing/leading whitespace
+  // so refactor diffs aren't polluted by re-indentation noise. The choice
+  // is persisted across sessions in localStorage.
+  const [includeWhitespace, setIncludeWhitespace] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem(WHITESPACE_STORAGE_KEY);
+      return raw === null ? true : raw === "true";
+    } catch {
+      return true;
+    }
+  });
+  const updateIncludeWhitespace = (next: boolean) => {
+    setIncludeWhitespace(next);
+    try {
+      localStorage.setItem(WHITESPACE_STORAGE_KEY, String(next));
+    } catch {
+      /* best-effort */
+    }
+  };
 
   // Fetch snapshot from the daemon.
   useEffect(() => {
@@ -86,7 +112,10 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
     };
   }, [client, repoId, path, against]);
 
-  // Construct the editor once the host element is mounted.
+  // Construct the editor once the host element is mounted. The
+  // `ignoreTrimWhitespace` option seeds the initial value but is also
+  // kept in sync below via `editor.updateOptions`, so toggling the
+  // checkbox at runtime doesn't require rebuilding the editor.
   useEffect(() => {
     if (!hostRef.current) return;
     const editor = monaco.editor.createDiffEditor(hostRef.current, {
@@ -96,7 +125,7 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
       renderSideBySide: true,
       renderOverviewRuler: false,
       scrollBeyondLastLine: false,
-      ignoreTrimWhitespace: false,
+      ignoreTrimWhitespace: !includeWhitespace,
       fontSize: 12,
     });
     editorRef.current = editor;
@@ -109,7 +138,21 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
         modelsRef.current = null;
       }
     };
+    // The effect deliberately depends on nothing — we want exactly one
+    // editor for the component lifetime. `ignoreTrimWhitespace` changes
+    // are pushed in via `updateOptions` below; rebuilding the editor on
+    // every toggle would lose scroll state and refresh the entire model.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Push `ignoreTrimWhitespace` updates into the live editor instance.
+  // Monaco recomputes the diff on the next tick when this changes, so
+  // the diff-count + nav buttons stay in sync via `onDidUpdateDiff`.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.updateOptions({ ignoreTrimWhitespace: !includeWhitespace });
+  }, [includeWhitespace]);
 
   // Sync content into the editor whenever the snapshot changes.
   useEffect(() => {
@@ -214,6 +257,19 @@ export default function DiffPane({ client, repoId, path, against }: Props) {
         <span className="muted small">
           {against === null ? "worktree vs index" : `vs ${against}`}
         </span>
+        <label
+          className="diff-pane-whitespace-toggle"
+          title="When unchecked, whitespace-only changes are hidden from the diff"
+        >
+          <input
+            type="checkbox"
+            checked={includeWhitespace}
+            onChange={(e) => updateIncludeWhitespace(e.target.checked)}
+            data-testid="diff-pane-whitespace-toggle"
+            aria-label="Include whitespace diffs"
+          />
+          <span className="muted small">include whitespace</span>
+        </label>
         <div
           className="diff-pane-nav"
           data-testid="diff-pane-nav"
