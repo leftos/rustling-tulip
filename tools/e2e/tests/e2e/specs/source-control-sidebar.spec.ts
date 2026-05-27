@@ -244,7 +244,7 @@ describe("source-control sidebar", function () {
     expect(geometry.chipRight).to.be.at.most(geometry.rowRight);
   });
 
-  it("dirty source-control state collapses history and stays within width", async function () {
+  it("dirty source-control state lays out without horizontal overflow", async function () {
     if (!fixtureRepo) throw new Error("setup");
     await writeFile(
       join(fixtureRepo, "README.md"),
@@ -259,18 +259,11 @@ describe("source-control sidebar", function () {
     );
     await worktreeBucket.waitForExist({ timeout: 5_000 });
 
+    // History no longer auto-collapses when changes appear — Changes and
+    // History share the split and the user re-allocates space via the
+    // divider. Just verify the layout doesn't overflow.
     const toggle = await browser.$("[data-testid=source-control-history-toggle]");
     await toggle.waitForExist({ timeout: 5_000 });
-    await browser.waitUntil(
-      async () => (await toggle.getAttribute("aria-expanded")) === "false",
-      {
-        timeout: 2_000,
-        timeoutMsg: "history section did not collapse for dirty state",
-      },
-    );
-
-    const historyList = await browser.$("[data-testid=source-control-history-list]");
-    expect(await historyList.isExisting()).to.equal(false);
 
     await assertNoHorizontalOverflow();
     await browser.saveScreenshot(
@@ -280,7 +273,13 @@ describe("source-control sidebar", function () {
 
   it("expanded history-selected state has no horizontal overflow", async function () {
     const toggle = await browser.$("[data-testid=source-control-history-toggle]");
-    await toggle.click();
+    await toggle.waitForExist({ timeout: 5_000 });
+    // Ensure the panel is expanded regardless of starting state, then keep
+    // it expanded for the rest of the assertions.
+    const initialExpanded = (await toggle.getAttribute("aria-expanded")) === "true";
+    if (!initialExpanded) {
+      await toggle.click();
+    }
     await browser.waitUntil(
       async () => (await toggle.getAttribute("aria-expanded")) === "true",
       {

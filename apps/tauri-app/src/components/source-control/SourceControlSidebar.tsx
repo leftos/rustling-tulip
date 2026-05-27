@@ -3,12 +3,19 @@
  *
  * Two modes:
  * - **Workspace mode** (a session is focused and it has 1+ members): renders
- *   one stacked Changes section per session member, each bound to that
- *   member's worktree path. The History view at the bottom follows the
- *   focused pane's member (or falls back to the first member).
+ *   one stacked Changes section per session member at the top, and one
+ *   stacked History section per session member at the bottom. Each repo's
+ *   Changes header is collapsible (default: dirty repos expanded, clean
+ *   repos collapsed). Each repo's History is collapsible (default
+ *   collapsed; commits are lazy-fetched on first expand).
  * - **Registered-repo mode** (no session focused): renders a single Changes
- *   section for the active registered repo's main tree, with manual repo
- *   override available when 2+ repos are registered.
+ *   section + a single History section for the active registered repo's
+ *   main tree, with manual repo override available when 2+ repos are
+ *   registered. History defaults to expanded in this mode (only one
+ *   history, plenty of room).
+ *
+ * Per-section collapse state is persisted in localStorage keyed by
+ * `repo_id + worktree_path`, so the layout sticks across reloads.
  *
  * In workspace mode, every status/history/stash/commit request carries the
  * member's `worktree_path`, so pending changes and the timeline reflect the
@@ -34,6 +41,27 @@ import StashesSection from "./StashesSection";
 
 const COMMIT_PAGE_SIZE = 50;
 const STORAGE_KEY = "rt.sourceControl.repoOverride";
+const CHANGES_COLLAPSE_PREFIX = "rt.sourceControl.changesCollapsed::";
+const HISTORY_COLLAPSE_PREFIX = "rt.sourceControl.historyCollapsed::";
+
+function readStoredBool(key: string): boolean | null {
+  try {
+    const value = localStorage.getItem(key);
+    if (value === "true") return true;
+    if (value === "false") return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredBool(key: string, value: boolean): void {
+  try {
+    localStorage.setItem(key, value ? "true" : "false");
+  } catch {
+    /* best-effort */
+  }
+}
 
 /// One stacked section in the sidebar. In workspace mode there's one per
 /// session member; in registered-repo mode there's exactly one for the
@@ -89,8 +117,6 @@ export default function SourceControlSidebar({
   const [selectedChange, setSelectedChange] = useState<SelectedChange | null>(
     null,
   );
-  const [changesNeedSpace, setChangesNeedSpace] = useState(false);
-  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [override, setOverride] = useState<string | null>(() => {
     try {
       return localStorage.getItem(STORAGE_KEY);
@@ -154,31 +180,10 @@ export default function SourceControlSidebar({
     ];
   }, [workspaceMode, focusedSession, override, focusedRepoId, repos]);
 
-  /// The History view binds to a single section at a time. In workspace
-  /// mode we prefer the section matching the focused pane's repo, else the
-  /// first member. In registered-repo mode there's exactly one section.
-  const historySection = useMemo<SectionDescriptor | null>(() => {
-    if (sections.length === 0) return null;
-    if (workspaceMode && focusedRepoId) {
-      const match = sections.find((s) => s.repoId === focusedRepoId);
-      if (match) return match;
-    }
-    return sections[0] ?? null;
-  }, [sections, workspaceMode, focusedRepoId]);
-
   const isAuto = override === null;
   const followingFocus = !workspaceMode && isAuto && focusedRepoId !== null;
   const autoNoActive =
     !workspaceMode && isAuto && focusedRepoId === null && repos.length > 1;
-
-  useEffect(() => {
-    setChangesNeedSpace(false);
-    setHistoryCollapsed(false);
-  }, [historySection?.key]);
-
-  useEffect(() => {
-    setHistoryCollapsed(changesNeedSpace);
-  }, [changesNeedSpace]);
 
   const refreshSourceControl = () => {
     setRefreshSeq((value) => value + 1);
@@ -268,17 +273,11 @@ export default function SourceControlSidebar({
         )}
       </header>
       {sections.length > 0 && (
-        <div
-          className={
-            historyCollapsed
-              ? "source-control-body source-control-history-collapsed"
-              : "source-control-body"
-          }
-        >
+        <div className="source-control-body">
           <ResizableSplit
             storageKey="source-control.sidebar"
             defaultSize={420}
-            minSize={180}
+            minSize={140}
             direction="vertical"
           >
             <div className="source-control-sections">
@@ -292,22 +291,24 @@ export default function SourceControlSidebar({
                   selectedChange={selectedChange}
                   onSelectedChange={setSelectedChange}
                   onActivateTab={onActivateTab}
-                  onChangesNeedSpace={setChangesNeedSpace}
                 />
               ))}
             </div>
-            {historySection ? (
-              <HistoryView
-                section={historySection}
-                showSectionHeader={workspaceMode}
-                client={client}
-                collapsed={historyCollapsed}
-                refreshSeq={refreshSeq}
-                onCollapsedChange={setHistoryCollapsed}
-              />
-            ) : (
-              <div />
-            )}
+            <div
+              className="source-control-histories"
+              data-testid="source-control-histories"
+            >
+              {sections.map((section) => (
+                <HistoryView
+                  key={section.key}
+                  section={section}
+                  showSectionHeader={workspaceMode}
+                  client={client}
+                  refreshSeq={refreshSeq}
+                  defaultCollapsed={workspaceMode}
+                />
+              ))}
+            </div>
           </ResizableSplit>
         </div>
       )}
@@ -319,16 +320,16 @@ export default function SourceControlSidebar({
 
 interface ChangesViewProps {
   section: SectionDescriptor;
-  /// In workspace mode each section gets a header (member name + branch).
-  /// In registered-repo mode the section info is already shown in the
-  /// sidebar header so we skip the per-section header to avoid duplication.
+  /// In workspace mode each section gets a clickable, collapsible header
+  /// (member name + branch + change count). In registered-repo mode the
+  /// section info is already shown in the sidebar header, so we skip the
+  /// per-section header and the section is always expanded.
   showSectionHeader: boolean;
   client: DaemonClient;
   refreshSeq: number;
   selectedChange: SelectedChange | null;
   onSelectedChange: (selected: SelectedChange) => void;
   onActivateTab: (tabId: string) => void;
-  onChangesNeedSpace: (needsSpace: boolean) => void;
 }
 
 function ChangesView({
@@ -339,11 +340,11 @@ function ChangesView({
   selectedChange,
   onSelectedChange,
   onActivateTab,
-  onChangesNeedSpace,
 }: ChangesViewProps) {
   const activeRepoId = section.repoId;
   const activeRepoName = section.repoName;
   const worktreePath = section.worktreePath;
+  const collapseKey = `${CHANGES_COLLAPSE_PREFIX}${section.key}`;
   const [indexChanges, setIndexChanges] = useState<GitFileChange[] | null>(null);
   const [worktreeChanges, setWorktreeChanges] = useState<GitFileChange[] | null>(null);
   const [contextMenu, setContextMenu] = useState<FileContextMenuState | null>(null);
@@ -351,6 +352,11 @@ function ChangesView({
   const [pendingOp, setPendingOp] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [pendingDiscard, setPendingDiscard] = useState<string[] | null>(null);
+  // User's explicit collapse override. `null` = follow the auto rule (clean
+  // repos collapsed, dirty repos expanded once status arrives).
+  const [manualCollapse, setManualCollapse] = useState<boolean | null>(() =>
+    readStoredBool(collapseKey),
+  );
 
   useEffect(() => {
     setIndexChanges(null);
@@ -358,8 +364,8 @@ function ChangesView({
     setContextMenu(null);
     setErrorBanner(null);
     setCommitMessage("");
-    onChangesNeedSpace(false);
-  }, [activeRepoId, worktreePath, onChangesNeedSpace]);
+    setManualCollapse(readStoredBool(collapseKey));
+  }, [activeRepoId, worktreePath, collapseKey]);
 
   useEffect(() => {
     const handler = (ev: Event) => {
@@ -372,9 +378,6 @@ function ChangesView({
         return;
       setIndexChanges(detail.index_changes);
       setWorktreeChanges(detail.worktree_changes);
-      onChangesNeedSpace(
-        detail.index_changes.length > 0 || detail.worktree_changes.length > 0,
-      );
       setPendingOp((op) => (op === "commit" ? op : null));
     };
     window.addEventListener("rt:repo_status", handler);
@@ -384,7 +387,7 @@ function ChangesView({
       worktree_path: worktreePath,
     });
     return () => window.removeEventListener("rt:repo_status", handler);
-  }, [activeRepoId, worktreePath, client, onChangesNeedSpace, refreshSeq]);
+  }, [activeRepoId, worktreePath, client, refreshSeq]);
 
   // Listen for write errors + commit confirmation across the lifetime of
   // this view.
@@ -528,27 +531,56 @@ function ChangesView({
     commitMessage.trim().length > 0 ||
     pendingOp === "commit";
 
+  const loaded = indexChanges !== null && worktreeChanges !== null;
+  const totalChanges =
+    (indexChanges?.length ?? 0) + (worktreeChanges?.length ?? 0);
+  // Default rule: dirty repos expanded, clean repos collapsed (once status
+  // has loaded). Pre-load we leave the section expanded so the user sees
+  // the loading state instead of a silent empty row.
+  const autoCollapsed = loaded && totalChanges === 0;
+  const collapsed = showSectionHeader && (manualCollapse ?? autoCollapsed);
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setManualCollapse(next);
+    writeStoredBool(collapseKey, next);
+  };
+
   return (
     <div
       className="git-list source-control-list source-control-changes-full"
       data-testid="source-control-changes-list"
       data-repo-id={activeRepoId}
       data-worktree-path={worktreePath ?? ""}
+      data-collapsed={collapsed ? "true" : "false"}
     >
       {showSectionHeader && (
-        <div
-          className="source-control-section-header"
+        <button
+          type="button"
+          className="source-control-section-header source-control-section-toggle"
           data-testid="source-control-section-header"
+          aria-expanded={!collapsed}
+          aria-label={`${activeRepoName} changes (${totalChanges})`}
           title={worktreePath ?? activeRepoName}
+          onClick={toggleCollapsed}
         >
+          <span className="tree-caret" aria-hidden="true">
+            {collapsed ? "▸" : "▾"}
+          </span>
           <strong>{activeRepoName}</strong>
           {section.branchLabel && (
             <span className="muted small inline-note">
               · {section.branchLabel}
             </span>
           )}
-        </div>
+          {loaded && totalChanges > 0 && (
+            <span className="bucket-count" data-testid="source-control-section-count">
+              {totalChanges}
+            </span>
+          )}
+        </button>
       )}
+      {!collapsed && (
+        <>
       {showCommitBox && (
         <div className="source-control-commit">
           <textarea
@@ -693,7 +725,9 @@ function ChangesView({
             Open in forge
           </button>
         </div>
-        {contextMenu && (
+        </>
+      )}
+      {contextMenu && (
           <FileContextMenu
             state={contextMenu}
             pendingOp={pendingOp}
@@ -858,21 +892,37 @@ interface HistoryViewProps {
   section: SectionDescriptor;
   showSectionHeader: boolean;
   client: DaemonClient;
-  collapsed: boolean;
   refreshSeq: number;
-  onCollapsedChange: (collapsed: boolean) => void;
+  /// Default collapsed state when there is no localStorage override yet.
+  /// `true` in workspace mode (N histories — start small), `false` in
+  /// registered-repo mode (one history — show it).
+  defaultCollapsed: boolean;
 }
 
 function HistoryView({
   section,
   showSectionHeader,
   client,
-  collapsed,
   refreshSeq,
-  onCollapsedChange,
+  defaultCollapsed,
 }: HistoryViewProps) {
   const activeRepoId = section.repoId;
   const worktreePath = section.worktreePath;
+  const collapseKey = `${HISTORY_COLLAPSE_PREFIX}${section.key}`;
+  const [collapsed, setCollapsedState] = useState<boolean>(
+    () => readStoredBool(collapseKey) ?? defaultCollapsed,
+  );
+  // Track defaultCollapsed in a ref so the section-change effect below picks
+  // up the latest value without re-running on every prop change.
+  useEffect(() => {
+    setCollapsedState(readStoredBool(collapseKey) ?? defaultCollapsed);
+  }, [collapseKey, defaultCollapsed]);
+
+  const setCollapsed = (next: boolean) => {
+    setCollapsedState(next);
+    writeStoredBool(collapseKey, next);
+  };
+
   const [commits, setCommits] = useState<GitCommit[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detailDiff, setDetailDiff] = useState<string | null>(null);
@@ -881,7 +931,18 @@ function HistoryView({
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
+  // Only fetch commits while expanded. Re-fetch on section change or
+  // explicit refresh while expanded. Collapsing resets cached state so the
+  // next expand always shows fresh data.
   useEffect(() => {
+    if (collapsed) {
+      setCommits(null);
+      setSelected(null);
+      setDetailDiff(null);
+      setExhausted(false);
+      setLoadingMore(false);
+      return;
+    }
     setCommits(null);
     setSelected(null);
     setDetailDiff(null);
@@ -926,7 +987,7 @@ function HistoryView({
       worktree_path: worktreePath,
     });
     return () => window.removeEventListener("rt:commits", handler);
-  }, [activeRepoId, worktreePath, client, refreshSeq]);
+  }, [collapsed, activeRepoId, worktreePath, client, refreshSeq]);
 
   const loadMore = () => {
     if (!commits || loadingMore || exhausted) return;
@@ -973,13 +1034,16 @@ function HistoryView({
     <section
       className="source-control-history-panel"
       data-testid="source-control-history-panel"
+      data-collapsed={collapsed ? "true" : "false"}
+      data-repo-id={activeRepoId}
+      data-worktree-path={worktreePath ?? ""}
     >
       <div className="source-control-section-title source-control-history-title">
         <button
           type="button"
           className="source-control-history-toggle"
           aria-expanded={!collapsed}
-          onClick={() => onCollapsedChange(!collapsed)}
+          onClick={() => setCollapsed(!collapsed)}
           data-testid="source-control-history-toggle"
         >
           <span className="tree-caret" aria-hidden="true">
@@ -995,14 +1059,16 @@ function HistoryView({
               </span>
             )}
           </span>
-          <span className="bucket-count">{commits?.length ?? 0}</span>
+          {commits !== null && (
+            <span className="bucket-count">{commits.length}</span>
+          )}
         </button>
       </div>
       {!collapsed && (
         <ResizableSplit
-          storageKey="source-control.history"
+          storageKey={`source-control.history::${section.key}`}
           defaultSize={220}
-          minSize={110}
+          minSize={90}
           direction="vertical"
         >
           <div

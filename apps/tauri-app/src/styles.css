@@ -325,15 +325,15 @@ button:focus-visible {
   min-height: 0;
 }
 .source-control-header {
-  padding: 10px 12px;
+  padding: 6px 10px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 11px;
   color: var(--fg-muted);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 .source-control-header .brand {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--fg);
   font-weight: 600;
   text-transform: none;
@@ -343,13 +343,13 @@ button:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 .source-control-header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 .source-control-refresh-button {
@@ -357,14 +357,14 @@ button:focus-visible {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg-muted);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
 }
 .source-control-refresh-button:hover {
@@ -377,8 +377,8 @@ button:focus-visible {
   min-width: 0;
 }
 .source-control-active-repo {
-  margin-top: 4px;
-  font-size: 12px;
+  margin-top: 2px;
+  font-size: 11px;
   color: var(--fg);
   text-transform: none;
   letter-spacing: 0;
@@ -401,29 +401,18 @@ button:focus-visible {
   flex: 1 1 auto;
   min-height: 0;
 }
-.source-control-history-collapsed > .split {
-  grid-template-rows: minmax(0, 1fr) 0 30px !important;
-}
-.source-control-history-collapsed > .split > .split-divider {
-  pointer-events: none;
-  visibility: hidden;
-}
-.source-control-history-collapsed .source-control-history-panel {
-  flex: none;
-  border-top: 1px solid var(--border);
-}
 .source-control-list {
   overflow-x: hidden;
-  padding: 4px 0;
+  padding: 0;
 }
-.source-control > .empty { padding: 12px 14px; }
+.source-control > .empty { padding: 8px 10px; }
 .changes-tree { list-style: none; margin: 0; padding: 0; }
 .changes-tree ul { list-style: none; margin: 0; padding: 0; }
 .changes-tree .tree-row {
   font-size: 12px;
-  min-height: 20px;
-  padding-top: 2px;
-  padding-bottom: 2px;
+  min-height: 18px;
+  padding-top: 0;
+  padding-bottom: 0;
   padding-left: calc(4px + var(--tree-depth, 0) * 12px);
 }
 .changes-tree-folder .tree-label { color: var(--fg); }
@@ -455,8 +444,8 @@ button:focus-visible {
 .source-control-commit {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 4px 8px 6px;
   border-bottom: 1px solid var(--border);
 }
 .source-control-commit .commit-input {
@@ -467,15 +456,15 @@ button:focus-visible {
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 5px 6px;
+  padding: 3px 5px;
   resize: vertical;
-  min-height: 36px;
+  min-height: 30px;
 }
 .source-control-commit .commit-input:focus { outline: none; border-color: var(--accent); }
 .source-control-commit .commit-button {
   align-self: flex-end;
-  font-size: 12px;
-  padding: 4px 12px;
+  font-size: 11px;
+  padding: 2px 10px;
   background: var(--accent);
   color: var(--bg);
   border: 0;
@@ -489,12 +478,12 @@ button:focus-visible {
 }
 
 /* STAGED / CHANGES section headers. */
-.changes-bucket { margin-bottom: 4px; }
+.changes-bucket { margin-bottom: 2px; }
 .changes-bucket-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: 4px;
+  padding: 2px 8px;
   font-size: 11px;
   color: var(--fg-muted);
   text-transform: uppercase;
@@ -514,7 +503,7 @@ button:focus-visible {
   color: var(--fg-muted);
   font-size: 11px;
   cursor: pointer;
-  padding: 2px 4px;
+  padding: 1px 4px;
 }
 .changes-bucket-header .bucket-action:hover:not(:disabled) { color: var(--fg); }
 .changes-bucket-header .bucket-action:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -546,13 +535,13 @@ button:focus-visible {
 /* STASHES section — sits under the CHANGES buckets in the changes view. */
 .stashes-section {
   border-top: 1px solid var(--border);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 .stashes-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: 4px;
+  padding: 2px 8px;
   font-size: 11px;
   color: var(--fg-muted);
   text-transform: uppercase;
@@ -565,11 +554,11 @@ button:focus-visible {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
-.stashes-body { padding: 4px 8px 8px; }
+.stashes-body { padding: 2px 6px 4px; }
 .stash-push-row {
   display: flex;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 4px;
+  margin-bottom: 4px;
 }
 .stash-push-input {
   flex: 1 1 auto;
@@ -578,7 +567,7 @@ button:focus-visible {
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 4px 6px;
+  padding: 2px 5px;
   font-size: 12px;
 }
 .stash-push-button {
@@ -586,8 +575,8 @@ button:focus-visible {
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: 3px;
-  padding: 4px 10px;
-  font-size: 12px;
+  padding: 2px 8px;
+  font-size: 11px;
   cursor: pointer;
 }
 .stash-push-button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -599,8 +588,8 @@ button:focus-visible {
 .stash-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 4px;
+  gap: 6px;
+  padding: 2px 4px;
   border-bottom: 1px solid var(--border);
 }
 .stash-row:last-child { border-bottom: 0; }
@@ -768,7 +757,7 @@ button:focus-visible {
   border-bottom: 0;
 }
 .source-control-section-header {
-  padding: 6px 10px;
+  padding: 3px 8px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -776,8 +765,8 @@ button:focus-visible {
   background: var(--bg-elevated, transparent);
   border-bottom: 1px solid var(--border);
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -788,12 +777,57 @@ button:focus-visible {
   text-transform: none;
   letter-spacing: 0;
 }
+.source-control-section-toggle {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+.source-control-section-toggle:hover {
+  background: var(--bg-elev2);
+  color: var(--fg);
+}
+.source-control-section-toggle .bucket-count {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+.source-control-section-toggle .tree-caret {
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1;
+  width: 10px;
+  flex: none;
+}
 
+/* Stacked histories — one per workspace member at the bottom of the
+   sidebar. Collapsed siblings shrink to their header; an expanded panel
+   takes the remaining vertical space. */
+.source-control-histories {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
 .source-control-history-panel {
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   min-height: 0;
   min-width: 0;
+  border-top: 1px solid var(--border);
+}
+.source-control-histories > .source-control-history-panel:first-child {
+  border-top: 0;
+}
+.source-control-history-panel[data-collapsed="false"] {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .source-control-history-panel > .split {
@@ -804,7 +838,7 @@ button:focus-visible {
 
 .source-control-section-title {
   flex: 0 0 auto;
-  padding: 5px 10px;
+  padding: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   color: var(--fg-muted);
@@ -822,20 +856,27 @@ button:focus-visible {
   display: flex;
   width: 100%;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   border: 0;
   background: transparent;
   color: inherit;
   cursor: pointer;
   font: inherit;
   letter-spacing: inherit;
-  padding: 5px 10px;
+  padding: 3px 8px;
   text-align: left;
   text-transform: inherit;
 }
 .source-control-history-toggle:hover {
   background: var(--bg-elev2);
   color: var(--fg);
+}
+.source-control-history-toggle .tree-caret {
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1;
+  width: 10px;
+  flex: none;
 }
 .source-control-history-toggle .bucket-count {
   margin-left: auto;
@@ -2433,21 +2474,21 @@ button.tree-tab-pill:hover {
   flex: 1; min-height: 0;
 }
 .git-list {
-  overflow-x: hidden; overflow-y: auto; padding: 6px;
+  overflow-x: hidden; overflow-y: auto; padding: 2px;
   display: flex; flex-direction: column;
   flex: 1; min-height: 0; min-width: 0;
 }
 .git-list .list { flex: 1; min-width: 0; }
 .history-load-more {
   display: block;
-  width: calc(100% - 16px);
-  margin: 6px 8px 8px;
-  padding: 6px;
+  width: calc(100% - 8px);
+  margin: 3px 4px 4px;
+  padding: 3px;
   background: var(--bg);
   color: var(--fg-muted);
   border: 1px dashed var(--border);
   border-radius: 3px;
-  font-size: 12px;
+  font-size: 11px;
   text-align: center;
   cursor: pointer;
 }
@@ -2455,7 +2496,7 @@ button.tree-tab-pill:hover {
 .history-load-more:disabled { opacity: 0.5; cursor: progress; }
 .git-meta {
   border-top: 1px solid var(--border);
-  padding: 6px; font-size: 11px; color: var(--fg-muted);
+  padding: 3px 6px; font-size: 11px; color: var(--fg-muted);
   display: flex; justify-content: space-between; align-items: center;
 }
 .file-status {
@@ -2473,15 +2514,15 @@ button.tree-tab-pill:hover {
   flex: none;
 }
 .history-commit-row {
-  min-height: 28px;
+  min-height: 20px;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 6px;
+  padding: 2px 6px;
   overflow: visible;
   min-width: 0;
 }
 .history-commit-row .commit-sha {
-  width: 50px;
+  width: 46px;
   color: color-mix(in srgb, var(--accent) 86%, var(--fg));
   font-size: 11px;
 }
@@ -2490,24 +2531,24 @@ button.tree-tab-pill:hover {
   min-width: 0;
   overflow: hidden;
   color: var(--fg);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  line-height: 1.35;
+  line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .commit-author-chip {
   flex: 0 0 auto;
-  max-width: 82px;
+  max-width: 76px;
   overflow: hidden;
-  padding: 1px 6px;
+  padding: 0 5px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--bg);
   color: var(--fg-muted);
   font-size: 10px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
