@@ -47,7 +47,17 @@
       host path can still be entered). **Known follow-up:** pop-out windows render
       their own App instance outside the provider, so a terminal file link in a
       remote pop-out isn't gated yet (no regression — it was never gated).
-- [ ] Phase 7 — per-client layouts (daemon + frontend) — NEXT.
+- [x] Phase 7a — per-client layout plumbing. `PersistedState.tabs` →
+      `layouts: HashMap<client_id, ClientLayout>` (+ `legacy_tabs` migrated via
+      serde alias). Hello carries `client_id`/`client_name` (new `get_client_identity`
+      Tauri command persists a per-install UUID + hostname); every tab handler,
+      the scoped `tab_events` forwarder, `push_initial_state`, preset launch, and
+      the startup prune are per-client. First client after upgrade adopts the
+      legacy layout (desktop keeps its tabs); later clients start empty.
+- [ ] Phase 7b — explicit first-connect chooser (`LayoutInitRequired`/`InitLayout`:
+      empty / clone legacy / clone another client / all sessions) — NEXT.
+- [ ] Phase 7c — session-removal auto-close (close panes + sibling-fill across
+      all layouts, replacing prune-to-placeholder).
 - [ ] Phases 8–9 — see below.
 
 ## Context
