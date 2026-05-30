@@ -27,6 +27,17 @@ interface Props {
   /// Open the worktrees-management modal. Owned by the parent so it
   /// lives at the App level (matches the SettingsModal own placement).
   onOpenWorktreesManager: () => void;
+  /// Opt-in LAN access status, mirrored from the daemon's `lan_status`
+  /// broadcast. `null` before the initial state push lands.
+  lanStatus: {
+    enabled: boolean;
+    port: number;
+    fingerprint: string | null;
+    addresses: string[];
+  } | null;
+  /// The local daemon's auth token, for assembling the remote connection
+  /// code. `null` until the first connect.
+  daemonToken: string | null;
 }
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
@@ -36,6 +47,7 @@ type SettingsTabKey =
   | "notifications"
   | "spawn"
   | "worktrees"
+  | "lan"
   | "appearance"
   | "title";
 
@@ -49,6 +61,7 @@ const SETTINGS_TABS: SettingsTabDef[] = [
   { key: "notifications", label: "Notifications" },
   { key: "spawn", label: "Spawn defaults" },
   { key: "worktrees", label: "Worktrees" },
+  { key: "lan", label: "Remote access" },
   { key: "appearance", label: "Appearance" },
   { key: "title", label: "App Title" },
 ];
@@ -63,6 +76,8 @@ export default function SettingsModal({
   client,
   worktreesRoot,
   onOpenWorktreesManager,
+  lanStatus,
+  daemonToken,
 }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
@@ -157,6 +172,13 @@ export default function SettingsModal({
                 client={client}
                 worktreesRoot={worktreesRoot}
                 onOpenManager={onOpenWorktreesManager}
+              />
+            )}
+            {activeTab === "lan" && (
+              <LanPanel
+                client={client}
+                lanStatus={lanStatus}
+                daemonToken={daemonToken}
               />
             )}
             {activeTab === "appearance" && (
@@ -585,6 +607,243 @@ interface WorktreesPanelProps {
 /// on Save. The draft re-syncs whenever the daemon broadcast updates so
 /// concurrent changes from another window propagate without manual
 /// refresh.
+interface LanPanelProps {
+  client: DaemonClient | null;
+  lanStatus: {
+    enabled: boolean;
+    port: number;
+    fingerprint: string | null;
+    addresses: string[];
+  } | null;
+  daemonToken: string | null;
+}
+
+const LAN_CODE_VERSION = 1;
+const DEFAULT_LAN_PORT = 8787;
+
+/// Encode the host's LAN connection details as a single base64url blob the
+/// remote client pastes once. Carries the pinned cert fingerprint + auth
+/// token, so it grants full control — treated as a secret in the UI copy.
+function buildConnectionCode(
+  host: string,
+  port: number,
+  token: string,
+  fingerprint: string,
+): string {
+  const json = JSON.stringify({
+    v: LAN_CODE_VERSION,
+    host,
+    port,
+    token,
+    fp: fingerprint,
+  });
+  return btoa(json)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/// Remote-access (LAN) settings: toggle the opt-in TLS listener, pick which
+/// of the host's addresses to advertise, and copy the connection code a remote
+/// client pastes to pair. The daemon is the source of truth (`lan_status`);
+/// this panel just sends `configure_lan` and renders the broadcast back.
+function LanPanel({ client, lanStatus, daemonToken }: LanPanelProps) {
+  const enabled = lanStatus?.enabled ?? false;
+  const addresses = lanStatus?.addresses ?? [];
+  const [portDraft, setPortDraft] = useState<string>(
+    String(lanStatus?.port ?? DEFAULT_LAN_PORT),
+  );
+  const [selectedAddr, setSelectedAddr] = useState<string>("");
+  const [copied, setCopied] = useState(false);
+
+  // Re-sync the port input when the daemon's status changes.
+  useEffect(() => {
+    setPortDraft(String(lanStatus?.port ?? DEFAULT_LAN_PORT));
+  }, [lanStatus?.port]);
+  // Default the address selection to the first detected address, keeping a
+  // valid prior choice if it still exists.
+  useEffect(() => {
+    setSelectedAddr((prev) =>
+      prev && addresses.includes(prev) ? prev : (addresses[0] ?? ""),
+    );
+  }, [addresses]);
+
+  const parsedPort = Number.parseInt(portDraft, 10);
+  const portValid =
+    Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535;
+
+  const onToggle = useCallback(() => {
+    if (!client || !portValid) return;
+    client.send({
+      type: "configure_lan",
+      enabled: !enabled,
+      port: parsedPort,
+    });
+  }, [client, enabled, parsedPort, portValid]);
+
+  const onApplyPort = useCallback(() => {
+    if (!client || !portValid || !enabled) return;
+    client.send({ type: "configure_lan", enabled: true, port: parsedPort });
+  }, [client, enabled, parsedPort, portValid]);
+
+  const connectionCode = useMemo(() => {
+    if (!enabled || !daemonToken || !lanStatus?.fingerprint || !selectedAddr) {
+      return null;
+    }
+    return buildConnectionCode(
+      selectedAddr,
+      lanStatus.port,
+      daemonToken,
+      lanStatus.fingerprint,
+    );
+  }, [enabled, daemonToken, lanStatus, selectedAddr]);
+
+  const onCopy = useCallback(() => {
+    if (!connectionCode) return;
+    void navigator.clipboard
+      .writeText(connectionCode)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch((err: unknown) => {
+        logToFile(
+          "warn",
+          `settings: copy connection code failed: ${String(err)}`,
+        );
+      });
+  }, [connectionCode]);
+
+  const disabled = !client;
+  return (
+    <section className="settings-section" data-testid="settings-section-lan">
+      <h3>Remote access (LAN)</h3>
+      <p className="settings-section-hint">
+        Let another machine on your local network connect to this daemon and
+        control its shells over an encrypted (TLS) connection. Off by default —
+        the daemon stays loopback-only until you enable this.
+      </p>
+      <p className="settings-section-hint">
+        ⚠ The connection code below grants full control of this machine's
+        shells — it can run commands here. Only share it with devices you trust
+        on a network you trust.
+      </p>
+      <div className="settings-row">
+        <label htmlFor="lan-port-input">Port</label>
+        <input
+          id="lan-port-input"
+          type="text"
+          inputMode="numeric"
+          value={portDraft}
+          onChange={(e) => setPortDraft(e.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          disabled={disabled}
+          data-testid="settings-lan-port-input"
+        />
+        {enabled && (
+          <button
+            type="button"
+            onClick={onApplyPort}
+            disabled={disabled || !portValid || parsedPort === lanStatus?.port}
+          >
+            Apply
+          </button>
+        )}
+      </div>
+      {!portValid && (
+        <p className="settings-section-hint">
+          Port must be a number between 1 and 65535.
+        </p>
+      )}
+      <div className="settings-row">
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={disabled || !portValid}
+          data-testid="settings-lan-toggle"
+        >
+          {enabled ? "Disable LAN access" : "Enable LAN access"}
+        </button>
+        <span className="settings-section-hint">
+          {lanStatus === null
+            ? "(daemon not connected)"
+            : enabled
+              ? "Enabled"
+              : "Disabled"}
+        </span>
+      </div>
+      {enabled && (
+        <>
+          {addresses.length > 1 && (
+            <div className="settings-row">
+              <label htmlFor="lan-addr-select">This machine's address</label>
+              <select
+                id="lan-addr-select"
+                value={selectedAddr}
+                onChange={(e) => setSelectedAddr(e.target.value)}
+                data-testid="settings-lan-addr-select"
+              >
+                {addresses.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {addresses.length === 1 && (
+            <p className="settings-section-hint">
+              This machine: <code>{addresses[0]}</code>
+            </p>
+          )}
+          {addresses.length === 0 && (
+            <p className="settings-section-hint">
+              No LAN address detected — check your network connection.
+            </p>
+          )}
+          {lanStatus?.fingerprint && (
+            <p className="settings-section-hint">
+              Certificate fingerprint:{" "}
+              <code>{lanStatus.fingerprint.slice(0, 32)}…</code>
+            </p>
+          )}
+          {connectionCode ? (
+            <div className="settings-row">
+              <label htmlFor="lan-conn-code">Connection code</label>
+              <input
+                id="lan-conn-code"
+                type="text"
+                value={connectionCode}
+                readOnly
+                onFocus={(e) => e.currentTarget.select()}
+                spellCheck={false}
+                data-testid="settings-lan-connection-code"
+              />
+              <button
+                type="button"
+                onClick={onCopy}
+                data-testid="settings-lan-copy"
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+          ) : (
+            <p className="settings-section-hint">
+              Connection code unavailable — waiting for the certificate and a
+              detected address…
+            </p>
+          )}
+          <p className="settings-section-hint">
+            On the other machine, open rustling-tulip, choose “Add remote”, and
+            paste this code.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
 function WorktreesPanel({
   client,
   worktreesRoot,

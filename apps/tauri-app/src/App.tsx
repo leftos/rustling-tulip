@@ -221,6 +221,10 @@ interface AppState {
     fingerprint: string | null;
     addresses: string[];
   } | null;
+  /// The local daemon's auth token, captured from the handshake on connect.
+  /// Used by the Remote access settings panel to assemble the connection code
+  /// the host hands to a remote client. `null` until the first connect.
+  daemonToken: string | null;
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
@@ -325,6 +329,7 @@ export default function App() {
     sessionOrder: new Map(),
     worktreesRoot: null,
     lanStatus: null,
+    daemonToken: null,
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -444,6 +449,7 @@ export default function App() {
       try {
         const handshake = await ensureDaemonStarted();
         if (cancelled) return;
+        setState((s) => ({ ...s, daemonToken: handshake.auth_token }));
         client = connectDaemon(handshake);
         clientRef.current = client;
         client.onConnectionChange((next) => {
@@ -2474,6 +2480,8 @@ export default function App() {
           onClose={onCloseSettings}
           client={state.client}
           worktreesRoot={state.worktreesRoot}
+          lanStatus={state.lanStatus}
+          daemonToken={state.daemonToken}
           onOpenWorktreesManager={() =>
             setState((s) => ({ ...s, worktreesManagerOpen: true }))
           }
