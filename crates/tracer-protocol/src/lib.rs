@@ -141,12 +141,56 @@ impl InboundTracerResponse {
     }
 }
 
-/// Pipe name format. The daemon picks the session id; the tracer derives the
-/// pipe name from it via this function so both sides agree without an
-/// explicit handshake step.
+/// Local-socket name format. The daemon picks the session id; the tracer
+/// derives the same name from it so both sides agree without an explicit
+/// handshake step.
+///
+/// The transport is `interprocess` local sockets:
+/// - **Windows:** a namespaced name (`rt-tracer-<session_id>`) that the
+///   `interprocess` `GenericNamespaced` mapping turns into
+///   `\\.\pipe\rt-tracer-<session_id>` — byte-identical to the legacy
+///   named-pipe path.
+/// - **Unix:** a filesystem socket path under the per-user temp dir. The
+///   session-id fragment is length-bounded so the full path stays within the
+///   platform `sun_path` limit (104 bytes on macOS).
 #[must_use]
-pub fn pipe_name(session_id: &str) -> String {
-    format!(r"\\.\pipe\rt-tracer-{session_id}")
+pub fn socket_name(session_id: &str) -> String {
+    socket_name_with_prefix("rt-tracer", session_id)
+}
+
+/// Like [`socket_name`] but with a caller-supplied prefix, used for test
+/// isolation when several daemons share a host. `prefix` is assumed already
+/// sanitized by the caller.
+#[must_use]
+pub fn socket_name_with_prefix(prefix: &str, session_id: &str) -> String {
+    socket_name_inner(prefix, session_id)
+}
+
+#[cfg(windows)]
+fn socket_name_inner(prefix: &str, session_id: &str) -> String {
+    format!("{prefix}-{session_id}")
+}
+
+#[cfg(not(windows))]
+fn socket_name_inner(prefix: &str, session_id: &str) -> String {
+    // A macOS `sun_path` is only 104 bytes including the temp-dir prefix, and
+    // session ids are 36-char UUIDs — so bound both fragments. Keep
+    // alphanumerics (and dashes in the prefix) so the file name stays
+    // shell- and tool-friendly.
+    let prefix_short: String = prefix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(24)
+        .collect();
+    let id_short: String = session_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(16)
+        .collect();
+    std::env::temp_dir()
+        .join(format!("{prefix_short}-{id_short}.sock"))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Negotiate the highest mutually supported ABI version.
@@ -201,8 +245,16 @@ mod tests {
     }
 
     #[test]
-    fn pipe_name_format_is_session_id_suffixed() {
-        let pipe = pipe_name("abc-123");
-        assert_eq!(pipe, r"\\.\pipe\rt-tracer-abc-123");
+    fn socket_name_is_session_id_suffixed() {
+        let name = socket_name("abc-123");
+        #[cfg(windows)]
+        assert_eq!(name, "rt-tracer-abc-123");
+        #[cfg(not(windows))]
+        {
+            assert!(name.ends_with(".sock"), "got {name}");
+            assert!(name.contains("rt-tracer-"), "got {name}");
+            // Hyphens are stripped from the bounded session-id fragment.
+            assert!(name.contains("abc123"), "got {name}");
+        }
     }
 }

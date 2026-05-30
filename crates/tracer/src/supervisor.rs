@@ -1,14 +1,19 @@
-//! Top-level supervisor loop. Spawns the child via PTY, hosts the named-pipe
-//! server, and multiplexes child output → ring/pipe and pipe → child stdin.
+//! Top-level supervisor loop. Spawns the child via PTY, hosts the local-socket
+//! server (`interprocess`: named pipe on Windows, Unix domain socket on
+//! macOS/Linux), and multiplexes child output → ring/socket and socket → child
+//! stdin.
 //!
 //! Design notes:
 //! - The PTY reader runs in a dedicated `std::thread`; output bytes are pushed
-//!   to a bounded ring and, when a daemon is attached, forwarded over the pipe
+//!   to a bounded ring and, when a daemon is attached, forwarded over the socket
 //!   with backpressure. A slow daemon therefore slows the child rather than
 //!   ballooning memory.
-//! - Only one daemon can attach at a time (`max_instances(1)`). If a second
-//!   daemon races, the OS returns `ERROR_PIPE_BUSY` (231) — see the C.1 spike
-//!   write-up at `docs/spikes/c1-tracer-spike.md` Q5.
+//! - Only one daemon attaches at a time. The accept loop is serialized — it
+//!   runs `handle_client` to completion before accepting the next connection —
+//!   so a racing daemon waits (in the OS backlog / connect-retry) until the
+//!   current one drops. A daemon restart drops the old connection (EOF on the
+//!   read half), `handle_client` returns, and the next accept picks up the new
+//!   daemon.
 //! - On reconnect, the freshly-attached daemon receives a single ring-snapshot
 //!   Output frame as the first message after `Welcome` so it can replay what
 //!   it missed during the outage. After the snapshot, live output is forwarded
@@ -19,12 +24,13 @@ use anyhow::Context as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use interprocess::local_socket::ListenerOptions;
+use interprocess::local_socket::tokio::prelude::*;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
-use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
+use std::time::Instant;
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tracer_protocol::{
     InboundTracerRequest, SUPPORTED_TRACER_VERSIONS, TRACER_VERSION, TracerHello, TracerRequest,
@@ -38,18 +44,12 @@ use tracing::{debug, error, info, warn};
 /// grow unbounded.
 const PIPE_OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
-/// Backoff between attempts to re-arm the named pipe after a daemon disconnect.
-const PIPE_REARM_RETRY_BACKOFF: Duration = Duration::from_millis(25);
-
-/// Upper bound on re-arm retries. The transient busy/access-denied window after
-/// the previous instance is released clears in milliseconds; this cap is
-/// generous (well past the daemon's reattach budget) so a genuinely wedged pipe
-/// still ends the loop and surfaces in logs rather than spinning forever.
-const PIPE_REARM_RETRY_BUDGET: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub session_id: String,
+    /// `interprocess` local-socket name (Windows namespaced name / Unix socket
+    /// path). Field name kept as `pipe_name` to match the daemon's `--pipe-name`
+    /// CLI arg and the sidecar's `tracer_pipe` field.
     pub pipe_name: String,
     pub program: String,
     pub args: Vec<String>,
@@ -357,8 +357,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         }
     });
 
-    // Pipe accept loop.
-    let pipe_cfg = PipeAcceptConfig {
+    // Local-socket accept loop.
+    let accept_cfg = AcceptConfig {
         pipe_name: cfg.pipe_name.clone(),
         session_id: cfg.session_id.clone(),
         child_pid,
@@ -368,7 +368,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         stop_tx,
         exit_broadcast: exit_broadcast_tx,
     };
-    let pipe_accept = tokio::spawn(pipe_accept_loop(pipe_cfg));
+    let pipe_accept = tokio::spawn(accept_loop(accept_cfg));
 
     // Block on child exit. Once the child is gone we let the pipe accept loop
     // finish whatever its current connection is doing (with the Exited frame
@@ -376,11 +376,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let exit_code = child_wait.await.unwrap_or(-1);
     info!(exit_code, "supervisor: child exited; shutting down");
 
-    // Brief grace period so the pipe handler can flush the Exited frame.
+    // Brief grace period so the socket handler can flush the Exited frame.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     pipe_accept.abort();
     stop_handler.abort();
     heartbeat.abort();
+
+    // On Unix the bound socket leaves a file behind; remove it so a re-spawn
+    // with the same name binds cleanly. (No-op on Windows named pipes.)
+    #[cfg(unix)]
+    remove_stale_socket(&cfg.pipe_name);
 
     let _ = reader_handle.join();
 
@@ -396,27 +401,35 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Create a single byte-mode pipe instance. `first` adds `first_pipe_instance`
-/// so the very first create fails if a stale server is already squatting the
-/// name; re-arms after a client disconnect must omit it.
-fn create_pipe(first: bool, name: &str) -> std::io::Result<NamedPipeServer> {
-    let mut opts = ServerOptions::new();
-    opts.pipe_mode(PipeMode::Byte).max_instances(1);
-    if first {
-        opts.first_pipe_instance(true);
+/// Convert a stored socket-name string into an `interprocess` `Name`. The
+/// daemon and tracer agree on the same string (passed via `--pipe-name`); this
+/// just selects the right namespace per platform.
+#[cfg(windows)]
+fn to_local_name(s: &str) -> std::io::Result<interprocess::local_socket::Name<'_>> {
+    use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
+    s.to_ns_name::<GenericNamespaced>()
+}
+
+#[cfg(not(windows))]
+fn to_local_name(s: &str) -> std::io::Result<interprocess::local_socket::Name<'_>> {
+    use interprocess::local_socket::{GenericFilePath, ToFsName as _};
+    s.to_fs_name::<GenericFilePath>()
+}
+
+/// Remove a leftover Unix socket file so a fresh bind doesn't fail with
+/// `EADDRINUSE`. `interprocess` reclaims the name by default; this is a
+/// belt-and-suspenders guard plus the explicit shutdown cleanup. No-op when
+/// the file is already gone.
+#[cfg(unix)]
+fn remove_stale_socket(path: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => debug!(path, "supervisor: removed stale socket file"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => warn!(?err, path, "supervisor: could not remove stale socket file"),
     }
-    opts.create(name)
 }
 
-/// Errors seen while re-arming the pipe immediately after a daemon disconnect,
-/// before the OS has released the previous instance: `ERROR_PIPE_BUSY` (231)
-/// and `ERROR_ACCESS_DENIED` (5). Both clear within milliseconds, so retrying
-/// succeeds where bailing would close the child's stdin and kill it.
-fn is_transient_rearm_error(raw: Option<i32>) -> bool {
-    matches!(raw, Some(231 | 5))
-}
-
-struct PipeAcceptConfig {
+struct AcceptConfig {
     pipe_name: String,
     session_id: String,
     child_pid: Option<u32>,
@@ -427,90 +440,60 @@ struct PipeAcceptConfig {
     exit_broadcast: broadcast::Sender<i32>,
 }
 
-async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
-    let mut first = true;
+async fn accept_loop(cfg: AcceptConfig) {
+    let name = match to_local_name(&cfg.pipe_name) {
+        Ok(name) => name,
+        Err(err) => {
+            error!(
+                ?err,
+                pipe = %cfg.pipe_name,
+                "supervisor: invalid socket name; ending accept loop"
+            );
+            return;
+        }
+    };
+
+    #[cfg(unix)]
+    remove_stale_socket(&cfg.pipe_name);
+
+    let listener = match ListenerOptions::new().name(name).create_tokio() {
+        Ok(listener) => listener,
+        Err(err) => {
+            error!(
+                ?err,
+                pipe = %cfg.pipe_name,
+                "supervisor: failed to bind local socket; ending accept loop"
+            );
+            return;
+        }
+    };
+    info!(pipe = %cfg.pipe_name, "supervisor: local socket bound; awaiting clients");
+
+    // Serialized accept: only one daemon is serviced at a time. A racing daemon
+    // waits in the OS backlog (Unix) or retries the connect (Windows named
+    // pipe) until the current `handle_client` returns. A daemon restart drops
+    // the old connection (EOF on the read half), `handle_client` returns, and
+    // the next iteration accepts the new daemon — preserving the single-attach
+    // + ring-replay contract the named-pipe `max_instances(1)` used to give us.
     let mut iteration: u32 = 0;
-    // Time the previous client disconnect happened (or supervisor start, if
-    // no client has yet connected). Used to log "ready window" durations,
-    // which is the key diagnostic for "tracer pipe stayed busy" reattach
-    // failures: a non-zero ready window means the tracer was waiting on
-    // ConnectNamedPipe (so the BUSY came from somewhere else); a near-zero
-    // ready window means the previous client was still draining.
-    let mut last_disconnect = Instant::now();
     loop {
         iteration = iteration.saturating_add(1);
-        let create_started = Instant::now();
-        // Re-arming the pipe right after a daemon disconnect can transiently
-        // fail with ERROR_PIPE_BUSY / ERROR_ACCESS_DENIED: the OS is still
-        // releasing the just-disconnected instance. Bailing here would end the
-        // accept loop, which drops `cfg` (the last PTY-input sender), closes the
-        // child's stdin, and kills the child — turning a routine daemon restart
-        // into an abandoned session. Retry until the instance frees up (clears
-        // within milliseconds); only a persistent failure ends the loop.
-        let server = loop {
-            match create_pipe(first, &cfg.pipe_name) {
-                Ok(s) => break s,
-                Err(err) => {
-                    let raw = err.raw_os_error();
-                    if is_transient_rearm_error(raw)
-                        && create_started.elapsed() < PIPE_REARM_RETRY_BUDGET
-                    {
-                        debug!(
-                            ?err,
-                            raw_os_error = ?raw,
-                            iteration,
-                            "supervisor: pipe instance still busy; retrying re-arm"
-                        );
-                        tokio::time::sleep(PIPE_REARM_RETRY_BACKOFF).await;
-                        continue;
-                    }
-                    error!(
-                        ?err,
-                        raw_os_error = ?raw,
-                        iteration,
-                        pipe = %cfg.pipe_name,
-                        "supervisor: pipe create failed; ending accept loop"
-                    );
-                    return;
-                }
+        let conn = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                warn!(?err, iteration, "supervisor: accept failed; retrying");
+                continue;
             }
         };
-        first = false;
-        let create_elapsed_ms =
-            u64::try_from(create_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let since_last_disconnect_ms =
-            u64::try_from(last_disconnect.elapsed().as_millis()).unwrap_or(u64::MAX);
-
         info!(
             iteration,
-            create_elapsed_ms,
-            since_last_disconnect_ms,
-            pipe = %cfg.pipe_name,
-            "supervisor: awaiting client"
-        );
-        let wait_started = Instant::now();
-        if let Err(err) = server.connect().await {
-            warn!(
-                ?err,
-                iteration,
-                wait_elapsed_ms =
-                    u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "supervisor: pipe connect failed; retrying"
-            );
-            last_disconnect = Instant::now();
-            continue;
-        }
-        let wait_elapsed_ms = u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        info!(
-            iteration,
-            wait_elapsed_ms,
             session_id = %cfg.session_id,
             "supervisor: client connected"
         );
 
         let handle_started = Instant::now();
         let res = handle_client(
-            server,
+            conn,
             Arc::clone(&cfg.shared),
             cfg.pty_input_tx.clone(),
             cfg.resize_tx.clone(),
@@ -538,7 +521,6 @@ async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
                 iteration, session_elapsed_ms, "supervisor: client handler ended with error"
             ),
         }
-        last_disconnect = Instant::now();
     }
 }
 
@@ -547,16 +529,19 @@ async fn pipe_accept_loop(cfg: PipeAcceptConfig) {
     reason = "handle_client runs handshake + input dispatch + output forwarding in one task; \
               breaking it up means routing a handle's worth of channels through every helper"
 )]
-async fn handle_client(
-    server: NamedPipeServer,
+async fn handle_client<S>(
+    stream: S,
     shared: Arc<Mutex<SharedOutput>>,
     pty_input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     stop_tx: mpsc::UnboundedSender<()>,
     mut exit_rx: broadcast::Receiver<i32>,
     child_pid: Option<u32>,
-) -> anyhow::Result<()> {
-    let (reader, writer) = tokio::io::split(server);
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut writer = writer;
 
@@ -808,19 +793,3 @@ const _: () = {
     // Sanity: re-export the version we negotiate against.
     assert!(TRACER_VERSION > 0);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::is_transient_rearm_error;
-
-    #[test]
-    fn classifies_pipe_rearm_errors() {
-        // ERROR_PIPE_BUSY and ERROR_ACCESS_DENIED clear once the previous
-        // instance is released, so they must be retried (not fatal).
-        assert!(is_transient_rearm_error(Some(231)));
-        assert!(is_transient_rearm_error(Some(5)));
-        // Anything else is a genuine failure that should end the accept loop.
-        assert!(!is_transient_rearm_error(Some(2)));
-        assert!(!is_transient_rearm_error(None));
-    }
-}

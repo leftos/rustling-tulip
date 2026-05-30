@@ -21,12 +21,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader};
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+use interprocess::local_socket::tokio::{Stream, prelude::*};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracer_protocol::{
     InboundTracerResponse, SUPPORTED_TRACER_VERSIONS, TRACER_VERSION, TracerHello, TracerRequest,
-    TracerResponse, TracerWelcome, negotiate, pipe_name,
+    TracerResponse, TracerWelcome, negotiate,
 };
 use tracing::{debug, info, warn};
 
@@ -70,7 +70,7 @@ pub async fn spawn(
     expected_output_subscribers: usize,
 ) -> anyhow::Result<TracerSpawn> {
     let tracer_path = locate_tracer_exe(dirs)?;
-    let pipe = tracer_pipe_name(&spec.session_id);
+    let pipe = tracer_socket_name(&spec.session_id);
     debug!(
         tracer = %tracer_path.display(),
         pipe = %pipe,
@@ -131,16 +131,16 @@ fn locate_tracer_exe(dirs: &Dirs) -> anyhow::Result<PathBuf> {
     binary_cache::ensure_cached(&template, &dirs.binaries_dir, stem)
 }
 
-fn tracer_pipe_name(session_id: &str) -> String {
+fn tracer_socket_name(session_id: &str) -> String {
     let prefix = std::env::var(TRACER_PIPE_PREFIX_ENV).ok();
-    pipe_name_with_prefix(session_id, prefix.as_deref())
+    resolve_socket_name(session_id, prefix.as_deref())
 }
 
-fn pipe_name_with_prefix(session_id: &str, prefix: Option<&str>) -> String {
-    if let Some(prefix) = prefix.and_then(sanitize_pipe_prefix) {
-        return format!(r"\\.\pipe\{prefix}-{session_id}");
+fn resolve_socket_name(session_id: &str, prefix: Option<&str>) -> String {
+    match prefix.and_then(sanitize_pipe_prefix) {
+        Some(prefix) => tracer_protocol::socket_name_with_prefix(&prefix, session_id),
+        None => tracer_protocol::socket_name(session_id),
     }
-    pipe_name(session_id)
 }
 
 fn sanitize_pipe_prefix(raw: &str) -> Option<String> {
@@ -362,75 +362,94 @@ fn spawn_tracer_process(
     Ok(child.id())
 }
 
-async fn connect_with_retry(pipe: &str) -> anyhow::Result<NamedPipeClient> {
-    enum PendingPipeState {
-        Missing,
-        Busy,
-    }
+/// Convert a stored socket-name string into an `interprocess` `Name`. Mirrors
+/// the tracer's helper; the daemon and tracer agree on the same string (passed
+/// via `--pipe-name`) and just select the right namespace per platform.
+#[cfg(windows)]
+fn to_local_name(s: &str) -> io::Result<interprocess::local_socket::Name<'_>> {
+    use interprocess::local_socket::{GenericNamespaced, ToNsName as _};
+    s.to_ns_name::<GenericNamespaced>()
+}
 
-    impl PendingPipeState {
-        fn as_str(&self) -> &'static str {
-            match self {
-                Self::Missing => "missing",
-                Self::Busy => "busy",
-            }
-        }
-    }
+#[cfg(not(windows))]
+fn to_local_name(s: &str) -> io::Result<interprocess::local_socket::Name<'_>> {
+    use interprocess::local_socket::{GenericFilePath, ToFsName as _};
+    s.to_fs_name::<GenericFilePath>()
+}
 
+/// Connect errors that mean "the tracer hasn't finished binding yet", so the
+/// caller should retry within the budget rather than fail the spawn:
+/// - `NotFound`: the socket file / named pipe doesn't exist yet.
+/// - `ConnectionRefused`: the socket exists but the listener isn't accepting.
+/// - Windows `ERROR_PIPE_BUSY` (231): a concurrent daemon restart briefly holds
+///   the pipe (not mapped to a portable `ErrorKind`, so matched by raw code).
+fn is_retryable_connect_error(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    ) {
+        return true;
+    }
+    #[cfg(windows)]
+    if err.raw_os_error() == Some(231) {
+        return true;
+    }
+    false
+}
+
+fn connect_retry_reason(err: &io::Error) -> &'static str {
+    match err.kind() {
+        io::ErrorKind::NotFound => "missing",
+        io::ErrorKind::ConnectionRefused => "refused",
+        _ => "busy",
+    }
+}
+
+async fn connect_with_retry(pipe: &str) -> anyhow::Result<Stream> {
     let started = Instant::now();
-    let mut pending: PendingPipeState;
     let mut iterations = 0_u32;
     loop {
         iterations += 1;
-        match ClientOptions::new().open(pipe) {
+        let name = to_local_name(pipe).with_context(|| format!("invalid socket name {pipe}"))?;
+        let err = match Stream::connect(name).await {
             Ok(c) => {
                 tracing::info!(
                     pipe,
                     iterations,
                     elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    "connect_with_retry: pipe opened"
+                    "connect_with_retry: socket opened"
                 );
                 return Ok(c);
             }
-            Err(err) if err.raw_os_error() == Some(2) => {
-                // ERROR_FILE_NOT_FOUND — tracer hasn't created the pipe yet.
-                // Retry until the timeout.
-                pending = PendingPipeState::Missing;
-            }
-            Err(err) if err.raw_os_error() == Some(231) => {
-                // ERROR_PIPE_BUSY — a concurrent daemon restart can briefly
-                // claim the pipe before the surviving daemon settles.
-                pending = PendingPipeState::Busy;
-            }
-            Err(err) => return Err(err).context(format!("opening tracer pipe {pipe}")),
-        }
+            Err(err) if is_retryable_connect_error(&err) => err,
+            Err(err) => return Err(err).context(format!("opening tracer socket {pipe}")),
+        };
         if started.elapsed() >= PIPE_CONNECT_TIMEOUT {
+            let reason = connect_retry_reason(&err);
             tracing::warn!(
                 pipe,
                 iterations,
-                final_state = pending.as_str(),
+                final_state = reason,
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "connect_with_retry: timeout"
             );
-            return match pending {
-                PendingPipeState::Missing => Err(anyhow!(
-                    "tracer pipe {pipe} did not appear within {PIPE_CONNECT_TIMEOUT:?}"
-                )),
-                PendingPipeState::Busy => Err(anyhow!(
-                    "tracer pipe {pipe} stayed busy for {PIPE_CONNECT_TIMEOUT:?}"
-                )),
-            };
+            return Err(anyhow!(
+                "tracer socket {pipe} did not become connectable within {PIPE_CONNECT_TIMEOUT:?} ({reason})"
+            ));
         }
         tokio::time::sleep(PIPE_RETRY_INTERVAL).await;
     }
 }
 
-async fn handshake_and_wire(
-    client: NamedPipeClient,
+async fn handshake_and_wire<S>(
+    client: S,
     session_id: String,
     pid_for_handle: Option<u32>,
     expected_output_subscribers: usize,
-) -> anyhow::Result<(Arc<PtyHandle>, u32)> {
+) -> anyhow::Result<(Arc<PtyHandle>, u32)>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (reader, writer) = tokio::io::split(client);
     let mut reader = BufReader::new(reader);
     let mut writer = writer;
@@ -533,11 +552,10 @@ async fn handshake_and_wire(
     Ok((handle, negotiated))
 }
 
-async fn read_loop(
-    mut reader: BufReader<tokio::io::ReadHalf<NamedPipeClient>>,
-    output_tx: broadcast::Sender<Vec<u8>>,
-    session_id: &str,
-) -> i32 {
+async fn read_loop<R>(mut reader: R, output_tx: broadcast::Sender<Vec<u8>>, session_id: &str) -> i32
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     let mut line = String::new();
     loop {
         line.clear();
@@ -592,12 +610,14 @@ async fn read_loop(
     }
 }
 
-async fn write_loop(
-    mut writer: tokio::io::WriteHalf<NamedPipeClient>,
+async fn write_loop<W>(
+    mut writer: W,
     mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut resize_rx: mpsc::UnboundedReceiver<(u16, u16)>,
     mut stop_rx: mpsc::UnboundedReceiver<()>,
-) {
+) where
+    W: AsyncWrite + Unpin,
+{
     loop {
         let req = tokio::select! {
             Some(bytes) = input_rx.recv() => TracerRequest::Input { data_b64: B64.encode(&bytes) },
@@ -651,7 +671,7 @@ impl ChildKiller for TracerKiller {
     reason = "tests assert scratch setup preconditions with expect for clear failure messages"
 )]
 mod tests {
-    use super::{locate_tracer_template_candidate, pipe_name_with_prefix, sanitize_pipe_prefix};
+    use super::{locate_tracer_template_candidate, resolve_socket_name, sanitize_pipe_prefix};
     use std::fs;
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -683,17 +703,19 @@ mod tests {
 
     #[test]
     fn pipe_prefix_is_sanitized() {
-        assert_eq!(
-            pipe_name_with_prefix("session-1", Some("rt/e2e:test")),
-            r"\\.\pipe\rt-e2e-test-session-1",
+        // The sanitized prefix is woven into the name on every platform
+        // (bare namespaced name on Windows, socket-file name on Unix).
+        assert!(
+            resolve_socket_name("session-1", Some("rt/e2e:test")).contains("rt-e2e-test"),
+            "sanitized prefix missing from socket name",
         );
     }
 
     #[test]
     fn empty_pipe_prefix_uses_default_protocol_name() {
         assert_eq!(
-            pipe_name_with_prefix("session-1", Some("///")),
-            tracer_protocol::pipe_name("session-1"),
+            resolve_socket_name("session-1", Some("///")),
+            tracer_protocol::socket_name("session-1"),
         );
     }
 

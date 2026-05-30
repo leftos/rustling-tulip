@@ -72,18 +72,24 @@ The daemon spawns tracers from `<exe_dir>/rt-tracer.exe` (resolved via
 to their old binary — they don't get hot-upgraded.
 
 When the user installs a new daemon, the new daemon scans the sidecar
-registry for live tracer pids and reconnects via `\\.\pipe\rt-tracer-<id>`.
+registry for live tracer pids and reconnects to the same local socket.
 Tracers that don't respond within a short timeout are considered crashed and
 their sessions are flipped to abandoned (Phase B.2 path).
 
-## Cross-platform plans
+## Cross-platform transport
 
-Today: Windows-only via named pipes (`\\.\pipe\rt-tracer-<id>`). The
-`pipe_name(session_id)` helper centralizes the format.
+The transport is the `interprocess` crate's local sockets, one code path on
+every platform:
 
-When Linux/macOS support is on the horizon, swap to Unix domain sockets via
-the `interprocess` crate. The protocol itself is platform-agnostic — only
-the transport changes. The pipe-name helper would gain a target-os cfg gate.
+- **Windows:** a namespaced name (`rt-tracer-<id>`) that maps to
+  `\\.\pipe\rt-tracer-<id>` — byte-identical to the legacy named pipe.
+- **macOS/Linux:** a Unix domain socket file under the per-user temp dir, with
+  a length-bounded name to stay within the `sun_path` limit.
+
+`tracer_protocol::socket_name(session_id)` centralizes the format; each side
+converts it to an `interprocess` `Name` (`GenericNamespaced` on Windows,
+`GenericFilePath` on Unix). The protocol frames themselves are platform-agnostic
+JSON — only the transport differs.
 
 ## Spike (C.1) — required before C.3
 

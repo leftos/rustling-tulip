@@ -28,6 +28,10 @@ anyhow = { workspace = true }
 base64 = "0.22"
 portable-pty = "0.9"
 clap = { version = "4", features = ["derive"] }
+# Cross-platform local-socket transport for the daemon↔tracer IPC: named
+# pipes on Windows, Unix domain sockets on macOS/Linux. Replaces the
+# Windows-only tokio::net::windows::named_pipe layer.
+interprocess = { version = "2", features = ["tokio"] }
 
 [target.'cfg(windows)'.dependencies]
 # Job objects: bundle the child + every descendant into one kill scope

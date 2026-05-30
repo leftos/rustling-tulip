@@ -2,14 +2,22 @@
 
 ## Status
 
-**Greenlit 2026-05-30 — macOS is now a committed target.** No code has changed
-yet: this document is the map from the initial investigation sweep (every
-Windows-specific surface, what each needs on macOS, and the phasing below). The
-**next step is a detailed implementation plan** built on the phasing in
-"Suggested phasing", then execution starting at Phase M0. Two scoping decisions
-(IPC transport, distribution) are still open — see "Decisions to make during
-planning"; settle them with the user before/while writing the detailed plan. The
-phase checkboxes below are the work items.
+**Greenlit 2026-05-30 — macOS is now a committed target.**
+
+**M1–M3 implemented 2026-05-30 (code-complete, Windows build/clippy/test/deny
+green; pending verification on a real Mac).** Scope this round: M1 (IPC over
+`interprocess` local sockets), M2 (Unix process-tree cleanup via `killpg`), M3
+(macOS autostart LaunchAgent). Distribution scope was set to **local dev builds
+only** — packaging/signing (M4) stays deferred. Both open decisions are now
+settled (see "Decisions"). What's left is runtime verification on macOS (and a
+Windows runtime reattach smoke test, since M1 replaced the named-pipe transport
+on the primary platform).
+
+Note discovered during execution: `mod job_object;` was **already**
+`#[cfg(windows)]`-gated (`crates/tracer/src/main.rs`), so the doc's "compile
+blocker #2" was stale. The real compile blocker was the unconditional
+named-pipe imports, which M1 removed entirely (the transport is now
+`interprocess` on both platforms).
 
 ## Executive summary
 
@@ -68,14 +76,19 @@ abstracted. Two viable shapes:
 - The `interprocess` crate (cross-platform local sockets) — fewer `#[cfg]`s but a
   new dependency to vet against `cargo deny`.
 
-- [ ] Decide transport abstraction (manual `#[cfg]` alias vs `interprocess`).
-- [ ] Abstract `create_pipe`/`connect_with_retry` over a platform transport;
-      keep handshake + frame loops generic.
-- [ ] Unix socket-name derivation (replace `\\.\pipe\…`); ensure cleanup of stale
-      socket files (bind fails `AddrInUse` on a leftover path — unlink-then-bind).
-- [ ] Port the transient-error retry semantics (Windows `ERROR_PIPE_BUSY`/231,
-      `ERROR_ACCESS_DENIED`/5) to the Unix equivalents (`ECONNREFUSED`/`ENOENT`
-      while the peer re-binds).
+- [x] Decide transport abstraction → `interprocess` (replaces named pipes on
+      both platforms; no `#[cfg]` alias). The frame-write helpers were already
+      generic; `handle_client`/`handshake_and_wire`/read+write loops are now
+      generic over `AsyncRead + AsyncWrite`.
+- [x] `create_pipe` → persistent `interprocess` `Listener` with a serialized
+      accept loop; `connect_with_retry` → `Stream::connect`. Handshake + frame
+      loops unchanged.
+- [x] Socket-name derivation in `tracer_protocol::socket_name` (Windows
+      namespaced `rt-tracer-<id>`; Unix length-bounded `<tmp>/rt-tracer-<16hex>.sock`
+      for the `sun_path` limit). Stale-socket unlink-before-bind + shutdown
+      removal on Unix.
+- [x] Retry semantics ported to portable `io::ErrorKind` (`NotFound` /
+      `ConnectionRefused`) plus the Windows `ERROR_PIPE_BUSY`/231 raw-code check.
 
 **Watch:** the Windows side just shipped a re-arm retry fix (see
 `remote-lan-access.md` → Post-merge robustness). The Unix path needs an
@@ -88,13 +101,14 @@ tracer over the socket.
   imports `windows::Win32::System::JobObjects::*`. The call site
   (`supervisor.rs:162`) is already `#[cfg(windows)]`-gated, so only the module
   declaration leaks.
-- [ ] Gate the module: `#[cfg(windows)] mod job_object;` (makes macOS compile).
-- [ ] Implement the Unix equivalent so worktree cleanup isn't wedged by surviving
-      grandchildren: spawn the PTY child in its own session/process-group
-      (`setsid`/`pre_exec`) and, on tracer shutdown/kill, `killpg` the group.
-      macOS has no `PR_SET_PDEATHSIG`, so death-of-parent cleanup must be explicit
-      on the shutdown path. Mirror the existing "best-effort, log-and-proceed"
-      contract.
+- [x] Module already gated `#[cfg(windows)] mod job_object;` (was stale in the
+      original doc).
+- [x] Unix equivalent implemented: `portable-pty` already `setsid`s the PTY
+      child (session leader), and `kill_process_group` does `killpg(child_pid,
+      SIGTERM)` then `SIGKILL` on the tracer shutdown path. Best-effort +
+      logged. A tracer killed with SIGKILL still leaks survivors (no
+      `PR_SET_PDEATHSIG` on macOS) — accepted. *Verify on macOS that
+      `portable-pty` makes the child a group leader and grandchildren die.*
 
 ## 3. Autostart on login
 
@@ -104,10 +118,15 @@ tracer over the socket.
   `[target.'cfg(windows)'.dependencies]`.
 - Frontend already gates the toggle when unsupported
   (`SettingsModal.tsx` ~931–944, hides when the value is `null`).
-- [ ] macOS arm: write/remove `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist`
-      pointing at the daemon binary (`daemon_supervisor::locate_daemon_binary`),
-      toggled via `launchctl load/unload`. Candidate dep: `plist` (vet with
-      `cargo deny`) or hand-emit the small XML.
+- [x] macOS arm implemented in `autostart.rs`: write/remove
+      `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (hand-emitted
+      XML — no `plist` dep), `ProgramArguments` from
+      `daemon_supervisor::locate_daemon_binary`, `RunAtLoad`. **File-only** (no
+      `launchctl load` on toggle: that would start a second daemon while the
+      app's supervisor runs one; the file gives next-login parity with the
+      Windows `Run` key). *Verify on macOS that launchd loads it at login;
+      consider an `EnvironmentVariables`/PATH key if the daemon can't find
+      `claude` in launchd's minimal env.*
 
 ## 4. Build, bundle, packaging
 
@@ -168,25 +187,31 @@ Confirmed dual-arm or platform-neutral during the sweep:
 
 ## Suggested phasing (when greenlit)
 
-- [ ] **Phase M0 — compile on macOS.** Gate `mod job_object`; add the macOS bundle
-      target; confirm `cargo build` + `cargo clippy` are clean on macOS for all
-      crates. (No runtime yet — IPC still stubbed/absent.)
-- [ ] **Phase M1 — tracer IPC over Unix sockets.** The core of the port; gets
-      interactive + plain-shell PTY sessions actually working, including
-      daemon-restart reattach.
-- [ ] **Phase M2 — process-tree cleanup.** `setsid`/`killpg` so worktree removal
-      isn't wedged by survivors.
-- [ ] **Phase M3 — autostart (LaunchAgent).**
+- [x] **Phase M0 — compile on macOS.** `mod job_object` was already gated; the
+      named-pipe imports (the real blocker) are gone after M1. macOS bundle
+      target intentionally skipped (distribution = local dev only). *Pending: a
+      real `cargo build`/`cargo clippy` on macOS to confirm.*
+- [x] **Phase M1 — tracer IPC over `interprocess` local sockets.** Transport
+      replaced on both platforms; daemon-restart reattach preserved via a
+      serialized accept loop. Code-complete; *pending macOS + Windows runtime
+      verification.*
+- [x] **Phase M2 — process-tree cleanup.** `#[cfg(unix)]` `killpg` (SIGTERM →
+      SIGKILL) on tracer shutdown, mirroring the Windows job object. Relies on
+      `portable-pty` making the child a session leader — *verify on macOS.*
+- [x] **Phase M3 — autostart (LaunchAgent).** Writes/removes
+      `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (file-only;
+      no `launchctl load` on toggle, to avoid a double daemon). *Verify on macOS.*
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.
+      Deferred (local dev only this round).
 
 ## Decisions to make during planning
 
 - [x] **Is macOS a real target?** Yes — greenlit 2026-05-30. Invest in the real
       IPC abstraction (Phase M1), not just a compile-time stub.
-- [ ] **IPC transport for the port:** manual `#[cfg]` transport alias over
-      `AsyncRead + AsyncWrite` (no new dependency) vs the `interprocess` crate
-      (fewer `#[cfg]`s, a new dependency to vet with `cargo deny`). Settle with
-      the user before writing the M1 detail.
-- [ ] **Distribution scope:** local dev builds only, or signed/notarized `.dmg`?
-      (Signing is the long pole and is Apple-account-dependent — it scopes Phase
-      M4.) Settle with the user.
+- [x] **IPC transport for the port:** `interprocess` crate (v2.4.2) chosen — one
+      code path on both platforms (named pipe on Windows, Unix socket on
+      macOS/Linux), no `#[cfg]` transport alias. Its `0BSD` transitive deps
+      (`doctest-file`, `recvmsg`) were added to the `deny.toml` allow-list.
+- [x] **Distribution scope:** local dev builds only this round. No installer /
+      signing / notarization — `pnpm tauri dev` + `cargo build` are enough for
+      development; M4 stays deferred.

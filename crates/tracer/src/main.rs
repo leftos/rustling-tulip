@@ -28,13 +28,13 @@ mod supervisor;
     about = "rustling-tulip per-session PTY supervisor"
 )]
 struct Cli {
-    /// Session id used to derive the named-pipe path
-    /// (`\\.\pipe\rt-tracer-<session-id>`).
+    /// Session id used to derive the local-socket name when `--pipe-name`
+    /// is omitted (see [`tracer_protocol::socket_name`]).
     #[arg(long)]
     session_id: String,
 
-    /// Named-pipe path supplied by the daemon. Defaults to the protocol's
-    /// legacy session-derived pipe path when omitted.
+    /// Local-socket name supplied by the daemon. Defaults to the protocol's
+    /// session-derived name when omitted.
     #[arg(long)]
     pipe_name: Option<String>,
 
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pipe_name = cli
         .pipe_name
-        .unwrap_or_else(|| tracer_protocol::pipe_name(&cli.session_id));
+        .unwrap_or_else(|| tracer_protocol::socket_name(&cli.session_id));
 
     let cfg = supervisor::Config {
         session_id: cli.session_id,

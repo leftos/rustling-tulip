@@ -23,6 +23,10 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # interprocess (the daemon↔tracer transport) pulls in doctest-file and
+    # recvmsg under the BSD Zero Clause License — public-domain-equivalent,
+    # OSI-approved, strictly more permissive than the MIT/BSD entries above.
+    "0BSD",
     # webpki-roots (via reqwest's rustls-tls) ships the Mozilla CA bundle under
     # the Community Data License Agreement — Permissive 2.0.
     "CDLA-Permissive-2.0",
