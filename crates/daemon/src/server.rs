@@ -63,7 +63,7 @@ pub struct Hub {
     /// event channel: every connected client subscribes and forwards events
     /// to its WebSocket sender. Buffered to keep up with bursty drag-reorder
     /// or split-pane sequences.
-    pub tab_events: broadcast::Sender<TabEvent>,
+    pub tab_events: broadcast::Sender<ScopedTabEvent>,
     /// Broadcast for preset-launch progress/failure events. Every connected
     /// client subscribes and forwards. Lets the launching client auto-switch
     /// tabs while the batch runs, and lets other clients see new tabs appear.
@@ -89,6 +89,17 @@ pub struct Hub {
     /// takes it on disable to drive a graceful shutdown; the daemon-wide
     /// shutdown task also tears it down. `None` when LAN access is off.
     pub lan_handle: Arc<AsyncMutex<Option<axum_server::Handle<SocketAddr>>>>,
+}
+
+impl Hub {
+    /// Broadcast a tab-layout change scoped to one client's layout. Only that
+    /// client's connections (window + same-machine pop-outs) forward it.
+    pub(crate) fn emit_tab(&self, client_id: &str, event: TabEvent) {
+        let _ = self.tab_events.send(ScopedTabEvent {
+            client_id: client_id.to_string(),
+            event,
+        });
+    }
 }
 
 /// RAII guard around [`Hub::client_count`]: increments on construction,
@@ -166,6 +177,15 @@ pub enum TabEvent {
     Updated(TabEntry),
     Removed(String),
     Reordered(Vec<String>),
+}
+
+/// A [`TabEvent`] tagged with the `client_id` whose layout it belongs to. Tab
+/// layouts are per-client, so a connection only forwards events scoped to its
+/// own `client_id` (a window + its same-machine pop-outs share one).
+#[derive(Debug, Clone)]
+pub struct ScopedTabEvent {
+    pub client_id: String,
+    pub event: TabEvent,
 }
 
 #[derive(Debug, Clone)]
@@ -580,7 +600,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     });
 
     // Mandatory handshake.
-    let _negotiated_version = match handshake(&hub, &mut receiver, &out_tx).await {
+    let handshake = match handshake(&hub, &mut receiver, &out_tx).await {
         Ok(v) => v,
         Err(err) => {
             warn!(?err, "client handshake failed");
@@ -592,6 +612,14 @@ async fn client_session(hub: Hub, socket: WebSocket) {
             return;
         }
     };
+    // Effective per-client layout key: the client's id, or the shared legacy
+    // key for connections that don't send one. Same value drives the tab-event
+    // filter, push_initial_state, and every tab handler in `dispatch`.
+    let client_id = handshake
+        .client_id
+        .clone()
+        .unwrap_or_else(|| crate::state::LEGACY_CLIENT_ID.to_string());
+    ensure_client_layout(&hub, &client_id, handshake.client_name.as_deref());
 
     // Per-session PTY forwarder tasks. Each task subscribes directly to a
     // session's `pty.output` broadcast and pumps bytes into this client's
@@ -636,16 +664,21 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         }
     });
 
-    // Subscribe to tab-layout and preset-launch events; both forwarded
-    // unconditionally to every connected client.
-    let tab_event_task = spawn_tab_forwarder(hub.tab_events.subscribe(), out_tx.clone());
+    // Subscribe to tab-layout and preset-launch events. Tab events are
+    // filtered to this connection's `client_id` (per-client layouts); preset
+    // and registry events are forwarded to every client.
+    let tab_event_task = spawn_tab_forwarder(
+        hub.tab_events.subscribe(),
+        out_tx.clone(),
+        client_id.clone(),
+    );
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
     let state_event_task = spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
 
-    // Send initial state snapshots.
-    push_initial_state(&hub, &out_tx);
+    // Send initial state snapshots (including this client's own layout).
+    push_initial_state(&hub, &out_tx, &client_id);
 
-    recv_loop(&hub, &mut receiver, &out_tx, &pty_forwarders).await;
+    recv_loop(&hub, &mut receiver, &out_tx, &pty_forwarders, &client_id).await;
 
     info!("client_session: recv_loop returned; tearing down");
     {
@@ -663,21 +696,61 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     info!("client_session: returning");
 }
 
+/// Make sure a layout entry exists for `client_id`, applying the one-time
+/// legacy migration on first sight. The first client to connect after an
+/// upgrade adopts the pre-per-client global layout (so the desktop keeps its
+/// tabs); every client after that starts empty and curates its own. The
+/// first-connect chooser (Phase 7b) refines this with explicit clone/all
+/// options.
+fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Option<&str>) {
+    if hub.state.has_client_layout(client_id) {
+        if let Err(err) = hub
+            .state
+            .set_client_name(client_id, client_name.map(std::string::ToString::to_string))
+        {
+            warn!(?err, "failed to refresh client layout name");
+        }
+        return;
+    }
+    let legacy = hub.state.legacy_tabs();
+    let consume_legacy = !legacy.is_empty();
+    let tabs = if consume_legacy { legacy } else { Vec::new() };
+    if let Err(err) = hub.state.set_client_layout(
+        client_id,
+        client_name.map(std::string::ToString::to_string),
+        tabs,
+    ) {
+        warn!(?err, %client_id, "failed to initialize client layout");
+        return;
+    }
+    if consume_legacy && let Err(err) = hub.state.clear_legacy_tabs() {
+        warn!(?err, "failed to clear legacy tabs after migration");
+    }
+}
+
 fn spawn_tab_forwarder(
-    mut rx: broadcast::Receiver<TabEvent>,
+    mut rx: broadcast::Receiver<ScopedTabEvent>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    client_id: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(TabEvent::Updated(tab)) => {
-                    let _ = out_tx.send(DaemonMessage::TabUpdated { tab });
-                }
-                Ok(TabEvent::Removed(tab_id)) => {
-                    let _ = out_tx.send(DaemonMessage::TabRemoved { tab_id });
-                }
-                Ok(TabEvent::Reordered(ids)) => {
-                    let _ = out_tx.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                Ok(scoped) => {
+                    if scoped.client_id != client_id {
+                        continue;
+                    }
+                    match scoped.event {
+                        TabEvent::Updated(tab) => {
+                            let _ = out_tx.send(DaemonMessage::TabUpdated { tab });
+                        }
+                        TabEvent::Removed(tab_id) => {
+                            let _ = out_tx.send(DaemonMessage::TabRemoved { tab_id });
+                        }
+                        TabEvent::Reordered(ids) => {
+                            let _ = out_tx.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                        }
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client tab event stream lagged");
@@ -822,6 +895,7 @@ async fn recv_loop(
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    client_id: &str,
 ) {
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
@@ -866,7 +940,7 @@ async fn recv_loop(
                         continue;
                     }
                 };
-                if let Err(err) = dispatch(hub, parsed, out_tx, pty_forwarders).await {
+                if let Err(err) = dispatch(hub, parsed, out_tx, pty_forwarders, client_id).await {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                     });
@@ -876,11 +950,22 @@ async fn recv_loop(
     }
 }
 
+/// Outcome of a successful handshake: the negotiated protocol version plus the
+/// client's self-reported identity (used to key its per-client tab layout).
+struct Handshake {
+    #[expect(dead_code, reason = "kept for symmetry/logging; not yet read")]
+    negotiated_version: u32,
+    /// `None` when the client didn't send a `client_id` (older builds); the
+    /// connection then falls back to the shared legacy layout.
+    client_id: Option<String>,
+    client_name: Option<String>,
+}
+
 async fn handshake(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<u32> {
+) -> anyhow::Result<Handshake> {
     let Some(Ok(msg)) = receiver.next().await else {
         return Err(anyhow!("client closed before handshake"));
     };
@@ -893,6 +978,8 @@ async fn handshake(
         protocol_version,
         protocol_versions,
         auth_token,
+        client_id,
+        client_name,
     }) = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
@@ -911,13 +998,18 @@ async fn handshake(
         negotiated,
         scalar = protocol_version,
         ?protocol_versions,
+        client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
     let _ = out_tx.send(DaemonMessage::Welcome {
         protocol_version: negotiated,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
     });
-    Ok(negotiated)
+    Ok(Handshake {
+        negotiated_version: negotiated,
+        client_id,
+        client_name,
+    })
 }
 
 /// Pick the highest protocol version both the client and daemon understand.
@@ -934,16 +1026,16 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
     best
 }
 
-fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces, tabs, container_order, session_order) = hub.state.with_persisted(|s| {
+fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, client_id: &str) {
+    let (repos, workspaces, container_order, session_order) = hub.state.with_persisted(|s| {
         (
             s.repos.clone(),
             s.workspaces.clone(),
-            s.tabs.clone(),
             s.container_order.clone(),
             s.session_order.clone(),
         )
     });
+    let tabs = hub.state.client_layout(client_id);
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
     let _ = out_tx.send(DaemonMessage::ContainersReordered {
@@ -984,6 +1076,7 @@ async fn dispatch(
     msg: ClientMessage,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    client_id: &str,
 ) -> anyhow::Result<()> {
     match msg {
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
@@ -1586,13 +1679,14 @@ async fn dispatch(
         } => {
             let outcome = open_diff_tab(
                 hub,
+                client_id,
                 &repo_id,
                 &path,
                 against.as_deref(),
                 worktree_path.as_deref(),
             )?;
             if let Some(new_tab) = outcome.created {
-                let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+                hub.emit_tab(client_id, TabEvent::Updated(new_tab));
             }
             let _ = out_tx.send(DaemonMessage::DiffTabOpened {
                 id,
@@ -1740,7 +1834,7 @@ async fn dispatch(
             });
         }
         ClientMessage::ListTabs => {
-            let tabs = hub.state.with_persisted(|s| s.tabs.clone());
+            let tabs = hub.state.client_layout(client_id);
             let _ = out_tx.send(DaemonMessage::Tabs { tabs });
         }
         ClientMessage::CreateTab {
@@ -1749,51 +1843,51 @@ async fn dispatch(
         } => {
             // Resolve the default name against the current tab list so
             // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
-            let new_tab = hub.state.mutate(|s| {
-                let tab = tabs::make_tab(name, initial_session_id, &s.tabs);
-                s.tabs.push(tab.clone());
+            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::make_tab(name, initial_session_id, tabs);
+                tabs.push(tab.clone());
                 tab
             })?;
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::CloseTab { tab_id } => {
-            let removed = hub.state.mutate(|s| {
-                let prev = s.tabs.len();
-                s.tabs.retain(|t| t.id != tab_id);
-                prev != s.tabs.len()
+            let removed = hub.state.mutate_client_layout(client_id, |tabs| {
+                let prev = tabs.len();
+                tabs.retain(|t| t.id != tab_id);
+                prev != tabs.len()
             })?;
             if removed {
-                let _ = hub.tab_events.send(TabEvent::Removed(tab_id));
+                hub.emit_tab(client_id, TabEvent::Removed(tab_id));
             }
         }
         ClientMessage::RestoreTab { tab, index } => {
-            let (restored, ordered_ids) = hub.state.mutate(|s| {
-                let restored = tabs::restore_tab(&mut s.tabs, tab, index)?;
-                let ordered_ids = s.tabs.iter().map(|t| t.id.clone()).collect();
+            let (restored, ordered_ids) = hub.state.mutate_client_layout(client_id, |tabs| {
+                let restored = tabs::restore_tab(tabs, tab, index)?;
+                let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
                 Ok::<_, anyhow::Error>((restored, ordered_ids))
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(restored));
-            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+            hub.emit_tab(client_id, TabEvent::Updated(restored));
+            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
         }
         ClientMessage::RestoreTabSnapshot { tab } => {
             let restored = hub
                 .state
-                .mutate(|s| tabs::restore_tab_snapshot(&mut s.tabs, tab))??;
-            let _ = hub.tab_events.send(TabEvent::Updated(restored));
+                .mutate_client_layout(client_id, |tabs| tabs::restore_tab_snapshot(tabs, tab))??;
+            hub.emit_tab(client_id, TabEvent::Updated(restored));
         }
         ClientMessage::RenameTab { tab_id, name } => {
-            let updated = hub.state.mutate(|s| {
-                tabs::find_tab_mut(&mut s.tabs, &tab_id).map(|t| {
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                tabs::find_tab_mut(tabs, &tab_id).map(|t| {
                     t.name = name;
                     t.clone()
                 })
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ReorderTabs { ordered_ids } => {
             hub.state
-                .mutate(|s| tabs::reorder_tabs(&mut s.tabs, &ordered_ids))??;
-            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+                .mutate_client_layout(client_id, |tabs| tabs::reorder_tabs(tabs, &ordered_ids))??;
+            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
         }
         ClientMessage::ReorderContainers { ordered } => {
             let applied = reorder_containers(&hub.state, ordered)?;
@@ -1818,21 +1912,21 @@ async fn dispatch(
             place,
             new_session_id,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ClosePane { tab_id, pane_id } => {
-            let outcome = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let outcome = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let empty = tabs::close_pane(grid, &pane_id)?;
                 if empty {
-                    s.tabs.retain(|t| t.id != tab_id);
+                    tabs.retain(|t| t.id != tab_id);
                     Ok::<_, anyhow::Error>(CloseOutcome::TabRemoved(tab_id.clone()))
                 } else {
                     Ok(CloseOutcome::TabUpdated(tab.clone()))
@@ -1840,10 +1934,10 @@ async fn dispatch(
             })??;
             match outcome {
                 CloseOutcome::TabRemoved(id) => {
-                    let _ = hub.tab_events.send(TabEvent::Removed(id));
+                    hub.emit_tab(client_id, TabEvent::Removed(id));
                 }
                 CloseOutcome::TabUpdated(tab) => {
-                    let _ = hub.tab_events.send(TabEvent::Updated(tab));
+                    hub.emit_tab(client_id, TabEvent::Updated(tab));
                 }
             }
         }
@@ -1852,26 +1946,26 @@ async fn dispatch(
             split_path,
             ratio,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::set_pane_ratio(grid, &split_path, ratio)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ReplacePaneSession {
             tab_id,
             pane_id,
             session_id,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::replace_pane_session(grid, &pane_id, session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::MovePane {
             src_tab_id,
@@ -1885,6 +1979,7 @@ async fn dispatch(
             } else {
                 let events = move_pane(
                     hub,
+                    client_id,
                     &src_tab_id,
                     &src_pane_id,
                     &dst_tab_id,
@@ -1892,54 +1987,55 @@ async fn dispatch(
                     edge,
                 )?;
                 for event in events {
-                    let _ = hub.tab_events.send(event);
+                    hub.emit_tab(client_id, event);
                 }
             }
         }
         ClientMessage::RearrangeTab { tab_id, layout } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let new_grid = tabs::rearrange_grid(grid, layout)?;
                 *grid = new_grid;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::MergeTabs {
             tab_ids,
             name,
             layout,
         } => {
-            let new_tab = hub
-                .state
-                .mutate(|s| tabs::merge_tabs(&mut s.tabs, &tab_ids, name, layout))??;
+            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+                tabs::merge_tabs(tabs, &tab_ids, name, layout)
+            })??;
             for id in &tab_ids {
-                let _ = hub.tab_events.send(TabEvent::Removed(id.clone()));
+                hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
             }
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::ExtractToNewTab {
             source_tab_id,
             pane_ids,
             name,
         } => {
-            let (new_tab, source_empty, source_survivor) = hub.state.mutate(|s| {
-                let (new_tab, source_empty) =
-                    tabs::extract_to_new_tab(&mut s.tabs, &source_tab_id, &pane_ids, name)?;
-                let source_survivor = if source_empty {
-                    None
-                } else {
-                    s.tabs.iter().find(|t| t.id == source_tab_id).cloned()
-                };
-                Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
-            })??;
+            let (new_tab, source_empty, source_survivor) =
+                hub.state.mutate_client_layout(client_id, |tabs| {
+                    let (new_tab, source_empty) =
+                        tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name)?;
+                    let source_survivor = if source_empty {
+                        None
+                    } else {
+                        tabs.iter().find(|t| t.id == source_tab_id).cloned()
+                    };
+                    Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
+                })??;
             if source_empty {
-                let _ = hub.tab_events.send(TabEvent::Removed(source_tab_id));
+                hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             } else if let Some(survivor) = source_survivor {
-                let _ = hub.tab_events.send(TabEvent::Updated(survivor));
+                hub.emit_tab(client_id, TabEvent::Updated(survivor));
             }
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::ListPresets { target } => {
             let entries = crate::presets::list(hub, &target).await?;
@@ -1967,6 +2063,7 @@ async fn dispatch(
                 variable_values,
                 use_worktree_override,
                 max_panes_per_tab_override,
+                client_id: client_id.to_string(),
             };
             tokio::spawn(async move {
                 crate::presets::launch(hub, args).await;
@@ -2093,15 +2190,16 @@ enum CloseOutcome {
 /// `state.mutate` so the persisted snapshot is never half-applied.
 fn move_pane(
     hub: &Hub,
+    client_id: &str,
     src_tab_id: &str,
     src_pane_id: &str,
     dst_tab_id: &str,
     dst_pane_id: &str,
     edge: PaneDropEdge,
 ) -> anyhow::Result<Vec<TabEvent>> {
-    hub.state.mutate(|s| {
+    hub.state.mutate_client_layout(client_id, |tabs| {
         if src_tab_id == dst_tab_id {
-            let tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+            let tab = tabs::find_tab_mut(tabs, src_tab_id)?;
             let grid = tabs::grid_or_err_mut(tab)?;
             if edge == PaneDropEdge::Replace {
                 tabs::swap_pane_sessions(grid, src_pane_id, dst_pane_id)?;
@@ -2115,24 +2213,23 @@ fn move_pane(
             Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
         } else {
             let (extracted_node, source_empty) = {
-                let src_tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+                let src_tab = tabs::find_tab_mut(tabs, src_tab_id)?;
                 let src_grid = tabs::grid_or_err_mut(src_tab)?;
                 tabs::extract_pane(src_grid, src_pane_id)?
             };
             let mut events = Vec::new();
             if source_empty {
-                s.tabs.retain(|t| t.id != src_tab_id);
+                tabs.retain(|t| t.id != src_tab_id);
                 events.push(TabEvent::Removed(src_tab_id.to_string()));
             } else {
-                let src_snapshot = s
-                    .tabs
+                let src_snapshot = tabs
                     .iter()
                     .find(|t| t.id == src_tab_id)
                     .cloned()
                     .ok_or_else(|| anyhow!("source tab vanished mid-mutation: {src_tab_id}"))?;
                 events.push(TabEvent::Updated(src_snapshot));
             }
-            let dst_tab = tabs::find_tab_mut(&mut s.tabs, dst_tab_id)?;
+            let dst_tab = tabs::find_tab_mut(tabs, dst_tab_id)?;
             let dst_grid = tabs::grid_or_err_mut(dst_tab)?;
             tabs::insert_adjacent(dst_grid, dst_pane_id, edge, extracted_node)?;
             events.push(TabEvent::Updated(dst_tab.clone()));
@@ -2169,6 +2266,7 @@ struct OpenDiffOutcome {
 /// Returns the tab id either way so the client can activate it.
 fn open_diff_tab(
     hub: &Hub,
+    client_id: &str,
     repo_id: &str,
     path: &str,
     against: Option<&str>,
@@ -2176,8 +2274,8 @@ fn open_diff_tab(
 ) -> anyhow::Result<OpenDiffOutcome> {
     let against_owned = against.map(str::to_string);
     let worktree_path_owned = worktree_path.map(str::to_string);
-    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate(|s| {
-        if let Some(existing) = s.tabs.iter().find(|t| {
+    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
+        if let Some(existing) = tabs.iter().find(|t| {
             matches!(
                 &t.content,
                 TabContent::Diff {
@@ -2205,7 +2303,7 @@ fn open_diff_tab(
             created_at: chrono::Utc::now(),
         };
         let id = new_tab.id.clone();
-        s.tabs.push(new_tab.clone());
+        tabs.push(new_tab.clone());
         Ok(OpenDiffOutcome {
             tab_id: id,
             created: Some(new_tab),
@@ -3783,18 +3881,21 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop dangling pane references to `session_id` from every tab. Each
-/// affected tab is broadcast as a fresh `TabUpdated` so all connected clients
-/// switch the pane to the empty-placeholder state.
+/// Drop dangling pane references to `session_id` from every client's layout.
+/// Each affected tab is broadcast as a scoped `TabUpdated` so the owning
+/// client's panes switch to the empty-placeholder state.
 fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
-    let modified = match hub.state.mutate(|s| {
-        let mut out = Vec::new();
-        for tab in &mut s.tabs {
-            let Some(grid) = tab.grid_mut() else {
-                continue;
-            };
-            if tabs::prune_session(grid, session_id) {
-                out.push(tab.clone());
+    // (client_id, tab) pairs for every layout touched.
+    let modified = match hub.state.mutate_all_layouts(|layouts| {
+        let mut out: Vec<(String, TabEntry)> = Vec::new();
+        for (cid, layout) in layouts.iter_mut() {
+            for tab in &mut layout.tabs {
+                let Some(grid) = tab.grid_mut() else {
+                    continue;
+                };
+                if tabs::prune_session(grid, session_id) {
+                    out.push((cid.clone(), tab.clone()));
+                }
             }
         }
         out
@@ -3805,8 +3906,8 @@ fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
             return;
         }
     };
-    for tab in modified {
-        let _ = hub.tab_events.send(TabEvent::Updated(tab));
+    for (cid, tab) in modified {
+        hub.emit_tab(&cid, TabEvent::Updated(tab));
     }
 }
 

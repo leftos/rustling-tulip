@@ -1303,6 +1303,16 @@ pub enum ClientMessage {
         #[serde(default)]
         protocol_versions: Vec<u32>,
         auth_token: String,
+        /// Stable per-install client identity. The daemon keys each client's
+        /// tab/pane layout on this. `None` (older clients) falls back to a
+        /// shared legacy layout so they keep working. `#[serde(default)]` keeps
+        /// this additive — no protocol bump.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Human-readable label for this client (e.g. the machine hostname),
+        /// shown in another client's "clone layout" chooser. Optional.
+        #[serde(default)]
+        client_name: Option<String>,
     },
     ListRepos,
     AddRepo {
@@ -3230,6 +3240,7 @@ mod tests {
                 protocol_version,
                 protocol_versions,
                 auth_token,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert!(protocol_versions.is_empty());

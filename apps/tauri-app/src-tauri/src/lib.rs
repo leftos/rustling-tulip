@@ -184,6 +184,35 @@ pub struct DaemonPaths {
     pub handshake_file: String,
 }
 
+/// Stable per-install client identity for per-client tab layouts. `client_id`
+/// is generated once and persisted in the config dir so a window and its
+/// pop-outs (same install) share one layout; `client_name` is the machine
+/// hostname, shown when another client offers to clone this layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientIdentity {
+    pub client_id: String,
+    pub client_name: Option<String>,
+}
+
+#[tauri::command]
+fn get_client_identity() -> Result<ClientIdentity, String> {
+    let dir = config_dir()?;
+    let path = dir.join("client-id");
+    let client_id = match std::fs::read_to_string(&path) {
+        Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
+        _ => {
+            let id = uuid::Uuid::new_v4().to_string();
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+            std::fs::write(&path, &id).map_err(|e| format!("write client-id: {e}"))?;
+            id
+        }
+    };
+    Ok(ClientIdentity {
+        client_id,
+        client_name: sysinfo::System::host_name(),
+    })
+}
+
 #[tauri::command]
 fn daemon_paths() -> Result<DaemonPaths, String> {
     let cfg = config_dir()?;
@@ -746,6 +775,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
             daemon_paths,
+            get_client_identity,
             stop_daemon,
             pick_directory,
             pick_file,

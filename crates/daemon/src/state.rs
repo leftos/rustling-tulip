@@ -11,14 +11,37 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Reserved layout key for connections that don't send a `client_id` (older
+/// app builds, or the plain-shell back-compat path). They all share this one
+/// layout so they keep working without the per-client chooser.
+pub const LEGACY_CLIENT_ID: &str = "__legacy__";
+
+/// One client's persisted tab/pane layout. Sessions are global to the daemon;
+/// only the layout — which sessions appear in which panes/tabs — is per-client.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientLayout {
+    /// Human-readable label (e.g. the client's hostname), shown when another
+    /// client offers to clone this layout. `None` until the client supplies one.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Tab display order; each `TabEntry` owns its pane grid.
+    #[serde(default)]
+    pub tabs: Vec<TabEntry>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersistedState {
     pub repos: Vec<RepoEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
-    /// Tab layouts shared by all connected clients. Vec order is display
-    /// order. Older state.json files without this field deserialize cleanly.
+    /// Per-client tab layouts, keyed by `client_id`. Each client curates its
+    /// own tabs/panes over the shared global session set.
     #[serde(default)]
-    pub tabs: Vec<TabEntry>,
+    pub layouts: HashMap<String, ClientLayout>,
+    /// Pre-per-client global layout, migrated in-place from the old top-level
+    /// `tabs` field via the serde alias. Offered once to the first new client
+    /// through the first-connect chooser (`CloneLegacy`), then cleared.
+    #[serde(default, alias = "tabs")]
+    pub legacy_tabs: Vec<TabEntry>,
     /// Manual sidebar-container order (workspaces + repos as a single
     /// flat list). Empty vec means "no manual order; clients fall back
     /// to alphabetical". Maintained by the registry helpers on every
@@ -145,6 +168,98 @@ impl AppState {
         })?;
         Ok((self.worktrees_dir(), self.worktrees_root_is_override()))
     }
+
+    /// Clone of a client's tab layout. Empty when the client has no layout yet.
+    pub fn client_layout(&self, client_id: &str) -> Vec<TabEntry> {
+        self.with_persisted(|s| {
+            s.layouts
+                .get(client_id)
+                .map_or_else(Vec::new, |l| l.tabs.clone())
+        })
+    }
+
+    /// Whether a layout entry exists for this client. An entry with an empty
+    /// `tabs` vec still counts — it's a deliberately-empty saved layout, not a
+    /// first-connect that needs the chooser.
+    pub fn has_client_layout(&self, client_id: &str) -> bool {
+        self.with_persisted(|s| s.layouts.contains_key(client_id))
+    }
+
+    /// Mutate a client's tab vec in place (creating the entry if absent) and
+    /// persist. The per-client analogue of [`AppState::mutate`] used by every
+    /// tab-layout handler.
+    pub fn mutate_client_layout<R>(
+        &self,
+        client_id: &str,
+        f: impl FnOnce(&mut Vec<TabEntry>) -> R,
+    ) -> anyhow::Result<R> {
+        self.mutate(|s| {
+            let layout = s.layouts.entry(client_id.to_string()).or_default();
+            f(&mut layout.tabs)
+        })
+    }
+
+    /// Create or replace a client's layout outright (first-connect init /
+    /// chooser). Records the display name so other clients can clone it.
+    pub fn set_client_layout(
+        &self,
+        client_id: &str,
+        name: Option<String>,
+        tabs: Vec<TabEntry>,
+    ) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.layouts
+                .insert(client_id.to_string(), ClientLayout { name, tabs });
+        })
+    }
+
+    /// Record/refresh a client's display name without touching its tabs. No-op
+    /// when the client has no layout entry yet.
+    pub fn set_client_name(&self, client_id: &str, name: Option<String>) -> anyhow::Result<()> {
+        if name.is_none() {
+            return Ok(());
+        }
+        self.mutate(|s| {
+            if let Some(layout) = s.layouts.get_mut(client_id) {
+                layout.name = name;
+            }
+        })
+    }
+
+    /// The pre-per-client global layout awaiting migration (empty once a client
+    /// has adopted it via `CloneLegacy`).
+    pub fn legacy_tabs(&self) -> Vec<TabEntry> {
+        self.with_persisted(|s| s.legacy_tabs.clone())
+    }
+
+    pub fn clear_legacy_tabs(&self) -> anyhow::Result<()> {
+        self.mutate(|s| s.legacy_tabs.clear())
+    }
+
+    /// Other clients' layouts available to clone: `(client_id, display name)`,
+    /// excluding `exclude` (the requesting client) and any empty layouts (no
+    /// point cloning an empty one).
+    #[expect(dead_code, reason = "consumed by the first-connect chooser (Phase 7b)")]
+    pub fn clonable_layouts(&self, exclude: &str) -> Vec<(String, Option<String>)> {
+        self.with_persisted(|s| {
+            let mut out: Vec<(String, Option<String>)> = s
+                .layouts
+                .iter()
+                .filter(|(id, layout)| id.as_str() != exclude && !layout.tabs.is_empty())
+                .map(|(id, layout)| (id.clone(), layout.name.clone()))
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        })
+    }
+
+    /// Mutate every client's layout (session-removal fan-out) and persist once.
+    pub fn mutate_all_layouts<R>(
+        &self,
+        f: impl FnOnce(&mut HashMap<String, ClientLayout>) -> R,
+    ) -> anyhow::Result<R> {
+        self.mutate(|s| f(&mut s.layouts))
+    }
 }
 
 /// Walk through every stored path and rewrite it to the simplified form (no
@@ -173,4 +288,109 @@ fn simplify_str(s: &str) -> Option<String> {
     let simplified = simplify_path(Path::new(s));
     let as_str = simplified.to_string_lossy();
     (as_str != s).then(|| as_str.into_owned())
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect for clearer failures"
+)]
+mod tests {
+    use super::*;
+    use protocol::{GridNode, TabContent};
+
+    fn sample_tab(id: &str) -> TabEntry {
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Grid {
+                grid: GridNode::Pane {
+                    pane_id: format!("pane-{id}"),
+                    session_id: None,
+                },
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn scratch_dirs(tag: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rt-state-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        }
+    }
+
+    #[test]
+    fn old_tabs_key_migrates_into_legacy_tabs() {
+        // A pre-per-client state.json used a top-level `tabs` array; the serde
+        // alias must route it into `legacy_tabs` with `layouts` left empty.
+        let json = r#"{
+            "repos": [],
+            "workspaces": [],
+            "tabs": [
+                {"id":"t1","name":"Tab","content":{"kind":"grid","grid":{"kind":"pane","pane_id":"p1","session_id":null}},"created_at":"2026-01-01T00:00:00Z"}
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parse legacy state");
+        assert_eq!(state.legacy_tabs.len(), 1, "old tabs land in legacy_tabs");
+        assert!(state.layouts.is_empty(), "layouts start empty");
+    }
+
+    #[test]
+    fn per_client_layouts_are_independent() {
+        let dirs = scratch_dirs("independent");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+
+        assert!(!state.has_client_layout("a"));
+        state
+            .mutate_client_layout("a", |tabs| tabs.push(sample_tab("ta")))
+            .expect("mutate a");
+        state
+            .mutate_client_layout("b", |tabs| {
+                tabs.push(sample_tab("tb1"));
+                tabs.push(sample_tab("tb2"));
+            })
+            .expect("mutate b");
+
+        assert!(state.has_client_layout("a"));
+        assert_eq!(state.client_layout("a").len(), 1);
+        assert_eq!(state.client_layout("a")[0].id, "ta");
+        assert_eq!(state.client_layout("b").len(), 2);
+        assert!(
+            state.client_layout("c").is_empty(),
+            "unknown client is empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn set_client_layout_replaces_tabs_and_persists() {
+        let dirs = scratch_dirs("setlayout");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state
+            .set_client_layout(
+                "desktop",
+                Some("desktop-host".to_string()),
+                vec![sample_tab("t")],
+            )
+            .expect("set layout");
+        assert_eq!(state.client_layout("desktop").len(), 1);
+        // Reload from disk: the layout (and its name) survived the round-trip.
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert_eq!(reloaded.client_layout("desktop").len(), 1);
+        assert_eq!(reloaded.client_layout("desktop")[0].id, "t");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
 }

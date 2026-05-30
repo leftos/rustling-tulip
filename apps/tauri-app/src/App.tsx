@@ -14,11 +14,13 @@ import {
   deleteRemoteProfile,
   disconnectRemote,
   ensureDaemonStarted,
+  getClientIdentity,
   listRemoteProfiles,
   pickDirectory,
   requestSpawnConfig,
   saveRemoteProfile,
   stopDaemon,
+  type ClientIdentity,
   type ConnectionState,
   type ConnectionTarget,
   type DaemonClient,
@@ -410,6 +412,10 @@ export default function App() {
   // re-runs only when `connectionVersion` bumps).
   const connectionTargetRef = useRef<ConnectionTarget>(state.connectionTarget);
   connectionTargetRef.current = state.connectionTarget;
+  // Per-install client identity (for per-client tab layouts), fetched once and
+  // cached. A window and its pop-outs read the same persisted id, so they
+  // share one layout.
+  const clientIdentityRef = useRef<ClientIdentity | null>(null);
 
   // App-wide user preferences (localStorage-backed). `useSettings` returns
   // a live tuple — any other component that calls `useSettings` will
@@ -557,8 +563,19 @@ export default function App() {
       try {
         const handshake = await resolveHandshake();
         if (cancelled) return;
+        // Resolve the per-install identity once (cached) before the first
+        // connect so the Hello carries client_id for per-client layouts.
+        if (clientIdentityRef.current === null) {
+          clientIdentityRef.current = await getClientIdentity().catch(
+            (err: unknown) => {
+              logToFile("warn", `getClientIdentity failed: ${String(err)}`);
+              return null;
+            },
+          );
+          if (cancelled) return;
+        }
         setState((s) => ({ ...s, daemonToken: handshake.auth_token }));
-        client = connectDaemon(handshake);
+        client = connectDaemon(handshake, clientIdentityRef.current);
         clientRef.current = client;
         client.onConnectionChange((next) => {
           setState((s) => ({

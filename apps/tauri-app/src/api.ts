@@ -40,6 +40,19 @@ export async function ensureDaemonStarted(): Promise<DaemonHandshake> {
   return await invoke<DaemonHandshake>("ensure_daemon_started");
 }
 
+/// Stable per-install client identity for per-client tab layouts. Mirrors the
+/// Rust `ClientIdentity` struct. The daemon keys each client's layout on
+/// `client_id`; `client_name` (hostname) labels it in another client's
+/// clone-layout chooser.
+export interface ClientIdentity {
+  client_id: string;
+  client_name: string | null;
+}
+
+export async function getClientIdentity(): Promise<ClientIdentity> {
+  return await invoke<ClientIdentity>("get_client_identity");
+}
+
 /// Paths the daemon-footer troubleshooting flyout exposes for "open log",
 /// "reveal config dir", and "copy handshake path". Mirrors the Rust
 /// `DaemonPaths` struct in `apps/tauri-app/src-tauri/src/lib.rs`.
@@ -209,7 +222,10 @@ export async function pickFile(opts: PickFileOpts = {}): Promise<string | null> 
   return result;
 }
 
-export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
+export function connectDaemon(
+  handshake: DaemonHandshake,
+  identity?: ClientIdentity | null,
+): DaemonClient {
   const url = `ws://127.0.0.1:${handshake.port}/ws`;
   const ws = new WebSocket(url);
   const messageCbs = new Set<(msg: DaemonMessage) => void>();
@@ -228,6 +244,14 @@ export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
         protocol_version: PROTOCOL_VERSION,
         protocol_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth_token: handshake.auth_token,
+        ...(identity
+          ? {
+              client_id: identity.client_id,
+              ...(identity.client_name
+                ? { client_name: identity.client_name }
+                : {}),
+            }
+          : {}),
       } satisfies ClientMessage),
     );
     setState({ kind: "open" });

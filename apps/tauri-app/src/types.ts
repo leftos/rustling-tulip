@@ -585,6 +585,10 @@ export type ClientMessage =
       protocol_version: number;
       protocol_versions: number[];
       auth_token: string;
+      /// Stable per-install identity for per-client tab layouts. Optional —
+      /// older daemons ignore it; absent falls back to the shared legacy layout.
+      client_id?: string;
+      client_name?: string;
     }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
