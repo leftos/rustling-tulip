@@ -9,6 +9,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod daemon_supervisor;
+mod remote;
 
 const APP_BACKGROUND_COLOR: Color = Color(8, 9, 11, 255);
 
@@ -741,6 +742,7 @@ pub fn run() {
     }
 
     builder
+        .manage(remote::RemoteState::default())
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
             daemon_paths,
@@ -755,7 +757,13 @@ pub fn run() {
             open_path_in_vscode,
             open_folders_in_vscode,
             log_message,
-            quit_app
+            quit_app,
+            remote::connect_remote,
+            remote::disconnect_remote,
+            remote::decode_connection_code,
+            remote::list_remote_profiles,
+            remote::save_remote_profile,
+            remote::delete_remote_profile
         ])
         .setup(|_app| {
             info!("rustling-tulip Tauri app starting");

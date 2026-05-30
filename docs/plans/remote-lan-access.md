@@ -13,8 +13,19 @@
 - [x] `cargo deny check` made green (pre-existing failures fixed: app license,
       CDLA-Permissive-2.0, `allow-wildcard-paths` + `publish = false`,
       `unmaintained = "workspace"`).
-- [ ] Phase 3 — desktop UI (enable LAN + copyable connection code) — NEXT.
-- [ ] Phases 4–9 — see below.
+- [x] Phase 3 — desktop UI: "Remote access" settings tab (enable toggle, port,
+      address picker, copyable connection code).
+- [x] Phase 4 — Tauri pinned-TLS loopback tunnel + remote-profile store
+      (`apps/tauri-app/src-tauri/src/remote.rs`). **Deviation:** `connect_remote`
+      takes resolved `ConnectionParams` (not the raw code) for uniformity across
+      the paste flow and saved-profile reconnect; a separate
+      `decode_connection_code(code)` does the pure decode, and `disconnect_remote`
+      tears the bridge down. Commands: `connect_remote`, `disconnect_remote`,
+      `decode_connection_code`, `list_remote_profiles`, `save_remote_profile`,
+      `delete_remote_profile`. Pinned-verifier accept/reject + code/fingerprint
+      parsing are unit-tested.
+- [ ] Phase 5 — frontend connection-mode launcher — NEXT.
+- [ ] Phases 6–9 — see below.
 
 ## Context
 
@@ -172,7 +183,7 @@ leaf-cert fingerprint; pass a dummy SNI.
 - [ ] TS mirror in `apps/tauri-app/src/types.ts` + dispatcher in `api.ts`/`App.tsx`.
 
 ### Phase 3 — Desktop UI: enable LAN + copyable connection code
-- [ ] Settings panel/modal: "Enable LAN access" toggle, port field, live status
+- [x] Settings panel/modal: "Enable LAN access" toggle, port field, live status
       (detected addresses, cert fingerprint). On enable, assemble a single
       **connection code** = base64url(JSON `{ v, host, port, token, fp }`) — the
       desktop already holds its token (local `daemon.json`); combine with `LanStatus`.
@@ -180,16 +191,19 @@ leaf-cert fingerprint; pass a dummy SNI.
 - [ ] Optional "Regenerate token" button (revokes laptop access; forces re-pair).
 
 ### Phase 4 — Tauri Rust: pinned-TLS loopback tunnel + remote-profile store
-- [ ] `connect_remote(code) -> DaemonHandshake` command: parse code → start the
-      loopback TLS-terminating tunnel (listen `127.0.0.1:0`; per-accept open a
-      `tokio_rustls` TLS conn to `host:port` with a custom `ServerCertVerifier` that
-      accepts **only** the pinned fingerprint; `copy_bidirectional`) → return a
-      synthetic `DaemonHandshake { port: bridgePort, auth_token: <profile token>,
-      protocol_version, pid: 0 }`.
-- [ ] Remote-profile persistence: `remote-profiles.json` in the config dir +
+- [x] `connect_remote(params) -> DaemonHandshake` command: start the loopback
+      TLS-terminating tunnel (listen `127.0.0.1:0`; per-accept open a `tokio_rustls`
+      TLS conn to `host:port` with a custom `ServerCertVerifier` that accepts
+      **only** the pinned fingerprint; `copy_bidirectional`) → return a synthetic
+      `DaemonHandshake { port: bridgePort, auth_token: <profile token>,
+      protocol_version, pid: 0 }`. An eager TLS probe (8 s timeout) validates
+      reachability + pinning before the bridge port is returned. `connect_remote`
+      takes resolved `ConnectionParams`; `decode_connection_code(code)` is the pure
+      base64url decode; `disconnect_remote` aborts the active bridge.
+- [x] Remote-profile persistence: `remote-profiles.json` in the config dir +
       commands `list_remote_profiles` / `save_remote_profile` / `delete_remote_profile`.
-- Files: `apps/tauri-app/src-tauri/src/lib.rs` (commands + handler registration at
-  lib.rs:744), new `apps/tauri-app/src-tauri/src/remote.rs`.
+- Files: `apps/tauri-app/src-tauri/src/lib.rs` (commands + handler registration),
+  new `apps/tauri-app/src-tauri/src/remote.rs`.
 
 ### Phase 5 — Frontend: connection-mode launcher + reuse the connect path
 - [ ] Pre-main launcher state in `App.tsx` (model after the `?session=`/`?pane=`

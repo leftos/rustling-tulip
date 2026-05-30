@@ -3877,10 +3877,13 @@ name = "rustling-tulip-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "directories",
  "protocol",
+ "rcgen",
  "reqwest 0.12.28",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -3892,6 +3895,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-window-state",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
 ]

@@ -29,9 +29,36 @@ directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tokio = { version = "1", features = ["fs", "process", "rt", "time", "macros"] }
+tokio = { version = "1", features = [
+    "fs",
+    "process",
+    "rt",
+    "time",
+    "macros",
+    "net",
+    "io-util",
+] }
 sha2 = "0.10"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# Pinned-TLS loopback tunnel to a remote daemon (LAN access). Same `ring`
+# backend as the daemon + reqwest, so no `aws-lc-sys` (NASM/CMake) in the tree.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+base64 = "0.22"
+
+[dev-dependencies]
+# Generates a throwaway self-signed cert so the pinned verifier test can prove
+# it accepts a matching fingerprint and rejects a different one.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
