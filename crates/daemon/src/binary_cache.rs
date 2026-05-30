@@ -73,6 +73,10 @@ pub fn ensure_cached(
 
     let tmp = cache_dir.join(format!("{filename}.tmp"));
     fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    // `fs::write` creates the file with default (non-executable) permissions.
+    // A cached binary must stay executable or `spawn` fails with EACCES on
+    // Unix; mirror the template's mode. No-op on Windows (no execute bit).
+    copy_mode(template, &tmp)?;
     if let Err(err) = fs::rename(&tmp, &cached) {
         // Another concurrent caller may have populated the cache between our
         // existence check and rename. Retry the existence check before
@@ -158,6 +162,18 @@ pub struct GcReport {
     pub removed: usize,
     pub skipped: usize,
     pub tmp_removed: usize,
+}
+
+/// Copy `src`'s permission bits onto `dst`. On Unix this carries the
+/// executable bit — without it the `fs::write`-created cache entry is a
+/// non-executable `0644` file and `spawn` fails with `EACCES`. On Windows the
+/// only bit is read-only, which is harmless for a freshly written file.
+fn copy_mode(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    let perms = fs::metadata(src)
+        .with_context(|| format!("reading template metadata {}", src.display()))?
+        .permissions();
+    fs::set_permissions(dst, perms)
+        .with_context(|| format!("setting permissions on {}", dst.display()))
 }
 
 fn hash_prefix(bytes: &[u8]) -> String {
@@ -253,6 +269,26 @@ mod tests {
         assert!(
             v1.exists() && v2.exists(),
             "GC is separate; both linger until prune"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cached_preserves_executable_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("exec-bit");
+        let template = write_template(scratch.path(), "rt-tracer", b"#!/bin/sh\ntrue\n");
+        // Mark the template executable, like a cargo-built binary.
+        let mut perms = fs::metadata(&template).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&template, perms).unwrap();
+        let cache = scratch.path().join("cache");
+
+        let cached = ensure_cached(&template, &cache, "rt-tracer").expect("ensure");
+        let mode = fs::metadata(&cached).unwrap().permissions().mode();
+        assert!(
+            mode & 0o111 != 0,
+            "cached binary must be executable, got mode {mode:o}"
         );
     }
 

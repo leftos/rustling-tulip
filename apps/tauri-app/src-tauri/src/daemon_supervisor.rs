@@ -471,6 +471,13 @@ fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
 
     let tmp = cache_dir.join(format!("{filename}.tmp"));
     fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    // `fs::write` yields a non-executable 0644 file on Unix; without the
+    // template's mode the spawned daemon fails with EACCES. No-op on Windows.
+    let template_perms = fs::metadata(template)
+        .with_context(|| format!("reading template metadata {}", template.display()))?
+        .permissions();
+    fs::set_permissions(&tmp, template_perms)
+        .with_context(|| format!("setting permissions on {}", tmp.display()))?;
     if let Err(err) = fs::rename(&tmp, &cached) {
         if cached.exists() {
             let _ = fs::remove_file(&tmp);
