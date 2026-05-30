@@ -5,6 +5,10 @@ all-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
+# Only flag unmaintained crates we directly depend on. The gtk-rs, unic-*, and
+# proc-macro-error advisories all come in transitively through tauri/wry, which
+# we can't upgrade away from — flagging them is noise we can't action.
+unmaintained = "workspace"
 
 [licenses]
 allow = [
@@ -19,12 +23,18 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # webpki-roots (via reqwest's rustls-tls) ships the Mozilla CA bundle under
+    # the Community Data License Agreement — Permissive 2.0.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal path deps (protocol, tracer-protocol) have no version
+# requirement and so read as wildcards; that's expected for a workspace.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

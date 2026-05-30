@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 description = "rustling-tulip Tauri desktop client"
+license.workspace = true
+publish = false
 
 [lib]
 name = "rustling_tulip_app_lib"
