@@ -62,6 +62,14 @@ Does `claude --add-dir` propagate hooks and `settings.json` from each additional
 or only from the primary `cwd`? Not yet verified empirically. Relevant to workspace
 sessions where member repos may have their own `CLAUDE.md` / hooks.
 
+### macOS compatibility
+Explored 2026-05-30 (investigation only, not greenlit). Substantially portable
+already: PTY via `portable-pty`, config/data dirs via `directories`, most OS calls
+already dual-armed (`#[cfg(not(windows))]`). One architectural blocker — the
+tracer↔daemon IPC is Windows named pipes with no Unix path (needs Unix domain
+sockets) — plus a `job_object` module compile-gate, autostart (LaunchAgent), and a
+macOS bundle target. Full catalog + phased plan in `docs/plans/macos-compat.md`.
+
 ## Out of scope
 
 - Sub-agent / Task-tool interception or isolation
