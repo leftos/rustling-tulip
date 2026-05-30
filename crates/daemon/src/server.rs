@@ -4,6 +4,7 @@ use crate::agents::CommonSpawnFields;
 use crate::discovery;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
+use crate::pairing;
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -23,6 +24,7 @@ use crate::{
     git, git_inspect, git_write, headless, inject, osc_title, pty_state, vscode, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -96,6 +98,11 @@ pub struct Hub {
     /// (which unregisters the service) by [`stop_lan_listener`] and at
     /// daemon shutdown. `None` when LAN access is off.
     pub advertiser: Arc<AsyncMutex<Option<discovery::Advertiser>>>,
+    /// The active short-code pairing window, if the host has one open.
+    /// [`ClientMessage::StartPairing`] opens it; the `/pair` HTTP handler and
+    /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
+    /// pairing is in progress.
+    pub pairing: Arc<AsyncMutex<Option<pairing::PairingSession>>>,
 }
 
 impl Hub {
@@ -176,6 +183,13 @@ pub enum StateEvent {
         port: u16,
         fingerprint: Option<String>,
         addresses: Vec<String>,
+    },
+    /// Broadcast when the active pairing window ends (paired / expired /
+    /// cancelled / locked out) so every connected host window clears the
+    /// displayed code. Carries no code, so broadcasting to all clients —
+    /// including a remote laptop — is safe.
+    PairingEnded {
+        reason: protocol::PairingEndReason,
     },
 }
 
@@ -397,6 +411,7 @@ pub async fn run(
         client_count,
         lan_handle: Arc::new(AsyncMutex::new(None)),
         advertiser: Arc::new(AsyncMutex::new(None)),
+        pairing: Arc::new(AsyncMutex::new(None)),
     };
 
     let app = build_router(hub.clone());
@@ -473,7 +488,65 @@ fn build_router(hub: Hub) -> Router {
         .route("/ws", get(ws_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/shutdown", post(shutdown_handler))
+        .route("/pair", post(pair_handler))
         .with_state(hub)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairRequest {
+    code: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PairResponse {
+    token: String,
+    protocol_version: u32,
+}
+
+/// `POST /pair` — exchange a valid pairing code for the daemon's auth token.
+///
+/// Reachable on the LAN TLS listener: a discovering laptop pins the cert from
+/// the mDNS TXT record, then submits the host's short code here. The endpoint
+/// is unauthenticated by design — the short-lived, attempt-capped code *is* the
+/// authorization. A match consumes the window and hands back the token (the
+/// laptop then connects over the normal pinned-TLS WS path); any terminal
+/// outcome broadcasts [`protocol::DaemonMessage::PairingEnded`] so the host UI
+/// clears the displayed code.
+async fn pair_handler(State(hub): State<Hub>, Json(req): Json<PairRequest>) -> Response {
+    let outcome = {
+        let mut slot = hub.pairing.lock().await;
+        pairing::validate(&mut slot, &req.code, std::time::Instant::now())
+    };
+    if let Some(reason) = outcome.end_reason() {
+        let _ = hub.state_events.send(StateEvent::PairingEnded { reason });
+    }
+    match outcome {
+        pairing::PairOutcome::Matched => {
+            info!("HTTP /pair: code accepted; handing back auth token");
+            (
+                StatusCode::OK,
+                Json(PairResponse {
+                    token: hub.auth_token.clone(),
+                    protocol_version: PROTOCOL_VERSION,
+                }),
+            )
+                .into_response()
+        }
+        pairing::PairOutcome::Wrong => {
+            (StatusCode::FORBIDDEN, "invalid pairing code").into_response()
+        }
+        pairing::PairOutcome::TooManyAttempts => (
+            StatusCode::FORBIDDEN,
+            "too many attempts; ask the host for a new code",
+        )
+            .into_response(),
+        pairing::PairOutcome::Expired => {
+            (StatusCode::FORBIDDEN, "pairing code expired").into_response()
+        }
+        pairing::PairOutcome::NoSession => {
+            (StatusCode::FORBIDDEN, "no pairing in progress").into_response()
+        }
+    }
 }
 
 /// Start (or restart) the opt-in LAN TLS listener on `0.0.0.0:<port>`, serving
@@ -862,6 +935,9 @@ fn spawn_state_forwarder(
                         fingerprint,
                         addresses,
                     });
+                }
+                Ok(StateEvent::PairingEnded { reason }) => {
+                    let _ = out_tx.send(DaemonMessage::PairingEnded { reason });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
@@ -1869,6 +1945,26 @@ async fn dispatch(
                 fingerprint: lan::fingerprint(&hub.dirs),
                 addresses: lan::detect_addresses(),
             });
+        }
+        ClientMessage::StartPairing => {
+            // Open a fresh pairing window and hand the code back to *this*
+            // connection only — broadcasting it would leak the code to a
+            // remote client. The `/pair` HTTP endpoint validates submissions.
+            let session = pairing::PairingSession::new(std::time::Instant::now());
+            let code = session.code().to_string();
+            *hub.pairing.lock().await = Some(session);
+            let ttl_secs = u32::try_from(pairing::PAIRING_TTL.as_secs()).unwrap_or(u32::MAX);
+            info!("pairing window opened");
+            let _ = out_tx.send(DaemonMessage::PairingStarted { code, ttl_secs });
+        }
+        ClientMessage::CancelPairing => {
+            let had_session = hub.pairing.lock().await.take().is_some();
+            if had_session {
+                info!("pairing window cancelled by host");
+                let _ = hub.state_events.send(StateEvent::PairingEnded {
+                    reason: protocol::PairingEndReason::Cancelled,
+                });
+            }
         }
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();

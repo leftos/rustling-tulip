@@ -2110,6 +2110,7 @@ mod tests {
             client_count: Arc::new(client_count),
             lan_handle: Arc::new(AsyncMutex::new(None)),
             advertiser: Arc::new(AsyncMutex::new(None)),
+            pairing: Arc::new(AsyncMutex::new(None)),
         };
         (hub, preset_rx, scratch)
     }

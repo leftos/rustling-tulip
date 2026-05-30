@@ -1312,6 +1312,25 @@ pub enum InitLayoutKind {
     Unknown,
 }
 
+/// Why a pairing window ended, carried by [`DaemonMessage::PairingEnded`] so the
+/// host UI can clear (or annotate) the displayed code. Serialized as a
+/// `snake_case` string with a catch-all so an older client keeps decoding a
+/// newer reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingEndReason {
+    /// A device completed pairing with the code.
+    Paired,
+    /// The code's time-to-live elapsed before anyone paired.
+    Expired,
+    /// The host cancelled pairing.
+    Cancelled,
+    /// Too many wrong codes were submitted; the window was invalidated.
+    TooManyAttempts,
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -1714,6 +1733,16 @@ pub enum ClientMessage {
         enabled: bool,
         port: u16,
     },
+    /// Begin a pairing window. The daemon generates a short numeric code and
+    /// replies — to this connection only, so the code never reaches other
+    /// clients — with [`DaemonMessage::PairingStarted`]. A discovering device
+    /// submits the code to the daemon's `/pair` endpoint over the pinned-TLS
+    /// LAN channel to obtain the auth token. Only meaningful on the host while
+    /// LAN access is enabled.
+    StartPairing,
+    /// Cancel the active pairing window early. The daemon clears it and
+    /// broadcasts [`DaemonMessage::PairingEnded`].
+    CancelPairing,
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
     /// abandoned session registries. Daemon replies with
@@ -2155,6 +2184,20 @@ pub enum DaemonMessage {
         port: u16,
         fingerprint: Option<String>,
         addresses: Vec<String>,
+    },
+    /// Reply to [`ClientMessage::StartPairing`], sent only to the requesting
+    /// connection (the code must never reach other clients). `code` is the
+    /// short numeric pairing code for the user to read out; `ttl_secs` is how
+    /// long it stays valid, so the UI can show a countdown.
+    PairingStarted {
+        code: String,
+        ttl_secs: u32,
+    },
+    /// Broadcast when the active pairing window ends — a device paired, the
+    /// code expired or was cancelled, or too many wrong codes were tried — so
+    /// the host UI can clear the displayed code.
+    PairingEnded {
+        reason: PairingEndReason,
     },
     /// Reply to [`ClientMessage::InspectWorktreesRoot`]. Carries every
     /// `wt.<branch>/` group discovered under the current root, plus a

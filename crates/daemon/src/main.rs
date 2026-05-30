@@ -13,6 +13,7 @@ mod lan;
 mod lock_finder;
 mod orphan;
 mod osc_title;
+mod pairing;
 mod paths;
 mod presets;
 mod pty;
