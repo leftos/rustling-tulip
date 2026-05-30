@@ -32,6 +32,8 @@ import {
 import {
   DEFAULT_CLAUDE_OPTIONS,
   tabGrid,
+  type CheckoutStrategy,
+  type ClientMessage,
   type ClonableLayout,
   type ContainerRef,
   type DaemonMessage,
@@ -66,6 +68,7 @@ import SourceControlSidebar from "./components/source-control/SourceControlSideb
 import PaneWindow from "./components/PaneWindow";
 import SessionWindow from "./components/SessionWindow";
 import SpawnDialog, { type SpawnPlacement } from "./components/SpawnDialog";
+import CheckoutConfirmModal from "./components/CheckoutConfirmModal";
 import StandaloneShellDialog from "./components/StandaloneShellDialog";
 import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
@@ -212,6 +215,10 @@ interface AppState {
   /// codex sandbox, and extra env vars from this config — overriding the
   /// usual Settings defaults. `undefined` for normal spawns.
   spawnPrefill: SpawnConfig | undefined;
+  /// Set when the daemon asks to confirm an in-place checkout into a dirty
+  /// tree (`checkout_confirm_required`); drives the CheckoutConfirmModal. The
+  /// confirmed choice resends the stashed spawn request with a strategy.
+  checkoutConfirm: { repo_id: string; branch: string; dirty_count: number } | null;
   /// Counter incremented every time we arm a "next new tab becomes
   /// active" intent (e.g. user spawns a session, merges tabs, extracts a
   /// pane to a new tab). Each subsequent `tab_updated` for an unseen tab
@@ -384,6 +391,7 @@ export default function App() {
     spawnInitial: undefined,
     spawnInitialLocked: true,
     spawnPrefill: undefined,
+    checkoutConfirm: null,
     pendingTabActivate: 0,
     workspaceCreatorOpen: false,
     vscodeQueue: [],
@@ -430,6 +438,12 @@ export default function App() {
   // cached. A window and its pop-outs read the same persisted id, so they
   // share one layout.
   const clientIdentityRef = useRef<ClientIdentity | null>(null);
+  // The last spawn_session request sent, stashed so a `checkout_confirm_required`
+  // reply can resend it verbatim with a chosen `checkout_strategy`.
+  const lastSpawnReqRef = useRef<Extract<
+    ClientMessage,
+    { type: "spawn_session" }
+  > | null>(null);
 
   // App-wide user preferences (localStorage-backed). `useSettings` returns
   // a live tuple — any other component that calls `useSettings` will
@@ -1281,6 +1295,32 @@ export default function App() {
   const onClosePresetLaunch = useCallback(() => {
     setState((s) => ({ ...s, presetLaunch: null }));
   }, []);
+
+  /// Stash a just-sent spawn request so we can resend it with a checkout
+  /// strategy if the daemon asks to confirm a dirty in-place switch.
+  const onSpawnRequest = useCallback(
+    (req: Extract<ClientMessage, { type: "spawn_session" }>) => {
+      lastSpawnReqRef.current = req;
+    },
+    [],
+  );
+
+  /// Resolve the checkout-confirm modal: resend the stashed spawn with the
+  /// chosen strategy, then clear the prompt.
+  const onCheckoutConfirm = useCallback(
+    (strategy: CheckoutStrategy) => {
+      const base = lastSpawnReqRef.current;
+      const client = latestStateRef.current?.client;
+      if (base && client && base.target.kind === "single") {
+        client.send({
+          ...base,
+          target: { ...base.target, checkout_strategy: strategy },
+        });
+      }
+      setState((s) => ({ ...s, checkoutConfirm: null }));
+    },
+    [],
+  );
 
   const onSpawned = useCallback((placement: SpawnPlacement, detail?: string) => {
     // Arm the one-shot follow-up for the next new session. Priority:
@@ -2765,7 +2805,16 @@ export default function App() {
           activeTabId={spawnCurrentTab?.id ?? null}
           onClose={onCloseSpawn}
           onSpawned={onSpawned}
+          onSpawnRequest={onSpawnRequest}
           onAddRepo={onAddRepo}
+        />
+      )}
+      {state.checkoutConfirm && (
+        <CheckoutConfirmModal
+          branch={state.checkoutConfirm.branch}
+          dirtyCount={state.checkoutConfirm.dirty_count}
+          onChoose={onCheckoutConfirm}
+          onCancel={() => setState((s) => ({ ...s, checkoutConfirm: null }))}
         />
       )}
       {state.standaloneShellOpen && (
@@ -3267,6 +3316,16 @@ function handleMessage(
           attentionSessions: attention,
         };
       });
+      return;
+    case "checkout_confirm_required":
+      setState((s) => ({
+        ...s,
+        checkoutConfirm: {
+          repo_id: msg.repo_id,
+          branch: msg.branch,
+          dirty_count: msg.dirty_count,
+        },
+      }));
       return;
     case "layout_init_required":
       setState((s) => ({

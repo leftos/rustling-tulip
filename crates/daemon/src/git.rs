@@ -213,30 +213,79 @@ pub async fn is_clean(repo: &Path) -> anyhow::Result<bool> {
     Ok(changed_files(repo).await?.is_empty())
 }
 
-/// Check out `branch` directly in `repo`'s working tree (no worktree). If
-/// the branch doesn't exist, create it from `create_from_base`. The working
-/// tree must be clean when an actual switch is required — callers should
-/// surface the returned error to the user.
+/// What an in-place checkout of `branch` would do right now, computed without
+/// mutating the working tree. Drives the daemon's "confirm before touching a
+/// dirty tree" prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InPlaceCheckout {
+    /// Already on `branch`; switching is a no-op.
+    SameBranch,
+    /// On a different branch with a clean tree; safe to switch.
+    Clean,
+    /// On a different branch with `count` uncommitted changes a switch would
+    /// touch.
+    Dirty { count: usize },
+}
+
+/// Classify an in-place checkout of `branch` without changing anything.
+pub async fn in_place_checkout_preflight(
+    repo: &Path,
+    branch: &str,
+) -> anyhow::Result<InPlaceCheckout> {
+    if current_branch(repo).await.ok().flatten().as_deref() == Some(branch) {
+        return Ok(InPlaceCheckout::SameBranch);
+    }
+    let changed = changed_files(repo).await?;
+    if changed.is_empty() {
+        Ok(InPlaceCheckout::Clean)
+    } else {
+        Ok(InPlaceCheckout::Dirty {
+            count: changed.len(),
+        })
+    }
+}
+
+/// Check out `branch` directly in `repo`'s working tree (no worktree),
+/// creating it from `create_from_base` if it doesn't exist.
 ///
 /// Same-branch fast path: when the repo's current branch already equals
-/// `branch`, this is a no-op and the function returns Ok without running
-/// any git command and without checking cleanliness. Spawning a session
-/// against the branch you're already on must never touch the working
-/// tree, even if it has uncommitted changes — that's the whole point of
-/// "spawn in-place" on the current branch.
+/// `branch`, this is a no-op and returns Ok without running any git command
+/// or checking cleanliness — spawning against the branch you're already on
+/// must never touch the working tree, even when it has uncommitted changes.
+///
+/// Otherwise `strategy` governs a dirty tree:
+/// - `None`: refuse if the tree is dirty. The daemon pre-checks via
+///   [`in_place_checkout_preflight`] and prompts, so this is the safety
+///   backstop (and the behavior for non-interactive callers like presets).
+/// - `Some(Carry)`: `git checkout`, carrying uncommitted changes across (git
+///   refuses if they would conflict with the target).
+/// - `Some(Stash)`: stash (including untracked), switch, and leave the stash.
+/// - `Some(Unknown)`: treated as `None`.
 pub async fn checkout_in_place(
     repo: &Path,
     branch: &str,
     create_from_base: Option<&str>,
+    strategy: Option<protocol::CheckoutStrategy>,
 ) -> anyhow::Result<()> {
     if current_branch(repo).await.ok().flatten().as_deref() == Some(branch) {
         return Ok(());
     }
-    if !is_clean(repo).await? {
+    let carry = matches!(strategy, Some(protocol::CheckoutStrategy::Carry));
+    let stash = matches!(strategy, Some(protocol::CheckoutStrategy::Stash));
+    if !carry && !stash && !is_clean(repo).await? {
         return Err(anyhow!(
             "{} has uncommitted changes; switching to '{branch}' would touch them — commit or stash first, or use a worktree",
             repo.display()
         ));
+    }
+    if stash {
+        let message = format!("rustling-tulip: switching to {branch}");
+        run_git(
+            repo,
+            &["stash", "push", "--include-untracked", "-m", &message],
+        )
+        .await
+        .context("stashing changes before in-place switch")?;
     }
     let branch_exists = run_git(repo, &["rev-parse", "--verify", branch])
         .await

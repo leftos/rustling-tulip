@@ -3078,6 +3078,58 @@ button.tree-tab-pill:hover {
   border-radius: var(--radius-sm, 6px);
   color: var(--fg);
 }
+.branch-combobox {
+  position: relative;
+}
+.branch-combobox input {
+  width: 100%;
+}
+.branch-combobox-list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+}
+.branch-combobox-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+  font-size: 13px;
+}
+.branch-combobox-list li.active {
+  background: var(--bg-elev1);
+}
+.branch-combobox-name {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch-combobox-current {
+  flex: none;
+  font-size: var(--text-micro);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.branch-combobox-create {
+  color: var(--fg-muted);
+  font-style: italic;
+}
 .appearance-control-stack {
   flex-wrap: wrap;
   justify-content: flex-end;

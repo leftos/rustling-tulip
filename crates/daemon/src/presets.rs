@@ -1334,6 +1334,8 @@ async fn spawn_one(
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
+            // Preset launches don't prompt; a dirty in-place tree still errors.
+            checkout_strategy: None,
         },
         PresetSpawnKind::Workspace { workspace_id } => SpawnTarget::Workspace {
             workspace_id: workspace_id.clone(),

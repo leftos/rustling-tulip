@@ -165,14 +165,21 @@ pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> 
             })?;
         } else {
             let repo_path = PathBuf::from(&member.repo.path);
-            git::checkout_in_place(&repo_path, branch_name, member.effective_base.as_deref())
-                .await
-                .with_context(|| {
-                    format!(
-                        "checking out {branch_name} in {} (in-place)",
-                        member.repo.name
-                    )
-                })?;
+            // Workspace in-place checkout keeps the safe default (error on a
+            // dirty member); the confirm-and-strategy flow is single-repo only.
+            git::checkout_in_place(
+                &repo_path,
+                branch_name,
+                member.effective_base.as_deref(),
+                None,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "checking out {branch_name} in {} (in-place)",
+                    member.repo.name
+                )
+            })?;
         }
     }
     info!("ensure_branches: done");

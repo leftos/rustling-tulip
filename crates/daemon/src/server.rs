@@ -1379,8 +1379,12 @@ async fn dispatch(
             });
         }
         ClientMessage::SpawnSession(req) => {
-            let snap = spawn_session(hub, req).await?;
-            let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+            if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
+                let _ = out_tx.send(confirm);
+            } else {
+                let snap = spawn_session(hub, req).await?;
+                let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+            }
         }
         ClientMessage::DuplicateSession { session_id } => {
             let stored = hub
@@ -2720,6 +2724,49 @@ async fn handle_stash_write<F>(
     }
 }
 
+/// If `req` is an in-place single-repo spawn that would switch a dirty working
+/// tree to a *different* branch and no strategy was chosen yet, return the
+/// `CheckoutConfirmRequired` message asking the client how to proceed. Returns
+/// `None` when the spawn can run normally (worktree mode, same branch, clean
+/// tree, non-git folder, or a strategy already chosen).
+async fn in_place_checkout_confirm(hub: &Hub, req: &SpawnRequest) -> Option<DaemonMessage> {
+    let SpawnTarget::Single {
+        repo_id,
+        branch_name,
+        use_worktree: false,
+        checkout_strategy: None,
+        ..
+    } = &req.target
+    else {
+        return None;
+    };
+    let repo_path = hub.state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .find(|r| r.id == *repo_id)
+            .map(|r| r.path.clone())
+    })?;
+    let repo_path = PathBuf::from(repo_path);
+    if !git::is_initialized(&repo_path).await {
+        return None;
+    }
+    match git::in_place_checkout_preflight(&repo_path, branch_name).await {
+        Ok(git::InPlaceCheckout::Dirty { count }) => Some(DaemonMessage::CheckoutConfirmRequired {
+            repo_id: repo_id.clone(),
+            branch: branch_name.clone(),
+            dirty_count: u32::try_from(count).unwrap_or(u32::MAX),
+        }),
+        Ok(_) => None,
+        Err(err) => {
+            warn!(
+                ?err,
+                repo_id, "in_place_checkout_confirm: preflight failed; spawning anyway"
+            );
+            None
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "Spawn is naturally a flat pipeline (resolve → config → mode switch → \
@@ -2780,7 +2827,18 @@ pub(crate) async fn spawn_session(
             branch_name,
             base_branch,
             use_worktree,
-        } => spawn_single(hub, &repo_id, &branch_name, base_branch, use_worktree).await?,
+            checkout_strategy,
+        } => {
+            spawn_single(
+                hub,
+                &repo_id,
+                &branch_name,
+                base_branch,
+                use_worktree,
+                checkout_strategy,
+            )
+            .await?
+        }
         SpawnTarget::Workspace {
             workspace_id,
             branch_name,
@@ -3535,6 +3593,7 @@ async fn spawn_single(
     branch_name: &str,
     base_branch: Option<String>,
     use_worktree: bool,
+    checkout_strategy: Option<protocol::CheckoutStrategy>,
 ) -> anyhow::Result<SpawnResolution> {
     let repo = hub
         .state
@@ -3605,9 +3664,14 @@ async fn spawn_single(
         }
         worktree_path
     } else {
-        git::checkout_in_place(&repo_path, branch_name, Some(&base_for_create))
-            .await
-            .context("checking out branch in-place")?;
+        git::checkout_in_place(
+            &repo_path,
+            branch_name,
+            Some(&base_for_create),
+            checkout_strategy,
+        )
+        .await
+        .context("checking out branch in-place")?;
         repo_path.clone()
     };
 

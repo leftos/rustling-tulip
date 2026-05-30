@@ -161,6 +161,10 @@ export interface SessionSnapshot {
   worktree_paths: string[];
 }
 
+// How to resolve a dirty working tree on an in-place checkout. Mirrors the Rust
+// `CheckoutStrategy`; the client only ever sends a confirmed choice.
+export type CheckoutStrategy = "carry" | "stash";
+
 export type SpawnTarget =
   | {
       kind: "single";
@@ -168,6 +172,9 @@ export type SpawnTarget =
       branch_name: string;
       base_branch: string | null;
       use_worktree: boolean;
+      // Confirmed dirty-tree strategy for an in-place switch; null/omitted on
+      // the first attempt (the daemon then asks via `checkout_confirm_required`).
+      checkout_strategy?: CheckoutStrategy | null;
     }
   | {
       kind: "workspace";
@@ -964,6 +971,15 @@ export type DaemonMessage =
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
   | { type: "session_removed"; session_id: string }
+  // An in-place spawn would switch a dirty tree to a different branch; the
+  // daemon declined and asks how to proceed. The client resends the same spawn
+  // with a `checkout_strategy` of "carry" or "stash".
+  | {
+      type: "checkout_confirm_required";
+      repo_id: string;
+      branch: string;
+      dirty_count: number;
+    }
   | {
       type: "spawn_config_reply";
       session_id: string;

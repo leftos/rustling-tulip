@@ -439,8 +439,15 @@ pub enum SpawnTarget {
         /// When `true`, the daemon adds a worktree under
         /// `<repo>.wt/<branch>` and runs claude there. When `false`, the
         /// branch is checked out in the repo's primary directory and claude
-        /// runs there directly (errors out on a dirty working tree).
+        /// runs there directly.
         use_worktree: bool,
+        /// How to resolve a dirty working tree on an in-place
+        /// (`use_worktree = false`) switch to a *different* branch. `None`
+        /// (default) makes the daemon decline a dirty switch and emit
+        /// [`DaemonMessage::CheckoutConfirmRequired`] so the client can confirm;
+        /// the confirmed retry resends with `Carry` or `Stash`.
+        #[serde(default)]
+        checkout_strategy: Option<CheckoutStrategy>,
     },
     Workspace {
         workspace_id: String,
@@ -458,6 +465,24 @@ pub enum SpawnTarget {
         #[serde(default)]
         cwd: Option<String>,
     },
+}
+
+/// How to resolve a dirty working tree when checking out a branch in place
+/// (`SpawnTarget::Single { use_worktree: false }`). Sent on the confirmed retry
+/// after the daemon asked via [`DaemonMessage::CheckoutConfirmRequired`]. Grows
+/// a catch-all so an older daemon decoding a newer choice falls back to the
+/// safe (decline) path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckoutStrategy {
+    /// Switch with `git checkout`, carrying uncommitted changes across (git
+    /// refuses if they would conflict with the target branch).
+    Carry,
+    /// Stash uncommitted changes (including untracked), switch, and leave the
+    /// stash for the user to pop.
+    Stash,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2246,6 +2271,18 @@ pub enum DaemonMessage {
     SessionRemoved {
         session_id: String,
     },
+    /// An in-place spawn (`SpawnTarget::Single { use_worktree: false }`) would
+    /// switch a dirty working tree to a different branch. The daemon declines
+    /// rather than touch uncommitted work, and asks the client how to proceed;
+    /// the client confirms by resending the same spawn with a `checkout_strategy`
+    /// of `Carry` or `Stash`.
+    CheckoutConfirmRequired {
+        repo_id: String,
+        branch: String,
+        /// Count of uncommitted (index + worktree) changes that would be
+        /// affected, for the confirmation prompt.
+        dirty_count: u32,
+    },
     /// Reply to [`ClientMessage::GetSpawnConfig`]. `config` is `None` when
     /// the session no longer exists or pre-dates spawn-config persistence
     /// (orphan sidecars written before v13). UIs that prefilled a dialog
@@ -3099,6 +3136,7 @@ mod tests {
                 branch_name: "bug/1".to_string(),
                 base_branch: None,
                 use_worktree: true,
+                checkout_strategy: None,
             },
             mode: SessionMode::Interactive,
             initial_prompt: None,
@@ -3164,6 +3202,7 @@ mod tests {
                 branch_name: "feat/y".to_string(),
                 base_branch: None,
                 use_worktree: true,
+                checkout_strategy: None,
             },
             mode: SessionMode::Interactive,
             initial_prompt: Some("investigate".to_string()),

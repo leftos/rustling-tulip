@@ -3,11 +3,13 @@ import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 import { useIsRemote } from "../utils/remoteMode";
+import BranchCombobox from "./BranchCombobox";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import { loadSettings } from "../utils/settings";
 import type {
   Agent,
   AgentOptions,
+  ClientMessage,
   CodexSandbox,
   CursorSandbox,
   DaemonMessage,
@@ -52,6 +54,9 @@ interface Props {
   activeTabId: string | null;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
+  /// Hands the just-sent spawn request up so the app can resend it with a
+  /// checkout strategy if the daemon asks to confirm a dirty in-place switch.
+  onSpawnRequest: (req: Extract<ClientMessage, { type: "spawn_session" }>) => void;
   /// Closes the dialog and opens the directory picker so a fresh user
   /// can register a repo when they hit the empty-state CTA.
   onAddRepo: () => void;
@@ -228,6 +233,7 @@ export default function SpawnDialog({
   activeTabId,
   onClose,
   onSpawned,
+  onSpawnRequest,
   onAddRepo,
 }: Props) {
   const [target, setTarget] = useState<TargetSelection | null>(() =>
@@ -444,6 +450,7 @@ export default function SpawnDialog({
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
+                  onSpawnRequest={onSpawnRequest}
                   header={sharedFooter}
                 />
               ) : target?.kind === "workspace" ? (
@@ -1210,6 +1217,7 @@ function SingleForm({
   spawnPlacement,
   onClose,
   onSpawned,
+  onSpawnRequest,
   header,
 }: {
   /// Selected repo id — owned by the dialog's unified Target picker.
@@ -1227,6 +1235,9 @@ function SingleForm({
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
+  onSpawnRequest: (
+    req: Extract<ClientMessage, { type: "spawn_session" }>,
+  ) => void;
   header: React.ReactNode;
 }) {
   // Autofocus the branch name input — it's the field most likely to be
@@ -1271,6 +1282,12 @@ function SingleForm({
   // didn't exist.
   const defaultBranch =
     repo?.default_branch ?? currentBranch ?? knownBranches[0] ?? "main";
+  // The in-place "Branch" field defaults to the branch you're already on (so
+  // spawning in place is a no-op checkout), whereas `defaultBranch` above keeps
+  // preferring the repo default for the worktree *base* branch (new worktrees
+  // branch off main, not your current feature branch).
+  const inPlaceDefault =
+    currentBranch ?? repo?.default_branch ?? knownBranches[0] ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(
     () => prefillTarget?.use_worktree ?? true,
   );
@@ -1308,7 +1325,7 @@ function SingleForm({
   }, [repoId, useWorktree, worktreeMode, client]);
 
   const branch = useBranchField(
-    defaultBranch,
+    inPlaceDefault,
     useWorktree,
     `repo:${repoId}`,
     prefillTarget?.branch_name ?? null,
@@ -1380,7 +1397,7 @@ function SingleForm({
         value: useWorktree,
       });
     }
-    client.send({
+    const spawnMsg: Extract<ClientMessage, { type: "spawn_session" }> = {
       type: "spawn_session",
       label: null,
       target: {
@@ -1389,6 +1406,10 @@ function SingleForm({
         branch_name: branch.value.trim(),
         base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
+        // First attempt carries no strategy: a dirty in-place switch makes the
+        // daemon ask via `checkout_confirm_required`, and the app resends this
+        // request with the chosen strategy.
+        checkout_strategy: null,
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
@@ -1401,12 +1422,12 @@ function SingleForm({
         runMode === "plain_shell",
       ),
       ...advancedToWire(advanced, runMode),
-    });
+    };
+    client.send(spawnMsg);
+    onSpawnRequest(spawnMsg);
     onSpawned(spawnPlacement);
     onClose();
   };
-
-  const datalistId = `single-branches-${repoId || "none"}`;
 
   return (
     <>
@@ -1481,20 +1502,15 @@ function SingleForm({
         <>
           <label className="field">
             <span>{useWorktree ? "New worktree branch" : "Branch"}</span>
-            <input
-              ref={branchInputRef}
-              type="text"
-              list={datalistId}
+            <BranchCombobox
               value={branch.value}
-              onChange={(e) => branch.setValue(e.target.value)}
-              placeholder={defaultBranch}
-              data-testid="spawn-single-branch"
+              onChange={branch.setValue}
+              branches={knownBranches}
+              currentBranch={currentBranch}
+              placeholder={useWorktree ? defaultBranch : inPlaceDefault}
+              inputRef={branchInputRef}
+              testId="spawn-single-branch"
             />
-            <datalist id={datalistId}>
-              {knownBranches.map((b) => (
-                <option key={b} value={b} />
-              ))}
-            </datalist>
           </label>
 
           {useWorktree && worktreeMode === "new" && (
