@@ -517,6 +517,42 @@ pub fn has_any_session(grid: &GridNode) -> bool {
     }
 }
 
+/// Rebind every pane bound to `old` across `tabs` to `new`, in place. Used by
+/// abandoned-session resume: the fresh session takes over the slot(s) the
+/// abandoned one occupied instead of orphaning into the sidebar. Topology is
+/// untouched. Returns clones of the tabs whose grids changed so the caller can
+/// broadcast scoped tab events.
+pub fn rebind_session(tabs: &mut [TabEntry], old: &str, new: &str) -> Vec<TabEntry> {
+    let mut updated = Vec::new();
+    for tab in tabs.iter_mut() {
+        let Some(grid) = tab.grid_mut() else {
+            continue;
+        };
+        if rebind_grid(grid, old, new) {
+            updated.push(tab.clone());
+        }
+    }
+    updated
+}
+
+fn rebind_grid(grid: &mut GridNode, old: &str, new: &str) -> bool {
+    match grid {
+        GridNode::Pane { session_id, .. } => {
+            if session_id.as_deref() == Some(old) {
+                *session_id = Some(new.to_string());
+                true
+            } else {
+                false
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            let a = rebind_grid(first, old, new);
+            let b = rebind_grid(second, old, new);
+            a || b
+        }
+    }
+}
+
 /// Extract a pane (leaf) from the grid, collapsing parent splits as needed.
 /// Returns the extracted Pane node plus a flag indicating whether the source
 /// tab is now empty (caller should remove the tab).
@@ -1193,6 +1229,49 @@ mod tests {
         assert!(
             tabs.is_empty(),
             "tab with all panes on the session is removed"
+        );
+    }
+
+    #[test]
+    fn rebind_session_rewrites_matching_panes_across_tabs() {
+        // tab A: single pane on the old session.
+        // tab B: two panes, one on old + one on a different session.
+        // tab C: no panes on old -> untouched, not reported.
+        let mut tabs = vec![
+            grid_tab("A", pane("a1", Some("old"))),
+            grid_tab(
+                "B",
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("b1", Some("old")),
+                    pane("b2", Some("other")),
+                ),
+            ),
+            grid_tab("C", pane("c1", Some("other"))),
+        ];
+
+        let updated = rebind_session(&mut tabs, "old", "new");
+
+        // A + B reported (changed); C not.
+        let updated_ids: Vec<String> = updated.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(updated_ids, vec!["A".to_string(), "B".to_string()]);
+
+        // Panes bound to old now point at new; other bindings + topology intact.
+        assert_eq!(
+            collect_panes(tabs[0].grid().expect("A grid")),
+            vec![("a1".to_string(), Some("new".to_string()))]
+        );
+        assert_eq!(
+            collect_panes(tabs[1].grid().expect("B grid")),
+            vec![
+                ("b1".to_string(), Some("new".to_string())),
+                ("b2".to_string(), Some("other".to_string())),
+            ]
+        );
+        assert_eq!(
+            collect_panes(tabs[2].grid().expect("C grid")),
+            vec![("c1".to_string(), Some("other".to_string()))]
         );
     }
 

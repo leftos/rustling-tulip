@@ -3817,6 +3817,11 @@ async fn resume_abandoned(
     req.initial_prompt = last_prompt;
     let snap = spawn_session(hub, req).await?;
 
+    // Rebind any pane that pointed at the abandoned session to the fresh one,
+    // in every client layout, so the resume reattaches to its original slot
+    // instead of orphaning into the sidebar as an unbound session.
+    rebind_session_panes(hub, session_id, &snap.id);
+
     // Remove the abandoned placeholder and delete the sidecar atomically
     // after the spawn succeeds. If spawn failed, the placeholder stays
     // so the user can try again.
@@ -4223,6 +4228,31 @@ fn close_session_panes(hub: &Hub, session_id: &str) {
             Outcome::Updated(cid, tab) => hub.emit_tab(&cid, TabEvent::Updated(tab)),
             Outcome::Removed(cid, tab_id) => hub.emit_tab(&cid, TabEvent::Removed(tab_id)),
         }
+    }
+}
+
+/// Rebind every pane bound to `old_id` to `new_id` across every client's
+/// layout, broadcasting a scoped `TabUpdated` per affected tab. Used by
+/// `resume_abandoned` so a resumed session reattaches to the pane its
+/// abandoned predecessor occupied instead of orphaning into the sidebar.
+fn rebind_session_panes(hub: &Hub, old_id: &str, new_id: &str) {
+    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
+        let mut out: Vec<(String, TabEntry)> = Vec::new();
+        for (cid, layout) in layouts.iter_mut() {
+            for tab in tabs::rebind_session(&mut layout.tabs, old_id, new_id) {
+                out.push((cid.clone(), tab));
+            }
+        }
+        out
+    }) {
+        Ok(list) => list,
+        Err(err) => {
+            warn!(?err, "rebind_session_panes: state.mutate failed");
+            return;
+        }
+    };
+    for (cid, tab) in outcomes {
+        hub.emit_tab(&cid, TabEvent::Updated(tab));
     }
 }
 
