@@ -80,6 +80,12 @@ import TabWindow from "./components/TabWindow";
 import UndoShelf, { type UndoShelfEntry } from "./components/UndoShelf";
 import { markForAutoFocus } from "./utils/autofocus";
 import { logToFile } from "./utils/logger";
+import {
+  RemoteModeContext,
+  REMOTE_UNAVAILABLE_EVENT,
+  notifyRemoteUnavailable,
+  type RemoteUnavailableDetail,
+} from "./utils/remoteMode";
 import { randomWorktreeBranchName } from "./utils/randomName";
 import {
   balanceSplitDirection,
@@ -673,6 +679,13 @@ export default function App() {
   }, [state.undoEntries]);
 
   const onAddRepo = useCallback(async () => {
+    // Local-FS action: the picker browses *this* machine, but the daemon
+    // validates repo paths on its own filesystem. Meaningless over a remote
+    // connection — gate it (the UI also disables the affordance).
+    if (latestStateRef.current?.connectionTarget.kind === "remote") {
+      notifyRemoteUnavailable("Add repository");
+      return;
+    }
     const path = await pickDirectory(undefined, { lastDirKey: "addRepo" });
     if (!path) return;
     state.client?.send({ type: "add_repo", path, name: null });
@@ -680,6 +693,10 @@ export default function App() {
 
   const onAddRepoPath = useCallback(
     (path: string) => {
+      if (latestStateRef.current?.connectionTarget.kind === "remote") {
+        notifyRemoteUnavailable("Add repository");
+        return;
+      }
       state.client?.send({ type: "add_repo", path, name: null });
     },
     [state.client],
@@ -1541,6 +1558,10 @@ export default function App() {
   }, []);
 
   const onRevealInExplorer = useCallback((path: string) => {
+    if (latestStateRef.current?.connectionTarget.kind === "remote") {
+      notifyRemoteUnavailable("Reveal in file manager");
+      return;
+    }
     void invoke("reveal_in_explorer", { path }).catch((err: unknown) => {
       console.error("reveal_in_explorer failed", err);
     });
@@ -1854,6 +1875,23 @@ export default function App() {
       .catch((err: unknown) => {
         logToFile("warn", `listRemoteProfiles failed: ${String(err)}`);
       });
+  }, []);
+
+  // Toast for local-FS actions a deeply-nested component couldn't cleanly
+  // disable in remote mode (e.g. terminal file links). Dedup-keyed so rapid
+  // repeats replace in place rather than stacking.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<RemoteUnavailableDetail>).detail;
+      pushToast(setState, {
+        severity: "info",
+        key: "remote-unavailable",
+        message: `${detail.action} is unavailable on remote connections`,
+        detail: "This action would run on your machine, not the host.",
+      });
+    };
+    window.addEventListener(REMOTE_UNAVAILABLE_EVENT, handler);
+    return () => window.removeEventListener(REMOTE_UNAVAILABLE_EVENT, handler);
   }, []);
 
   /// Switch the active connection target and force a fresh connect. Tears down
@@ -2559,6 +2597,7 @@ export default function App() {
   );
 
   return (
+    <RemoteModeContext.Provider value={isRemote}>
     <div className="app-root" data-testid="app-root">
       <ActivityBar
         active={activitySection}
@@ -2682,7 +2721,7 @@ export default function App() {
           onClose={onCloseWorkspaceCreator}
         />
       )}
-      {state.vscodeQueue[0] && state.client && (
+      {!isRemote && state.vscodeQueue[0] && state.client && (
         <VscodeSuggestionToast
           suggestion={state.vscodeQueue[0]}
           client={state.client}
@@ -2787,6 +2826,7 @@ export default function App() {
         />
       )}
     </div>
+    </RemoteModeContext.Provider>
   );
 }
 

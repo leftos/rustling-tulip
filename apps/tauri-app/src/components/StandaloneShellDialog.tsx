@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { pickDirectory } from "../api";
 import { useEscape, useFocusReturn } from "../utils/a11y";
+import { REMOTE_UNAVAILABLE_TOOLTIP, useIsRemote } from "../utils/remoteMode";
 
 interface Props {
   initialPath: string | null;
@@ -15,6 +16,7 @@ export default function StandaloneShellDialog({
 }: Props) {
   const [cwd, setCwd] = useState(initialPath ?? "");
   const [saveAsDefault, setSaveAsDefault] = useState(true);
+  const isRemote = useIsRemote();
   const trimmed = cwd.trim();
   const canSubmit = trimmed.length > 0;
 
@@ -62,12 +64,20 @@ export default function StandaloneShellDialog({
               <button
                 type="button"
                 onClick={browse}
+                disabled={isRemote}
+                title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
                 data-testid="standalone-shell-browse"
               >
                 Browse
               </button>
             </div>
           </label>
+          {isRemote && (
+            <p className="settings-section-hint">
+              Browsing is disabled on remote connections — type a path that
+              exists on the host machine.
+            </p>
+          )}
           <label className="checkbox">
             <input
               type="checkbox"

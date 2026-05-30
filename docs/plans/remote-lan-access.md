@@ -35,8 +35,20 @@
       profile then connects; re-pairing the same host:port updates in place.
       Remote mode relabels footer "Restart"→"Reconnect" (never WS-shutdowns the
       remote daemon) and hides the local-only "Stop daemon".
-- [ ] Phase 6 — remote-mode UI degradation (hide local-FS actions) — NEXT.
-- [ ] Phases 7–9 — see below.
+- [x] Phase 6 — remote-mode UI degradation. A `RemoteModeContext` (provided at
+      the main App render) + a `rt:remote-unavailable` window-event toast let
+      deeply-nested components gate local-FS actions without prop-drilling.
+      Gated: add-repo (Sidebar button/link/empty-state, SpawnDialog, add-repo-path
+      handler), create-workspace (Sidebar), reveal-in-explorer (App handler,
+      SessionContextMenu, WorktreeCleanupFailedDialog), open-in-VS-Code (Sidebar
+      container menu, terminal file links — URLs stay enabled), VS Code workspace
+      suggestion (suppressed), and every directory/file Browse/Pick (Standalone
+      shell, PresetLaunchDialog ×4 — those readonly fields become typeable so a
+      host path can still be entered). **Known follow-up:** pop-out windows render
+      their own App instance outside the provider, so a terminal file link in a
+      remote pop-out isn't gated yet (no regression — it was never gated).
+- [ ] Phase 7 — per-client layouts (daemon + frontend) — NEXT.
+- [ ] Phases 8–9 — see below.
 
 ## Context
 
@@ -231,11 +243,16 @@ leaf-cert fingerprint; pass a dummy SNI.
       Restart→Reconnect, hide local-only Stop). Full local-FS gating is Phase 6.
 
 ### Phase 6 — Remote-mode UI degradation (hide local-FS actions)
-- [ ] Gate on `!isRemote`: add-repo file picker (`onAddRepo`, App.tsx:554),
-      `reveal_in_explorer`, `open_path_in_vscode`, `open_folders_in_vscode`. Hide or
-      disable with a tooltip ("unavailable on remote connections"). Touch points:
-      `App.tsx`, `components/Sidebar.tsx` (~2052/2072), `components/Terminal.tsx`
-      (~120), `components/SessionContextMenu.tsx` (~570).
+- [x] Gate on `isRemote` via `RemoteModeContext` + `notifyRemoteUnavailable`
+      (window-event toast). Covered: add-repo, add-repo-path, create-workspace,
+      `reveal_in_explorer`, `open_path_in_vscode`, `open_folders_in_vscode`, the VS
+      Code workspace suggestion, and all directory/file Browse/Pick affordances.
+      Buttons disable + tooltip; readonly path fields become typeable so a host
+      path can still be entered; click-only handlers (terminal links) toast.
+      Touch points: `App.tsx`, `Sidebar.tsx`, `Terminal.tsx`,
+      `SessionContextMenu.tsx`, `SpawnDialog.tsx`, `StandaloneShellDialog.tsx`,
+      `PresetLaunchDialog.tsx`, `WorktreeCleanupFailedDialog.tsx`, new
+      `utils/remoteMode.ts`.
 
 ### Phase 7 — Per-client layouts (the core of "control only what I care about")
 

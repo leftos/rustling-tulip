@@ -6,6 +6,7 @@ import type {
   WorktreeLockingProcess,
 } from "../types";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
+import { notifyRemoteUnavailable, useIsRemote } from "../utils/remoteMode";
 
 interface Props {
   sessionId: string;
@@ -37,6 +38,7 @@ export default function WorktreeCleanupFailedDialog({
   onIgnore,
 }: Props) {
   const ignoreRef = useRef<HTMLButtonElement | null>(null);
+  const isRemote = useIsRemote();
   useEscape(onIgnore);
   useAutoFocus(ignoreRef);
   useFocusReturn();
@@ -79,6 +81,10 @@ export default function WorktreeCleanupFailedDialog({
   };
 
   const onClickOpenFolder = (memberPath: string) => {
+    if (isRemote) {
+      notifyRemoteUnavailable("Reveal in file manager");
+      return;
+    }
     // Parent of the member dir — the wt.<branch>/ wrapper — so the
     // user can see siblings if it's a workspace session.
     const parent = parentDir(memberPath);

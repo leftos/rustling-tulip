@@ -10,6 +10,7 @@ import {
   type WorkspaceEntry,
 } from "../types";
 import { useClampedMenuPosition } from "../utils/a11y";
+import { useIsRemote } from "../utils/remoteMode";
 import { pickBalancedDropTarget, sessionTabBindings } from "../utils/grid";
 import {
   clearPanePoppedOut,
@@ -97,6 +98,7 @@ export default function SessionContextMenu({
   // sessions the user can still drill into individual members via the
   // sidebar; the menu offers the primary one as a fast-path.
   const worktreePath = s.members[0]?.worktree_path ?? null;
+  const isRemote = useIsRemote();
 
   /// Action-bucket detection. Mutually exclusive:
   /// - `inactive`: parked by the user; no pane, sits in the sidebar
@@ -562,7 +564,7 @@ export default function SessionContextMenu({
                 </button>
               </li>
             </MenuSubmenu>
-            {worktreePath && (
+            {worktreePath && !isRemote && (
               <li>
                 <button
                   type="button"
