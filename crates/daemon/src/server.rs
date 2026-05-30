@@ -473,12 +473,19 @@ pub async fn run(
         let port = lan_config
             .as_ref()
             .map_or(lan::DEFAULT_LAN_PORT, |c| c.port);
-        match start_lan_listener(&hub, port).await {
-            Ok(fingerprint) => {
-                info!(port, %fingerprint, "LAN access enabled at startup; TLS listener bound");
+        // Bring the LAN listener up off the critical path: its bind retries for
+        // up to ~10s while a restarting daemon's predecessor releases the port,
+        // and that must never delay the loopback `serve` below — local clients
+        // come first.
+        let hub_for_lan = hub.clone();
+        tokio::spawn(async move {
+            match start_lan_listener(&hub_for_lan, port).await {
+                Ok(fingerprint) => {
+                    info!(port, %fingerprint, "LAN access enabled at startup; TLS listener bound");
+                }
+                Err(err) => error!(?err, "LAN access enabled but listener failed to start"),
             }
-            Err(err) => error!(?err, "LAN access enabled but listener failed to start"),
-        }
+        });
     }
 
     // Tear down the LAN listener + mDNS advertisement (started at boot or via
@@ -588,16 +595,18 @@ async fn start_lan_listener(hub: &Hub, port: u16) -> anyhow::Result<String> {
     let cert = lan::ensure_cert(&hub.dirs)?;
     let fingerprint = cert.fingerprint;
     let lan_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    // Bind synchronously with retry so the result is the real bind outcome (a
+    // failure propagates to the caller's log) and a supervisor handoff doesn't
+    // lose the port race against the outgoing daemon's graceful drain.
+    let listener = lan::bind_listener(lan_addr).await?;
     let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(cert.server_config);
     let handle = axum_server::Handle::new();
     *hub.lan_handle.lock().await = Some(handle.clone());
     let app = build_router(hub.clone());
+    let server = axum_server::from_tcp_rustls(listener, tls_config)
+        .context("building LAN TLS server from bound listener")?;
     tokio::spawn(async move {
-        if let Err(err) = axum_server::bind_rustls(lan_addr, tls_config)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
-        {
+        if let Err(err) = server.handle(handle).serve(app.into_make_service()).await {
             error!(?err, "LAN TLS listener exited with error");
         }
     });

@@ -16,13 +16,24 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Default port for the LAN TLS listener. Fixed (not ephemeral) so a remote
 /// client's saved profile keeps pointing at the right port across restarts.
 pub const DEFAULT_LAN_PORT: u16 = 8787;
 
 const AUTH_TOKEN_LEN: usize = 48;
+
+/// Backoff between LAN bind attempts while the previous daemon releases the
+/// port.
+const LAN_BIND_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+/// How long to keep retrying a LAN bind that fails with `AddrInUse`. Sized to
+/// outlast the previous daemon's graceful-shutdown drain (3s) plus socket
+/// teardown, so a fast supervisor handoff doesn't leave the new daemon's LAN
+/// listener permanently down.
+const LAN_BIND_RETRY_BUDGET: Duration = Duration::from_secs(10);
 
 /// Persisted contents of `lan.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +202,70 @@ pub fn detect_addresses() -> Vec<String> {
     }
 }
 
+/// Bind a TCP listener for the LAN TLS server, retrying while the address is
+/// still held by the previous daemon (`AddrInUse`).
+///
+/// On a supervisor handoff the outgoing daemon keeps `:<port>` bound for the
+/// duration of its graceful-shutdown drain, so a single bind attempt by the
+/// incoming daemon loses the race and the LAN listener would silently never
+/// come up until the next restart. Retrying with backoff bridges that window.
+/// Non-`AddrInUse` errors fail immediately. The returned listener is set
+/// nonblocking, ready for [`axum_server::from_tcp_rustls`].
+pub async fn bind_listener(addr: SocketAddr) -> anyhow::Result<std::net::TcpListener> {
+    bind_listener_inner(addr, LAN_BIND_RETRY_BUDGET, LAN_BIND_RETRY_BACKOFF).await
+}
+
+async fn bind_listener_inner(
+    addr: SocketAddr,
+    budget: Duration,
+    backoff: Duration,
+) -> anyhow::Result<std::net::TcpListener> {
+    let start = Instant::now();
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                listener
+                    .set_nonblocking(true)
+                    .context("setting LAN listener nonblocking")?;
+                if attempts > 1 {
+                    tracing::info!(
+                        port = addr.port(),
+                        attempts,
+                        "LAN listener bound after retrying past the previous daemon"
+                    );
+                }
+                return Ok(listener);
+            }
+            Err(err) if is_addr_in_use(&err) && start.elapsed() < budget => {
+                tracing::debug!(port = addr.port(), "LAN port still in use; retrying bind");
+                tokio::time::sleep(backoff).await;
+            }
+            Err(err) if is_addr_in_use(&err) => {
+                return Err(anyhow::Error::new(err)).with_context(|| {
+                    format!(
+                        "LAN port {} still in use after {}s; another process may hold it or the \
+                         previous daemon never released it",
+                        addr.port(),
+                        budget.as_secs()
+                    )
+                });
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err))
+                    .with_context(|| format!("binding LAN listener on {addr}"));
+            }
+        }
+    }
+}
+
+/// Whether a bind error means the port is only momentarily held (retry) rather
+/// than a genuine, permanent failure (give up).
+fn is_addr_in_use(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::AddrInUse
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
@@ -247,5 +322,41 @@ mod tests {
         assert_eq!(first.len(), 64, "sha-256 hex is 64 chars");
         assert_eq!(fingerprint(&dirs), Some(first));
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn classifies_addr_in_use() {
+        assert!(is_addr_in_use(&std::io::Error::from(
+            std::io::ErrorKind::AddrInUse
+        )));
+        assert!(!is_addr_in_use(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[tokio::test]
+    async fn bind_listener_succeeds_on_free_port() {
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let listener = bind_listener(addr).await.expect("bind a free port");
+        assert!(
+            listener.local_addr().expect("local addr").port() > 0,
+            "OS assigned an ephemeral port"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_listener_gives_up_when_port_stays_busy() {
+        // Hold a port for the whole attempt so every retry sees AddrInUse.
+        let occupied = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("grab a port to occupy");
+        let addr = occupied.local_addr().expect("addr of occupied port");
+        // Short budget so the test doesn't wait the production 10s.
+        let result =
+            bind_listener_inner(addr, Duration::from_millis(250), Duration::from_millis(25)).await;
+        assert!(
+            result.is_err(),
+            "bind must fail while the port stays occupied"
+        );
+        drop(occupied);
     }
 }

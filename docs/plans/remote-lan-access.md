@@ -1,6 +1,6 @@
 # Remote LAN Access — Control Desktop Shells from a Laptop
 
-## Status (2026-05-29)
+## Status (2026-05-30)
 
 - [x] Dependency guardrail — `rustls`/`tokio-rustls`/`axum-server`/`rcgen` on the
       `ring` backend (no `aws-lc-sys`); verified no new `cargo deny` failures.
@@ -83,6 +83,25 @@
       crate. **Chosen security model:** code-gated exchange with the fingerprint
       from mDNS TXT (vs PAKE) — LAN-convenience grade; an active mDNS spoofer
       could MITM, which the manual pasted code (out-of-band fingerprint) avoids.
+
+### Post-merge robustness fixes
+
+The remote-LAN workflow restarts the daemon often (each new build makes the
+supervisor retire the running daemon and spawn the rebuilt one), which exposed
+two restart races that hand-testing hit:
+
+- [x] Tracer pipe re-arm retry. A transient `ERROR_PIPE_BUSY`/`ERROR_ACCESS_DENIED`
+      while the named-pipe instance was torn down made the tracer's accept loop
+      bail, dropping the last PTY-input sender → child stdin EOF → child died →
+      session abandoned on reattach. The accept loop now retries the re-arm with
+      backoff (`crates/tracer/src/supervisor.rs`), and orphan reattach runs
+      concurrently so one dead tracer can't stall boot.
+- [x] LAN listener bind retry. The new daemon could try to bind `0.0.0.0:<port>`
+      while the outgoing daemon still held it for its graceful-shutdown drain,
+      failing with `AddrInUse` and silently leaving the LAN listener down until
+      the next restart. `lan::bind_listener` now retries the bind with backoff
+      (10s budget) and the listener is started off the loopback critical path so
+      the retry never delays local clients.
 
 ## Context
 
