@@ -440,6 +440,7 @@ pub fn workspace_worktree_paths(
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
 mod tests {
     use super::*;
 
@@ -587,5 +588,170 @@ mod tests {
         let members = paths(&["/home/u/foo"]);
         let got = workspace_worktree_paths(&root, &refs(&members), "feature/x");
         assert_eq!(got, vec![PathBuf::from("/wt/wt.feature-x/home/u/foo")]);
+    }
+
+    // --- In-place checkout integration tests (shell real git) ---------------
+    // The daemon shells `git` for everything, so these spin up a throwaway repo
+    // and exercise the real preflight/checkout behavior rather than mocking.
+
+    /// Create a throwaway git repo on `main` with a single committed file.
+    async fn init_repo(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rt-git-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create repo dir");
+        run_git(&root, &["init"]).await.expect("git init");
+        run_git(&root, &["config", "user.email", "t@example.com"])
+            .await
+            .expect("config email");
+        run_git(&root, &["config", "user.name", "Test"])
+            .await
+            .expect("config name");
+        // A global commit.gpgsign=true without a usable key would block commits.
+        run_git(&root, &["config", "commit.gpgsign", "false"])
+            .await
+            .expect("config gpgsign");
+        std::fs::write(root.join("README.md"), "init\n").expect("seed file");
+        run_git(&root, &["add", "."]).await.expect("git add");
+        run_git(&root, &["commit", "-m", "init"])
+            .await
+            .expect("git commit");
+        // Normalize the initial branch name regardless of git's default.
+        run_git(&root, &["branch", "-M", "main"])
+            .await
+            .expect("rename to main");
+        root
+    }
+
+    fn write_file(repo: &Path, name: &str, body: &str) {
+        std::fs::write(repo.join(name), body).expect("write file");
+    }
+
+    #[tokio::test]
+    async fn preflight_same_branch_is_noop() {
+        let repo = init_repo("preflight-same").await;
+        let got = in_place_checkout_preflight(&repo, "main")
+            .await
+            .expect("preflight");
+        assert_eq!(got, InPlaceCheckout::SameBranch);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn preflight_clean_other_branch_is_clean() {
+        let repo = init_repo("preflight-clean").await;
+        let got = in_place_checkout_preflight(&repo, "feature")
+            .await
+            .expect("preflight");
+        assert_eq!(got, InPlaceCheckout::Clean);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn preflight_dirty_counts_changes() {
+        let repo = init_repo("preflight-dirty").await;
+        write_file(&repo, "scratch.txt", "uncommitted\n");
+        let got = in_place_checkout_preflight(&repo, "feature")
+            .await
+            .expect("preflight");
+        assert_eq!(got, InPlaceCheckout::Dirty { count: 1 });
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_same_branch_never_touches_dirty_tree() {
+        let repo = init_repo("co-same").await;
+        write_file(&repo, "scratch.txt", "uncommitted\n");
+        // Spawning against the branch you're already on is a no-op even when
+        // the tree is dirty, and needs no strategy.
+        checkout_in_place(&repo, "main", Some("main"), None)
+            .await
+            .expect("same-branch checkout is a no-op");
+        assert!(repo.join("scratch.txt").exists(), "dirty file untouched");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_clean_creates_and_switches_branch() {
+        let repo = init_repo("co-clean").await;
+        checkout_in_place(&repo, "feature", Some("main"), None)
+            .await
+            .expect("clean switch");
+        assert_eq!(
+            current_branch(&repo).await.expect("branch").as_deref(),
+            Some("feature")
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_dirty_without_strategy_errors() {
+        let repo = init_repo("co-dirty-none").await;
+        write_file(&repo, "scratch.txt", "uncommitted\n");
+        let result = checkout_in_place(&repo, "feature", Some("main"), None).await;
+        assert!(result.is_err(), "dirty in-place switch must refuse");
+        assert_eq!(
+            current_branch(&repo).await.expect("branch").as_deref(),
+            Some("main"),
+            "stays on the original branch after refusing"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_carry_keeps_changes_on_new_branch() {
+        let repo = init_repo("co-carry").await;
+        // Modify a tracked file; carrying applies cleanly onto a branch forked
+        // from the same commit.
+        write_file(&repo, "README.md", "carried edit\n");
+        checkout_in_place(
+            &repo,
+            "feature",
+            Some("main"),
+            Some(protocol::CheckoutStrategy::Carry),
+        )
+        .await
+        .expect("carry switch");
+        assert_eq!(
+            current_branch(&repo).await.expect("branch").as_deref(),
+            Some("feature")
+        );
+        let body = std::fs::read_to_string(repo.join("README.md")).expect("read README");
+        assert_eq!(body, "carried edit\n", "edit carried across the switch");
+        assert!(
+            !is_clean(&repo).await.expect("clean check"),
+            "carried change is still uncommitted on the new branch"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_stash_cleans_tree_and_leaves_stash() {
+        let repo = init_repo("co-stash").await;
+        write_file(&repo, "README.md", "stashed edit\n");
+        write_file(&repo, "scratch.txt", "untracked too\n");
+        checkout_in_place(
+            &repo,
+            "feature",
+            Some("main"),
+            Some(protocol::CheckoutStrategy::Stash),
+        )
+        .await
+        .expect("stash switch");
+        assert_eq!(
+            current_branch(&repo).await.expect("branch").as_deref(),
+            Some("feature")
+        );
+        assert!(
+            is_clean(&repo).await.expect("clean check"),
+            "tree is clean after stashing"
+        );
+        let stashes = run_git(&repo, &["stash", "list"])
+            .await
+            .expect("stash list");
+        assert!(
+            stashes.contains("switching to feature"),
+            "stash left for the user to pop: {stashes:?}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }
