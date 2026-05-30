@@ -239,7 +239,6 @@ impl AppState {
     /// Other clients' layouts available to clone: `(client_id, display name)`,
     /// excluding `exclude` (the requesting client) and any empty layouts (no
     /// point cloning an empty one).
-    #[expect(dead_code, reason = "consumed by the first-connect chooser (Phase 7b)")]
     pub fn clonable_layouts(&self, exclude: &str) -> Vec<(String, Option<String>)> {
         self.with_persisted(|s| {
             let mut out: Vec<(String, Option<String>)> = s

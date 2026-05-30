@@ -30,8 +30,10 @@ import {
 import {
   DEFAULT_CLAUDE_OPTIONS,
   tabGrid,
+  type ClonableLayout,
   type ContainerRef,
   type DaemonMessage,
+  type InitLayoutKind,
   type GridNode,
   type PresetEntry,
   type PresetLaunchJobSnapshot,
@@ -74,6 +76,7 @@ import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import SettingsModal from "./components/SettingsModal";
 import ConnectionPicker from "./components/ConnectionPicker";
+import LayoutChooser from "./components/LayoutChooser";
 import WorktreesManagerModal from "./components/WorktreesManagerModal";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
@@ -287,6 +290,14 @@ interface AppState {
   /// True while the connection picker modal (DaemonFooter → Connections) is
   /// open.
   connectionPickerOpen: boolean;
+  /// First-connect layout chooser payload, set on `layout_init_required` (a
+  /// new client_id the daemon has never seen). The LayoutChooser modal renders
+  /// it; cleared when the daemon answers with `tabs`. `null` otherwise.
+  layoutChooser: {
+    has_legacy: boolean;
+    active_session_count: number;
+    clonable: ClonableLayout[];
+  } | null;
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
@@ -395,6 +406,7 @@ export default function App() {
     connectionTarget: loadConnectionTarget(),
     remoteProfiles: [],
     connectionPickerOpen: false,
+    layoutChooser: null,
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -2788,6 +2800,19 @@ export default function App() {
           }
         />
       )}
+      {state.layoutChooser && (
+        <LayoutChooser
+          hasLegacy={state.layoutChooser.has_legacy}
+          activeSessionCount={state.layoutChooser.active_session_count}
+          clonable={state.layoutChooser.clonable}
+          onChoose={(kind) => {
+            clientRef.current?.send({ type: "init_layout", kind });
+            // Optimistically close; the daemon replies with `tabs`, which also
+            // clears this. Closing now avoids a flash if the reply is slow.
+            setState((s) => ({ ...s, layoutChooser: null }));
+          }}
+        />
+      )}
       {state.connectionPickerOpen && (
         <ConnectionPicker
           target={state.connectionTarget}
@@ -3196,6 +3221,16 @@ function handleMessage(
         };
       });
       return;
+    case "layout_init_required":
+      setState((s) => ({
+        ...s,
+        layoutChooser: {
+          has_legacy: msg.has_legacy,
+          active_session_count: msg.active_session_count,
+          clonable: msg.clonable,
+        },
+      }));
+      return;
     case "tabs":
       setState((s) => {
         const ids = new Set(msg.tabs.map((t) => t.id));
@@ -3220,6 +3255,8 @@ function handleMessage(
           activeTabId: active,
           focusedPaneId,
           focusedPaneByTab,
+          // The daemon answered the first-connect chooser (if one was open).
+          layoutChooser: null,
         };
       });
       return;

@@ -1285,6 +1285,33 @@ fn default_stagger_ms() -> u32 {
     3000
 }
 
+/// One cloneable layout offered in the first-connect chooser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClonableLayout {
+    pub client_id: String,
+    /// Display label (e.g. the other machine's hostname), if it reported one.
+    pub name: Option<String>,
+}
+
+/// How a client wants to seed its brand-new per-client layout, chosen at first
+/// connect. Grows over time, so it carries a catch-all `Unknown` so an older
+/// daemon keeps decoding a newer client's choice (falls back to empty).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InitLayoutKind {
+    /// Start with no tabs; curate from scratch.
+    Empty,
+    /// Adopt the pre-per-client global layout (offered once after upgrade).
+    CloneLegacy,
+    /// Deep-copy another client's current layout (fresh pane ids, same
+    /// session ids).
+    CloneClient { client_id: String },
+    /// One tab holding a pane per currently-running session.
+    AllSessions,
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -1756,6 +1783,12 @@ pub enum ClientMessage {
     /// set; mismatches are rejected.
     ReorderTabs {
         ordered_ids: Vec<String>,
+    },
+    /// Reply to [`DaemonMessage::LayoutInitRequired`]: the client picked how to
+    /// seed its brand-new per-client layout. The daemon creates the layout for
+    /// the connection's `client_id` and then sends [`DaemonMessage::Tabs`].
+    InitLayout {
+        kind: InitLayoutKind,
     },
     /// Manual ordering of the sidebar's top-level containers as a single
     /// flat list mixing workspaces and repos. Anything not present in the
@@ -2293,6 +2326,20 @@ pub enum DaemonMessage {
     /// Initial tab snapshot sent on connect.
     Tabs {
         tabs: Vec<TabEntry>,
+    },
+    /// Sent instead of [`DaemonMessage::Tabs`] when a client connects with a
+    /// `client_id` the daemon has never seen. The client shows a first-connect
+    /// chooser and replies with [`ClientMessage::InitLayout`]; the daemon then
+    /// creates the layout and sends `Tabs`. Clients that don't recognize this
+    /// message (older builds) just won't render tabs until they send any tab
+    /// mutation, which lazily creates an empty layout.
+    LayoutInitRequired {
+        /// Whether a pre-per-client global layout is available to adopt.
+        has_legacy: bool,
+        /// Count of currently-running sessions (for the "open all" option).
+        active_session_count: u32,
+        /// Other clients' non-empty layouts that can be cloned.
+        clonable: Vec<ClonableLayout>,
     },
     /// Broadcast on any structural change to a single tab (create, rename,
     /// split, close pane, ratio adjustment, move, session-prune).

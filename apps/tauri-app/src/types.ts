@@ -568,6 +568,21 @@ export interface TabEntry {
   created_at: string;
 }
 
+/// One cloneable layout offered in the first-connect chooser. Mirrors the Rust
+/// `ClonableLayout`.
+export interface ClonableLayout {
+  client_id: string;
+  name: string | null;
+}
+
+/// How a brand-new client seeds its per-client layout at first connect. Mirrors
+/// the Rust `InitLayoutKind` (internally tagged on `kind`).
+export type InitLayoutKind =
+  | { kind: "empty" }
+  | { kind: "clone_legacy" }
+  | { kind: "clone_client"; client_id: string }
+  | { kind: "all_sessions" };
+
 /**
  * Borrow the grid of `tab` when the tab is a grid kind. Returns `null` for
  * other kinds — callers that render pane layouts must guard on this, since
@@ -590,6 +605,7 @@ export type ClientMessage =
       client_id?: string;
       client_name?: string;
     }
+  | { type: "init_layout"; kind: InitLayoutKind }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "remove_repo"; repo_id: string }
@@ -1019,6 +1035,12 @@ export type DaemonMessage =
       truncated: boolean;
     }
   | { type: "tabs"; tabs: TabEntry[] }
+  | {
+      type: "layout_init_required";
+      has_legacy: boolean;
+      active_session_count: number;
+      clonable: ClonableLayout[];
+    }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }

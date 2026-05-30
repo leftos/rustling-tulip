@@ -385,6 +385,51 @@ fn collect_panes_for_session(grid: &GridNode, session_id: &str, out: &mut Vec<St
     }
 }
 
+/// Deep-copy a layout's tabs with fresh tab + pane ids but the same session
+/// bindings and structure. Used by the first-connect chooser's "clone another
+/// client's layout" — the clone attaches to the same global sessions in its own
+/// independent panes.
+#[must_use]
+pub fn clone_tabs_fresh_ids(tabs: &[TabEntry]) -> Vec<TabEntry> {
+    tabs.iter()
+        .map(|t| {
+            let content = match &t.content {
+                TabContent::Grid { grid } => TabContent::Grid {
+                    grid: clone_grid_fresh_pane_ids(grid),
+                },
+                // Diff tabs have no panes/sessions to re-id — copy verbatim.
+                diff @ TabContent::Diff { .. } => diff.clone(),
+            };
+            TabEntry {
+                id: new_id(),
+                name: t.name.clone(),
+                content,
+                created_at: t.created_at,
+            }
+        })
+        .collect()
+}
+
+fn clone_grid_fresh_pane_ids(grid: &GridNode) -> GridNode {
+    match grid {
+        GridNode::Pane { session_id, .. } => GridNode::Pane {
+            pane_id: new_id(),
+            session_id: session_id.clone(),
+        },
+        GridNode::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => GridNode::Split {
+            direction: *direction,
+            ratio: *ratio,
+            first: Box::new(clone_grid_fresh_pane_ids(first)),
+            second: Box::new(clone_grid_fresh_pane_ids(second)),
+        },
+    }
+}
+
 /// Result of [`close_session_panes`]: tabs that survived (to re-broadcast) and
 /// the ids of tabs whose last pane closed (removed from the layout).
 pub struct SessionCloseResult {
@@ -1149,6 +1194,32 @@ mod tests {
             tabs.is_empty(),
             "tab with all panes on the session is removed"
         );
+    }
+
+    #[test]
+    fn clone_tabs_fresh_ids_keeps_sessions_but_remints_ids() {
+        let src = vec![grid_tab(
+            "orig",
+            split(
+                Vertical,
+                0.5,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )];
+        let cloned = clone_tabs_fresh_ids(&src);
+        assert_eq!(cloned.len(), 1);
+        assert_ne!(cloned[0].id, "orig", "tab id is fresh");
+        let panes = collect_panes(cloned[0].grid().expect("cloned grid"));
+        let sessions: Vec<_> = panes.iter().map(|(_, sid)| sid.clone()).collect();
+        assert_eq!(
+            sessions,
+            vec![Some("s1".to_string()), Some("s2".to_string())],
+            "same session bindings"
+        );
+        let pane_ids: Vec<_> = panes.iter().map(|(pid, _)| pid.clone()).collect();
+        assert!(!pane_ids.contains(&"p1".to_string()), "pane ids are fresh");
+        assert!(!pane_ids.contains(&"p2".to_string()), "pane ids are fresh");
     }
 
     #[test]

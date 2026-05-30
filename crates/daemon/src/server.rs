@@ -33,10 +33,11 @@ use chrono::Utc;
 use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, DaemonHandshake,
-    DaemonMessage, InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PresetLaunchJobSnapshot,
-    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, ClonableLayout,
+    DaemonHandshake, DaemonMessage, InboundClientMessage, InitLayoutKind, PROTOCOL_VERSION,
+    PaneDropEdge, PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember,
+    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    VscodeWorkspaceSuggestion,
 };
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -619,7 +620,15 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         .client_id
         .clone()
         .unwrap_or_else(|| crate::state::LEGACY_CLIENT_ID.to_string());
-    ensure_client_layout(&hub, &client_id, handshake.client_name.as_deref());
+    let client_name = handshake.client_name.clone();
+    // A real client_id the daemon has never seen gets the first-connect chooser
+    // (LayoutInitRequired instead of Tabs). Legacy/no-id clients can't handle
+    // the chooser, so they auto-init the shared legacy layout.
+    let needs_layout_chooser =
+        client_id != crate::state::LEGACY_CLIENT_ID && !hub.state.has_client_layout(&client_id);
+    if !needs_layout_chooser {
+        ensure_client_layout(&hub, &client_id, client_name.as_deref());
+    }
 
     // Per-session PTY forwarder tasks. Each task subscribes directly to a
     // session's `pty.output` broadcast and pumps bytes into this client's
@@ -675,10 +684,19 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
     let state_event_task = spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
 
-    // Send initial state snapshots (including this client's own layout).
-    push_initial_state(&hub, &out_tx, &client_id);
+    // Send initial state snapshots: this client's layout, or the first-connect
+    // chooser when it has none yet.
+    push_initial_state(&hub, &out_tx, &client_id, needs_layout_chooser);
 
-    recv_loop(&hub, &mut receiver, &out_tx, &pty_forwarders, &client_id).await;
+    recv_loop(
+        &hub,
+        &mut receiver,
+        &out_tx,
+        &pty_forwarders,
+        &client_id,
+        client_name.as_deref(),
+    )
+    .await;
 
     info!("client_session: recv_loop returned; tearing down");
     {
@@ -696,12 +714,12 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     info!("client_session: returning");
 }
 
-/// Make sure a layout entry exists for `client_id`, applying the one-time
-/// legacy migration on first sight. The first client to connect after an
-/// upgrade adopts the pre-per-client global layout (so the desktop keeps its
-/// tabs); every client after that starts empty and curates its own. The
-/// first-connect chooser (Phase 7b) refines this with explicit clone/all
-/// options.
+/// Ensure a layout exists for a non-chooser connection: an existing client
+/// (refresh its name) or the shared legacy key (no `client_id`). Legacy
+/// connections mirror the pre-per-client global layout without consuming it,
+/// so a real client can still adopt it through the first-connect chooser
+/// (`CloneLegacy`). Real clients with no layout never reach here — they go
+/// through the chooser.
 fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Option<&str>) {
     if hub.state.has_client_layout(client_id) {
         if let Err(err) = hub
@@ -712,19 +730,12 @@ fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Option<&str>) {
         }
         return;
     }
-    let legacy = hub.state.legacy_tabs();
-    let consume_legacy = !legacy.is_empty();
-    let tabs = if consume_legacy { legacy } else { Vec::new() };
     if let Err(err) = hub.state.set_client_layout(
         client_id,
         client_name.map(std::string::ToString::to_string),
-        tabs,
+        hub.state.legacy_tabs(),
     ) {
-        warn!(?err, %client_id, "failed to initialize client layout");
-        return;
-    }
-    if consume_legacy && let Err(err) = hub.state.clear_legacy_tabs() {
-        warn!(?err, "failed to clear legacy tabs after migration");
+        warn!(?err, %client_id, "failed to initialize legacy client layout");
     }
 }
 
@@ -896,6 +907,7 @@ async fn recv_loop(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     client_id: &str,
+    client_name: Option<&str>,
 ) {
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
@@ -940,7 +952,9 @@ async fn recv_loop(
                         continue;
                     }
                 };
-                if let Err(err) = dispatch(hub, parsed, out_tx, pty_forwarders, client_id).await {
+                if let Err(err) =
+                    dispatch(hub, parsed, out_tx, pty_forwarders, client_id, client_name).await
+                {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                     });
@@ -1026,7 +1040,12 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
     best
 }
 
-fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, client_id: &str) {
+fn push_initial_state(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    client_id: &str,
+    needs_layout_chooser: bool,
+) {
     let (repos, workspaces, container_order, session_order) = hub.state.with_persisted(|s| {
         (
             s.repos.clone(),
@@ -1035,7 +1054,6 @@ fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, 
             s.session_order.clone(),
         )
     });
-    let tabs = hub.state.client_layout(client_id);
     let _ = out_tx.send(DaemonMessage::Repos { repos });
     let _ = out_tx.send(DaemonMessage::Workspaces { workspaces });
     let _ = out_tx.send(DaemonMessage::ContainersReordered {
@@ -1049,10 +1067,26 @@ fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>, 
             });
         }
     }
-    let _ = out_tx.send(DaemonMessage::Sessions {
-        sessions: hub.sessions.snapshots(),
-    });
-    let _ = out_tx.send(DaemonMessage::Tabs { tabs });
+    let sessions = hub.sessions.snapshots();
+    let session_count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
+    let _ = out_tx.send(DaemonMessage::Sessions { sessions });
+    if needs_layout_chooser {
+        let clonable = hub
+            .state
+            .clonable_layouts(client_id)
+            .into_iter()
+            .map(|(client_id, name)| ClonableLayout { client_id, name })
+            .collect();
+        let _ = out_tx.send(DaemonMessage::LayoutInitRequired {
+            has_legacy: !hub.state.legacy_tabs().is_empty(),
+            active_session_count: session_count,
+            clonable,
+        });
+    } else {
+        let _ = out_tx.send(DaemonMessage::Tabs {
+            tabs: hub.state.client_layout(client_id),
+        });
+    }
     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged {
         root: hub.state.worktrees_dir().to_string_lossy().into_owned(),
         is_override: hub.state.worktrees_root_is_override(),
@@ -1077,6 +1111,7 @@ async fn dispatch(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     client_id: &str,
+    client_name: Option<&str>,
 ) -> anyhow::Result<()> {
     match msg {
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
@@ -1888,6 +1923,32 @@ async fn dispatch(
             hub.state
                 .mutate_client_layout(client_id, |tabs| tabs::reorder_tabs(tabs, &ordered_ids))??;
             hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
+        }
+        ClientMessage::InitLayout { kind } => {
+            // First-connect chooser reply: seed this client's brand-new layout
+            // and send it the resulting tabs. CloneClient deep-copies another
+            // client's layout with fresh pane ids (same sessions); AllSessions
+            // builds one tab of panes over every running session.
+            let clear_legacy = matches!(kind, InitLayoutKind::CloneLegacy);
+            let tabs = match kind {
+                InitLayoutKind::Empty | InitLayoutKind::Unknown => Vec::new(),
+                InitLayoutKind::CloneLegacy => hub.state.legacy_tabs(),
+                InitLayoutKind::CloneClient { client_id: source } => {
+                    tabs::clone_tabs_fresh_ids(&hub.state.client_layout(&source))
+                }
+                InitLayoutKind::AllSessions => build_all_sessions_layout(hub),
+            };
+            hub.state.set_client_layout(
+                client_id,
+                client_name.map(std::string::ToString::to_string),
+                tabs,
+            )?;
+            if clear_legacy {
+                hub.state.clear_legacy_tabs()?;
+            }
+            let _ = out_tx.send(DaemonMessage::Tabs {
+                tabs: hub.state.client_layout(client_id),
+            });
         }
         ClientMessage::ReorderContainers { ordered } => {
             let applied = reorder_containers(&hub.state, ordered)?;
@@ -3885,6 +3946,27 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
 /// the session is removed: a pane's sibling fills its space, and a tab whose
 /// last pane closed is removed entirely. Emits scoped `TabUpdated` (survivors)
 /// / `TabRemoved` (emptied tabs) per affected client.
+/// Build a one-tab layout with a pane per currently-running session — the
+/// "open all active sessions" first-connect choice. Empty when no sessions
+/// exist (the client starts with no tabs).
+fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
+    let panes: Vec<(String, Option<String>)> = hub
+        .sessions
+        .snapshots()
+        .into_iter()
+        .map(|s| (uuid::Uuid::new_v4().to_string(), Some(s.id)))
+        .collect();
+    let Some(grid) = tabs::build_grid(&panes, 0) else {
+        return Vec::new();
+    };
+    vec![TabEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "All sessions".to_string(),
+        content: TabContent::Grid { grid },
+        created_at: Utc::now(),
+    }]
+}
+
 fn close_session_panes(hub: &Hub, session_id: &str) {
     // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
     // last pane closed (already removed from that client's layout).

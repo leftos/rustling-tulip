@@ -54,10 +54,16 @@
       the scoped `tab_events` forwarder, `push_initial_state`, preset launch, and
       the startup prune are per-client. First client after upgrade adopts the
       legacy layout (desktop keeps its tabs); later clients start empty.
-- [ ] Phase 7b — explicit first-connect chooser (`LayoutInitRequired`/`InitLayout`:
-      empty / clone legacy / clone another client / all sessions) — NEXT.
-- [ ] Phase 7c — session-removal auto-close (close panes + sibling-fill across
-      all layouts, replacing prune-to-placeholder).
+- [x] Phase 7b — explicit first-connect chooser. New `client_id` → daemon sends
+      `LayoutInitRequired` (has_legacy / active_session_count / clonable) instead
+      of `Tabs`; the `LayoutChooser` modal offers start-empty / open-all-sessions /
+      adopt-legacy / clone-another-client; the `InitLayout` reply seeds the layout
+      (`tabs::clone_tabs_fresh_ids` for clones — same sessions, fresh pane ids) and
+      the daemon answers with `Tabs`. Legacy/no-id clients skip the chooser.
+- [x] Phase 7c — session-removal auto-close. `tabs::close_session_panes` closes
+      panes bound to the removed session (sibling-fill, tab removed if last) across
+      every layout, emitting scoped `TabUpdated`/`TabRemoved`. Replaces the old
+      prune-to-placeholder.
 - [ ] Phases 8–9 — see below.
 
 ## Context
