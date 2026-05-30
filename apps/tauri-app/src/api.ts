@@ -63,6 +63,71 @@ export async function stopDaemon(): Promise<void> {
   await invoke<void>("stop_daemon");
 }
 
+/// Resolved connection parameters for a remote daemon. Mirrors the Rust
+/// `remote::ConnectionParams`. Obtained by decoding a pasted connection code
+/// or from a saved `RemoteProfile`.
+export interface ConnectionParams {
+  host: string;
+  port: number;
+  token: string;
+  /// SHA-256 of the remote leaf cert, lowercase hex (64 chars).
+  fingerprint: string;
+}
+
+/// A saved remote host. Mirrors the Rust `remote::RemoteProfile`, persisted in
+/// `remote-profiles.json`.
+export interface RemoteProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  token: string;
+  fingerprint: string;
+}
+
+/// Which daemon the app talks to. `local` is the bundled per-machine daemon
+/// (`ensureDaemonStarted`); `remote` is a saved profile reached through the
+/// pinned-TLS loopback bridge (`connectRemote`). Persisted client-side so the
+/// last choice auto-connects on boot.
+export type ConnectionTarget =
+  | { kind: "local" }
+  | { kind: "remote"; profileId: string };
+
+/// Establish (or replace) the pinned-TLS loopback bridge to a remote daemon
+/// and return a synthetic handshake the frontend dials over plaintext
+/// loopback. Throws a descriptive string if the host is unreachable or the
+/// certificate fingerprint does not match the pinned value.
+export async function connectRemote(
+  params: ConnectionParams,
+): Promise<DaemonHandshake> {
+  return await invoke<DaemonHandshake>("connect_remote", { params });
+}
+
+/// Tear down the active remote bridge (when switching back to local).
+export async function disconnectRemote(): Promise<void> {
+  await invoke<void>("disconnect_remote");
+}
+
+/// Decode a pasted base64url connection code into connection params. Pure
+/// parse — does not touch the network.
+export async function decodeConnectionCode(
+  code: string,
+): Promise<ConnectionParams> {
+  return await invoke<ConnectionParams>("decode_connection_code", { code });
+}
+
+export async function listRemoteProfiles(): Promise<RemoteProfile[]> {
+  return await invoke<RemoteProfile[]>("list_remote_profiles");
+}
+
+export async function saveRemoteProfile(profile: RemoteProfile): Promise<void> {
+  await invoke<void>("save_remote_profile", { profile });
+}
+
+export async function deleteRemoteProfile(id: string): Promise<void> {
+  await invoke<void>("delete_remote_profile", { id });
+}
+
 // Picker memory: store the parent directory of the last successful pick
 // keyed by a caller-supplied purpose tag, so the next time the same picker
 // opens (across reloads / app restarts) it lands the user where they were.

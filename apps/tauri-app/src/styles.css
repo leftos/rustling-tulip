@@ -1669,6 +1669,14 @@ button.tree-tab-pill:hover {
   font-size: var(--text-micro);
   font-variant-numeric: tabular-nums;
 }
+.daemon-footer-remote {
+  color: var(--accent);
+  font-weight: 600;
+  max-width: 10ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .daemon-footer-dot {
   flex: none;
   width: 8px;
@@ -2905,6 +2913,108 @@ button.tree-tab-pill:hover {
 }
 .settings-row > span { font-size: 13px; }
 .settings-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Connection picker (DaemonFooter → Connections) */
+.connection-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.connection-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.connection-option {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elev1);
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.connection-option:hover {
+  background: var(--bg-elev2);
+}
+.connection-option.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.connection-option-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.connection-option-detail {
+  font-size: var(--text-micro);
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+.connection-delete {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-elev1);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.connection-delete:hover {
+  color: var(--status-error, #e5534b);
+  border-color: var(--status-error, #e5534b);
+}
+.connection-add {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connection-add-toggle {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--fg-muted);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm, 6px);
+  cursor: pointer;
+}
+.connection-add-toggle:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.connection-code-input {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  padding: 8px;
+  background: var(--bg-elev1);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+.connection-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--status-error, #e5534b);
+}
+.connection-add-actions {
   display: flex;
   align-items: center;
   gap: 8px;

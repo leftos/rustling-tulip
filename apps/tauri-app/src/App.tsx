@@ -9,13 +9,21 @@ import {
 } from "@tauri-apps/plugin-notification";
 import {
   connectDaemon,
+  connectRemote,
+  decodeConnectionCode,
+  deleteRemoteProfile,
+  disconnectRemote,
   ensureDaemonStarted,
+  listRemoteProfiles,
   pickDirectory,
   requestSpawnConfig,
+  saveRemoteProfile,
   stopDaemon,
   type ConnectionState,
+  type ConnectionTarget,
   type DaemonClient,
   type DaemonHandshake,
+  type RemoteProfile,
 } from "./api";
 import {
   DEFAULT_CLAUDE_OPTIONS,
@@ -63,6 +71,7 @@ import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import SettingsModal from "./components/SettingsModal";
+import ConnectionPicker from "./components/ConnectionPicker";
 import WorktreesManagerModal from "./components/WorktreesManagerModal";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
@@ -110,8 +119,42 @@ const popoutTabId = queryParams.get("tab");
 const popoutSessionId = queryParams.get("session");
 
 const ACTIVE_TAB_KEY = "rt:active-tab:main";
+const CONNECTION_TARGET_KEY = "rt:connection-target";
 const UNDO_TTL_MS = 8000;
 const UNDO_LIMIT = 3;
+
+/// Read the persisted connection target. Defaults to `local` (the bundled
+/// per-machine daemon) so a fresh install — and every desktop launch — boots
+/// straight into the local daemon with no extra friction.
+function loadConnectionTarget(): ConnectionTarget {
+  try {
+    const raw = localStorage.getItem(CONNECTION_TARGET_KEY);
+    if (!raw) return { kind: "local" };
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { kind?: unknown }).kind === "remote" &&
+      typeof (parsed as { profileId?: unknown }).profileId === "string"
+    ) {
+      return {
+        kind: "remote",
+        profileId: (parsed as { profileId: string }).profileId,
+      };
+    }
+    return { kind: "local" };
+  } catch {
+    return { kind: "local" };
+  }
+}
+
+function saveConnectionTarget(target: ConnectionTarget): void {
+  try {
+    localStorage.setItem(CONNECTION_TARGET_KEY, JSON.stringify(target));
+  } catch {
+    /* localStorage unavailable — best-effort, drop silently */
+  }
+}
 
 type UndoTabSnapshot = {
   tab: TabEntry;
@@ -225,6 +268,17 @@ interface AppState {
   /// Used by the Remote access settings panel to assemble the connection code
   /// the host hands to a remote client. `null` until the first connect.
   daemonToken: string | null;
+  /// Which daemon this window currently talks to. `local` is the bundled
+  /// per-machine daemon; `remote` reaches a saved host through the pinned-TLS
+  /// loopback bridge. Persisted client-side; drives the `connect()` branch and
+  /// the remote-mode UI degradation.
+  connectionTarget: ConnectionTarget;
+  /// Saved remote hosts, loaded from `remote-profiles.json` via the Tauri
+  /// side. Powers the connection picker and resolves the active remote target.
+  remoteProfiles: RemoteProfile[];
+  /// True while the connection picker modal (DaemonFooter → Connections) is
+  /// open.
+  connectionPickerOpen: boolean;
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
@@ -330,6 +384,9 @@ export default function App() {
     worktreesRoot: null,
     lanStatus: null,
     daemonToken: null,
+    connectionTarget: loadConnectionTarget(),
+    remoteProfiles: [],
+    connectionPickerOpen: false,
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -342,6 +399,11 @@ export default function App() {
   // effect's closure (which captures values at mount time).
   const stopRequestedRef = useRef(false);
   stopRequestedRef.current = state.daemonStopRequested;
+  // Mirror of `state.connectionTarget` so the connection effect's `connect()`
+  // closure always reads the current target (it captures values at mount and
+  // re-runs only when `connectionVersion` bumps).
+  const connectionTargetRef = useRef<ConnectionTarget>(state.connectionTarget);
+  connectionTargetRef.current = state.connectionTarget;
 
   // App-wide user preferences (localStorage-backed). `useSettings` returns
   // a live tuple — any other component that calls `useSettings` will
@@ -443,11 +505,51 @@ export default function App() {
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
 
+    /// Resolve a handshake for the current connection target. Local goes
+    /// through the daemon supervisor; remote opens the pinned-TLS loopback
+    /// bridge to a saved host. A remote target whose profile has vanished
+    /// (deleted, or a fresh install with a stale persisted id) self-heals back
+    /// to local so the reconnect loop doesn't spin forever on a missing host.
+    const resolveHandshake = async (): Promise<DaemonHandshake> => {
+      const target = connectionTargetRef.current;
+      if (target.kind !== "remote") {
+        return await ensureDaemonStarted();
+      }
+      const profiles = await listRemoteProfiles().catch(
+        () => [] as RemoteProfile[],
+      );
+      const profile = profiles.find((p) => p.id === target.profileId);
+      if (!profile) {
+        logToFile(
+          "warn",
+          `remote profile ${target.profileId} not found; falling back to local`,
+        );
+        saveConnectionTarget({ kind: "local" });
+        if (!cancelled) {
+          setState((s) => ({
+            ...s,
+            connectionTarget: { kind: "local" },
+            remoteProfiles: profiles,
+          }));
+        }
+        return await ensureDaemonStarted();
+      }
+      if (!cancelled) {
+        setState((s) => ({ ...s, remoteProfiles: profiles }));
+      }
+      return await connectRemote({
+        host: profile.host,
+        port: profile.port,
+        token: profile.token,
+        fingerprint: profile.fingerprint,
+      });
+    };
+
     /// Connect (or reconnect) and wire all subscriptions. Called on mount
     /// and from the close handler with exponential backoff.
     const connect = async () => {
       try {
-        const handshake = await ensureDaemonStarted();
+        const handshake = await resolveHandshake();
         if (cancelled) return;
         setState((s) => ({ ...s, daemonToken: handshake.auth_token }));
         client = connectDaemon(handshake);
@@ -508,19 +610,21 @@ export default function App() {
         }
         setState((s) => ({ ...s, client, handshake }));
       } catch (err) {
-        // ensureDaemonStarted failure (e.g. supervisor can't spawn the
-        // daemon) — record the error AND schedule a retry. The supervisor
-        // may need a moment to clean up a stale daemon.json. Exception:
-        // when the user has just hit Stop, don't retry — they asked for
-        // the daemon to be down.
+        // Handshake resolution failed: local → supervisor can't spawn the
+        // daemon; remote → host unreachable or fingerprint mismatch. Record
+        // the error AND schedule a retry (the chosen "stay + retry" behavior
+        // for an offline remote host — the user can switch targets from the
+        // connection picker). Exception: when the user just hit Stop, don't
+        // retry — they asked for the daemon to be down.
         const reason = String(err);
+        const targetKind = connectionTargetRef.current.kind;
         setState((s) => ({ ...s, status: { kind: "error", reason } }));
         if (!cancelled && !stopRequestedRef.current) {
           const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt);
           reconnectAttempt += 1;
           logToFile(
             "warn",
-            `daemon supervisor failed (${reason}); retrying in ${delay}ms (attempt ${reconnectAttempt})`,
+            `${targetKind} connect failed (${reason}); retrying in ${delay}ms (attempt ${reconnectAttempt})`,
           );
           reconnectTimer = window.setTimeout(() => {
             reconnectTimer = null;
@@ -1698,6 +1802,21 @@ export default function App() {
     const client = clientRef.current;
     const wasStopRequested = stopRequestedRef.current;
     const statusKind = latestStateRef.current?.status.kind;
+    // Remote: "Reconnect" must never send a WS `shutdown` (that would stop the
+    // remote daemon). Just tear down the WS + bridge and re-run connect().
+    if (connectionTargetRef.current.kind === "remote") {
+      client?.close();
+      clientRef.current = null;
+      setState((s) => ({
+        ...s,
+        client: null,
+        daemonStopRequested: false,
+        handshake: null,
+        status: { kind: "connecting" },
+      }));
+      setConnectionVersion((v) => v + 1);
+      return;
+    }
     if (statusKind === "auth_failed") {
       logToFile(
         "info",
@@ -1726,6 +1845,112 @@ export default function App() {
     setState((s) => ({ ...s, daemonStopRequested: false }));
     client.send({ type: "shutdown", drain: false });
   }, []);
+
+  // Load saved remote profiles once on mount so the connection picker has
+  // them without waiting for the user to open it.
+  useEffect(() => {
+    void listRemoteProfiles()
+      .then((profiles) => setState((s) => ({ ...s, remoteProfiles: profiles })))
+      .catch((err: unknown) => {
+        logToFile("warn", `listRemoteProfiles failed: ${String(err)}`);
+      });
+  }, []);
+
+  /// Switch the active connection target and force a fresh connect. Tears down
+  /// the loopback bridge when leaving a remote host for local. Clears any
+  /// user-Stopped state so the reconnect actually proceeds.
+  const onSwitchConnection = useCallback((target: ConnectionTarget) => {
+    const prev = latestStateRef.current?.connectionTarget;
+    if (prev?.kind === "remote" && target.kind === "local") {
+      void disconnectRemote().catch((err: unknown) => {
+        logToFile("warn", `disconnectRemote failed: ${String(err)}`);
+      });
+    }
+    saveConnectionTarget(target);
+    clientRef.current?.close();
+    clientRef.current = null;
+    setState((s) => ({
+      ...s,
+      connectionTarget: target,
+      client: null,
+      daemonStopRequested: false,
+      handshake: null,
+      status: { kind: "connecting" },
+      connectionPickerOpen: false,
+    }));
+    setConnectionVersion((v) => v + 1);
+  }, []);
+
+  /// "Add remote (paste code)": decode the code, upsert a profile (re-pairing
+  /// the same host updates its token/fingerprint in place), then connect.
+  /// Returns a decode error so the picker can show it inline; a successful
+  /// decode switches the target even if the host is unreachable (that surfaces
+  /// as a retrying error in the footer).
+  const onAddRemote = useCallback(
+    async (
+      code: string,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      let params;
+      try {
+        params = await decodeConnectionCode(code);
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+      const existing = (latestStateRef.current?.remoteProfiles ?? []).find(
+        (p) => p.host === params.host && p.port === params.port,
+      );
+      const id =
+        existing?.id ??
+        `remote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const profile: RemoteProfile = {
+        id,
+        name: existing?.name ?? params.host,
+        host: params.host,
+        port: params.port,
+        token: params.token,
+        fingerprint: params.fingerprint,
+      };
+      try {
+        await saveRemoteProfile(profile);
+      } catch (err) {
+        return { ok: false, error: `saving profile: ${String(err)}` };
+      }
+      const profiles = await listRemoteProfiles().catch(
+        () => [] as RemoteProfile[],
+      );
+      setState((s) => ({ ...s, remoteProfiles: profiles }));
+      onSwitchConnection({ kind: "remote", profileId: id });
+      return { ok: true };
+    },
+    [onSwitchConnection],
+  );
+
+  /// Forget a saved remote host. If it was the active target, fall back to the
+  /// local daemon (which also tears the bridge down + reconnects).
+  const onDeleteRemoteProfile = useCallback(
+    (id: string) => {
+      const wasActive =
+        latestStateRef.current?.connectionTarget.kind === "remote" &&
+        latestStateRef.current.connectionTarget.profileId === id;
+      void deleteRemoteProfile(id)
+        .catch((err: unknown) => {
+          logToFile("warn", `deleteRemoteProfile failed: ${String(err)}`);
+        })
+        .finally(() => {
+          void listRemoteProfiles()
+            .then((profiles) =>
+              setState((s) => ({ ...s, remoteProfiles: profiles })),
+            )
+            .catch(() => {
+              /* best-effort refresh */
+            });
+        });
+      if (wasActive) {
+        onSwitchConnection({ kind: "local" });
+      }
+    },
+    [onSwitchConnection],
+  );
 
   const activeSessionCount = useMemo(
     () =>
@@ -1779,6 +2004,21 @@ export default function App() {
     () => state.tabs.find((t) => t.id === state.activeTabId) ?? null,
     [state.tabs, state.activeTabId],
   );
+
+  const isRemote = state.connectionTarget.kind === "remote";
+  const activeRemoteProfile = useMemo(() => {
+    const target = state.connectionTarget;
+    if (target.kind !== "remote") return null;
+    return (
+      state.remoteProfiles.find((p) => p.id === target.profileId) ?? null
+    );
+  }, [state.connectionTarget, state.remoteProfiles]);
+  // Footer label for the active target: a remote host's name (or a generic
+  // "remote" until its profile loads), or null for local (keeps the desktop
+  // footer visually unchanged).
+  const connectionLabel = isRemote
+    ? (activeRemoteProfile?.name ?? "remote")
+    : null;
 
   /// Dynamic OS-window title for the main window. Pop-out windows manage
   /// their own titles via PaneWindow / TabWindow / SessionWindow, so we
@@ -2346,6 +2586,11 @@ export default function App() {
             daemonStopRequested={state.daemonStopRequested}
             onRestartDaemon={onRestartDaemon}
             onStopDaemon={onStopDaemon}
+            isRemote={isRemote}
+            connectionLabel={connectionLabel}
+            onOpenConnections={() =>
+              setState((s) => ({ ...s, connectionPickerOpen: true }))
+            }
             onLocalReorderTabs={onLocalReorder}
             containerOrder={state.containerOrder}
             onLocalReorderContainers={onLocalReorderContainers}
@@ -2484,6 +2729,21 @@ export default function App() {
           daemonToken={state.daemonToken}
           onOpenWorktreesManager={() =>
             setState((s) => ({ ...s, worktreesManagerOpen: true }))
+          }
+        />
+      )}
+      {state.connectionPickerOpen && (
+        <ConnectionPicker
+          target={state.connectionTarget}
+          profiles={state.remoteProfiles}
+          onSelectLocal={() => onSwitchConnection({ kind: "local" })}
+          onSelectProfile={(id) =>
+            onSwitchConnection({ kind: "remote", profileId: id })
+          }
+          onAddRemote={onAddRemote}
+          onDeleteProfile={onDeleteRemoteProfile}
+          onClose={() =>
+            setState((s) => ({ ...s, connectionPickerOpen: false }))
           }
         />
       )}

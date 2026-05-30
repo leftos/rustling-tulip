@@ -94,6 +94,15 @@ interface Props {
   /// Footer "Stop daemon" — pid-kill via Tauri command + set the
   /// stop-requested flag so auto-reconnect doesn't immediately respawn.
   onStopDaemon: () => void;
+  /// True when this window is connected to a remote host (not the bundled
+  /// local daemon). The footer relabels controls and gates local-only actions.
+  isRemote: boolean;
+  /// Display name of the active remote host, or null for local. Surfaced as a
+  /// footer chip so the active connection is visible at a glance.
+  connectionLabel: string | null;
+  /// Footer "Connections" — opens the connection picker (local / saved remote
+  /// / paste a code).
+  onOpenConnections: () => void;
   /// Optimistic tab-reorder hook from App.tsx. Mirrors the TabBar's
   /// same-named prop: applied immediately on drop so the row doesn't
   /// snap back while the daemon's `tabs_reordered` broadcast is in
@@ -940,6 +949,9 @@ export default function Sidebar(props: Props) {
         stopRequested={props.daemonStopRequested}
         onRestart={props.onRestartDaemon}
         onStop={props.onStopDaemon}
+        isRemote={props.isRemote}
+        connectionLabel={props.connectionLabel}
+        onOpenConnections={props.onOpenConnections}
       />
     </aside>
   );

@@ -31,6 +31,13 @@ interface Props {
   stopRequested: boolean;
   onRestart: () => void;
   onStop: () => void;
+  /// True when connected to a remote host (not the bundled local daemon).
+  /// Relabels "Restart" → "Reconnect" and hides the local-only "Stop daemon".
+  isRemote: boolean;
+  /// Active remote host name, or null for local. Rendered as a footer chip.
+  connectionLabel: string | null;
+  /// Opens the connection picker (local / saved remote / paste a code).
+  onOpenConnections: () => void;
 }
 
 export default function DaemonFooter({
@@ -40,6 +47,9 @@ export default function DaemonFooter({
   stopRequested,
   onRestart,
   onStop,
+  isRemote,
+  connectionLabel,
+  onOpenConnections,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [paths, setPaths] = useState<DaemonPaths | null>(null);
@@ -147,6 +157,17 @@ export default function DaemonFooter({
       >
         <span className={dotClass} aria-hidden="true" />
         <span className="daemon-footer-name">daemon</span>
+        {isRemote && connectionLabel && (
+          <>
+            <span className="daemon-footer-sep" aria-hidden="true">·</span>
+            <span
+              className="daemon-footer-remote"
+              title={`Remote host: ${connectionLabel}`}
+            >
+              ⇄ {connectionLabel}
+            </span>
+          </>
+        )}
         <span className="daemon-footer-sep" aria-hidden="true">·</span>
         <span className="daemon-footer-state">{stateLabel}</span>
         {portChip && (
@@ -256,6 +277,29 @@ export default function DaemonFooter({
             </ul>
 
             <div className="daemon-footer-section">
+              <div className="daemon-footer-section-label">Connection</div>
+              <button
+                type="button"
+                className="daemon-footer-action"
+                onClick={() => {
+                  onOpenConnections();
+                  setOpen(false);
+                  setConfirmingStop(false);
+                }}
+                data-testid="daemon-footer-connections"
+              >
+                <span>
+                  {isRemote
+                    ? `Remote — ${connectionLabel ?? "remote host"}`
+                    : "This machine (Local)"}
+                </span>
+                <span className="daemon-footer-action-hint">
+                  switch · add remote…
+                </span>
+              </button>
+            </div>
+
+            <div className="daemon-footer-section">
               <div className="daemon-footer-section-label">Logs &amp; files</div>
               <button
                 type="button"
@@ -307,37 +351,41 @@ export default function DaemonFooter({
                 }}
                 data-testid="daemon-footer-restart"
               >
-                <span>Restart daemon</span>
+                <span>{isRemote ? "Reconnect" : "Restart daemon"}</span>
                 <span className="daemon-footer-action-hint">
-                  graceful · tracer-backed sessions reattach
+                  {isRemote
+                    ? "re-establish the encrypted bridge"
+                    : "graceful · tracer-backed sessions reattach"}
                 </span>
               </button>
-              <button
-                type="button"
-                className={
-                  confirmingStop
-                    ? "daemon-footer-action danger is-confirming"
-                    : "daemon-footer-action danger"
-                }
-                onClick={() => {
-                  if (!confirmingStop) {
-                    setConfirmingStop(true);
-                    return;
+              {!isRemote && (
+                <button
+                  type="button"
+                  className={
+                    confirmingStop
+                      ? "daemon-footer-action danger is-confirming"
+                      : "daemon-footer-action danger"
                   }
-                  onStop();
-                  setOpen(false);
-                  setConfirmingStop(false);
-                }}
-                data-testid="daemon-footer-stop"
-                data-confirming={confirmingStop ? "true" : "false"}
-              >
-                <span>
-                  {confirmingStop ? "Confirm: stop daemon" : "Stop daemon"}
-                </span>
-                <span className="daemon-footer-action-hint">
-                  no auto-respawn · Restart to bring back
-                </span>
-              </button>
+                  onClick={() => {
+                    if (!confirmingStop) {
+                      setConfirmingStop(true);
+                      return;
+                    }
+                    onStop();
+                    setOpen(false);
+                    setConfirmingStop(false);
+                  }}
+                  data-testid="daemon-footer-stop"
+                  data-confirming={confirmingStop ? "true" : "false"}
+                >
+                  <span>
+                    {confirmingStop ? "Confirm: stop daemon" : "Stop daemon"}
+                  </span>
+                  <span className="daemon-footer-action-hint">
+                    no auto-respawn · Restart to bring back
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         </>

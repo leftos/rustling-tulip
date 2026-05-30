@@ -24,8 +24,19 @@
       `decode_connection_code`, `list_remote_profiles`, `save_remote_profile`,
       `delete_remote_profile`. Pinned-verifier accept/reject + code/fingerprint
       parsing are unit-tested.
-- [ ] Phase 5 — frontend connection-mode launcher — NEXT.
-- [ ] Phases 6–9 — see below.
+- [x] Phase 5 — frontend connection picker. DaemonFooter → **Connections**
+      opens a picker modal (`ConnectionPicker.tsx`): Local / saved remote
+      profiles / "Add remote (paste code)". Boot auto-connects to the last
+      target (default Local — zero new friction on the desktop). `connect()`
+      branches local→`ensureDaemonStarted` vs remote→`connectRemote`; the target
+      is persisted (`rt:connection-target`) and self-heals to local if its
+      profile is missing. Unreachable remote → stay + retry (the footer error
+      state keeps the picker reachable). "Add remote" auto-saves a host-named
+      profile then connects; re-pairing the same host:port updates in place.
+      Remote mode relabels footer "Restart"→"Reconnect" (never WS-shutdowns the
+      remote daemon) and hides the local-only "Stop daemon".
+- [ ] Phase 6 — remote-mode UI degradation (hide local-FS actions) — NEXT.
+- [ ] Phases 7–9 — see below.
 
 ## Context
 
@@ -206,15 +217,18 @@ leaf-cert fingerprint; pass a dummy SNI.
   new `apps/tauri-app/src-tauri/src/remote.rs`.
 
 ### Phase 5 — Frontend: connection-mode launcher + reuse the connect path
-- [ ] Pre-main launcher state in `App.tsx` (model after the `?session=`/`?pane=`
-      pop-out branch already in App.tsx): choose **Local (this machine)** vs a saved
-      remote profile vs **Add remote (paste code)**. Persist last choice for
-      auto-connect.
-- [ ] In the `connect()` effect (App.tsx:432): branch — local → `ensureDaemonStarted()`;
-      remote → `connect_remote(profile)`. Both yield a `DaemonHandshake`; downstream
-      `connectDaemon(handshake)` (api.ts:147) and the Hello/Sessions/attach flow are
-      **unchanged** (`ws://127.0.0.1:${handshake.port}` already works for the bridge).
-- [ ] Thread an `isRemote` flag into app state.
+- [x] Connection picker reachable from the DaemonFooter (**Connections**), not a
+      pre-main gate — keeps the desktop's zero-friction boot. Modal
+      (`ConnectionPicker.tsx`): **Local (this machine)** / saved remote profiles
+      / **Add remote (paste code)**. Last choice persisted (`rt:connection-target`)
+      for auto-connect.
+- [x] In the `connect()` effect: `resolveHandshake()` branches — local →
+      `ensureDaemonStarted()`; remote → `connectRemote(params)`. Both yield a
+      `DaemonHandshake`; downstream `connectDaemon(handshake)` and the
+      Hello/Sessions/attach flow are **unchanged** (`ws://127.0.0.1:${port}`
+      already works for the bridge). A missing remote profile self-heals to local.
+- [x] `isRemote` derived from `connectionTarget`, threaded to the footer (relabel
+      Restart→Reconnect, hide local-only Stop). Full local-FS gating is Phase 6.
 
 ### Phase 6 — Remote-mode UI degradation (hide local-FS actions)
 - [ ] Gate on `!isRemote`: add-repo file picker (`onAddRepo`, App.tsx:554),
