@@ -56,6 +56,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 ] }
 base64 = "0.22"
 
+[target.'cfg(windows)'.dependencies]
+# HKCU Run-key access for the "start daemon on login" host setting.
+winreg = "0.55"
+
 [dev-dependencies]
 # Generates a throwaway self-signed cert so the pinned verifier test can prove
 # it accepts a matching fingerprint and rejects a different one.

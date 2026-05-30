@@ -64,7 +64,12 @@
       panes bound to the removed session (sibling-fill, tab removed if last) across
       every layout, emitting scoped `TabUpdated`/`TabRemoved`. Replaces the old
       prune-to-placeholder.
-- [ ] Phases 8–9 — see below.
+- [x] Phase 8 — host auto-start on login. `get_autostart`/`set_autostart` Tauri
+      commands register the **daemon** binary under the HKCU `Run` key (via
+      `winreg`), so after a reboot the daemon comes up in the user's interactive
+      session and binds LAN from `lan.json` without opening the app. Toggle lives
+      in the host-side Remote access settings panel. Windows-only.
+- [ ] Phase 9 — mDNS discovery + pairing code (convenience, after MVP).
 
 ## Context
 
@@ -340,12 +345,19 @@ or a `client_id` override) independent of the TLS transport.
   shell its size governs cleanly — the RDP-DPI problem the user wanted to avoid.
 
 ### Phase 8 — Host auto-start on login
-- [ ] Tauri commands `set_autostart(enabled)` / `get_autostart()` registering the
-      **daemon binary** (resolved like `daemon_supervisor` resolves it) in HKCU
-      `Software\Microsoft\Windows\CurrentVersion\Run` (or a Task Scheduler "at logon"
-      task). Runs in the user's interactive session → full claude-CLI compatibility.
-      Desktop settings toggle. (Launch the daemon directly, not the app — the daemon
-      reads its persisted `lan.json` and brings the LAN listener up on its own.)
+- [x] Tauri commands `set_autostart(enabled)` / `get_autostart()` register the
+      **daemon binary** (resolved via `daemon_supervisor::locate_daemon_binary`) in
+      HKCU `Software\Microsoft\Windows\CurrentVersion\Run` via the `winreg` crate.
+      Runs in the user's interactive session → full claude-CLI compatibility.
+      Toggle in the host-side Remote access settings panel. Launches the daemon
+      directly (not the app) — it reads `lan.json` and binds LAN on its own.
+      Windows-only; the toggle hides elsewhere. New module
+      `apps/tauri-app/src-tauri/src/autostart.rs`.
+      **Caveat:** in dev, the app supervisor spawns the daemon from a content-
+      addressed cache, so when the app later opens it may retire the Run-key
+      daemon (binary-path mismatch) and respawn from cache — it self-heals
+      (rebinds LAN from `lan.json`) but with a brief blip. Production installs
+      run from a stable path, so no churn.
 
 ### Phase 9 — Discovery Phase 2: mDNS + pairing code  *(convenience, after MVP)*
 - [ ] Daemon advertises `_rustling-tulip._tcp` (e.g. `mdns-sd`) with TXT records

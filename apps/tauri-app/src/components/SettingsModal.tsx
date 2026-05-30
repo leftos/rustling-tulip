@@ -4,7 +4,7 @@ import {
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { DaemonClient } from "../api";
+import { getAutostart, setAutostart, type DaemonClient } from "../api";
 import type { CodexSandbox, PermissionMode } from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
@@ -655,6 +655,30 @@ function LanPanel({ client, lanStatus, daemonToken }: LanPanelProps) {
   );
   const [selectedAddr, setSelectedAddr] = useState<string>("");
   const [copied, setCopied] = useState(false);
+  // Host-side "start daemon on login" (Windows only). `null` until the initial
+  // read resolves or if autostart is unsupported on this platform.
+  const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(
+    null,
+  );
+  const [autostartBusy, setAutostartBusy] = useState(false);
+
+  useEffect(() => {
+    void getAutostart()
+      .then(setAutostartEnabled)
+      .catch(() => setAutostartEnabled(null));
+  }, []);
+
+  const onToggleAutostart = useCallback(() => {
+    if (autostartEnabled === null || autostartBusy) return;
+    const next = !autostartEnabled;
+    setAutostartBusy(true);
+    void setAutostart(next)
+      .then(() => setAutostartEnabled(next))
+      .catch((err: unknown) => {
+        logToFile("warn", `setAutostart failed: ${String(err)}`);
+      })
+      .finally(() => setAutostartBusy(false));
+  }, [autostartEnabled, autostartBusy]);
 
   // Re-sync the port input when the daemon's status changes.
   useEffect(() => {
@@ -773,6 +797,25 @@ function LanPanel({ client, lanStatus, daemonToken }: LanPanelProps) {
               : "Disabled"}
         </span>
       </div>
+      {autostartEnabled !== null && (
+        <div className="settings-row">
+          <button
+            type="button"
+            onClick={onToggleAutostart}
+            disabled={autostartBusy}
+            data-testid="settings-autostart-toggle"
+          >
+            {autostartEnabled
+              ? "Don't start daemon on login"
+              : "Start daemon on login"}
+          </button>
+          <span className="settings-section-hint">
+            {autostartEnabled
+              ? "The daemon launches after you sign in, so this machine stays reachable without opening the app."
+              : "Make this machine reachable after a reboot without opening the app."}
+          </span>
+        </div>
+      )}
       {enabled && (
         <>
           {addresses.length > 1 && (

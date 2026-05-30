@@ -8,6 +8,7 @@ use tauri_plugin_dialog::DialogExt as _;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod autostart;
 mod daemon_supervisor;
 mod remote;
 
@@ -793,7 +794,9 @@ pub fn run() {
             remote::decode_connection_code,
             remote::list_remote_profiles,
             remote::save_remote_profile,
-            remote::delete_remote_profile
+            remote::delete_remote_profile,
+            autostart::get_autostart,
+            autostart::set_autostart
         ])
         .setup(|_app| {
             info!("rustling-tulip Tauri app starting");

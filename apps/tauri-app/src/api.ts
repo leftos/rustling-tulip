@@ -53,6 +53,17 @@ export async function getClientIdentity(): Promise<ClientIdentity> {
   return await invoke<ClientIdentity>("get_client_identity");
 }
 
+/// Whether the daemon is registered to start on login (host-side, Windows
+/// only — returns false elsewhere). Lets the desktop be reachable by a remote
+/// client after a reboot without anyone opening the app.
+export async function getAutostart(): Promise<boolean> {
+  return await invoke<boolean>("get_autostart");
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  await invoke<void>("set_autostart", { enabled });
+}
+
 /// Paths the daemon-footer troubleshooting flyout exposes for "open log",
 /// "reveal config dir", and "copy handshake path". Mirrors the Rust
 /// `DaemonPaths` struct in `apps/tauri-app/src-tauri/src/lib.rs`.
