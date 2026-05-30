@@ -568,6 +568,21 @@ export interface TabEntry {
   created_at: string;
 }
 
+/// One cloneable layout offered in the first-connect chooser. Mirrors the Rust
+/// `ClonableLayout`.
+export interface ClonableLayout {
+  client_id: string;
+  name: string | null;
+}
+
+/// How a brand-new client seeds its per-client layout at first connect. Mirrors
+/// the Rust `InitLayoutKind` (internally tagged on `kind`).
+export type InitLayoutKind =
+  | { kind: "empty" }
+  | { kind: "clone_legacy" }
+  | { kind: "clone_client"; client_id: string }
+  | { kind: "all_sessions" };
+
 /**
  * Borrow the grid of `tab` when the tab is a grid kind. Returns `null` for
  * other kinds — callers that render pane layouts must guard on this, since
@@ -579,13 +594,27 @@ export function tabGrid(tab: TabEntry): GridNode | null {
 
 // ------- Wire envelopes -------
 
+// Why a pairing window ended (mirrors the daemon `PairingEndReason`). The
+// catch-all keeps the frontend forward-compatible with a newer daemon.
+export type PairingEndReason =
+  | "paired"
+  | "expired"
+  | "cancelled"
+  | "too_many_attempts"
+  | "unknown";
+
 export type ClientMessage =
   | {
       type: "hello";
       protocol_version: number;
       protocol_versions: number[];
       auth_token: string;
+      /// Stable per-install identity for per-client tab layouts. Optional —
+      /// older daemons ignore it; absent falls back to the shared legacy layout.
+      client_id?: string;
+      client_name?: string;
     }
+  | { type: "init_layout"; kind: InitLayoutKind }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "remove_repo"; repo_id: string }
@@ -742,6 +771,17 @@ export type ClientMessage =
   // default. Daemon validates + creates the directory; broadcasts
   // `worktrees_root_changed` on success.
   | { type: "set_worktrees_root"; path: string | null }
+  // Enable/disable opt-in LAN access (the 0.0.0.0 TLS listener) and set its
+  // port. Daemon persists to lan.json, binds/tears down the listener live,
+  // then broadcasts `lan_status`. Loopback access is unaffected.
+  | { type: "configure_lan"; enabled: boolean; port: number }
+  // Begin a pairing window. The daemon generates a short numeric code and
+  // replies (to this connection only) with `pairing_started`. A discovering
+  // device submits the code to the daemon's /pair endpoint over pinned TLS to
+  // obtain the auth token. Only meaningful on the host while LAN access is on.
+  | { type: "start_pairing" }
+  // Cancel the active pairing window early; daemon broadcasts `pairing_ended`.
+  | { type: "cancel_pairing" }
   // Scan the worktrees root and cross-reference against the session
   // registry. Reply: `worktrees_root_snapshot`.
   | { type: "inspect_worktrees_root" }
@@ -879,6 +919,31 @@ export type DaemonMessage =
       root: string;
       is_override: boolean;
     }
+  // Current opt-in LAN access status. Broadcast in response to `configure_lan`
+  // and once at initial state. `fingerprint` is the SHA-256 (hex) of the
+  // self-signed TLS cert remote clients pin; null until LAN has been enabled
+  // once. `addresses` are the host's non-loopback IPv4 addresses.
+  | {
+      type: "lan_status";
+      enabled: boolean;
+      port: number;
+      fingerprint: string | null;
+      addresses: string[];
+    }
+  // Reply to `start_pairing`, sent only to the requesting connection (the code
+  // must never reach other clients). `code` is the short pairing code to read
+  // out; `ttl_secs` is how long it stays valid, for a countdown.
+  | {
+      type: "pairing_started";
+      code: string;
+      ttl_secs: number;
+    }
+  // Broadcast when the active pairing window ends so the host UI clears the
+  // displayed code. Carries no code, so broadcasting to all clients is safe.
+  | {
+      type: "pairing_ended";
+      reason: PairingEndReason;
+    }
   | {
       type: "worktrees_root_snapshot";
       root: string;
@@ -1000,6 +1065,12 @@ export type DaemonMessage =
       truncated: boolean;
     }
   | { type: "tabs"; tabs: TabEntry[] }
+  | {
+      type: "layout_init_required";
+      has_legacy: boolean;
+      active_session_count: number;
+      clonable: ClonableLayout[];
+    }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "tab_removed"; tab_id: string }
   | { type: "tabs_reordered"; ordered_ids: string[] }

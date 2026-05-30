@@ -391,7 +391,7 @@ async fn probe_health(port: u16) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
-fn locate_daemon_binary() -> Result<PathBuf, String> {
+pub(crate) fn locate_daemon_binary() -> Result<PathBuf, String> {
     let exe_name = if cfg!(windows) {
         "rustling-tulipd.exe"
     } else {

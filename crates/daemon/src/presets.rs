@@ -52,6 +52,9 @@ pub struct LaunchArgs {
     pub variable_values: Vec<(String, String)>,
     pub use_worktree_override: Option<bool>,
     pub max_panes_per_tab_override: Option<u32>,
+    /// Layout key of the client that launched the preset. Tabs created by the
+    /// launch land in this client's per-client layout.
+    pub client_id: String,
 }
 
 pub async fn launch(hub: Hub, args: LaunchArgs) {
@@ -832,6 +835,8 @@ struct TabState {
     current_tab_id: Option<String>,
     current_panes: Vec<(String, Option<String>)>,
     tab_count: u32,
+    /// Per-client layout key the launched tabs belong to.
+    client_id: String,
 }
 
 impl TabState {
@@ -1063,6 +1068,7 @@ fn build_tab_state(
             current_tab_id: None,
             current_panes: Vec::new(),
             tab_count: 0,
+            client_id: args.client_id.clone(),
         }),
         TabGroupingConfig::NewTab {
             layout,
@@ -1112,6 +1118,7 @@ fn build_tab_state(
                 current_tab_id: None,
                 current_panes: Vec::new(),
                 tab_count: 0,
+                client_id: args.client_id.clone(),
             })
         }
     }
@@ -1382,9 +1389,8 @@ fn attach_to_tab(
     })?;
     let updated = hub
         .state
-        .mutate(|s| {
-            let tab = s
-                .tabs
+        .mutate_client_layout(&state.client_id, |tabs| {
+            let tab = tabs
                 .iter_mut()
                 .find(|t| t.id == tab_id)
                 .ok_or_else(|| anyhow!("tab vanished mid-launch: {tab_id}"))?;
@@ -1402,7 +1408,7 @@ fn attach_to_tab(
             LaunchFailure::new(format!("updating tab grid: {e}"))
                 .with_partials(session_ids, &state.tab_ids)
         })?;
-    let _ = hub.tab_events.send(TabEvent::Updated(updated));
+    hub.emit_tab(&state.client_id, TabEvent::Updated(updated));
     Ok(())
 }
 
@@ -1429,10 +1435,12 @@ fn open_new_tab(
         created_at: Utc::now(),
     };
     let tab_id = tab.id.clone();
-    hub.state.mutate(|s| s.tabs.push(tab)).map_err(|e| {
-        LaunchFailure::new(format!("persisting new tab: {e}"))
-            .with_partials(session_ids, &state.tab_ids)
-    })?;
+    hub.state
+        .mutate_client_layout(&state.client_id, |tabs| tabs.push(tab))
+        .map_err(|e| {
+            LaunchFailure::new(format!("persisting new tab: {e}"))
+                .with_partials(session_ids, &state.tab_ids)
+        })?;
     state.tab_ids.push(tab_id.clone());
     state.current_tab_id = Some(tab_id);
     state.current_panes.clear();
@@ -2073,6 +2081,9 @@ mod tests {
             config: config.clone(),
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
+            lan_config_file: config.join("lan.json"),
+            lan_cert_file: config.join("lan-cert.pem"),
+            lan_key_file: config.join("lan-key.pem"),
             sessions_dir,
             worktrees_dir,
             binaries_dir,
@@ -2097,6 +2108,9 @@ mod tests {
             preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
             state_events,
             client_count: Arc::new(client_count),
+            lan_handle: Arc::new(AsyncMutex::new(None)),
+            advertiser: Arc::new(AsyncMutex::new(None)),
+            pairing: Arc::new(AsyncMutex::new(None)),
         };
         (hub, preset_rx, scratch)
     }
@@ -2167,6 +2181,7 @@ mod tests {
                 current_tab_id: None,
                 current_panes: Vec::new(),
                 tab_count: 0,
+                client_id: "test-client".to_string(),
             },
             date_str: "2026-05-13".to_string(),
             datetime_str: "2026-05-13T00:00:00".to_string(),

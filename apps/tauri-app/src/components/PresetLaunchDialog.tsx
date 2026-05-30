@@ -19,6 +19,7 @@ import type {
   ScriptCommandPreview,
 } from "../types";
 import { useEscape, useFocusReturn } from "../utils/a11y";
+import { REMOTE_UNAVAILABLE_TOOLTIP, useIsRemote } from "../utils/remoteMode";
 import { parsePrompts } from "../utils/parsePrompts";
 
 interface Props {
@@ -462,6 +463,7 @@ function SourceStage({
   onInlineTextChange: (s: string) => void;
 }) {
   const folderSource = allowed.find((s) => s.kind === "folder");
+  const isRemote = useIsRemote();
   return (
     <>
       <fieldset className="field" data-testid="preset-source-stage">
@@ -484,13 +486,24 @@ function SourceStage({
           <div className="row">
             <input
               type="text"
-              readOnly
+              readOnly={!isRemote}
               value={filePath ?? ""}
-              placeholder="Pick a .txt or .md file…"
+              onChange={
+                isRemote
+                  ? (e) => onFilePathChange(e.target.value || null)
+                  : undefined
+              }
+              placeholder={
+                isRemote
+                  ? "Type a file path on the host…"
+                  : "Pick a .txt or .md file…"
+              }
               data-testid="preset-source-file-path"
             />
             <button
               type="button"
+              disabled={isRemote}
+              title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
               onClick={() =>
                 void pickFile({
                   extensions: ["txt", "md"],
@@ -519,13 +532,24 @@ function SourceStage({
           <div className="row">
             <input
               type="text"
-              readOnly
+              readOnly={!isRemote}
               value={folderPath ?? ""}
-              placeholder="Pick a folder of .md files…"
+              onChange={
+                isRemote
+                  ? (e) => onFolderPathChange(e.target.value || null)
+                  : undefined
+              }
+              placeholder={
+                isRemote
+                  ? "Type a folder path on the host…"
+                  : "Pick a folder of .md files…"
+              }
               data-testid="preset-source-folder-path"
             />
             <button
               type="button"
+              disabled={isRemote}
+              title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
               onClick={() =>
                 void pickDirectory(folderPath ?? undefined, {
                   lastDirKey: "presetSourceFolder",
@@ -613,25 +637,31 @@ function VariableInput({
   invalid: boolean;
 }) {
   const invalidClass = invalid ? "input-invalid" : "";
+  const isRemote = useIsRemote();
   const { kind } = variable;
   if (kind.kind === "file_path") {
     return (
       <div className="row">
         <input
           type="text"
-          readOnly
+          readOnly={!isRemote}
           value={value}
+          onChange={isRemote ? (e) => onChange(e.target.value) : undefined}
           className={invalidClass}
           aria-invalid={invalid}
           placeholder={
-            kind.extensions.length > 0
-              ? `Pick a ${kind.extensions.join(" / ")} file…`
-              : "Pick a file…"
+            isRemote
+              ? "Type a file path on the host…"
+              : kind.extensions.length > 0
+                ? `Pick a ${kind.extensions.join(" / ")} file…`
+                : "Pick a file…"
           }
           data-testid={`preset-variable-${variable.name}`}
         />
         <button
           type="button"
+          disabled={isRemote}
+          title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
           onClick={() =>
             void pickFile({
               extensions: kind.extensions,
@@ -660,15 +690,20 @@ function VariableInput({
       <div className="row">
         <input
           type="text"
-          readOnly
+          readOnly={!isRemote}
           value={value}
+          onChange={isRemote ? (e) => onChange(e.target.value) : undefined}
           className={invalidClass}
           aria-invalid={invalid}
-          placeholder="Pick a folder…"
+          placeholder={
+            isRemote ? "Type a folder path on the host…" : "Pick a folder…"
+          }
           data-testid={`preset-variable-${variable.name}`}
         />
         <button
           type="button"
+          disabled={isRemote}
+          title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
           onClick={() =>
             void pickDirectory(value || undefined, {
               lastDirKey: `presetVar:${variable.name}`,

@@ -4,8 +4,12 @@ import {
   requestPermission,
 } from "@tauri-apps/plugin-notification";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import type { DaemonClient } from "../api";
-import type { CodexSandbox, PermissionMode } from "../types";
+import { getAutostart, setAutostart, type DaemonClient } from "../api";
+import type {
+  CodexSandbox,
+  PairingEndReason,
+  PermissionMode,
+} from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { saveSettings, type Settings } from "../utils/settings";
@@ -27,6 +31,17 @@ interface Props {
   /// Open the worktrees-management modal. Owned by the parent so it
   /// lives at the App level (matches the SettingsModal own placement).
   onOpenWorktreesManager: () => void;
+  /// Opt-in LAN access status, mirrored from the daemon's `lan_status`
+  /// broadcast. `null` before the initial state push lands.
+  lanStatus: {
+    enabled: boolean;
+    port: number;
+    fingerprint: string | null;
+    addresses: string[];
+  } | null;
+  /// The local daemon's auth token, for assembling the remote connection
+  /// code. `null` until the first connect.
+  daemonToken: string | null;
 }
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
@@ -36,6 +51,7 @@ type SettingsTabKey =
   | "notifications"
   | "spawn"
   | "worktrees"
+  | "lan"
   | "appearance"
   | "title";
 
@@ -49,6 +65,7 @@ const SETTINGS_TABS: SettingsTabDef[] = [
   { key: "notifications", label: "Notifications" },
   { key: "spawn", label: "Spawn defaults" },
   { key: "worktrees", label: "Worktrees" },
+  { key: "lan", label: "Remote access" },
   { key: "appearance", label: "Appearance" },
   { key: "title", label: "App Title" },
 ];
@@ -63,6 +80,8 @@ export default function SettingsModal({
   client,
   worktreesRoot,
   onOpenWorktreesManager,
+  lanStatus,
+  daemonToken,
 }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
@@ -157,6 +176,13 @@ export default function SettingsModal({
                 client={client}
                 worktreesRoot={worktreesRoot}
                 onOpenManager={onOpenWorktreesManager}
+              />
+            )}
+            {activeTab === "lan" && (
+              <LanPanel
+                client={client}
+                lanStatus={lanStatus}
+                daemonToken={daemonToken}
               />
             )}
             {activeTab === "appearance" && (
@@ -585,6 +611,414 @@ interface WorktreesPanelProps {
 /// on Save. The draft re-syncs whenever the daemon broadcast updates so
 /// concurrent changes from another window propagate without manual
 /// refresh.
+interface LanPanelProps {
+  client: DaemonClient | null;
+  lanStatus: {
+    enabled: boolean;
+    port: number;
+    fingerprint: string | null;
+    addresses: string[];
+  } | null;
+  daemonToken: string | null;
+}
+
+const LAN_CODE_VERSION = 1;
+const DEFAULT_LAN_PORT = 8787;
+
+/// A short status line shown after a pairing window ends. `null` reasons
+/// (cancelled / unknown) leave no note.
+function pairingEndNote(reason: PairingEndReason): string | null {
+  switch (reason) {
+    case "paired":
+      return "Device paired ✓";
+    case "too_many_attempts":
+      return "Too many attempts — generate a new code.";
+    case "expired":
+      return "Code expired.";
+    default:
+      return null;
+  }
+}
+
+/// Host-side "pair a device" flow: ask the daemon to open a short-code window
+/// (`start_pairing`), show the code + a live countdown, and let the user cancel
+/// (`cancel_pairing`). The daemon sends the code only to this connection
+/// (`pairing_started`) and broadcasts `pairing_ended` when it closes — both
+/// arrive as side-channel window events via App's message handler.
+function PairDevicePanel({ client }: { client: DaemonClient | null }) {
+  const [code, setCode] = useState<string | null>(null);
+  const [deadline, setDeadline] = useState<number | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const onStarted = (e: Event) => {
+      const detail = (e as CustomEvent<{ code: string; ttl_secs: number }>)
+        .detail;
+      setCode(detail.code);
+      setDeadline(Date.now() + detail.ttl_secs * 1000);
+      setNote(null);
+    };
+    const onEnded = (e: Event) => {
+      const reason = (e as CustomEvent<{ reason: PairingEndReason }>).detail
+        .reason;
+      setCode(null);
+      setDeadline(null);
+      setNote(pairingEndNote(reason));
+    };
+    window.addEventListener("rt:pairing_started", onStarted);
+    window.addEventListener("rt:pairing_ended", onEnded);
+    return () => {
+      window.removeEventListener("rt:pairing_started", onStarted);
+      window.removeEventListener("rt:pairing_ended", onEnded);
+    };
+  }, []);
+
+  // Tick once a second while a code is live so the countdown updates.
+  useEffect(() => {
+    if (deadline === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [deadline]);
+
+  const remaining =
+    deadline === null ? 0 : Math.max(0, Math.ceil((deadline - now) / 1000));
+
+  // Drop the code locally when the countdown elapses; the daemon also rejects
+  // an expired code, but this keeps the UI honest without a round-trip.
+  useEffect(() => {
+    if (deadline !== null && remaining === 0) {
+      setCode(null);
+      setDeadline(null);
+      setNote("Code expired.");
+    }
+  }, [deadline, remaining]);
+
+  const onStart = useCallback(() => {
+    if (!client) return;
+    setNote(null);
+    client.send({ type: "start_pairing" });
+  }, [client]);
+
+  const onCancel = useCallback(() => {
+    if (!client) return;
+    client.send({ type: "cancel_pairing" });
+    setCode(null);
+    setDeadline(null);
+    setNote(null);
+  }, [client]);
+
+  if (code) {
+    return (
+      <div className="settings-pairing" data-testid="settings-pairing">
+        <p className="settings-section-hint">
+          On the other machine, open the connection picker, choose “Scan” under
+          Discover on LAN, pick this host, and enter this code:
+        </p>
+        <div className="settings-row">
+          <code className="pairing-code" data-testid="pairing-code">
+            {code}
+          </code>
+          <span className="settings-section-hint">expires in {remaining}s</span>
+          <button
+            type="button"
+            onClick={onCancel}
+            data-testid="pairing-cancel"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-pairing" data-testid="settings-pairing">
+      <div className="settings-row">
+        <button
+          type="button"
+          onClick={onStart}
+          disabled={!client}
+          data-testid="pairing-start"
+        >
+          Pair a device
+        </button>
+        <span className="settings-section-hint">
+          {note ??
+            "Show a one-time code to pair a discovered device without copying the connection code."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/// Encode the host's LAN connection details as a single base64url blob the
+/// remote client pastes once. Carries the pinned cert fingerprint + auth
+/// token, so it grants full control — treated as a secret in the UI copy.
+function buildConnectionCode(
+  host: string,
+  port: number,
+  token: string,
+  fingerprint: string,
+): string {
+  const json = JSON.stringify({
+    v: LAN_CODE_VERSION,
+    host,
+    port,
+    token,
+    fp: fingerprint,
+  });
+  return btoa(json)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+/// Remote-access (LAN) settings: toggle the opt-in TLS listener, pick which
+/// of the host's addresses to advertise, and copy the connection code a remote
+/// client pastes to pair. The daemon is the source of truth (`lan_status`);
+/// this panel just sends `configure_lan` and renders the broadcast back.
+function LanPanel({ client, lanStatus, daemonToken }: LanPanelProps) {
+  const enabled = lanStatus?.enabled ?? false;
+  const addresses = lanStatus?.addresses ?? [];
+  const [portDraft, setPortDraft] = useState<string>(
+    String(lanStatus?.port ?? DEFAULT_LAN_PORT),
+  );
+  const [selectedAddr, setSelectedAddr] = useState<string>("");
+  const [copied, setCopied] = useState(false);
+  // Host-side "start daemon on login" (Windows only). `null` until the initial
+  // read resolves or if autostart is unsupported on this platform.
+  const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(
+    null,
+  );
+  const [autostartBusy, setAutostartBusy] = useState(false);
+
+  useEffect(() => {
+    void getAutostart()
+      .then(setAutostartEnabled)
+      .catch(() => setAutostartEnabled(null));
+  }, []);
+
+  const onToggleAutostart = useCallback(() => {
+    if (autostartEnabled === null || autostartBusy) return;
+    const next = !autostartEnabled;
+    setAutostartBusy(true);
+    void setAutostart(next)
+      .then(() => setAutostartEnabled(next))
+      .catch((err: unknown) => {
+        logToFile("warn", `setAutostart failed: ${String(err)}`);
+      })
+      .finally(() => setAutostartBusy(false));
+  }, [autostartEnabled, autostartBusy]);
+
+  // Re-sync the port input when the daemon's status changes.
+  useEffect(() => {
+    setPortDraft(String(lanStatus?.port ?? DEFAULT_LAN_PORT));
+  }, [lanStatus?.port]);
+  // Default the address selection to the first detected address, keeping a
+  // valid prior choice if it still exists.
+  useEffect(() => {
+    setSelectedAddr((prev) =>
+      prev && addresses.includes(prev) ? prev : (addresses[0] ?? ""),
+    );
+  }, [addresses]);
+
+  const parsedPort = Number.parseInt(portDraft, 10);
+  const portValid =
+    Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535;
+
+  const onToggle = useCallback(() => {
+    if (!client || !portValid) return;
+    client.send({
+      type: "configure_lan",
+      enabled: !enabled,
+      port: parsedPort,
+    });
+  }, [client, enabled, parsedPort, portValid]);
+
+  const onApplyPort = useCallback(() => {
+    if (!client || !portValid || !enabled) return;
+    client.send({ type: "configure_lan", enabled: true, port: parsedPort });
+  }, [client, enabled, parsedPort, portValid]);
+
+  const connectionCode = useMemo(() => {
+    if (!enabled || !daemonToken || !lanStatus?.fingerprint || !selectedAddr) {
+      return null;
+    }
+    return buildConnectionCode(
+      selectedAddr,
+      lanStatus.port,
+      daemonToken,
+      lanStatus.fingerprint,
+    );
+  }, [enabled, daemonToken, lanStatus, selectedAddr]);
+
+  const onCopy = useCallback(() => {
+    if (!connectionCode) return;
+    void navigator.clipboard
+      .writeText(connectionCode)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch((err: unknown) => {
+        logToFile(
+          "warn",
+          `settings: copy connection code failed: ${String(err)}`,
+        );
+      });
+  }, [connectionCode]);
+
+  const disabled = !client;
+  return (
+    <section className="settings-section" data-testid="settings-section-lan">
+      <h3>Remote access (LAN)</h3>
+      <p className="settings-section-hint">
+        Let another machine on your local network connect to this daemon and
+        control its shells over an encrypted (TLS) connection. Off by default —
+        the daemon stays loopback-only until you enable this.
+      </p>
+      <p className="settings-section-hint">
+        ⚠ The connection code below grants full control of this machine's
+        shells — it can run commands here. Only share it with devices you trust
+        on a network you trust.
+      </p>
+      <div className="settings-row">
+        <label htmlFor="lan-port-input">Port</label>
+        <input
+          id="lan-port-input"
+          type="text"
+          inputMode="numeric"
+          value={portDraft}
+          onChange={(e) => setPortDraft(e.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          disabled={disabled}
+          data-testid="settings-lan-port-input"
+        />
+        {enabled && (
+          <button
+            type="button"
+            onClick={onApplyPort}
+            disabled={disabled || !portValid || parsedPort === lanStatus?.port}
+          >
+            Apply
+          </button>
+        )}
+      </div>
+      {!portValid && (
+        <p className="settings-section-hint">
+          Port must be a number between 1 and 65535.
+        </p>
+      )}
+      <div className="settings-row">
+        <button
+          type="button"
+          onClick={onToggle}
+          disabled={disabled || !portValid}
+          data-testid="settings-lan-toggle"
+        >
+          {enabled ? "Disable LAN access" : "Enable LAN access"}
+        </button>
+        <span className="settings-section-hint">
+          {lanStatus === null
+            ? "(daemon not connected)"
+            : enabled
+              ? "Enabled"
+              : "Disabled"}
+        </span>
+      </div>
+      {autostartEnabled !== null && (
+        <div className="settings-row">
+          <button
+            type="button"
+            onClick={onToggleAutostart}
+            disabled={autostartBusy}
+            data-testid="settings-autostart-toggle"
+          >
+            {autostartEnabled
+              ? "Don't start daemon on login"
+              : "Start daemon on login"}
+          </button>
+          <span className="settings-section-hint">
+            {autostartEnabled
+              ? "The daemon launches after you sign in, so this machine stays reachable without opening the app."
+              : "Make this machine reachable after a reboot without opening the app."}
+          </span>
+        </div>
+      )}
+      {enabled && (
+        <>
+          {addresses.length > 1 && (
+            <div className="settings-row">
+              <label htmlFor="lan-addr-select">This machine's address</label>
+              <select
+                id="lan-addr-select"
+                value={selectedAddr}
+                onChange={(e) => setSelectedAddr(e.target.value)}
+                data-testid="settings-lan-addr-select"
+              >
+                {addresses.map((a) => (
+                  <option key={a} value={a}>
+                    {a}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {addresses.length === 1 && (
+            <p className="settings-section-hint">
+              This machine: <code>{addresses[0]}</code>
+            </p>
+          )}
+          {addresses.length === 0 && (
+            <p className="settings-section-hint">
+              No LAN address detected — check your network connection.
+            </p>
+          )}
+          {lanStatus?.fingerprint && (
+            <p className="settings-section-hint">
+              Certificate fingerprint:{" "}
+              <code>{lanStatus.fingerprint.slice(0, 32)}…</code>
+            </p>
+          )}
+          {connectionCode ? (
+            <div className="settings-row">
+              <label htmlFor="lan-conn-code">Connection code</label>
+              <input
+                id="lan-conn-code"
+                type="text"
+                value={connectionCode}
+                readOnly
+                onFocus={(e) => e.currentTarget.select()}
+                spellCheck={false}
+                data-testid="settings-lan-connection-code"
+              />
+              <button
+                type="button"
+                onClick={onCopy}
+                data-testid="settings-lan-copy"
+              >
+                {copied ? "Copied!" : "Copy"}
+              </button>
+            </div>
+          ) : (
+            <p className="settings-section-hint">
+              Connection code unavailable — waiting for the certificate and a
+              detected address…
+            </p>
+          )}
+          <p className="settings-section-hint">
+            On the other machine, open rustling-tulip, choose “Add remote”, and
+            paste this code — or pair without copying using a one-time code:
+          </p>
+          <PairDevicePanel client={client} />
+        </>
+      )}
+    </section>
+  );
+}
+
 function WorktreesPanel({
   client,
   worktreesRoot,

@@ -8,7 +8,9 @@ use tauri_plugin_dialog::DialogExt as _;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod autostart;
 mod daemon_supervisor;
+mod remote;
 
 const APP_BACKGROUND_COLOR: Color = Color(8, 9, 11, 255);
 
@@ -181,6 +183,35 @@ pub struct DaemonPaths {
     pub daemon_log: String,
     pub app_log: String,
     pub handshake_file: String,
+}
+
+/// Stable per-install client identity for per-client tab layouts. `client_id`
+/// is generated once and persisted in the config dir so a window and its
+/// pop-outs (same install) share one layout; `client_name` is the machine
+/// hostname, shown when another client offers to clone this layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientIdentity {
+    pub client_id: String,
+    pub client_name: Option<String>,
+}
+
+#[tauri::command]
+fn get_client_identity() -> Result<ClientIdentity, String> {
+    let dir = config_dir()?;
+    let path = dir.join("client-id");
+    let client_id = match std::fs::read_to_string(&path) {
+        Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
+        _ => {
+            let id = uuid::Uuid::new_v4().to_string();
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
+            std::fs::write(&path, &id).map_err(|e| format!("write client-id: {e}"))?;
+            id
+        }
+    };
+    Ok(ClientIdentity {
+        client_id,
+        client_name: sysinfo::System::host_name(),
+    })
 }
 
 #[tauri::command]
@@ -741,9 +772,11 @@ pub fn run() {
     }
 
     builder
+        .manage(remote::RemoteState::default())
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_started,
             daemon_paths,
+            get_client_identity,
             stop_daemon,
             pick_directory,
             pick_file,
@@ -755,7 +788,17 @@ pub fn run() {
             open_path_in_vscode,
             open_folders_in_vscode,
             log_message,
-            quit_app
+            quit_app,
+            remote::connect_remote,
+            remote::disconnect_remote,
+            remote::decode_connection_code,
+            remote::list_remote_profiles,
+            remote::save_remote_profile,
+            remote::delete_remote_profile,
+            remote::discover_lan_hosts,
+            remote::pair_with_host,
+            autostart::get_autostart,
+            autostart::set_autostart
         ])
         .setup(|_app| {
             info!("rustling-tulip Tauri app starting");

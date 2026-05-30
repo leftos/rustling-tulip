@@ -40,6 +40,30 @@ export async function ensureDaemonStarted(): Promise<DaemonHandshake> {
   return await invoke<DaemonHandshake>("ensure_daemon_started");
 }
 
+/// Stable per-install client identity for per-client tab layouts. Mirrors the
+/// Rust `ClientIdentity` struct. The daemon keys each client's layout on
+/// `client_id`; `client_name` (hostname) labels it in another client's
+/// clone-layout chooser.
+export interface ClientIdentity {
+  client_id: string;
+  client_name: string | null;
+}
+
+export async function getClientIdentity(): Promise<ClientIdentity> {
+  return await invoke<ClientIdentity>("get_client_identity");
+}
+
+/// Whether the daemon is registered to start on login (host-side, Windows
+/// only — returns false elsewhere). Lets the desktop be reachable by a remote
+/// client after a reboot without anyone opening the app.
+export async function getAutostart(): Promise<boolean> {
+  return await invoke<boolean>("get_autostart");
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  await invoke<void>("set_autostart", { enabled });
+}
+
 /// Paths the daemon-footer troubleshooting flyout exposes for "open log",
 /// "reveal config dir", and "copy handshake path". Mirrors the Rust
 /// `DaemonPaths` struct in `apps/tauri-app/src-tauri/src/lib.rs`.
@@ -61,6 +85,107 @@ export async function fetchDaemonPaths(): Promise<DaemonPaths> {
 /// respawn it.
 export async function stopDaemon(): Promise<void> {
   await invoke<void>("stop_daemon");
+}
+
+/// Resolved connection parameters for a remote daemon. Mirrors the Rust
+/// `remote::ConnectionParams`. Obtained by decoding a pasted connection code
+/// or from a saved `RemoteProfile`.
+export interface ConnectionParams {
+  host: string;
+  port: number;
+  token: string;
+  /// SHA-256 of the remote leaf cert, lowercase hex (64 chars).
+  fingerprint: string;
+}
+
+/// A saved remote host. Mirrors the Rust `remote::RemoteProfile`, persisted in
+/// `remote-profiles.json`.
+export interface RemoteProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  token: string;
+  fingerprint: string;
+}
+
+/// Which daemon the app talks to. `local` is the bundled per-machine daemon
+/// (`ensureDaemonStarted`); `remote` is a saved profile reached through the
+/// pinned-TLS loopback bridge (`connectRemote`). Persisted client-side so the
+/// last choice auto-connects on boot.
+export type ConnectionTarget =
+  | { kind: "local" }
+  | { kind: "remote"; profileId: string };
+
+/// Establish (or replace) the pinned-TLS loopback bridge to a remote daemon
+/// and return a synthetic handshake the frontend dials over plaintext
+/// loopback. Throws a descriptive string if the host is unreachable or the
+/// certificate fingerprint does not match the pinned value.
+export async function connectRemote(
+  params: ConnectionParams,
+): Promise<DaemonHandshake> {
+  return await invoke<DaemonHandshake>("connect_remote", { params });
+}
+
+/// Tear down the active remote bridge (when switching back to local).
+export async function disconnectRemote(): Promise<void> {
+  await invoke<void>("disconnect_remote");
+}
+
+/// Decode a pasted base64url connection code into connection params. Pure
+/// parse — does not touch the network.
+export async function decodeConnectionCode(
+  code: string,
+): Promise<ConnectionParams> {
+  return await invoke<ConnectionParams>("decode_connection_code", { code });
+}
+
+export async function listRemoteProfiles(): Promise<RemoteProfile[]> {
+  return await invoke<RemoteProfile[]>("list_remote_profiles");
+}
+
+export async function saveRemoteProfile(profile: RemoteProfile): Promise<void> {
+  await invoke<void>("save_remote_profile", { profile });
+}
+
+export async function deleteRemoteProfile(id: string): Promise<void> {
+  await invoke<void>("delete_remote_profile", { id });
+}
+
+/// A daemon host discovered on the LAN via mDNS. Mirrors the Rust
+/// `remote::DiscoveredHost`.
+export interface DiscoveredHost {
+  /// Human label: the host's mDNS `name` TXT record, else its instance name.
+  name: string;
+  /// First IPv4 address the host advertised.
+  host: string;
+  port: number;
+  /// SHA-256 of the host's LAN cert (lowercase hex) to pin when pairing.
+  fingerprint: string;
+}
+
+/// Browse the LAN (~2.5s) for daemon hosts advertising over mDNS. An empty
+/// list means none were found (mDNS blocked, nothing advertising, slow net).
+export async function discoverLanHosts(): Promise<DiscoveredHost[]> {
+  return await invoke<DiscoveredHost[]>("discover_lan_hosts");
+}
+
+/// Exchange a host's short pairing code for its auth token over pinned TLS,
+/// returning connection params ready to save as a profile and connect with.
+/// Throws a descriptive string if the host is unreachable, the fingerprint
+/// mismatches, or the code is wrong/expired.
+export async function pairWithHost(
+  host: string,
+  port: number,
+  fingerprint: string,
+  code: string,
+): Promise<ConnectionParams> {
+  return await invoke<ConnectionParams>("pair_with_host", {
+    host,
+    port,
+    fingerprint,
+    code,
+  });
 }
 
 // Picker memory: store the parent directory of the last successful pick
@@ -144,7 +269,10 @@ export async function pickFile(opts: PickFileOpts = {}): Promise<string | null> 
   return result;
 }
 
-export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
+export function connectDaemon(
+  handshake: DaemonHandshake,
+  identity?: ClientIdentity | null,
+): DaemonClient {
   const url = `ws://127.0.0.1:${handshake.port}/ws`;
   const ws = new WebSocket(url);
   const messageCbs = new Set<(msg: DaemonMessage) => void>();
@@ -163,6 +291,14 @@ export function connectDaemon(handshake: DaemonHandshake): DaemonClient {
         protocol_version: PROTOCOL_VERSION,
         protocol_versions: [...SUPPORTED_PROTOCOL_VERSIONS],
         auth_token: handshake.auth_token,
+        ...(identity
+          ? {
+              client_id: identity.client_id,
+              ...(identity.client_name
+                ? { client_name: identity.client_name }
+                : {}),
+            }
+          : {}),
       } satisfies ClientMessage),
     );
     setState({ kind: "open" });

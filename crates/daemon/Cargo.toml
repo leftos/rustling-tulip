@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "rustling-tulip background daemon: WS server, PTY pool, session/repo registry"
+publish = false
 
 [[bin]]
 name = "rustling-tulipd"
@@ -44,6 +45,32 @@ notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"
 sha2 = "0.10"
+
+# TLS for the opt-in LAN listener. Pinned to the `ring` crypto backend to match
+# the backend already resolved via reqwest (rustls-tls) — keeps `aws-lc-sys`
+# (and its NASM/CMake build requirement) out of the tree.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# TLS-terminating server for the LAN listener. `tls-rustls-no-provider` keeps us
+# on the `ring` provider we build the ServerConfig with (no aws-lc default).
+axum-server = { version = "0.8", default-features = false, features = [
+    "tls-rustls-no-provider",
+] }
+# Enumerate the host's non-loopback IPv4 addresses for the LAN connection code.
+local-ip-address = "0.6"
+# Advertise the LAN listener over mDNS so laptops can discover it without a
+# hand-typed address (see crates/daemon/src/discovery.rs).
+mdns-sd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Restart Manager API for locating processes holding handles inside the

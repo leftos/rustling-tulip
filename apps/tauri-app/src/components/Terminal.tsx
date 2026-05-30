@@ -15,6 +15,7 @@ import {
 import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
+import { notifyRemoteUnavailable, useIsRemote } from "../utils/remoteMode";
 import { RtClipboardProvider } from "./clipboardProvider";
 import {
   attachShellIntegration,
@@ -103,7 +104,7 @@ interface TerminalLinkOpenDetail {
   baseDirs: string[];
 }
 
-function openTerminalLink(detail: TerminalLinkOpenDetail): void {
+function openTerminalLink(detail: TerminalLinkOpenDetail, isRemote: boolean): void {
   const event = new CustomEvent<TerminalLinkOpenDetail>("rt:terminal-link-open", {
     cancelable: true,
     detail,
@@ -111,9 +112,18 @@ function openTerminalLink(detail: TerminalLinkOpenDetail): void {
   if (!window.dispatchEvent(event)) return;
 
   if (detail.kind === "url") {
+    // URLs open in the client's browser regardless of where the daemon runs —
+    // they're not a local-FS action, so they stay enabled on remote.
     void invoke("open_url", { url: detail.target }).catch((err: unknown) => {
       console.warn("open_url failed", detail.target, err);
     });
+    return;
+  }
+
+  // A file path resolves on the *host's* filesystem; opening it in the
+  // client's VS Code is meaningless over a remote connection.
+  if (isRemote) {
+    notifyRemoteUnavailable("Open in VS Code");
     return;
   }
 
@@ -166,6 +176,11 @@ export default function Terminal({
   const fitRef = useRef<FitAddon | null>(null);
   const linkBaseDirsRef = useRef(linkBaseDirs);
   linkBaseDirsRef.current = linkBaseDirs;
+  // Read inside the xterm link-provider closure (registered once); the ref
+  // keeps it current so toggling the connection doesn't re-wire xterm.
+  const isRemote = useIsRemote();
+  const isRemoteRef = useRef(isRemote);
+  isRemoteRef.current = isRemote;
 
   // Shell-integration chip menu state. Set when the user clicks a
   // gutter dot; cleared on outside-click / Escape / scroll. The ref is
@@ -473,6 +488,7 @@ export default function Terminal({
                   event.preventDefault();
                   openTerminalLink(
                     terminalLinkDetail(link, linkBaseDirsRef.current),
+                    isRemoteRef.current,
                   );
                 },
                 dispose() {

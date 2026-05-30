@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "rt-tracer.exe: per-session PTY supervisor that owns the claude child and survives daemon restarts. Phase C skeleton — not yet wired into the daemon."
+publish = false
 
 [[bin]]
 name = "rt-tracer"

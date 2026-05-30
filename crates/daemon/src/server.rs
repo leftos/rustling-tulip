@@ -1,7 +1,10 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
 use crate::agents::CommonSpawnFields;
+use crate::discovery;
+use crate::lan;
 use crate::orphan::{self, OrphanMeta};
+use crate::pairing;
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
@@ -21,6 +24,7 @@ use crate::{
     git, git_inspect, git_write, headless, inject, osc_title, pty_state, vscode, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -32,13 +36,12 @@ use chrono::Utc;
 use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, DaemonHandshake,
-    DaemonMessage, InboundClientMessage, PROTOCOL_VERSION, PaneDropEdge, PresetLaunchJobSnapshot,
-    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, ClonableLayout,
+    DaemonHandshake, DaemonMessage, InboundClientMessage, InitLayoutKind, PROTOCOL_VERSION,
+    PaneDropEdge, PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember,
+    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    VscodeWorkspaceSuggestion,
 };
-use rand::Rng as _;
-use rand::distributions::Alphanumeric;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -64,7 +67,7 @@ pub struct Hub {
     /// event channel: every connected client subscribes and forwards events
     /// to its WebSocket sender. Buffered to keep up with bursty drag-reorder
     /// or split-pane sequences.
-    pub tab_events: broadcast::Sender<TabEvent>,
+    pub tab_events: broadcast::Sender<ScopedTabEvent>,
     /// Broadcast for preset-launch progress/failure events. Every connected
     /// client subscribes and forwards. Lets the launching client auto-switch
     /// tabs while the batch runs, and lets other clients see new tabs appear.
@@ -85,6 +88,32 @@ pub struct Hub {
     /// listening — the broadcasts would just be dropped on the floor and
     /// every event would cost a couple of `git` subprocesses for nothing.
     pub client_count: Arc<tokio::sync::watch::Sender<usize>>,
+    /// Handle to the running opt-in LAN TLS listener, if any.
+    /// [`ClientMessage::ConfigureLan`] stores the handle here on enable and
+    /// takes it on disable to drive a graceful shutdown; the daemon-wide
+    /// shutdown task also tears it down. `None` when LAN access is off.
+    pub lan_handle: Arc<AsyncMutex<Option<axum_server::Handle<SocketAddr>>>>,
+    /// Live mDNS advertisement for LAN discovery, present while the LAN
+    /// listener is bound. Started by [`start_lan_listener`] and dropped
+    /// (which unregisters the service) by [`stop_lan_listener`] and at
+    /// daemon shutdown. `None` when LAN access is off.
+    pub advertiser: Arc<AsyncMutex<Option<discovery::Advertiser>>>,
+    /// The active short-code pairing window, if the host has one open.
+    /// [`ClientMessage::StartPairing`] opens it; the `/pair` HTTP handler and
+    /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
+    /// pairing is in progress.
+    pub pairing: Arc<AsyncMutex<Option<pairing::PairingSession>>>,
+}
+
+impl Hub {
+    /// Broadcast a tab-layout change scoped to one client's layout. Only that
+    /// client's connections (window + same-machine pop-outs) forward it.
+    pub(crate) fn emit_tab(&self, client_id: &str, event: TabEvent) {
+        let _ = self.tab_events.send(ScopedTabEvent {
+            client_id: client_id.to_string(),
+            event,
+        });
+    }
 }
 
 /// RAII guard around [`Hub::client_count`]: increments on construction,
@@ -146,6 +175,22 @@ pub enum StateEvent {
         root: String,
         is_override: bool,
     },
+    /// Broadcast after a successful [`ClientMessage::ConfigureLan`] so every
+    /// connected client's Settings UI reflects the new LAN access state
+    /// without polling. Mirrors [`protocol::DaemonMessage::LanStatus`].
+    LanStatus {
+        enabled: bool,
+        port: u16,
+        fingerprint: Option<String>,
+        addresses: Vec<String>,
+    },
+    /// Broadcast when the active pairing window ends (paired / expired /
+    /// cancelled / locked out) so every connected host window clears the
+    /// displayed code. Carries no code, so broadcasting to all clients —
+    /// including a remote laptop — is safe.
+    PairingEnded {
+        reason: protocol::PairingEndReason,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +198,15 @@ pub enum TabEvent {
     Updated(TabEntry),
     Removed(String),
     Reordered(Vec<String>),
+}
+
+/// A [`TabEvent`] tagged with the `client_id` whose layout it belongs to. Tab
+/// layouts are per-client, so a connection only forwards events scoped to its
+/// own `client_id` (a window + its same-machine pop-outs share one).
+#[derive(Debug, Clone)]
+pub struct ScopedTabEvent {
+    pub client_id: String,
+    pub event: TabEvent,
 }
 
 #[derive(Debug, Clone)]
@@ -204,78 +258,25 @@ async fn reattach_orphans(
     let orphan_count = orphans.len();
     let abandoned_count = abandoned.len();
     info!(orphan_count, abandoned_count, "reattach_orphans: begin");
+    // Reattach concurrently. Each orphan's tracer connect can block up to the
+    // per-tracer reattach budget, so a sequential loop made boot time scale
+    // with the number of unreachable tracers (N × budget) and stalled the
+    // handshake — a single dead tracer would delay every session. All
+    // reattaches still complete before the caller binds the listener, so the
+    // "clients only see fully-wired sessions" invariant holds; the registry
+    // mutations inside each task are independently locked.
+    let mut tasks = Vec::with_capacity(orphans.len());
     for meta in orphans {
-        let session_start = std::time::Instant::now();
-        match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
-            (Some(pipe), Some(tracer_pid)) => {
-                match tracer_client::reattach(
-                    &meta.session_id,
-                    pipe,
-                    tracer_pid,
-                    expected_output_subscribers(meta.mode),
-                )
-                .await
-                {
-                    Ok(pty) => {
-                        info!(
-                            session_id = %meta.session_id,
-                            tracer_pid,
-                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                            "tracer reattach succeeded"
-                        );
-                        let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
-                        let snap_tx = attach_lifecycle(
-                            sessions,
-                            meta.session_id.clone(),
-                            &pty,
-                            Some(dirs.clone()),
-                        );
-                        let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                        {
-                            let mut guard = crate::sync::lock(pending.arc());
-                            guard.scrollback_snapshot_req = Some(snap_tx);
-                            guard.input_notifier = Some(in_tx);
-                        }
-                        if meta.mode == SessionMode::PlainShell {
-                            pty_state::watch_plain_shell(
-                                sessions,
-                                meta.session_id.clone(),
-                                pty.output.subscribe(),
-                                in_rx,
-                            );
-                        } else {
-                            pty_state::watch(
-                                sessions,
-                                meta.session_id.clone(),
-                                pty.output.subscribe(),
-                                in_rx,
-                                attention_tx.clone(),
-                            );
-                        }
-                        osc_title::watch(
-                            sessions,
-                            meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            dirs.clone(),
-                            meta.mode == SessionMode::PlainShell,
-                        );
-                        pending.publish();
-                    }
-                    Err(err) => {
-                        warn!(
-                            ?err,
-                            session_id = %meta.session_id,
-                            tracer_pid,
-                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                            "tracer reattach failed; routing to abandoned"
-                        );
-                        sessions.insert_abandoned(&meta);
-                    }
-                }
-            }
-            _ => {
-                sessions.insert_orphan(&meta);
-            }
+        tasks.push(tokio::spawn(reattach_one(
+            Arc::clone(sessions),
+            dirs.clone(),
+            attention_tx.clone(),
+            meta,
+        )));
+    }
+    for task in tasks {
+        if let Err(err) = task.await {
+            warn!(?err, "reattach_orphans: reattach task failed to join");
         }
     }
     for meta in abandoned {
@@ -289,6 +290,89 @@ async fn reattach_orphans(
     );
 }
 
+/// Reattach a single orphan to its still-running tracer, or route it to the
+/// abandoned bucket if the tracer is unreachable. Runs as its own task so a
+/// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
+async fn reattach_one(
+    sessions: Arc<SessionRegistry>,
+    dirs: Dirs,
+    attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    meta: OrphanMeta,
+) {
+    let session_start = std::time::Instant::now();
+    match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
+        (Some(pipe), Some(tracer_pid)) => {
+            match tracer_client::reattach(
+                &meta.session_id,
+                pipe,
+                tracer_pid,
+                expected_output_subscribers(meta.mode),
+            )
+            .await
+            {
+                Ok(pty) => {
+                    info!(
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach succeeded"
+                    );
+                    let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
+                    let snap_tx = attach_lifecycle(
+                        &sessions,
+                        meta.session_id.clone(),
+                        &pty,
+                        Some(dirs.clone()),
+                    );
+                    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                    {
+                        let mut guard = crate::sync::lock(pending.arc());
+                        guard.scrollback_snapshot_req = Some(snap_tx);
+                        guard.input_notifier = Some(in_tx);
+                    }
+                    if meta.mode == SessionMode::PlainShell {
+                        pty_state::watch_plain_shell(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            in_rx,
+                        );
+                    } else {
+                        pty_state::watch(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            in_rx,
+                            attention_tx.clone(),
+                        );
+                    }
+                    osc_title::watch(
+                        &sessions,
+                        meta.session_id.clone(),
+                        pty.output.subscribe(),
+                        dirs.clone(),
+                        meta.mode == SessionMode::PlainShell,
+                    );
+                    pending.publish();
+                }
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach failed; routing to abandoned"
+                    );
+                    sessions.insert_abandoned(&meta);
+                }
+            }
+        }
+        _ => {
+            sessions.insert_orphan(&meta);
+        }
+    }
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -296,11 +380,13 @@ pub async fn run(
     abandoned: Vec<OrphanMeta>,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
-    let auth_token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(48)
-        .map(char::from)
-        .collect();
+    // LAN access (opt-in) persists its auth token in `lan.json` so a paired
+    // remote client survives daemon restarts. When LAN has never been enabled,
+    // fall back to a fresh per-start token — loopback-only, exactly as before.
+    let lan_config = lan::load(&dirs);
+    let auth_token: String = lan_config
+        .as_ref()
+        .map_or_else(lan::generate_auth_token, |c| c.auth_token.clone());
 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
@@ -353,13 +439,12 @@ pub async fn run(
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
         state_events,
         client_count,
+        lan_handle: Arc::new(AsyncMutex::new(None)),
+        advertiser: Arc::new(AsyncMutex::new(None)),
+        pairing: Arc::new(AsyncMutex::new(None)),
     };
 
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/health", get(|| async { "ok" }))
-        .route("/shutdown", post(shutdown_handler))
-        .with_state(hub);
+    let app = build_router(hub.clone());
 
     let bind_start = std::time::Instant::now();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -379,6 +464,27 @@ pub async fn run(
         run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "handshake file written; daemon ready for clients"
     );
+
+    // Opt-in LAN TLS listener. When enabled in `lan.json`, bind a second
+    // listener on `0.0.0.0:<port>` serving the *same* Router over TLS. The
+    // loopback listener above stays plaintext and unchanged. Failures here are
+    // logged and swallowed — they never block local clients.
+    if lan_config.as_ref().is_some_and(|c| c.enabled) {
+        let port = lan_config
+            .as_ref()
+            .map_or(lan::DEFAULT_LAN_PORT, |c| c.port);
+        match start_lan_listener(&hub, port).await {
+            Ok(fingerprint) => {
+                info!(port, %fingerprint, "LAN access enabled at startup; TLS listener bound");
+            }
+            Err(err) => error!(?err, "LAN access enabled but listener failed to start"),
+        }
+    }
+
+    // Tear down the LAN listener + mDNS advertisement (started at boot or via
+    // ConfigureLan) when the daemon shuts down, off the same watch the loopback
+    // listener uses.
+    spawn_lan_teardown(&hub, shutdown_rx.clone());
 
     let shutdown_signal = async move {
         // Returns once the Shutdown handler flips the watch to `true`. A
@@ -403,6 +509,139 @@ pub async fn run(
     let _ = std::fs::remove_file(&dirs.handshake_file);
     info!("server::run: discovery file removed; returning");
     serve_result
+}
+
+/// Build the axum Router with all routes + Hub state. Shared by the loopback
+/// listener and the opt-in LAN TLS listener so both serve identical routes.
+fn build_router(hub: Hub) -> Router {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/health", get(|| async { "ok" }))
+        .route("/shutdown", post(shutdown_handler))
+        .route("/pair", post(pair_handler))
+        .with_state(hub)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairRequest {
+    code: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PairResponse {
+    token: String,
+    protocol_version: u32,
+}
+
+/// `POST /pair` — exchange a valid pairing code for the daemon's auth token.
+///
+/// Reachable on the LAN TLS listener: a discovering laptop pins the cert from
+/// the mDNS TXT record, then submits the host's short code here. The endpoint
+/// is unauthenticated by design — the short-lived, attempt-capped code *is* the
+/// authorization. A match consumes the window and hands back the token (the
+/// laptop then connects over the normal pinned-TLS WS path); any terminal
+/// outcome broadcasts [`protocol::DaemonMessage::PairingEnded`] so the host UI
+/// clears the displayed code.
+async fn pair_handler(State(hub): State<Hub>, Json(req): Json<PairRequest>) -> Response {
+    let outcome = {
+        let mut slot = hub.pairing.lock().await;
+        pairing::validate(&mut slot, &req.code, std::time::Instant::now())
+    };
+    if let Some(reason) = outcome.end_reason() {
+        let _ = hub.state_events.send(StateEvent::PairingEnded { reason });
+    }
+    match outcome {
+        pairing::PairOutcome::Matched => {
+            info!("HTTP /pair: code accepted; handing back auth token");
+            (
+                StatusCode::OK,
+                Json(PairResponse {
+                    token: hub.auth_token.clone(),
+                    protocol_version: PROTOCOL_VERSION,
+                }),
+            )
+                .into_response()
+        }
+        pairing::PairOutcome::Wrong => {
+            (StatusCode::FORBIDDEN, "invalid pairing code").into_response()
+        }
+        pairing::PairOutcome::TooManyAttempts => (
+            StatusCode::FORBIDDEN,
+            "too many attempts; ask the host for a new code",
+        )
+            .into_response(),
+        pairing::PairOutcome::Expired => {
+            (StatusCode::FORBIDDEN, "pairing code expired").into_response()
+        }
+        pairing::PairOutcome::NoSession => {
+            (StatusCode::FORBIDDEN, "no pairing in progress").into_response()
+        }
+    }
+}
+
+/// Start (or restart) the opt-in LAN TLS listener on `0.0.0.0:<port>`, serving
+/// the same Router over TLS (rustls, ring). Stops any previously-running LAN
+/// listener first so a port change or re-enable never leaks a listener. Returns
+/// the pinned cert fingerprint on success.
+async fn start_lan_listener(hub: &Hub, port: u16) -> anyhow::Result<String> {
+    stop_lan_listener(hub).await;
+    let cert = lan::ensure_cert(&hub.dirs)?;
+    let fingerprint = cert.fingerprint;
+    let lan_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(cert.server_config);
+    let handle = axum_server::Handle::new();
+    *hub.lan_handle.lock().await = Some(handle.clone());
+    let app = build_router(hub.clone());
+    tokio::spawn(async move {
+        if let Err(err) = axum_server::bind_rustls(lan_addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await
+        {
+            error!(?err, "LAN TLS listener exited with error");
+        }
+    });
+
+    // Advertise over mDNS so a laptop can discover this host without a typed
+    // address. Best-effort: a failure here (no responder, blocked UDP 5353)
+    // leaves the working TLS listener up — pairing by pasted code still works.
+    match discovery::advertise(port, &fingerprint, &lan::detect_addresses()) {
+        Ok(adv) => *hub.advertiser.lock().await = Some(adv),
+        Err(err) => warn!(
+            ?err,
+            "mDNS advertising failed to start; LAN listener still bound"
+        ),
+    }
+
+    Ok(fingerprint)
+}
+
+/// Spawn the task that gracefully stops the LAN TLS listener and drops its
+/// mDNS advertisement when the daemon-wide shutdown watch flips to `true`.
+fn spawn_lan_teardown(hub: &Hub, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    let lan_handle_slot = hub.lan_handle.clone();
+    let advertiser_slot = hub.advertiser.clone();
+    tokio::spawn(async move {
+        while shutdown_rx.changed().await.is_ok() {
+            if *shutdown_rx.borrow() {
+                if let Some(handle) = lan_handle_slot.lock().await.take() {
+                    handle.graceful_shutdown(Some(Duration::from_secs(3)));
+                }
+                drop(advertiser_slot.lock().await.take());
+                break;
+            }
+        }
+    });
+}
+
+/// Gracefully stop the LAN TLS listener if running; no-op otherwise. Also drops
+/// the mDNS advertisement (its `Drop` unregisters the service).
+async fn stop_lan_listener(hub: &Hub) {
+    let handle = hub.lan_handle.lock().await.take();
+    if let Some(handle) = handle {
+        handle.graceful_shutdown(Some(std::time::Duration::from_secs(3)));
+    }
+    drop(hub.advertiser.lock().await.take());
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
@@ -491,7 +730,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     });
 
     // Mandatory handshake.
-    let _negotiated_version = match handshake(&hub, &mut receiver, &out_tx).await {
+    let handshake = match handshake(&hub, &mut receiver, &out_tx).await {
         Ok(v) => v,
         Err(err) => {
             warn!(?err, "client handshake failed");
@@ -503,6 +742,22 @@ async fn client_session(hub: Hub, socket: WebSocket) {
             return;
         }
     };
+    // Effective per-client layout key: the client's id, or the shared legacy
+    // key for connections that don't send one. Same value drives the tab-event
+    // filter, push_initial_state, and every tab handler in `dispatch`.
+    let client_id = handshake
+        .client_id
+        .clone()
+        .unwrap_or_else(|| crate::state::LEGACY_CLIENT_ID.to_string());
+    let client_name = handshake.client_name.clone();
+    // A real client_id the daemon has never seen gets the first-connect chooser
+    // (LayoutInitRequired instead of Tabs). Legacy/no-id clients can't handle
+    // the chooser, so they auto-init the shared legacy layout.
+    let needs_layout_chooser =
+        client_id != crate::state::LEGACY_CLIENT_ID && !hub.state.has_client_layout(&client_id);
+    if !needs_layout_chooser {
+        ensure_client_layout(&hub, &client_id, client_name.as_deref());
+    }
 
     // Per-session PTY forwarder tasks. Each task subscribes directly to a
     // session's `pty.output` broadcast and pumps bytes into this client's
@@ -547,16 +802,30 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         }
     });
 
-    // Subscribe to tab-layout and preset-launch events; both forwarded
-    // unconditionally to every connected client.
-    let tab_event_task = spawn_tab_forwarder(hub.tab_events.subscribe(), out_tx.clone());
+    // Subscribe to tab-layout and preset-launch events. Tab events are
+    // filtered to this connection's `client_id` (per-client layouts); preset
+    // and registry events are forwarded to every client.
+    let tab_event_task = spawn_tab_forwarder(
+        hub.tab_events.subscribe(),
+        out_tx.clone(),
+        client_id.clone(),
+    );
     let preset_event_task = spawn_preset_forwarder(hub.preset_events.subscribe(), out_tx.clone());
     let state_event_task = spawn_state_forwarder(hub.state_events.subscribe(), out_tx.clone());
 
-    // Send initial state snapshots.
-    push_initial_state(&hub, &out_tx);
+    // Send initial state snapshots: this client's layout, or the first-connect
+    // chooser when it has none yet.
+    push_initial_state(&hub, &out_tx, &client_id, needs_layout_chooser);
 
-    recv_loop(&hub, &mut receiver, &out_tx, &pty_forwarders).await;
+    recv_loop(
+        &hub,
+        &mut receiver,
+        &out_tx,
+        &pty_forwarders,
+        &client_id,
+        client_name.as_deref(),
+    )
+    .await;
 
     info!("client_session: recv_loop returned; tearing down");
     {
@@ -574,21 +843,54 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     info!("client_session: returning");
 }
 
+/// Ensure a layout exists for a non-chooser connection: an existing client
+/// (refresh its name) or the shared legacy key (no `client_id`). Legacy
+/// connections mirror the pre-per-client global layout without consuming it,
+/// so a real client can still adopt it through the first-connect chooser
+/// (`CloneLegacy`). Real clients with no layout never reach here — they go
+/// through the chooser.
+fn ensure_client_layout(hub: &Hub, client_id: &str, client_name: Option<&str>) {
+    if hub.state.has_client_layout(client_id) {
+        if let Err(err) = hub
+            .state
+            .set_client_name(client_id, client_name.map(std::string::ToString::to_string))
+        {
+            warn!(?err, "failed to refresh client layout name");
+        }
+        return;
+    }
+    if let Err(err) = hub.state.set_client_layout(
+        client_id,
+        client_name.map(std::string::ToString::to_string),
+        hub.state.legacy_tabs(),
+    ) {
+        warn!(?err, %client_id, "failed to initialize legacy client layout");
+    }
+}
+
 fn spawn_tab_forwarder(
-    mut rx: broadcast::Receiver<TabEvent>,
+    mut rx: broadcast::Receiver<ScopedTabEvent>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    client_id: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(TabEvent::Updated(tab)) => {
-                    let _ = out_tx.send(DaemonMessage::TabUpdated { tab });
-                }
-                Ok(TabEvent::Removed(tab_id)) => {
-                    let _ = out_tx.send(DaemonMessage::TabRemoved { tab_id });
-                }
-                Ok(TabEvent::Reordered(ids)) => {
-                    let _ = out_tx.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                Ok(scoped) => {
+                    if scoped.client_id != client_id {
+                        continue;
+                    }
+                    match scoped.event {
+                        TabEvent::Updated(tab) => {
+                            let _ = out_tx.send(DaemonMessage::TabUpdated { tab });
+                        }
+                        TabEvent::Removed(tab_id) => {
+                            let _ = out_tx.send(DaemonMessage::TabRemoved { tab_id });
+                        }
+                        TabEvent::Reordered(ids) => {
+                            let _ = out_tx.send(DaemonMessage::TabsReordered { ordered_ids: ids });
+                        }
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client tab event stream lagged");
@@ -650,6 +952,22 @@ fn spawn_state_forwarder(
                 }
                 Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
                     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
+                }
+                Ok(StateEvent::LanStatus {
+                    enabled,
+                    port,
+                    fingerprint,
+                    addresses,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::LanStatus {
+                        enabled,
+                        port,
+                        fingerprint,
+                        addresses,
+                    });
+                }
+                Ok(StateEvent::PairingEnded { reason }) => {
+                    let _ = out_tx.send(DaemonMessage::PairingEnded { reason });
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
@@ -720,6 +1038,8 @@ async fn recv_loop(
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    client_id: &str,
+    client_name: Option<&str>,
 ) {
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
@@ -764,7 +1084,9 @@ async fn recv_loop(
                         continue;
                     }
                 };
-                if let Err(err) = dispatch(hub, parsed, out_tx, pty_forwarders).await {
+                if let Err(err) =
+                    dispatch(hub, parsed, out_tx, pty_forwarders, client_id, client_name).await
+                {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                     });
@@ -774,11 +1096,22 @@ async fn recv_loop(
     }
 }
 
+/// Outcome of a successful handshake: the negotiated protocol version plus the
+/// client's self-reported identity (used to key its per-client tab layout).
+struct Handshake {
+    #[expect(dead_code, reason = "kept for symmetry/logging; not yet read")]
+    negotiated_version: u32,
+    /// `None` when the client didn't send a `client_id` (older builds); the
+    /// connection then falls back to the shared legacy layout.
+    client_id: Option<String>,
+    client_name: Option<String>,
+}
+
 async fn handshake(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-) -> anyhow::Result<u32> {
+) -> anyhow::Result<Handshake> {
     let Some(Ok(msg)) = receiver.next().await else {
         return Err(anyhow!("client closed before handshake"));
     };
@@ -791,6 +1124,8 @@ async fn handshake(
         protocol_version,
         protocol_versions,
         auth_token,
+        client_id,
+        client_name,
     }) = parsed
     else {
         return Err(anyhow!("first message must be Hello"));
@@ -809,13 +1144,18 @@ async fn handshake(
         negotiated,
         scalar = protocol_version,
         ?protocol_versions,
+        client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
     let _ = out_tx.send(DaemonMessage::Welcome {
         protocol_version: negotiated,
         supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
     });
-    Ok(negotiated)
+    Ok(Handshake {
+        negotiated_version: negotiated,
+        client_id,
+        client_name,
+    })
 }
 
 /// Pick the highest protocol version both the client and daemon understand.
@@ -832,12 +1172,16 @@ fn negotiate_protocol_version(scalar: u32, range: &[u32]) -> Option<u32> {
     best
 }
 
-fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
-    let (repos, workspaces, tabs, container_order, session_order) = hub.state.with_persisted(|s| {
+fn push_initial_state(
+    hub: &Hub,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    client_id: &str,
+    needs_layout_chooser: bool,
+) {
+    let (repos, workspaces, container_order, session_order) = hub.state.with_persisted(|s| {
         (
             s.repos.clone(),
             s.workspaces.clone(),
-            s.tabs.clone(),
             s.container_order.clone(),
             s.session_order.clone(),
         )
@@ -855,13 +1199,36 @@ fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) 
             });
         }
     }
-    let _ = out_tx.send(DaemonMessage::Sessions {
-        sessions: hub.sessions.snapshots(),
-    });
-    let _ = out_tx.send(DaemonMessage::Tabs { tabs });
+    let sessions = hub.sessions.snapshots();
+    let session_count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
+    let _ = out_tx.send(DaemonMessage::Sessions { sessions });
+    if needs_layout_chooser {
+        let clonable = hub
+            .state
+            .clonable_layouts(client_id)
+            .into_iter()
+            .map(|(client_id, name)| ClonableLayout { client_id, name })
+            .collect();
+        let _ = out_tx.send(DaemonMessage::LayoutInitRequired {
+            has_legacy: !hub.state.legacy_tabs().is_empty(),
+            active_session_count: session_count,
+            clonable,
+        });
+    } else {
+        let _ = out_tx.send(DaemonMessage::Tabs {
+            tabs: hub.state.client_layout(client_id),
+        });
+    }
     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged {
         root: hub.state.worktrees_dir().to_string_lossy().into_owned(),
         is_override: hub.state.worktrees_root_is_override(),
+    });
+    let lan_cfg = lan::load(&hub.dirs);
+    let _ = out_tx.send(DaemonMessage::LanStatus {
+        enabled: lan_cfg.as_ref().is_some_and(|c| c.enabled),
+        port: lan_cfg.as_ref().map_or(lan::DEFAULT_LAN_PORT, |c| c.port),
+        fingerprint: lan::fingerprint(&hub.dirs),
+        addresses: lan::detect_addresses(),
     });
 }
 
@@ -875,6 +1242,8 @@ async fn dispatch(
     msg: ClientMessage,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    client_id: &str,
+    client_name: Option<&str>,
 ) -> anyhow::Result<()> {
     match msg {
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
@@ -1477,13 +1846,14 @@ async fn dispatch(
         } => {
             let outcome = open_diff_tab(
                 hub,
+                client_id,
                 &repo_id,
                 &path,
                 against.as_deref(),
                 worktree_path.as_deref(),
             )?;
             if let Some(new_tab) = outcome.created {
-                let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+                hub.emit_tab(client_id, TabEvent::Updated(new_tab));
             }
             let _ = out_tx.send(DaemonMessage::DiffTabOpened {
                 id,
@@ -1578,6 +1948,54 @@ async fn dispatch(
                 is_override,
             });
         }
+        ClientMessage::ConfigureLan { enabled, port } => {
+            // Persist the config (with the stable auth token so a paired remote
+            // client survives restarts), then bring the TLS listener up/down
+            // live, and broadcast the resulting status to every client.
+            let cfg = lan::LanConfig {
+                enabled,
+                port,
+                auth_token: hub.auth_token.clone(),
+            };
+            lan::save(&hub.dirs, &cfg)?;
+            if enabled {
+                match start_lan_listener(hub, port).await {
+                    Ok(fingerprint) => {
+                        info!(port, %fingerprint, "LAN access enabled via ConfigureLan");
+                    }
+                    Err(err) => error!(?err, "ConfigureLan: failed to start LAN listener"),
+                }
+            } else {
+                stop_lan_listener(hub).await;
+                info!("LAN access disabled via ConfigureLan");
+            }
+            let _ = hub.state_events.send(StateEvent::LanStatus {
+                enabled,
+                port,
+                fingerprint: lan::fingerprint(&hub.dirs),
+                addresses: lan::detect_addresses(),
+            });
+        }
+        ClientMessage::StartPairing => {
+            // Open a fresh pairing window and hand the code back to *this*
+            // connection only — broadcasting it would leak the code to a
+            // remote client. The `/pair` HTTP endpoint validates submissions.
+            let session = pairing::PairingSession::new(std::time::Instant::now());
+            let code = session.code().to_string();
+            *hub.pairing.lock().await = Some(session);
+            let ttl_secs = u32::try_from(pairing::PAIRING_TTL.as_secs()).unwrap_or(u32::MAX);
+            info!("pairing window opened");
+            let _ = out_tx.send(DaemonMessage::PairingStarted { code, ttl_secs });
+        }
+        ClientMessage::CancelPairing => {
+            let had_session = hub.pairing.lock().await.take().is_some();
+            if had_session {
+                info!("pairing window cancelled by host");
+                let _ = hub.state_events.send(StateEvent::PairingEnded {
+                    reason: protocol::PairingEndReason::Cancelled,
+                });
+            }
+        }
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
@@ -1603,7 +2021,7 @@ async fn dispatch(
             });
         }
         ClientMessage::ListTabs => {
-            let tabs = hub.state.with_persisted(|s| s.tabs.clone());
+            let tabs = hub.state.client_layout(client_id);
             let _ = out_tx.send(DaemonMessage::Tabs { tabs });
         }
         ClientMessage::CreateTab {
@@ -1612,51 +2030,77 @@ async fn dispatch(
         } => {
             // Resolve the default name against the current tab list so
             // sequential opens produce `Tab`, `Tab 2`, `Tab 3`, ...
-            let new_tab = hub.state.mutate(|s| {
-                let tab = tabs::make_tab(name, initial_session_id, &s.tabs);
-                s.tabs.push(tab.clone());
+            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::make_tab(name, initial_session_id, tabs);
+                tabs.push(tab.clone());
                 tab
             })?;
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::CloseTab { tab_id } => {
-            let removed = hub.state.mutate(|s| {
-                let prev = s.tabs.len();
-                s.tabs.retain(|t| t.id != tab_id);
-                prev != s.tabs.len()
+            let removed = hub.state.mutate_client_layout(client_id, |tabs| {
+                let prev = tabs.len();
+                tabs.retain(|t| t.id != tab_id);
+                prev != tabs.len()
             })?;
             if removed {
-                let _ = hub.tab_events.send(TabEvent::Removed(tab_id));
+                hub.emit_tab(client_id, TabEvent::Removed(tab_id));
             }
         }
         ClientMessage::RestoreTab { tab, index } => {
-            let (restored, ordered_ids) = hub.state.mutate(|s| {
-                let restored = tabs::restore_tab(&mut s.tabs, tab, index)?;
-                let ordered_ids = s.tabs.iter().map(|t| t.id.clone()).collect();
+            let (restored, ordered_ids) = hub.state.mutate_client_layout(client_id, |tabs| {
+                let restored = tabs::restore_tab(tabs, tab, index)?;
+                let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
                 Ok::<_, anyhow::Error>((restored, ordered_ids))
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(restored));
-            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+            hub.emit_tab(client_id, TabEvent::Updated(restored));
+            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
         }
         ClientMessage::RestoreTabSnapshot { tab } => {
             let restored = hub
                 .state
-                .mutate(|s| tabs::restore_tab_snapshot(&mut s.tabs, tab))??;
-            let _ = hub.tab_events.send(TabEvent::Updated(restored));
+                .mutate_client_layout(client_id, |tabs| tabs::restore_tab_snapshot(tabs, tab))??;
+            hub.emit_tab(client_id, TabEvent::Updated(restored));
         }
         ClientMessage::RenameTab { tab_id, name } => {
-            let updated = hub.state.mutate(|s| {
-                tabs::find_tab_mut(&mut s.tabs, &tab_id).map(|t| {
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                tabs::find_tab_mut(tabs, &tab_id).map(|t| {
                     t.name = name;
                     t.clone()
                 })
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ReorderTabs { ordered_ids } => {
             hub.state
-                .mutate(|s| tabs::reorder_tabs(&mut s.tabs, &ordered_ids))??;
-            let _ = hub.tab_events.send(TabEvent::Reordered(ordered_ids));
+                .mutate_client_layout(client_id, |tabs| tabs::reorder_tabs(tabs, &ordered_ids))??;
+            hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
+        }
+        ClientMessage::InitLayout { kind } => {
+            // First-connect chooser reply: seed this client's brand-new layout
+            // and send it the resulting tabs. CloneClient deep-copies another
+            // client's layout with fresh pane ids (same sessions); AllSessions
+            // builds one tab of panes over every running session.
+            let clear_legacy = matches!(kind, InitLayoutKind::CloneLegacy);
+            let tabs = match kind {
+                InitLayoutKind::Empty | InitLayoutKind::Unknown => Vec::new(),
+                InitLayoutKind::CloneLegacy => hub.state.legacy_tabs(),
+                InitLayoutKind::CloneClient { client_id: source } => {
+                    tabs::clone_tabs_fresh_ids(&hub.state.client_layout(&source))
+                }
+                InitLayoutKind::AllSessions => build_all_sessions_layout(hub),
+            };
+            hub.state.set_client_layout(
+                client_id,
+                client_name.map(std::string::ToString::to_string),
+                tabs,
+            )?;
+            if clear_legacy {
+                hub.state.clear_legacy_tabs()?;
+            }
+            let _ = out_tx.send(DaemonMessage::Tabs {
+                tabs: hub.state.client_layout(client_id),
+            });
         }
         ClientMessage::ReorderContainers { ordered } => {
             let applied = reorder_containers(&hub.state, ordered)?;
@@ -1681,21 +2125,21 @@ async fn dispatch(
             place,
             new_session_id,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ClosePane { tab_id, pane_id } => {
-            let outcome = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let outcome = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let empty = tabs::close_pane(grid, &pane_id)?;
                 if empty {
-                    s.tabs.retain(|t| t.id != tab_id);
+                    tabs.retain(|t| t.id != tab_id);
                     Ok::<_, anyhow::Error>(CloseOutcome::TabRemoved(tab_id.clone()))
                 } else {
                     Ok(CloseOutcome::TabUpdated(tab.clone()))
@@ -1703,10 +2147,10 @@ async fn dispatch(
             })??;
             match outcome {
                 CloseOutcome::TabRemoved(id) => {
-                    let _ = hub.tab_events.send(TabEvent::Removed(id));
+                    hub.emit_tab(client_id, TabEvent::Removed(id));
                 }
                 CloseOutcome::TabUpdated(tab) => {
-                    let _ = hub.tab_events.send(TabEvent::Updated(tab));
+                    hub.emit_tab(client_id, TabEvent::Updated(tab));
                 }
             }
         }
@@ -1715,26 +2159,26 @@ async fn dispatch(
             split_path,
             ratio,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::set_pane_ratio(grid, &split_path, ratio)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ReplacePaneSession {
             tab_id,
             pane_id,
             session_id,
         } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::replace_pane_session(grid, &pane_id, session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::MovePane {
             src_tab_id,
@@ -1748,6 +2192,7 @@ async fn dispatch(
             } else {
                 let events = move_pane(
                     hub,
+                    client_id,
                     &src_tab_id,
                     &src_pane_id,
                     &dst_tab_id,
@@ -1755,54 +2200,55 @@ async fn dispatch(
                     edge,
                 )?;
                 for event in events {
-                    let _ = hub.tab_events.send(event);
+                    hub.emit_tab(client_id, event);
                 }
             }
         }
         ClientMessage::RearrangeTab { tab_id, layout } => {
-            let updated = hub.state.mutate(|s| {
-                let tab = tabs::find_tab_mut(&mut s.tabs, &tab_id)?;
+            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+                let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let new_grid = tabs::rearrange_grid(grid, layout)?;
                 *grid = new_grid;
                 Ok::<_, anyhow::Error>(tab.clone())
             })??;
-            let _ = hub.tab_events.send(TabEvent::Updated(updated));
+            hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::MergeTabs {
             tab_ids,
             name,
             layout,
         } => {
-            let new_tab = hub
-                .state
-                .mutate(|s| tabs::merge_tabs(&mut s.tabs, &tab_ids, name, layout))??;
+            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+                tabs::merge_tabs(tabs, &tab_ids, name, layout)
+            })??;
             for id in &tab_ids {
-                let _ = hub.tab_events.send(TabEvent::Removed(id.clone()));
+                hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
             }
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::ExtractToNewTab {
             source_tab_id,
             pane_ids,
             name,
         } => {
-            let (new_tab, source_empty, source_survivor) = hub.state.mutate(|s| {
-                let (new_tab, source_empty) =
-                    tabs::extract_to_new_tab(&mut s.tabs, &source_tab_id, &pane_ids, name)?;
-                let source_survivor = if source_empty {
-                    None
-                } else {
-                    s.tabs.iter().find(|t| t.id == source_tab_id).cloned()
-                };
-                Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
-            })??;
+            let (new_tab, source_empty, source_survivor) =
+                hub.state.mutate_client_layout(client_id, |tabs| {
+                    let (new_tab, source_empty) =
+                        tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name)?;
+                    let source_survivor = if source_empty {
+                        None
+                    } else {
+                        tabs.iter().find(|t| t.id == source_tab_id).cloned()
+                    };
+                    Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
+                })??;
             if source_empty {
-                let _ = hub.tab_events.send(TabEvent::Removed(source_tab_id));
+                hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             } else if let Some(survivor) = source_survivor {
-                let _ = hub.tab_events.send(TabEvent::Updated(survivor));
+                hub.emit_tab(client_id, TabEvent::Updated(survivor));
             }
-            let _ = hub.tab_events.send(TabEvent::Updated(new_tab));
+            hub.emit_tab(client_id, TabEvent::Updated(new_tab));
         }
         ClientMessage::ListPresets { target } => {
             let entries = crate::presets::list(hub, &target).await?;
@@ -1830,6 +2276,7 @@ async fn dispatch(
                 variable_values,
                 use_worktree_override,
                 max_panes_per_tab_override,
+                client_id: client_id.to_string(),
             };
             tokio::spawn(async move {
                 crate::presets::launch(hub, args).await;
@@ -1956,15 +2403,16 @@ enum CloseOutcome {
 /// `state.mutate` so the persisted snapshot is never half-applied.
 fn move_pane(
     hub: &Hub,
+    client_id: &str,
     src_tab_id: &str,
     src_pane_id: &str,
     dst_tab_id: &str,
     dst_pane_id: &str,
     edge: PaneDropEdge,
 ) -> anyhow::Result<Vec<TabEvent>> {
-    hub.state.mutate(|s| {
+    hub.state.mutate_client_layout(client_id, |tabs| {
         if src_tab_id == dst_tab_id {
-            let tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+            let tab = tabs::find_tab_mut(tabs, src_tab_id)?;
             let grid = tabs::grid_or_err_mut(tab)?;
             if edge == PaneDropEdge::Replace {
                 tabs::swap_pane_sessions(grid, src_pane_id, dst_pane_id)?;
@@ -1978,24 +2426,23 @@ fn move_pane(
             Ok::<_, anyhow::Error>(vec![TabEvent::Updated(tab.clone())])
         } else {
             let (extracted_node, source_empty) = {
-                let src_tab = tabs::find_tab_mut(&mut s.tabs, src_tab_id)?;
+                let src_tab = tabs::find_tab_mut(tabs, src_tab_id)?;
                 let src_grid = tabs::grid_or_err_mut(src_tab)?;
                 tabs::extract_pane(src_grid, src_pane_id)?
             };
             let mut events = Vec::new();
             if source_empty {
-                s.tabs.retain(|t| t.id != src_tab_id);
+                tabs.retain(|t| t.id != src_tab_id);
                 events.push(TabEvent::Removed(src_tab_id.to_string()));
             } else {
-                let src_snapshot = s
-                    .tabs
+                let src_snapshot = tabs
                     .iter()
                     .find(|t| t.id == src_tab_id)
                     .cloned()
                     .ok_or_else(|| anyhow!("source tab vanished mid-mutation: {src_tab_id}"))?;
                 events.push(TabEvent::Updated(src_snapshot));
             }
-            let dst_tab = tabs::find_tab_mut(&mut s.tabs, dst_tab_id)?;
+            let dst_tab = tabs::find_tab_mut(tabs, dst_tab_id)?;
             let dst_grid = tabs::grid_or_err_mut(dst_tab)?;
             tabs::insert_adjacent(dst_grid, dst_pane_id, edge, extracted_node)?;
             events.push(TabEvent::Updated(dst_tab.clone()));
@@ -2032,6 +2479,7 @@ struct OpenDiffOutcome {
 /// Returns the tab id either way so the client can activate it.
 fn open_diff_tab(
     hub: &Hub,
+    client_id: &str,
     repo_id: &str,
     path: &str,
     against: Option<&str>,
@@ -2039,8 +2487,8 @@ fn open_diff_tab(
 ) -> anyhow::Result<OpenDiffOutcome> {
     let against_owned = against.map(str::to_string);
     let worktree_path_owned = worktree_path.map(str::to_string);
-    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate(|s| {
-        if let Some(existing) = s.tabs.iter().find(|t| {
+    let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
+        if let Some(existing) = tabs.iter().find(|t| {
             matches!(
                 &t.content,
                 TabContent::Diff {
@@ -2068,7 +2516,7 @@ fn open_diff_tab(
             created_at: chrono::Utc::now(),
         };
         let id = new_tab.id.clone();
-        s.tabs.push(new_tab.clone());
+        tabs.push(new_tab.clone());
         Ok(OpenDiffOutcome {
             tab_id: id,
             created: Some(new_tab),
@@ -3376,9 +3824,9 @@ async fn park_session(hub: &Hub, session_id: &str) {
         }
         push_recent_action(r, "parked — worktree retained".to_string());
     });
-    // Detach from panes so the grid shows an empty slot; the session record
-    // itself lives on in the registry for the sidebar's Resume button.
-    prune_session_from_tabs(hub, session_id);
+    // Auto-close panes bound to this session in every client's layout; the
+    // session record itself lives on in the registry for the Resume button.
+    close_session_panes(hub, session_id);
 }
 
 /// Remove a stopped or inactive session from the registry. Optionally removes
@@ -3483,7 +3931,7 @@ async fn discard_session(
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
-    prune_session_from_tabs(hub, session_id);
+    close_session_panes(hub, session_id);
 
     if !failures.is_empty() {
         let _ = out_tx.send(DaemonMessage::WorktreeCleanupFailed {
@@ -3646,30 +4094,62 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop dangling pane references to `session_id` from every tab. Each
-/// affected tab is broadcast as a fresh `TabUpdated` so all connected clients
-/// switch the pane to the empty-placeholder state.
-fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
-    let modified = match hub.state.mutate(|s| {
-        let mut out = Vec::new();
-        for tab in &mut s.tabs {
-            let Some(grid) = tab.grid_mut() else {
-                continue;
-            };
-            if tabs::prune_session(grid, session_id) {
-                out.push(tab.clone());
+/// Auto-close every pane bound to `session_id` across all client layouts when
+/// the session is removed: a pane's sibling fills its space, and a tab whose
+/// last pane closed is removed entirely. Emits scoped `TabUpdated` (survivors)
+/// / `TabRemoved` (emptied tabs) per affected client.
+/// Build a one-tab layout with a pane per currently-running session — the
+/// "open all active sessions" first-connect choice. Empty when no sessions
+/// exist (the client starts with no tabs).
+fn build_all_sessions_layout(hub: &Hub) -> Vec<TabEntry> {
+    let panes: Vec<(String, Option<String>)> = hub
+        .sessions
+        .snapshots()
+        .into_iter()
+        .map(|s| (uuid::Uuid::new_v4().to_string(), Some(s.id)))
+        .collect();
+    let Some(grid) = tabs::build_grid(&panes, 0) else {
+        return Vec::new();
+    };
+    vec![TabEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "All sessions".to_string(),
+        content: TabContent::Grid { grid },
+        created_at: Utc::now(),
+    }]
+}
+
+fn close_session_panes(hub: &Hub, session_id: &str) {
+    // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
+    // last pane closed (already removed from that client's layout).
+    enum Outcome {
+        Updated(String, TabEntry),
+        Removed(String, String),
+    }
+    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
+        let mut out: Vec<Outcome> = Vec::new();
+        for (cid, layout) in layouts.iter_mut() {
+            let result = tabs::close_session_panes(&mut layout.tabs, session_id);
+            for tab in result.updated {
+                out.push(Outcome::Updated(cid.clone(), tab));
+            }
+            for tab_id in result.removed_tab_ids {
+                out.push(Outcome::Removed(cid.clone(), tab_id));
             }
         }
         out
     }) {
         Ok(list) => list,
         Err(err) => {
-            warn!(?err, "prune_session_from_tabs: state.mutate failed");
+            warn!(?err, "close_session_panes: state.mutate failed");
             return;
         }
     };
-    for tab in modified {
-        let _ = hub.tab_events.send(TabEvent::Updated(tab));
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Updated(cid, tab) => hub.emit_tab(&cid, TabEvent::Updated(tab)),
+            Outcome::Removed(cid, tab_id) => hub.emit_tab(&cid, TabEvent::Removed(tab_id)),
+        }
     }
 }
 

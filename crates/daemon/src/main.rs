@@ -2,15 +2,18 @@
 
 mod agents;
 mod binary_cache;
+mod discovery;
 mod git;
 mod git_inspect;
 mod git_watch;
 mod git_write;
 mod headless;
 mod inject;
+mod lan;
 mod lock_finder;
 mod orphan;
 mod osc_title;
+mod pairing;
 mod paths;
 mod presets;
 mod pty;
@@ -239,10 +242,13 @@ fn prune_stale_tabs(
         .map(|m| m.session_id.clone())
         .chain(abandoned.iter().map(|m| m.session_id.clone()))
         .collect();
-    let result = state.mutate(|s| {
-        let prev_tab_count = s.tabs.len();
+    // Prune one tab vec in place: clear panes whose session is dead, then drop
+    // grid tabs left with no live session. Non-grid tabs (e.g. diff tabs)
+    // always survive. Returns (panes_cleared, tabs_dropped).
+    let prune_vec = |tabs: &mut Vec<protocol::TabEntry>| {
+        let prev = tabs.len();
         let mut panes_cleared = 0usize;
-        for tab in &mut s.tabs {
+        for tab in tabs.iter_mut() {
             let Some(grid) = tab.grid_mut() else {
                 continue;
             };
@@ -250,11 +256,20 @@ fn prune_stale_tabs(
                 panes_cleared += 1;
             }
         }
-        // Non-grid tabs (e.g. diff tabs) survive the prune unconditionally;
-        // grid tabs are kept only if they still bind at least one session.
-        s.tabs
-            .retain(|t| t.grid().is_none_or(tabs::has_any_session));
-        let tabs_dropped = prev_tab_count.saturating_sub(s.tabs.len());
+        tabs.retain(|t| t.grid().is_none_or(tabs::has_any_session));
+        (panes_cleared, prev.saturating_sub(tabs.len()))
+    };
+    let result = state.mutate(|s| {
+        let mut panes_cleared = 0usize;
+        let mut tabs_dropped = 0usize;
+        for layout in s.layouts.values_mut() {
+            let (p, t) = prune_vec(&mut layout.tabs);
+            panes_cleared += p;
+            tabs_dropped += t;
+        }
+        let (p, t) = prune_vec(&mut s.legacy_tabs);
+        panes_cleared += p;
+        tabs_dropped += t;
         (panes_cleared, tabs_dropped)
     });
     match result {

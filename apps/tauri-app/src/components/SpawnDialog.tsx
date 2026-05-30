@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../api";
 import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
+import { useIsRemote } from "../utils/remoteMode";
 import { randomWorktreeBranchName } from "../utils/randomName";
 import { loadSettings } from "../utils/settings";
 import type {
@@ -479,13 +480,14 @@ function EmptyRepoState({
   onAddRepo: () => void;
   onClose: () => void;
 }) {
+  const isRemote = useIsRemote();
   return (
     <div className="empty-state" data-testid="spawn-empty-repos">
       <h3>No repos registered</h3>
       <p className="muted">
-        Add a repo before spawning a session — sessions are scoped to a repo
-        or a workspace, and rustling-tulip needs at least one to know where
-        to run the agent.
+        {isRemote
+          ? "The host has no repos registered. Repos are managed on the host machine — add one there before spawning a session."
+          : "Add a repo before spawning a session — sessions are scoped to a repo or a workspace, and rustling-tulip needs at least one to know where to run the agent."}
       </p>
       <div className="modal-footer-inline">
         <button
@@ -493,19 +495,21 @@ function EmptyRepoState({
           onClick={onClose}
           data-testid="spawn-empty-cancel"
         >
-          Cancel
+          {isRemote ? "Close" : "Cancel"}
         </button>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => {
-            onClose();
-            onAddRepo();
-          }}
-          data-testid="spawn-empty-add-repo"
-        >
-          + Add repo
-        </button>
+        {!isRemote && (
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              onClose();
+              onAddRepo();
+            }}
+            data-testid="spawn-empty-add-repo"
+          >
+            + Add repo
+          </button>
+        )}
       </div>
     </div>
   );

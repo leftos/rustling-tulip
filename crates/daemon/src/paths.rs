@@ -9,6 +9,17 @@ pub struct Dirs {
     pub config: PathBuf,
     pub state_file: PathBuf,
     pub handshake_file: PathBuf,
+    /// Opt-in LAN access config: `<config>/lan.json` holds `{ enabled, port,
+    /// auth_token }`. The token is persisted here (not regenerated per start)
+    /// so a paired remote client's saved profile survives daemon restarts.
+    /// Absent until the user first enables LAN access.
+    pub lan_config_file: PathBuf,
+    /// Self-signed TLS leaf certificate (PEM) for the LAN listener, generated
+    /// on first enable and pinned by remote clients (TOFU). Sibling key file
+    /// is `lan_key_file`.
+    pub lan_cert_file: PathBuf,
+    /// Private key (PEM) paired with `lan_cert_file`.
+    pub lan_key_file: PathBuf,
     /// Per-session sidecar directory: `<config>/sessions/<session-id>/` holds
     /// `meta.json` (orphan recovery) and `scrollback.bin` (replay on attach).
     pub sessions_dir: PathBuf,
@@ -106,6 +117,9 @@ impl Dirs {
         Ok(Self {
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
+            lan_config_file: config.join("lan.json"),
+            lan_cert_file: config.join("lan-cert.pem"),
+            lan_key_file: config.join("lan-key.pem"),
             sessions_dir,
             worktrees_dir,
             binaries_dir,

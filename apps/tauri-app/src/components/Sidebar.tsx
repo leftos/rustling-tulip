@@ -28,6 +28,11 @@ import {
 } from "../utils/sessionLabel";
 import { sessionAccentStyle } from "../utils/sessionColor";
 import { copyToClipboard } from "../utils/clipboard";
+import {
+  notifyRemoteUnavailable,
+  useIsRemote,
+  REMOTE_UNAVAILABLE_TOOLTIP,
+} from "../utils/remoteMode";
 import { saveSettings, useSettings, type Settings } from "../utils/settings";
 import { resolveAppearance, resolveAppearanceLayers } from "../utils/appearance";
 import DaemonFooter from "./DaemonFooter";
@@ -94,6 +99,15 @@ interface Props {
   /// Footer "Stop daemon" — pid-kill via Tauri command + set the
   /// stop-requested flag so auto-reconnect doesn't immediately respawn.
   onStopDaemon: () => void;
+  /// True when this window is connected to a remote host (not the bundled
+  /// local daemon). The footer relabels controls and gates local-only actions.
+  isRemote: boolean;
+  /// Display name of the active remote host, or null for local. Surfaced as a
+  /// footer chip so the active connection is visible at a glance.
+  connectionLabel: string | null;
+  /// Footer "Connections" — opens the connection picker (local / saved remote
+  /// / paste a code).
+  onOpenConnections: () => void;
   /// Optimistic tab-reorder hook from App.tsx. Mirrors the TabBar's
   /// same-named prop: applied immediately on drop so the row doesn't
   /// snap back while the daemon's `tabs_reordered` broadcast is in
@@ -212,6 +226,7 @@ interface AppearanceEditorState {
 type VscodeWorkspaceScanState = VscodeWorkspaceSuggestion | null | "pending";
 
 export default function Sidebar(props: Props) {
+  const isRemote = useIsRemote();
   // The current sidebar view is a per-window selection but it also serves
   // as the persisted default for the next window — same key, same value.
   // Source-of-truth is `settings.sidebar.default_view` (managed by
@@ -516,8 +531,9 @@ export default function Sidebar(props: Props) {
     props.repos.length === 0
       ? "Register a repo to spawn repo-tied sessions."
       : null;
-  const workspaceDisabledReason =
-    props.repos.length < 2
+  const workspaceDisabledReason = isRemote
+    ? REMOTE_UNAVAILABLE_TOOLTIP
+    : props.repos.length < 2
       ? "Register at least 2 repos to create a workspace."
       : null;
 
@@ -618,6 +634,8 @@ export default function Sidebar(props: Props) {
           type="button"
           className="link"
           onClick={props.onAddRepo}
+          disabled={isRemote}
+          title={isRemote ? REMOTE_UNAVAILABLE_TOOLTIP : undefined}
           data-testid="sidebar-add-repo"
         >
           + Repo
@@ -626,11 +644,13 @@ export default function Sidebar(props: Props) {
           type="button"
           className="link"
           onClick={
-            props.repos.length >= 2 ? props.onOpenWorkspaceCreator : undefined
+            !isRemote && props.repos.length >= 2
+              ? props.onOpenWorkspaceCreator
+              : undefined
           }
-          disabled={props.repos.length < 2}
+          disabled={isRemote || props.repos.length < 2}
           aria-describedby={
-            workspaceDisabledReason
+            !isRemote && workspaceDisabledReason
               ? "sidebar-add-workspace-disabled-reason"
               : undefined
           }
@@ -640,7 +660,7 @@ export default function Sidebar(props: Props) {
           data-testid="sidebar-add-workspace"
         >
           + Workspace
-          {workspaceDisabledReason && (
+          {!isRemote && workspaceDisabledReason && (
             <span
               id="sidebar-add-workspace-disabled-reason"
               className="toolbar-disabled-reason"
@@ -663,13 +683,24 @@ export default function Sidebar(props: Props) {
       </div>
 
       {containers.length === 0 ? (
-        <p className="empty">
-          No repos or workspaces yet — start with{" "}
-          <button type="button" className="link inline" onClick={props.onAddRepo}>
-            + Repo
-          </button>
-          .
-        </p>
+        isRemote ? (
+          <p className="empty">
+            No repos or workspaces on the host yet. Repos are managed on the
+            host machine.
+          </p>
+        ) : (
+          <p className="empty">
+            No repos or workspaces yet — start with{" "}
+            <button
+              type="button"
+              className="link inline"
+              onClick={props.onAddRepo}
+            >
+              + Repo
+            </button>
+            .
+          </p>
+        )
       ) : (
         <ul className="tree">
           {containers.map((c) => {
@@ -860,6 +891,11 @@ export default function Sidebar(props: Props) {
             closeMenu();
           }}
           onOpenInVscode={() => {
+            if (isRemote) {
+              notifyRemoteUnavailable("Open in VS Code");
+              closeMenu();
+              return;
+            }
             openContainerInVscode(
               contextMenu.container,
               props.repos,
@@ -867,10 +903,10 @@ export default function Sidebar(props: Props) {
             );
             closeMenu();
           }}
-          canOpenInVscode={canOpenContainerInVscode(
-            contextMenu.container,
-            props.workspaces,
-          )}
+          canOpenInVscode={
+            !isRemote &&
+            canOpenContainerInVscode(contextMenu.container, props.workspaces)
+          }
           onCopyPath={() => {
             const path = contextMenu.container.fsPath;
             if (path) void copyToClipboard(path, "path").catch(() => {});
@@ -940,6 +976,9 @@ export default function Sidebar(props: Props) {
         stopRequested={props.daemonStopRequested}
         onRestart={props.onRestartDaemon}
         onStop={props.onStopDaemon}
+        isRemote={props.isRemote}
+        connectionLabel={props.connectionLabel}
+        onOpenConnections={props.onOpenConnections}
       />
     </aside>
   );

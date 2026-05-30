@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
+/// mDNS service type the daemon advertises and clients browse for LAN
+/// discovery. Single source of truth so the advertiser and the browser can't
+/// drift (a mismatch would silently break discovery).
+pub const MDNS_SERVICE_TYPE: &str = "_rustling-tulip._tcp.local.";
+
+/// mDNS TXT key carrying the LAN cert's SHA-256 fingerprint (lowercase hex), so
+/// a discovering client can pin it before pairing.
+pub const MDNS_TXT_FINGERPRINT: &str = "fp";
+
+/// mDNS TXT key carrying the host's human-readable name (e.g. its hostname).
+pub const MDNS_TXT_NAME: &str = "name";
+
 fn default_true() -> bool {
     true
 }
@@ -1285,6 +1297,52 @@ fn default_stagger_ms() -> u32 {
     3000
 }
 
+/// One cloneable layout offered in the first-connect chooser.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClonableLayout {
+    pub client_id: String,
+    /// Display label (e.g. the other machine's hostname), if it reported one.
+    pub name: Option<String>,
+}
+
+/// How a client wants to seed its brand-new per-client layout, chosen at first
+/// connect. Grows over time, so it carries a catch-all `Unknown` so an older
+/// daemon keeps decoding a newer client's choice (falls back to empty).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InitLayoutKind {
+    /// Start with no tabs; curate from scratch.
+    Empty,
+    /// Adopt the pre-per-client global layout (offered once after upgrade).
+    CloneLegacy,
+    /// Deep-copy another client's current layout (fresh pane ids, same
+    /// session ids).
+    CloneClient { client_id: String },
+    /// One tab holding a pane per currently-running session.
+    AllSessions,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a pairing window ended, carried by [`DaemonMessage::PairingEnded`] so the
+/// host UI can clear (or annotate) the displayed code. Serialized as a
+/// `snake_case` string with a catch-all so an older client keeps decoding a
+/// newer reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingEndReason {
+    /// A device completed pairing with the code.
+    Paired,
+    /// The code's time-to-live elapsed before anyone paired.
+    Expired,
+    /// The host cancelled pairing.
+    Cancelled,
+    /// Too many wrong codes were submitted; the window was invalidated.
+    TooManyAttempts,
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -1303,6 +1361,16 @@ pub enum ClientMessage {
         #[serde(default)]
         protocol_versions: Vec<u32>,
         auth_token: String,
+        /// Stable per-install client identity. The daemon keys each client's
+        /// tab/pane layout on this. `None` (older clients) falls back to a
+        /// shared legacy layout so they keep working. `#[serde(default)]` keeps
+        /// this additive — no protocol bump.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Human-readable label for this client (e.g. the machine hostname),
+        /// shown in another client's "clone layout" chooser. Optional.
+        #[serde(default)]
+        client_name: Option<String>,
     },
     ListRepos,
     AddRepo {
@@ -1668,6 +1736,25 @@ pub enum ClientMessage {
     SetWorktreesRoot {
         path: Option<String>,
     },
+    /// Enable or disable opt-in LAN access (the `0.0.0.0` TLS listener) and
+    /// set its port. The daemon persists this to `lan.json` (along with the
+    /// stable auth token), binds or tears down the TLS listener immediately
+    /// (no restart needed), then broadcasts [`DaemonMessage::LanStatus`] to
+    /// every connected client. Loopback access is unaffected.
+    ConfigureLan {
+        enabled: bool,
+        port: u16,
+    },
+    /// Begin a pairing window. The daemon generates a short numeric code and
+    /// replies — to this connection only, so the code never reaches other
+    /// clients — with [`DaemonMessage::PairingStarted`]. A discovering device
+    /// submits the code to the daemon's `/pair` endpoint over the pinned-TLS
+    /// LAN channel to obtain the auth token. Only meaningful on the host while
+    /// LAN access is enabled.
+    StartPairing,
+    /// Cancel the active pairing window early. The daemon clears it and
+    /// broadcasts [`DaemonMessage::PairingEnded`].
+    CancelPairing,
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
     /// abandoned session registries. Daemon replies with
@@ -1737,6 +1824,12 @@ pub enum ClientMessage {
     /// set; mismatches are rejected.
     ReorderTabs {
         ordered_ids: Vec<String>,
+    },
+    /// Reply to [`DaemonMessage::LayoutInitRequired`]: the client picked how to
+    /// seed its brand-new per-client layout. The daemon creates the layout for
+    /// the connection's `client_id` and then sends [`DaemonMessage::Tabs`].
+    InitLayout {
+        kind: InitLayoutKind,
     },
     /// Manual ordering of the sidebar's top-level containers as a single
     /// flat list mixing workspaces and repos. Anything not present in the
@@ -2091,6 +2184,33 @@ pub enum DaemonMessage {
         root: String,
         is_override: bool,
     },
+    /// Current opt-in LAN access status. Broadcast in response to
+    /// [`ClientMessage::ConfigureLan`] and sent once at initial state so a
+    /// freshly-connected client can render the Settings UI without polling.
+    /// `fingerprint` is the SHA-256 (lowercase hex) of the self-signed TLS
+    /// leaf cert that remote clients pin; `None` until LAN has been enabled
+    /// at least once (no cert yet). `addresses` is the daemon host's detected
+    /// non-loopback IPv4 addresses, for assembling the remote connection code.
+    LanStatus {
+        enabled: bool,
+        port: u16,
+        fingerprint: Option<String>,
+        addresses: Vec<String>,
+    },
+    /// Reply to [`ClientMessage::StartPairing`], sent only to the requesting
+    /// connection (the code must never reach other clients). `code` is the
+    /// short numeric pairing code for the user to read out; `ttl_secs` is how
+    /// long it stays valid, so the UI can show a countdown.
+    PairingStarted {
+        code: String,
+        ttl_secs: u32,
+    },
+    /// Broadcast when the active pairing window ends — a device paired, the
+    /// code expired or was cancelled, or too many wrong codes were tried — so
+    /// the host UI can clear the displayed code.
+    PairingEnded {
+        reason: PairingEndReason,
+    },
     /// Reply to [`ClientMessage::InspectWorktreesRoot`]. Carries every
     /// `wt.<branch>/` group discovered under the current root, plus a
     /// snapshot of the root path itself so the client can reconcile
@@ -2261,6 +2381,20 @@ pub enum DaemonMessage {
     /// Initial tab snapshot sent on connect.
     Tabs {
         tabs: Vec<TabEntry>,
+    },
+    /// Sent instead of [`DaemonMessage::Tabs`] when a client connects with a
+    /// `client_id` the daemon has never seen. The client shows a first-connect
+    /// chooser and replies with [`ClientMessage::InitLayout`]; the daemon then
+    /// creates the layout and sends `Tabs`. Clients that don't recognize this
+    /// message (older builds) just won't render tabs until they send any tab
+    /// mutation, which lazily creates an empty layout.
+    LayoutInitRequired {
+        /// Whether a pre-per-client global layout is available to adopt.
+        has_legacy: bool,
+        /// Count of currently-running sessions (for the "open all" option).
+        active_session_count: u32,
+        /// Other clients' non-empty layouts that can be cloned.
+        clonable: Vec<ClonableLayout>,
     },
     /// Broadcast on any structural change to a single tab (create, rename,
     /// split, close pane, ratio adjustment, move, session-prune).
@@ -3208,6 +3342,7 @@ mod tests {
                 protocol_version,
                 protocol_versions,
                 auth_token,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert!(protocol_versions.is_empty());
