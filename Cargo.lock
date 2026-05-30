@@ -3917,6 +3917,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "directories",
+ "mdns-sd",
  "protocol",
  "rcgen",
  "reqwest 0.12.28",

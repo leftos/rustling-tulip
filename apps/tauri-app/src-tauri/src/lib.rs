@@ -795,6 +795,8 @@ pub fn run() {
             remote::list_remote_profiles,
             remote::save_remote_profile,
             remote::delete_remote_profile,
+            remote::discover_lan_hosts,
+            remote::pair_with_host,
             autostart::get_autostart,
             autostart::set_autostart
         ])

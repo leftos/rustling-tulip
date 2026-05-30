@@ -10,9 +10,7 @@
 
 use anyhow::Context as _;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
-
-/// mDNS service type the daemon advertises and the Tauri app browses for.
-pub const SERVICE_TYPE: &str = "_rustling-tulip._tcp.local.";
+use protocol::{MDNS_SERVICE_TYPE, MDNS_TXT_FINGERPRINT, MDNS_TXT_NAME};
 
 /// A live mDNS registration. Dropping it unregisters the service and shuts the
 /// responder thread down, so the LAN listener and its advertisement share a
@@ -33,9 +31,13 @@ pub fn advertise(port: u16, fingerprint: &str, addresses: &[String]) -> anyhow::
     let hostname = sysinfo::System::host_name().unwrap_or_else(|| "rustling-tulip".to_string());
     let host_target = format!("{}.local.", sanitize_label(&hostname));
     let joined = addresses.join(",");
-    let props = [("fp", fingerprint), ("name", hostname.as_str()), ("v", "1")];
+    let props = [
+        (MDNS_TXT_FINGERPRINT, fingerprint),
+        (MDNS_TXT_NAME, hostname.as_str()),
+        ("v", "1"),
+    ];
     let info = ServiceInfo::new(
-        SERVICE_TYPE,
+        MDNS_SERVICE_TYPE,
         &hostname,
         &host_target,
         joined.as_str(),

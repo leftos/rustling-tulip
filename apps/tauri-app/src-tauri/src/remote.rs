@@ -24,16 +24,19 @@
 use crate::{DaemonHandshake, config_dir};
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
+use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
@@ -426,13 +429,200 @@ pub async fn delete_remote_profile(id: String) -> Result<(), String> {
     save_store(&store).map_err(|e| format!("{e:#}"))
 }
 
+/// How long to listen for mDNS responses before returning the hosts found.
+const DISCOVERY_WINDOW: Duration = Duration::from_millis(2500);
+
+/// A daemon host discovered on the LAN via mDNS.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveredHost {
+    /// Human-readable label: the host's mDNS TXT `name`, else its instance name.
+    pub name: String,
+    /// First IPv4 address the host advertised.
+    pub host: String,
+    pub port: u16,
+    /// SHA-256 of the LAN cert (lowercase hex) from the TXT record, to pin.
+    pub fingerprint: String,
+}
+
+/// The leading label of an mDNS fullname (`DESKTOP-PC._rustling-tulip._tcp.local.`
+/// -> `DESKTOP-PC`), used when a host didn't publish a `name` TXT record.
+fn instance_label(fullname: &str) -> String {
+    fullname.split('.').next().unwrap_or(fullname).to_string()
+}
+
+/// Turn a resolved mDNS service into a [`DiscoveredHost`], or `None` if it
+/// lacks the fingerprint TXT record or any IPv4 address (we can't pair without
+/// both).
+fn resolve_host(rs: &ResolvedService) -> Option<DiscoveredHost> {
+    let fingerprint = rs
+        .get_property_val_str(protocol::MDNS_TXT_FINGERPRINT)?
+        .to_string();
+    let ip = rs.get_addresses_v4().into_iter().min()?;
+    let name = rs
+        .get_property_val_str(protocol::MDNS_TXT_NAME)
+        .map_or_else(|| instance_label(&rs.fullname), str::to_string);
+    Some(DiscoveredHost {
+        name,
+        host: ip.to_string(),
+        port: rs.port,
+        fingerprint,
+    })
+}
+
+async fn discover_inner() -> anyhow::Result<Vec<DiscoveredHost>> {
+    let daemon = ServiceDaemon::new().context("creating mDNS browser")?;
+    let receiver = daemon
+        .browse(protocol::MDNS_SERVICE_TYPE)
+        .context("starting mDNS browse")?;
+    // Keyed by fullname so re-announcements (multiple interfaces, repeated TTL
+    // refreshes) collapse to one entry per host.
+    let mut found: HashMap<String, DiscoveredHost> = HashMap::new();
+    let deadline = tokio::time::Instant::now() + DISCOVERY_WINDOW;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, receiver.recv_async()).await {
+            Ok(Ok(ServiceEvent::ServiceResolved(rs))) => {
+                if let Some(host) = resolve_host(&rs) {
+                    found.insert(rs.fullname.clone(), host);
+                }
+            }
+            // Other events (search started, service found-but-unresolved) are
+            // not actionable; keep listening until the window closes.
+            Ok(Ok(_)) => {}
+            // Channel closed or window elapsed: stop and return what we have.
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    let _ = daemon.shutdown();
+    Ok(found.into_values().collect())
+}
+
+/// Browse the LAN for daemon hosts advertising over mDNS. Returns every host
+/// resolved within [`DISCOVERY_WINDOW`]; an empty list means none were found
+/// (mDNS blocked, no host advertising, or a slow network).
+#[tauri::command]
+pub async fn discover_lan_hosts() -> Result<Vec<DiscoveredHost>, String> {
+    discover_inner().await.map_err(|e| format!("{e:#}"))
+}
+
+#[derive(Debug, Deserialize)]
+struct PairResponseBody {
+    token: String,
+}
+
+/// Split a raw HTTP/1.1 response into its status code and body bytes. Expects a
+/// Content-Length / `Connection: close` framed response (what axum emits for
+/// small JSON or string bodies) — not chunked transfer encoding.
+fn split_http_response(raw: &[u8]) -> anyhow::Result<(u16, &[u8])> {
+    let sep = b"\r\n\r\n";
+    let head_end = raw
+        .windows(sep.len())
+        .position(|w| w == sep)
+        .context("malformed HTTP response (no header terminator)")?;
+    let body = &raw[head_end + sep.len()..];
+    let status_line = raw[..head_end]
+        .split(|&b| b == b'\n')
+        .next()
+        .context("empty HTTP response")?;
+    let status_line = std::str::from_utf8(status_line).context("non-UTF-8 HTTP status line")?;
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .context("HTTP status line missing status code")?
+        .parse::<u16>()
+        .context("HTTP status code is not a number")?;
+    Ok((code, body))
+}
+
+async fn pair_inner(
+    host: String,
+    port: u16,
+    fingerprint_hex: String,
+    code: String,
+) -> anyhow::Result<ConnectionParams> {
+    let fingerprint = parse_fingerprint(&fingerprint_hex)?;
+    let config = build_client_config(fingerprint)?;
+    let connector = TlsConnector::from(Arc::new(config));
+    let server_name = ServerName::try_from(TUNNEL_SNI)
+        .context("building TLS server name")?
+        .to_owned();
+    let body = serde_json::to_vec(&serde_json::json!({ "code": code.trim() }))
+        .context("encoding pairing request")?;
+
+    let exchange = async {
+        let tcp = TcpStream::connect((host.as_str(), port))
+            .await
+            .context("could not reach the remote host")?;
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .context("TLS handshake failed (host unreachable or fingerprint mismatch)")?;
+        let header = format!(
+            "POST /pair HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tls.write_all(header.as_bytes())
+            .await
+            .context("sending pairing request")?;
+        tls.write_all(&body).await.context("sending pairing body")?;
+        tls.flush().await.context("flushing pairing request")?;
+        let mut raw = Vec::new();
+        tls.read_to_end(&mut raw)
+            .await
+            .context("reading pairing response")?;
+        anyhow::Ok(raw)
+    };
+    let raw = tokio::time::timeout(PROBE_TIMEOUT, exchange)
+        .await
+        .context("pairing request timed out")??;
+
+    let (status, http_body) = split_http_response(&raw)?;
+    if status != 200 {
+        let msg = String::from_utf8_lossy(http_body);
+        bail!(
+            "host rejected the pairing code (HTTP {status}): {}",
+            msg.trim()
+        );
+    }
+    let parsed: PairResponseBody =
+        serde_json::from_slice(http_body).context("parsing pairing response JSON")?;
+    Ok(ConnectionParams {
+        host,
+        port,
+        token: parsed.token,
+        fingerprint: fingerprint_hex,
+    })
+}
+
+/// Exchange a host's short pairing code for its auth token over the pinned-TLS
+/// LAN channel, returning ready-to-use [`ConnectionParams`] the caller can save
+/// as a profile and connect with. `fingerprint` is the value discovered over
+/// mDNS, which is pinned for this handshake.
+#[tauri::command]
+pub async fn pair_with_host(
+    host: String,
+    port: u16,
+    fingerprint: String,
+    code: String,
+) -> Result<ConnectionParams, String> {
+    pair_inner(host, port, fingerprint, code)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[cfg(test)]
 #[expect(
     clippy::expect_used,
     reason = "tests assert preconditions with expect for clearer failure output"
 )]
 mod tests {
-    use super::{CONNECTION_CODE_VERSION, build_client_config, decode_code, parse_fingerprint};
+    use super::{
+        CONNECTION_CODE_VERSION, build_client_config, decode_code, instance_label,
+        parse_fingerprint, split_http_response,
+    };
     use base64::Engine as _;
 
     fn encode_code(json: &str) -> String {
@@ -479,6 +669,36 @@ mod tests {
     fn rejects_non_hex_fingerprint() {
         let bad = "zz".repeat(32);
         assert!(parse_fingerprint(&bad).is_err());
+    }
+
+    #[test]
+    fn instance_label_takes_leading_dns_label() {
+        assert_eq!(
+            instance_label("DESKTOP-PC._rustling-tulip._tcp.local."),
+            "DESKTOP-PC"
+        );
+        assert_eq!(instance_label("solo"), "solo");
+    }
+
+    #[test]
+    fn splits_a_200_response_into_status_and_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"token\":\"abc\"}\n";
+        let (status, body) = split_http_response(raw).expect("split");
+        assert_eq!(status, 200);
+        assert_eq!(body, b"{\"token\":\"abc\"}\n");
+    }
+
+    #[test]
+    fn splits_an_error_response_status() {
+        let raw = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 19\r\n\r\ninvalid pairing code";
+        let (status, body) = split_http_response(raw).expect("split");
+        assert_eq!(status, 403);
+        assert_eq!(body, b"invalid pairing code");
+    }
+
+    #[test]
+    fn rejects_a_response_without_a_header_terminator() {
+        assert!(split_http_response(b"HTTP/1.1 200 OK\r\n").is_err());
     }
 
     #[test]

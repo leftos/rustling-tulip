@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
+/// mDNS service type the daemon advertises and clients browse for LAN
+/// discovery. Single source of truth so the advertiser and the browser can't
+/// drift (a mismatch would silently break discovery).
+pub const MDNS_SERVICE_TYPE: &str = "_rustling-tulip._tcp.local.";
+
+/// mDNS TXT key carrying the LAN cert's SHA-256 fingerprint (lowercase hex), so
+/// a discovering client can pin it before pairing.
+pub const MDNS_TXT_FINGERPRINT: &str = "fp";
+
+/// mDNS TXT key carrying the host's human-readable name (e.g. its hostname).
+pub const MDNS_TXT_NAME: &str = "name";
+
 fn default_true() -> bool {
     true
 }
