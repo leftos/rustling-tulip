@@ -382,6 +382,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     stop_handler.abort();
     heartbeat.abort();
 
+    // Unix mirror of the Windows KILL_ON_JOB_CLOSE job object: take out any
+    // surviving descendants in the child's process group (dev servers, node,
+    // etc.) so they don't pin worktree files open and wedge cleanup — and so a
+    // grandchild holding the PTY slave open can't block the reader-thread join
+    // below. macOS has no PR_SET_PDEATHSIG, so this is explicit on the shutdown
+    // path; a tracer killed with SIGKILL still leaks survivors (same gap the
+    // plan notes). Best-effort, mirroring the job-object contract.
+    #[cfg(unix)]
+    if let Some(pid) = child_pid {
+        kill_process_group(pid);
+    }
+
     // On Unix the bound socket leaves a file behind; remove it so a re-spawn
     // with the same name binds cleanly. (No-op on Windows named pipes.)
     #[cfg(unix)]
@@ -427,6 +439,33 @@ fn remove_stale_socket(path: &str) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => warn!(?err, path, "supervisor: could not remove stale socket file"),
     }
+}
+
+/// Signal the child's process group on shutdown. `portable-pty` runs `setsid`
+/// for the PTY child, so its PGID equals its PID and the whole descendant tree
+/// shares the group; `killpg` therefore reaches grandchildren the way the
+/// Windows job object does. If the child was somehow not a group leader,
+/// `killpg` no-ops (`ESRCH`) rather than touching the tracer's own group.
+/// SIGTERM first for a clean exit, then SIGKILL for anything still standing.
+#[cfg(unix)]
+fn kill_process_group(child_pid: u32) {
+    let Ok(pgid) = i32::try_from(child_pid) else {
+        warn!(child_pid, "supervisor: child pid too large for killpg; skipping group kill");
+        return;
+    };
+    // SAFETY: `killpg` only inspects the pgid + signal number; there are no
+    // memory-safety preconditions. Return values are intentionally ignored —
+    // this is best-effort cleanup, exactly like the Windows job-object path.
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    // SAFETY: see above.
+    let killed = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    debug!(
+        child_pid,
+        killed, "supervisor: signalled child process group on shutdown"
+    );
 }
 
 struct AcceptConfig {

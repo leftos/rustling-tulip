@@ -5380,6 +5380,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "interprocess",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",

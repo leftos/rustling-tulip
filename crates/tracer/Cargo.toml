@@ -44,3 +44,10 @@ windows = { version = "0.61", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# `killpg` for the Unix equivalent of the Windows kill-on-close job object:
+# portable-pty makes the PTY child a session leader (setsid), so signalling its
+# process group on tracer shutdown takes out surviving dev-server grandchildren
+# that would otherwise pin worktree files open.
+libc = "0.2"
