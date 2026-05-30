@@ -203,10 +203,11 @@ fn reap_orphan_tracers(
 /// `rt-tracer-<hash>.exe`. The leading `-` after the stem prevents matching
 /// unrelated processes that happen to share the prefix.
 fn is_tracer_image(name: &str) -> bool {
-    let stem = name
-        .to_ascii_lowercase()
-        .strip_suffix(".exe")
-        .map_or_else(|| name.to_ascii_lowercase(), str::to_string);
+    let lower = name.to_ascii_lowercase();
+    #[cfg(windows)]
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    #[cfg(not(windows))]
+    let stem = lower.as_str();
     stem == "rt-tracer" || stem.starts_with("rt-tracer-")
 }
 

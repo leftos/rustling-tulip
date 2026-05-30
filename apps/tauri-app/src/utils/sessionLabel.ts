@@ -72,6 +72,10 @@ function isNoisyShellTitle(title: string): boolean {
     basename === "pwsh.exe" ||
     basename === "bash.exe" ||
     basename === "sh.exe" ||
+    basename === "bash" ||
+    basename === "zsh" ||
+    basename === "sh" ||
+    basename === "pwsh" ||
     normalized === "windows powershell" ||
     normalized === "administrator: windows powershell"
   );
