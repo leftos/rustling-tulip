@@ -50,6 +50,7 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 - **Daemon-status footer** — persistent connection status bar + troubleshooting flyout.
 - **NSIS installer** — bundles `rustling-tulipd.exe` + `rt-tracer.exe` as sidecars.
 - **Two-mode workspace creator** — repo-list mode or VS Code `.code-workspace` file import.
+- **Remote LAN access** — opt-in `0.0.0.0` TLS listener (self-signed cert + fingerprint pinning/TOFU), off by default; a pinned-TLS loopback tunnel in the Tauri app bridges the webview WS to the remote daemon. Per-client tab/pane layouts (sessions stay global to the daemon); host auto-start on login (HKCU `Run`); mDNS discovery + short-code pairing. See `docs/plans/remote-lan-access.md`.
 
 ## Open
 
@@ -74,6 +75,6 @@ macOS bundle target. Full catalog + phased plan in `docs/plans/macos-compat.md`.
 
 - Sub-agent / Task-tool interception or isolation
 - Auto-discovery of repos (registry is manual only)
-- Multi-machine / SSH attach
+- Attach beyond the LAN — internet exposure, cloud relay, SSH tunneling (LAN-scoped remote access shipped; see Shipped)
 - Cloud sync of registry or sessions
 - Mobile companion app
