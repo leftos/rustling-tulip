@@ -2073,6 +2073,9 @@ mod tests {
             config: config.clone(),
             state_file: config.join("state.json"),
             handshake_file: config.join("daemon.json"),
+            lan_config_file: config.join("lan.json"),
+            lan_cert_file: config.join("lan-cert.pem"),
+            lan_key_file: config.join("lan-key.pem"),
             sessions_dir,
             worktrees_dir,
             binaries_dir,
@@ -2097,6 +2100,7 @@ mod tests {
             preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
             state_events,
             client_count: Arc::new(client_count),
+            lan_handle: Arc::new(AsyncMutex::new(None)),
         };
         (hub, preset_rx, scratch)
     }

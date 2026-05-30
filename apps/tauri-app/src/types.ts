@@ -742,6 +742,10 @@ export type ClientMessage =
   // default. Daemon validates + creates the directory; broadcasts
   // `worktrees_root_changed` on success.
   | { type: "set_worktrees_root"; path: string | null }
+  // Enable/disable opt-in LAN access (the 0.0.0.0 TLS listener) and set its
+  // port. Daemon persists to lan.json, binds/tears down the listener live,
+  // then broadcasts `lan_status`. Loopback access is unaffected.
+  | { type: "configure_lan"; enabled: boolean; port: number }
   // Scan the worktrees root and cross-reference against the session
   // registry. Reply: `worktrees_root_snapshot`.
   | { type: "inspect_worktrees_root" }
@@ -878,6 +882,17 @@ export type DaemonMessage =
       type: "worktrees_root_changed";
       root: string;
       is_override: boolean;
+    }
+  // Current opt-in LAN access status. Broadcast in response to `configure_lan`
+  // and once at initial state. `fingerprint` is the SHA-256 (hex) of the
+  // self-signed TLS cert remote clients pin; null until LAN has been enabled
+  // once. `addresses` are the host's non-loopback IPv4 addresses.
+  | {
+      type: "lan_status";
+      enabled: boolean;
+      port: number;
+      fingerprint: string | null;
+      addresses: string[];
     }
   | {
       type: "worktrees_root_snapshot";

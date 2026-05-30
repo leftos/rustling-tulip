@@ -211,6 +211,16 @@ interface AppState {
   /// every `set_worktrees_root` mutation. `null` only until that first
   /// broadcast lands.
   worktreesRoot: { path: string; isOverride: boolean } | null;
+  /// Opt-in LAN access status, mirrored from the daemon's `lan_status`
+  /// broadcast (first delivery in the initial-state push after Welcome, then
+  /// on every `configure_lan`). `null` only until that first broadcast lands.
+  /// `fingerprint` is null until LAN has been enabled at least once.
+  lanStatus: {
+    enabled: boolean;
+    port: number;
+    fingerprint: string | null;
+    addresses: string[];
+  } | null;
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
@@ -314,6 +324,7 @@ export default function App() {
     containerOrder: [],
     sessionOrder: new Map(),
     worktreesRoot: null,
+    lanStatus: null,
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -3058,6 +3069,17 @@ function handleMessage(
       window.dispatchEvent(
         new CustomEvent(`rt:${msg.type}`, { detail: msg }),
       );
+      return;
+    case "lan_status":
+      setState((s) => ({
+        ...s,
+        lanStatus: {
+          enabled: msg.enabled,
+          port: msg.port,
+          fingerprint: msg.fingerprint,
+          addresses: msg.addresses,
+        },
+      }));
       return;
     case "worktrees_root_snapshot":
       // Ephemeral — no AppState slot. The WorktreesManager modal

@@ -1668,6 +1668,15 @@ pub enum ClientMessage {
     SetWorktreesRoot {
         path: Option<String>,
     },
+    /// Enable or disable opt-in LAN access (the `0.0.0.0` TLS listener) and
+    /// set its port. The daemon persists this to `lan.json` (along with the
+    /// stable auth token), binds or tears down the TLS listener immediately
+    /// (no restart needed), then broadcasts [`DaemonMessage::LanStatus`] to
+    /// every connected client. Loopback access is unaffected.
+    ConfigureLan {
+        enabled: bool,
+        port: u16,
+    },
     /// Scan the current worktrees root and report every `wt.<branch>/`
     /// group found under it, cross-referenced against the live and
     /// abandoned session registries. Daemon replies with
@@ -2090,6 +2099,19 @@ pub enum DaemonMessage {
     WorktreesRootChanged {
         root: String,
         is_override: bool,
+    },
+    /// Current opt-in LAN access status. Broadcast in response to
+    /// [`ClientMessage::ConfigureLan`] and sent once at initial state so a
+    /// freshly-connected client can render the Settings UI without polling.
+    /// `fingerprint` is the SHA-256 (lowercase hex) of the self-signed TLS
+    /// leaf cert that remote clients pin; `None` until LAN has been enabled
+    /// at least once (no cert yet). `addresses` is the daemon host's detected
+    /// non-loopback IPv4 addresses, for assembling the remote connection code.
+    LanStatus {
+        enabled: bool,
+        port: u16,
+        fingerprint: Option<String>,
+        addresses: Vec<String>,
     },
     /// Reply to [`ClientMessage::InspectWorktreesRoot`]. Carries every
     /// `wt.<branch>/` group discovered under the current root, plus a

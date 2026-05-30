@@ -1,6 +1,7 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
 use crate::agents::CommonSpawnFields;
+use crate::lan;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
@@ -37,8 +38,6 @@ use protocol::{
     SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
     SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
-use rand::Rng as _;
-use rand::distributions::Alphanumeric;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -85,6 +84,11 @@ pub struct Hub {
     /// listening — the broadcasts would just be dropped on the floor and
     /// every event would cost a couple of `git` subprocesses for nothing.
     pub client_count: Arc<tokio::sync::watch::Sender<usize>>,
+    /// Handle to the running opt-in LAN TLS listener, if any.
+    /// [`ClientMessage::ConfigureLan`] stores the handle here on enable and
+    /// takes it on disable to drive a graceful shutdown; the daemon-wide
+    /// shutdown task also tears it down. `None` when LAN access is off.
+    pub lan_handle: Arc<AsyncMutex<Option<axum_server::Handle<SocketAddr>>>>,
 }
 
 /// RAII guard around [`Hub::client_count`]: increments on construction,
@@ -145,6 +149,15 @@ pub enum StateEvent {
     WorktreesRootChanged {
         root: String,
         is_override: bool,
+    },
+    /// Broadcast after a successful [`ClientMessage::ConfigureLan`] so every
+    /// connected client's Settings UI reflects the new LAN access state
+    /// without polling. Mirrors [`protocol::DaemonMessage::LanStatus`].
+    LanStatus {
+        enabled: bool,
+        port: u16,
+        fingerprint: Option<String>,
+        addresses: Vec<String>,
     },
 }
 
@@ -296,11 +309,13 @@ pub async fn run(
     abandoned: Vec<OrphanMeta>,
 ) -> anyhow::Result<()> {
     let run_start = std::time::Instant::now();
-    let auth_token: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(48)
-        .map(char::from)
-        .collect();
+    // LAN access (opt-in) persists its auth token in `lan.json` so a paired
+    // remote client survives daemon restarts. When LAN has never been enabled,
+    // fall back to a fresh per-start token — loopback-only, exactly as before.
+    let lan_config = lan::load(&dirs);
+    let auth_token: String = lan_config
+        .as_ref()
+        .map_or_else(lan::generate_auth_token, |c| c.auth_token.clone());
 
     let (attention_tx, mut attention_rx) = mpsc::unbounded_channel::<pty_state::AttentionEvent>();
     let sessions = SessionRegistry::new(dirs.clone());
@@ -353,13 +368,10 @@ pub async fn run(
         preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
         state_events,
         client_count,
+        lan_handle: Arc::new(AsyncMutex::new(None)),
     };
 
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/health", get(|| async { "ok" }))
-        .route("/shutdown", post(shutdown_handler))
-        .with_state(hub);
+    let app = build_router(hub.clone());
 
     let bind_start = std::time::Instant::now();
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
@@ -379,6 +391,40 @@ pub async fn run(
         run_elapsed_ms = u64::try_from(run_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "handshake file written; daemon ready for clients"
     );
+
+    // Opt-in LAN TLS listener. When enabled in `lan.json`, bind a second
+    // listener on `0.0.0.0:<port>` serving the *same* Router over TLS. The
+    // loopback listener above stays plaintext and unchanged. Failures here are
+    // logged and swallowed — they never block local clients.
+    if lan_config.as_ref().is_some_and(|c| c.enabled) {
+        let port = lan_config
+            .as_ref()
+            .map_or(lan::DEFAULT_LAN_PORT, |c| c.port);
+        match start_lan_listener(&hub, port).await {
+            Ok(fingerprint) => {
+                info!(port, %fingerprint, "LAN access enabled at startup; TLS listener bound");
+            }
+            Err(err) => error!(?err, "LAN access enabled but listener failed to start"),
+        }
+    }
+
+    // Tear down the LAN listener (started at boot or via ConfigureLan) when the
+    // daemon shuts down, off the same watch the loopback listener uses.
+    {
+        let lan_handle_slot = hub.lan_handle.clone();
+        let mut lan_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            while lan_shutdown_rx.changed().await.is_ok() {
+                if *lan_shutdown_rx.borrow() {
+                    let handle = lan_handle_slot.lock().await.take();
+                    if let Some(handle) = handle {
+                        handle.graceful_shutdown(Some(Duration::from_secs(3)));
+                    }
+                    break;
+                }
+            }
+        });
+    }
 
     let shutdown_signal = async move {
         // Returns once the Shutdown handler flips the watch to `true`. A
@@ -403,6 +449,49 @@ pub async fn run(
     let _ = std::fs::remove_file(&dirs.handshake_file);
     info!("server::run: discovery file removed; returning");
     serve_result
+}
+
+/// Build the axum Router with all routes + Hub state. Shared by the loopback
+/// listener and the opt-in LAN TLS listener so both serve identical routes.
+fn build_router(hub: Hub) -> Router {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/health", get(|| async { "ok" }))
+        .route("/shutdown", post(shutdown_handler))
+        .with_state(hub)
+}
+
+/// Start (or restart) the opt-in LAN TLS listener on `0.0.0.0:<port>`, serving
+/// the same Router over TLS (rustls, ring). Stops any previously-running LAN
+/// listener first so a port change or re-enable never leaks a listener. Returns
+/// the pinned cert fingerprint on success.
+async fn start_lan_listener(hub: &Hub, port: u16) -> anyhow::Result<String> {
+    stop_lan_listener(hub).await;
+    let cert = lan::ensure_cert(&hub.dirs)?;
+    let fingerprint = cert.fingerprint;
+    let lan_addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(cert.server_config);
+    let handle = axum_server::Handle::new();
+    *hub.lan_handle.lock().await = Some(handle.clone());
+    let app = build_router(hub.clone());
+    tokio::spawn(async move {
+        if let Err(err) = axum_server::bind_rustls(lan_addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await
+        {
+            error!(?err, "LAN TLS listener exited with error");
+        }
+    });
+    Ok(fingerprint)
+}
+
+/// Gracefully stop the LAN TLS listener if running; no-op otherwise.
+async fn stop_lan_listener(hub: &Hub) {
+    let handle = hub.lan_handle.lock().await.take();
+    if let Some(handle) = handle {
+        handle.graceful_shutdown(Some(std::time::Duration::from_secs(3)));
+    }
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
@@ -651,6 +740,19 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::WorktreesRootChanged { root, is_override }) => {
                     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged { root, is_override });
                 }
+                Ok(StateEvent::LanStatus {
+                    enabled,
+                    port,
+                    fingerprint,
+                    addresses,
+                }) => {
+                    let _ = out_tx.send(DaemonMessage::LanStatus {
+                        enabled,
+                        port,
+                        fingerprint,
+                        addresses,
+                    });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                 }
@@ -862,6 +964,13 @@ fn push_initial_state(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) 
     let _ = out_tx.send(DaemonMessage::WorktreesRootChanged {
         root: hub.state.worktrees_dir().to_string_lossy().into_owned(),
         is_override: hub.state.worktrees_root_is_override(),
+    });
+    let lan_cfg = lan::load(&hub.dirs);
+    let _ = out_tx.send(DaemonMessage::LanStatus {
+        enabled: lan_cfg.as_ref().is_some_and(|c| c.enabled),
+        port: lan_cfg.as_ref().map_or(lan::DEFAULT_LAN_PORT, |c| c.port),
+        fingerprint: lan::fingerprint(&hub.dirs),
+        addresses: lan::detect_addresses(),
     });
 }
 
@@ -1576,6 +1685,34 @@ async fn dispatch(
             let _ = hub.state_events.send(StateEvent::WorktreesRootChanged {
                 root: resolved.to_string_lossy().into_owned(),
                 is_override,
+            });
+        }
+        ClientMessage::ConfigureLan { enabled, port } => {
+            // Persist the config (with the stable auth token so a paired remote
+            // client survives restarts), then bring the TLS listener up/down
+            // live, and broadcast the resulting status to every client.
+            let cfg = lan::LanConfig {
+                enabled,
+                port,
+                auth_token: hub.auth_token.clone(),
+            };
+            lan::save(&hub.dirs, &cfg)?;
+            if enabled {
+                match start_lan_listener(hub, port).await {
+                    Ok(fingerprint) => {
+                        info!(port, %fingerprint, "LAN access enabled via ConfigureLan");
+                    }
+                    Err(err) => error!(?err, "ConfigureLan: failed to start LAN listener"),
+                }
+            } else {
+                stop_lan_listener(hub).await;
+                info!("LAN access disabled via ConfigureLan");
+            }
+            let _ = hub.state_events.send(StateEvent::LanStatus {
+                enabled,
+                port,
+                fingerprint: lan::fingerprint(&hub.dirs),
+                addresses: lan::detect_addresses(),
             });
         }
         ClientMessage::InspectWorktreesRoot => {

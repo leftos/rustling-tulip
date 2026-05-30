@@ -8,6 +8,7 @@ mod git_watch;
 mod git_write;
 mod headless;
 mod inject;
+mod lan;
 mod lock_finder;
 mod orphan;
 mod osc_title;
