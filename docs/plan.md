@@ -63,13 +63,19 @@ Does `claude --add-dir` propagate hooks and `settings.json` from each additional
 or only from the primary `cwd`? Not yet verified empirically. Relevant to workspace
 sessions where member repos may have their own `CLAUDE.md` / hooks.
 
-### macOS compatibility
-Explored 2026-05-30 (investigation only, not greenlit). Substantially portable
-already: PTY via `portable-pty`, config/data dirs via `directories`, most OS calls
-already dual-armed (`#[cfg(not(windows))]`). One architectural blocker — the
-tracer↔daemon IPC is Windows named pipes with no Unix path (needs Unix domain
-sockets) — plus a `job_object` module compile-gate, autostart (LaunchAgent), and a
-macOS bundle target. Full catalog + phased plan in `docs/plans/macos-compat.md`.
+### macOS compatibility — greenlit 2026-05-30
+- [ ] **Next up:** produce the detailed macOS implementation plan from the phased
+      map in `docs/plans/macos-compat.md`, then start at Phase M0. First settle
+      the two open scoping decisions with the user (IPC transport: `#[cfg]` alias
+      vs `interprocess`; distribution: dev-only vs signed `.dmg`) — both are in
+      that doc's "Decisions to make during planning".
+
+Substantially portable already: PTY via `portable-pty`, config/data dirs via
+`directories`, most OS calls already dual-armed (`#[cfg(not(windows))]`). One
+architectural blocker — the tracer↔daemon IPC is Windows named pipes with no Unix
+path (needs Unix domain sockets) — plus a `job_object` module compile-gate,
+autostart (LaunchAgent), and a macOS bundle target. Full catalog + phasing in
+`docs/plans/macos-compat.md`.
 
 ## Out of scope
 

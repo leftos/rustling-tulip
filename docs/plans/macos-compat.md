@@ -1,11 +1,15 @@
 # macOS Compatibility — Investigation & Porting Plan
 
-## Status (2026-05-30)
+## Status
 
-Investigation only — **no code has been changed**. This document catalogs every
-Windows-specific surface found in a full sweep of the workspace, what each needs
-on macOS, and a phased plan if/when a macOS port is greenlit. Nothing here is
-committed work; the checkboxes are future tasks.
+**Greenlit 2026-05-30 — macOS is now a committed target.** No code has changed
+yet: this document is the map from the initial investigation sweep (every
+Windows-specific surface, what each needs on macOS, and the phasing below). The
+**next step is a detailed implementation plan** built on the phasing in
+"Suggested phasing", then execution starting at Phase M0. Two scoping decisions
+(IPC transport, distribution) are still open — see "Decisions to make during
+planning"; settle them with the user before/while writing the detailed plan. The
+phase checkboxes below are the work items.
 
 ## Executive summary
 
@@ -175,11 +179,14 @@ Confirmed dual-arm or platform-neutral during the sweep:
 - [ ] **Phase M3 — autostart (LaunchAgent).**
 - [ ] **Phase M4 — packaging + signing/notarization** for distribution.
 
-## Open questions for the user
+## Decisions to make during planning
 
-- [ ] Is macOS a real target or exploratory? (Determines whether to invest in the
-      IPC abstraction now vs leave this doc as a map.)
-- [ ] Transport choice for the IPC port: manual `#[cfg]` alias (no new dep) vs the
-      `interprocess` crate (cleaner, new dependency to vet)?
-- [ ] Distribution scope: local dev builds only, or signed/notarized `.dmg`?
-      (Signing is the long pole and is org/account-dependent.)
+- [x] **Is macOS a real target?** Yes — greenlit 2026-05-30. Invest in the real
+      IPC abstraction (Phase M1), not just a compile-time stub.
+- [ ] **IPC transport for the port:** manual `#[cfg]` transport alias over
+      `AsyncRead + AsyncWrite` (no new dependency) vs the `interprocess` crate
+      (fewer `#[cfg]`s, a new dependency to vet with `cargo deny`). Settle with
+      the user before writing the M1 detail.
+- [ ] **Distribution scope:** local dev builds only, or signed/notarized `.dmg`?
+      (Signing is the long pole and is Apple-account-dependent — it scopes Phase
+      M4.) Settle with the user.
