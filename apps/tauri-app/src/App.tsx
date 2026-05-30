@@ -37,7 +37,6 @@ import {
   type ClonableLayout,
   type ContainerRef,
   type DaemonMessage,
-  type InitLayoutKind,
   type GridNode,
   type PresetEntry,
   type PresetLaunchJobSnapshot,

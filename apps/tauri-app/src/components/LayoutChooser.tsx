@@ -1,5 +1,4 @@
 import type { ClonableLayout, InitLayoutKind } from "../types";
-import Icon from "./Icon";
 
 interface Props {
   hasLegacy: boolean;
