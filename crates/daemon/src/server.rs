@@ -258,78 +258,25 @@ async fn reattach_orphans(
     let orphan_count = orphans.len();
     let abandoned_count = abandoned.len();
     info!(orphan_count, abandoned_count, "reattach_orphans: begin");
+    // Reattach concurrently. Each orphan's tracer connect can block up to the
+    // per-tracer reattach budget, so a sequential loop made boot time scale
+    // with the number of unreachable tracers (N × budget) and stalled the
+    // handshake — a single dead tracer would delay every session. All
+    // reattaches still complete before the caller binds the listener, so the
+    // "clients only see fully-wired sessions" invariant holds; the registry
+    // mutations inside each task are independently locked.
+    let mut tasks = Vec::with_capacity(orphans.len());
     for meta in orphans {
-        let session_start = std::time::Instant::now();
-        match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
-            (Some(pipe), Some(tracer_pid)) => {
-                match tracer_client::reattach(
-                    &meta.session_id,
-                    pipe,
-                    tracer_pid,
-                    expected_output_subscribers(meta.mode),
-                )
-                .await
-                {
-                    Ok(pty) => {
-                        info!(
-                            session_id = %meta.session_id,
-                            tracer_pid,
-                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                            "tracer reattach succeeded"
-                        );
-                        let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
-                        let snap_tx = attach_lifecycle(
-                            sessions,
-                            meta.session_id.clone(),
-                            &pty,
-                            Some(dirs.clone()),
-                        );
-                        let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                        {
-                            let mut guard = crate::sync::lock(pending.arc());
-                            guard.scrollback_snapshot_req = Some(snap_tx);
-                            guard.input_notifier = Some(in_tx);
-                        }
-                        if meta.mode == SessionMode::PlainShell {
-                            pty_state::watch_plain_shell(
-                                sessions,
-                                meta.session_id.clone(),
-                                pty.output.subscribe(),
-                                in_rx,
-                            );
-                        } else {
-                            pty_state::watch(
-                                sessions,
-                                meta.session_id.clone(),
-                                pty.output.subscribe(),
-                                in_rx,
-                                attention_tx.clone(),
-                            );
-                        }
-                        osc_title::watch(
-                            sessions,
-                            meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            dirs.clone(),
-                            meta.mode == SessionMode::PlainShell,
-                        );
-                        pending.publish();
-                    }
-                    Err(err) => {
-                        warn!(
-                            ?err,
-                            session_id = %meta.session_id,
-                            tracer_pid,
-                            elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
-                            "tracer reattach failed; routing to abandoned"
-                        );
-                        sessions.insert_abandoned(&meta);
-                    }
-                }
-            }
-            _ => {
-                sessions.insert_orphan(&meta);
-            }
+        tasks.push(tokio::spawn(reattach_one(
+            Arc::clone(sessions),
+            dirs.clone(),
+            attention_tx.clone(),
+            meta,
+        )));
+    }
+    for task in tasks {
+        if let Err(err) = task.await {
+            warn!(?err, "reattach_orphans: reattach task failed to join");
         }
     }
     for meta in abandoned {
@@ -341,6 +288,89 @@ async fn reattach_orphans(
         elapsed_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX),
         "reattach_orphans: done"
     );
+}
+
+/// Reattach a single orphan to its still-running tracer, or route it to the
+/// abandoned bucket if the tracer is unreachable. Runs as its own task so a
+/// slow/dead tracer doesn't serialize the others (see `reattach_orphans`).
+async fn reattach_one(
+    sessions: Arc<SessionRegistry>,
+    dirs: Dirs,
+    attention_tx: mpsc::UnboundedSender<pty_state::AttentionEvent>,
+    meta: OrphanMeta,
+) {
+    let session_start = std::time::Instant::now();
+    match (meta.tracer_pipe.as_deref(), meta.tracer_pid) {
+        (Some(pipe), Some(tracer_pid)) => {
+            match tracer_client::reattach(
+                &meta.session_id,
+                pipe,
+                tracer_pid,
+                expected_output_subscribers(meta.mode),
+            )
+            .await
+            {
+                Ok(pty) => {
+                    info!(
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach succeeded"
+                    );
+                    let pending = sessions.insert_reattached(&meta, Arc::clone(&pty));
+                    let snap_tx = attach_lifecycle(
+                        &sessions,
+                        meta.session_id.clone(),
+                        &pty,
+                        Some(dirs.clone()),
+                    );
+                    let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
+                    {
+                        let mut guard = crate::sync::lock(pending.arc());
+                        guard.scrollback_snapshot_req = Some(snap_tx);
+                        guard.input_notifier = Some(in_tx);
+                    }
+                    if meta.mode == SessionMode::PlainShell {
+                        pty_state::watch_plain_shell(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            in_rx,
+                        );
+                    } else {
+                        pty_state::watch(
+                            &sessions,
+                            meta.session_id.clone(),
+                            pty.output.subscribe(),
+                            in_rx,
+                            attention_tx.clone(),
+                        );
+                    }
+                    osc_title::watch(
+                        &sessions,
+                        meta.session_id.clone(),
+                        pty.output.subscribe(),
+                        dirs.clone(),
+                        meta.mode == SessionMode::PlainShell,
+                    );
+                    pending.publish();
+                }
+                Err(err) => {
+                    warn!(
+                        ?err,
+                        session_id = %meta.session_id,
+                        tracer_pid,
+                        elapsed_ms = u64::try_from(session_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        "tracer reattach failed; routing to abandoned"
+                    );
+                    sessions.insert_abandoned(&meta);
+                }
+            }
+        }
+        _ => {
+            sessions.insert_orphan(&meta);
+        }
+    }
 }
 
 pub async fn run(
