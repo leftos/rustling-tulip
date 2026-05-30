@@ -3611,9 +3611,9 @@ async fn park_session(hub: &Hub, session_id: &str) {
         }
         push_recent_action(r, "parked — worktree retained".to_string());
     });
-    // Detach from panes so the grid shows an empty slot; the session record
-    // itself lives on in the registry for the sidebar's Resume button.
-    prune_session_from_tabs(hub, session_id);
+    // Auto-close panes bound to this session in every client's layout; the
+    // session record itself lives on in the registry for the Resume button.
+    close_session_panes(hub, session_id);
 }
 
 /// Remove a stopped or inactive session from the registry. Optionally removes
@@ -3718,7 +3718,7 @@ async fn discard_session(
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
-    prune_session_from_tabs(hub, session_id);
+    close_session_panes(hub, session_id);
 
     if !failures.is_empty() {
         let _ = out_tx.send(DaemonMessage::WorktreeCleanupFailed {
@@ -3881,33 +3881,41 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Drop dangling pane references to `session_id` from every client's layout.
-/// Each affected tab is broadcast as a scoped `TabUpdated` so the owning
-/// client's panes switch to the empty-placeholder state.
-fn prune_session_from_tabs(hub: &Hub, session_id: &str) {
-    // (client_id, tab) pairs for every layout touched.
-    let modified = match hub.state.mutate_all_layouts(|layouts| {
-        let mut out: Vec<(String, TabEntry)> = Vec::new();
+/// Auto-close every pane bound to `session_id` across all client layouts when
+/// the session is removed: a pane's sibling fills its space, and a tab whose
+/// last pane closed is removed entirely. Emits scoped `TabUpdated` (survivors)
+/// / `TabRemoved` (emptied tabs) per affected client.
+fn close_session_panes(hub: &Hub, session_id: &str) {
+    // Per-client outcomes: a surviving tab to re-broadcast, or a tab id whose
+    // last pane closed (already removed from that client's layout).
+    enum Outcome {
+        Updated(String, TabEntry),
+        Removed(String, String),
+    }
+    let outcomes = match hub.state.mutate_all_layouts(|layouts| {
+        let mut out: Vec<Outcome> = Vec::new();
         for (cid, layout) in layouts.iter_mut() {
-            for tab in &mut layout.tabs {
-                let Some(grid) = tab.grid_mut() else {
-                    continue;
-                };
-                if tabs::prune_session(grid, session_id) {
-                    out.push((cid.clone(), tab.clone()));
-                }
+            let result = tabs::close_session_panes(&mut layout.tabs, session_id);
+            for tab in result.updated {
+                out.push(Outcome::Updated(cid.clone(), tab));
+            }
+            for tab_id in result.removed_tab_ids {
+                out.push(Outcome::Removed(cid.clone(), tab_id));
             }
         }
         out
     }) {
         Ok(list) => list,
         Err(err) => {
-            warn!(?err, "prune_session_from_tabs: state.mutate failed");
+            warn!(?err, "close_session_panes: state.mutate failed");
             return;
         }
     };
-    for (cid, tab) in modified {
-        hub.emit_tab(&cid, TabEvent::Updated(tab));
+    for outcome in outcomes {
+        match outcome {
+            Outcome::Updated(cid, tab) => hub.emit_tab(&cid, TabEvent::Updated(tab)),
+            Outcome::Removed(cid, tab_id) => hub.emit_tab(&cid, TabEvent::Removed(tab_id)),
+        }
     }
 }
 

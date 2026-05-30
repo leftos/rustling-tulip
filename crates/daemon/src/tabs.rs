@@ -358,23 +358,80 @@ fn pane_session(node: &GridNode, target: &str) -> PaneSessionLookup {
     }
 }
 
-/// Set every pane referencing `removed_session_id` to `None`. Returns true if
-/// at least one pane was modified.
-pub fn prune_session(grid: &mut GridNode, removed_session_id: &str) -> bool {
+/// Collect the ids of every pane in `grid` bound to `session_id`, in
+/// left-to-right order. Used by the session-removal auto-close to know which
+/// panes to close.
+#[must_use]
+pub fn panes_for_session(grid: &GridNode, session_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_panes_for_session(grid, session_id, &mut out);
+    out
+}
+
+fn collect_panes_for_session(grid: &GridNode, session_id: &str, out: &mut Vec<String>) {
     match grid {
-        GridNode::Pane { session_id, .. } => {
-            if session_id.as_deref() == Some(removed_session_id) {
-                *session_id = None;
-                true
-            } else {
-                false
+        GridNode::Pane {
+            pane_id,
+            session_id: sid,
+        } => {
+            if sid.as_deref() == Some(session_id) {
+                out.push(pane_id.clone());
             }
         }
         GridNode::Split { first, second, .. } => {
-            let a = prune_session(first, removed_session_id);
-            let b = prune_session(second, removed_session_id);
-            a || b
+            collect_panes_for_session(first, session_id, out);
+            collect_panes_for_session(second, session_id, out);
         }
+    }
+}
+
+/// Result of [`close_session_panes`]: tabs that survived (to re-broadcast) and
+/// the ids of tabs whose last pane closed (removed from the layout).
+pub struct SessionCloseResult {
+    pub updated: Vec<TabEntry>,
+    pub removed_tab_ids: Vec<String>,
+}
+
+/// Close every pane bound to `session_id` across `tabs`: a closed pane's
+/// sibling fills its space, and a tab emptied of its last pane is removed.
+/// Mutates `tabs` in place and reports what changed so the caller can broadcast
+/// scoped tab events. This is the auto-close behavior on session removal.
+pub fn close_session_panes(tabs: &mut Vec<TabEntry>, session_id: &str) -> SessionCloseResult {
+    let mut updated = Vec::new();
+    let mut removed_tab_ids = Vec::new();
+    for tab in tabs.iter_mut() {
+        let Some(grid) = tab.grid_mut() else {
+            continue;
+        };
+        let pane_ids = panes_for_session(grid, session_id);
+        if pane_ids.is_empty() {
+            continue;
+        }
+        let mut emptied = false;
+        for pane_id in &pane_ids {
+            match close_pane(grid, pane_id) {
+                Ok(true) => {
+                    emptied = true;
+                    break;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    // Ids were just collected from this grid and closed in
+                    // order, so a not-found here is unexpected — log and skip.
+                    tracing::warn!(?err, %pane_id, "close_session_panes: pane vanished");
+                }
+            }
+        }
+        if emptied {
+            removed_tab_ids.push(tab.id.clone());
+        } else {
+            updated.push(tab.clone());
+        }
+    }
+    tabs.retain(|t| !removed_tab_ids.contains(&t.id));
+    SessionCloseResult {
+        updated,
+        removed_tab_ids,
     }
 }
 
@@ -1012,49 +1069,86 @@ mod tests {
         );
     }
 
+    fn grid_tab(id: &str, grid: GridNode) -> TabEntry {
+        TabEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            content: TabContent::Grid { grid },
+            created_at: Utc::now(),
+        }
+    }
+
     #[test]
-    fn prune_session_clears_matching_panes_only() {
-        let mut grid = split(
+    fn panes_for_session_collects_matching_pane_ids() {
+        let grid = split(
             Horizontal,
             0.5,
-            pane("p1", Some("s-doomed")),
+            pane("p1", Some("s")),
             split(
                 Vertical,
                 0.5,
-                pane("p2", Some("s-doomed")),
-                pane("p3", Some("s-survives")),
+                pane("p2", Some("s")),
+                pane("p3", Some("other")),
             ),
         );
-        let changed = prune_session(&mut grid, "s-doomed");
-        assert!(changed);
-        assert!(!prune_session(&mut grid, "s-doomed"));
-        let GridNode::Split { first, second, .. } = &grid else {
-            panic!("expected Split");
-        };
-        assert!(matches!(
-            &**first,
-            GridNode::Pane {
-                session_id: None,
-                ..
-            }
-        ));
-        let GridNode::Split {
-            first: inner_first,
-            second: inner_second,
-            ..
-        } = &**second
-        else {
-            panic!("expected nested Split");
-        };
-        assert!(matches!(
-            &**inner_first,
-            GridNode::Pane {
-                session_id: None,
-                ..
-            }
-        ));
-        assert!(matches!(&**inner_second, GridNode::Pane { session_id, .. }
-                                    if session_id.as_deref() == Some("s-survives")));
+        let ids = panes_for_session(&grid, "s");
+        assert_eq!(ids, vec!["p1".to_string(), "p2".to_string()]);
+        assert!(panes_for_session(&grid, "absent").is_empty());
+    }
+
+    #[test]
+    fn close_session_panes_fills_siblings_and_removes_empty_tabs() {
+        // tab A: single pane on the doomed session -> tab is removed.
+        // tab B: two panes, only one on the session -> that pane closes, the
+        //        sibling fills, the tab survives.
+        // tab C: no panes on the session -> untouched, not reported.
+        let mut tabs = vec![
+            grid_tab("A", pane("a1", Some("doomed"))),
+            grid_tab(
+                "B",
+                split(
+                    Horizontal,
+                    0.5,
+                    pane("b1", Some("doomed")),
+                    pane("b2", Some("keep")),
+                ),
+            ),
+            grid_tab("C", pane("c1", Some("keep"))),
+        ];
+
+        let result = close_session_panes(&mut tabs, "doomed");
+
+        // Tab A removed; B updated; C untouched.
+        assert_eq!(result.removed_tab_ids, vec!["A".to_string()]);
+        assert_eq!(result.updated.len(), 1);
+        assert_eq!(result.updated[0].id, "B");
+        // A is gone from the vec; B + C remain.
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].id, "B");
+        assert_eq!(tabs[1].id, "C");
+        // B collapsed to just the surviving pane.
+        let b_panes = collect_panes(tabs[0].grid().expect("B has a grid"));
+        assert_eq!(b_panes, vec![("b2".to_string(), Some("keep".to_string()))]);
+    }
+
+    #[test]
+    fn close_session_panes_removes_tab_when_all_panes_share_the_session() {
+        let mut tabs = vec![grid_tab(
+            "T",
+            split(
+                Horizontal,
+                0.5,
+                pane("t1", Some("s")),
+                pane("t2", Some("s")),
+            ),
+        )];
+        let result = close_session_panes(&mut tabs, "s");
+        assert_eq!(result.removed_tab_ids, vec!["T".to_string()]);
+        assert!(result.updated.is_empty());
+        assert!(
+            tabs.is_empty(),
+            "tab with all panes on the session is removed"
+        );
     }
 
     #[test]
