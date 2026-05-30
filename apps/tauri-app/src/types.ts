@@ -594,6 +594,15 @@ export function tabGrid(tab: TabEntry): GridNode | null {
 
 // ------- Wire envelopes -------
 
+// Why a pairing window ended (mirrors the daemon `PairingEndReason`). The
+// catch-all keeps the frontend forward-compatible with a newer daemon.
+export type PairingEndReason =
+  | "paired"
+  | "expired"
+  | "cancelled"
+  | "too_many_attempts"
+  | "unknown";
+
 export type ClientMessage =
   | {
       type: "hello";
@@ -766,6 +775,13 @@ export type ClientMessage =
   // port. Daemon persists to lan.json, binds/tears down the listener live,
   // then broadcasts `lan_status`. Loopback access is unaffected.
   | { type: "configure_lan"; enabled: boolean; port: number }
+  // Begin a pairing window. The daemon generates a short numeric code and
+  // replies (to this connection only) with `pairing_started`. A discovering
+  // device submits the code to the daemon's /pair endpoint over pinned TLS to
+  // obtain the auth token. Only meaningful on the host while LAN access is on.
+  | { type: "start_pairing" }
+  // Cancel the active pairing window early; daemon broadcasts `pairing_ended`.
+  | { type: "cancel_pairing" }
   // Scan the worktrees root and cross-reference against the session
   // registry. Reply: `worktrees_root_snapshot`.
   | { type: "inspect_worktrees_root" }
@@ -913,6 +929,20 @@ export type DaemonMessage =
       port: number;
       fingerprint: string | null;
       addresses: string[];
+    }
+  // Reply to `start_pairing`, sent only to the requesting connection (the code
+  // must never reach other clients). `code` is the short pairing code to read
+  // out; `ttl_secs` is how long it stays valid, for a countdown.
+  | {
+      type: "pairing_started";
+      code: string;
+      ttl_secs: number;
+    }
+  // Broadcast when the active pairing window ends so the host UI clears the
+  // displayed code. Carries no code, so broadcasting to all clients is safe.
+  | {
+      type: "pairing_ended";
+      reason: PairingEndReason;
     }
   | {
       type: "worktrees_root_snapshot";

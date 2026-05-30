@@ -5,7 +5,11 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getAutostart, setAutostart, type DaemonClient } from "../api";
-import type { CodexSandbox, PermissionMode } from "../types";
+import type {
+  CodexSandbox,
+  PairingEndReason,
+  PermissionMode,
+} from "../types";
 import { logToFile } from "../utils/logger";
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { saveSettings, type Settings } from "../utils/settings";
@@ -621,6 +625,133 @@ interface LanPanelProps {
 const LAN_CODE_VERSION = 1;
 const DEFAULT_LAN_PORT = 8787;
 
+/// A short status line shown after a pairing window ends. `null` reasons
+/// (cancelled / unknown) leave no note.
+function pairingEndNote(reason: PairingEndReason): string | null {
+  switch (reason) {
+    case "paired":
+      return "Device paired ✓";
+    case "too_many_attempts":
+      return "Too many attempts — generate a new code.";
+    case "expired":
+      return "Code expired.";
+    default:
+      return null;
+  }
+}
+
+/// Host-side "pair a device" flow: ask the daemon to open a short-code window
+/// (`start_pairing`), show the code + a live countdown, and let the user cancel
+/// (`cancel_pairing`). The daemon sends the code only to this connection
+/// (`pairing_started`) and broadcasts `pairing_ended` when it closes — both
+/// arrive as side-channel window events via App's message handler.
+function PairDevicePanel({ client }: { client: DaemonClient | null }) {
+  const [code, setCode] = useState<string | null>(null);
+  const [deadline, setDeadline] = useState<number | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const onStarted = (e: Event) => {
+      const detail = (e as CustomEvent<{ code: string; ttl_secs: number }>)
+        .detail;
+      setCode(detail.code);
+      setDeadline(Date.now() + detail.ttl_secs * 1000);
+      setNote(null);
+    };
+    const onEnded = (e: Event) => {
+      const reason = (e as CustomEvent<{ reason: PairingEndReason }>).detail
+        .reason;
+      setCode(null);
+      setDeadline(null);
+      setNote(pairingEndNote(reason));
+    };
+    window.addEventListener("rt:pairing_started", onStarted);
+    window.addEventListener("rt:pairing_ended", onEnded);
+    return () => {
+      window.removeEventListener("rt:pairing_started", onStarted);
+      window.removeEventListener("rt:pairing_ended", onEnded);
+    };
+  }, []);
+
+  // Tick once a second while a code is live so the countdown updates.
+  useEffect(() => {
+    if (deadline === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [deadline]);
+
+  const remaining =
+    deadline === null ? 0 : Math.max(0, Math.ceil((deadline - now) / 1000));
+
+  // Drop the code locally when the countdown elapses; the daemon also rejects
+  // an expired code, but this keeps the UI honest without a round-trip.
+  useEffect(() => {
+    if (deadline !== null && remaining === 0) {
+      setCode(null);
+      setDeadline(null);
+      setNote("Code expired.");
+    }
+  }, [deadline, remaining]);
+
+  const onStart = useCallback(() => {
+    if (!client) return;
+    setNote(null);
+    client.send({ type: "start_pairing" });
+  }, [client]);
+
+  const onCancel = useCallback(() => {
+    if (!client) return;
+    client.send({ type: "cancel_pairing" });
+    setCode(null);
+    setDeadline(null);
+    setNote(null);
+  }, [client]);
+
+  if (code) {
+    return (
+      <div className="settings-pairing" data-testid="settings-pairing">
+        <p className="settings-section-hint">
+          On the other machine, open the connection picker, choose “Scan” under
+          Discover on LAN, pick this host, and enter this code:
+        </p>
+        <div className="settings-row">
+          <code className="pairing-code" data-testid="pairing-code">
+            {code}
+          </code>
+          <span className="settings-section-hint">expires in {remaining}s</span>
+          <button
+            type="button"
+            onClick={onCancel}
+            data-testid="pairing-cancel"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-pairing" data-testid="settings-pairing">
+      <div className="settings-row">
+        <button
+          type="button"
+          onClick={onStart}
+          disabled={!client}
+          data-testid="pairing-start"
+        >
+          Pair a device
+        </button>
+        <span className="settings-section-hint">
+          {note ??
+            "Show a one-time code to pair a discovered device without copying the connection code."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 /// Encode the host's LAN connection details as a single base64url blob the
 /// remote client pastes once. Carries the pinned cert fingerprint + auth
 /// token, so it grants full control — treated as a secret in the UI copy.
@@ -879,8 +1010,9 @@ function LanPanel({ client, lanStatus, daemonToken }: LanPanelProps) {
           )}
           <p className="settings-section-hint">
             On the other machine, open rustling-tulip, choose “Add remote”, and
-            paste this code.
+            paste this code — or pair without copying using a one-time code:
           </p>
+          <PairDevicePanel client={client} />
         </>
       )}
     </section>

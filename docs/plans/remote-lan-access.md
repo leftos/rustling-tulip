@@ -69,7 +69,20 @@
       `winreg`), so after a reboot the daemon comes up in the user's interactive
       session and binds LAN from `lan.json` without opening the app. Toggle lives
       in the host-side Remote access settings panel. Windows-only.
-- [ ] Phase 9 — mDNS discovery + pairing code (convenience, after MVP).
+- [x] Phase 9 — mDNS discovery + pairing code. The daemon advertises
+      `_rustling-tulip._tcp` (TXT: fingerprint + hostname) whenever the LAN
+      listener is bound (`crates/daemon/src/discovery.rs`, `mdns-sd`). Pairing
+      replaces hand-copying the connection code: the host opens a short-code
+      window (`StartPairing` → 6-digit code, 3-min TTL, 5-attempt cap,
+      `crates/daemon/src/pairing.rs`); the laptop browses (`discover_lan_hosts`),
+      pins the advertised fingerprint, and POSTs the code to the daemon's
+      `/pair` endpoint (`pair_with_host`) to receive the token, then connects
+      over the normal pinned-TLS path. Frontend: "Discover on LAN" in the
+      connection picker + "Pair a device" in the host's Remote access settings.
+      Shared mDNS contract (service type + TXT keys) lives in the protocol
+      crate. **Chosen security model:** code-gated exchange with the fingerprint
+      from mDNS TXT (vs PAKE) — LAN-convenience grade; an active mDNS spoofer
+      could MITM, which the manual pasted code (out-of-band fingerprint) avoids.
 
 ## Context
 
@@ -360,12 +373,15 @@ or a `client_id` override) independent of the TLS transport.
       run from a stable path, so no churn.
 
 ### Phase 9 — Discovery Phase 2: mDNS + pairing code  *(convenience, after MVP)*
-- [ ] Daemon advertises `_rustling-tulip._tcp` (e.g. `mdns-sd`) with TXT records
-      (port). Laptop browses + lists hosts.
-- [ ] Pairing: desktop shows a short code; laptop enters it; a short-lived pairing
-      exchange over TLS transfers token + fingerprint so the long token is never
-      hand-copied. Becomes the default convenient path; manual code remains the
-      fallback.
+- [x] Daemon advertises `_rustling-tulip._tcp` via `mdns-sd` with TXT records
+      (fingerprint + hostname) whenever the LAN listener is bound; the laptop
+      browses and lists hosts (`discover_lan_hosts`). 9a.
+- [x] Pairing: the host shows a short numeric code (`StartPairing`); the laptop
+      pins the advertised fingerprint and submits the code to the daemon's
+      `/pair` endpoint over TLS (`pair_with_host`) to receive the auth token,
+      then connects over the normal pinned-TLS path. The long token is never
+      hand-copied; the manual pasted code remains the fallback. The code is
+      TTL- and attempt-bounded. 9b (daemon) / 9c (app) / 9d (frontend UI).
 
 ## Dependencies & guardrails (validate FIRST)
 

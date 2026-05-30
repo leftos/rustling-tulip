@@ -16,6 +16,7 @@ import {
   ensureDaemonStarted,
   getClientIdentity,
   listRemoteProfiles,
+  pairWithHost,
   pickDirectory,
   requestSpawnConfig,
   saveRemoteProfile,
@@ -25,6 +26,7 @@ import {
   type ConnectionTarget,
   type DaemonClient,
   type DaemonHandshake,
+  type DiscoveredHost,
   type RemoteProfile,
 } from "./api";
 import {
@@ -1992,6 +1994,50 @@ export default function App() {
     [onSwitchConnection],
   );
 
+  /// Pair with a host discovered over mDNS: exchange its short code for the
+  /// auth token over pinned TLS, save (or update) a profile named after the
+  /// host, then connect. Mirrors `onAddRemote` but sourced from discovery +
+  /// a code instead of a pasted connection code.
+  const onPairHost = useCallback(
+    async (
+      host: DiscoveredHost,
+      code: string,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      let params;
+      try {
+        params = await pairWithHost(host.host, host.port, host.fingerprint, code);
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+      const existing = (latestStateRef.current?.remoteProfiles ?? []).find(
+        (p) => p.host === params.host && p.port === params.port,
+      );
+      const id =
+        existing?.id ??
+        `remote-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const profile: RemoteProfile = {
+        id,
+        name: existing?.name ?? host.name ?? params.host,
+        host: params.host,
+        port: params.port,
+        token: params.token,
+        fingerprint: params.fingerprint,
+      };
+      try {
+        await saveRemoteProfile(profile);
+      } catch (err) {
+        return { ok: false, error: `saving profile: ${String(err)}` };
+      }
+      const profiles = await listRemoteProfiles().catch(
+        () => [] as RemoteProfile[],
+      );
+      setState((s) => ({ ...s, remoteProfiles: profiles }));
+      onSwitchConnection({ kind: "remote", profileId: id });
+      return { ok: true };
+    },
+    [onSwitchConnection],
+  );
+
   /// Forget a saved remote host. If it was the active target, fall back to the
   /// local daemon (which also tears the bridge down + reconnects).
   const onDeleteRemoteProfile = useCallback(
@@ -2822,6 +2868,7 @@ export default function App() {
             onSwitchConnection({ kind: "remote", profileId: id })
           }
           onAddRemote={onAddRemote}
+          onPairHost={onPairHost}
           onDeleteProfile={onDeleteRemoteProfile}
           onClose={() =>
             setState((s) => ({ ...s, connectionPickerOpen: false }))
@@ -3442,6 +3489,12 @@ function handleMessage(
           addresses: msg.addresses,
         },
       }));
+      return;
+    case "pairing_started":
+    case "pairing_ended":
+      // Host-side pairing lifecycle. Ephemeral — the Remote access settings
+      // panel subscribes via the side-channel event to show/clear the code.
+      window.dispatchEvent(new CustomEvent(`rt:${msg.type}`, { detail: msg }));
       return;
     case "worktrees_root_snapshot":
       // Ephemeral — no AppState slot. The WorktreesManager modal

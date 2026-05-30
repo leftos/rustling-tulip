@@ -152,6 +152,42 @@ export async function deleteRemoteProfile(id: string): Promise<void> {
   await invoke<void>("delete_remote_profile", { id });
 }
 
+/// A daemon host discovered on the LAN via mDNS. Mirrors the Rust
+/// `remote::DiscoveredHost`.
+export interface DiscoveredHost {
+  /// Human label: the host's mDNS `name` TXT record, else its instance name.
+  name: string;
+  /// First IPv4 address the host advertised.
+  host: string;
+  port: number;
+  /// SHA-256 of the host's LAN cert (lowercase hex) to pin when pairing.
+  fingerprint: string;
+}
+
+/// Browse the LAN (~2.5s) for daemon hosts advertising over mDNS. An empty
+/// list means none were found (mDNS blocked, nothing advertising, slow net).
+export async function discoverLanHosts(): Promise<DiscoveredHost[]> {
+  return await invoke<DiscoveredHost[]>("discover_lan_hosts");
+}
+
+/// Exchange a host's short pairing code for its auth token over pinned TLS,
+/// returning connection params ready to save as a profile and connect with.
+/// Throws a descriptive string if the host is unreachable, the fingerprint
+/// mismatches, or the code is wrong/expired.
+export async function pairWithHost(
+  host: string,
+  port: number,
+  fingerprint: string,
+  code: string,
+): Promise<ConnectionParams> {
+  return await invoke<ConnectionParams>("pair_with_host", {
+    host,
+    port,
+    fingerprint,
+    code,
+  });
+}
+
 // Picker memory: store the parent directory of the last successful pick
 // keyed by a caller-supplied purpose tag, so the next time the same picker
 // opens (across reloads / app restarts) it lands the user where they were.

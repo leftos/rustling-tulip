@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ConnectionTarget, RemoteProfile } from "../api";
+import {
+  discoverLanHosts,
+  type ConnectionTarget,
+  type DiscoveredHost,
+  type RemoteProfile,
+} from "../api";
 import Icon from "./Icon";
 
 interface Props {
@@ -16,6 +21,13 @@ interface Props {
   onAddRemote: (
     code: string,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /// Pair with a host discovered over mDNS by submitting its short code. Same
+  /// resolve contract as `onAddRemote`: `{ ok: false }` keeps the modal open to
+  /// show the error; `{ ok: true }` lets App close it.
+  onPairHost: (
+    host: DiscoveredHost,
+    code: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   onDeleteProfile: (id: string) => void;
   onClose: () => void;
 }
@@ -29,6 +41,7 @@ export default function ConnectionPicker({
   onSelectLocal,
   onSelectProfile,
   onAddRemote,
+  onPairHost,
   onDeleteProfile,
   onClose,
 }: Props) {
@@ -37,6 +50,48 @@ export default function ConnectionPicker({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Discovery state.
+  const [scanning, setScanning] = useState(false);
+  const [discovered, setDiscovered] = useState<DiscoveredHost[] | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  // The host whose pairing-code input is open, keyed by host:port.
+  const [pairKey, setPairKey] = useState<string | null>(null);
+  const [pairCode, setPairCode] = useState("");
+  const [pairError, setPairError] = useState<string | null>(null);
+  const [pairBusy, setPairBusy] = useState(false);
+
+  const onScan = useCallback(async () => {
+    if (scanning) return;
+    setScanning(true);
+    setScanError(null);
+    setPairKey(null);
+    try {
+      setDiscovered(await discoverLanHosts());
+    } catch (err) {
+      setScanError(String(err));
+      setDiscovered([]);
+    } finally {
+      setScanning(false);
+    }
+  }, [scanning]);
+
+  const onSubmitPair = useCallback(
+    async (host: DiscoveredHost) => {
+      const trimmed = pairCode.trim();
+      if (!trimmed || pairBusy) return;
+      setPairBusy(true);
+      setPairError(null);
+      const result = await onPairHost(host, trimmed);
+      if (result.ok) {
+        setPairCode("");
+      } else {
+        setPairError(result.error);
+        setPairBusy(false);
+      }
+    },
+    [pairCode, pairBusy, onPairHost],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -147,6 +202,104 @@ export default function ConnectionPicker({
               </li>
             ))}
           </ul>
+
+          <div className="connection-discover">
+            <div className="connection-discover-header">
+              <span className="connection-discover-title">
+                Discover on LAN
+              </span>
+              <button
+                type="button"
+                className="link"
+                onClick={() => void onScan()}
+                disabled={scanning}
+                data-testid="connection-scan"
+              >
+                {scanning ? "Scanning…" : "Scan"}
+              </button>
+            </div>
+            {scanError && (
+              <p className="connection-error" data-testid="connection-scan-error">
+                {scanError}
+              </p>
+            )}
+            {discovered !== null && !scanning && discovered.length === 0 && (
+              <p className="settings-section-hint">
+                No hosts found. Make sure the other machine has LAN access
+                enabled, or add it by pasting its connection code below.
+              </p>
+            )}
+            {discovered && discovered.length > 0 && (
+              <ul
+                className="connection-list"
+                data-testid="discovered-host-list"
+              >
+                {discovered.map((h) => {
+                  const key = `${h.host}:${h.port}`;
+                  const open = pairKey === key;
+                  return (
+                    <li key={key} className="connection-row connection-discovered">
+                      <button
+                        type="button"
+                        className="connection-option"
+                        onClick={() => {
+                          setPairKey(open ? null : key);
+                          setPairCode("");
+                          setPairError(null);
+                        }}
+                        data-testid={`discovered-host-${key}`}
+                        aria-expanded={open}
+                      >
+                        <span className="connection-option-name">{h.name}</span>
+                        <span className="connection-option-detail">
+                          {h.host}:{h.port}
+                        </span>
+                      </button>
+                      {open && (
+                        <div className="connection-pair">
+                          <label htmlFor={`pair-code-${key}`}>
+                            Enter the code shown on {h.name}
+                          </label>
+                          <div className="connection-pair-row">
+                            <input
+                              id={`pair-code-${key}`}
+                              className="connection-pair-input"
+                              value={pairCode}
+                              inputMode="numeric"
+                              autoComplete="off"
+                              spellCheck={false}
+                              placeholder="123456"
+                              onChange={(e) => {
+                                setPairCode(e.target.value);
+                                setPairError(null);
+                              }}
+                              data-testid="pair-code-input"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void onSubmitPair(h)}
+                              disabled={!pairCode.trim() || pairBusy}
+                              data-testid="pair-code-submit"
+                            >
+                              {pairBusy ? "Pairing…" : "Pair"}
+                            </button>
+                          </div>
+                          {pairError && (
+                            <p
+                              className="connection-error"
+                              data-testid="pair-code-error"
+                            >
+                              {pairError}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
 
           <div className="connection-add">
             {addOpen ? (

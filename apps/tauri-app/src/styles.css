@@ -3019,6 +3019,65 @@ button.tree-tab-pill:hover {
   align-items: center;
   gap: 8px;
 }
+.connection-discover {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.connection-discover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.connection-discover-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.connection-discovered {
+  flex-direction: column;
+  align-items: stretch;
+}
+.connection-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 4px;
+}
+.connection-pair-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.connection-pair-input {
+  flex: 1;
+  font-family: var(--font-mono);
+  letter-spacing: 0.15em;
+  padding: 6px 8px;
+  background: var(--bg-elev1);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+.settings-pairing {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pairing-code {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.25em;
+  padding: 4px 10px;
+  background: var(--bg-elev1);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--fg);
+}
 .appearance-control-stack {
   flex-wrap: wrap;
   justify-content: flex-end;
