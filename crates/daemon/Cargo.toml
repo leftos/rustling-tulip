@@ -68,6 +68,9 @@ axum-server = { version = "0.8", default-features = false, features = [
 ] }
 # Enumerate the host's non-loopback IPv4 addresses for the LAN connection code.
 local-ip-address = "0.6"
+# Advertise the LAN listener over mDNS so laptops can discover it without a
+# hand-typed address (see crates/daemon/src/discovery.rs).
+mdns-sd = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 # Restart Manager API for locating processes holding handles inside the

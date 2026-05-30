@@ -2109,6 +2109,7 @@ mod tests {
             state_events,
             client_count: Arc::new(client_count),
             lan_handle: Arc::new(AsyncMutex::new(None)),
+            advertiser: Arc::new(AsyncMutex::new(None)),
         };
         (hub, preset_rx, scratch)
     }

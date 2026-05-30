@@ -2,6 +2,7 @@
 
 mod agents;
 mod binary_cache;
+mod discovery;
 mod git;
 mod git_inspect;
 mod git_watch;

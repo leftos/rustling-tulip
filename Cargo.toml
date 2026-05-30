@@ -27,6 +27,9 @@ anyhow = "1.0"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "5.0"
+# mDNS service discovery for opt-in LAN access: the daemon advertises, the
+# Tauri app browses. Pure-Rust, dual MIT/Apache (clean for cargo-deny).
+mdns-sd = "0.20"
 
 protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }

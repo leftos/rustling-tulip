@@ -1,6 +1,7 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
 use crate::agents::CommonSpawnFields;
+use crate::discovery;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
@@ -90,6 +91,11 @@ pub struct Hub {
     /// takes it on disable to drive a graceful shutdown; the daemon-wide
     /// shutdown task also tears it down. `None` when LAN access is off.
     pub lan_handle: Arc<AsyncMutex<Option<axum_server::Handle<SocketAddr>>>>,
+    /// Live mDNS advertisement for LAN discovery, present while the LAN
+    /// listener is bound. Started by [`start_lan_listener`] and dropped
+    /// (which unregisters the service) by [`stop_lan_listener`] and at
+    /// daemon shutdown. `None` when LAN access is off.
+    pub advertiser: Arc<AsyncMutex<Option<discovery::Advertiser>>>,
 }
 
 impl Hub {
@@ -390,6 +396,7 @@ pub async fn run(
         state_events,
         client_count,
         lan_handle: Arc::new(AsyncMutex::new(None)),
+        advertiser: Arc::new(AsyncMutex::new(None)),
     };
 
     let app = build_router(hub.clone());
@@ -429,23 +436,10 @@ pub async fn run(
         }
     }
 
-    // Tear down the LAN listener (started at boot or via ConfigureLan) when the
-    // daemon shuts down, off the same watch the loopback listener uses.
-    {
-        let lan_handle_slot = hub.lan_handle.clone();
-        let mut lan_shutdown_rx = shutdown_rx.clone();
-        tokio::spawn(async move {
-            while lan_shutdown_rx.changed().await.is_ok() {
-                if *lan_shutdown_rx.borrow() {
-                    let handle = lan_handle_slot.lock().await.take();
-                    if let Some(handle) = handle {
-                        handle.graceful_shutdown(Some(Duration::from_secs(3)));
-                    }
-                    break;
-                }
-            }
-        });
-    }
+    // Tear down the LAN listener + mDNS advertisement (started at boot or via
+    // ConfigureLan) when the daemon shuts down, off the same watch the loopback
+    // listener uses.
+    spawn_lan_teardown(&hub, shutdown_rx.clone());
 
     let shutdown_signal = async move {
         // Returns once the Shutdown handler flips the watch to `true`. A
@@ -504,15 +498,47 @@ async fn start_lan_listener(hub: &Hub, port: u16) -> anyhow::Result<String> {
             error!(?err, "LAN TLS listener exited with error");
         }
     });
+
+    // Advertise over mDNS so a laptop can discover this host without a typed
+    // address. Best-effort: a failure here (no responder, blocked UDP 5353)
+    // leaves the working TLS listener up — pairing by pasted code still works.
+    match discovery::advertise(port, &fingerprint, &lan::detect_addresses()) {
+        Ok(adv) => *hub.advertiser.lock().await = Some(adv),
+        Err(err) => warn!(
+            ?err,
+            "mDNS advertising failed to start; LAN listener still bound"
+        ),
+    }
+
     Ok(fingerprint)
 }
 
-/// Gracefully stop the LAN TLS listener if running; no-op otherwise.
+/// Spawn the task that gracefully stops the LAN TLS listener and drops its
+/// mDNS advertisement when the daemon-wide shutdown watch flips to `true`.
+fn spawn_lan_teardown(hub: &Hub, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    let lan_handle_slot = hub.lan_handle.clone();
+    let advertiser_slot = hub.advertiser.clone();
+    tokio::spawn(async move {
+        while shutdown_rx.changed().await.is_ok() {
+            if *shutdown_rx.borrow() {
+                if let Some(handle) = lan_handle_slot.lock().await.take() {
+                    handle.graceful_shutdown(Some(Duration::from_secs(3)));
+                }
+                drop(advertiser_slot.lock().await.take());
+                break;
+            }
+        }
+    });
+}
+
+/// Gracefully stop the LAN TLS listener if running; no-op otherwise. Also drops
+/// the mDNS advertisement (its `Drop` unregisters the service).
 async fn stop_lan_listener(hub: &Hub) {
     let handle = hub.lan_handle.lock().await.take();
     if let Some(handle) = handle {
         handle.graceful_shutdown(Some(std::time::Duration::from_secs(3)));
     }
+    drop(hub.advertiser.lock().await.take());
 }
 
 fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<()> {
