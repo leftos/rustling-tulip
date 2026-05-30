@@ -78,6 +78,9 @@ interface Props {
     message: string,
     restoreFocusedPaneId: string | null,
   ) => void;
+  /// Arms the App-level focus-switch to a freshly created tab for the session
+  /// context menu's "Move to ▸ New tab" action. Pop-out windows pass a no-op.
+  onArmNextNewTab: () => void;
   /// Wrapper pop-outs already render session chrome in their window toolbar.
   /// Hide the in-pane header there so title/status/actions are not duplicated.
   hideHeader?: boolean;
@@ -98,6 +101,7 @@ export default function SessionPane({
   onExtractToTab,
   onClosePane,
   onTabsSnapshotUndo,
+  onArmNextNewTab,
   hideHeader = false,
 }: Props) {
   const showPaneControls =
@@ -433,6 +437,7 @@ export default function SessionPane({
           repos={repos}
           workspaces={workspaces}
           client={client}
+          onArmNextNewTab={onArmNextNewTab}
           {...(paneId ? { preferredPaneId: paneId } : {})}
           {...(onTabsSnapshotUndo ? { onTabsSnapshotUndo } : {})}
           onClose={() => setSessionMenu(null)}

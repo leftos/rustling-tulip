@@ -150,6 +150,7 @@ export default function PaneWindow({
           subscribePty={subscribePty}
           tabId={tab.id}
           paneId={paneId}
+          onArmNextNewTab={() => {}}
           hideHeader
         />
       </div>

@@ -25,6 +25,7 @@ import SessionPane from "./SessionPane";
 import EmptyPane from "./EmptyPane";
 import Icon from "./Icon";
 import PaneCloseDialog from "./PaneCloseDialog";
+import { MoveToSubmenu } from "./MoveToSubmenu";
 
 const DRAG_MIME = "text/x-rt-pane";
 
@@ -625,6 +626,7 @@ function PaneChrome(props: PaneChromeProps) {
             }
             onExtractToTab={onExtract}
             onClosePane={onClose}
+            onArmNextNewTab={props.onArmNextNewTab}
           />
         ) : (
           <EmptyPane
@@ -656,11 +658,13 @@ function PaneChrome(props: PaneChromeProps) {
       {contextMenu && (
         <PaneContextMenu
           state={contextMenu}
+          tabs={tabs}
+          sourceTabId={tabId}
+          sourcePaneId={node.pane_id}
+          client={client}
+          onArmNextNewTab={props.onArmNextNewTab}
+          onTabsSnapshotUndo={onTabsSnapshotUndo}
           onClose={() => setContextMenu(null)}
-          onExtract={() => {
-            onExtract();
-            setContextMenu(null);
-          }}
           onCloseItem={() => {
             onClose();
             setContextMenu(null);
@@ -773,8 +777,17 @@ function DropOverlay({ edge }: { edge: PaneDropEdge }) {
 
 interface PaneContextMenuProps {
   state: PaneContextMenuState;
+  tabs: TabEntry[];
+  sourceTabId: string;
+  sourcePaneId: string;
+  client: DaemonClient;
+  onArmNextNewTab: () => void;
+  onTabsSnapshotUndo: (
+    tabs: TabEntry[],
+    message: string,
+    restoreFocusedPaneId: string | null,
+  ) => void;
   onClose: () => void;
-  onExtract: () => void;
   onCloseItem: () => void;
 }
 
@@ -798,11 +811,16 @@ function PaneContextMenu(p: PaneContextMenuProps) {
         style={{ left: position.left, top: position.top }}
         onClick={(e) => e.stopPropagation()}
       >
-        <li>
-          <button type="button" onClick={p.onExtract}>
-            Move to new tab
-          </button>
-        </li>
+        <MoveToSubmenu
+          tabs={p.tabs}
+          sourceTabId={p.sourceTabId}
+          sourcePaneId={p.sourcePaneId}
+          client={p.client}
+          onArmNextNewTab={p.onArmNextNewTab}
+          onTabsSnapshotUndo={p.onTabsSnapshotUndo}
+          testIdPrefix="pane-context"
+          onClose={p.onClose}
+        />
         <li>
           <button type="button" onClick={p.onCloseItem}>
             Close pane

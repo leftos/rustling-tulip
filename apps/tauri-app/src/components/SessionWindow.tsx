@@ -119,6 +119,7 @@ export default function SessionWindow({
           repos={repos}
           workspaces={workspaces}
           subscribePty={subscribePty}
+          onArmNextNewTab={() => {}}
           hideHeader
         />
       </div>

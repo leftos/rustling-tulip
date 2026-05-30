@@ -1,6 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
+import { MenuSubmenu } from "./MenuSubmenu";
+import { MoveToSubmenu } from "./MoveToSubmenu";
 import {
   tabGrid,
   type AppearanceOverrides,
@@ -11,7 +13,7 @@ import {
 } from "../types";
 import { useClampedMenuPosition } from "../utils/a11y";
 import { useIsRemote } from "../utils/remoteMode";
-import { pickBalancedDropTarget, sessionTabBindings } from "../utils/grid";
+import { sessionTabBindings } from "../utils/grid";
 import {
   clearPanePoppedOut,
   markPanePoppedOut,
@@ -45,6 +47,10 @@ interface Props {
   repos: RepoEntry[];
   workspaces: WorkspaceEntry[];
   client: DaemonClient;
+  /// Arms the App-level focus-switch to the freshly created tab when the
+  /// "Move to ▸ New tab" entry extracts the pane (see App.tsx
+  /// `onArmNextNewTab`).
+  onArmNextNewTab: () => void;
   preferredPaneId?: string;
   onClose: () => void;
   /** `withDialog` = true when the click was modified with Shift. When
@@ -73,6 +79,7 @@ export default function SessionContextMenu({
   repos,
   workspaces,
   client,
+  onArmNextNewTab,
   preferredPaneId,
   onClose,
   onDuplicate,
@@ -87,12 +94,13 @@ export default function SessionContextMenu({
 
   // Source bindings drive the "Move to" submenu. With zero bindings the
   // session has no live pane to move — fall back to the unbound-pill flow.
+  // Prefer the right-clicked pane (the pane-header menu passes
+  // `preferredPaneId`) so a session open in multiple panes moves the one the
+  // user aimed at; the sidebar menu has no pane context and uses the first.
   const bindings = sessionTabBindings(s.id, tabs);
-  const sourceBinding = bindings[0] ?? null;
+  const sourceBinding =
+    bindings.find((b) => b.pane_id === preferredPaneId) ?? bindings[0] ?? null;
   const bindingTabIds = new Set(bindings.map((b) => b.tab_id));
-  const moveTargets = sourceBinding
-    ? tabs.filter((t) => !bindingTabIds.has(t.id))
-    : [];
 
   // Reveal worktree picks the first member's worktree path. For workspace
   // sessions the user can still drill into individual members via the
@@ -269,31 +277,6 @@ export default function SessionContextMenu({
     onClose();
   };
 
-  const onMoveTo = (dstTab: TabEntry) => {
-    if (!sourceBinding) return;
-    const dstGrid = tabGrid(dstTab);
-    if (!dstGrid) return;
-    // Smart-balanced destination: an empty pane absorbs the move in
-    // place; otherwise the largest pane in the destination splits along
-    // its longer axis. Mirrors the auto-add behavior for spawned
-    // sessions and the tab-pill drag-drop path.
-    const dst = pickBalancedDropTarget(dstGrid);
-    if (!dst) return;
-    const sourceTab = tabs.find((t) => t.id === sourceBinding.tab_id) ?? null;
-    if (onTabsSnapshotUndo && sourceTab) {
-      onTabsSnapshotUndo([sourceTab, dstTab], "Moved pane", sourceBinding.pane_id);
-    }
-    client.send({
-      type: "move_pane",
-      src_tab_id: sourceBinding.tab_id,
-      src_pane_id: sourceBinding.pane_id,
-      dst_tab_id: dstTab.id,
-      dst_pane_id: dst.paneId,
-      edge: dst.edge,
-    });
-    onClose();
-  };
-
   const onPopOut = () => {
     const paneId = preferredPaneId ?? sourceBinding?.pane_id ?? null;
     if (!paneId) {
@@ -405,22 +388,18 @@ export default function SessionContextMenu({
               ))}
             </MenuSubmenu>
 
-            {moveTargets.length > 0 && (
-              <MenuSubmenu label="Move to" dataTestId="session-context-move-menu">
-                {moveTargets.map((t) => (
-                  <li key={`mv:${t.id}`}>
-                    <button
-                      type="button"
-                      onClick={() => onMoveTo(t)}
-                      title={`Move this session into "${t.name}"`}
-                      data-testid="session-context-move-to-tab"
-                      data-tab-id={t.id}
-                    >
-                      {t.name}
-                    </button>
-                  </li>
-                ))}
-              </MenuSubmenu>
+            {sourceBinding && (
+              <MoveToSubmenu
+                tabs={tabs}
+                sourceTabId={sourceBinding.tab_id}
+                sourcePaneId={sourceBinding.pane_id}
+                client={client}
+                onArmNextNewTab={onArmNextNewTab}
+                excludeTabIds={bindingTabIds}
+                testIdPrefix="session-context"
+                onClose={onClose}
+                {...(onTabsSnapshotUndo ? { onTabsSnapshotUndo } : {})}
+              />
             )}
 
             {sourceBinding === null && (
@@ -674,64 +653,6 @@ export default function SessionContextMenu({
         )}
       </ul>
     </div>
-  );
-}
-
-interface MenuSubmenuProps {
-  label: string;
-  children: ReactNode;
-  disabled?: boolean;
-  title?: string;
-  dataTestId?: string;
-  chip?: string;
-  chipEmphasis?: boolean;
-}
-
-function MenuSubmenu({
-  label,
-  children,
-  disabled = false,
-  title,
-  dataTestId,
-  chip,
-  chipEmphasis = false,
-}: MenuSubmenuProps) {
-  return (
-    <li className="context-menu-submenu">
-      <button
-        type="button"
-        className="context-menu-submenu-trigger"
-        disabled={disabled}
-        title={title}
-        aria-haspopup="menu"
-        data-testid={dataTestId}
-        onClick={(e) => {
-          e.preventDefault();
-          e.currentTarget.focus();
-        }}
-      >
-        <span className="context-menu-submenu-label">{label}</span>
-        {chip && (
-          <span
-            className={
-              chipEmphasis
-                ? "context-menu-chip context-menu-chip-emph"
-                : "context-menu-chip"
-            }
-          >
-            {chip}
-          </span>
-        )}
-        <span className="context-menu-submenu-arrow" aria-hidden="true">
-          &gt;
-        </span>
-      </button>
-      {!disabled && (
-        <ul className="context-menu-submenu-panel" role="menu">
-          {children}
-        </ul>
-      )}
-    </li>
   );
 }
 

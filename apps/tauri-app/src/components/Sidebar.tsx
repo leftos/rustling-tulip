@@ -161,6 +161,9 @@ interface Props {
   /// Active main-window tab. Threaded down so the "Launch last in current
   /// tab" submenu entry can be disabled when no tab is selected.
   activeTabId: string | null;
+  /// Arms the App-level focus-switch to a freshly created tab for the session
+  /// context menu's "Move to ▸ New tab" action.
+  onArmNextNewTab: () => void;
   /// Instant duplicate from the session context menu. App-level handler
   /// arms a pending spawn intent (`newTab` or `addToTab` depending on
   /// `target`) before sending DuplicateSession, so the freshly spawned
@@ -956,6 +959,7 @@ export default function Sidebar(props: Props) {
           repos={props.repos}
           workspaces={props.workspaces}
           client={props.client}
+          onArmNextNewTab={props.onArmNextNewTab}
           onClose={closeSessionMenu}
           onDuplicate={(withDialog, target) => {
             const sid = sessionMenu.session.id;

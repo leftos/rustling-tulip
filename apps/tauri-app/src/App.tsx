@@ -2766,6 +2766,7 @@ export default function App() {
             onLaunchLast={onLaunchLast}
             onEditLastSpawn={onEditLastSpawn}
             activeTabId={state.activeTabId}
+            onArmNextNewTab={onArmNextNewTab}
             onDuplicateSession={onDuplicateSession}
             onDuplicateSessionWithDialog={onDuplicateSessionWithDialog}
             onOpenWorkspaceCreator={onOpenWorkspaceCreator}
