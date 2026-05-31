@@ -490,6 +490,53 @@ function Sync-SidecarBinaries {
     }
 }
 
+# Returns $true when dist/ is at least as new as every tracked frontend
+# source file, meaning `pnpm build` would produce identical output. Used
+# to skip the build step in the release path when nothing has changed.
+# Excludes generated artifacts (tsconfig.tsbuildinfo, vite.config.js/.d.ts)
+# from the source scan so they don't falsely invalidate the check.
+function Test-FrontendUpToDate {
+    [OutputType([bool])]
+    param()
+
+    $distDir = Join-Path $AppDir 'dist'
+    if (-not (Test-Path $distDir)) { return $false }
+
+    $distFiles = @(Get-ChildItem $distDir -Recurse -File -ErrorAction SilentlyContinue)
+    if ($distFiles.Count -eq 0) { return $false }
+
+    # Use the oldest dist file as the threshold: every dist file must be
+    # newer than every source file for the bundle to be considered current.
+    $oldestDist = ($distFiles | Sort-Object LastWriteTimeUtc | Select-Object -First 1).LastWriteTimeUtc
+
+    $sourceItems = @(
+        (Join-Path $AppDir 'src'),
+        (Join-Path $AppDir 'public'),
+        (Join-Path $AppDir 'index.html'),
+        (Join-Path $AppDir 'package.json'),
+        (Join-Path $AppDir 'pnpm-lock.yaml'),
+        (Join-Path $AppDir 'pnpm-workspace.yaml'),
+        (Join-Path $AppDir 'tsconfig.json'),
+        (Join-Path $AppDir 'tsconfig.node.json'),
+        (Join-Path $AppDir 'vite.config.ts')
+    )
+
+    foreach ($path in $sourceItems) {
+        if (-not (Test-Path $path)) { continue }
+        $item = Get-Item $path
+        $files = if ($item.PSIsContainer) {
+            Get-ChildItem $item -Recurse -File -ErrorAction SilentlyContinue
+        } else {
+            @($item)
+        }
+        foreach ($f in $files) {
+            if ($f.LastWriteTimeUtc -gt $oldestDist) { return $false }
+        }
+    }
+
+    return $true
+}
+
 function Initialize-FrontendDeps {
     [CmdletBinding()]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '',
@@ -689,13 +736,17 @@ function Invoke-ReleaseBuild {
     }
 
     Initialize-FrontendDeps
-    Write-Host '==> Building frontend bundle (pnpm build)...' -ForegroundColor Cyan
-    Push-Location $AppDir
-    try {
-        & pnpm build
-        Test-CargoExitOk 'pnpm build'
-    } finally {
-        Pop-Location
+    if (Test-FrontendUpToDate) {
+        Write-Host '==> Frontend bundle up-to-date, skipping pnpm build.' -ForegroundColor DarkGray
+    } else {
+        Write-Host '==> Building frontend bundle (pnpm build)...' -ForegroundColor Cyan
+        Push-Location $AppDir
+        try {
+            & pnpm build
+            Test-CargoExitOk 'pnpm build'
+        } finally {
+            Pop-Location
+        }
     }
 
     Write-Host '==> Building daemon + tracer + tauri app (release)...' -ForegroundColor Cyan
