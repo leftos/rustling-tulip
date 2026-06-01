@@ -819,21 +819,32 @@ pub fn rearrange_grid(grid: &GridNode, layout: RearrangeLayout) -> anyhow::Resul
         .cloned()
         .collect();
     let panes = if bound.is_empty() { all_panes } else { bound };
-    let new = match layout {
+    build_for_layout(&panes, layout)
+        .ok_or_else(|| anyhow!("rearrange produced empty tab (unreachable)"))
+}
+
+/// Build a grid tree laying `panes` out per `layout`. Shared by the
+/// "Rearrange panes" path and "Move panes to a new tab" so a requested
+/// layout means the same shape in both. Returns `None` only for an empty
+/// `panes` slice.
+fn build_for_layout(
+    panes: &[(String, Option<String>)],
+    layout: RearrangeLayout,
+) -> Option<GridNode> {
+    match layout {
         RearrangeLayout::Horizontal | RearrangeLayout::Balanced => {
-            build_balanced(&panes, SplitDirection::Horizontal)
+            build_balanced(panes, SplitDirection::Horizontal)
         }
-        RearrangeLayout::Vertical => build_balanced(&panes, SplitDirection::Vertical),
-        RearrangeLayout::Grid { cols } => build_grid(&panes, cols),
+        RearrangeLayout::Vertical => build_balanced(panes, SplitDirection::Vertical),
+        RearrangeLayout::Grid { cols } => build_grid(panes, cols),
         RearrangeLayout::Unknown => {
             // Forward-compat: client requested a layout this daemon doesn't
             // know. Fall back to Balanced (the safest known shape — keeps
             // every pane visible without strong orientation claims).
-            tracing::warn!("rearrange: unknown layout from client; falling back to balanced");
-            build_balanced(&panes, SplitDirection::Horizontal)
+            tracing::warn!("layout: unknown variant from client; falling back to balanced");
+            build_balanced(panes, SplitDirection::Horizontal)
         }
-    };
-    new.ok_or_else(|| anyhow!("rearrange produced empty tab (unreachable)"))
+    }
 }
 
 /// Merge multiple tabs into a single new tab. Removes the source tabs from
@@ -876,13 +887,16 @@ pub fn merge_tabs(
 }
 
 /// Move a set of panes out of `source_tab_id` into a fresh tab. Returns the
-/// new tab. If extracting empties the source tab, the source is removed
-/// (caller must broadcast `TabRemoved` for the source as well).
+/// new tab. `layout` controls how the new tab arranges the extracted panes;
+/// `None` keeps the historical horizontal tiling. If extracting empties the
+/// source tab, the source is removed (caller must broadcast `TabRemoved` for
+/// the source as well).
 pub fn extract_to_new_tab(
     tabs: &mut Vec<TabEntry>,
     source_tab_id: &str,
     pane_ids: &[String],
     name: Option<String>,
+    layout: Option<RearrangeLayout>,
 ) -> anyhow::Result<(TabEntry, bool)> {
     if pane_ids.is_empty() {
         return Err(anyhow!("extract requires at least one pane"));
@@ -909,7 +923,8 @@ pub fn extract_to_new_tab(
     if source_empty {
         tabs.retain(|t| t.id != source_tab_id);
     }
-    let grid = build_balanced(&extracted, SplitDirection::Horizontal)
+    let layout = layout.unwrap_or(RearrangeLayout::Horizontal);
+    let grid = build_for_layout(&extracted, layout)
         .ok_or_else(|| anyhow!("extract produced empty tab"))?;
     let resolved_name = name.unwrap_or_else(|| next_default_name(tabs));
     let entry = TabEntry {
@@ -1626,6 +1641,7 @@ mod tests {
             "t1",
             &["p1".to_string()],
             Some("Extracted".to_string()),
+            None,
         )
         .expect("extract");
         assert!(!source_empty);
@@ -1643,10 +1659,51 @@ mod tests {
     fn extract_to_new_tab_empties_source_when_all_panes_moved() {
         let mut tabs = vec![make_tab_with("t1", "A", pane("only", Some("s1")))];
         let (_, source_empty) =
-            extract_to_new_tab(&mut tabs, "t1", &["only".to_string()], None).expect("extract");
+            extract_to_new_tab(&mut tabs, "t1", &["only".to_string()], None, None)
+                .expect("extract");
         assert!(source_empty);
         assert_eq!(tabs.len(), 1);
         assert_ne!(tabs[0].id, "t1");
+    }
+
+    #[test]
+    fn extract_to_new_tab_honors_grid_layout() {
+        // Source tab is a flat horizontal strip of six bound panes p0..p5.
+        // Move the first four into a new tab arranged as a 2-column grid; the
+        // new tab's root must be a vertical split (rows) whose first row
+        // carries p0 and p1.
+        let mut grid = pane("p0", Some("s0"));
+        for i in 1..6 {
+            let pid = format!("p{i}");
+            let sid = format!("s{i}");
+            grid = split(Horizontal, 0.5, grid, pane(&pid, Some(sid.as_str())));
+        }
+        let mut tabs = vec![make_tab_with("t1", "A", grid)];
+        let moved: Vec<String> = (0..4).map(|i| format!("p{i}")).collect();
+        let (new_tab, source_empty) = extract_to_new_tab(
+            &mut tabs,
+            "t1",
+            &moved,
+            None,
+            Some(RearrangeLayout::Grid { cols: 2 }),
+        )
+        .expect("extract");
+        assert!(!source_empty);
+        let new_grid = grid_or_err(&new_tab).expect("new grid");
+        let GridNode::Split {
+            direction, first, ..
+        } = new_grid
+        else {
+            panic!("expected vertical Split at grid root");
+        };
+        assert_eq!(*direction, Vertical);
+        let first_row: Vec<String> = collect_panes(first).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(first_row, vec!["p0".to_string(), "p1".to_string()]);
+        let all: Vec<String> = collect_panes(new_grid)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(all, vec!["p0", "p1", "p2", "p3"]);
     }
 
     #[test]

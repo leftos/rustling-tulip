@@ -54,6 +54,90 @@ export function tabPaneCount(tab: TabEntry): number {
 }
 
 /**
+ * Count of session-bound panes in the tab. `rearrange_grid` (daemon) drops
+ * empty placeholder panes before rebuilding the grid, so this is the pane
+ * count a rearrange actually lays out — the honest basis for labeling the
+ * grid-arrangement options the user can pick.
+ */
+export function tabBoundPaneCount(tab: TabEntry): number {
+  const grid = tabGrid(tab);
+  if (!grid) return 0;
+  return collectPanes(grid).filter((p) => p.session_id !== null).length;
+}
+
+/**
+ * Aspect-aware column count for an N-pane "Auto" grid. Picks the column
+ * count whose cells are closest to square for the given container aspect
+ * ratio (width / height), lightly preferring layouts that fill evenly (no
+ * ragged last row) and discouraging degenerate single-row / single-column
+ * shapes for non-trivial pane counts. A square container (`aspect == 1`)
+ * yields a roughly square grid; a wide container biases toward more
+ * columns, a tall one toward more rows.
+ *
+ * The client computes this — rather than the daemon's `cols == 0` path —
+ * because only the client knows the viewport: see `paneAreaAspect`.
+ */
+export function bestFitGridCols(n: number, aspect: number): number {
+  if (n <= 1) return 1;
+  const a = aspect > 0 && Number.isFinite(aspect) ? aspect : 16 / 9;
+  let best = 1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const empties = rows * cols - n;
+    const cellAspect = (a * rows) / cols;
+    let score = Math.abs(Math.log(cellAspect)) + 0.2 * empties;
+    if ((cols === 1 || cols === n) && n >= 5) {
+      // A 1×N / N×1 strip rarely reads well for 5+ panes; an extreme
+      // window aspect can still win it on cell shape alone.
+      score += 0.4;
+    }
+    if (score < bestScore) {
+      bestScore = score;
+      best = cols;
+    }
+  }
+  return best;
+}
+
+/**
+ * Aspect ratio (width / height) of the live pane area — the grid container
+ * the panes occupy. Used to drive `bestFitGridCols` for the "Auto" grid
+ * actions. Falls back to the window aspect, then 16:9, when the element
+ * can't be measured (e.g. nothing rendered yet).
+ */
+export function paneAreaAspect(): number {
+  const el =
+    document.querySelector(".grid-root") ?? document.querySelector(".main-pane");
+  if (el) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return r.width / r.height;
+  }
+  if (window.innerHeight > 0) return window.innerWidth / window.innerHeight;
+  return 16 / 9;
+}
+
+/// A concrete grid shape: `cols` columns per row, `rows` rows total.
+export interface GridArrangement {
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Enumerate the grid shapes strictly between "Stacked" (1 column) and "Side
+ * by side" (N columns) for an N-pane tab: every column count from 2 to N-1.
+ * `rows` is `ceil(N / cols)`, matching the daemon's row-major chunking in
+ * `build_grid`. Returns an empty list for N < 3 (no in-between shape exists).
+ */
+export function gridArrangements(n: number): GridArrangement[] {
+  const out: GridArrangement[] = [];
+  for (let cols = 2; cols <= n - 1; cols++) {
+    out.push({ cols, rows: Math.ceil(n / cols) });
+  }
+  return out;
+}
+
+/**
  * Find the first tab whose grid contains a pane bound to `sessionId`. Returns
  * the tab id and the pane id, or `null` if no tab references the session.
  * Used to route a sidebar click back to an already-open tab instead of

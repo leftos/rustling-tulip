@@ -871,6 +871,10 @@ export type ClientMessage =
       source_tab_id: string;
       pane_ids: string[];
       name: string | null;
+      // Optional layout for the new tab. Omitted by the single-pane extract
+      // paths (daemon keeps horizontal tiling); the "move panes to new tab"
+      // dialog sets it to arrange the new tab as a grid / row / column.
+      layout?: RearrangeLayout;
     }
   | { type: "list_presets"; target: PresetTarget }
   | {

@@ -2861,6 +2861,60 @@ button.tree-tab-pill:hover {
 }
 .modal-narrow { width: 420px; }
 .modal-wide { width: 880px; }
+
+/* "Move panes to a new tab" dialog. */
+.move-panes-list {
+  list-style: none;
+  margin: 8px 0 12px;
+  padding: 4px;
+  max-height: min(40vh, 280px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.move-panes-list li { padding: 0; }
+.move-panes-list .checkbox {
+  width: 100%;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.move-panes-list .checkbox:hover { background: var(--bg-elev2); }
+.move-panes-pane-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.move-panes-layout {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+.move-panes-layout legend {
+  float: left;
+  width: 100%;
+  margin-bottom: 6px;
+  color: var(--fg-muted);
+  font-size: var(--text-small);
+}
+.move-panes-grid-shape {
+  margin-left: auto;
+  max-width: 60%;
+}
+.move-panes-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  color: var(--fg-muted);
+  font-size: var(--text-small);
+}
+.move-panes-name input { width: 100%; }
 .path-input-row {
   display: flex;
   gap: 8px;

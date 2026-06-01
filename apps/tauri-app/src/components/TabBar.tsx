@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DaemonClient } from "../api";
-import type { RearrangeLayout, TabEntry } from "../types";
+import type { RearrangeLayout, SessionSnapshot, TabEntry } from "../types";
 import { useClampedMenuPosition, useEscape } from "../utils/a11y";
 import {
+  bestFitGridCols,
+  gridArrangements,
+  paneAreaAspect,
   pickBalancedDropTarget,
+  tabBoundPaneCount,
   tabHasBoundSessions,
   tabPaneCount,
 } from "../utils/grid";
 import { tabGrid } from "../types";
+import { MenuSubmenu } from "./MenuSubmenu";
+import MovePanesDialog from "./MovePanesDialog";
 import {
   clearTabFontSize,
   getTabFontSize,
@@ -25,6 +31,9 @@ interface Props {
   tabs: TabEntry[];
   activeTabId: string | null;
   client: DaemonClient;
+  /// All known sessions, used to label panes by their session title in the
+  /// "move panes to a new tab" dialog.
+  sessions: SessionSnapshot[];
   onActivate: (tabId: string) => void;
   /// Arm the next-new-tab activation flag at the App level. Called right
   /// before a merge/extract send so the freshly broadcast `tab_updated`
@@ -60,6 +69,7 @@ export default function TabBar({
   tabs,
   activeTabId,
   client,
+  sessions,
   onActivate,
   onArmNextNewTab,
   onLocalReorder,
@@ -67,6 +77,7 @@ export default function TabBar({
   onTabsSnapshotUndo,
 }: Props) {
   const [selectedTabIds, setSelectedTabIds] = useState<Set<string>>(new Set());
+  const [movePanesTabId, setMovePanesTabId] = useState<string | null>(null);
   const [settings] = useSettings();
   const appFontSize = resolveAppearanceLayers(
     null,
@@ -494,6 +505,10 @@ export default function TabBar({
             const t = tabs.find((tt) => tt.id === contextMenu.tabId);
             return t ? tabPaneCount(t) : 0;
           })()}
+          targetBoundPaneCount={(() => {
+            const t = tabs.find((tt) => tt.id === contextMenu.tabId);
+            return t ? tabBoundPaneCount(t) : 0;
+          })()}
           onClose={() => {
             setConfirmingCloseOthers(false);
             closeMenu();
@@ -552,8 +567,27 @@ export default function TabBar({
             setConfirmingCloseOthers(false);
             closeMenu();
           }}
+          onMovePanes={() => {
+            setMovePanesTabId(contextMenu.tabId);
+            setConfirmingCloseOthers(false);
+            closeMenu();
+          }}
         />
       )}
+      {movePanesTabId &&
+        (() => {
+          const tab = tabs.find((t) => t.id === movePanesTabId);
+          if (!tab) return null;
+          return (
+            <MovePanesDialog
+              tab={tab}
+              sessions={sessions}
+              client={client}
+              onArmNextNewTab={onArmNextNewTab}
+              onClose={() => setMovePanesTabId(null)}
+            />
+          );
+        })()}
     </div>
   );
 }
@@ -603,6 +637,10 @@ interface ContextMenuProps {
   /// makes sense when there are 2+ panes — a single pane has nothing
   /// to rearrange, so the entire section is omitted.
   targetPaneCount: number;
+  /// Session-bound pane count of the right-clicked tab. Rearrange drops
+  /// empty placeholder panes, so this — not `targetPaneCount` — is the
+  /// count the concrete grid arrangements are enumerated and labeled from.
+  targetBoundPaneCount: number;
   /// Effective font size for the right-clicked tab (override or
   /// app-default). Rendered as a numeric chip in the menu so the user
   /// can see what their +/- clicks are nudging.
@@ -620,6 +658,9 @@ interface ContextMenuProps {
   onFontSizeReset: () => void;
   onMergeSelected: (layout: "tile_horizontal" | "tile_vertical") => void;
   onPopOut: () => void;
+  /// Open the "move panes to a new tab" dialog for the right-clicked tab.
+  /// Only offered when the tab has 3+ session-bound panes.
+  onMovePanes: () => void;
 }
 
 function TabContextMenu(p: ContextMenuProps) {
@@ -628,6 +669,12 @@ function TabContextMenu(p: ContextMenuProps) {
     x: p.state.x,
     y: p.state.y,
   });
+  const gridShapes = gridArrangements(p.targetBoundPaneCount);
+  // Aspect-aware auto: pick columns from the live pane-area shape so a wide
+  // window favors more columns. Sent as an explicit `cols` (not 0) because
+  // the daemon's auto has no viewport.
+  const autoCols = bestFitGridCols(p.targetBoundPaneCount, paneAreaAspect());
+  const autoRows = Math.ceil(p.targetBoundPaneCount / autoCols);
   return (
     <div
       className="context-menu-backdrop"
@@ -657,15 +704,51 @@ function TabContextMenu(p: ContextMenuProps) {
           <>
             <li className="context-menu-separator" aria-hidden="true" />
             <li className="context-menu-label">Rearrange panes</li>
-            <li>
-              <button
-                type="button"
-                onClick={() => p.onRearrange({ kind: "grid", cols: 0 })}
-                data-testid="tab-context-rearrange-grid"
+            {gridShapes.length > 0 ? (
+              <MenuSubmenu
+                label={"  Grid"}
+                dataTestId="tab-context-rearrange-grid-menu"
               >
-                &nbsp;&nbsp;Grid (auto)
-              </button>
-            </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      p.onRearrange({ kind: "grid", cols: autoCols })
+                    }
+                    data-testid="tab-context-rearrange-grid"
+                  >
+                    Auto ({autoCols} cols × {autoRows} rows)
+                  </button>
+                </li>
+                <li className="context-menu-separator" aria-hidden="true" />
+                {gridShapes.map((shape) => (
+                  <li key={`grid:${shape.cols}`}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        p.onRearrange({ kind: "grid", cols: shape.cols })
+                      }
+                      data-testid="tab-context-rearrange-grid-cols"
+                      data-cols={shape.cols}
+                    >
+                      {shape.cols} cols × {shape.rows} rows
+                    </button>
+                  </li>
+                ))}
+              </MenuSubmenu>
+            ) : (
+              <li>
+                <button
+                  type="button"
+                  onClick={() =>
+                    p.onRearrange({ kind: "grid", cols: autoCols })
+                  }
+                  data-testid="tab-context-rearrange-grid"
+                >
+                  &nbsp;&nbsp;Grid (auto)
+                </button>
+              </li>
+            )}
             <li>
               <button
                 type="button"
@@ -684,6 +767,17 @@ function TabContextMenu(p: ContextMenuProps) {
                 &nbsp;&nbsp;Stacked
               </button>
             </li>
+            {p.targetBoundPaneCount >= 3 && (
+              <li>
+                <button
+                  type="button"
+                  onClick={p.onMovePanes}
+                  data-testid="tab-context-move-panes"
+                >
+                  &nbsp;&nbsp;Move panes to new tab…
+                </button>
+              </li>
+            )}
           </>
         )}
         <li className="context-menu-separator" aria-hidden="true" />

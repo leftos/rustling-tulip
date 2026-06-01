@@ -1932,11 +1932,16 @@ pub enum ClientMessage {
         layout: MergeLayout,
     },
     /// Move a set of panes out of `source_tab_id` into a new tab. Panes are
-    /// appended to the new tab using horizontal tiling.
+    /// collected in the order `pane_ids` is given. `layout` controls how the
+    /// new tab arranges them; `None` (older clients) keeps the historical
+    /// horizontal tiling. `Some(_)` builds the grid via the same path as
+    /// [`ClientMessage::RearrangeTab`], so the new tab can be a true grid.
     ExtractToNewTab {
         source_tab_id: String,
         pane_ids: Vec<String>,
         name: Option<String>,
+        #[serde(default)]
+        layout: Option<RearrangeLayout>,
     },
     /// Request the list of presets available for a repo or workspace. The
     /// daemon reads `.rustling-tulip/presets.json` from the target repo (or

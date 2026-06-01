@@ -2244,11 +2244,12 @@ async fn dispatch(
             source_tab_id,
             pane_ids,
             name,
+            layout,
         } => {
             let (new_tab, source_empty, source_survivor) =
                 hub.state.mutate_client_layout(client_id, |tabs| {
                     let (new_tab, source_empty) =
-                        tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name)?;
+                        tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)?;
                     let source_survivor = if source_empty {
                         None
                     } else {

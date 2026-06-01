@@ -2666,6 +2666,7 @@ export default function App() {
         tabs={state.tabs}
         activeTabId={state.activeTabId}
         client={state.client!}
+        sessions={state.sessions}
         onActivate={onActivateTab}
         onArmNextNewTab={onArmNextNewTab}
         onLocalReorder={onLocalReorder}
