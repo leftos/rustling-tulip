@@ -11,6 +11,7 @@ import {
   tabBoundPaneCount,
   tabHasBoundSessions,
   tabPaneCount,
+  tabSessionCounts,
 } from "../utils/grid";
 import { tabGrid } from "../types";
 import { MenuSubmenu } from "./MenuSubmenu";
@@ -400,6 +401,7 @@ export default function TabBar({
             dragState?.overId === t.id && dragState.side === "after";
           const isDragging = dragState?.draggingId === t.id;
           const kind = t.content.kind;
+          const counts = tabSessionCounts(t, sessions);
           const classes = [
             "tab-pill",
             `tab-pill-kind-${kind}`,
@@ -447,6 +449,19 @@ export default function TabBar({
                       title="Diff tab"
                     >
                       Δ
+                    </span>
+                  )}
+                  {counts.total > 0 && (
+                    <span
+                      className={
+                        counts.busy > 0
+                          ? "tab-pill-count busy"
+                          : "tab-pill-count"
+                      }
+                      title={`${counts.busy} of ${counts.total} panes busy`}
+                      data-testid="tab-pill-count"
+                    >
+                      {counts.busy}/{counts.total}
                     </span>
                   )}
                   <span className="tab-pill-label" title={t.name}>

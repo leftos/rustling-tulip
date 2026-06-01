@@ -3671,6 +3671,24 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
   width: 140px;
   outline: none;
 }
+.tab-pill-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev2);
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+}
+/* At least one busy pane in the tab — warm it so a glance across the strip
+   shows which background tabs are working. */
+.tab-pill-count.busy {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: transparent;
+}
 .tab-pill-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3764,6 +3782,23 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 }
 .grid-pane.is-focused .session-pane.has-custom-terminal-frame {
   border-color: var(--terminal-frame-strong, var(--border));
+}
+/* Accented panes (explicit pick or repo-derived default) show focus as a
+   border in their own accent color, matching the header band, instead of the
+   global blue ring. The blue grid-pane ring is suppressed for these so the two
+   don't double up; it still applies to empty/unbound panes, which carry no
+   accent. The transparent border is reserved on every accented pane so toggling
+   focus never shifts layout — only the focused pane reveals the color. These
+   come after the custom-terminal-frame rules above so they win for panes that
+   carry both classes (a context-menu color sets accent + frame together). */
+.grid-pane:has(.session-pane.has-session-accent) {
+  border-color: transparent;
+}
+.session-pane.has-session-accent {
+  border: 1px solid transparent;
+}
+.grid-pane.is-focused .session-pane.has-session-accent {
+  border-color: var(--session-accent);
 }
 .grid-pane-body {
   flex: 1;

@@ -1,6 +1,5 @@
 import type { SessionSnapshot, TabEntry } from "../types";
-import { tabGrid } from "../types";
-import { collectPanes } from "./grid";
+import { tabSessionCounts } from "./grid";
 
 const PRODUCT_NAME = "rustling-tulip";
 
@@ -37,32 +36,8 @@ export function computeWindowTitle(
     return options.show_product_suffix ? PRODUCT_NAME : "";
   }
 
-  const grid = tabGrid(activeTab);
-  let total = 0;
-  let busy = 0;
-  if (grid) {
-    const sessionById = new Map(sessions.map((s) => [s.id, s] as const));
-    for (const pane of collectPanes(grid)) {
-      if (pane.session_id === null) continue;
-      const session = sessionById.get(pane.session_id);
-      if (!session || session.is_inactive) continue;
-      total += 1;
-      if (isBusy(session)) busy += 1;
-    }
-  }
+  const { busy, total } = tabSessionCounts(activeTab, sessions);
 
   const prefix = options.show_busy_count && total > 0 ? `(${busy}/${total}) ` : "";
   return `${prefix}${activeTab.name}${suffix}`;
-}
-
-/// A session counts as "busy" when it's actively doing something the user
-/// might want to know about: running a command, awaiting permission, or
-/// still booting. Idle and exited sessions don't count — the dot is calm,
-/// and the title should be too.
-function isBusy(session: SessionSnapshot): boolean {
-  return (
-    session.status === "working" ||
-    session.status === "awaiting_input" ||
-    session.status === "spawning"
-  );
 }

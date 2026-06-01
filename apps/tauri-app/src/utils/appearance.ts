@@ -9,6 +9,12 @@ import type { Settings } from "./settings";
 export type AppearanceField = keyof AppearanceOverrides;
 export type AppearanceSource = "session" | "container" | "app" | "built-in";
 
+/// App-wide default accent color — the same subtle blue as the CSS `--accent`
+/// token (`styles.css`). Every pane carries this as its band/focus color out of
+/// the box until someone picks a different one. Also offered as the first swatch
+/// in `APPEARANCE_ACCENT_COLOR_PRESETS` so users can return to it explicitly.
+export const DEFAULT_ACCENT_COLOR = "#5b9bff";
+
 export interface EffectiveAppearance {
   accent_color: string | null;
   terminal_background_color: string;
@@ -33,7 +39,7 @@ export const EMPTY_APPEARANCE: AppearanceOverrides = {
 };
 
 export const BUILT_IN_APPEARANCE: EffectiveAppearance = {
-  accent_color: null,
+  accent_color: DEFAULT_ACCENT_COLOR,
   terminal_background_color: "#08090b",
   terminal_frame_color: "#08090b",
   terminal_font_family: null,
@@ -51,6 +57,7 @@ export const APPEARANCE_BACKGROUND_COLOR_PRESETS = [
 ] as const;
 
 export const APPEARANCE_ACCENT_COLOR_PRESETS = [
+  { name: "Default", color: DEFAULT_ACCENT_COLOR },
   { name: "Sky", color: "#38bdf8" },
   { name: "Blue", color: "#3b82f6" },
   { name: "Violet", color: "#8b5cf6" },

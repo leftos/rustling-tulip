@@ -1,6 +1,7 @@
 import type {
   GridNode,
   PaneDropEdge,
+  SessionSnapshot,
   SplitDirection,
   SplitPlace,
   TabEntry,
@@ -63,6 +64,48 @@ export function tabBoundPaneCount(tab: TabEntry): number {
   const grid = tabGrid(tab);
   if (!grid) return 0;
   return collectPanes(grid).filter((p) => p.session_id !== null).length;
+}
+
+/**
+ * A session counts as "busy" when it's actively doing something worth
+ * surfacing: running a command, awaiting permission, or still booting. Idle
+ * and exited sessions are calm and don't count.
+ */
+export function isSessionBusy(session: SessionSnapshot): boolean {
+  return (
+    session.status === "working" ||
+    session.status === "awaiting_input" ||
+    session.status === "spawning"
+  );
+}
+
+export interface TabSessionCounts {
+  busy: number;
+  total: number;
+}
+
+/**
+ * Busy / total live-session counts for a tab. `total` counts panes bound to a
+ * non-inactive session; `busy` counts the subset that are busy. Shared by the
+ * OS-window title and the tab-strip (M/N) badge so the two never disagree.
+ */
+export function tabSessionCounts(
+  tab: TabEntry,
+  sessions: SessionSnapshot[],
+): TabSessionCounts {
+  const grid = tabGrid(tab);
+  if (!grid) return { busy: 0, total: 0 };
+  const byId = new Map(sessions.map((s) => [s.id, s] as const));
+  let total = 0;
+  let busy = 0;
+  for (const pane of collectPanes(grid)) {
+    if (pane.session_id === null) continue;
+    const session = byId.get(pane.session_id);
+    if (!session || session.is_inactive) continue;
+    total += 1;
+    if (isSessionBusy(session)) busy += 1;
+  }
+  return { busy, total };
 }
 
 /**
