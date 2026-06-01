@@ -2274,11 +2274,27 @@ button.tree-tab-pill:hover {
 .session-header-draggable button,
 .session-header-draggable .link { cursor: pointer; }
 .session-title {
-  display: flex; align-items: center; gap: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
   min-width: 0;
   flex: 1;
-  /* Member chips wrap with the title when the chip count + label exceeds
-   * the pane width so narrow workspace panes don't truncate. */
+}
+.session-title-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* Member chips live on their own row beneath the title so long branch
+ * names can't crowd out the session title. Wrap when several workspace
+ * members overflow the pane width. */
+.session-title-members {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
   flex-wrap: wrap;
 }
 .session-title h2 {
@@ -2303,7 +2319,15 @@ button.tree-tab-pill:hover {
   font-size: var(--text-small);
   font-family: var(--font-mono);
 }
-.session-actions { display: flex; align-items: center; gap: 4px; }
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Pin the action buttons to the title row even when member chips push
+   * the title block to two rows, so the buttons don't float to the
+   * vertical middle of a two-row header. */
+  align-self: flex-start;
+}
 /* Action buttons live in the pane header chrome; tighter than the
  * global button baseline so they don't overwhelm the 38px header. */
 .session-actions button {
@@ -2370,6 +2394,13 @@ button.tree-tab-pill:hover {
   border: 1px solid var(--border);
   color: var(--fg-muted);
   font-weight: 500;
+  /* A long unbreakable branch slug ellipsizes within the pane width
+   * instead of overflowing the header; the full repo:branch + worktree
+   * path stay available on the hover tooltip. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   transition: color var(--dur-fast) var(--ease-out),
               border-color var(--dur-fast) var(--ease-out);
 }

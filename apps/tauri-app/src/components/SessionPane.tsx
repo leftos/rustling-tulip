@@ -251,48 +251,54 @@ export default function SessionPane({
           }
         >
           <div className="session-title">
-            <span
-              className={`status-dot status-${session.status}`}
-              title={`status: ${session.status}`}
-              aria-label={`status ${session.status}`}
-              role="img"
-            />
-            <h2 title={sessionLabelTooltip(session)}>
-              {sessionDisplayLabel(session)}
-            </h2>
-            {/* Per-member <repo>:<branch> chips sit inline with the title
-              so a workspace session doesn't waste an
-              entire row. Single-repo sessions render one chip; workspace
-              sessions render N. Hover surfaces the worktree path. */}
-            {session.members.map((m) => (
+            <div className="session-title-main">
               <span
-                key={m.repo_id}
-                className="chip session-member-chip"
-                title={m.worktree_path}
-              >
-                {m.repo_name}: {m.branch}
-              </span>
-            ))}
-            {runtimeLabel && (
-              <span
-                className="chip session-runtime-chip"
-                title={`Running ${runtimeLabel}`}
-                data-testid="session-runtime-chip"
-              >
-                {runtimeLabel}
-              </span>
-            )}
-            {session.elevated_authority && (
-              <span
-                className="chip session-authority-chip"
-                title="Trusted launch: permission prompts were bypassed"
-                data-testid="session-authority-badge"
-              >
-                trusted
-              </span>
-            )}
-            {modeSuffix && (
-              <span className="session-meta">{modeSuffix}</span>
+                className={`status-dot status-${session.status}`}
+                title={`status: ${session.status}`}
+                aria-label={`status ${session.status}`}
+                role="img"
+              />
+              <h2 title={sessionLabelTooltip(session)}>
+                {sessionDisplayLabel(session)}
+              </h2>
+              {runtimeLabel && (
+                <span
+                  className="chip session-runtime-chip"
+                  title={`Running ${runtimeLabel}`}
+                  data-testid="session-runtime-chip"
+                >
+                  {runtimeLabel}
+                </span>
+              )}
+              {session.elevated_authority && (
+                <span
+                  className="chip session-authority-chip"
+                  title="Trusted launch: permission prompts were bypassed"
+                  data-testid="session-authority-badge"
+                >
+                  trusted
+                </span>
+              )}
+              {modeSuffix && (
+                <span className="session-meta">{modeSuffix}</span>
+              )}
+            </div>
+            {/* Per-member <repo>:<branch> chips live on their own row beneath
+              the title so long branch names can't crowd out the session
+              title. Single-repo sessions render one chip; workspace sessions
+              render N. Hover surfaces the worktree path. */}
+            {session.members.length > 0 && (
+              <div className="session-title-members">
+                {session.members.map((m) => (
+                  <span
+                    key={m.repo_id}
+                    className="chip session-member-chip"
+                    title={`${m.repo_name}: ${m.branch}\n${m.worktree_path}`}
+                  >
+                    {m.repo_name}: {m.branch}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
           <div className="session-actions">
