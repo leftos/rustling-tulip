@@ -3958,11 +3958,13 @@ async fn discard_session(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
 
-    // Track which wt.<branch-slug>/ wrapper dirs were touched so we can
-    // finalize them once all members of the group have been processed.
-    // A `HashSet` would dedupe in O(1), but the typical N is 1–3 members
-    // so a Vec scan is cheaper and keeps allocations bounded.
-    let mut wrappers_touched: Vec<PathBuf> = Vec::new();
+    // Track each removed member's immediate parent so we can prune the
+    // now-empty anchor skeleton + wt.<branch-slug>/ wrapper once all
+    // members of the group have been processed. A `HashSet` would dedupe
+    // in O(1), but the typical N is 1–3 members so a Vec scan is cheaper
+    // and keeps allocations bounded.
+    let worktrees_root = hub.state.worktrees_dir();
+    let mut member_parents: Vec<PathBuf> = Vec::new();
     let mut failures: Vec<protocol::WorktreeCleanupFailure> = Vec::new();
     for action in cleanup {
         if !action.remove_worktree || !has_per_session_worktree {
@@ -3999,13 +4001,13 @@ async fn discard_session(
             }
         }
         if let Some(parent) = worktree_path.parent()
-            && !wrappers_touched.iter().any(|p| p == parent)
+            && !member_parents.iter().any(|p| p == parent)
         {
-            wrappers_touched.push(parent.to_path_buf());
+            member_parents.push(parent.to_path_buf());
         }
     }
-    for wrapper in &wrappers_touched {
-        crate::worktree_cleanup::finalize_wrapper(wrapper);
+    for parent in &member_parents {
+        crate::worktree_cleanup::prune_empty_ancestors(parent, &worktrees_root);
     }
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
@@ -4085,7 +4087,7 @@ async fn retry_worktree_cleanup(
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    let mut wrappers_touched: Vec<PathBuf> = Vec::new();
+    let mut member_parents: Vec<PathBuf> = Vec::new();
     let mut failures: Vec<protocol::WorktreeCleanupFailure> = Vec::new();
     for target in &valid_targets {
         let member = PathBuf::from(&target.member_path);
@@ -4102,13 +4104,13 @@ async fn retry_worktree_cleanup(
             }
         }
         if let Some(parent) = member.parent()
-            && !wrappers_touched.iter().any(|p| p == parent)
+            && !member_parents.iter().any(|p| p == parent)
         {
-            wrappers_touched.push(parent.to_path_buf());
+            member_parents.push(parent.to_path_buf());
         }
     }
-    for wrapper in &wrappers_touched {
-        crate::worktree_cleanup::finalize_wrapper(wrapper);
+    for parent in &member_parents {
+        crate::worktree_cleanup::prune_empty_ancestors(parent, &root);
     }
 
     if !failures.is_empty() {
