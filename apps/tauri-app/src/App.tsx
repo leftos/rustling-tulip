@@ -80,7 +80,8 @@ import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
 import SettingsModal from "./components/SettingsModal";
 import ConnectionPicker from "./components/ConnectionPicker";
-import LayoutChooser from "./components/LayoutChooser";
+import LayoutChooser, { type ArrangementConfig } from "./components/LayoutChooser";
+import ImportArrangementModal from "./components/ImportArrangementModal";
 import WorktreesManagerModal from "./components/WorktreesManagerModal";
 import TabBar from "./components/TabBar";
 import GridRenderer from "./components/GridRenderer";
@@ -306,6 +307,13 @@ interface AppState {
     active_session_count: number;
     clonable: ClonableLayout[];
   } | null;
+  /// Set when a remote `sessions` snapshot arrives with a count that differs
+  /// from what the client previously knew. The ImportArrangementModal renders
+  /// it; cleared on any user choice (keep / import / empty). `null` otherwise.
+  importArrangement: {
+    incoming_count: number;
+    local_count: number;
+  } | null;
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
@@ -416,6 +424,7 @@ export default function App() {
     remoteProfiles: [],
     connectionPickerOpen: false,
     layoutChooser: null,
+    importArrangement: null,
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -485,6 +494,20 @@ export default function App() {
     | { kind: "addToTab"; tabId: string }
     | null
   >(null);
+
+  /// Set when the user picks an arrangement in LayoutChooser or
+  /// ImportArrangementModal before the daemon replies with `tabs`. The `tabs`
+  /// handler reads it, clears it, then sends `rearrange_tab` /
+  /// `extract_to_new_tab` to apply the chosen shape.
+  const pendingArrangementRef = useRef<ArrangementConfig | null>(null);
+
+  /// Stashes the session-count mismatch detected in the `sessions` handler.
+  /// Cleared by the `layout_init_required` handler (LayoutChooser takes over)
+  /// or by the `tabs` handler (which promotes it to `importArrangement` state).
+  const pendingSessionImportRef = useRef<{
+    incoming_count: number;
+    local_count: number;
+  } | null>(null);
 
   /// Captured when the spawn dialog is opened from an empty pane's "+ spawn"
   /// button. Read at `onSpawned` to route current-tab placement into that pane.
@@ -647,6 +670,8 @@ export default function App() {
             clientRef,
             seenSessionIdsRef,
             pendingSpawnIntentRef,
+            pendingArrangementRef,
+            pendingSessionImportRef,
             pendingPaneFocusRef,
             latestStateRef,
           ),
@@ -2901,11 +2926,35 @@ export default function App() {
           hasLegacy={state.layoutChooser.has_legacy}
           activeSessionCount={state.layoutChooser.active_session_count}
           clonable={state.layoutChooser.clonable}
-          onChoose={(kind) => {
+          onChoose={(kind, arrangement) => {
+            // Stash any chosen arrangement before sending so the `tabs`
+            // handler can apply it once the daemon replies.
+            if (arrangement) pendingArrangementRef.current = arrangement;
             clientRef.current?.send({ type: "init_layout", kind });
             // Optimistically close; the daemon replies with `tabs`, which also
             // clears this. Closing now avoids a flash if the reply is slow.
             setState((s) => ({ ...s, layoutChooser: null }));
+          }}
+        />
+      )}
+      {state.importArrangement && (
+        <ImportArrangementModal
+          incomingCount={state.importArrangement.incoming_count}
+          localCount={state.importArrangement.local_count}
+          onKeep={() =>
+            setState((s) => ({ ...s, importArrangement: null }))
+          }
+          onEmpty={() => {
+            clientRef.current?.send({ type: "init_layout", kind: { kind: "empty" } });
+            setState((s) => ({ ...s, importArrangement: null }));
+          }}
+          onImport={(layout, maxPerTab) => {
+            pendingArrangementRef.current = { layout, maxPerTab };
+            clientRef.current?.send({
+              type: "init_layout",
+              kind: { kind: "all_sessions" },
+            });
+            setState((s) => ({ ...s, importArrangement: null }));
           }}
         />
       )}
@@ -3133,6 +3182,11 @@ function handleMessage(
   clientRef: React.MutableRefObject<DaemonClient | null>,
   seenSessionIdsRef: React.MutableRefObject<Set<string>>,
   pendingSpawnIntentRef: React.MutableRefObject<PendingSpawnIntent>,
+  pendingArrangementRef: React.MutableRefObject<ArrangementConfig | null>,
+  pendingSessionImportRef: React.MutableRefObject<{
+    incoming_count: number;
+    local_count: number;
+  } | null>,
   pendingPaneFocusRef: React.MutableRefObject<
     { tabId: string; knownPaneIds: Set<string> } | null
   >,
@@ -3175,8 +3229,21 @@ function handleMessage(
     case "sessions": {
       // Initial snapshot. Seed the seen-set so a subsequent session_updated
       // for one of these ids is recognized as not-new.
-      for (const s of msg.sessions) seenSessionIdsRef.current.add(s.id);
-      setState((s) => ({ ...s, sessions: msg.sessions }));
+      const incoming = msg.sessions;
+      for (const s of incoming) seenSessionIdsRef.current.add(s.id);
+      // On remote connections, stash the count mismatch so the `tabs` handler
+      // can offer the import-arrangement modal. The `layout_init_required`
+      // handler clears this if LayoutChooser will handle layout init instead.
+      const localCount = latestStateRef.current?.sessions.length ?? 0;
+      const isRemote =
+        latestStateRef.current?.connectionTarget.kind === "remote";
+      if (isRemote && incoming.length > 0 && incoming.length !== localCount) {
+        pendingSessionImportRef.current = {
+          incoming_count: incoming.length,
+          local_count: localCount,
+        };
+      }
+      setState((s) => ({ ...s, sessions: incoming }));
       return;
     }
     case "session_updated": {
@@ -3329,6 +3396,8 @@ function handleMessage(
       }));
       return;
     case "layout_init_required":
+      // LayoutChooser handles init — the session-count stash is not needed.
+      pendingSessionImportRef.current = null;
       setState((s) => ({
         ...s,
         layoutChooser: {
@@ -3338,7 +3407,47 @@ function handleMessage(
         },
       }));
       return;
-    case "tabs":
+    case "tabs": {
+      // Apply any pending arrangement chosen from LayoutChooser or
+      // ImportArrangementModal (set before `init_layout all_sessions` was sent).
+      const pendingArr = pendingArrangementRef.current;
+      if (pendingArr) {
+        pendingArrangementRef.current = null;
+        const firstTab = msg.tabs[0];
+        if (firstTab?.content.kind === "grid") {
+          const allPanes = collectPanes(firstTab.content.grid);
+          const maxPerTab = pendingArr.maxPerTab ?? allPanes.length;
+          // Extract groups that exceed `maxPerTab` into new tabs.
+          for (
+            let start = maxPerTab;
+            start < allPanes.length;
+            start += maxPerTab
+          ) {
+            const batch = allPanes
+              .slice(start, start + maxPerTab)
+              .map((p) => p.pane_id);
+            clientRef.current?.send({
+              type: "extract_to_new_tab",
+              source_tab_id: firstTab.id,
+              pane_ids: batch,
+              name: null,
+              layout: pendingArr.layout,
+            });
+          }
+          // Rearrange the first tab (may have fewer panes after extractions).
+          clientRef.current?.send({
+            type: "rearrange_tab",
+            tab_id: firstTab.id,
+            layout: pendingArr.layout,
+          });
+        }
+      }
+      // If this `tabs` is the initial reconnect push (not a reply to
+      // `init_layout`), promote any stashed session-count mismatch into the
+      // import-arrangement modal.
+      const sessionImport = pendingSessionImportRef.current;
+      pendingSessionImportRef.current = null;
+      const showImport = sessionImport !== null && pendingArr === null;
       setState((s) => {
         const ids = new Set(msg.tabs.map((t) => t.id));
         const active =
@@ -3364,9 +3473,11 @@ function handleMessage(
           focusedPaneByTab,
           // The daemon answered the first-connect chooser (if one was open).
           layoutChooser: null,
+          importArrangement: showImport ? sessionImport : s.importArrangement,
         };
       });
       return;
+    }
     case "tab_updated":
       setState((s) => {
         const idx = s.tabs.findIndex((t) => t.id === msg.tab.id);
