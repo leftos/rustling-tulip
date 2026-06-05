@@ -3215,6 +3215,24 @@ button.tree-tab-pill:hover {
   color: var(--fg-muted);
   font-style: italic;
 }
+.branch-with-dice {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.branch-with-dice .branch-combobox,
+.branch-with-dice > input {
+  flex: 1;
+  min-width: 0;
+}
+.branch-dice {
+  flex: none;
+  white-space: nowrap;
+}
+.action-failed-detail {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .appearance-control-stack {
   flex-wrap: wrap;
   justify-content: flex-end;

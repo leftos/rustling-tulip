@@ -2543,6 +2543,18 @@ pub enum DaemonMessage {
     Error {
         message: String,
     },
+    /// A user-requested action was refused or failed in a way that warrants a
+    /// blocking modal rather than a transient toast — e.g. a worktree spawn
+    /// that collided with an in-use worktree, or a "remove worktree" discard
+    /// blocked because another live session still uses it. `title` is the
+    /// modal heading, `detail` the explanation, and `hint` an optional
+    /// actionable next step.
+    ActionFailed {
+        title: String,
+        detail: String,
+        #[serde(default)]
+        hint: Option<String>,
+    },
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message

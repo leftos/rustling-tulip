@@ -1391,8 +1391,12 @@ async fn dispatch(
             if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
             } else {
-                let snap = spawn_session(hub, req).await?;
-                let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+                match spawn_session(hub, req).await {
+                    Ok(snap) => {
+                        let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+                    }
+                    Err(err) => send_spawn_failure(out_tx, &err),
+                }
             }
         }
         ClientMessage::DuplicateSession { session_id } => {
@@ -1407,8 +1411,12 @@ async fn dispatch(
                 ));
             };
             let req = stored.to_clone_request();
-            let snap = spawn_session(hub, req).await?;
-            let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+            match spawn_session(hub, req).await {
+                Ok(snap) => {
+                    let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+                }
+                Err(err) => send_spawn_failure(out_tx, &err),
+            }
         }
         ClientMessage::GetSpawnConfig { session_id } => {
             let config = hub
@@ -3597,6 +3605,189 @@ type SpawnResolution = (
     Option<String>,
 );
 
+/// Structured spawn-time failure carried out of the spawn pipeline so the
+/// dispatcher can render it as a blocking `ActionFailed` modal with an
+/// actionable hint, instead of a bare error toast that drops the git reason.
+#[derive(Debug, thiserror::Error)]
+#[error("{title}: {detail}")]
+struct SpawnFailure {
+    title: String,
+    detail: String,
+    hint: Option<String>,
+}
+
+/// Normalize a worktree path for comparison: strip trailing separators and
+/// lowercase on Windows (case-insensitive filesystem). Both sides come from
+/// the same path generator, so this is belt-and-suspenders against a stored
+/// vs. freshly-computed spelling mismatch.
+fn normalize_worktree_path(p: &str) -> String {
+    let trimmed = p.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        trimmed.to_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Live (running, non-parked) sessions other than `exclude_id` whose recorded
+/// worktree paths include `worktree_path`. Uses the same "active" filter as
+/// `ListWorktrees` (not Stopped/Error, not parked), so a worktree offered for
+/// reuse in the spawn dialog is never wrongly flagged as in-use. Returned as
+/// `(session_id, label)` pairs.
+fn active_sessions_using_worktree(
+    hub: &Hub,
+    worktree_path: &str,
+    exclude_id: Option<&str>,
+) -> Vec<(String, String)> {
+    let target = normalize_worktree_path(worktree_path);
+    hub.sessions
+        .snapshots()
+        .into_iter()
+        .filter(|s| exclude_id != Some(s.id.as_str()))
+        .filter(|s| {
+            !matches!(
+                s.status,
+                protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
+            ) && !s.is_inactive
+        })
+        .filter(|s| {
+            s.worktree_paths
+                .iter()
+                .any(|p| normalize_worktree_path(p) == target)
+                || s.members
+                    .iter()
+                    .any(|m| normalize_worktree_path(&m.worktree_path) == target)
+        })
+        .map(|s| (s.id.clone(), s.label.clone()))
+        .collect()
+}
+
+/// If this discard would remove any worktree still bound to another live
+/// session, returns the ready-to-send `ActionFailed` modal that refuses it
+/// (and logs a warning); otherwise `None`, meaning the discard is safe.
+/// Removing a shared worktree would yank the dir out from under that other
+/// session's running child (the shared-worktree corruption).
+fn blocked_discard_message(
+    hub: &Hub,
+    session_id: &str,
+    cleanup: &[protocol::CleanupAction],
+    members: &[SessionMember],
+) -> Option<DaemonMessage> {
+    let mut blockers = Vec::new();
+    for action in cleanup {
+        if !action.remove_worktree {
+            continue;
+        }
+        let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
+            continue;
+        };
+        let users = active_sessions_using_worktree(hub, &member.worktree_path, Some(session_id));
+        if !users.is_empty() {
+            let labels = users
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            blockers.push(format!("{} (used by {labels})", member.worktree_path));
+        }
+    }
+    if blockers.is_empty() {
+        return None;
+    }
+    warn!(
+        session_id,
+        ?blockers,
+        "discard_session: refused — worktree still in use by another live session"
+    );
+    Some(DaemonMessage::ActionFailed {
+        title: "Can't remove worktree".to_string(),
+        detail: format!(
+            "This session's worktree is still in use by another live session, so removing it would break that session:\n\n{}",
+            blockers.join("\n")
+        ),
+        hint: Some(
+            "Close the other session(s) first, then remove the worktree — or discard this session while keeping the worktree."
+                .to_string(),
+        ),
+    })
+}
+
+/// Build the `SpawnFailure` returned when a target worktree is already bound
+/// to a live session — the collision that previously slipped through the
+/// "worktree dir already present, skipping add" reuse and corrupted the other
+/// session on discard.
+fn worktree_in_use_failure(branch_name: &str, users: &[(String, String)]) -> SpawnFailure {
+    let labels = users
+        .iter()
+        .map(|(_, label)| label.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    SpawnFailure {
+        title: "Worktree already in use".to_string(),
+        detail: format!(
+            "The worktree for branch '{branch_name}' is already in use by another live session ({labels}). Two sessions can't share one worktree."
+        ),
+        hint: Some(
+            "Pick a different branch name — the Random button on the spawn dialog generates a unique one — or close the other session first."
+                .to_string(),
+        ),
+    }
+}
+
+/// Map a raw `git worktree add` failure to a tailored `SpawnFailure`. Known
+/// git refusals (branch already checked out, path already exists) get an
+/// actionable message; anything else falls back to git's full stderr chain.
+fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> SpawnFailure {
+    let chain = format!("{err:#}");
+    let lower = chain.to_lowercase();
+    if lower.contains("already checked out") || lower.contains("already used by worktree") {
+        SpawnFailure {
+            title: "Branch already checked out".to_string(),
+            detail: format!(
+                "Git won't create a worktree for '{branch_name}' because that branch is already checked out elsewhere — a branch can only be checked out in one worktree at a time."
+            ),
+            hint: Some(
+                "Pick a different branch name (the Random button generates a unique one), or base the new worktree on a fresh branch."
+                    .to_string(),
+            ),
+        }
+    } else if lower.contains("already exists") {
+        SpawnFailure {
+            title: "Worktree path already exists".to_string(),
+            detail: format!("A directory for this worktree already exists on disk.\n\n{chain}"),
+            hint: Some(
+                "Choose a different branch name, or remove the stale worktree directory and try again."
+                    .to_string(),
+            ),
+        }
+    } else {
+        SpawnFailure {
+            title: "Couldn't create worktree".to_string(),
+            detail: chain,
+            hint: None,
+        }
+    }
+}
+
+/// Send a spawn failure to the requesting client as a blocking `ActionFailed`
+/// modal. Uses the structured `SpawnFailure` fields when present; otherwise
+/// surfaces the full anyhow chain under a generic title.
+fn send_spawn_failure(out_tx: &mpsc::UnboundedSender<DaemonMessage>, err: &anyhow::Error) {
+    let msg = err.downcast_ref::<SpawnFailure>().map_or_else(
+        || DaemonMessage::ActionFailed {
+            title: "Couldn't start session".to_string(),
+            detail: format!("{err:#}"),
+            hint: None,
+        },
+        |sf| DaemonMessage::ActionFailed {
+            title: sf.title.clone(),
+            detail: sf.detail.clone(),
+            hint: sf.hint.clone(),
+        },
+    );
+    let _ = out_tx.send(msg);
+}
+
 async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
@@ -3662,6 +3853,14 @@ async fn spawn_single(
         let worktree_path = paths
             .pop()
             .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?;
+        // Refuse to bind a worktree that's already driving a live session.
+        // Without this the "dir already present, skipping add" reuse below
+        // would silently share one worktree across two sessions.
+        let in_use =
+            active_sessions_using_worktree(hub, &worktree_path.to_string_lossy(), None);
+        if !in_use.is_empty() {
+            return Err(worktree_in_use_failure(branch_name, &in_use).into());
+        }
         if !worktree_path.exists() {
             git::worktree_add(
                 &repo_path,
@@ -3670,7 +3869,7 @@ async fn spawn_single(
                 Some(&base_for_create),
             )
             .await
-            .context("creating worktree")?;
+            .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
         }
         worktree_path
     } else {
@@ -3752,7 +3951,24 @@ async fn spawn_workspace(
         use_worktree,
     )
     .await?;
-    ws::ensure_branches(&resolved, branch_name).await?;
+    // Refuse to bind any member worktree that's already driving a live
+    // session — mirrors the single-repo guard so a workspace re-spawn on a
+    // branch whose worktrees already exist can't be shared across sessions.
+    if use_worktree {
+        for member in &resolved {
+            let in_use = active_sessions_using_worktree(
+                hub,
+                &member.working_path.to_string_lossy(),
+                None,
+            );
+            if !in_use.is_empty() {
+                return Err(worktree_in_use_failure(branch_name, &in_use).into());
+            }
+        }
+    }
+    ws::ensure_branches(&resolved, branch_name)
+        .await
+        .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
 
     let primary = resolved
         .first()
@@ -3942,6 +4158,16 @@ async fn discard_session(
                 )
             },
         );
+
+    // Refuse the whole discard if any worktree it would remove is still in
+    // use by another live session. The user must close the other session(s)
+    // first, or discard while keeping the worktree.
+    if has_per_session_worktree
+        && let Some(blocked) = blocked_discard_message(hub, session_id, cleanup, &members)
+    {
+        let _ = out_tx.send(blocked);
+        return;
+    }
 
     // Brief grace period before touching the filesystem. The typical
     // call sequence is stop_session → discard_session back-to-back, and

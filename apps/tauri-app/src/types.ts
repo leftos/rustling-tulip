@@ -1137,4 +1137,14 @@ export type DaemonMessage =
       error: string;
       variable_name: string | null;
     }
+  // A user-requested action was refused or failed in a way that warrants a
+  // blocking modal rather than a transient toast — e.g. a worktree spawn that
+  // collided with an in-use worktree, or a "remove worktree" discard blocked
+  // because another live session still uses it.
+  | {
+      type: "action_failed";
+      title: string;
+      detail: string;
+      hint: string | null;
+    }
   | { type: "error"; message: string };

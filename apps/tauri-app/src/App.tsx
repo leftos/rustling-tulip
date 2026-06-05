@@ -73,6 +73,7 @@ import PresetLaunchDialog from "./components/PresetLaunchDialog";
 import WorkspaceCreator from "./components/WorkspaceCreator";
 import VscodeSuggestionToast from "./components/VscodeSuggestionToast";
 import WorktreeCleanupFailedDialog from "./components/WorktreeCleanupFailedDialog";
+import ActionFailedModal from "./components/ActionFailedModal";
 import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
 import RepoRemoveDialog from "./components/RepoRemoveDialog";
 import type { RepoRemoveIntent } from "./components/Sidebar";
@@ -328,12 +329,22 @@ interface AppState {
   /// (kill & retry, ignore) dequeue. A second failure for the same
   /// session id replaces the queued entry — that's the retry result.
   worktreeCleanupQueue: WorktreeCleanupQueueEntry[];
+  /// Head `ActionFailed` event — a refused/failed action (worktree-in-use
+  /// spawn, blocked discard) shown as a blocking modal. `null` when none is
+  /// pending; a newer event replaces an unacknowledged one.
+  actionFailed: ActionFailedInfo | null;
 }
 
 interface WorktreeCleanupQueueEntry {
   session_id: string;
   session_label: string;
   failures: WorktreeCleanupFailure[];
+}
+
+interface ActionFailedInfo {
+  title: string;
+  detail: string;
+  hint: string | null;
 }
 
 function lastSpawnConfigForTarget(
@@ -428,6 +439,7 @@ export default function App() {
     worktreesManagerOpen: false,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
+    actionFailed: null,
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -2908,6 +2920,12 @@ export default function App() {
           }}
         />
       )}
+      {state.actionFailed && (
+        <ActionFailedModal
+          info={state.actionFailed}
+          onDismiss={() => setState((s) => ({ ...s, actionFailed: null }))}
+        />
+      )}
       {state.settingsOpen && (
         <SettingsModal
           settings={settings}
@@ -3690,6 +3708,21 @@ function handleMessage(
         });
         return { ...s, worktreeCleanupQueue: queue };
       });
+      return;
+    case "action_failed":
+      // A refused/failed action (worktree-in-use spawn, blocked discard).
+      // Disarm any pending spawn intent — a rejected spawn must not leave
+      // stale "open in new tab" routing armed for the next one — then raise
+      // the blocking modal.
+      pendingSpawnIntentRef.current = null;
+      setState((s) => ({
+        ...s,
+        actionFailed: {
+          title: msg.title,
+          detail: msg.detail,
+          hint: msg.hint,
+        },
+      }));
       return;
     case "branches":
     case "worktrees":

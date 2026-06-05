@@ -1502,15 +1502,32 @@ function SingleForm({
         <>
           <label className="field">
             <span>{useWorktree ? "New worktree branch" : "Branch"}</span>
-            <BranchCombobox
-              value={branch.value}
-              onChange={branch.setValue}
-              branches={knownBranches}
-              currentBranch={currentBranch}
-              placeholder={useWorktree ? defaultBranch : inPlaceDefault}
-              inputRef={branchInputRef}
-              testId="spawn-single-branch"
-            />
+            <div className="branch-with-dice">
+              <BranchCombobox
+                value={branch.value}
+                onChange={branch.setValue}
+                branches={knownBranches}
+                currentBranch={currentBranch}
+                placeholder={useWorktree ? defaultBranch : inPlaceDefault}
+                inputRef={branchInputRef}
+                testId="spawn-single-branch"
+              />
+              {useWorktree && (
+                <button
+                  type="button"
+                  className="branch-dice"
+                  onClick={() => {
+                    branch.setValue(randomWorktreeBranchName());
+                    branchInputRef.current?.focus();
+                  }}
+                  title="Generate a random worktree branch name"
+                  aria-label="Generate a random worktree branch name"
+                  data-testid="spawn-single-branch-random"
+                >
+                  Random
+                </button>
+              )}
+            </div>
           </label>
 
           {useWorktree && worktreeMode === "new" && (
@@ -1735,14 +1752,31 @@ function WorkspaceForm({
             ? "New worktree branch (same across all members)"
             : "Branch (same across all members)"}
         </span>
-        <input
-          ref={branchInputRef}
-          type="text"
-          value={branch.value}
-          onChange={(e) => branch.setValue(e.target.value)}
-          placeholder={defaultBranch}
-          data-testid="spawn-workspace-branch"
-        />
+        <div className="branch-with-dice">
+          <input
+            ref={branchInputRef}
+            type="text"
+            value={branch.value}
+            onChange={(e) => branch.setValue(e.target.value)}
+            placeholder={defaultBranch}
+            data-testid="spawn-workspace-branch"
+          />
+          {useWorktree && (
+            <button
+              type="button"
+              className="branch-dice"
+              onClick={() => {
+                branch.setValue(randomWorktreeBranchName());
+                branchInputRef.current?.focus();
+              }}
+              title="Generate a random worktree branch name"
+              aria-label="Generate a random worktree branch name"
+              data-testid="spawn-workspace-branch-random"
+            >
+              Random
+            </button>
+          )}
+        </div>
       </label>
 
       <label className="checkbox">
