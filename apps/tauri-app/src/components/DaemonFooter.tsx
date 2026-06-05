@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { open as openInShell } from "@tauri-apps/plugin-shell";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   fetchDaemonPaths,
   type ConnectionState,
@@ -115,10 +115,14 @@ export default function DaemonFooter({
       ? connection.reason
       : null;
 
-  const openPath = async (path: string | undefined) => {
+  const openOnDisk = async (path: string | undefined) => {
     if (!path) return;
     try {
-      await openInShell(path);
+      // Opener plugin opens files with the system default app and
+      // directories in the file manager. Replaces the shell plugin's
+      // `open`, whose capability scope only allowed git-host URLs, so
+      // these local paths silently no-op'd.
+      await openPath(path);
     } catch (err) {
       // Failure-to-open is non-fatal — surface in app.log so a user
       // chasing a hung flyout can see what blew up.
@@ -304,7 +308,7 @@ export default function DaemonFooter({
               <button
                 type="button"
                 className="daemon-footer-action"
-                onClick={() => openPath(paths?.daemon_log)}
+                onClick={() => openOnDisk(paths?.daemon_log)}
                 disabled={!paths}
                 data-testid="daemon-footer-open-daemon-log"
               >
@@ -316,7 +320,7 @@ export default function DaemonFooter({
               <button
                 type="button"
                 className="daemon-footer-action"
-                onClick={() => openPath(paths?.app_log)}
+                onClick={() => openOnDisk(paths?.app_log)}
                 disabled={!paths}
                 data-testid="daemon-footer-open-app-log"
               >
@@ -328,7 +332,7 @@ export default function DaemonFooter({
               <button
                 type="button"
                 className="daemon-footer-action"
-                onClick={() => openPath(paths?.config_dir)}
+                onClick={() => openOnDisk(paths?.config_dir)}
                 disabled={!paths}
                 data-testid="daemon-footer-reveal-config"
               >

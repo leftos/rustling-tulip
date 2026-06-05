@@ -760,6 +760,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init());
     // Skip window-state restoration in offscreen e2e mode. The plugin
     // auto-restores from disk on window creation, which would override the

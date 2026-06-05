@@ -19,6 +19,10 @@
         { "url": "https://gitlab.com/*" },
         { "url": "https://bitbucket.org/*" }
       ]
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "$HOME/**" }]
     }
   ]
 }
