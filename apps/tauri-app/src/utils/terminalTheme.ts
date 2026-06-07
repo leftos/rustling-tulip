@@ -49,33 +49,25 @@ interface Rgb {
   b: number;
 }
 
-export interface TerminalThemeOptions {
-  /// When true, xterm's own cursor is rendered transparent and the cell
-  /// underneath keeps its normal foreground color. Used in alt-screen
-  /// mode so TUIs that paint their own cursor (claude, codex, vim, …)
-  /// aren't visually fighting xterm's native cursor for the same cell.
-  hideCursor?: boolean;
-}
-
-export function buildTerminalTheme(
-  background: string,
-  options?: TerminalThemeOptions,
-): ITheme {
+export function buildTerminalTheme(background: string): ITheme {
   const bg = normalizeHex(background) ?? "#08090b";
   const foreground = ensureContrast(
     luminance(hexToRgb(bg)) < 0.5 ? BASE_THEME.foreground : "#1a1c22",
     bg,
     7,
   );
-  const cursor = ensureContrast(BASE_THEME.cursor, bg, 3);
-  const hideCursor = options?.hideCursor === true;
+  // White caret, darkened toward visibility on light backgrounds. The
+  // selection tint stays on the brand blue (BASE_THEME.cursor) so making
+  // the cursor white doesn't recolor highlighted text.
+  const cursor = ensureContrast("#ffffff", bg, 3);
+  const selectionTint = ensureContrast(BASE_THEME.cursor, bg, 3);
   const theme: ITheme = {
     ...BASE_THEME,
     background: bg,
     foreground,
-    cursor: hideCursor ? "rgba(0, 0, 0, 0)" : cursor,
-    cursorAccent: hideCursor ? foreground : bg,
-    selectionBackground: rgba(cursor, 0.3),
+    cursor,
+    cursorAccent: bg,
+    selectionBackground: rgba(selectionTint, 0.3),
     selectionForeground: foreground,
   };
   for (const key of ANSI_KEYS) {

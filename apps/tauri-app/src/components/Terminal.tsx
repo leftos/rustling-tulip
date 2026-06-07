@@ -225,32 +225,19 @@ export default function Terminal({
   const fontFamily = appearance.terminal_font_family;
   const fontBold = appearance.terminal_font_bold;
   const backgroundColor = appearance.terminal_background_color;
-  /// Read by the buffer-change handler (registered once at mount) so it
-  /// always rebuilds the theme against the latest background color
-  /// without needing to re-register every time the user changes it.
+  /// Read by `applyTheme` so the background-change effect always rebuilds
+  /// the theme against the latest color without re-registering on every
+  /// change.
   const backgroundColorRef = useRef(backgroundColor);
   backgroundColorRef.current = backgroundColor;
 
-  /// Rebuild xterm's theme using the live buffer type and session mode.
-  /// We hide xterm's native cursor whenever the running program paints
-  /// its own — otherwise the two compete for the same cell and the
-  /// native cursor visibly jumps to every transient position the TUI
-  /// moves to during a redraw, which reads as flicker.
-  ///
-  /// Two cases:
-  ///   - Interactive agent sessions (claude / codex / cursor): Ink-based TUIs
-  ///     that render inline on the *normal* buffer (no `\e[?1049h`),
-  ///     redrawing by cursor movement. Always hide xterm's cursor.
-  ///   - Plain shells: cursor stays visible during normal shell use,
-  ///     but hidden when the user launches a full-screen TUI that
-  ///     does switch to alt-screen (vim, less, top, …).
+  /// Rebuild xterm's theme against the latest background color. Cursor
+  /// visibility is left to the running program: xterm honors the DEC
+  /// `?25` show/hide requests that claude / codex / cursor (and plain
+  /// shells, vim, less, …) emit, so the real cursor appears wherever the
+  /// program puts it instead of being painted over by the theme.
   const applyTheme = (term: XTerm) => {
-    const hideCursor =
-      modeRef.current === "interactive" ||
-      term.buffer.active.type === "alternate";
-    term.options.theme = buildTerminalTheme(backgroundColorRef.current, {
-      hideCursor,
-    });
+    term.options.theme = buildTerminalTheme(backgroundColorRef.current);
   };
 
   /// Apply font-size changes to the live XTerm without remounting it —
@@ -304,8 +291,6 @@ export default function Terminal({
   /// Apply terminal palette changes independently from font changes. The
   /// xterm options setter needs a fresh object reference for structured
   /// options, so build a new theme each time the resolved background shifts.
-  /// `applyTheme` reads the live buffer type so the alt-screen cursor-hide
-  /// stays in effect across palette changes.
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
@@ -334,11 +319,16 @@ export default function Terminal({
       if (cancelled) return;
 
       const term = new XTerm({
-        // Steady (non-blinking) cursor — TUIs like claude / codex paint
-        // their own blinking input indicator, and an additional blinking
-        // xterm cursor at the real ANSI position looks like flicker
-        // beside it. Plain shells still show a visible cursor, just not
-        // pulsing.
+        // Cursor shape per mode: a bar caret for interactive agent
+        // sessions (claude / codex / cursor), a block for plain shells.
+        // Steady, never blinking — agent TUIs re-assert cursor visibility
+        // (DEC `?25h`) on every render frame, thousands of times a
+        // session, and each toggle resets xterm's blink timer, so a
+        // blinking cursor never completes a cycle and reads as absent.
+        // A steady cursor tracks the program's `?25` state directly and
+        // stays put where the TUI parks it (its input box). Either shape
+        // yields to the program if it emits DECSCUSR (`\e[ q`).
+        cursorStyle: modeRef.current === "interactive" ? "bar" : "block",
         cursorBlink: false,
         // Geist Mono first (vendored as /public/fonts/GeistMono-Variable.woff2,
         // pulled in via @font-face in styles.css). Cascadia/Consolas fall back
@@ -427,26 +417,6 @@ export default function Terminal({
 
       termRef.current = term;
       fitRef.current = fit;
-
-      // Apply the mode-aware theme now that the term is mounted —
-      // interactive agent sessions need the cursor hidden from the
-      // very first paint, not only after the first buffer-change or
-      // palette-change event fires.
-      applyTheme(term);
-
-      // Buffer-change listener — covers plain-shell sessions where the
-      // user launches a full-screen TUI (vim, less, top, …) that
-      // switches to the alternate screen buffer via `\e[?1049h`. When
-      // that happens we hide xterm's native cursor so it doesn't
-      // compete with the TUI's own input indicator. Restored when the
-      // TUI exits back to the normal buffer. Interactive agent sessions
-      // (claude / codex) keep the cursor hidden unconditionally via
-      // applyTheme's mode check above, since Ink-based TUIs render
-      // inline on the normal buffer and never trigger this event.
-      const bufferChangeDisposable = term.buffer.onBufferChange(() => {
-        applyTheme(term);
-      });
-      cleanupFns.push(() => bufferChangeDisposable.dispose());
 
       let terminalLinkMode = false;
       const providedTerminalLinks = new Set<ILink>();
