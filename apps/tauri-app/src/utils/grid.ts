@@ -111,11 +111,18 @@ export function tabSessionCounts(
 /**
  * Aspect-aware column count for an N-pane "Auto" grid. Picks the column
  * count whose cells are closest to square for the given container aspect
- * ratio (width / height), lightly preferring layouts that fill evenly (no
- * ragged last row) and discouraging degenerate single-row / single-column
- * shapes for non-trivial pane counts. A square container (`aspect == 1`)
- * yields a roughly square grid; a wide container biases toward more
- * columns, a tall one toward more rows.
+ * ratio (width / height), preferring layouts that fill evenly (penalizing
+ * each ragged/empty trailing cell) and discouraging degenerate single-row /
+ * single-column shapes for non-trivial pane counts. A square container
+ * (`aspect == 1`) yields a roughly square grid; a wide container biases
+ * toward more columns, a tall one toward more rows.
+ *
+ * The `0.3` empty-cell weight is tuned so a 4-pane grid on any container
+ * wider than ~1.5:1 reads as a clean 2x2 rather than a 3x2 with two phantom
+ * cells: the squarer cells of a 3-wide layout (cellAspect ~1.19 vs ~1.78 at
+ * 16:9) only edge out 2x2 below a ~0.20 weight. The same weight keeps 9 -> 3x3
+ * and 16 -> 4x4 clean; going past ~0.34 would over-penalize empties and pull
+ * 10 panes on a tall/square container from 4x3 to a wide 5x2.
  *
  * The client computes this — rather than the daemon's `cols == 0` path —
  * because only the client knows the viewport: see `paneAreaAspect`.
@@ -129,7 +136,7 @@ export function bestFitGridCols(n: number, aspect: number): number {
     const rows = Math.ceil(n / cols);
     const empties = rows * cols - n;
     const cellAspect = (a * rows) / cols;
-    let score = Math.abs(Math.log(cellAspect)) + 0.2 * empties;
+    let score = Math.abs(Math.log(cellAspect)) + 0.3 * empties;
     if ((cols === 1 || cols === n) && n >= 5) {
       // A 1×N / N×1 strip rarely reads well for 5+ panes; an extreme
       // window aspect can still win it on cell shape alone.
