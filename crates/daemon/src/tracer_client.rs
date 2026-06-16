@@ -15,13 +15,13 @@ use crate::paths::Dirs;
 use crate::pty::{PtyHandle, PtyHandleParts, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use interprocess::local_socket::tokio::{Stream, prelude::*};
 use portable_pty::ChildKiller;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use interprocess::local_socket::tokio::{Stream, prelude::*};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracer_protocol::{

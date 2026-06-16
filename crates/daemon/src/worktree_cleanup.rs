@@ -143,10 +143,7 @@ async fn prune_repo(repo: &Path) {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "tests assert preconditions with unwrap"
-)]
+#[expect(clippy::unwrap_used, reason = "tests assert preconditions with unwrap")]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -215,7 +212,10 @@ mod tests {
             "surviving member must be untouched"
         );
         assert!(anchor_leaf.exists(), "non-empty anchor leaf must remain");
-        assert!(wrapper.exists(), "wrapper above non-empty content must remain");
+        assert!(
+            wrapper.exists(),
+            "wrapper above non-empty content must remain"
+        );
     }
 
     #[test]
@@ -232,7 +232,10 @@ mod tests {
 
         prune_empty_ancestors(&already_gone, root);
 
-        assert!(!wrapper.exists(), "wrapper should be removed despite missing leaf");
+        assert!(
+            !wrapper.exists(),
+            "wrapper should be removed despite missing leaf"
+        );
         assert!(root.exists(), "worktrees root must never be removed");
     }
 

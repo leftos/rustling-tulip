@@ -3856,8 +3856,7 @@ async fn spawn_single(
         // Refuse to bind a worktree that's already driving a live session.
         // Without this the "dir already present, skipping add" reuse below
         // would silently share one worktree across two sessions.
-        let in_use =
-            active_sessions_using_worktree(hub, &worktree_path.to_string_lossy(), None);
+        let in_use = active_sessions_using_worktree(hub, &worktree_path.to_string_lossy(), None);
         if !in_use.is_empty() {
             return Err(worktree_in_use_failure(branch_name, &in_use).into());
         }
@@ -3956,11 +3955,8 @@ async fn spawn_workspace(
     // branch whose worktrees already exist can't be shared across sessions.
     if use_worktree {
         for member in &resolved {
-            let in_use = active_sessions_using_worktree(
-                hub,
-                &member.working_path.to_string_lossy(),
-                None,
-            );
+            let in_use =
+                active_sessions_using_worktree(hub, &member.working_path.to_string_lossy(), None);
             if !in_use.is_empty() {
                 return Err(worktree_in_use_failure(branch_name, &in_use).into());
             }

@@ -355,8 +355,7 @@ pub fn start(
         loop {
             match session_rx.recv().await {
                 Ok(SessionEvent::Updated(_) | SessionEvent::Removed(_)) => {
-                    let targets =
-                        collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
+                    let targets = collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
                     let mut guard = worktree_handles_for_wt.lock().await;
                     sync_worktree_handles(
                         &targets,
@@ -371,8 +370,7 @@ pub fn start(
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "git_watch: session event stream lagged");
                     // Re-sync to be safe.
-                    let targets =
-                        collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
+                    let targets = collect_session_worktree_targets(&state_for_wt, &sessions_for_wt);
                     let mut guard = worktree_handles_for_wt.lock().await;
                     sync_worktree_handles(
                         &targets,

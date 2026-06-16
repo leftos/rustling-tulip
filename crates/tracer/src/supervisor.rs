@@ -23,9 +23,9 @@ use crate::ring::OutputRing;
 use anyhow::Context as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use interprocess::local_socket::ListenerOptions;
 use interprocess::local_socket::tokio::prelude::*;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -450,7 +450,10 @@ fn remove_stale_socket(path: &str) {
 #[cfg(unix)]
 fn kill_process_group(child_pid: u32) {
     let Ok(pgid) = i32::try_from(child_pid) else {
-        warn!(child_pid, "supervisor: child pid too large for killpg; skipping group kill");
+        warn!(
+            child_pid,
+            "supervisor: child pid too large for killpg; skipping group kill"
+        );
         return;
     };
     // SAFETY: `killpg` only inspects the pgid + signal number; there are no
