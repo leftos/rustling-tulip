@@ -211,6 +211,55 @@ impl Parser {
     }
 }
 
+/// Tracks the most recent terminal title seen on a PTY output stream and
+/// reports when a *new* title appears. The status classifier in
+/// [`crate::pty_state`] uses this as an activity heartbeat: an agent that keeps
+/// repainting its title (spinner glyph, elapsed-time counter, progress text) is
+/// busy even when its raw byte volume dips below the echo budget, so a title
+/// change keeps the pane — or flips it — to `Working`.
+///
+/// This is intentionally a thin wrapper over the same [`Parser`] the title
+/// watcher uses, so there is a single OSC-parsing implementation. Cwd and other
+/// non-title sequences are decoded and discarded.
+pub struct TitleActivity {
+    parser: Parser,
+    last_title: Option<String>,
+}
+
+impl Default for TitleActivity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TitleActivity {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            parser: Parser::new(false),
+            last_title: None,
+        }
+    }
+
+    /// Feed one chunk of PTY output. Returns `true` if the chunk carried a
+    /// terminal title different from the last one seen (the first title ever
+    /// seen counts as a change). Returns `false` for chunks with no title or
+    /// only a re-emission of the current title.
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
+        let mut changed = false;
+        for event in self.parser.feed(bytes) {
+            let OscEvent::Title(title) = event else {
+                continue;
+            };
+            if self.last_title.as_deref() != Some(title.as_str()) {
+                self.last_title = Some(title);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
 fn is_supported_param_prefix(param: u8) -> bool {
     matches!(param, 0 | 1 | 2 | 7)
 }
@@ -592,5 +641,38 @@ mod tests {
         let mut p = Parser::new(true);
         let events = feed_all(&mut p, &[b"\x1b[32mPS X:\\dev\\repo> \x1b[0m"]);
         assert_eq!(events, vec![cwd("X:\\dev\\repo")]);
+    }
+
+    #[test]
+    fn title_activity_reports_first_and_changed_titles() {
+        let mut t = TitleActivity::new();
+        assert!(t.feed(b"\x1b]2;\xe2\x9c\xbb Cooking (3s)\x07"));
+        assert!(t.feed(b"\x1b]2;\xe2\x9c\xbb Cooking (4s)\x07"));
+    }
+
+    #[test]
+    fn title_activity_ignores_unchanged_title_re_emit() {
+        let mut t = TitleActivity::new();
+        assert!(t.feed(b"\x1b]2;idle-repo\x07"));
+        assert!(!t.feed(b"\x1b]2;idle-repo\x07"));
+    }
+
+    #[test]
+    fn title_activity_ignores_non_title_output() {
+        let mut t = TitleActivity::new();
+        assert!(!t.feed(b"regular command output\r\n"));
+        let cwd_seq: &[u8] = if cfg!(windows) {
+            b"\x1b]7;file:///C:/dev/repo\x07"
+        } else {
+            b"\x1b]7;file:///tmp/repo\x07"
+        };
+        assert!(!t.feed(cwd_seq));
+    }
+
+    #[test]
+    fn title_activity_detects_title_split_across_chunks() {
+        let mut t = TitleActivity::new();
+        assert!(!t.feed(b"\x1b]0;partial"));
+        assert!(t.feed(b"-title\x07"));
     }
 }

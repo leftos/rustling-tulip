@@ -3,9 +3,16 @@
 //! Watches the PTY output stream and infers `idle / working / awaiting_input`
 //! by combining:
 //! - regex matches against known Claude Code TUI prompt patterns
+//! - an output-vs-input byte-volume comparison: genuine model/command output
+//!   outpaces keystroke echo and promotes to `working`
+//! - a terminal-title heartbeat: an agent that keeps repainting its title
+//!   (spinner glyph, elapsed-time counter, progress text) is busy even when its
+//!   byte volume dips below the echo budget, so a title change counts as
+//!   activity (see [`crate::osc_title::TitleActivity`])
 //! - an idle timeout: after N ms of silence following recent output, the
 //!   session settles back to `idle` (still attached, just nothing to do)
 
+use crate::osc_title::TitleActivity;
 use crate::session::{SessionRegistry, push_recent_action};
 use protocol::{AttentionReason, SessionStatus};
 use std::collections::VecDeque;
@@ -66,6 +73,10 @@ pub struct AttentionEvent {
 /// echoes back via the PTY but should not flip the dot to Working). Output
 /// that exceeds the budget — i.e. genuine model streaming — promotes to
 /// Working as before.
+///
+/// A terminal-title change in the output stream also counts as activity, so an
+/// agent whose spinner/elapsed-time title keeps repainting stays Working even
+/// when the redraw is too small to clear the echo budget.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -80,6 +91,7 @@ pub fn watch(
         let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
+        let mut title_activity = TitleActivity::new();
 
         loop {
             let next_idle_check = last_output + IDLE_AFTER;
@@ -107,6 +119,11 @@ pub fn watch(
                         let out_sum = window_sum(&out_window);
                         let budget = in_sum.saturating_mul(ECHO_BUDGET_PER_INPUT_BYTE);
                         let exceeds_echo = out_sum > budget.saturating_add(MIN_WORKING_EXCESS);
+                        // A repainted terminal title (spinner / elapsed time) is
+                        // activity in its own right, even when the redraw is too
+                        // small to clear the echo budget.
+                        let title_changed = title_activity.feed(&bytes);
+                        let active = exceeds_echo || title_changed;
 
                         debug!(
                             session_id = %session_id,
@@ -114,11 +131,12 @@ pub fn watch(
                             out_sum,
                             budget,
                             exceeds_echo,
+                            title_changed,
                             current = ?state,
                             "pty_state volume tick"
                         );
 
-                        let new_state = classify(&scrollback, state, exceeds_echo);
+                        let new_state = classify(&scrollback, state, active);
                         on_transition(
                             &registry,
                             &session_id,
@@ -176,6 +194,7 @@ pub fn watch_plain_shell(
         let mut last_output = Instant::now();
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
+        let mut title_activity = TitleActivity::new();
 
         loop {
             let next_idle_check = last_output + IDLE_AFTER;
@@ -197,7 +216,10 @@ pub fn watch_plain_shell(
 
                         let in_sum = window_sum(&in_window);
                         let out_sum = window_sum(&out_window);
-                        let next = if shell_output_is_working(in_sum, out_sum) {
+                        // A title change (e.g. a `cd` that repaints the cwd in
+                        // the prompt) counts as activity alongside command output.
+                        let title_changed = title_activity.feed(&bytes);
+                        let next = if shell_output_is_working(in_sum, out_sum) || title_changed {
                             State::Working
                         } else {
                             state
@@ -276,7 +298,7 @@ fn append_scrollback(buf: &mut Vec<u8>, bytes: &[u8]) {
     }
 }
 
-fn classify(scrollback: &[u8], current: State, exceeds_echo: bool) -> State {
+fn classify(scrollback: &[u8], current: State, active: bool) -> State {
     // Strip ANSI escape sequences and non-ASCII before matching: Claude's TUI
     // emits a lot of color codes that would otherwise break naive substring
     // matches. We work on the last ~2 KB of stripped output.
@@ -286,12 +308,14 @@ fn classify(scrollback: &[u8], current: State, exceeds_echo: bool) -> State {
 
     if matches_prompt(tail) {
         State::AwaitingInput
-    } else if exceeds_echo {
+    } else if active {
+        // Genuine output beyond the echo budget, or a terminal-title repaint —
+        // either way the session is doing something.
         State::Working
     } else {
-        // Output fit inside the echo budget — keep current state. When
-        // current is already Working from a prior tick the IDLE_AFTER timer
-        // demotes us to Idle once the PTY actually goes quiet.
+        // No activity this tick — keep current state. When current is already
+        // Working from a prior tick the IDLE_AFTER timer demotes us to Idle
+        // once the PTY actually goes quiet.
         current
     }
 }
@@ -402,7 +426,30 @@ fn on_plain_shell_transition(
 
 #[cfg(test)]
 mod tests {
-    use super::shell_output_is_working;
+    use super::{State, classify, shell_output_is_working};
+
+    #[test]
+    fn active_signal_promotes_idle_to_working() {
+        // A title heartbeat with no qualifying byte volume still flips Idle to
+        // Working via the `active` argument.
+        assert_eq!(classify(b"", State::Idle, true), State::Working);
+    }
+
+    #[test]
+    fn no_activity_keeps_current_state() {
+        assert_eq!(classify(b"", State::Idle, false), State::Idle);
+        assert_eq!(classify(b"", State::Working, false), State::Working);
+    }
+
+    #[test]
+    fn prompt_match_beats_activity() {
+        // Even while the title is repainting (active == true), a detected
+        // permission prompt must win so the dot reflects AwaitingInput.
+        assert_eq!(
+            classify(b"Do you want to proceed?", State::Working, true),
+            State::AwaitingInput
+        );
+    }
 
     #[test]
     fn shell_output_below_minimum_does_not_mark_working() {
