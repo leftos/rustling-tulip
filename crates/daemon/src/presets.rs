@@ -518,7 +518,9 @@ async fn resolve_variables_with_script_observer(
         let value =
             resolve_one_variable(var, &supplied, repo_root, &out, executed, on_script_command)
                 .await?;
-        if value.is_empty() && !var.optional {
+        // A Toggle's "off" state is a valid empty value, not a missing input.
+        let toggle = matches!(var.kind, PresetVariableKind::Toggle { .. });
+        if value.is_empty() && !var.optional && !toggle {
             return Err(LaunchFailure::new(format!(
                 "variable '{}' is required but no value was supplied",
                 var.name
@@ -547,6 +549,21 @@ async fn resolve_one_variable(
             .unwrap_or_default()),
         PresetVariableKind::EnvVar { name } => Ok(std::env::var(name).unwrap_or_default()),
         PresetVariableKind::LiteralPath { path } => Ok(expand_literal_path(path, repo_root)),
+        PresetVariableKind::Toggle { value } => {
+            // Checked → the expanded path; unchecked → empty so the footer
+            // line is dropped. The checkbox sends "true"/"false"; fall back
+            // to the variable's default when nothing was supplied.
+            let on = supplied
+                .get(var.name.as_str())
+                .copied()
+                .or(var.default.as_deref())
+                .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+            Ok(if on {
+                expand_literal_path(value, repo_root)
+            } else {
+                String::new()
+            })
+        }
         PresetVariableKind::Script {
             cmd,
             args,
@@ -1895,6 +1912,57 @@ mod tests {
             .await
             .expect_err("required missing");
         assert!(err.error.contains("required"));
+    }
+
+    fn toggle_var(optional: bool) -> Vec<PresetVariable> {
+        vec![PresetVariable {
+            name: "client_log".to_string(),
+            label: "Attach client log".to_string(),
+            kind: PresetVariableKind::Toggle {
+                value: "{repo_root}/yaat-client.log".to_string(),
+            },
+            prompt_at_launch: true,
+            default: Some("false".to_string()),
+            optional,
+        }]
+    }
+
+    #[tokio::test]
+    async fn toggle_off_resolves_empty_on_resolves_value() {
+        let vars = toggle_var(true);
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+
+        // Default "false" → off → empty value.
+        let off = resolve_variables(&vars, &[], Path::new("X:/repo"), &mut executed)
+            .await
+            .expect("off resolves");
+        assert_eq!(off.get("client_log").map(String::as_str), Some(""));
+
+        // Supplied "true" → on → expanded path.
+        let on = resolve_variables(
+            &vars,
+            &[("client_log".to_string(), "true".to_string())],
+            Path::new("X:/repo"),
+            &mut executed,
+        )
+        .await
+        .expect("on resolves");
+        assert_eq!(
+            on.get("client_log").map(String::as_str),
+            Some("X:/repo/yaat-client.log")
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_off_is_not_a_missing_required() {
+        // A non-optional toggle resolving to empty (unchecked) is valid, not
+        // a "required but no value supplied" failure.
+        let vars = toggle_var(false);
+        let mut executed: Vec<ScriptCommandPreview> = Vec::new();
+        let resolved = resolve_variables(&vars, &[], Path::new("X:/repo"), &mut executed)
+            .await
+            .expect("toggle off is allowed even when not optional");
+        assert_eq!(resolved.get("client_log").map(String::as_str), Some(""));
     }
 
     #[test]

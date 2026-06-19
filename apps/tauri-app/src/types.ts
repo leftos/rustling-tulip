@@ -312,6 +312,9 @@ export type PresetVariableKind =
       // preset gate an optional fetch on user input.
       skip_if_empty: string | null;
     }
+  // A checkbox in the wizard. Checked → resolves to `value` (env-expanded);
+  // unchecked → empty so a footer line referencing it is dropped.
+  | { kind: "toggle"; value: string }
   // Forward-compat: presets from a newer daemon may declare variable
   // kinds this client can't render. Launch dialog skips them.
   | { kind: "unknown" };

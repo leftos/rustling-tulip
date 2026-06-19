@@ -211,7 +211,10 @@ export default function PresetLaunchDialog({
   // launch failure — now Next gets disabled and the empty field gets a
   // visual error hint.
   const missingRequiredVariables = promptedVariables.filter(
-    (v) => !v.optional && (variableValues[v.name] ?? "").trim().length === 0,
+    (v) =>
+      !v.optional &&
+      v.kind.kind !== "toggle" &&
+      (variableValues[v.name] ?? "").trim().length === 0,
   );
   const canAdvanceFromVariables = missingRequiredVariables.length === 0;
 
@@ -721,6 +724,19 @@ function VariableInput({
   const invalidClass = invalid ? "input-invalid" : "";
   const isRemote = useIsRemote();
   const { kind } = variable;
+  if (kind.kind === "toggle") {
+    // The enclosing field `<label>` already carries the variable label and
+    // makes the text a click target, so render just the checkbox here.
+    return (
+      <input
+        type="checkbox"
+        className="preset-variable-toggle"
+        checked={value === "true"}
+        onChange={(e) => onChange(e.target.checked ? "true" : "false")}
+        data-testid={`preset-variable-${variable.name}`}
+      />
+    );
+  }
   if (kind.kind === "file_path") {
     return (
       <div className="row">

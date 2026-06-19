@@ -1090,6 +1090,14 @@ pub enum PresetVariableKind {
         #[serde(default)]
         skip_if_empty: Option<String>,
     },
+    /// A checkbox in the launch wizard. When checked, resolves to `value`
+    /// (with the same `${ENV}` / `%ENV%` / `{repo_root}` expansion as
+    /// `LiteralPath`); when unchecked, resolves to an empty string so any
+    /// footer line referencing it is omitted. The variable's `default`
+    /// (`"true"` / `"false"`) sets the initial checkbox state. Lets a preset
+    /// offer an opt-in attachment (e.g. a log file) instead of always
+    /// appending it.
+    Toggle { value: String },
     /// Forward-compat fallback: a variable kind the current build doesn't
     /// know. Preset resolution treats this as a hard error since we can't
     /// compute the value. Daemon never constructs this directly.
@@ -2929,6 +2937,17 @@ mod tests {
         };
         let json = serde_json::to_string(&kind).expect("serialize");
         assert!(json.contains(r#""kind":"script""#));
+        let decoded: PresetVariableKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, kind);
+    }
+
+    #[test]
+    fn toggle_variable_kind_tagged() {
+        let kind = PresetVariableKind::Toggle {
+            value: "${LOCALAPPDATA}/yaat/yaat-client.log".to_string(),
+        };
+        let json = serde_json::to_string(&kind).expect("serialize");
+        assert!(json.contains(r#""kind":"toggle""#));
         let decoded: PresetVariableKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, kind);
     }
