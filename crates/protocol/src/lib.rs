@@ -1015,6 +1015,12 @@ pub enum PresetPromptSource {
     /// User types prompts directly into a textarea. Same bullet/paragraph
     /// parsing as `File`.
     Inline,
+    /// User types a comma-separated list of GitHub issue numbers, with
+    /// contiguous inclusive ranges allowed (e.g. `123-127, 131, 134-136`).
+    /// The daemon expands the spec into one prompt per issue; each prompt is
+    /// a `GitHub issue #<n>` reference (the spawned session fetches the issue
+    /// body itself via `gh` / the GitHub MCP).
+    GithubIssues,
 }
 
 /// Concrete prompt-source picked at launch time. Mirrors
@@ -1025,6 +1031,9 @@ pub enum LaunchPresetSource {
     File { path: String },
     Folder { path: String },
     Inline { prompts: Vec<String> },
+    /// Raw issue spec as typed by the user (e.g. `123-127, 131, 134-136`).
+    /// The daemon parses + expands it at resolve time.
+    GithubIssues { spec: String },
 }
 
 /// Where the variable's value comes from. Pure data shape — the daemon
@@ -3015,6 +3024,25 @@ mod tests {
             panic!("wrong variant");
         };
         assert_eq!(job_id, "preset-job-1");
+    }
+
+    #[test]
+    fn github_issues_prompt_source_roundtrips() {
+        let src = PresetPromptSource::GithubIssues;
+        let json = serde_json::to_string(&src).expect("serialize");
+        assert_eq!(json, r#"{"kind":"github_issues"}"#);
+        let decoded: PresetPromptSource = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, src);
+    }
+
+    #[test]
+    fn github_issues_launch_source_roundtrips() {
+        let src = LaunchPresetSource::GithubIssues {
+            spec: "123-127, 131".to_string(),
+        };
+        let json = serde_json::to_string(&src).expect("serialize");
+        let decoded: LaunchPresetSource = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, src);
     }
 
     #[test]

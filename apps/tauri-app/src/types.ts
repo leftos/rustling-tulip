@@ -284,12 +284,14 @@ export interface PresetLaunchJobSnapshot {
 export type PresetPromptSource =
   | { kind: "file" }
   | { kind: "folder"; relative_path: string }
-  | { kind: "inline" };
+  | { kind: "inline" }
+  | { kind: "github_issues" };
 
 export type LaunchPresetSource =
   | { kind: "file"; path: string }
   | { kind: "folder"; path: string }
-  | { kind: "inline"; prompts: string[] };
+  | { kind: "inline"; prompts: string[] }
+  | { kind: "github_issues"; spec: string };
 
 export type PresetVariableKind =
   | { kind: "text" }

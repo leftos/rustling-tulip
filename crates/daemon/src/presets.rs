@@ -322,6 +322,70 @@ fn flush_block(prompts: &mut Vec<String>, current: &mut Vec<String>) {
     }
 }
 
+/// Upper bound on the number of issues a single spec may expand to. Guards
+/// against a fat-fingered range (`123-12700`) spawning thousands of sessions.
+const MAX_ISSUES_PER_SPEC: usize = 200;
+
+/// Parse a comma-separated GitHub issue spec into an ordered, de-duplicated
+/// list of issue numbers. Each token is either a single number (`131`) or an
+/// inclusive range (`123-127`). Whitespace around tokens and the `-` is
+/// ignored; empty tokens (e.g. a trailing comma) are skipped. Order follows
+/// first appearance and duplicates (including overlaps between ranges) are
+/// dropped, so every issue yields exactly one session with a unique branch.
+///
+/// Returns a human-readable error on a malformed token, a reversed range, an
+/// empty result, or a spec that expands past [`MAX_ISSUES_PER_SPEC`].
+fn parse_issue_spec(spec: &str) -> Result<Vec<u32>, String> {
+    let mut issues: Vec<u32> = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    for token in spec.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (start, end) = if let Some((lo, hi)) = token.split_once('-') {
+            let lo = parse_issue_number(lo.trim(), token)?;
+            let hi = parse_issue_number(hi.trim(), token)?;
+            if hi < lo {
+                return Err(format!(
+                    "issue range '{token}' is reversed (end {hi} is before start {lo})"
+                ));
+            }
+            (lo, hi)
+        } else {
+            let n = parse_issue_number(token, token)?;
+            (n, n)
+        };
+        for n in start..=end {
+            if seen.insert(n) {
+                issues.push(n);
+            }
+            if issues.len() > MAX_ISSUES_PER_SPEC {
+                return Err(format!(
+                    "issue spec expands to more than {MAX_ISSUES_PER_SPEC} issues; narrow the ranges"
+                ));
+            }
+        }
+    }
+    if issues.is_empty() {
+        return Err("no issue numbers found in the spec".to_string());
+    }
+    Ok(issues)
+}
+
+fn parse_issue_number(raw: &str, token: &str) -> Result<u32, String> {
+    if raw.is_empty() {
+        return Err(format!("issue token '{token}' is missing a number"));
+    }
+    let n: u32 = raw
+        .parse()
+        .map_err(|_| format!("issue token '{token}' is not a valid issue number"))?;
+    if n == 0 {
+        return Err(format!("issue number must be positive (got '{token}')"));
+    }
+    Ok(n)
+}
+
 async fn resolve_prompts(
     repo_path: &Path,
     source: &LaunchPresetSource,
@@ -346,6 +410,19 @@ async fn resolve_prompts(
                 stem: None,
             })
             .collect()),
+        LaunchPresetSource::GithubIssues { spec } => {
+            let issues = parse_issue_spec(spec).map_err(LaunchFailure::new)?;
+            // Each issue becomes a `GitHub issue #<n>` reference; the spawned
+            // session fetches the body itself. `stem` carries the bare number
+            // so branch / label templates can use `{stem}`.
+            Ok(issues
+                .into_iter()
+                .map(|n| RawPrompt {
+                    text: format!("GitHub issue #{n}"),
+                    stem: Some(n.to_string()),
+                })
+                .collect())
+        }
     }
 }
 
@@ -1498,6 +1575,52 @@ mod tests {
     fn parse_prompts_empty() {
         assert!(parse_prompts("").is_empty());
         assert!(parse_prompts("\n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn parse_issue_spec_mixed_ranges_and_singles() {
+        assert_eq!(
+            parse_issue_spec("123-127, 131, 134-136").expect("valid spec"),
+            vec![123, 124, 125, 126, 127, 131, 134, 135, 136]
+        );
+    }
+
+    #[test]
+    fn parse_issue_spec_single_number() {
+        assert_eq!(parse_issue_spec("42").expect("valid spec"), vec![42]);
+    }
+
+    #[test]
+    fn parse_issue_spec_preserves_order_and_dedupes_overlap() {
+        // Order follows first appearance; the 125-127 overlap is dropped.
+        assert_eq!(
+            parse_issue_spec("131, 123-127, 125-130").expect("valid spec"),
+            vec![131, 123, 124, 125, 126, 127, 128, 129, 130]
+        );
+    }
+
+    #[test]
+    fn parse_issue_spec_tolerates_whitespace_and_trailing_comma() {
+        assert_eq!(
+            parse_issue_spec("  7 - 9 ,, 12 ,").expect("valid spec"),
+            vec![7, 8, 9, 12]
+        );
+    }
+
+    #[test]
+    fn parse_issue_spec_rejects_garbage() {
+        assert!(parse_issue_spec("abc").is_err());
+        assert!(parse_issue_spec("12-").is_err());
+        assert!(parse_issue_spec("-12").is_err());
+        assert!(parse_issue_spec("12-9").is_err()); // reversed range
+        assert!(parse_issue_spec("0").is_err()); // issues are 1-based
+        assert!(parse_issue_spec("").is_err());
+        assert!(parse_issue_spec("  ,  ").is_err());
+    }
+
+    #[test]
+    fn parse_issue_spec_caps_runaway_ranges() {
+        assert!(parse_issue_spec("1-100000").is_err());
     }
 
     #[test]

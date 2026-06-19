@@ -21,6 +21,7 @@ import type {
 import { useEscape, useFocusReturn } from "../utils/a11y";
 import { REMOTE_UNAVAILABLE_TOOLTIP, useIsRemote } from "../utils/remoteMode";
 import { parsePrompts } from "../utils/parsePrompts";
+import { parseIssueSpec } from "../utils/parseIssueSpec";
 
 interface Props {
   preset: PresetEntry;
@@ -34,7 +35,7 @@ interface Props {
   onStopSessions: (sessionIds: string[]) => void;
 }
 
-type SourceKind = "file" | "folder" | "inline";
+type SourceKind = "file" | "folder" | "inline" | "github_issues";
 type Stage = "source" | "variables" | "preview" | "launching";
 
 const FIRST_LINE_PREVIEW_LIMIT = 80;
@@ -65,6 +66,7 @@ export default function PresetLaunchDialog({
     defaultFolderPath(allowedSources, sourceRepo),
   );
   const [inlineText, setInlineText] = useState("");
+  const [issuesSpec, setIssuesSpec] = useState("");
 
   // Variables-stage state
   const [variableValues, setVariableValues] = useState<Record<string, string>>(
@@ -91,10 +93,25 @@ export default function PresetLaunchDialog({
       setPreviewError(null);
       return;
     }
+    if (sourceKind === "github_issues") {
+      // Mirrors the daemon's parse_issue_spec so the preview is exact; no
+      // round-trip needed for an offline expansion.
+      const result = parseIssueSpec(issuesSpec);
+      setPreviewLoading(false);
+      if (result.ok) {
+        setPreviewPrompts(result.issues.map((n) => `GitHub issue #${n}`));
+        setPreviewError(null);
+      } else {
+        setPreviewPrompts([]);
+        setPreviewError(result.error);
+      }
+      return;
+    }
     const source = buildLaunchSource(sourceKind, {
       filePath,
       folderPath,
       inlineText,
+      issuesSpec,
     });
     if (!source) {
       setPreviewPrompts([]);
@@ -126,6 +143,7 @@ export default function PresetLaunchDialog({
     stage,
     sourceKind,
     inlineText,
+    issuesSpec,
     filePath,
     folderPath,
     client,
@@ -184,6 +202,7 @@ export default function PresetLaunchDialog({
     filePath,
     folderPath,
     inlineText,
+    issuesSpec,
   });
 
   // Required variables (prompt_at_launch + !optional) must have a non-empty
@@ -225,6 +244,7 @@ export default function PresetLaunchDialog({
       filePath,
       folderPath,
       inlineText,
+      issuesSpec,
     });
     if (!source) return;
     const cap = parseMaxPerTab(maxPerTab);
@@ -328,6 +348,8 @@ export default function PresetLaunchDialog({
               onFolderPathChange={setFolderPath}
               inlineText={inlineText}
               onInlineTextChange={setInlineText}
+              issuesSpec={issuesSpec}
+              onIssuesSpecChange={setIssuesSpec}
             />
           )}
           {stage === "variables" && (
@@ -451,6 +473,8 @@ function SourceStage({
   onFolderPathChange,
   inlineText,
   onInlineTextChange,
+  issuesSpec,
+  onIssuesSpecChange,
 }: {
   allowed: PresetPromptSource[];
   sourceKind: SourceKind;
@@ -461,6 +485,8 @@ function SourceStage({
   onFolderPathChange: (s: string | null) => void;
   inlineText: string;
   onInlineTextChange: (s: string) => void;
+  issuesSpec: string;
+  onIssuesSpecChange: (s: string) => void;
 }) {
   const folderSource = allowed.find((s) => s.kind === "folder");
   const isRemote = useIsRemote();
@@ -577,8 +603,64 @@ function SourceStage({
           />
         </label>
       )}
+      {sourceKind === "github_issues" && (
+        <GithubIssuesField spec={issuesSpec} onChange={onIssuesSpecChange} />
+      )}
     </>
   );
+}
+
+function GithubIssuesField({
+  spec,
+  onChange,
+}: {
+  spec: string;
+  onChange: (s: string) => void;
+}) {
+  const trimmed = spec.trim();
+  const result = trimmed === "" ? null : parseIssueSpec(spec);
+  return (
+    <label className="field">
+      <span>
+        GitHub issues{" "}
+        <span className="muted">· one session per issue</span>
+      </span>
+      <input
+        type="text"
+        value={spec}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="123-127, 131, 134-136"
+        data-testid="preset-source-github-issues-spec"
+      />
+      {result === null ? (
+        <span className="muted small">
+          Comma-separated issue numbers; ranges like <code>123-127</code> are
+          inclusive.
+        </span>
+      ) : result.ok ? (
+        <span className="muted small" data-testid="preset-source-github-issues-ok">
+          {result.issues.length}{" "}
+          {result.issues.length === 1 ? "issue" : "issues"} →{" "}
+          {result.issues.length === 1 ? "session" : "sessions"}:{" "}
+          {previewIssueList(result.issues)}
+        </span>
+      ) : (
+        <span
+          className="error small"
+          data-testid="preset-source-github-issues-error"
+        >
+          {result.error}
+        </span>
+      )}
+    </label>
+  );
+}
+
+function previewIssueList(issues: number[]): string {
+  const head = issues.slice(0, 12).map((n) => `#${n}`);
+  return issues.length > head.length
+    ? `${head.join(", ")}, … (+${issues.length - head.length})`
+    : head.join(", ");
 }
 
 function VariablesStage({
@@ -1089,6 +1171,7 @@ function sourceLabel(src: PresetPromptSource): string {
   if (src.kind === "file") return "From file";
   if (src.kind === "folder")
     return `From folder (${src.relative_path})`;
+  if (src.kind === "github_issues") return "From GitHub issues";
   return "Inline";
 }
 
@@ -1135,21 +1218,34 @@ function isSourceReady(args: {
   filePath: string | null;
   folderPath: string | null;
   inlineText: string;
+  issuesSpec: string;
 }): boolean {
   if (args.sourceKind === "file") return !!args.filePath;
   if (args.sourceKind === "folder") return !!args.folderPath;
+  if (args.sourceKind === "github_issues")
+    return parseIssueSpec(args.issuesSpec).ok;
   return parsePrompts(args.inlineText).length > 0;
 }
 
 function buildLaunchSource(
   kind: SourceKind,
-  args: { filePath: string | null; folderPath: string | null; inlineText: string },
+  args: {
+    filePath: string | null;
+    folderPath: string | null;
+    inlineText: string;
+    issuesSpec: string;
+  },
 ): LaunchPresetSource | null {
   if (kind === "file") {
     return args.filePath ? { kind: "file", path: args.filePath } : null;
   }
   if (kind === "folder") {
     return args.folderPath ? { kind: "folder", path: args.folderPath } : null;
+  }
+  if (kind === "github_issues") {
+    return parseIssueSpec(args.issuesSpec).ok
+      ? { kind: "github_issues", spec: args.issuesSpec }
+      : null;
   }
   return { kind: "inline", prompts: parsePrompts(args.inlineText) };
 }
