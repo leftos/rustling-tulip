@@ -30,6 +30,10 @@ allow = [
     # webpki-roots (via reqwest's rustls-tls) ships the Mozilla CA bundle under
     # the Community Data License Agreement — Permissive 2.0.
     "CDLA-Permissive-2.0",
+    # arboard's Windows clipboard backend (clipboard-win, error-code) is under
+    # the Boost Software License — permissive, OSI-approved, no attribution
+    # requirement (strictly more permissive than the MIT/BSD entries above).
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 

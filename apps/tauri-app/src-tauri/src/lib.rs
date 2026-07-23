@@ -173,6 +173,23 @@ fn log_message(level: String, message: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Reads the OS clipboard text directly via arboard (the Rust side), bypassing
+/// the `WebView2` clipboard bridge. The terminal paste path uses this as the
+/// paste source: `WebView2`'s `clipboardData.getData` can intermittently return
+/// truncated text for large or delayed-render payloads (dropping the middle of
+/// a paste), and a native read goes straight to the Win32 clipboard. The same
+/// value feeds the paste-fidelity logging so the sources stay comparable. An
+/// empty or non-text clipboard yields an empty string rather than an error.
+#[tauri::command]
+fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    match clipboard.get_text() {
+        Ok(text) => Ok(text),
+        Err(arboard::Error::ContentNotAvailable) => Ok(String::new()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 /// Paths the daemon-status footer + troubleshooting flyout exposes to the
 /// user (open log, reveal config dir, copy handshake path, etc). All four
 /// derive from the same `config_dir()` so we return them as one struct
@@ -789,6 +806,7 @@ pub fn run() {
             open_path_in_vscode,
             open_folders_in_vscode,
             log_message,
+            read_clipboard_text,
             quit_app,
             remote::connect_remote,
             remote::disconnect_remote,

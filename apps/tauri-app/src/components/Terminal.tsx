@@ -363,40 +363,72 @@ export default function Terminal({
 
       term.open(container);
 
-      // Paste-fidelity instrumentation. The daemon→tracer→ConPTY→agent input
-      // path is proven byte-lossless, and xterm delivers a paste as one
-      // `onData`, so any dropped paste content originates upstream in the
-      // WebView2 clipboard read: `clipboardData.getData` can intermittently
-      // return truncated text for large or delayed-render payloads. This
-      // capture-phase listener records the synchronous length xterm will
-      // receive and compares it against the async Clipboard API, which uses a
-      // different (more reliable) read path — a mismatch in app.log pins the
-      // loss to the browser clipboard the next time a paste drops its middle.
-      // Observation only: it never calls preventDefault or alters the paste.
+      // Paste source override + fidelity instrumentation. The
+      // daemon→tracer→ConPTY→agent path is proven byte-lossless, and xterm
+      // delivers a paste as one `onData`, so intermittent paste loss ("top and
+      // bottom, middle gone") originates upstream in the WebView2 clipboard
+      // bridge: `clipboardData.getData` can return truncated text for large or
+      // delayed-render payloads. So we take over the paste in the capture phase
+      // (before xterm's textarea handler) and inject the OS clipboard read
+      // natively via the Rust side (arboard), which bypasses WebView2, through
+      // xterm's own `paste()` so bracketing and onData stay unchanged. All
+      // three source lengths are logged to app.log so we can confirm which read
+      // stays intact: `clipboardData` (sync WebView2), `asyncClipboard` (async
+      // WebView2), and `native` (arboard). `using=` records the source we fed
+      // to the terminal.
       let pasteSeq = 0;
-      const onPasteInstrument = (event: ClipboardEvent) => {
+      const onPaste = (event: ClipboardEvent) => {
         const seq = ++pasteSeq;
-        const syncLen = event.clipboardData?.getData("text/plain").length ?? 0;
         pasteSeqRef.current = seq;
+        // Read the WebView2 synchronous value now (the event is consumed after
+        // the first await) and take the paste over so xterm's own handler
+        // doesn't also inject the WebView2 copy.
+        const syncText = event.clipboardData?.getData("text/plain") ?? "";
+        event.preventDefault();
+        event.stopImmediatePropagation();
         void (async () => {
+          let nativeText: string | null = null;
+          try {
+            nativeText = await invoke<string>("read_clipboard_text");
+          } catch (err) {
+            logToFile(
+              "warn",
+              `paste#${seq} session=${sessionId} native clipboard read failed: ` +
+                String(err),
+            );
+          }
+          // Inject as soon as we have content — don't delay the paste for the
+          // comparison read below. Prefer the native read; fall back to the
+          // WebView2 value only if the native read failed.
+          const chosen = nativeText ?? syncText;
+          const stopped =
+            statusRef.current === "stopped" || statusRef.current === "error";
+          if (chosen.length > 0 && !stopped) {
+            term.paste(chosen);
+          }
+          // Comparison logging (does not gate the paste above).
           let asyncLen = -1;
           try {
             asyncLen = (await navigator.clipboard.readText()).length;
           } catch {
-            // Async clipboard read unavailable/denied — logged as -1 so we
-            // know the comparison couldn't run rather than that it matched.
+            // Async Web Clipboard read denied/unsupported — logged as -1.
           }
-          const tag = asyncLen >= 0 && asyncLen !== syncLen ? " MISMATCH" : "";
+          const nativeLen = nativeText === null ? -1 : nativeText.length;
+          const mismatch =
+            (nativeLen >= 0 && nativeLen !== syncText.length) ||
+            (asyncLen >= 0 && asyncLen !== syncText.length);
           logToFile(
-            asyncLen >= 0 && asyncLen !== syncLen ? "warn" : "info",
-            `paste#${seq} session=${sessionId} clipboardData=${syncLen} ` +
-              `asyncClipboard=${asyncLen}${tag}`,
+            mismatch ? "warn" : "info",
+            `paste#${seq} session=${sessionId} clipboardData=${syncText.length} ` +
+              `asyncClipboard=${asyncLen} native=${nativeLen} ` +
+              `using=${nativeText === null ? "webview-sync" : "native"}` +
+              `${mismatch ? " MISMATCH" : ""}`,
           );
         })();
       };
-      container.addEventListener("paste", onPasteInstrument, true);
+      container.addEventListener("paste", onPaste, true);
       cleanupFns.push(() =>
-        container.removeEventListener("paste", onPasteInstrument, true),
+        container.removeEventListener("paste", onPaste, true),
       );
 
       // WebGL renderer — paints the whole frame in a single rAF, so even
