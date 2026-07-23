@@ -143,8 +143,11 @@ export default function TabBar({
   }, [tabs]);
 
   const onNewTab = useCallback(() => {
+    // Arm the focus-switch so the freshly created tab becomes active — a
+    // user explicitly asking for a new tab expects to land on it.
+    onArmNextNewTab();
     client.send({ type: "create_tab", name: null, initial_session_id: null });
-  }, [client]);
+  }, [client, onArmNextNewTab]);
 
   const onCloseTab = useCallback(
     (tabId: string, e?: React.MouseEvent) => {

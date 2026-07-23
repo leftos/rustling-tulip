@@ -269,6 +269,9 @@ export default function SessionContextMenu({
     onClose();
   };
   const sendOpenInNewTab = () => {
+    // Arm the focus-switch so the new tab becomes active — "Open in new tab"
+    // should land the user on the tab it just created.
+    onArmNextNewTab();
     client.send({
       type: "create_tab",
       name: null,
