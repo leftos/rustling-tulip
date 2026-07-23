@@ -8,6 +8,10 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  buildSpawnMessage,
+  dismissLayoutChooser,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   GridNode,
@@ -35,6 +39,7 @@ describe("pane close stop cleanup", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -217,26 +222,15 @@ async function spawnPlainShell(
       msg.session.mode === "plain_shell",
     { timeoutMs: 20_000 },
   );
-  ws.send({
-    type: "spawn_session",
-    label: options.label,
-    target: {
-      kind: "single",
-      repo_id: repoId,
-      branch_name: options.branchName,
-      base_branch: null,
-      use_worktree: options.useWorktree,
-    },
-    mode: "plain_shell",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    agent: "claude",
-    model: null,
-    permission_mode: null,
-    codex_sandbox: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
+  ws.send(
+    buildSpawnMessage({
+      label: options.label,
+      repoId,
+      branchName: options.branchName,
+      useWorktree: options.useWorktree,
+      mode: "plain_shell",
+    }),
+  );
   return (await spawned).session;
 }
 

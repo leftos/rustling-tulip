@@ -7,6 +7,10 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  buildSpawnMessage,
+  dismissLayoutChooser,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   GridNode,
@@ -45,6 +49,7 @@ describe("undo shelf", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
     await mkdir(join(repoRoot, ".tmp", "e2e"), { recursive: true });
@@ -377,20 +382,13 @@ async function spawnStandaloneShell(
       msg.session.mode === "plain_shell",
     { timeoutMs: 20_000 },
   );
-  ws.send({
-    type: "spawn_session",
-    label,
-    target: { kind: "standalone", cwd: null },
-    mode: "plain_shell",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    agent: "claude",
-    model: null,
-    permission_mode: null,
-    codex_sandbox: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
+  ws.send(
+    buildSpawnMessage({
+      label,
+      target: { kind: "standalone", cwd: null },
+      mode: "plain_shell",
+    }),
+  );
   return (await spawned).session;
 }
 
