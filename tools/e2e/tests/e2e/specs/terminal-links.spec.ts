@@ -8,6 +8,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  buildSpawnMessage,
+  dismissLayoutChooser,
+  openSessionPane,
+} from "../../../src/session-helpers.js";
 import type { DaemonMessage, SessionSnapshot } from "../../../src/types.js";
 
 type SessionUpdatedMessage = DaemonMessage & {
@@ -42,6 +47,7 @@ describe("terminal links", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
     const parent = join(repoRoot, ".tmp", "e2e");
@@ -131,33 +137,14 @@ async function spawnStandaloneShell(
       msg.session.mode === "plain_shell",
     { timeoutMs: 20_000 },
   );
-  ws.send({
-    type: "spawn_session",
-    label: "links",
-    target: { kind: "standalone", cwd },
-    mode: "plain_shell",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    agent: "claude",
-    model: null,
-    permission_mode: null,
-    codex_sandbox: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
+  ws.send(
+    buildSpawnMessage({
+      label: "links",
+      target: { kind: "standalone", cwd },
+      mode: "plain_shell",
+    }),
+  );
   return (await spawned).session.id;
-}
-
-async function openSessionPane(sessionId: string): Promise<void> {
-  const row = await browser.$(
-    `[data-testid=sidebar-session][data-session-id="${sessionId}"]`,
-  );
-  await row.waitForExist({ timeout: 10_000 });
-  await row.click();
-  const pane = await browser.$(
-    `[data-testid=session-pane][data-session-id="${sessionId}"]`,
-  );
-  await pane.waitForExist({ timeout: 10_000 });
 }
 
 async function installLinkListener(): Promise<void> {

@@ -23,6 +23,11 @@ import { expect } from "chai";
 
 import { captureNewWindow } from "../../../src/popout.js";
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  dismissLayoutChooser,
+  openSessionPane,
+  spawnSession,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -43,6 +48,7 @@ describe("pop-out pane stop/discard lifecycle", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
     fixtureRepo = await mkdtemp(join(tmpdir(), "rt-e2e-popout-"));
@@ -103,49 +109,16 @@ describe("pop-out pane stop/discard lifecycle", function () {
     registeredRepoId = fixture!.id;
 
     // Spawn an interactive session.
-    const spawnPromise = ws.waitFor(
-      (m): m is DaemonMessage & {
-        type: "session_updated";
-        session: SessionSnapshot;
-      } => m.type === "session_updated",
-      { timeoutMs: 15_000 },
-    );
-    ws.send({
-      type: "spawn_session",
+    const session = await spawnSession(ws, {
       label: "popout-autoclose",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
+      repoId: registeredRepoId,
+      timeoutMs: 15_000,
     });
-    const spawnMsg = await spawnPromise;
-    const sessionId = spawnMsg.session.id;
+    const sessionId = session.id;
     spawnedSessionId = sessionId;
 
-    // Click the session leaf in the sidebar to render it in a pane.
-    const sidebarRow = await browser.$(
-      `[data-testid=sidebar-session][data-session-id="${sessionId}"]`,
-    );
-    await sidebarRow.waitForExist({ timeout: 10_000 });
-    await sidebarRow.click();
-
-    // Wait for the session pane to appear.
-    const pane = await browser.$(
-      `[data-testid=session-pane][data-session-id="${sessionId}"]`,
-    );
-    await pane.waitForExist({ timeout: 10_000 });
+    // Render the session in a pane.
+    await openSessionPane(sessionId);
 
     // Click "Pop out" and capture the resulting pane-backed pop-out window.
     const popOutBtn = await browser.$("[data-testid=session-pop-out]");

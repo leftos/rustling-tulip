@@ -14,6 +14,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  dismissLayoutChooser,
+  openSessionPane,
+  spawnSession,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -41,6 +46,7 @@ describe("session appearance customization", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -111,9 +117,7 @@ describe("session appearance customization", function () {
     );
     spawnedSessionIds.push(spawnedSessionId);
 
-    const row = await sidebarRow(spawnedSessionId);
-    await row.click();
-    await sessionPane(spawnedSessionId);
+    await openSessionPane(spawnedSessionId);
 
     await openSessionContextMenu(spawnedSessionId);
     await openContextSubmenu("session-context-accent-frame-menu");
@@ -185,9 +189,7 @@ describe("session appearance customization", function () {
     );
     spawnedSessionIds.push(spawnedSessionId);
 
-    const row = await sidebarRow(spawnedSessionId);
-    await row.click();
-    await sessionPane(spawnedSessionId);
+    await openSessionPane(spawnedSessionId);
 
     await openSessionAppearance(spawnedSessionId);
     const settingsBeforeStage = await localStorageSettings();
@@ -225,6 +227,7 @@ describe("session appearance customization", function () {
     await browser.refresh();
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
     await waitForAppDaemonConnection();
     await waitForAppearance(spawnedSessionId, {
       accent: CUSTOM_ACCENT_FRAME,
@@ -259,29 +262,9 @@ async function spawnAppearanceSession(
   repoId: string,
   label: string,
 ): Promise<string> {
-  const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 15_000 });
-  ws.send({
-    type: "spawn_session",
-    label,
-    target: {
-      kind: "single",
-      repo_id: repoId,
-      branch_name: "main",
-      base_branch: null,
-      use_worktree: false,
-    },
-    mode: "interactive",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    agent: "claude",
-    model: null,
-    permission_mode: null,
-    codex_sandbox: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
-
-  return (await spawnPromise).session.id;
+  return (
+    await spawnSession(ws, { label, repoId, timeoutMs: 15_000 })
+  ).id;
 }
 
 async function sidebarRow(sessionId: string) {

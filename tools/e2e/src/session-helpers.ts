@@ -26,8 +26,14 @@ export const DEFAULT_AGENT_OPTIONS: AgentOptions = {
 };
 
 export interface SpawnOptions {
-  label: string;
-  repoId: string;
+  /** Session label; null lets the daemon auto-name it (spawnSession's
+   *  label-matching wait then won't apply — use buildSpawnMessage directly). */
+  label: string | null;
+  /** Repo for the default single-repo target. Omit when passing `target`. */
+  repoId?: string;
+  /** Full target override (e.g. standalone or workspace). When set, the
+   *  repoId/branchName/useWorktree single-target fields are ignored. */
+  target?: unknown;
   branchName?: string;
   baseBranch?: string | null;
   useWorktree?: boolean;
@@ -53,7 +59,7 @@ export function buildSpawnMessage(options: SpawnOptions): ClientMessage {
   return {
     type: "spawn_session",
     label: options.label,
-    target: {
+    target: options.target ?? {
       kind: "single",
       repo_id: options.repoId,
       branch_name: options.branchName ?? "main",

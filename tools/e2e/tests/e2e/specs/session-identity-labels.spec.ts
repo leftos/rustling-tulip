@@ -17,6 +17,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  buildSpawnMessage,
+  dismissLayoutChooser,
+  openSessionPane,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -47,6 +52,7 @@ describe("session identity labels", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -100,33 +106,18 @@ describe("session identity labels", function () {
     expectedDefaultLabel = `${repoName}: ${DEFAULT_BRANCH}`;
 
     const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 15_000 });
-    ws.send({
-      type: "spawn_session",
-      label: null,
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: DEFAULT_BRANCH,
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
-    });
+    ws.send(
+      buildSpawnMessage({
+        label: null,
+        repoId: registeredRepoId,
+        branchName: DEFAULT_BRANCH,
+      }),
+    );
     const spawnMsg = await spawnPromise;
     spawnedSessionId = spawnMsg.session.id;
     expect(spawnMsg.session.label).to.equal(expectedDefaultLabel);
 
-    const sidebarRow = await sessionSidebarRow(spawnedSessionId);
-    await sidebarRow.click();
-    await sessionPane(spawnedSessionId);
+    await openSessionPane(spawnedSessionId);
     await assertRenderedLabel(spawnedSessionId, expectedDefaultLabel);
 
     const banner = await waitForBufferText(

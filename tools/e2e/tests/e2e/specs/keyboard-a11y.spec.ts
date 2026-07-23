@@ -25,6 +25,10 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  dismissLayoutChooser,
+  spawnSession,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -45,6 +49,7 @@ describe("keyboard a11y", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -73,35 +78,12 @@ describe("keyboard a11y", function () {
     if (!fixture) throw new Error("fixture repo never registered");
     registeredRepoId = fixture.id;
 
-    const spawnPromise = ws.waitFor(
-      (m): m is DaemonMessage & {
-        type: "session_updated";
-        session: SessionSnapshot;
-      } => m.type === "session_updated",
-      { timeoutMs: 15_000 },
-    );
-    ws.send({
-      type: "spawn_session",
+    const session = await spawnSession(ws, {
       label: "a11y",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
+      repoId: registeredRepoId,
+      timeoutMs: 15_000,
     });
-    const spawnMsg = await spawnPromise;
-    spawnedSessionId = spawnMsg.session.id;
+    spawnedSessionId = session.id;
 
     // Wait for the repo row to render in the sidebar.
     const repoRow = await browser.$(

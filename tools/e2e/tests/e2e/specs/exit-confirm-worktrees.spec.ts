@@ -8,6 +8,10 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  buildSpawnMessage,
+  dismissLayoutChooser,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -31,6 +35,7 @@ describe("exit confirmation with worktree sessions", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -156,26 +161,15 @@ async function spawnPlainShell(
   repoId: string,
 ): Promise<SessionSnapshot> {
   const spawned = ws.waitFor(isExitWorktreeSession, { timeoutMs: 20_000 });
-  ws.send({
-    type: "spawn_session",
-    label: "exit-confirm-worktree-shell",
-    target: {
-      kind: "single",
-      repo_id: repoId,
-      branch_name: "rt-e2e-exit-confirm-worktree",
-      base_branch: null,
-      use_worktree: true,
-    },
-    mode: "plain_shell",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    agent: "claude",
-    model: null,
-    permission_mode: null,
-    codex_sandbox: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
+  ws.send(
+    buildSpawnMessage({
+      label: "exit-confirm-worktree-shell",
+      repoId,
+      branchName: "rt-e2e-exit-confirm-worktree",
+      useWorktree: true,
+      mode: "plain_shell",
+    }),
+  );
   return (await spawned).session;
 }
 

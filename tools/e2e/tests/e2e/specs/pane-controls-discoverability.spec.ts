@@ -8,6 +8,10 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  dismissLayoutChooser,
+  spawnSession,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -32,6 +36,7 @@ describe("pane controls discoverability", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -59,29 +64,13 @@ describe("pane controls discoverability", function () {
     if (!fixture) throw new Error("fixture repo never registered");
     registeredRepoId = fixture.id;
 
-    const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 20_000 });
-    ws.send({
-      type: "spawn_session",
+    const session = await spawnSession(ws, {
       label: "pane-controls-shell",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
+      repoId: registeredRepoId,
       mode: "plain_shell",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
+      timeoutMs: 20_000,
     });
-    const spawn = await spawnPromise;
-    spawnedSessionId = spawn.session.id;
+    spawnedSessionId = session.id;
 
     const tabPromise = ws.waitFor(isTabUpdated, { timeoutMs: 5_000 });
     ws.send({

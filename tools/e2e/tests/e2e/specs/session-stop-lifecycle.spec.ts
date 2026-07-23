@@ -14,6 +14,11 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import {
+  dismissLayoutChooser,
+  openSessionPane,
+  spawnSession,
+} from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -34,6 +39,7 @@ describe("session stop lifecycle", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
@@ -84,39 +90,16 @@ describe("session stop lifecycle", function () {
     expect(fixture, "fixture repo registered").to.exist;
     registeredRepoId = fixture!.id;
 
-    const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 15_000 });
-    ws.send({
-      type: "spawn_session",
+    const session = await spawnSession(ws, {
       label: "stop-lifecycle",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
+      repoId: registeredRepoId,
+      timeoutMs: 15_000,
     });
-    const spawnMsg = await spawnPromise;
-    spawnedSessionId = spawnMsg.session.id;
+    spawnedSessionId = session.id;
 
-    const sidebarRow = await browser.$(
-      `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
-    );
-    await sidebarRow.waitForExist({ timeout: 10_000 });
-    await sidebarRow.click();
-
+    await openSessionPane(spawnedSessionId);
     const paneSelector = `[data-testid=session-pane][data-session-id="${spawnedSessionId}"]`;
     const pane = await browser.$(paneSelector);
-    await pane.waitForExist({ timeout: 10_000 });
 
     const stoppedPromise = ws.waitFor(
       (m): m is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } =>
