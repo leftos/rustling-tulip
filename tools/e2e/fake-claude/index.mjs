@@ -9,9 +9,9 @@
  * Behavior:
  *   - Prints a stable banner the smoke test asserts on.
  *   - Echoes lines from stdin back so input from the harness is observable.
- *   - Treats a bracketed paste (\x1b[200~ … \x1b[201~) as one opaque payload
- *     and, on the closing marker, reports its exact byte count + sha256 as
- *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for byte-fidelity assertions.
+ *   - Reports the exact byte count + sha256 of an EOT-terminated payload as
+ *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for paste byte-fidelity assertions
+ *     (EOT survives ConPTY's raw-mode delivery; bracketed-paste markers don't).
  *   - Emits an OSC window-title update for "/rename <title>".
  *   - Emits deterministic streaming output for "/stream".
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
@@ -46,12 +46,24 @@ if (flags.prompt !== null) {
 }
 process.stdout.write(PROMPT);
 
-const PASTE_START = "\x1b[200~";
-const PASTE_END = "\x1b[201~";
+// Terminator for a paste-fidelity payload. A real bracketed paste's
+// \x1b[200~/\x1b[201~ markers do NOT survive ConPTY's raw-mode input delivery
+// to a non-native (Node) child — ConPTY interprets and strips them — but the
+// payload bytes and a plain control byte like EOT pass through intact. So the
+// paste e2e frames its payload with a trailing EOT and we checksum everything
+// received up to it, which verifies byte-exact delivery of the payload content
+// (where a dropped "middle" would show up) end-to-end.
+const PASTE_EOT = "\x04";
 
 let buffer = "";
-let inPaste = false;
-let pasteBuf = "";
+// Behave like a real agent TUI: raw mode so input bytes arrive immediately
+// rather than being held (and length-capped) by ConPTY's cooked line
+// discipline. A large payload with no trailing newline would otherwise never
+// be delivered — the canonical buffer waits for an Enter that never comes.
+// Guard on isTTY so piped-stdin contexts (unit harnesses) still work.
+if (process.stdin.isTTY && process.stdin.setRawMode) {
+  process.stdin.setRawMode(true);
+}
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -60,57 +72,32 @@ process.stdin.on("data", (chunk) => {
 process.stdin.on("end", () => process.exit(0));
 
 /**
- * Drain `buffer`, alternating between line-mode (existing slash commands and
- * echo) and paste-mode. A real agent TUI treats everything between the
- * bracketed-paste markers as one opaque payload; the shim mirrors that and,
- * on the closing marker, reports the exact byte count + sha256 of the payload
- * it received. That lets the paste e2e assert byte-for-byte fidelity instead
- * of only spot-checking the first and last markers. Marker-split-across-chunks
- * is handled by holding a short tail back until more input arrives.
+ * Drain `buffer`: complete lines go to `handleLine` (slash commands + echo); a
+ * payload terminated by EOT is checksummed and reported as RT_PASTE_RESULT so
+ * the paste e2e can assert byte-for-byte fidelity of what actually arrived,
+ * rather than spot-checking the first and last bytes.
  */
 function pump() {
   for (;;) {
-    if (inPaste) {
-      const endIdx = buffer.indexOf(PASTE_END);
-      if (endIdx === -1) {
-        // Closing marker not here yet — accumulate all but a possible split
-        // marker tail, then wait for the next chunk.
-        const keep = PASTE_END.length - 1;
-        if (buffer.length > keep) {
-          pasteBuf += buffer.slice(0, buffer.length - keep);
-          buffer = buffer.slice(buffer.length - keep);
-        }
-        return;
-      }
-      pasteBuf += buffer.slice(0, endIdx);
-      buffer = buffer.slice(endIdx + PASTE_END.length);
-      inPaste = false;
-      emitPasteResult(pasteBuf);
-      pasteBuf = "";
+    const eot = buffer.indexOf(PASTE_EOT);
+    const lineBreak = findLineBreak(buffer);
+
+    // An EOT before the next line break closes a paste payload.
+    if (eot !== -1 && (lineBreak === -1 || eot < lineBreak)) {
+      const payload = buffer.slice(0, eot);
+      buffer = buffer.slice(eot + PASTE_EOT.length);
+      emitPasteResult(payload);
       continue;
     }
 
-    const startIdx = buffer.indexOf(PASTE_START);
-    const lineBreak = findLineBreak(buffer);
-
-    // Flush any complete line that precedes the next paste start.
-    if (lineBreak !== -1 && (startIdx === -1 || lineBreak < startIdx)) {
+    if (lineBreak !== -1) {
       const line = buffer.slice(0, lineBreak);
       buffer = buffer.slice(lineBreak + lineBreakLength(buffer, lineBreak));
       handleLine(line);
       continue;
     }
 
-    if (startIdx !== -1) {
-      // Enter paste mode; drop everything up to and including the marker.
-      buffer = buffer.slice(startIdx + PASTE_START.length);
-      inPaste = true;
-      continue;
-    }
-
-    // No complete line and no paste start — wait for more input. (A partial
-    // PASTE_START at the tail stays buffered until the next chunk completes
-    // it, since indexOf returned -1.)
+    // No complete line and no EOT — wait for more input.
     return;
   }
 }

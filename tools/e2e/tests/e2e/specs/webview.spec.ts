@@ -21,11 +21,12 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type {
-  DaemonMessage,
-  RepoEntry,
-  SessionSnapshot,
-} from "../../../src/types.js";
+import {
+  dismissLayoutChooser,
+  openSessionPane,
+  spawnSession,
+} from "../../../src/session-helpers.js";
+import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -44,6 +45,10 @@ describe("rustling-tulip webview", function () {
     // daemon supervisor have completed bootstrap.
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+
+    // A fresh e2e client always gets the mandatory first-connect LayoutChooser;
+    // dismiss it so its backdrop doesn't intercept later session-pane clicks.
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     // The supervisor should have written daemon.json by now (or be about
     // to). The handshake-poll inside DaemonWsClient.open handles the wait.
@@ -106,47 +111,15 @@ describe("rustling-tulip webview", function () {
     registeredRepoId = fixture!.id;
 
     // Spawn an interactive session against fake-claude.
-    const spawnPromise = ws.waitFor(
-      (m): m is DaemonMessage & {
-        type: "session_updated";
-        session: SessionSnapshot;
-      } => m.type === "session_updated",
-      { timeoutMs: 15_000 },
-    );
-    ws.send({
-      type: "spawn_session",
+    const session = await spawnSession(ws, {
       label: "smoke",
-      target: {
-        kind: "single",
-        repo_id: registeredRepoId,
-        branch_name: "main",
-        base_branch: null,
-        use_worktree: false,
-      },
-      mode: "interactive",
-      initial_prompt: null,
-      dangerously_skip_permissions: false,
-      agent: "claude",
-      model: null,
-      permission_mode: null,
-      codex_sandbox: null,
-      extra_env: [],
-      prompt_injector: null,
+      repoId: registeredRepoId,
+      timeoutMs: 15_000,
     });
-    const spawnMsg = await spawnPromise;
-    spawnedSessionId = spawnMsg.session.id;
+    spawnedSessionId = session.id;
 
-    // Open the session in the UI by clicking its sidebar entry.
-    const sidebarSelector = `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`;
-    const sidebarRow = await browser.$(sidebarSelector);
-    await sidebarRow.waitForExist({ timeout: 10_000 });
-    await sidebarRow.click();
-
-    // Wait for the session pane (and its xterm) to mount.
-    const pane = await browser.$(
-      `[data-testid=session-pane][data-session-id="${spawnedSessionId}"]`,
-    );
-    await pane.waitForExist({ timeout: 10_000 });
+    // Open the session in the UI (dismisses the LayoutChooser if still up).
+    await openSessionPane(spawnedSessionId);
 
     // Poll the xterm buffer until the fake-claude banner appears. xterm
     // renders to a canvas, so we read the buffer through the

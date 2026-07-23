@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { platform } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,21 +9,16 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
-import type {
-  DaemonMessage,
-  RepoEntry,
-  SessionSnapshot,
-} from "../../../src/types.js";
-
-type SessionUpdatedMessage = DaemonMessage & {
-  type: "session_updated";
-  session: SessionSnapshot;
-};
+import {
+  dismissLayoutChooser,
+  openSessionPane,
+  spawnSession,
+} from "../../../src/session-helpers.js";
+import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
 const SESSION_OUTPUT_TIMEOUT = 20_000;
-const CTRL_KEY = "\uE009";
 const repoRoot = resolve(
   fileURLToPath(new URL("../../../../..", import.meta.url)),
 );
@@ -40,6 +34,9 @@ describe("terminal paste", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    // A fresh e2e client always gets the mandatory first-connect LayoutChooser;
+    // dismiss it so its backdrop doesn't intercept later session-pane clicks.
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
     const parent = join(repoRoot, ".tmp", "e2e");
@@ -82,34 +79,42 @@ describe("terminal paste", function () {
     }
   });
 
-  it("pastes the full clipboard text byte-for-byte with Ctrl+V", async function () {
+  it("delivers a large paste byte-for-byte to the agent", async function () {
     expect(ws, "ws").to.not.be.null;
     expect(fixtureRepo, "fixtureRepo").to.not.be.null;
     if (!ws || !fixtureRepo) throw new Error("setup failed");
 
     const repo = await registerRepo(ws, fixtureRepo);
     registeredRepoId = repo.id;
-    spawnedSessionId = await spawnFakeClaude(ws, registeredRepoId);
+    const session = await spawnSession(ws, {
+      label: "paste",
+      repoId: registeredRepoId,
+      timeoutMs: 15_000,
+    });
+    spawnedSessionId = session.id;
     await openSessionPane(spawnedSessionId);
     await waitForBufferMarkers(spawnedSessionId, [
       "[fake-claude] ready",
     ], SESSION_OUTPUT_TIMEOUT);
-    await enableBracketedPasteMode(spawnedSessionId);
-
-    // Single line, no newline: the payload survives bracketed-paste line-ending
-    // normalization unchanged, so the checksum the shim reports must equal the
-    // checksum of exactly what we put on the clipboard. A dropped middle — the
-    // reported bug — changes both the byte count and the sha, which the old
-    // "does BEGIN and END appear?" assertion could never detect.
+    // Single line, no newline, EOT-terminated: the shim checksums the payload's
+    // own bytes (the trailing EOT is just the delivery terminator, dropped
+    // before hashing). A missing middle — the reported bug — changes both the
+    // byte count and the sha, which the old "does BEGIN and END appear?"
+    // assertion could never detect.
     const payload =
       `RT_PASTE_BEGIN_${"0123456789abcdef".repeat(8192)}_RT_PASTE_END`;
     const expectedBytes = Buffer.byteLength(payload, "utf8");
     const expectedSha = createHash("sha256").update(payload, "utf8")
       .digest("hex");
 
-    await setClipboardText(payload);
-    await focusTerminal(spawnedSessionId);
-    await pressCtrlV();
+    // Two platform limits shape this test. WebDriver can't synthesize a real
+    // WebView2 clipboard `paste` event, so the browser clipboard read and the
+    // native-clipboard override are covered by hand-testing, not here. And
+    // ConPTY strips bracketed-paste markers when delivering raw-mode input to a
+    // Node child, so the payload is EOT-terminated instead. Driving xterm's
+    // `paste()` API still runs the full onData → send_input → daemon-chunking →
+    // tracer → ConPTY → fake-claude path — where a dropped middle would occur.
+    await pasteViaXterm(spawnedSessionId, `${payload}\x04`);
 
     const result = await waitForPasteResult(
       spawnedSessionId,
@@ -137,117 +142,16 @@ async function registerRepo(
   return repo;
 }
 
-async function spawnFakeClaude(
-  ws: DaemonWsClient,
-  repoId: string,
-): Promise<string> {
-  const spawnPromise = ws.waitFor(isSessionUpdated, { timeoutMs: 15_000 });
-  ws.send({
-    type: "spawn_session",
-    label: "paste",
-    target: {
-      kind: "single",
-      repo_id: repoId,
-      branch_name: "main",
-      base_branch: null,
-      use_worktree: false,
-    },
-    mode: "interactive",
-    initial_prompt: null,
-    dangerously_skip_permissions: false,
-    // SpawnRequest carries per-agent options under `agent_options` (tagged by
-    // `kind`); the old flat agent/permission_mode/codex_sandbox fields no
-    // longer deserialize and the daemon rejects the whole spawn_session.
-    agent_options: { kind: "claude", permission_mode: null },
-    model: null,
-    extra_env: [],
-    prompt_injector: null,
-  });
-  const msg = await spawnPromise;
-  return msg.session.id;
-}
-
-async function openSessionPane(sessionId: string): Promise<void> {
-  const sidebarRow = await browser.$(
-    `[data-testid=sidebar-session][data-session-id="${sessionId}"]`,
-  );
-  await sidebarRow.waitForExist({ timeout: 10_000 });
-  await sidebarRow.click();
-
-  const pane = await browser.$(
-    `[data-testid=session-pane][data-session-id="${sessionId}"]`,
-  );
-  await pane.waitForExist({ timeout: 10_000 });
-}
-
-async function setClipboardText(text: string): Promise<void> {
-  const browserWriteWorked = (await browser.execute(
-    `
-    return (async () => {
-      try {
-        await globalThis.navigator.clipboard.writeText(${JSON.stringify(text)});
-        return true;
-      } catch {
-        return false;
-      }
-    })();
-    `,
-  )) as unknown as boolean;
-  if (browserWriteWorked) return;
-
-  if (platform() !== "win32") {
-    throw new Error("navigator clipboard write failed");
-  }
-  execFileSync(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text",
-    ],
-    { input: text, encoding: "utf8" },
-  );
-}
-
-async function focusTerminal(sessionId: string): Promise<void> {
+async function pasteViaXterm(sessionId: string, text: string): Promise<void> {
   await browser.execute(
     `
     const term = globalThis.__rt_terms && globalThis.__rt_terms.get(${JSON.stringify(sessionId)});
     if (!term) {
       throw new Error("terminal not found");
     }
-    term.focus();
+    term.paste(${JSON.stringify(text)});
     `,
   );
-}
-
-async function enableBracketedPasteMode(sessionId: string): Promise<void> {
-  await browser.execute(
-    `
-    const term = globalThis.__rt_terms && globalThis.__rt_terms.get(${JSON.stringify(sessionId)});
-    if (!term) {
-      throw new Error("terminal not found");
-    }
-    term.write("\x1b[?2004h");
-    `,
-  );
-}
-
-async function pressCtrlV(): Promise<void> {
-  await browser.performActions([
-    {
-      type: "key",
-      id: "keyboard",
-      actions: [
-        { type: "keyDown", value: CTRL_KEY },
-        { type: "keyDown", value: "v" },
-        { type: "keyUp", value: "v" },
-        { type: "keyUp", value: CTRL_KEY },
-      ],
-    },
-  ]);
-  await browser.releaseActions();
 }
 
 async function waitForBufferMarkers(
@@ -313,12 +217,6 @@ function isRepos(
   msg: DaemonMessage,
 ): msg is DaemonMessage & { type: "repos"; repos: RepoEntry[] } {
   return msg.type === "repos";
-}
-
-function isSessionUpdated(msg: DaemonMessage): msg is SessionUpdatedMessage {
-  if (msg.type !== "session_updated") return false;
-  const session = (msg as { session?: unknown }).session;
-  return typeof session === "object" && session !== null;
 }
 
 function runGit(cwd: string, args: string[]): void {
