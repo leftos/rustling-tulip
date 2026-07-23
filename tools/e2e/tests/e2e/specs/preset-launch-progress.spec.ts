@@ -9,6 +9,7 @@ import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
+import { dismissLayoutChooser } from "../../../src/session-helpers.js";
 import type {
   DaemonMessage,
   PresetLaunchJobSnapshot,
@@ -32,6 +33,7 @@ describe("preset launch progress", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
     fixtureRepo = await mkdtemp(join(tmpdir(), "rt-e2e-preset-progress-"));

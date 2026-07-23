@@ -142,7 +142,12 @@ export type LaunchPresetSource =
   | { kind: "inline"; prompts: string[] };
 
 export type ClientMessage =
-  | { type: "hello"; protocol_version: number; auth_token: string }
+  | {
+      type: "hello";
+      protocol_version: number;
+      auth_token: string;
+      client_id?: string;
+    }
   | { type: "list_repos" }
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "scan_vscode_workspaces"; path: string }

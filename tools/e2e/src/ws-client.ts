@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import {
   PROTOCOL_VERSION,
+  readClientId,
   readHandshake,
   type DaemonHandshake,
   waitForHandshake,
@@ -23,7 +24,10 @@ export class DaemonWsClient {
   private listeners = new Set<MessageListener>();
   private welcomed = false;
 
-  constructor(private readonly handshake: DaemonHandshake) {}
+  constructor(
+    private readonly handshake: DaemonHandshake,
+    private readonly clientId: string | null,
+  ) {}
 
   static async open(opts: {
     waitTimeoutMs?: number;
@@ -31,7 +35,9 @@ export class DaemonWsClient {
     const hs = opts.waitTimeoutMs
       ? await waitForHandshake({ timeoutMs: opts.waitTimeoutMs })
       : await readHandshake();
-    const client = new DaemonWsClient(hs);
+    // Share the UI's client_id so create_tab lands in the layout the UI
+    // renders (tab layouts are keyed per client_id).
+    const client = new DaemonWsClient(hs, await readClientId());
     await client.connect();
     return client;
   }
@@ -50,6 +56,7 @@ export class DaemonWsClient {
           type: "hello",
           protocol_version: PROTOCOL_VERSION,
           auth_token: this.handshake.auth_token,
+          ...(this.clientId ? { client_id: this.clientId } : {}),
         });
       });
       socket.on("message", (data: Buffer) => {

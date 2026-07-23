@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import protocolVersion from "../../../protocol-version.json" with { type: "json" };
 
@@ -56,6 +56,23 @@ export function handshakeFilePath(): string {
   }
   const xdg = process.env["XDG_CONFIG_HOME"] ?? join(homedir(), ".config");
   return join(xdg, "rustling-tulip", "daemon.json");
+}
+
+/**
+ * Read the UI's stable per-install `client_id` from the config dir (written by
+ * the Tauri app's `get_client_identity`). Tab layouts are keyed per client_id,
+ * so the side-channel harness must send the SAME id in its Hello for its
+ * `create_tab` calls to land in the layout the UI actually renders. Returns
+ * null if the file isn't there yet (the caller then omits client_id).
+ */
+export async function readClientId(): Promise<string | null> {
+  try {
+    const path = join(dirname(handshakeFilePath()), "client-id");
+    const id = (await readFile(path, "utf8")).trim();
+    return id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function readHandshake(): Promise<DaemonHandshake> {
