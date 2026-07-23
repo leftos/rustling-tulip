@@ -15,6 +15,7 @@ import {
 import type { Agent, SessionMode } from "../types";
 import { consumeAutoFocus } from "../utils/autofocus";
 import { copyToClipboard } from "../utils/clipboard";
+import { logToFile } from "../utils/logger";
 import { notifyRemoteUnavailable, useIsRemote } from "../utils/remoteMode";
 import { RtClipboardProvider } from "./clipboardProvider";
 import {
@@ -172,6 +173,9 @@ export default function Terminal({
   const modeRef = useRef(mode);
   modeRef.current = mode;
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Correlates the paste-instrumentation clipboard log with the send-side log
+  // in `onData` (see `term.open` below). Latest paste sequence number.
+  const pasteSeqRef = useRef(0);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const linkBaseDirsRef = useRef(linkBaseDirs);
@@ -358,6 +362,42 @@ export default function Terminal({
       term.loadAddon(webFonts);
 
       term.open(container);
+
+      // Paste-fidelity instrumentation. The daemon→tracer→ConPTY→agent input
+      // path is proven byte-lossless, and xterm delivers a paste as one
+      // `onData`, so any dropped paste content originates upstream in the
+      // WebView2 clipboard read: `clipboardData.getData` can intermittently
+      // return truncated text for large or delayed-render payloads. This
+      // capture-phase listener records the synchronous length xterm will
+      // receive and compares it against the async Clipboard API, which uses a
+      // different (more reliable) read path — a mismatch in app.log pins the
+      // loss to the browser clipboard the next time a paste drops its middle.
+      // Observation only: it never calls preventDefault or alters the paste.
+      let pasteSeq = 0;
+      const onPasteInstrument = (event: ClipboardEvent) => {
+        const seq = ++pasteSeq;
+        const syncLen = event.clipboardData?.getData("text/plain").length ?? 0;
+        pasteSeqRef.current = seq;
+        void (async () => {
+          let asyncLen = -1;
+          try {
+            asyncLen = (await navigator.clipboard.readText()).length;
+          } catch {
+            // Async clipboard read unavailable/denied — logged as -1 so we
+            // know the comparison couldn't run rather than that it matched.
+          }
+          const tag = asyncLen >= 0 && asyncLen !== syncLen ? " MISMATCH" : "";
+          logToFile(
+            asyncLen >= 0 && asyncLen !== syncLen ? "warn" : "info",
+            `paste#${seq} session=${sessionId} clipboardData=${syncLen} ` +
+              `asyncClipboard=${asyncLen}${tag}`,
+          );
+        })();
+      };
+      container.addEventListener("paste", onPasteInstrument, true);
+      cleanupFns.push(() =>
+        container.removeEventListener("paste", onPasteInstrument, true),
+      );
 
       // WebGL renderer — paints the whole frame in a single rAF, so even
       // non-DEC-2026 redraws (legacy codex, edge-case repaints) don't
@@ -605,10 +645,27 @@ export default function Terminal({
           return;
         }
         const enc = new TextEncoder();
+        const bytes = enc.encode(data);
+        // Send-side half of the paste instrumentation: a bracketed paste
+        // arrives as a single onData wrapped in \x1b[200~ … \x1b[201~. Log the
+        // inner length so app.log shows, per paste, what the clipboard read
+        // yielded versus what we actually forwarded to the daemon. Equal inner
+        // and clipboardData lengths with a dropped result would exonerate the
+        // frontend send; a short inner would localize the loss to xterm.
+        if (data.startsWith("\x1b[200~")) {
+          const hasEnd = data.endsWith("\x1b[201~");
+          const innerChars = data.length - 6 - (hasEnd ? 6 : 0);
+          logToFile(
+            "info",
+            `paste#${pasteSeqRef.current} session=${sessionId} ` +
+              `onDataChars=${data.length} innerChars=${innerChars} ` +
+              `sentBytes=${bytes.length} bracketedEnd=${hasEnd}`,
+          );
+        }
         client.send({
           type: "send_input",
           session_id: sessionId,
-          data_b64: bytesToBase64(enc.encode(data)),
+          data_b64: bytesToBase64(bytes),
         });
       });
 

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { join, resolve } from "node:path";
@@ -81,7 +82,7 @@ describe("terminal paste", function () {
     }
   });
 
-  it("pastes the full clipboard text with Ctrl+V", async function () {
+  it("pastes the full clipboard text byte-for-byte with Ctrl+V", async function () {
     expect(ws, "ws").to.not.be.null;
     expect(fixtureRepo, "fixtureRepo").to.not.be.null;
     if (!ws || !fixtureRepo) throw new Error("setup failed");
@@ -95,19 +96,27 @@ describe("terminal paste", function () {
     ], SESSION_OUTPUT_TIMEOUT);
     await enableBracketedPasteMode(spawnedSessionId);
 
+    // Single line, no newline: the payload survives bracketed-paste line-ending
+    // normalization unchanged, so the checksum the shim reports must equal the
+    // checksum of exactly what we put on the clipboard. A dropped middle — the
+    // reported bug — changes both the byte count and the sha, which the old
+    // "does BEGIN and END appear?" assertion could never detect.
     const payload =
-      `RT_PASTE_BEGIN_${"0123456789abcdef".repeat(8192)}_RT_PASTE_END\n`;
+      `RT_PASTE_BEGIN_${"0123456789abcdef".repeat(8192)}_RT_PASTE_END`;
+    const expectedBytes = Buffer.byteLength(payload, "utf8");
+    const expectedSha = createHash("sha256").update(payload, "utf8")
+      .digest("hex");
+
     await setClipboardText(payload);
     await focusTerminal(spawnedSessionId);
     await pressCtrlV();
 
-    const text = await waitForBufferMarkers(
+    const result = await waitForPasteResult(
       spawnedSessionId,
-      ["RT_PASTE_BEGIN", "RT_PASTE_END"],
       SESSION_OUTPUT_TIMEOUT,
     );
-    expect(text).to.include("RT_PASTE_BEGIN");
-    expect(text).to.include("RT_PASTE_END");
+    expect(result.bytes, "received byte count").to.equal(expectedBytes);
+    expect(result.sha, "received payload sha256").to.equal(expectedSha);
   });
 });
 
@@ -146,10 +155,11 @@ async function spawnFakeClaude(
     mode: "interactive",
     initial_prompt: null,
     dangerously_skip_permissions: false,
-    agent: "claude",
+    // SpawnRequest carries per-agent options under `agent_options` (tagged by
+    // `kind`); the old flat agent/permission_mode/codex_sandbox fields no
+    // longer deserialize and the daemon rejects the whole spawn_session.
+    agent_options: { kind: "claude", permission_mode: null },
     model: null,
-    permission_mode: null,
-    codex_sandbox: null,
     extra_env: [],
     prompt_injector: null,
   });
@@ -256,6 +266,29 @@ async function waitForBufferMarkers(
   throw new Error(
     `xterm buffer for ${sessionId} never contained ${markers.join(", ")} ` +
       `within ${timeoutMs}ms.\nLast seen:\n${lastSeen.slice(-1_000)}`,
+  );
+}
+
+async function waitForPasteResult(
+  sessionId: string,
+  timeoutMs: number,
+): Promise<{ bytes: number; sha: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeen = "";
+  while (Date.now() < deadline) {
+    const text = await readTerminalBuffer(sessionId);
+    lastSeen = text;
+    // The shim prints one short, unwrapped line — reliably rendered even
+    // though the pasted payload itself is collapsed by bracketed-paste mode.
+    const m = text.match(/RT_PASTE_RESULT bytes=(\d+) sha=([0-9a-f]{64})/);
+    if (m && m[1] !== undefined && m[2] !== undefined) {
+      return { bytes: Number(m[1]), sha: m[2] };
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `xterm buffer for ${sessionId} never reported RT_PASTE_RESULT within ` +
+      `${timeoutMs}ms.\nLast seen:\n${lastSeen.slice(-1_000)}`,
   );
 }
 

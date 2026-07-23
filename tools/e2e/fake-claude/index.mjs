@@ -9,12 +9,17 @@
  * Behavior:
  *   - Prints a stable banner the smoke test asserts on.
  *   - Echoes lines from stdin back so input from the harness is observable.
+ *   - Treats a bracketed paste (\x1b[200~ … \x1b[201~) as one opaque payload
+ *     and, on the closing marker, reports its exact byte count + sha256 as
+ *     "RT_PASTE_RESULT bytes=<n> sha=<hex>" for byte-fidelity assertions.
  *   - Emits an OSC window-title update for "/rename <title>".
  *   - Emits deterministic streaming output for "/stream".
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
  */
+import { createHash } from "node:crypto";
+
 const READY_BANNER = "[fake-claude] ready";
 const PROMPT = "fake-claude> ";
 
@@ -41,18 +46,86 @@ if (flags.prompt !== null) {
 }
 process.stdout.write(PROMPT);
 
+const PASTE_START = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+
 let buffer = "";
+let inPaste = false;
+let pasteBuf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
-  let lineBreak;
-  while ((lineBreak = findLineBreak(buffer)) !== -1) {
-    const line = buffer.slice(0, lineBreak);
-    buffer = buffer.slice(lineBreak + lineBreakLength(buffer, lineBreak));
-    handleLine(line);
-  }
+  pump();
 });
 process.stdin.on("end", () => process.exit(0));
+
+/**
+ * Drain `buffer`, alternating between line-mode (existing slash commands and
+ * echo) and paste-mode. A real agent TUI treats everything between the
+ * bracketed-paste markers as one opaque payload; the shim mirrors that and,
+ * on the closing marker, reports the exact byte count + sha256 of the payload
+ * it received. That lets the paste e2e assert byte-for-byte fidelity instead
+ * of only spot-checking the first and last markers. Marker-split-across-chunks
+ * is handled by holding a short tail back until more input arrives.
+ */
+function pump() {
+  for (;;) {
+    if (inPaste) {
+      const endIdx = buffer.indexOf(PASTE_END);
+      if (endIdx === -1) {
+        // Closing marker not here yet — accumulate all but a possible split
+        // marker tail, then wait for the next chunk.
+        const keep = PASTE_END.length - 1;
+        if (buffer.length > keep) {
+          pasteBuf += buffer.slice(0, buffer.length - keep);
+          buffer = buffer.slice(buffer.length - keep);
+        }
+        return;
+      }
+      pasteBuf += buffer.slice(0, endIdx);
+      buffer = buffer.slice(endIdx + PASTE_END.length);
+      inPaste = false;
+      emitPasteResult(pasteBuf);
+      pasteBuf = "";
+      continue;
+    }
+
+    const startIdx = buffer.indexOf(PASTE_START);
+    const lineBreak = findLineBreak(buffer);
+
+    // Flush any complete line that precedes the next paste start.
+    if (lineBreak !== -1 && (startIdx === -1 || lineBreak < startIdx)) {
+      const line = buffer.slice(0, lineBreak);
+      buffer = buffer.slice(lineBreak + lineBreakLength(buffer, lineBreak));
+      handleLine(line);
+      continue;
+    }
+
+    if (startIdx !== -1) {
+      // Enter paste mode; drop everything up to and including the marker.
+      buffer = buffer.slice(startIdx + PASTE_START.length);
+      inPaste = true;
+      continue;
+    }
+
+    // No complete line and no paste start — wait for more input. (A partial
+    // PASTE_START at the tail stays buffered until the next chunk completes
+    // it, since indexOf returned -1.)
+    return;
+  }
+}
+
+/**
+ * @param {string} text
+ */
+function emitPasteResult(text) {
+  const bytes = Buffer.byteLength(text, "utf8");
+  const sha = createHash("sha256").update(text, "utf8").digest("hex");
+  process.stdout.write(
+    `\r\n[fake-claude] RT_PASTE_RESULT bytes=${bytes} sha=${sha}\r\n`,
+  );
+  process.stdout.write(PROMPT);
+}
 
 const exitClean = () => process.exit(0);
 process.on("SIGTERM", exitClean);
