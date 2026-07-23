@@ -15,7 +15,6 @@ import {
 import type {
   DaemonMessage,
   RepoEntry,
-  SessionSnapshot,
   TabEntry,
 } from "../../../src/types.js";
 
@@ -150,8 +149,7 @@ describe("pane controls discoverability", function () {
     const modalClose = await browser.$(".modal-close");
     await modalClose.click();
 
-    const sessionsButton = await browser.$('[data-testid="activity-btn-sessions"]');
-    await sessionsButton.click();
+    await ensureSessionsSidebarOpen();
     const containerViewButton = await browser.$(
       '[data-testid="sidebar-view-container"]',
     );
@@ -200,6 +198,7 @@ describe("pane controls discoverability", function () {
     spawnedSessionId = null;
     registeredRepoId = null;
 
+    await ensureSessionsSidebarOpen();
     const addSession = await browser.$('[data-testid="sidebar-add-session"]');
     await browser.waitUntil(
       async () => (await addSession.getAttribute("disabled")) !== null,
@@ -238,12 +237,6 @@ function isRepos(
   return m.type === "repos";
 }
 
-function isSessionUpdated(
-  m: DaemonMessage,
-): m is DaemonMessage & { type: "session_updated"; session: SessionSnapshot } {
-  return m.type === "session_updated";
-}
-
 function isTabUpdated(
   m: DaemonMessage,
 ): m is DaemonMessage & { type: "tab_updated"; tab: TabEntry } {
@@ -254,13 +247,32 @@ function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
+/// Clicking an activity button that is already the active section toggles
+/// the sidebar collapsed (VS Code behavior — see App.tsx `sidebarCollapsed`).
+/// The active button reports `aria-expanded="true"` only when its panel is
+/// open, so click to activate/expand unless it already reads open.
+async function ensureSessionsSidebarOpen(): Promise<void> {
+  const sessionsButton = await browser.$('[data-testid="activity-btn-sessions"]');
+  await sessionsButton.waitForExist({ timeout: 5_000 });
+  if ((await sessionsButton.getAttribute("aria-expanded")) === "true") return;
+  await sessionsButton.click();
+  await browser.waitUntil(
+    async () => (await sessionsButton.getAttribute("aria-expanded")) === "true",
+    { timeout: 5_000, timeoutMsg: "sessions sidebar did not expand" },
+  );
+}
+
 async function assertNamedIconButton(selector: string): Promise<void> {
   const button = await browser.$(selector);
   await button.waitForExist({ timeout: 5_000 });
   const ariaLabel = await button.getAttribute("aria-label");
   const title = await button.getAttribute("title");
-  expect(ariaLabel, `${selector} aria-label`).to.be.a("string").and.not.empty;
-  expect(title, `${selector} title`).to.be.a("string").and.not.empty;
+  expect(ariaLabel, `${selector} aria-label`)
+    .to.be.a("string")
+    .with.length.greaterThan(0);
+  expect(title, `${selector} title`)
+    .to.be.a("string")
+    .with.length.greaterThan(0);
 
   const icon = await button.$("svg.rt-icon");
   await icon.waitForExist({ timeout: 5_000 });

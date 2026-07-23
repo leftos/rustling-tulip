@@ -292,8 +292,14 @@ describe("spawn defaults", function () {
 
     const dialog = await browser.$('[data-testid="spawn-dialog"]');
     await dialog.waitForExist({ timeout: 10_000 });
-    const target = await dialog.$('[data-testid="spawn-target-select"]');
-    expect(await target.getValue()).to.equal(`repo:${registeredRepoId}`);
+    // Edit-before-launch is a launch-last path, so the target is locked to
+    // the invoking repo and rendered as a read-only implied label (not an
+    // editable picker) — see SpawnDialog lockInitialTarget.
+    const target = await dialog.$('[data-testid="spawn-target-implied"]');
+    await target.waitForExist({ timeout: 5_000 });
+    expect(await target.getText()).to.include(
+      "rt-e2e-spawn-defaults-fixture",
+    );
     const claude = await dialog.$('[data-testid="spawn-agent-claude"]');
     expect(await claude.isSelected()).to.equal(true);
     const branch = await dialog.$('[data-testid="spawn-single-branch"]');

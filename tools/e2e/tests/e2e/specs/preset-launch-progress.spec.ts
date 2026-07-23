@@ -14,7 +14,13 @@ import type {
   DaemonMessage,
   PresetLaunchJobSnapshot,
   RepoEntry,
+  SessionSnapshot,
 } from "../../../src/types.js";
+
+type SessionUpdatedMsg = DaemonMessage & {
+  type: "session_updated";
+  session: SessionSnapshot;
+};
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -215,10 +221,11 @@ describe("preset launch progress", function () {
     expect(await browser.$('[data-testid="preset-launch-cancel-job"]').isEnabled())
       .to.equal(false);
 
-    const row = await browser.$(
-      `[data-testid=sidebar-session][data-session-id="${firstSessionId}"]`,
-    );
-    await row.waitForExist({ timeout: 10_000 });
+    // Re-query the sidebar row on every poll: a status/selection change
+    // re-renders the row and replaces its DOM node, so a cached element
+    // handle would go stale ("element wasn't found") mid-wait.
+    const rowSelector = `[data-testid=sidebar-session][data-session-id="${firstSessionId}"]`;
+    await (await browser.$(rowSelector)).waitForExist({ timeout: 10_000 });
     const cleanup = await browser.$('[data-testid="preset-launch-cleanup"]');
     await cleanup.waitForExist({ timeout: 5_000 });
     await browser.saveScreenshot(
@@ -226,14 +233,43 @@ describe("preset launch progress", function () {
     );
     await browser.$('[data-testid="preset-launch-select-created"]').click();
     await browser.waitUntil(
-      async () => ((await row.getAttribute("class")) ?? "").includes("selected"),
+      async () =>
+        ((await (await browser.$(rowSelector)).getAttribute("class")) ?? "").includes(
+          "selected",
+        ),
       { timeout: 5_000, timeoutMsg: "created session row was not selected" },
     );
-    await browser.$('[data-testid="preset-launch-stop-created"]').click();
-    await browser.waitUntil(
-      async () => (await row.getAttribute("data-session-status")) === "stopped",
-      { timeout: 30_000, timeoutMsg: "created session did not stop" },
+    // Assert the stop against the daemon's authoritative session state, not
+    // the sidebar row: "Stop all from this preset" should keep the record and
+    // flip it to "stopped" (the dialog's own copy says the records stay
+    // visible). Watching the side-channel also tells us definitively whether
+    // the record is instead being removed.
+    let removedAfterStop = false;
+    const unsubRemoved = ws.onMessage((msg) => {
+      if (
+        msg.type === "session_removed" &&
+        (msg as { session_id?: string }).session_id === firstSessionId
+      ) {
+        removedAfterStop = true;
+      }
+    });
+    const stopped = ws.waitFor(
+      (msg): msg is SessionUpdatedMsg =>
+        msg.type === "session_updated" &&
+        (msg as SessionUpdatedMsg).session.id === firstSessionId &&
+        (msg as SessionUpdatedMsg).session.status === "stopped",
+      { timeoutMs: 30_000 },
     );
+    await browser.$('[data-testid="preset-launch-stop-created"]').click();
+    try {
+      await stopped;
+    } finally {
+      unsubRemoved();
+    }
+    expect(
+      removedAfterStop,
+      "stopped preset session record should stay in the registry",
+    ).to.equal(false);
     unsubscribeJobs();
   });
 

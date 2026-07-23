@@ -292,7 +292,7 @@ describe("undo shelf", function () {
     await restoredPane.waitForExist({ timeout: 10_000 });
   });
 
-  it("removes a new session binding from an empty pane", async function () {
+  it("binds a new session into an empty pane via double-click", async function () {
     if (!ws) {
       throw new Error("setup failed");
     }
@@ -326,33 +326,28 @@ describe("undo shelf", function () {
         tabContainsSession(msg.tab, session.id),
       { timeoutMs: 5_000 },
     );
-    await row.$(".tree-label").click();
+    // Binding an unbound session into the focused empty pane is a
+    // double-click gesture — single left-click on an unbound row is a
+    // deliberate no-op (see App.tsx onSelectSession). Binding is intentionally
+    // not undoable (the "Bound session" undo entry was dropped in 20d92bb when
+    // the gesture was reworked), so there is no undo-shelf entry to assert.
+    await row.$(".tree-label").doubleClick();
     await bound;
 
-    const shelf = await browser.$('[data-testid="undo-shelf"]');
-    await shelf.waitForExist({ timeout: 5_000 });
-    expect(await shelf.getText()).to.include("Bound session");
-    await browser.saveScreenshot(
-      join(repoRoot, ".tmp", "e2e", "undo-bind-session-shelf.png"),
-    );
-
-    const unbound = ws.waitFor(
-      (msg): msg is TabUpdatedMessage =>
-        isTabUpdated(msg) &&
-        msg.tab.id === tab.id &&
-        !tabContainsSession(msg.tab, session.id),
-      { timeoutMs: 5_000 },
-    );
-    await browser.$('[data-testid="undo-action"]').click();
-    await unbound;
-
+    // The row re-renders on binding, replacing its DOM node — re-query on each
+    // poll so a cached handle doesn't go stale.
+    const rowSel = `[data-testid="sidebar-session"][data-session-id="${session.id}"]`;
     await browser.waitUntil(
       async () =>
-        (await row.getAttribute("data-tab-binding-count")) === "0",
+        (await (await browser.$(rowSel)).getAttribute("data-tab-binding-count")) ===
+        "1",
       {
         timeout: 5_000,
-        timeoutMsg: "session remained bound after undo",
+        timeoutMsg: "session did not bind into the empty pane",
       },
+    );
+    await browser.saveScreenshot(
+      join(repoRoot, ".tmp", "e2e", "undo-bind-session.png"),
     );
   });
 });

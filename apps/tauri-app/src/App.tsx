@@ -458,6 +458,13 @@ export default function App() {
   // cached. A window and its pop-outs read the same persisted id, so they
   // share one layout.
   const clientIdentityRef = useRef<ClientIdentity | null>(null);
+  // Latch true once this client has seen a non-empty tab / session snapshot.
+  // The pop-out close effects use these to tell the initial pre-hydration
+  // empty state (don't close) apart from a genuine post-hydration empty state
+  // after the last tab/session was removed (do close, instead of orphaning
+  // the window on a "Pane not found" placeholder).
+  const tabsHydratedRef = useRef(false);
+  const sessionsHydratedRef = useRef(false);
   // The last spawn_session request sent, stashed so a `checkout_confirm_required`
   // reply can resend it verbatim with a chosen `checkout_strategy`.
   const lastSpawnReqRef = useRef<Extract<
@@ -1694,7 +1701,8 @@ export default function App() {
   // session (e.g. tab closed, pane closed, or the session was discarded).
   useEffect(() => {
     if (!popoutPaneId) return;
-    if (state.tabs.length === 0) return; // not yet hydrated
+    if (state.tabs.length > 0) tabsHydratedRef.current = true;
+    if (!tabsHydratedRef.current) return; // not yet hydrated
     const binding = findPaneBinding(state.tabs, popoutPaneId);
     if (binding && binding.session_id !== null) return;
     clearPanePoppedOut(popoutPaneId);
@@ -1705,7 +1713,8 @@ export default function App() {
   // (e.g. user closed the tab from the main window).
   useEffect(() => {
     if (!popoutTabId) return;
-    if (state.tabs.length === 0) return; // not yet hydrated
+    if (state.tabs.length > 0) tabsHydratedRef.current = true;
+    if (!tabsHydratedRef.current) return; // not yet hydrated
     if (state.tabs.some((t) => t.id === popoutTabId)) return;
     void getCurrentWindow().close();
   }, [state.tabs]);
@@ -1715,7 +1724,8 @@ export default function App() {
   // pop-out can show the same restart/remove surface as an in-grid pane.
   useEffect(() => {
     if (!popoutSessionId) return;
-    if (state.sessions.length === 0) return; // not yet hydrated
+    if (state.sessions.length > 0) sessionsHydratedRef.current = true;
+    if (!sessionsHydratedRef.current) return; // not yet hydrated
     if (state.sessions.some((s) => s.id === popoutSessionId)) return;
     void getCurrentWindow().close();
   }, [state.sessions]);

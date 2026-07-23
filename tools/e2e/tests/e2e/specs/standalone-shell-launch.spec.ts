@@ -422,12 +422,22 @@ async function waitForBufferText(
       const term = w.__rt_terms && w.__rt_terms.get(${JSON.stringify(sessionId)});
       if (!term) return "";
       const buf = term.buffer.active;
-      const lines = [];
+      // Join wrapped continuation rows without a separator so a prompt line
+      // that soft-wraps (e.g. a long cwd path in a narrow pane) stays a
+      // single contiguous logical line — otherwise a needle split across the
+      // wrap boundary would never match.
+      let text = "";
       for (let i = 0; i < buf.length; i++) {
         const line = buf.getLine(i);
-        if (line) lines.push(line.translateToString(true));
+        if (!line) continue;
+        const str = line.translateToString(true);
+        if (i > 0 && line.isWrapped) {
+          text += str;
+        } else {
+          text += (text.length > 0 ? "\\n" : "") + str;
+        }
       }
-      return lines.join("\\n");
+      return text;
       `,
     )) as unknown as string;
     lastSeen = text;

@@ -150,9 +150,8 @@ export async function openSessionPane(sessionId: string): Promise<void> {
   const paneSelector = `[data-testid=session-pane][data-session-id="${sessionId}"]`;
   if (await (await browser.$(paneSelector)).isExisting()) return;
 
-  const row = await browser.$(
-    `[data-testid=sidebar-session][data-session-id="${sessionId}"]`,
-  );
+  const rowSelector = `[data-testid=sidebar-session][data-session-id="${sessionId}"]`;
+  const row = await browser.$(rowSelector);
   await row.waitForExist({ timeout: 10_000 });
   await row.click({ button: "right" });
 
@@ -162,5 +161,27 @@ export async function openSessionPane(sessionId: string): Promise<void> {
   await openInNewTab.waitForExist({ timeout: 5_000 });
   await openInNewTab.click();
 
-  await (await browser.$(paneSelector)).waitForExist({ timeout: 10_000 });
+  // "Open in new tab" only auto-activates the new tab when no tab was already
+  // active (see App.tsx `pendingTabActivate`). When another tab is active the
+  // new tab stays in the background and its pane never mounts, so activate it
+  // via its tab-bar pill — the session row's tab-binding chip carries the id.
+  const boundPillSelector = `${rowSelector} [data-testid=session-tab-pill]`;
+  await browser.waitUntil(
+    async () => {
+      if (await (await browser.$(paneSelector)).isExisting()) return true;
+      const pill = await browser.$(boundPillSelector);
+      if (!(await pill.isExisting())) return false;
+      const tabId = await pill.getAttribute("data-tab-id");
+      if (!tabId) return false;
+      const tabPill = await browser.$(
+        `[data-testid=tab-pill][data-tab-id="${tabId}"]`,
+      );
+      if (await tabPill.isExisting()) await tabPill.click();
+      return false;
+    },
+    {
+      timeout: 15_000,
+      timeoutMsg: `session ${sessionId} pane did not mount after open-in-new-tab`,
+    },
+  );
 }

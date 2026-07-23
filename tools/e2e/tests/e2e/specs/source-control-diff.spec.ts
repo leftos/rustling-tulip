@@ -31,7 +31,6 @@ import {
 import type {
   DaemonMessage,
   RepoEntry,
-  SessionSnapshot,
 } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
@@ -127,17 +126,29 @@ describe("source-control sidebar diff tabs", function () {
     await scBtn.click();
     const sc = await browser.$("[data-testid=source-control-sidebar]");
     await sc.waitForExist({ timeout: 5_000 });
-    const activeRepo = await browser.$("[data-testid=source-control-active-repo]");
+    // A focused single-repo session puts the sidebar in session-scoped mode:
+    // the header shows the session label (source-control-active-session) with
+    // the changed repo's files below. The repo-scoped source-control-active-repo
+    // header only renders when no session pane is focused. Re-query on each poll
+    // — the sidebar re-renders as it follows the active pane. Wait for the
+    // header to follow the fixture session and its README change to load (the
+    // decoy repo is clean, so a README.md change row proves it's the fixture).
     await browser.waitUntil(
       async () => {
-        const text = await activeRepo.getText();
-        return text.includes("rt-e2e-scdiff");
+        const activeSession = await browser.$(
+          "[data-testid=source-control-active-session]",
+        );
+        if (!(await activeSession.isExisting())) return false;
+        return (await activeSession.getText()).includes("sc-diff");
       },
       {
-        timeout: 5_000,
-        timeoutMsg: "source-control sidebar never followed fixture repo",
+        timeout: 15_000,
+        timeoutMsg: "source-control sidebar never followed fixture session",
       },
     );
+    await browser
+      .$(`[data-testid=source-control-changes-row][data-file-path="README.md"]`)
+      .waitForExist({ timeout: 10_000 });
   });
 
   after(async function () {

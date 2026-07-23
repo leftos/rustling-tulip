@@ -229,11 +229,50 @@ describe("session appearance customization", function () {
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
     await dismissLayoutChooser(APP_BOOT_TIMEOUT);
     await waitForAppDaemonConnection();
-    await waitForAppearance(spawnedSessionId, {
-      accent: CUSTOM_ACCENT_FRAME,
-      background: CUSTOM_BACKGROUND,
-      frame: CUSTOM_ACCENT_FRAME,
-    });
+
+    // The pre-reload assertions above already covered pane-level rendering
+    // (accent + background + frame on the live pane). After reload this
+    // session's pane lives in a non-active tab, and the app restores the first
+    // tab as active, so the pane isn't in the DOM to inspect. Verify the
+    // appearance *survived the reload* via signals that don't depend on which
+    // tab is active:
+    //   - the sidebar row re-applies the custom accent (the app re-fetched and
+    //     re-rendered the session's appearance), and
+    //   - the daemon's session snapshot still carries the full appearance
+    //     (accent + background + frame), so nothing was dropped on reconnect.
+    const rowSel = sidebarSelector(spawnedSessionId);
+    await browser.waitUntil(
+      async () => {
+        const row = await browser.$(rowSel);
+        return (
+          (await row.isExisting()) &&
+          (await row.getAttribute("data-session-color")) === CUSTOM_ACCENT_FRAME
+        );
+      },
+      {
+        timeout: 15_000,
+        timeoutMsg: "sidebar row did not re-apply the custom accent after reload",
+      },
+    );
+
+    const snapshot = ws.waitFor(
+      (msg): msg is DaemonMessage & {
+        type: "sessions";
+        sessions: SessionSnapshot[];
+      } => msg.type === "sessions",
+      { timeoutMs: 10_000 },
+    );
+    ws.send({ type: "list_sessions" });
+    const restored = (await snapshot).sessions.find(
+      (s) => s.id === spawnedSessionId,
+    );
+    expect(restored?.appearance?.accent_color).to.equal(CUSTOM_ACCENT_FRAME);
+    expect(restored?.appearance?.terminal_background_color).to.equal(
+      CUSTOM_BACKGROUND,
+    );
+    expect(restored?.appearance?.terminal_frame_color).to.equal(
+      CUSTOM_ACCENT_FRAME,
+    );
 
     await browser.saveScreenshot(
       join(repoRoot, ".tmp", "e2e", "session-appearance-custom-reload.png"),
