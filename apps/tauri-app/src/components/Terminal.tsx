@@ -403,7 +403,19 @@ export default function Terminal({
           const chosen = nativeText ?? syncText;
           const stopped =
             statusRef.current === "stopped" || statusRef.current === "error";
-          if (chosen.length > 0 && !stopped) {
+          const injected = chosen.length > 0 && !stopped;
+          // Inject-site instrumentation: records what we handed to
+          // `term.paste()` (or why we skipped it). Pairs with the `onData`
+          // send-side line below — if `chosenChars` here matches `innerChars`
+          // there, xterm forwarded the paste intact and any loss is downstream
+          // (daemon → tracer → ConPTY → agent).
+          logToFile(
+            "info",
+            `paste#${seq} session=${sessionId} injecting chosenChars=${chosen.length} ` +
+              `source=${nativeText === null ? "webview-sync" : "native"} ` +
+              `status=${statusRef.current} injected=${injected}`,
+          );
+          if (injected) {
             term.paste(chosen);
           }
           // Comparison logging (does not gate the paste above).
@@ -678,20 +690,29 @@ export default function Terminal({
         }
         const enc = new TextEncoder();
         const bytes = enc.encode(data);
-        // Send-side half of the paste instrumentation: a bracketed paste
-        // arrives as a single onData wrapped in \x1b[200~ … \x1b[201~. Log the
-        // inner length so app.log shows, per paste, what the clipboard read
-        // yielded versus what we actually forwarded to the daemon. Equal inner
-        // and clipboardData lengths with a dropped result would exonerate the
-        // frontend send; a short inner would localize the loss to xterm.
-        if (data.startsWith("\x1b[200~")) {
+        // Send-side half of the paste instrumentation. A bracketed paste
+        // arrives as a single onData wrapped in \x1b[200~ … \x1b[201~; a
+        // non-bracketed paste (or one the app didn't request bracketing for)
+        // arrives raw. We log BOTH cases — gating on the \x1b[200~ prefix (as
+        // this used to) means large pastes that never got bracketed produced
+        // no send-side line at all, leaving the loss unlocalized. Log the inner
+        // length so app.log shows, per paste, what the clipboard read yielded
+        // versus what we actually forwarded to the daemon. Equal inner and
+        // chosenChars (from the inject-site line) with a dropped result would
+        // exonerate the frontend send; a short inner would localize the loss to
+        // xterm. Heuristic: treat any onData larger than a single keystroke as a
+        // paste candidate so we still catch unbracketed pastes.
+        const bracketed = data.startsWith("\x1b[200~");
+        if (bracketed || bytes.length > 4) {
           const hasEnd = data.endsWith("\x1b[201~");
-          const innerChars = data.length - 6 - (hasEnd ? 6 : 0);
+          const innerChars =
+            data.length - (bracketed ? 6 : 0) - (hasEnd ? 6 : 0);
           logToFile(
             "info",
             `paste#${pasteSeqRef.current} session=${sessionId} ` +
               `onDataChars=${data.length} innerChars=${innerChars} ` +
-              `sentBytes=${bytes.length} bracketedEnd=${hasEnd}`,
+              `sentBytes=${bytes.length} bracketed=${bracketed} ` +
+              `bracketedEnd=${hasEnd}`,
           );
         }
         client.send({

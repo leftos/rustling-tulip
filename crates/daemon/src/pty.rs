@@ -71,10 +71,26 @@ impl PtyHandle {
     }
 
     pub fn write_input(&self, data: Vec<u8>) {
-        if data.len() <= MAX_PTY_INPUT_CHUNK_BYTES {
+        // Paste-fidelity instrumentation (pairs with the frontend's app.log
+        // `paste#N ... sentBytes=` line). `chunks` records how many tracer Input
+        // frames this write was split into. Kept at `debug` now that the send
+        // path is proven byte-exact end to end and the ConPTY-overrun loss is
+        // paced against in the tracer writer thread (see supervisor.rs); the
+        // trail stays available for re-diagnosis without flooding daemon.log.
+        let total = data.len();
+        if total <= MAX_PTY_INPUT_CHUNK_BYTES {
+            if total > 16 {
+                debug!(bytes = total, chunks = 1, "write_input paste-sized");
+            }
             let _ = self.input_tx.send(data);
             return;
         }
+        let chunk_count = total.div_ceil(MAX_PTY_INPUT_CHUNK_BYTES);
+        debug!(
+            bytes = total,
+            chunks = chunk_count,
+            "write_input paste-sized (split)"
+        );
         for chunk in data.chunks(MAX_PTY_INPUT_CHUNK_BYTES) {
             let _ = self.input_tx.send(chunk.to_vec());
         }

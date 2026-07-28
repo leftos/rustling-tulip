@@ -29,7 +29,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
 use tokio::sync::{broadcast, mpsc};
 use tracer_protocol::{
@@ -43,6 +43,20 @@ use tracing::{debug, error, info, warn};
 /// the reader backpressures (slowing the child) rather than letting memory
 /// grow unbounded.
 const PIPE_OUTPUT_CHANNEL_CAPACITY: usize = 64;
+
+/// Paste pacing (input path). Windows `ConPTY` translates input-pipe bytes into
+/// console `INPUT_RECORD`s in the child's console input buffer, and that buffer
+/// is bounded. A large paste shoved at the master in one fast burst overruns it
+/// and `ConPTY` silently drops records in the middle ("top and bottom present,
+/// middle gone"). Windows Terminal works around the same limitation by pacing
+/// its paste feed; we do the same. Any single write larger than
+/// `PACING_CHUNK_BYTES` is sub-chunked and each sub-chunk is followed by a short
+/// sleep so the child can drain between writes. Writes at or below the threshold
+/// (ordinary keystrokes, control sequences) go through in one shot with no sleep
+/// so normal typing stays instant. These live here, at the deepest point of the
+/// send path, so the pacing holds regardless of how the daemon frames input.
+const PACING_CHUNK_BYTES: usize = 1024;
+const PACING_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -258,11 +272,33 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         debug!("supervisor: PTY writer thread started");
         let mut writer = writer;
         while let Some(bytes) = block_on_recv(&mut pty_input_rx) {
-            if let Err(err) = std::io::Write::write_all(&mut writer, &bytes) {
+            // Deepest point in the send path: the actual write onto the ConPTY
+            // master. Large writes are paced (sub-chunked + slept between
+            // sub-chunks) to avoid overrunning ConPTY's console input buffer;
+            // see `PACING_CHUNK_BYTES` / `PACING_DELAY`. `write_all` loops until
+            // every byte is accepted onto the pipe, so a byte count that reaches
+            // here intact but still shows loss downstream would implicate ConPTY
+            // itself. Paste-sized writes only (kept at debug — the pacing fix is
+            // in place, but the trail stays available for re-diagnosis).
+            if bytes.len() > 16 {
+                debug!(bytes = bytes.len(), "supervisor: writing to ConPTY master");
+            }
+            let paced = bytes.len() > PACING_CHUNK_BYTES;
+            let mut write_err = None;
+            for sub in bytes.chunks(PACING_CHUNK_BYTES) {
+                if let Err(err) = std::io::Write::write_all(&mut writer, sub) {
+                    write_err = Some(err);
+                    break;
+                }
+                let _ = std::io::Write::flush(&mut writer);
+                if paced {
+                    std::thread::sleep(PACING_DELAY);
+                }
+            }
+            if let Some(err) = write_err {
                 warn!(?err, "supervisor: PTY writer error; exiting");
                 break;
             }
-            let _ = std::io::Write::flush(&mut writer);
         }
     });
     // Detached; exits when input_tx is dropped.
@@ -670,6 +706,16 @@ where
                 InboundTracerRequest::Known(TracerRequest::Input { data_b64 }) => {
                     match B64.decode(&data_b64) {
                         Ok(bytes) => {
+                            // Paste-fidelity instrumentation: log paste-sized
+                            // Input frames as they arrive off the daemon pipe,
+                            // before they hit the ConPTY writer thread. Pairs
+                            // with the "writing to ConPTY master" line so a byte
+                            // count that arrives here but shrinks on the write
+                            // isolates loss to the ConPTY write itself. Kept at
+                            // debug now that the send path is proven intact.
+                            if bytes.len() > 16 {
+                                debug!(bytes = bytes.len(), "supervisor: Input frame received");
+                            }
                             let _ = pty_input_tx.send(bytes);
                         }
                         Err(err) => warn!(?err, "supervisor: bad base64 in Input"),
