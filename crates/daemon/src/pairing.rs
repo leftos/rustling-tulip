@@ -11,6 +11,7 @@
 //! host must generate a new code). With a six-digit space, a five-attempt cap,
 //! and a three-minute TTL, the odds of a blind guess landing are negligible.
 
+use crate::secret::constant_time_eq;
 use protocol::PairingEndReason;
 use rand::Rng as _;
 use std::time::{Duration, Instant};
@@ -114,20 +115,6 @@ fn generate_code() -> String {
     let max = 10u32.pow(CODE_DIGITS);
     let n = rand::thread_rng().gen_range(0..max);
     format!("{n:0width$}", width = CODE_DIGITS as usize)
-}
-
-/// Length-aware, branch-on-length-only comparison. The attempt cap already
-/// makes timing analysis irrelevant; this just avoids a short-circuit `==` out
-/// of habit for secret comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 #[cfg(test)]

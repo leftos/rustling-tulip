@@ -103,7 +103,7 @@ The test at `git_watch.rs:1012` only asserts top-level paths.
 Fix: match every component against `EXCLUDED_DIRS`, and decide deliberately
 whether nested `.git` should route to `classify_git_internal`.
 
-### - [ ] 3. Non-constant-time auth-token comparison (Low)
+### - [x] 3. Non-constant-time auth-token comparison (Low)
 
 `server.rs:702` (`/shutdown`) and `server.rs:1142` (WS `Hello`) compare with
 `!=`; `pairing.rs:100` correctly uses `constant_time_eq`. Both call sites are

@@ -20,6 +20,7 @@ mod pty;
 mod pty_state;
 mod registry;
 mod scrollback;
+mod secret;
 mod server;
 mod session;
 mod state;

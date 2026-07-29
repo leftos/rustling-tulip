@@ -699,7 +699,7 @@ async fn shutdown_handler(State(hub): State<Hub>, headers: HeaderMap) -> Respons
     let Some(token) = presented else {
         return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
     };
-    if token != hub.auth_token {
+    if !crate::secret::constant_time_eq(token.as_bytes(), hub.auth_token.as_bytes()) {
         return (StatusCode::UNAUTHORIZED, "bad bearer token").into_response();
     }
 
@@ -1139,7 +1139,7 @@ async fn handshake(
     else {
         return Err(anyhow!("first message must be Hello"));
     };
-    if auth_token != hub.auth_token {
+    if !crate::secret::constant_time_eq(auth_token.as_bytes(), hub.auth_token.as_bytes()) {
         return Err(anyhow!("invalid auth token"));
     }
     let negotiated =
