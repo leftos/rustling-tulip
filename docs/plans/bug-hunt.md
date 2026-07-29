@@ -161,7 +161,7 @@ Fix direction (needs a call — it's a behavior change for preset authors):
 require `%VAR%` to look like an identifier before treating it as a reference, and
 either error or preserve verbatim on unset, matching the `{name}` policy.
 
-### - [ ] 6. Stopping a headless session hangs and never kills the child (High, confirmed)
+### - [x] 6. Stopping a headless session hangs and never kills the child (High, confirmed)
 
 `crates/daemon/src/headless.rs:136-142` (exit waiter) vs `:39-46` (`kill`).
 
