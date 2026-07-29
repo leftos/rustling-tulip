@@ -1579,8 +1579,20 @@ async fn dispatch(
                 })
                 .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
             let path = PathBuf::from(&repo_path);
-            let branches = git::list_branches(&path).await.unwrap_or_default();
-            let current = git::current_branch(&path).await.unwrap_or(None);
+            // A git failure here (repo moved, `git` off PATH, held index.lock)
+            // renders as an empty branch list, which is indistinguishable from
+            // a repo that genuinely has none. Degrading is right — the dialog
+            // still opens — but it must leave a trail.
+            let branches = git::list_branches(&path)
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(?err, %repo_id, path = %path.display(), "list_branches failed; reporting none");
+                    Vec::new()
+                });
+            let current = git::current_branch(&path).await.unwrap_or_else(|err| {
+                warn!(?err, %repo_id, path = %path.display(), "current_branch failed");
+                None
+            });
             let _ = out_tx.send(DaemonMessage::Branches {
                 repo_id,
                 branches,
@@ -1598,7 +1610,10 @@ async fn dispatch(
                 })
                 .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
             let path = PathBuf::from(&repo_path);
-            let raw = git::list_worktrees(&path).await.unwrap_or_default();
+            let raw = git::list_worktrees(&path).await.unwrap_or_else(|err| {
+                warn!(?err, %repo_id, path = %path.display(), "list_worktrees failed; reporting none");
+                Vec::new()
+            });
             // Mark worktrees currently in use by active (non-stopped, non-parked) sessions.
             let active_paths: std::collections::HashSet<String> = hub
                 .sessions

@@ -112,13 +112,18 @@ pub fn ensure_default_branch(
     detected: Option<String>,
 ) -> Option<String> {
     detected.as_ref()?;
-    let _ = state.mutate(|s| {
+    // Best-effort: the value is re-detected on the next call, so a failed
+    // persist isn't worth failing the caller over — but it means state.json
+    // could not be written, which is never silently acceptable.
+    if let Err(err) = state.mutate(|s| {
         if let Some(repo) = s.repos.iter_mut().find(|r| r.id == repo_id)
             && repo.default_branch.is_none()
         {
             repo.default_branch.clone_from(&detected);
         }
-    });
+    }) {
+        tracing::warn!(?err, %repo_id, "persisting detected default branch failed");
+    }
     detected
 }
 

@@ -347,7 +347,7 @@ undiscriminated shape that fix was written to remove.
 Fix: raise the client timeout above the daemon's, and return a discriminated
 result so `Terminal.tsx` can surface a timeout distinctly from empty history.
 
-### - [ ] 12. Silently swallowed errors — four outlier sites (Low)
+### - [x] 12. Silently swallowed errors — four outlier sites (Low)
 
 CLAUDE.md's rule is "never swallow exceptions silently — at minimum, log". Four
 sites break it, and each is an outlier against its own neighbours:
