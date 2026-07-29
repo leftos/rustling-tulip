@@ -25,6 +25,7 @@ mod session;
 mod state;
 mod sync;
 mod tabs;
+mod termstate;
 mod tracer_client;
 mod vscode;
 mod workspace;

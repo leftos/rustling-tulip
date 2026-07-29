@@ -6,6 +6,7 @@ use crate::paths::Dirs;
 use crate::pty::PtyHandle;
 use crate::scrollback;
 use crate::sync::{lock, read, write};
+use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
 use protocol::{
     Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMetrics, SessionMode,
@@ -370,6 +371,26 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
 /// watcher's `registry.update` finds the session record. The returned
 /// `snap_tx` should be patched onto the record's `scrollback_snapshot_req`
 /// field before calling `PendingInsert::publish`.
+/// Build the scrollback replay handed to a freshly-attaching client: the
+/// persisted history plus a leading bracketed-paste enable when the child had
+/// that mode on, so xterm's paste flag is correct even if the enable sequence
+/// was trimmed from the ring. Returns `(bytes, truncated)`; empty when `dirs`
+/// is `None` (no persistence owner).
+fn build_replay_snapshot(dirs: Option<&Dirs>, session_id: &str, bp_enabled: bool) -> (Vec<u8>, bool) {
+    let Some(dirs) = dirs else {
+        return (Vec::new(), false);
+    };
+    let (bytes, truncated) = scrollback::load(dirs, session_id);
+    let prefix = termstate::replay_prefix(bp_enabled);
+    if prefix.is_empty() {
+        return (bytes, truncated);
+    }
+    let mut prefixed = Vec::with_capacity(prefix.len() + bytes.len());
+    prefixed.extend_from_slice(prefix);
+    prefixed.extend_from_slice(&bytes);
+    (prefixed, truncated)
+}
+
 pub fn attach_lifecycle(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -386,6 +407,16 @@ pub fn attach_lifecycle(
         // receiver's `recv()` would return None on every poll — without the
         // guard the select! arm would spin.
         let mut snap_open = true;
+        // Sticky bracketed-paste (DEC 2004) state, seeded from disk so it
+        // survives across daemon restarts even when the scrollback ring has
+        // trimmed the child's original `\e[?2004h`. Re-asserted as a prefix on
+        // the replay snapshot below so a freshly-attached xterm's paste flag
+        // matches the child. See `termstate` for the full rationale.
+        let mut bp_tracker = BracketedPasteTracker::new(
+            dirs_for_task
+                .as_ref()
+                .is_some_and(|d| termstate::load(d, &session_for_task)),
+        );
         loop {
             tokio::select! {
                 msg = output.recv() => {
@@ -393,6 +424,9 @@ pub fn attach_lifecycle(
                         Ok(bytes) => {
                             if let Some(d) = &dirs_for_task {
                                 scrollback::append(d, &session_for_task, &bytes);
+                                if bp_tracker.observe(&bytes) {
+                                    termstate::save(d, &session_for_task, bp_tracker.enabled());
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -418,6 +452,13 @@ pub fn attach_lifecycle(
                                     Ok(bytes) => {
                                         if let Some(d) = &dirs_for_task {
                                             scrollback::append(d, &session_for_task, &bytes);
+                                            if bp_tracker.observe(&bytes) {
+                                                termstate::save(
+                                                    d,
+                                                    &session_for_task,
+                                                    bp_tracker.enabled(),
+                                                );
+                                            }
                                         }
                                     }
                                     Err(
@@ -433,11 +474,11 @@ pub fn attach_lifecycle(
                                     }
                                 }
                             }
-                            let (data, truncated) = if let Some(d) = &dirs_for_task {
-                                scrollback::load(d, &session_for_task)
-                            } else {
-                                (Vec::new(), false)
-                            };
+                            let (data, truncated) = build_replay_snapshot(
+                                dirs_for_task.as_ref(),
+                                &session_for_task,
+                                bp_tracker.enabled(),
+                            );
                             // `resubscribe` positions the new receiver at
                             // the current tail. With the drain above, the
                             // output receiver is also at the tail, so any
