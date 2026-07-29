@@ -1,0 +1,105 @@
+# Git hooks, run via prek (https://github.com/j178/prek).
+#
+#   prek install                  # one-time, installs the git shims
+#   prek run                      # run the pre-commit stage against staged files
+#   prek run --all-files          # run against the whole tree
+#   prek run --hook-stage pre-push --all-files
+#   prek auto-update --cooldown-days 7
+#
+# There is no CI in this repo, so these hooks are the only automated gates.
+# They are split by cost:
+#
+#   pre-commit — fast, file-scoped checks. Must stay well under a second or
+#                people start passing --no-verify, and a bypassed hook gates
+#                nothing.
+#   pre-push   — the real build gates (clippy, tests, typecheck). Slower, but
+#                they run per push rather than per commit, and this is the last
+#                point before code leaves the machine.
+#
+# Anything needing the network (`cargo deny check` wants the advisory DB) is
+# deliberately left out: a hook that fails on a plane is a hook that gets
+# uninstalled. Run `cargo deny check` by hand before releases.
+
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Rust and TS sources only. Markdown is excluded because two trailing
+      # spaces are a hard line break, and the plan docs rely on it.
+      - id: trailing-whitespace
+        types_or: [rust, ts, tsx, javascript, json, yaml, toml, css]
+      - id: end-of-file-fixer
+        types_or: [rust, ts, tsx, javascript, json, yaml, toml, css]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      # The daemon generates a TLS private key at runtime (lan-key.pem). It
+      # lives in the config dir, not the repo, but the cost of being wrong here
+      # is a leaked key in git history.
+      - id: detect-private-key
+      # Cargo.lock and pnpm-lock.yaml are legitimately large; nothing else
+      # should be.
+      - id: check-added-large-files
+        args: [--maxkb=512]
+        exclude: '^(Cargo\.lock|.*/pnpm-lock\.yaml)$'
+
+  - repo: local
+    hooks:
+      # Formatting is the one Rust check cheap enough for pre-commit.
+      # `--check` rather than a rewrite: a hook that edits files under you
+      # mid-commit is worse than one that tells you to run `cargo fmt`.
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (-D warnings)
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      # `pnpm --dir` instead of a `cd`, so the hook works the same from any
+      # shell on any platform.
+      - id: tsc
+        name: tsc --noEmit
+        entry: pnpm --dir apps/tauri-app typecheck
+        language: system
+        files: ^apps/tauri-app/(src/|.*\.json$|.*\.ts$)
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: vitest
+        name: vitest run
+        entry: pnpm --dir apps/tauri-app test
+        language: system
+        files: ^apps/tauri-app/src/
+        pass_filenames: false
+        stages: [pre-push]
+
+      # The TS mirrors of the Rust wire enums are hand-maintained with no
+      # codegen (see CLAUDE.md), so drift is silent until something
+      # deserialises wrong at runtime. Cheap enough to check on every push.
+      - id: protocol-mirror
+        name: protocol Rust/TS mirror in sync
+        entry: python3 scripts/check_protocol_mirror.py
+        language: system
+        files: ^(crates/protocol/src/lib\.rs|apps/tauri-app/src/(types|api)\.ts|apps/tauri-app/src/App\.tsx)$
+        pass_filenames: false
+        stages: [pre-push]

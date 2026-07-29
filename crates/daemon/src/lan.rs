@@ -336,8 +336,10 @@ mod tests {
         // since nothing else deletes the pair.
         let dirs = scratch_dirs("cert-truncated");
         let first = ensure_cert(&dirs).expect("generate cert").fingerprint;
-        std::fs::write(&dirs.lan_key_file, b"-----BEGIN PRIVATE KEY-----\ntrunc")
-            .expect("truncate key");
+        // Deliberately not a realistic PEM header: `from_pem_file` rejects this
+        // just as well, and a literal BEGIN-PRIVATE-KEY line in a source file
+        // trips the detect-private-key hook.
+        std::fs::write(&dirs.lan_key_file, b"not a usable key").expect("truncate key");
         let second = ensure_cert(&dirs)
             .expect("a corrupt key must regenerate, not error")
             .fingerprint;
