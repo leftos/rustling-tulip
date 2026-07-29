@@ -91,7 +91,9 @@ pub fn load(dirs: &Dirs) -> Option<LanConfig> {
 pub fn save(dirs: &Dirs, cfg: &LanConfig) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(cfg).context("serializing lan.json")?;
     let tmp = dirs.lan_config_file.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes).context("writing lan.json tmp")?;
+    // Carries the auth token — owner-only, applied to the tmp path so the
+    // rename lands an already-restricted file.
+    crate::secret::write_private(&tmp, &bytes).context("writing lan.json tmp")?;
     std::fs::rename(&tmp, &dirs.lan_config_file).context("renaming lan.json")?;
     Ok(())
 }
@@ -109,10 +111,29 @@ pub struct LanCert {
 /// fingerprint stays stable. Built on the `ring` provider explicitly so it
 /// works regardless of any process-default crypto provider.
 pub fn ensure_cert(dirs: &Dirs) -> anyhow::Result<LanCert> {
-    let (cert, key) = if dirs.lan_cert_file.exists() && dirs.lan_key_file.exists() {
-        load_persisted_cert(dirs)?
+    // An unreadable pair regenerates rather than propagating. The cert and key
+    // are written as two separate files, so a crash during the key write leaves
+    // both present with the key truncated — and propagating there would wedge
+    // the LAN listener permanently, since nothing else ever deletes them.
+    // Regenerating changes the fingerprint, so already-paired clients must pair
+    // again; that is recoverable, a permanently dead listener is not.
+    let persisted = if dirs.lan_cert_file.exists() && dirs.lan_key_file.exists() {
+        match load_persisted_cert(dirs) {
+            Ok(pair) => Some(pair),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "LAN cert/key unreadable; regenerating — paired clients must re-pair"
+                );
+                None
+            }
+        }
     } else {
-        generate_and_persist_cert(dirs)?
+        None
+    };
+    let (cert, key) = match persisted {
+        Some(pair) => pair,
+        None => generate_and_persist_cert(dirs)?,
     };
     let fingerprint = fingerprint_hex(&cert);
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -134,8 +155,9 @@ fn generate_and_persist_cert(
     let CertifiedKey { cert, signing_key } =
         generate_simple_self_signed(vec!["rustling-tulip-lan".to_string()])
             .context("generating self-signed LAN certificate")?;
+    // The certificate is public (clients pin its fingerprint); the key is not.
     std::fs::write(&dirs.lan_cert_file, cert.pem().as_bytes()).context("writing lan-cert.pem")?;
-    std::fs::write(&dirs.lan_key_file, signing_key.serialize_pem().as_bytes())
+    crate::secret::write_private(&dirs.lan_key_file, signing_key.serialize_pem().as_bytes())
         .context("writing lan-key.pem")?;
     let cert_der = cert.der().clone();
     let key_der: PrivateKeyDer<'static> =
@@ -303,6 +325,27 @@ mod tests {
         assert!(loaded.enabled);
         assert_eq!(loaded.port, 9001);
         assert_eq!(loaded.auth_token, "round-trip-token");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn truncated_key_regenerates_instead_of_wedging() {
+        // The cert and key are two separate writes, so a crash during the key
+        // write leaves both files present with the key unusable. Propagating
+        // that error would leave the LAN listener permanently unable to start,
+        // since nothing else deletes the pair.
+        let dirs = scratch_dirs("cert-truncated");
+        let first = ensure_cert(&dirs).expect("generate cert").fingerprint;
+        std::fs::write(&dirs.lan_key_file, b"-----BEGIN PRIVATE KEY-----\ntrunc")
+            .expect("truncate key");
+        let second = ensure_cert(&dirs)
+            .expect("a corrupt key must regenerate, not error")
+            .fingerprint;
+        assert_eq!(second.len(), 64);
+        assert_ne!(first, second, "regeneration mints a fresh identity");
+        // ...and the regenerated pair is itself reloadable.
+        let third = ensure_cert(&dirs).expect("reload regenerated cert").fingerprint;
+        assert_eq!(second, third);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

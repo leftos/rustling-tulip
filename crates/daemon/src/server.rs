@@ -670,7 +670,9 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
     let tmp = dirs
         .handshake_file
         .with_extension(format!("json.tmp.{pid}"));
-    std::fs::write(&tmp, &bytes).context("writing handshake tmp")?;
+    // Carries the auth token — owner-only, and written to the tmp path so the
+    // rename lands an already-restricted file.
+    crate::secret::write_private(&tmp, &bytes).context("writing handshake tmp")?;
     std::fs::rename(&tmp, &dirs.handshake_file).context("renaming handshake")?;
     Ok(())
 }

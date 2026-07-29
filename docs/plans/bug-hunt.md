@@ -209,7 +209,7 @@ Fix direction: stop holding the guard across `wait()`. The idiomatic shape is a
 (`oneshot`/`watch`), so `kill()` never contends for the child at all.
 `HeadlessHandle` already stores `pid`, so a pid-based kill is an alternative.
 
-### - [ ] 7. Secret-bearing files written with default permissions (Low today, blocks macOS)
+### - [x] 7. Secret-bearing files written with default permissions (Low today, blocks macOS)
 
 No `set_permissions` call exists anywhere in the daemon for secret files —
 `binary_cache.rs:175` is the only permission handling and it's about the
