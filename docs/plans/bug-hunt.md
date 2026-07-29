@@ -22,7 +22,7 @@ nothing is removed once written down, only ticked off or re-classified.
 
 ## Findings
 
-### - [ ] 1. `BracketedPasteTracker` drops carry context (High, confirmed)
+### - [x] 1. `BracketedPasteTracker` drops carry context (High, confirmed)
 
 `crates/daemon/src/termstate.rs:76-77`
 

@@ -30,9 +30,9 @@ const ENABLE: &[u8] = b"\x1b[?2004h";
 const DISABLE: &[u8] = b"\x1b[?2004l";
 /// Bytes carried between chunks so a mode sequence split across a chunk
 /// boundary is still matched. One less than the (equal) sequence length: a
-/// sequence fully contained in the previous chunk was already resolved there,
-/// so keeping `len - 1` bytes catches every boundary split without ever
-/// re-matching an already-counted sequence.
+/// full sequence can never fit inside the carry, so an already-resolved marker
+/// can't be re-counted, while every partial prefix of one still survives into
+/// the next scan window.
 const CARRYOVER: usize = ENABLE.len() - 1;
 
 fn state_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -43,8 +43,9 @@ fn state_path(dirs: &Dirs, session_id: &str) -> PathBuf {
 /// output chunks, tolerating a sequence split across a chunk boundary.
 pub struct BracketedPasteTracker {
     enabled: bool,
-    /// Tail (< one full sequence) of the previous chunk, prepended to the next
-    /// scan window so a boundary-split `\e[?2004h`/`l` is still detected.
+    /// Tail (< one full sequence) of the previous scan window, prepended to the
+    /// next one so a boundary-split `\e[?2004h`/`l` is still detected — however
+    /// many chunks it is spread across.
     carry: Vec<u8>,
 }
 
@@ -70,11 +71,14 @@ impl BracketedPasteTracker {
         let mut window = std::mem::take(&mut self.carry);
         window.extend_from_slice(chunk);
         let resolved = last_mode_marker(&window);
-        // Carry forward only the tail of *this chunk* (never the whole window),
-        // bounded to `CARRYOVER`, so a sequence already fully seen here can't be
-        // re-counted next call.
-        let tail_start = chunk.len().saturating_sub(CARRYOVER);
-        self.carry = chunk[tail_start..].to_vec();
+        // Carry the tail of the whole *window*, not of `chunk`. Taking it from
+        // the chunk drops the previous carry whenever a chunk is shorter than
+        // CARRYOVER, which loses the leading ESC of a marker split across three
+        // or more chunks (or arriving byte-at-a-time). Re-counting is still
+        // impossible: a marker is `ENABLE.len()` bytes and the carry holds one
+        // fewer, so no complete marker can survive inside it.
+        let tail_start = window.len().saturating_sub(CARRYOVER);
+        self.carry = window[tail_start..].to_vec();
         match resolved {
             Some(new_state) if new_state != self.enabled => {
                 self.enabled = new_state;
@@ -175,6 +179,36 @@ mod tests {
         assert!(!t.enabled());
         assert!(t.observe(b"04h trailing"));
         assert!(t.enabled());
+    }
+
+    #[test]
+    fn detects_sequence_split_across_three_chunks() {
+        // Regression: the carry used to be rebuilt from the chunk, so a chunk
+        // shorter than CARRYOVER discarded the previous carry and lost the
+        // leading ESC. PTY reads are not guaranteed to be large.
+        let mut t = BracketedPasteTracker::new(false);
+        assert!(!t.observe(b"\x1b"));
+        assert!(!t.observe(b"[?20"));
+        assert!(t.observe(b"04h"));
+        assert!(t.enabled());
+    }
+
+    #[test]
+    fn detects_sequence_arriving_byte_at_a_time() {
+        let mut t = BracketedPasteTracker::new(false);
+        let mut changed = false;
+        for b in ENABLE {
+            changed |= t.observe(&[*b]);
+        }
+        assert!(changed, "the enable should have been observed");
+        assert!(t.enabled());
+        // ...and the disable that follows it, also byte-at-a-time.
+        let mut changed = false;
+        for b in DISABLE {
+            changed |= t.observe(&[*b]);
+        }
+        assert!(changed, "the disable should have been observed");
+        assert!(!t.enabled());
     }
 
     #[test]
