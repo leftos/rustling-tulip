@@ -317,7 +317,7 @@ emits its own marks. Display-only.
 Fix: give `status` a third state for `exitCode === null` rather than folding it
 into `failure`.
 
-### - [ ] 11. Scrollback request gives up before the daemon does (Medium)
+### - [x] 11. Scrollback request gives up before the daemon does (Medium)
 
 `apps/tauri-app/src/api.ts:388` times out `loadScrollback` after **2 s**;
 `server.rs:3013` sets `SCROLLBACK_SNAPSHOT_TIMEOUT` to **5 s**. The frontend can

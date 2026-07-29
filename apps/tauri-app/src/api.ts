@@ -363,10 +363,28 @@ export function connectDaemon(
 }
 
 /**
- * Request the persisted scrollback for a session and resolve with the
- * decoded payload. Times out after 2 s if the daemon never answers (e.g.
- * because the session was already removed) — the terminal still attaches
- * after the promise resolves.
+ * How long to wait for a `Scrollback` reply. Must stay **above** the daemon's
+ * own `SCROLLBACK_SNAPSHOT_TIMEOUT` (5 s, `server.rs`): the daemon asks the
+ * session's lifecycle task for a snapshot and only falls back to a direct file
+ * read once that times out. Giving up first means we never see the daemon's
+ * fallback answer, and any reply landing in the gap arrives with no listener
+ * attached.
+ */
+const SCROLLBACK_TIMEOUT_MS = 8000;
+
+export type LoadScrollbackResult =
+  | { ok: true; data_b64: string; truncated: boolean }
+  | { ok: false; reason: "timeout" };
+
+/**
+ * Request the persisted scrollback for a session and resolve with the decoded
+ * payload.
+ *
+ * Returns a discriminated result rather than `… | null` so callers can tell
+ * "the daemon answered, there is no history" apart from "we never heard back" —
+ * the same distinction `listPresets` was fixed to make. Collapsing them meant a
+ * slow-but-healthy attach painted an empty terminal indistinguishable from a
+ * fresh session, with nothing logged.
  *
  * Listens on the `rt:scrollback` window event (dispatched by App.tsx's
  * message router) so this works from any component without piercing the
@@ -375,7 +393,7 @@ export function connectDaemon(
 export function loadScrollback(
   client: DaemonClient,
   sessionId: string,
-): Promise<{ data_b64: string; truncated: boolean } | null> {
+): Promise<LoadScrollbackResult> {
   return new Promise((resolve) => {
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
@@ -383,12 +401,16 @@ export function loadScrollback(
         return;
       }
       cleanup();
-      resolve({ data_b64: detail.data_b64, truncated: detail.truncated });
+      resolve({
+        ok: true,
+        data_b64: detail.data_b64,
+        truncated: detail.truncated,
+      });
     };
     const timer = window.setTimeout(() => {
       cleanup();
-      resolve(null);
-    }, 2000);
+      resolve({ ok: false, reason: "timeout" });
+    }, SCROLLBACK_TIMEOUT_MS);
     const cleanup = () => {
       window.removeEventListener("rt:scrollback", handler);
       window.clearTimeout(timer);

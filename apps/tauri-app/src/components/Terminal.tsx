@@ -656,7 +656,17 @@ export default function Terminal({
       void (async () => {
         const sb = await loadScrollback(client, sessionId);
         if (scrollbackCancelled) return;
-        if (sb && sb.data_b64.length > 0) {
+        if (!sb.ok) {
+          // Say so rather than painting a blank terminal that looks like a
+          // session with no history. Live output still flows below.
+          term.writeln(
+            "\x1b[33m[could not load earlier output — the daemon did not respond]\x1b[0m",
+          );
+          logToFile(
+            "warn",
+            `scrollback request for session=${sessionId} timed out`,
+          );
+        } else if (sb.data_b64.length > 0) {
           if (sb.truncated) {
             term.writeln("\x1b[33m[earlier output discarded]\x1b[0m");
           }
