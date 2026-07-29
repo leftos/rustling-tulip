@@ -65,7 +65,7 @@ Note: `osc_title.rs` solves the same cross-chunk problem correctly, with a
 persistent state machine. Worth considering whether `termstate` should follow
 that shape rather than the carry-window one.
 
-### - [ ] 2. `classify_event` only excludes top-level build dirs (High, confirmed)
+### - [x] 2. `classify_event` only excludes top-level build dirs (High, confirmed)
 
 `crates/daemon/src/git_watch.rs:150-157` — `EXCLUDED_DIRS.contains(&first)`
 tests only `comps.first()`, but both watchers register `RecursiveMode::Recursive`

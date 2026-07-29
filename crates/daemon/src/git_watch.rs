@@ -14,7 +14,9 @@
 //!   discarded; only paths that can actually change `git status` or `git
 //!   stash list` output produce a wakeup. Without this filter, anything
 //!   that ran `cargo build` or wrote to `node_modules/` would keep firing
-//!   refreshes forever.
+//!   refreshes forever. Both filters match at **any** depth, since the
+//!   watcher is recursive and a monorepo carries these directories inside
+//!   nested packages, not only at the repo root.
 //! - Each wakeup is summarised as [`RefreshFlags`] — separate `status` and
 //!   `stash` bits, so we only spawn `git stash list` when a stash ref
 //!   actually changed (the common case after a normal edit is `status`
@@ -60,11 +62,12 @@ use tracing::{debug, info, warn};
 /// feel still feels "live" when the user edits a file in their IDE.
 const DEBOUNCE_MS: u64 = 750;
 
-/// Directory names (relative to the repo root) whose contents are never
-/// relevant to `git status` and whose write traffic dwarfs everything
-/// else. Hard-coded rather than parsed from `.gitignore` because (a)
-/// parsing per-event is too expensive and (b) the well-known offenders
-/// are pretty stable across the ecosystem.
+/// Directory names whose contents are never relevant to `git status` and
+/// whose write traffic dwarfs everything else. Matched at **any** depth
+/// under the repo root, not just the top level — monorepos put these in
+/// nested package dirs. Hard-coded rather than parsed from `.gitignore`
+/// because (a) parsing per-event is too expensive and (b) the well-known
+/// offenders are pretty stable across the ecosystem.
 const EXCLUDED_DIRS: &[&str] = &[
     "target",
     "node_modules",
@@ -147,13 +150,27 @@ fn classify_event(repo_root: &Path, event_path: &Path) -> Option<RefreshFlags> {
             _ => None,
         })
         .collect();
-    let first = *comps.first()?;
+    let (_leaf, ancestors) = comps.split_last()?;
 
-    if first == ".git" {
-        return classify_git_internal(&comps[1..]);
-    }
-    if EXCLUDED_DIRS.contains(&first) {
+    // Excluded dirs are matched at *any* depth, not just the repo root: a pnpm
+    // workspace puts a `node_modules/` in every package dir, a sub-crate can
+    // carry its own `target/`, and a nested app has its own `dist/`. Matching
+    // only the first component let all of those spin `git status` forever,
+    // which is the exact failure this filter exists to prevent.
+    //
+    // Only ancestor components count, so a tracked *file* named `dist` or
+    // `build` still refreshes. The accepted cost is the same one the top-level
+    // check always had: a tracked directory that happens to be named `build` /
+    // `out` / `dist` won't drive a live refresh. Parsing `.gitignore` per event
+    // would fix that properly but is far too expensive here.
+    if ancestors.iter().any(|c| EXCLUDED_DIRS.contains(c)) {
         return None;
+    }
+    // Likewise `.git` at any depth — a submodule's `.git/objects/` churn is
+    // just as noisy as the top-level repo's. Checked after the excluded dirs so
+    // a git-sourced dependency vendored under `node_modules/` stays ignored.
+    if let Some(idx) = comps.iter().position(|c| *c == ".git") {
+        return classify_git_internal(&comps[idx + 1..]);
     }
     Some(RefreshFlags::STATUS)
 }
@@ -1017,6 +1034,64 @@ mod tests {
                 "expected {dir}/foo.o to be ignored"
             );
         }
+    }
+
+    #[test]
+    fn nested_build_dir_writes_are_ignored() {
+        // Regression: only the first path component was checked, so every
+        // nested build dir in a monorepo woke a `git status` per debounce
+        // window for as long as the build ran.
+        for path in [
+            vec!["apps", "tauri-app", "node_modules", "react", "index.js"],
+            vec!["apps", "tauri-app", "dist", "assets", "main.js"],
+            vec!["tools", "e2e", "node_modules", ".pnpm", "lock"],
+            vec!["crates", "daemon", "target", "debug", "x.o"],
+            vec!["services", "api", ".venv", "lib", "site.py"],
+        ] {
+            assert_eq!(
+                classify_event(&repo(), &p(&path)),
+                None,
+                "expected {} to be ignored",
+                path.join("/")
+            );
+        }
+    }
+
+    #[test]
+    fn nested_git_dir_is_classified_as_git_internal() {
+        // A submodule's object churn is as noisy as the top-level repo's.
+        assert_eq!(
+            classify_event(&repo(), &p(&["sub", ".git", "objects", "ab", "cdef"])),
+            None
+        );
+        assert_eq!(
+            classify_event(&repo(), &p(&["sub", ".git", "index"])),
+            Some(RefreshFlags::STATUS)
+        );
+    }
+
+    #[test]
+    fn a_git_repo_vendored_under_an_excluded_dir_stays_ignored() {
+        // Excluded dirs are checked before `.git`, so a git-sourced dependency
+        // under node_modules can't sneak back in via its own index.
+        assert_eq!(
+            classify_event(&repo(), &p(&["node_modules", "dep", ".git", "index"])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tracked_file_named_like_a_build_dir_still_refreshes() {
+        // Only ancestor components are matched, so a real file called `dist`
+        // or `build` is not mistaken for the directory of that name.
+        assert_eq!(
+            classify_event(&repo(), &p(&["src", "dist"])),
+            Some(RefreshFlags::STATUS)
+        );
+        assert_eq!(
+            classify_event(&repo(), &p(&["build"])),
+            Some(RefreshFlags::STATUS)
+        );
     }
 
     #[test]
