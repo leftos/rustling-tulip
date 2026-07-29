@@ -13,9 +13,9 @@ use crate::registry::{
     set_repo_appearance, set_repo_worktree_default, set_session_order, set_workspace_appearance,
     set_workspace_worktree_default, upsert_workspace,
 };
-use crate::scrollback;
 use crate::session::{
-    SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, new_id, push_recent_action,
+    SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, build_replay_snapshot, new_id,
+    push_recent_action,
 };
 use crate::state::AppState;
 use crate::tabs;
@@ -3118,8 +3118,13 @@ async fn load_scrollback_and_attach_forwarder(
         forwarders.insert(session_id.to_string(), handle);
         (snap.data, snap.truncated)
     } else {
-        // No live PTY (orphan/abandoned/headless) — direct file read.
-        scrollback::load(&hub.dirs, session_id)
+        // No live PTY (orphan/abandoned/headless), or the lifecycle task failed
+        // to answer in time. Read the file directly, but still re-assert the
+        // child's bracketed-paste mode from the persisted sidecar: on the
+        // snapshot-timeout path the session *is* live, and handing it an
+        // unprefixed replay re-opens the stale-paste-flag bug.
+        let bp_enabled = crate::termstate::load(&hub.dirs, session_id);
+        build_replay_snapshot(Some(&hub.dirs), session_id, bp_enabled)
     };
 
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);

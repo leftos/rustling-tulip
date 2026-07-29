@@ -115,7 +115,7 @@ practically exploitable — network jitter swamps the signal. Logged because the
 codebase already has the right primitive and applies it inconsistently, which is
 the kind of gap that rots into a real one later.
 
-### - [ ] 4. Replay fallback skips the bracketed-paste prefix (Minor)
+### - [x] 4. Replay fallback skips the bracketed-paste prefix (Minor)
 
 `server.rs:3105` reads scrollback raw. Correct for orphan / abandoned / headless
 sessions, but it is *also* the error path when the snapshot request times out or

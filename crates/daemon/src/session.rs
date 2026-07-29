@@ -343,6 +343,34 @@ pub fn trim_recent_tail(actions: &[String]) -> Vec<String> {
     tail
 }
 
+/// Build the scrollback replay handed to a freshly-attaching client: the
+/// persisted history plus a leading bracketed-paste enable when the child had
+/// that mode on, so xterm's paste flag is correct even if the enable sequence
+/// was trimmed from the ring. Returns `(bytes, truncated)`; empty when `dirs`
+/// is `None` (no persistence owner).
+///
+/// Shared with the server's no-live-PTY fallback so every path that hands a
+/// client its scrollback re-asserts the same mode — the prefix has to come from
+/// wherever the replay is assembled, not just the lifecycle task.
+pub fn build_replay_snapshot(
+    dirs: Option<&Dirs>,
+    session_id: &str,
+    bp_enabled: bool,
+) -> (Vec<u8>, bool) {
+    let Some(dirs) = dirs else {
+        return (Vec::new(), false);
+    };
+    let (bytes, truncated) = scrollback::load(dirs, session_id);
+    let prefix = termstate::replay_prefix(bp_enabled);
+    if prefix.is_empty() {
+        return (bytes, truncated);
+    }
+    let mut prefixed = Vec::with_capacity(prefix.len() + bytes.len());
+    prefixed.extend_from_slice(prefix);
+    prefixed.extend_from_slice(&bytes);
+    (prefixed, truncated)
+}
+
 pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
     rec.recent_actions.push(action);
     if rec.recent_actions.len() > RECENT_ACTIONS_CAP {
@@ -371,26 +399,6 @@ pub fn push_recent_action(rec: &mut SessionRecord, action: String) {
 /// watcher's `registry.update` finds the session record. The returned
 /// `snap_tx` should be patched onto the record's `scrollback_snapshot_req`
 /// field before calling `PendingInsert::publish`.
-/// Build the scrollback replay handed to a freshly-attaching client: the
-/// persisted history plus a leading bracketed-paste enable when the child had
-/// that mode on, so xterm's paste flag is correct even if the enable sequence
-/// was trimmed from the ring. Returns `(bytes, truncated)`; empty when `dirs`
-/// is `None` (no persistence owner).
-fn build_replay_snapshot(dirs: Option<&Dirs>, session_id: &str, bp_enabled: bool) -> (Vec<u8>, bool) {
-    let Some(dirs) = dirs else {
-        return (Vec::new(), false);
-    };
-    let (bytes, truncated) = scrollback::load(dirs, session_id);
-    let prefix = termstate::replay_prefix(bp_enabled);
-    if prefix.is_empty() {
-        return (bytes, truncated);
-    }
-    let mut prefixed = Vec::with_capacity(prefix.len() + bytes.len());
-    prefixed.extend_from_slice(prefix);
-    prefixed.extend_from_slice(&bytes);
-    (prefixed, truncated)
-}
-
 pub fn attach_lifecycle(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -676,8 +684,58 @@ impl SessionRegistry {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use super::*;
+
+    /// Scratch config dir for the replay-snapshot tests.
+    fn scratch_dirs(tag: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rt-session-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        }
+    }
+
+    #[test]
+    fn replay_snapshot_prefixes_bracketed_paste_when_enabled() {
+        let dirs = scratch_dirs("replay-on");
+        crate::scrollback::append(&dirs, "s1", b"history bytes");
+        let (data, truncated) = build_replay_snapshot(Some(&dirs), "s1", true);
+        assert!(!truncated);
+        assert!(
+            data.starts_with(b"\x1b[?2004h"),
+            "replay must re-assert bracketed paste"
+        );
+        assert!(data.ends_with(b"history bytes"), "history must survive");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn replay_snapshot_is_unprefixed_when_disabled() {
+        let dirs = scratch_dirs("replay-off");
+        crate::scrollback::append(&dirs, "s1", b"history bytes");
+        let (data, _) = build_replay_snapshot(Some(&dirs), "s1", false);
+        assert_eq!(data, b"history bytes");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn replay_snapshot_without_dirs_is_empty() {
+        assert_eq!(build_replay_snapshot(None, "s1", true), (Vec::new(), false));
+    }
 
     #[test]
     fn trim_recent_tail_keeps_last_n_entries() {
