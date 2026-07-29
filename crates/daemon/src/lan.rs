@@ -344,7 +344,9 @@ mod tests {
         assert_eq!(second.len(), 64);
         assert_ne!(first, second, "regeneration mints a fresh identity");
         // ...and the regenerated pair is itself reloadable.
-        let third = ensure_cert(&dirs).expect("reload regenerated cert").fingerprint;
+        let third = ensure_cert(&dirs)
+            .expect("reload regenerated cert")
+            .fingerprint;
         assert_eq!(second, third);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

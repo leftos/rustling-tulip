@@ -548,9 +548,7 @@ async fn resolve_one_variable(
             .or_else(|| var.default.clone())
             .unwrap_or_default()),
         PresetVariableKind::EnvVar { name } => Ok(std::env::var(name).unwrap_or_default()),
-        PresetVariableKind::LiteralPath { path } => {
-            expand_literal_path(path, repo_root, &var.name)
-        }
+        PresetVariableKind::LiteralPath { path } => expand_literal_path(path, repo_root, &var.name),
         PresetVariableKind::Toggle { value } => {
             // Checked → the expanded path; unchecked → empty so the footer
             // line is dropped. The checkbox sends "true"/"false"; fall back
@@ -1824,8 +1822,9 @@ mod tests {
             r"C:\out\%20a%20b.txt",
             r"C:\out\file%20name.txt",
         ] {
-            let out = expand_env_pattern(input, "%", "%", "v")
-                .unwrap_or_else(|e| panic!("{input:?} should pass through, got error: {}", e.error));
+            let out = expand_env_pattern(input, "%", "%", "v").unwrap_or_else(|e| {
+                panic!("{input:?} should pass through, got error: {}", e.error)
+            });
             assert_eq!(out, input, "{input:?} must be unchanged");
         }
     }
@@ -1839,7 +1838,10 @@ mod tests {
             "error names the variable: {}",
             err.error
         );
-        assert!(err.error.contains("log_dir"), "error names the preset variable");
+        assert!(
+            err.error.contains("log_dir"),
+            "error names the preset variable"
+        );
         let err = expand_env_pattern("${RT_DEFINITELY_UNSET_VAR}/c", "${", "}", "log_dir")
             .expect_err("same for the ${{}} form");
         assert!(err.error.contains("RT_DEFINITELY_UNSET_VAR"));

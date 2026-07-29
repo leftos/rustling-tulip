@@ -166,9 +166,7 @@ pub fn spawn(
         let exit = match woke {
             Woke::Exited(code) => code,
             Woke::KillRequested(requested) => {
-                if requested
-                    && let Err(err) = child.start_kill()
-                {
+                if requested && let Err(err) = child.start_kill() {
                     warn!(?err, "failed to kill headless child");
                 }
                 child.wait().await.ok().and_then(|s| s.code())
@@ -211,8 +209,7 @@ mod tests {
     fn scratch_dirs() -> Dirs {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let tag = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("rt-headless-{}-{tag}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rt-headless-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("create scratch dir");
         Dirs {
@@ -317,8 +314,9 @@ mod tests {
 
     fn pid_is_alive(pid: u32) -> bool {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
-        let mut sys =
-            System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+        );
         sys.refresh_processes(ProcessesToUpdate::All, true);
         sys.process(sysinfo::Pid::from_u32(pid)).is_some()
     }

@@ -7,8 +7,14 @@ mirror in sync (53 `DaemonMessage` + 81 `ClientMessage` tags, zero drift).
 Everything recorded here is therefore *latent* — nothing the existing gates
 catch.
 
-This is a living document. Findings get appended as the sweep continues;
-nothing is removed once written down, only ticked off or re-classified.
+**Status: all 12 findings fixed** (2026-07-29). Each fix landed as its own
+commit with a regression test; the two High findings with runnable repros were
+additionally verified to fail against the pre-fix code. Gates after the sweep:
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` clean,
+348 Rust tests passing, `tsc --noEmit` clean, vitest 15/15.
+
+Kept as a record of what was looked at and what was found, so a later pass can
+resume from the coverage map rather than re-deriving it.
 
 ## How to read this
 
