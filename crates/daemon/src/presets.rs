@@ -548,7 +548,9 @@ async fn resolve_one_variable(
             .or_else(|| var.default.clone())
             .unwrap_or_default()),
         PresetVariableKind::EnvVar { name } => Ok(std::env::var(name).unwrap_or_default()),
-        PresetVariableKind::LiteralPath { path } => Ok(expand_literal_path(path, repo_root)),
+        PresetVariableKind::LiteralPath { path } => {
+            expand_literal_path(path, repo_root, &var.name)
+        }
         PresetVariableKind::Toggle { value } => {
             // Checked → the expanded path; unchecked → empty so the footer
             // line is dropped. The checkbox sends "true"/"false"; fall back
@@ -558,11 +560,11 @@ async fn resolve_one_variable(
                 .copied()
                 .or(var.default.as_deref())
                 .is_some_and(|s| s.eq_ignore_ascii_case("true"));
-            Ok(if on {
-                expand_literal_path(value, repo_root)
+            if on {
+                expand_literal_path(value, repo_root, &var.name)
             } else {
-                String::new()
-            })
+                Ok(String::new())
+            }
         }
         PresetVariableKind::Script {
             cmd,
@@ -610,10 +612,14 @@ async fn resolve_one_variable(
     }
 }
 
-fn expand_literal_path(raw: &str, repo_root: &Path) -> String {
+fn expand_literal_path(
+    raw: &str,
+    repo_root: &Path,
+    var_name: &str,
+) -> Result<String, LaunchFailure> {
     let with_repo = raw.replace("{repo_root}", &repo_root.to_string_lossy());
-    let after_dollar = expand_env_pattern(&with_repo, "${", "}");
-    expand_env_pattern(&after_dollar, "%", "%")
+    let after_dollar = expand_env_pattern(&with_repo, "${", "}", var_name)?;
+    expand_env_pattern(&after_dollar, "%", "%", var_name)
 }
 
 /// Render a single Script-arg token. Supports the same env expansion as
@@ -649,11 +655,34 @@ fn expand_script_token(
         rest = &after[end + 1..];
     }
     out.push_str(rest);
-    let after_dollar = expand_env_pattern(&out, "${", "}");
-    Ok(expand_env_pattern(&after_dollar, "%", "%"))
+    let after_dollar = expand_env_pattern(&out, "${", "}", script_var_name)?;
+    expand_env_pattern(&after_dollar, "%", "%", script_var_name)
 }
 
-fn expand_env_pattern(s: &str, open: &str, close: &str) -> String {
+/// Expand `<open>NAME<close>` environment references in `s`.
+///
+/// Two rules keep this from silently corrupting text, which is what the naive
+/// version did — `%` is both the opener and the closer, so *any* two literal
+/// percent signs were read as a reference and the text between them vanished:
+///
+/// 1. The span between the delimiters is only treated as a reference when it
+///    looks like a variable name (see [`is_probable_env_var_name`]). `%Y-%m-%d`
+///    and `coverage 50% to 80%` therefore pass through untouched, while
+///    `%ProgramFiles(x86)%` still expands.
+/// 2. A reference to a variable that is not set is a hard error, matching how
+///    [`expand_script_token`] already treats an unknown `{name}`. Expanding to
+///    empty turned a typo'd `%APPDAT%\foo` into `\foo` — a wrong-but-plausible
+///    path that fails much later and much more confusingly.
+///
+/// When rule 1 rejects a span, scanning resumes just after the opener rather
+/// than after the closer, so a genuine reference later in the string is still
+/// found.
+fn expand_env_pattern(
+    s: &str,
+    open: &str,
+    close: &str,
+    var_name: &str,
+) -> Result<String, LaunchFailure> {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find(open) {
@@ -662,14 +691,45 @@ fn expand_env_pattern(s: &str, open: &str, close: &str) -> String {
         let Some(end) = after_open.find(close) else {
             // No closing delimiter — bail and copy the remainder verbatim.
             out.push_str(&rest[start..]);
-            return out;
+            return Ok(out);
         };
         let name = &after_open[..end];
-        out.push_str(&std::env::var(name).unwrap_or_default());
+        if !is_probable_env_var_name(name) {
+            out.push_str(open);
+            rest = after_open;
+            continue;
+        }
+        let value = std::env::var(name).map_err(|_| {
+            LaunchFailure::new(format!(
+                "variable '{var_name}' references environment variable \
+                 '{name}', which is not set"
+            ))
+        })?;
+        out.push_str(&value);
         rest = &after_open[end + close.len()..];
     }
     out.push_str(rest);
-    out
+    Ok(out)
+}
+
+/// Whether `name` could be an environment variable rather than incidental text
+/// caught between two literal delimiters.
+///
+/// POSIX names are `[A-Za-z_][A-Za-z0-9_]*`; Windows adds parentheses for the
+/// `ProgramFiles(x86)` family, which preset authors do reference, so those are
+/// allowed too. Everything else is treated as literal text — notably a leading
+/// digit (`%20a%20b`, percent-encoded paths) and a hyphen (`%Y-%m-%d`, strftime
+/// formats), neither of which can start or appear in a name people actually
+/// use, and both of which would otherwise become spurious hard errors.
+fn is_probable_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '(' || c == ')')
 }
 
 /// Spawn a child process and capture its trimmed stdout (optionally regex-
@@ -1742,15 +1802,74 @@ mod tests {
 
     #[test]
     fn expand_literal_path_substitutes_repo_root() {
-        let path = expand_literal_path("{repo_root}/foo", Path::new("C:/repos/yaat"));
+        let path = expand_literal_path("{repo_root}/foo", Path::new("C:/repos/yaat"), "v")
+            .expect("no env refs to resolve");
         assert_eq!(path, "C:/repos/yaat/foo");
     }
 
     #[test]
     fn expand_env_pattern_handles_missing_close() {
         // No close → bail and copy verbatim.
-        let out = expand_env_pattern("${HOME prefix only", "${", "}");
+        let out = expand_env_pattern("${HOME prefix only", "${", "}", "v").expect("verbatim");
         assert_eq!(out, "${HOME prefix only");
+    }
+
+    /// Regression: `%` is both delimiters, so the naive scan read any two
+    /// literal percent signs as a reference and deleted the text between them.
+    #[test]
+    fn literal_percent_pairs_are_left_alone() {
+        for input in [
+            "%Y-%m-%d",
+            "coverage 50% to 80% please",
+            r"C:\out\%20a%20b.txt",
+            r"C:\out\file%20name.txt",
+        ] {
+            let out = expand_env_pattern(input, "%", "%", "v")
+                .unwrap_or_else(|e| panic!("{input:?} should pass through, got error: {}", e.error));
+            assert_eq!(out, input, "{input:?} must be unchanged");
+        }
+    }
+
+    #[test]
+    fn unset_variable_is_a_hard_error() {
+        let err = expand_env_pattern("%RT_DEFINITELY_UNSET_VAR%\\foo", "%", "%", "log_dir")
+            .expect_err("an unset variable must fail the launch");
+        assert!(
+            err.error.contains("RT_DEFINITELY_UNSET_VAR"),
+            "error names the variable: {}",
+            err.error
+        );
+        assert!(err.error.contains("log_dir"), "error names the preset variable");
+        let err = expand_env_pattern("${RT_DEFINITELY_UNSET_VAR}/c", "${", "}", "log_dir")
+            .expect_err("same for the ${{}} form");
+        assert!(err.error.contains("RT_DEFINITELY_UNSET_VAR"));
+    }
+
+    #[test]
+    fn set_variables_still_expand_including_awkward_names() {
+        // SAFETY: single-threaded test setup; no other thread reads the env.
+        unsafe {
+            std::env::set_var("RT_TEST_PLAIN", "plain-value");
+            std::env::set_var("RT_TEST_PAREN(x86)", "paren-value");
+        }
+        assert_eq!(
+            expand_env_pattern("%RT_TEST_PLAIN%/tail", "%", "%", "v").expect("expands"),
+            "plain-value/tail"
+        );
+        assert_eq!(
+            expand_env_pattern("${RT_TEST_PLAIN}/tail", "${", "}", "v").expect("expands"),
+            "plain-value/tail"
+        );
+        // Real Windows variables contain parentheses (ProgramFiles(x86)), so
+        // the name rule must be looser than a strict identifier.
+        assert_eq!(
+            expand_env_pattern("%RT_TEST_PAREN(x86)%\\bin", "%", "%", "v").expect("expands"),
+            "paren-value\\bin"
+        );
+        unsafe {
+            std::env::remove_var("RT_TEST_PLAIN");
+            std::env::remove_var("RT_TEST_PAREN(x86)");
+        }
     }
 
     #[test]

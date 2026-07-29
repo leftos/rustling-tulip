@@ -125,7 +125,7 @@ then gets an unprefixed replay, re-exposing finding 1's symptom.
 Narrow: in that path the per-client forwarder isn't spawned either, so the
 terminal is already broken and the missing prefix is the lesser problem.
 
-### - [ ] 5. `expand_env_pattern` silently destroys text (Medium, confirmed)
+### - [x] 5. `expand_env_pattern` silently destroys text (Medium, confirmed)
 
 `crates/daemon/src/presets.rs:656-673`. Two distinct defects in one function.
 Applied to `LiteralPath` variables (`presets.rs:551`), `Toggle` values (`:562`),
@@ -157,9 +157,13 @@ is a **hard error** ("most likely a typo in the preset", `presets.rs:645-648`),
 while an unknown `${VAR}` / `%VAR%` in the very same token is silent. Same typo
 class, opposite handling.
 
-Fix direction (needs a call — it's a behavior change for preset authors):
-require `%VAR%` to look like an identifier before treating it as a reference, and
-either error or preserve verbatim on unset, matching the `{name}` policy.
+Fixed. A span between delimiters is only a reference when it looks like a
+variable name (`[A-Za-z_][A-Za-z0-9_()]*` — parens because `ProgramFiles(x86)`
+is real), so `%Y-%m-%d`, `50% to 80%` and `%20a%20b` pass through untouched. A
+reference to an **unset** variable is now a hard `LaunchFailure` naming both the
+preset variable and the environment variable — user-chosen, matching the
+existing `{name}` policy. No bundled preset uses env references, so nothing
+in-tree changes behavior.
 
 ### - [x] 6. Stopping a headless session hangs and never kills the child (High, confirmed)
 
