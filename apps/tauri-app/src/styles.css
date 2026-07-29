@@ -4146,6 +4146,11 @@ fieldset.field { border: 1px solid var(--border); border-radius: var(--radius); 
 .rt-shell-chip[data-status="failure"] .rt-shell-chip-dot {
   background: #f48771;
 }
+/* Finished, but the shell never reported an exit code (bare OSC 133;D).
+   Neutral rather than red — full opacity keeps it distinct from "running". */
+.rt-shell-chip[data-status="unknown"] .rt-shell-chip-dot {
+  background: var(--fg-muted);
+}
 .rt-shell-chip:hover .rt-shell-chip-dot {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
 }

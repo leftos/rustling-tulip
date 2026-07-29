@@ -10,7 +10,21 @@ import type {
 /// committed command; ephemeral until the matching OSC 133;D arrives, at
 /// which point exit code + duration are filled in and the chip flips
 /// from neutral to success/failure colour.
-export type CommandStatus = "running" | "success" | "failure";
+/// `unknown` is a completed command whose exit status the shell never
+/// reported — a bare OSC 133;D with no `;<code>`. Per the OSC 133 convention
+/// that means "finished, status unknown", which is not the same as failed. The
+/// daemon's own hooks always emit the code, so this shows up only when the
+/// user's rc already carries its own shell integration, or a program inside the
+/// terminal emits marks of its own.
+export type CommandStatus = "running" | "success" | "failure" | "unknown";
+
+/// Upper bound on retained command records. Each one pins two xterm markers,
+/// a decoration, and (via `dotEl`) a DOM node that stays reachable after xterm
+/// detaches it, so an uncapped list leaks steadily on exactly the sessions this
+/// app is built for: long-lived shells that survive daemon restarts. Sized well
+/// above the 5000-line scrollback's realistic command count, so the cap only
+/// engages once the corresponding output has long since scrolled away.
+const MAX_RECORDS = 1000;
 
 export interface CommandRecord {
   /// Monotonic id, used by callers to identify records across updates.
@@ -131,6 +145,26 @@ export function attachShellIntegration(
     el.title = title;
   };
 
+  /// Release everything a record pins, so an evicted (or disposed) entry can't
+  /// keep an xterm marker or a detached chip element reachable.
+  const releaseRecord = (rec: InternalRecord) => {
+    rec.decoration?.dispose();
+    rec.decoration = null;
+    rec.promptMarker.dispose();
+    rec.outputMarker?.dispose();
+    rec.outputMarker = null;
+    rec.dotEl = null;
+  };
+
+  /// Trim the history to `MAX_RECORDS`, oldest first. Without this the array
+  /// grows for the life of the terminal.
+  const evictOldestRecords = () => {
+    if (records.length <= MAX_RECORDS) return;
+    for (const rec of records.splice(0, records.length - MAX_RECORDS)) {
+      releaseRecord(rec);
+    }
+  };
+
   const mountDecoration = (rec: InternalRecord) => {
     if (rec.decoration) return;
     const decoration = term.registerDecoration({
@@ -243,11 +277,19 @@ export function attachShellIntegration(
         // commands that bypass the AddToHistoryHandler, etc.).
         const startRef = current.startedAt ?? current.promptShownAt;
         current.durationMs = Math.max(0, current.endedAt - startRef);
-        current.status = current.exitCode === 0 ? "success" : "failure";
+        // A missing exit code means "finished, status unknown" — reporting it
+        // as a failure would paint a red chip on a command that may well have
+        // succeeded.
+        if (current.exitCode === null) {
+          current.status = "unknown";
+        } else {
+          current.status = current.exitCode === 0 ? "success" : "failure";
+        }
         // Push to history and mount the chip now — the user only ever
         // sees chips for completed commands, never a grey "running" dot
         // on the live prompt line.
         records.push(current);
+        evictOldestRecords();
         mountDecoration(current);
         setDotStatus(current);
         // Detach `current` so the next A starts a clean record without
@@ -287,14 +329,11 @@ export function attachShellIntegration(
       osc133.dispose();
       osc633.dispose();
       for (const rec of records) {
-        rec.decoration?.dispose();
-        rec.promptMarker.dispose();
-        rec.outputMarker?.dispose();
+        releaseRecord(rec);
       }
       records.length = 0;
       if (current) {
-        current.promptMarker.dispose();
-        current.outputMarker?.dispose();
+        releaseRecord(current);
         current = null;
       }
     },

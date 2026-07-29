@@ -275,7 +275,7 @@ ABI bump would produce — and it is broken before it ever gets used.
 Fix: drop the `.or_else` arm. The first `negotiate` call is already the complete
 intersection.
 
-### - [ ] 9. Shell-integration command records grow without bound (Medium)
+### - [x] 9. Shell-integration command records grow without bound (Medium)
 
 `apps/tauri-app/src/components/shellIntegration.ts:250` pushes an
 `InternalRecord` per completed command; the array is only ever emptied at
@@ -295,7 +295,7 @@ accumulates the lot. Slow leak, not a crash.
 Fix direction: cap `records` (a ring bounded near the scrollback line count is
 the natural fit) and null out `dotEl` when the decoration is disposed.
 
-### - [ ] 10. OSC 133 `D` without an exit code is reported as failure (Low)
+### - [x] 10. OSC 133 `D` without an exit code is reported as failure (Low)
 
 `shellIntegration.ts:234-246`. A bare `D` (no `;<code>`) parses to `NaN`, so
 `exitCode` becomes `null`, and then:
