@@ -54,6 +54,15 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 
 ## Open
 
+### Bug hunt — open findings
+Full-codebase audit, 2026-07-29 against `c4c2676`. **12 findings, 6 reproduced
+with runnable repros, none fixed yet.** Three are High: `BracketedPasteTracker`
+silently defeats the `c4c2676` paste fix on fragmented output; Stop/Park on a
+headless session hangs the handler without killing the child; and the git
+watcher's build-dir filter misses every nested `node_modules` / `dist` / `target`.
+Every Rust module has been swept; see [bug-hunt.md](./plans/bug-hunt.md) for the
+findings, the coverage map, and what was deliberately left unswept.
+
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
 pipeline exists (no GH Actions pipeline, no signing cert, no hosted manifest).
