@@ -1028,12 +1028,20 @@ pub enum PresetPromptSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LaunchPresetSource {
-    File { path: String },
-    Folder { path: String },
-    Inline { prompts: Vec<String> },
+    File {
+        path: String,
+    },
+    Folder {
+        path: String,
+    },
+    Inline {
+        prompts: Vec<String>,
+    },
     /// Raw issue spec as typed by the user (e.g. `123-127, 131, 134-136`).
     /// The daemon parses + expands it at resolve time.
-    GithubIssues { spec: String },
+    GithubIssues {
+        spec: String,
+    },
 }
 
 /// Where the variable's value comes from. Pure data shape — the daemon
