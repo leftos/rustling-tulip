@@ -472,9 +472,20 @@ where
     }
     let welcome: TracerWelcome =
         serde_json::from_str(welcome_line.trim_end()).context("parsing TracerWelcome")?;
-    let negotiated = negotiate(welcome.version, &welcome.supported)
-        .or_else(|| negotiate(welcome.version, SUPPORTED_TRACER_VERSIONS))
-        .ok_or_else(|| anyhow!("no mutually supported tracer version"))?;
+    // `negotiate` already intersects the tracer's scalar *and* its advertised
+    // range against SUPPORTED_TRACER_VERSIONS, so this single call is the whole
+    // intersection. There used to be an `.or_else(|| negotiate(welcome.version,
+    // SUPPORTED_TRACER_VERSIONS))` fallback here, which intersected our own list
+    // with itself — always non-empty — making the error below unreachable and
+    // letting an incompatible tracer through at our own maximum version.
+    let negotiated = negotiate(welcome.version, &welcome.supported).ok_or_else(|| {
+        anyhow!(
+            "no mutually supported tracer version: tracer advertises \
+             scalar={} + range={:?}, daemon supports {SUPPORTED_TRACER_VERSIONS:?}",
+            welcome.version,
+            welcome.supported
+        )
+    })?;
     debug!(
         version = negotiated,
         "tracer_client: tracer handshake complete"

@@ -244,6 +244,28 @@ mod tests {
         assert_eq!(negotiate(u32::MAX, &[]), None);
     }
 
+    /// `negotiate` is the *complete* intersection: it already tests the scalar
+    /// and every element of `range` against [`SUPPORTED_TRACER_VERSIONS`], so a
+    /// tracer with no overlap must yield `None`. `tracer_client` used to add a
+    /// second `negotiate(v, SUPPORTED_TRACER_VERSIONS)` fallback, which
+    /// intersects our own list with itself and so can never be `None` — that
+    /// made an incompatible tracer negotiate at our maximum version instead of
+    /// erroring. Callers must rely on a single call.
+    #[test]
+    fn negotiate_rejects_a_tracer_with_no_overlap() {
+        let unsupported: Vec<u32> = (1..=64)
+            .map(|n| u32::MAX - n)
+            .filter(|v| !SUPPORTED_TRACER_VERSIONS.contains(v))
+            .collect();
+        assert!(
+            !unsupported.is_empty(),
+            "test needs at least one unsupported version"
+        );
+        assert_eq!(negotiate(unsupported[0], &unsupported), None);
+        // Self-intersection is the degenerate case the old fallback hit.
+        assert!(negotiate(unsupported[0], SUPPORTED_TRACER_VERSIONS).is_some());
+    }
+
     #[test]
     fn socket_name_is_session_id_suffixed() {
         let name = socket_name("abc-123");

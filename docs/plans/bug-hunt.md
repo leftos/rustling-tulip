@@ -238,7 +238,7 @@ regenerates), but a crash *during* the key write leaves both files present with 
 truncated key — `load_persisted_cert` then fails forever and the LAN listener
 never starts again without manual file deletion. Low probability, no self-heal.
 
-### - [ ] 8. Tracer version negotiation can never fail (Medium, confirmed)
+### - [x] 8. Tracer version negotiation can never fail (Medium, confirmed)
 
 `crates/daemon/src/tracer_client.rs:475-477`:
 
