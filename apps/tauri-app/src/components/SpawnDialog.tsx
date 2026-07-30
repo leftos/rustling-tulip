@@ -20,6 +20,7 @@ import type {
   TabEntry,
   WorkspaceEntry,
   WorktreeInfo,
+  WorktreeReuseChoice,
 } from "../types";
 import type { SpawnInitialTarget } from "./Sidebar";
 
@@ -1128,6 +1129,130 @@ function SpawnPlacementPicker({
 /// is preserved (audit: previously regenerated on every reopen).
 const branchSuggestionCache = new Map<string, string>();
 
+/// Given the repo's local default branch and the remote-tracking refs the
+/// daemon reported, pick the ref a new worktree should be based on.
+///
+/// Prefers `origin/<default>` when it exists. In a repo driven through
+/// worktrees the local default never advances — every session forks off it,
+/// works, and pushes — so seeding the field with the local name silently
+/// bases new work on a months-old commit. Seeding with the remote ref makes
+/// the choice visible and editable rather than hidden.
+function preferRemoteBase(
+  localDefault: string,
+  remoteBranches: string[],
+): string {
+  const candidates = remoteBranches.filter(
+    (r) => r.slice(r.indexOf("/") + 1) === localDefault,
+  );
+  // Prefer `origin` when several remotes carry the branch, matching the
+  // daemon's own resolution order — otherwise the field could seed with a
+  // different remote than the one the spawn would actually use.
+  return (
+    candidates.find((r) => r.startsWith("origin/")) ??
+    candidates[0] ??
+    localDefault
+  );
+}
+
+/// Staleness callout for a base branch that trails its remote counterpart.
+/// Renders nothing when the base is level, unknown, or already a remote ref.
+function BaseStalenessNotice({
+  preview,
+  testId,
+}: {
+  preview: MemberSpawnPreview | null;
+  testId: string;
+}) {
+  const behind = preview?.base_behind_remote ?? 0;
+  if (!preview || behind <= 0 || !preview.base_remote_ref) return null;
+  return (
+    <div className="inline-warning" data-testid={testId}>
+      <strong>{preview.effective_base}</strong> is {behind} commit
+      {behind === 1 ? "" : "s"} behind{" "}
+      <strong>{preview.base_remote_ref}</strong>. Branching from it forks from
+      that older point.
+    </div>
+  );
+}
+
+/// Collision callout plus the reuse/recreate choice, shown when a worktree
+/// already sits at the path this spawn would use.
+///
+/// Reuse is the default and keeps the historical behavior; the important part
+/// is that it stops being silent, since a reused worktree ignores the base
+/// branch entirely and keeps whatever fork point it was created with.
+function WorktreeCollisionNotice({
+  preview,
+  policy,
+  onPolicyChange,
+  idPrefix,
+}: {
+  preview: MemberSpawnPreview | null;
+  policy: WorktreeReuseChoice;
+  onPolicyChange: (next: WorktreeReuseChoice) => void;
+  idPrefix: string;
+}) {
+  if (!preview?.worktree_exists) return null;
+  const behind = preview.existing_worktree_behind_base ?? 0;
+  const head = preview.existing_worktree_head;
+  return (
+    <div className="inline-warning" data-testid={`${idPrefix}-collision`}>
+      <div>
+        A worktree already exists at this path
+        {head ? (
+          <>
+            {" "}
+            at <code>{head}</code>
+          </>
+        ) : null}
+        {behind > 0 ? (
+          <>
+            , {behind} commit{behind === 1 ? "" : "s"} behind{" "}
+            <strong>{preview.resolved_base_ref ?? "the base branch"}</strong>
+          </>
+        ) : null}
+        .
+      </div>
+      <label className="radio-row">
+        <input
+          type="radio"
+          name={`${idPrefix}-reuse`}
+          checked={policy === "reuse"}
+          onChange={() => onPolicyChange("reuse")}
+          data-testid={`${idPrefix}-collision-reuse`}
+        />
+        <span>
+          Reuse it as-is
+          <span className="muted small inline-note">
+            (keeps its existing fork point; the base branch is not applied)
+          </span>
+        </span>
+      </label>
+      <label className="radio-row">
+        <input
+          type="radio"
+          name={`${idPrefix}-reuse`}
+          checked={policy === "recreate_from_base"}
+          onChange={() => onPolicyChange("recreate_from_base")}
+          data-testid={`${idPrefix}-collision-recreate`}
+        />
+        <span>
+          Recreate from the base branch
+          {preview.existing_worktree_dirty ? (
+            <span className="danger small inline-note">
+              (discards uncommitted changes in that worktree)
+            </span>
+          ) : (
+            <span className="muted small inline-note">
+              (deletes and re-adds the worktree)
+            </span>
+          )}
+        </span>
+      </label>
+    </div>
+  );
+}
+
 function useBranchField(
   defaultBranch: string,
   useWorktree: boolean,
@@ -1257,20 +1382,46 @@ function SingleForm({
       : null;
 
   const [knownBranches, setKnownBranches] = useState<string[]>([]);
+  const [remoteBranches, setRemoteBranches] = useState<string[]>([]);
   const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   useEffect(() => {
     if (!repoId) return;
     setKnownBranches([]);
+    setRemoteBranches([]);
     setCurrentBranch(null);
     client.send({ type: "list_branches", repo_id: repoId });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "branches" || detail.repo_id !== repoId) return;
       setKnownBranches(detail.branches);
+      setRemoteBranches(detail.remote_branches);
       setCurrentBranch(detail.current);
     };
     window.addEventListener("rt:branches", handler);
     return () => window.removeEventListener("rt:branches", handler);
+  }, [repoId, client]);
+
+  // Refresh remote-tracking refs in the background when the dialog opens.
+  // Deliberately off the spawn path: a slow or offline remote must never
+  // delay a launch, so the fetch just re-lists branches when it lands and
+  // the preview recomputes against the newer refs.
+  const [fetchState, setFetchState] = useState<"idle" | "running" | "failed">(
+    "idle",
+  );
+  useEffect(() => {
+    if (!repoId) return;
+    setFetchState("running");
+    client.send({ type: "fetch_repo", repo_id: repoId });
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "repo_fetched" || detail.repo_id !== repoId) return;
+      setFetchState(detail.error ? "failed" : "idle");
+      if (!detail.error) {
+        client.send({ type: "list_branches", repo_id: repoId });
+      }
+    };
+    window.addEventListener("rt:repo_fetched", handler);
+    return () => window.removeEventListener("rt:repo_fetched", handler);
   }, [repoId, client]);
 
   // Fallback chain for the in-place / base-branch field: repo's persisted
@@ -1280,12 +1431,18 @@ function SingleForm({
   // initial default-detection failed and stuck with `default_branch=null`,
   // which then crashed `git checkout -b main main` because the base ref
   // didn't exist.
-  const defaultBranch =
+  const localDefaultBranch =
     repo?.default_branch ?? currentBranch ?? knownBranches[0] ?? "main";
+  // Worktree base defaults to the *remote* counterpart when there is one —
+  // see preferRemoteBase. Shown in the field rather than applied invisibly,
+  // so a user who genuinely wants the local ref can just edit it back.
+  const defaultBranch = useMemo(
+    () => preferRemoteBase(localDefaultBranch, remoteBranches),
+    [localDefaultBranch, remoteBranches],
+  );
   // The in-place "Branch" field defaults to the branch you're already on (so
-  // spawning in place is a no-op checkout), whereas `defaultBranch` above keeps
-  // preferring the repo default for the worktree *base* branch (new worktrees
-  // branch off main, not your current feature branch).
+  // spawning in place is a no-op checkout). It stays a local name — you can't
+  // check out a remote-tracking ref in place without detaching HEAD.
   const inPlaceDefault =
     currentBranch ?? repo?.default_branch ?? knownBranches[0] ?? "main";
   const [useWorktree, setUseWorktree] = useState<boolean>(
@@ -1337,6 +1494,53 @@ function SingleForm({
   useEffect(() => {
     setBaseBranch(prefillTarget?.base_branch ?? defaultBranch);
   }, [defaultBranch, prefillTarget?.base_branch]);
+
+  // Where this spawn would actually fork from. Requested whenever the inputs
+  // that determine it change, so the user sees the fork point before
+  // committing rather than discovering it days later.
+  const [preview, setPreview] = useState<MemberSpawnPreview | null>(null);
+  const [reusePolicy, setReusePolicy] = useState<WorktreeReuseChoice>("reuse");
+  const trimmedBranch = branch.value.trim();
+  useEffect(() => {
+    setPreview(null);
+    setReusePolicy("reuse");
+    if (!repoId || !trimmedBranch || worktreeMode === "existing") return;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (
+        detail.type !== "spawn_preview" ||
+        detail.repo_id !== repoId ||
+        detail.branch_name !== trimmedBranch
+      ) {
+        return;
+      }
+      setPreview(detail.preview);
+    };
+    window.addEventListener("rt:spawn_preview", handler);
+    // Debounced so typing a branch name doesn't fire a git-backed preview per
+    // keystroke.
+    const timer = window.setTimeout(() => {
+      client.send({
+        type: "preview_spawn",
+        repo_id: repoId,
+        branch_name: trimmedBranch,
+        base_branch: baseBranch.trim() || null,
+        use_worktree: useWorktree,
+      });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("rt:spawn_preview", handler);
+    };
+  }, [
+    repoId,
+    trimmedBranch,
+    baseBranch,
+    useWorktree,
+    worktreeMode,
+    fetchState,
+    client,
+  ]);
 
   /// Worktrees a user can still pick — entries already bound to a live
   /// session are shown disabled (greyed) below, so we keep them in the
@@ -1410,6 +1614,7 @@ function SingleForm({
         // daemon ask via `checkout_confirm_required`, and the app resends this
         // request with the chosen strategy.
         checkout_strategy: null,
+        worktree_reuse: reusePolicy,
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
@@ -1531,16 +1736,43 @@ function SingleForm({
           </label>
 
           {useWorktree && worktreeMode === "new" && (
-            <label className="field">
-              <span>Base branch (optional)</span>
-              <input
-                type="text"
-                value={baseBranch}
-                onChange={(e) => setBaseBranch(e.target.value)}
-                placeholder={defaultBranch}
-                data-testid="spawn-single-base-branch"
+            <>
+              <label className="field">
+                <span>Base branch (optional)</span>
+                <input
+                  type="text"
+                  value={baseBranch}
+                  onChange={(e) => setBaseBranch(e.target.value)}
+                  placeholder={defaultBranch}
+                  list={`spawn-single-base-options-${repoId}`}
+                  data-testid="spawn-single-base-branch"
+                />
+                <datalist id={`spawn-single-base-options-${repoId}`}>
+                  {remoteBranches.map((b) => (
+                    <option key={`remote-${b}`} value={b} />
+                  ))}
+                  {knownBranches.map((b) => (
+                    <option key={`local-${b}`} value={b} />
+                  ))}
+                </datalist>
+              </label>
+              {fetchState === "failed" && (
+                <div className="muted small" data-testid="spawn-single-fetch-failed">
+                  Couldn't reach the remote — comparing against the last
+                  fetched refs.
+                </div>
+              )}
+              <BaseStalenessNotice
+                preview={preview}
+                testId="spawn-single-base-stale"
               />
-            </label>
+              <WorktreeCollisionNotice
+                preview={preview}
+                policy={reusePolicy}
+                onPolicyChange={setReusePolicy}
+                idPrefix="spawn-single"
+              />
+            </>
           )}
         </>
       )}
@@ -1627,7 +1859,40 @@ function WorkspaceForm({
       ? spawnPrefill.target
       : null;
 
-  const defaultBranch = firstMember?.default_branch ?? "main";
+  // Background-fetch every member so the preview's staleness figures reflect
+  // current remotes. Same non-blocking contract as SingleForm: a failure just
+  // means the comparison uses cached refs.
+  const memberIds = workspace?.member_repo_ids;
+  useEffect(() => {
+    if (!memberIds) return;
+    for (const id of memberIds) {
+      client.send({ type: "fetch_repo", repo_id: id });
+    }
+  }, [memberIds, client]);
+
+  // Remote-tracking refs for the first member drive the base-branch default.
+  // Members are expected to share a default branch name; the daemon resolves
+  // each member's base independently at spawn time regardless.
+  const [remoteBranches, setRemoteBranches] = useState<string[]>([]);
+  useEffect(() => {
+    const id = firstMember?.id;
+    if (!id) return;
+    setRemoteBranches([]);
+    client.send({ type: "list_branches", repo_id: id });
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "branches" || detail.repo_id !== id) return;
+      setRemoteBranches(detail.remote_branches);
+    };
+    window.addEventListener("rt:branches", handler);
+    return () => window.removeEventListener("rt:branches", handler);
+  }, [firstMember?.id, client]);
+
+  const localDefaultBranch = firstMember?.default_branch ?? "main";
+  const defaultBranch = useMemo(
+    () => preferRemoteBase(localDefaultBranch, remoteBranches),
+    [localDefaultBranch, remoteBranches],
+  );
   const [useWorktree, setUseWorktree] = useState<boolean>(
     () => prefillTarget?.use_worktree ?? true,
   );
@@ -1653,6 +1918,7 @@ function WorkspaceForm({
   }, [defaultBranch, prefillTarget?.base_branch]);
 
   const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
+  const [reusePolicy, setReusePolicy] = useState<WorktreeReuseChoice>("reuse");
   useEffect(() => {
     // Clear the preview whenever any input that changes the worktree-add
     // plan changes — that includes `useWorktree`, which alters paths. Audit
@@ -1660,6 +1926,9 @@ function WorkspaceForm({
     // worktree mode after a Preview, leaving the table showing paths that
     // no longer matched the active mode.
     setPreview(null);
+    // A recreate decision belongs to the collision the user was shown; a
+    // changed plan means a different collision (or none).
+    setReusePolicy("reuse");
   }, [workspaceId, branch.value, baseBranch, useWorktree]);
 
   useEffect(() => {
@@ -1727,6 +1996,7 @@ function WorkspaceForm({
         branch_name: branch.value.trim(),
         base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
+        worktree_reuse: reusePolicy,
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
@@ -1803,8 +2073,14 @@ function WorkspaceForm({
               value={baseBranch}
               onChange={(e) => setBaseBranch(e.target.value)}
               placeholder={defaultBranch}
+              list={`spawn-workspace-base-options-${workspaceId}`}
               data-testid="spawn-workspace-base-branch"
             />
+            <datalist id={`spawn-workspace-base-options-${workspaceId}`}>
+              {remoteBranches.map((b) => (
+                <option key={`remote-${b}`} value={b} />
+              ))}
+            </datalist>
           </label>
 
           <div className="modal-footer-inline">
@@ -1844,12 +2120,31 @@ function WorkspaceForm({
                         new from {m.effective_base ?? defaultBranch}
                       </span>
                     )}
+                    {m.worktree_exists && (
+                      <span className="badge badge-warn">
+                        worktree exists
+                        {m.existing_worktree_behind_base
+                          ? ` (${m.existing_worktree_behind_base} behind)`
+                          : ""}
+                      </span>
+                    )}
+                    {(m.base_behind_remote ?? 0) > 0 && (
+                      <span className="badge badge-warn">
+                        base {m.base_behind_remote} behind {m.base_remote_ref}
+                      </span>
+                    )}
                   </td>
                   <td className="muted small">{m.worktree_path}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <WorktreeCollisionNotice
+            preview={preview.find((m) => m.worktree_exists) ?? null}
+            policy={reusePolicy}
+            onPolicyChange={setReusePolicy}
+            idPrefix="spawn-workspace"
+          />
         </div>
       )}
 

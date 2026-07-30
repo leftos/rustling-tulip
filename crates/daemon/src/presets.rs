@@ -1486,14 +1486,17 @@ async fn spawn_one(
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
-            // Preset launches don't prompt; a dirty in-place tree still errors.
+            // Preset launches don't prompt; a dirty in-place tree still errors,
+            // and an existing worktree is reused rather than recreated.
             checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
         },
         PresetSpawnKind::Workspace { workspace_id } => SpawnTarget::Workspace {
             workspace_id: workspace_id.clone(),
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
         },
     };
     let req = SpawnRequest {

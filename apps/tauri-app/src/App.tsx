@@ -3737,6 +3737,8 @@ function handleMessage(
     case "branches":
     case "worktrees":
     case "workspace_spawn_preview":
+    case "spawn_preview":
+    case "repo_fetched":
     case "commits":
     case "commit_detail":
     case "file_diff":

@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
@@ -14,6 +15,19 @@ use tracing::debug;
 /// appear for each git child. No-op on other platforms.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Environment forced onto network git invocations so a repo with expired or
+/// missing credentials fails fast instead of blocking on a prompt. A blocked
+/// fetch would hold the per-repo lock forever and wedge every other git call
+/// for that repo — status refreshes, worktree adds, the lot.
+const NON_INTERACTIVE_ENV: &[(&str, &str)] =
+    &[("GIT_TERMINAL_PROMPT", "0"), ("GCM_INTERACTIVE", "never")];
+
+/// Ceiling on a single fetch. Fetches run off the spawn path, but they still
+/// hold the per-repo lock, so an unbounded one stalls that repo's other git
+/// work. Twenty seconds is long enough for a slow-but-working remote and
+/// short enough that a dead one doesn't linger.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Process-wide registry of per-repo async mutexes. Two `git` invocations
 /// against the same repo serialize through this; invocations against
@@ -40,6 +54,18 @@ fn repo_lock(repo: &Path) -> Arc<AsyncMutex<()>> {
 }
 
 async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+    run_git_inner(repo, args, false).await
+}
+
+/// Like [`run_git`] but for invocations that touch the network. Forces
+/// [`NON_INTERACTIVE_ENV`] so a credential prompt can't hang the child, and
+/// sets `kill_on_drop` so abandoning the future (via a timeout) actually
+/// reaps the process instead of leaving it holding the per-repo lock.
+async fn run_git_network(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
+    run_git_inner(repo, args, true).await
+}
+
+async fn run_git_inner(repo: &Path, args: &[&str], network: bool) -> anyhow::Result<String> {
     // Per-invocation timing logged at debug; bumped to info when slower than
     // 500ms so the user sees outliers without flipping log filters. Worktree
     // operations on Windows commonly hit several seconds and we want that to
@@ -70,6 +96,12 @@ async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if network {
+        for (key, value) in NON_INTERACTIVE_ENV {
+            cmd.env(key, value);
+        }
+        cmd.kill_on_drop(true);
+    }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let output = cmd
@@ -133,6 +165,145 @@ pub async fn list_branches(repo: &Path) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
+/// Remote-tracking branches as short names (`origin/main`). Kept separate
+/// from [`list_branches`] so callers that ask "does this *local* branch
+/// exist" keep their exact meaning. `<remote>/HEAD` is dropped — it's a
+/// symbolic alias, not something a user would base work on.
+pub async fn list_remote_branches(repo: &Path) -> anyhow::Result<Vec<String>> {
+    let stdout = run_git(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+    )
+    .await?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.ends_with("/HEAD"))
+        .map(String::from)
+        .collect())
+}
+
+/// Configured remote names, `origin` first when present. Ordering matters:
+/// callers probing for a remote-tracking counterpart should land on `origin`
+/// before some incidental second remote.
+pub async fn remotes(repo: &Path) -> Vec<String> {
+    let Ok(stdout) = run_git(repo, &["remote"]).await else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+    names.sort_by_key(|r| r != "origin");
+    names
+}
+
+/// Whether the fully-qualified `refname` (e.g. `refs/remotes/origin/main`)
+/// exists. Uses `show-ref --verify` rather than `rev-parse`, which would
+/// happily DWIM a bare name onto a tag or a remote-tracking ref and report
+/// success for a local branch that doesn't exist.
+pub async fn full_ref_exists(repo: &Path, refname: &str) -> bool {
+    run_git(repo, &["show-ref", "--verify", "--quiet", refname])
+        .await
+        .is_ok()
+}
+
+/// The remote-tracking ref shadowing local branch `branch`, as a short name
+/// (`origin/main`), or `None` when no remote carries that branch.
+pub async fn remote_tracking_for(repo: &Path, branch: &str) -> Option<String> {
+    let remotes = remotes(repo).await;
+    // A base that already names a remote resolves to itself — re-prefixing
+    // would ask for `origin/origin/main`.
+    for remote in &remotes {
+        if branch.starts_with(&format!("{remote}/")) {
+            return full_ref_exists(repo, &format!("refs/remotes/{branch}"))
+                .await
+                .then(|| branch.to_string());
+        }
+    }
+    for remote in &remotes {
+        let short = format!("{remote}/{branch}");
+        if full_ref_exists(repo, &format!("refs/remotes/{short}")).await {
+            return Some(short);
+        }
+    }
+    None
+}
+
+/// Resolve the ref a *new* branch should fork from, preferring the
+/// remote-tracking counterpart of `base` when one exists.
+///
+/// In a repo driven entirely through worktrees, the local default branch
+/// never advances: every session forks off it, works, and pushes to the
+/// remote, leaving the primary working tree's `main` pinned wherever it was
+/// last checked out by hand. Forking from `origin/main` makes "base off
+/// main" mean what it looks like it means. Falls back to `base` verbatim
+/// when there is no remote-tracking counterpart — no remote configured,
+/// never fetched, or `base` is a raw SHA or tag.
+pub async fn resolve_base_ref(repo: &Path, base: &str) -> String {
+    remote_tracking_for(repo, base)
+        .await
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// `(ahead, behind)` of `left` relative to `right`: commits reachable from
+/// `left` but not `right`, and vice versa. `None` when either ref is missing.
+pub async fn ahead_behind(repo: &Path, left: &str, right: &str) -> Option<(u32, u32)> {
+    let range = format!("{left}...{right}");
+    let stdout = run_git(repo, &["rev-list", "--left-right", "--count", &range])
+        .await
+        .ok()?;
+    parse_ahead_behind(&stdout)
+}
+
+fn parse_ahead_behind(stdout: &str) -> Option<(u32, u32)> {
+    let mut parts = stdout.lines().next()?.split_whitespace();
+    let ahead = parts.next()?.parse().ok()?;
+    let behind = parts.next()?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+/// Abbreviated SHA of `HEAD` at `path`, which may be a worktree rather than
+/// the primary repo directory.
+pub async fn head_short_sha(path: &Path) -> Option<String> {
+    let stdout = run_git(path, &["rev-parse", "--short", "HEAD"])
+        .await
+        .ok()?;
+    let trimmed = stdout.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `git fetch --prune` against the default remote, bounded by
+/// [`FETCH_TIMEOUT`] and hardened against credential prompts.
+///
+/// Callers treat failure as advisory: a fetch is a freshness improvement,
+/// never a precondition. A repo with no remote is a no-op success.
+pub async fn fetch(repo: &Path) -> anyhow::Result<()> {
+    if remotes(repo).await.is_empty() {
+        return Ok(());
+    }
+    let fut = run_git_network(
+        repo,
+        &[
+            "-c",
+            "credential.interactive=false",
+            "fetch",
+            "--prune",
+            "--quiet",
+        ],
+    );
+    match tokio::time::timeout(FETCH_TIMEOUT, fut).await {
+        Ok(result) => result.map(|_| ()),
+        Err(_) => Err(anyhow!(
+            "git fetch in {} timed out after {}s",
+            repo.display(),
+            FETCH_TIMEOUT.as_secs()
+        )),
+    }
+}
+
 /// Return all non-main worktrees for `repo` as `(branch, path)` pairs.
 ///
 /// The main worktree (first entry from `git worktree list --porcelain`) is
@@ -183,6 +354,14 @@ pub async fn worktree_add(
         args.extend_from_slice(&[&target_str, branch]);
     }
     run_git(repo, &args).await.map(|_| ())
+}
+
+/// `git branch -D <branch>`. Used when recreating a worktree from a fresh
+/// base: `worktree remove` leaves the branch behind, so re-adding with `-b`
+/// would fail on "branch already exists". Errors when the branch is absent,
+/// which callers treat as success.
+pub async fn delete_branch(repo: &Path, branch: &str) -> anyhow::Result<()> {
+    run_git(repo, &["branch", "-D", branch]).await.map(|_| ())
 }
 
 pub async fn worktree_remove(repo: &Path, target_path: &Path) -> anyhow::Result<()> {
@@ -453,6 +632,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_ahead_behind_reads_left_then_right() {
+        // `rev-list --left-right --count A...B` emits "<left-only>\t<right-only>".
+        assert_eq!(parse_ahead_behind("0\t273\n"), Some((0, 273)));
+        assert_eq!(parse_ahead_behind("4\t0\n"), Some((4, 0)));
+        assert_eq!(parse_ahead_behind("12 7"), Some((12, 7)));
+    }
+
+    #[test]
+    fn parse_ahead_behind_rejects_malformed_output() {
+        assert_eq!(parse_ahead_behind(""), None);
+        assert_eq!(parse_ahead_behind("5"), None);
+        assert_eq!(parse_ahead_behind("fatal: bad revision\n"), None);
+        assert_eq!(parse_ahead_behind("-1\t2"), None);
+    }
+
+    #[test]
     fn branch_slug_replaces_separators() {
         assert_eq!(branch_slug("feature/foo"), "feature-foo");
         assert_eq!(branch_slug(r"feature\bar"), "feature-bar");
@@ -624,6 +819,197 @@ mod tests {
 
     fn write_file(repo: &Path, name: &str, body: &str) {
         std::fs::write(repo.join(name), body).expect("write file");
+    }
+
+    /// A repo whose local `main` trails `origin/main` by `behind` commits —
+    /// the exact shape of a repo driven entirely through worktrees, where
+    /// every session forks off, works, and pushes, and nobody ever pulls the
+    /// primary working tree. Returns the working repo; the bare origin lives
+    /// alongside it and is removed with the same prefix.
+    async fn init_stale_repo(tag: &str, behind: u32) -> PathBuf {
+        let repo = init_repo(tag).await;
+        let origin = repo.with_file_name(format!(
+            "{}-origin",
+            repo.file_name()
+                .expect("repo leaf")
+                .to_string_lossy()
+                .into_owned()
+        ));
+        let _ = std::fs::remove_dir_all(&origin);
+        std::fs::create_dir_all(&origin).expect("create origin dir");
+        run_git(&origin, &["init", "--bare"])
+            .await
+            .expect("init bare origin");
+
+        let origin_str = origin.to_string_lossy().into_owned();
+        run_git(&repo, &["remote", "add", "origin", &origin_str])
+            .await
+            .expect("remote add");
+        run_git(&repo, &["push", "-u", "origin", "main"])
+            .await
+            .expect("initial push");
+
+        // Advance origin/main without moving local main: commit on a scratch
+        // branch, push it onto main, then throw the scratch branch away.
+        run_git(&repo, &["checkout", "-b", "scratch"])
+            .await
+            .expect("scratch branch");
+        for i in 0..behind {
+            write_file(&repo, &format!("upstream-{i}.txt"), "landed\n");
+            run_git(&repo, &["add", "."]).await.expect("add");
+            run_git(&repo, &["commit", "-m", &format!("upstream {i}")])
+                .await
+                .expect("commit");
+        }
+        run_git(&repo, &["push", "origin", "scratch:main"])
+            .await
+            .expect("push to main");
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+        run_git(&repo, &["branch", "-D", "scratch"])
+            .await
+            .expect("drop scratch");
+        fetch(&repo).await.expect("fetch");
+        repo
+    }
+
+    fn cleanup_stale_repo(repo: &Path) {
+        let _ = std::fs::remove_dir_all(repo);
+        let leaf = repo
+            .file_name()
+            .expect("repo leaf")
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(repo.with_file_name(format!("{leaf}-origin")));
+    }
+
+    #[tokio::test]
+    async fn resolve_base_ref_prefers_remote_tracking() {
+        let repo = init_stale_repo("base-remote", 2).await;
+        assert_eq!(
+            remote_tracking_for(&repo, "main").await.as_deref(),
+            Some("origin/main")
+        );
+        assert_eq!(resolve_base_ref(&repo, "main").await, "origin/main");
+        cleanup_stale_repo(&repo);
+    }
+
+    #[tokio::test]
+    async fn resolve_base_ref_leaves_a_remote_ref_alone() {
+        let repo = init_stale_repo("base-already-remote", 1).await;
+        // Must not compound into `origin/origin/main`.
+        assert_eq!(resolve_base_ref(&repo, "origin/main").await, "origin/main");
+        cleanup_stale_repo(&repo);
+    }
+
+    #[tokio::test]
+    async fn resolve_base_ref_falls_back_without_a_remote() {
+        let repo = init_repo("base-no-remote").await;
+        assert_eq!(remote_tracking_for(&repo, "main").await, None);
+        assert_eq!(resolve_base_ref(&repo, "main").await, "main");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn fetch_without_a_remote_is_a_noop_success() {
+        let repo = init_repo("fetch-no-remote").await;
+        fetch(&repo).await.expect("fetch on remote-less repo is Ok");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn ahead_behind_measures_local_main_against_origin() {
+        let repo = init_stale_repo("stale-count", 3).await;
+        assert_eq!(
+            ahead_behind(&repo, "main", "origin/main").await,
+            Some((0, 3)),
+            "local main trails origin/main by the pushed commits"
+        );
+        cleanup_stale_repo(&repo);
+    }
+
+    /// The core of the fix: basing a worktree on the remote-tracking ref puts
+    /// it on current work, while basing it on the stale local branch forks
+    /// from wherever that branch was abandoned.
+    #[tokio::test]
+    async fn worktree_from_remote_ref_skips_the_stale_local_branch() {
+        let repo = init_stale_repo("wt-remote-base", 4).await;
+        let wt = repo.with_file_name("rt-wt-remote-base-tree");
+        let _ = std::fs::remove_dir_all(&wt);
+
+        worktree_add(&repo, &wt, "wt/fresh", Some("origin/main"))
+            .await
+            .expect("worktree from origin/main");
+        assert_eq!(
+            ahead_behind(&wt, "HEAD", "origin/main").await,
+            Some((0, 0)),
+            "worktree sits exactly on origin/main"
+        );
+        assert_eq!(
+            ahead_behind(&wt, "HEAD", "main").await,
+            Some((4, 0)),
+            "and therefore ahead of the stale local main"
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        cleanup_stale_repo(&repo);
+    }
+
+    /// Recreating an existing worktree must actually move its fork point.
+    /// Mirrors the remove → delete-branch → re-add sequence the daemon runs
+    /// for `WorktreeReusePolicy::RecreateFromBase`; without the branch delete
+    /// the re-add fails on "branch already exists" and the stale worktree
+    /// silently survives.
+    #[tokio::test]
+    async fn recreating_a_worktree_moves_it_off_the_stale_base() {
+        let repo = init_stale_repo("wt-recreate", 5).await;
+        let wt = repo.with_file_name("rt-wt-recreate-tree");
+        let _ = std::fs::remove_dir_all(&wt);
+
+        worktree_add(&repo, &wt, "wt/stale", Some("main"))
+            .await
+            .expect("worktree from stale local main");
+        assert_eq!(
+            ahead_behind(&wt, "HEAD", "origin/main").await,
+            Some((0, 5)),
+            "forked from the stale local main"
+        );
+
+        worktree_remove(&repo, &wt).await.expect("remove worktree");
+        delete_branch(&repo, "wt/stale")
+            .await
+            .expect("branch survives worktree removal and must be deleted");
+        worktree_add(&repo, &wt, "wt/stale", Some("origin/main"))
+            .await
+            .expect("re-add from origin/main");
+        assert_eq!(
+            ahead_behind(&wt, "HEAD", "origin/main").await,
+            Some((0, 0)),
+            "recreated worktree is level with the remote"
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        cleanup_stale_repo(&repo);
+    }
+
+    #[tokio::test]
+    async fn list_remote_branches_reports_tracking_refs_without_head() {
+        let repo = init_stale_repo("remote-list", 1).await;
+        let remote = list_remote_branches(&repo).await.expect("list remotes");
+        assert!(
+            remote.contains(&"origin/main".to_string()),
+            "expected origin/main in {remote:?}"
+        );
+        assert!(
+            !remote.iter().any(|r| r.ends_with("/HEAD")),
+            "symbolic HEAD alias must be filtered out of {remote:?}"
+        );
+        // The local list must stay local-only so `branch_exists` checks keep
+        // their exact meaning.
+        let local = list_branches(&repo).await.expect("list branches");
+        assert_eq!(local, vec!["main".to_string()]);
+        cleanup_stale_repo(&repo);
     }
 
     #[tokio::test]

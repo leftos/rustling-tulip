@@ -50,6 +50,7 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 - **Daemon-status footer** — persistent connection status bar + troubleshooting flyout.
 - **NSIS installer** — bundles `rustling-tulipd.exe` + `rt-tracer.exe` as sidecars.
 - **Two-mode workspace creator** — repo-list mode or VS Code `.code-workspace` file import.
+- **Fresh worktree fork points** — spawns no longer cut branches from a long-stale local default. Auto-detected bases resolve to their remote-tracking counterpart (`main` → `origin/main`); the dialog background-fetches on open, offers remote refs in the base picker, reports "N commits behind origin/main", and prompts Reuse / Recreate-from-base when a worktree already exists at the target path instead of silently binding to it. See `docs/plans/completed/worktree-fork-point-staleness.md`.
 - **Remote LAN access** — opt-in `0.0.0.0` TLS listener (self-signed cert + fingerprint pinning/TOFU), off by default; a pinned-TLS loopback tunnel in the Tauri app bridges the webview WS to the remote daemon. Per-client tab/pane layouts (sessions stay global to the daemon); host auto-start on login (HKCU `Run`); mDNS discovery + short-code pairing. See `docs/plans/remote-lan-access.md`.
 
 ## Open

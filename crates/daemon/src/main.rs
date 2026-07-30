@@ -23,6 +23,7 @@ mod scrollback;
 mod secret;
 mod server;
 mod session;
+mod spawn_plan;
 mod state;
 mod sync;
 mod tabs;

@@ -448,6 +448,12 @@ pub enum SpawnTarget {
         /// the confirmed retry resends with `Carry` or `Stash`.
         #[serde(default)]
         checkout_strategy: Option<CheckoutStrategy>,
+        /// What to do when a worktree already exists at the target path.
+        /// Defaults to [`WorktreeReusePolicy::Reuse`] — the historical
+        /// behavior, and the right answer for non-interactive callers
+        /// (presets, duplicate, resume) that never saw a collision prompt.
+        #[serde(default)]
+        worktree_reuse: WorktreeReusePolicy,
     },
     Workspace {
         workspace_id: String,
@@ -458,6 +464,9 @@ pub enum SpawnTarget {
         /// See [`SpawnTarget::Single::use_worktree`]; applied independently to
         /// each member.
         use_worktree: bool,
+        /// See [`SpawnTarget::Single::worktree_reuse`]; applied to every member.
+        #[serde(default)]
+        worktree_reuse: WorktreeReusePolicy,
     },
     Standalone {
         /// Absolute directory for a non-repo shell. `None` lets the daemon
@@ -624,13 +633,33 @@ impl<'de> Deserialize<'de> for SpawnConfig {
     }
 }
 
+impl SpawnTarget {
+    /// Reset any worktree-collision decision back to
+    /// [`WorktreeReusePolicy::Reuse`].
+    ///
+    /// `RecreateFromBase` is a one-shot answer the user gave about one
+    /// specific collision they were shown. It must not survive into a
+    /// persisted [`SpawnConfig`], where "launch last again" or a duplicate
+    /// would replay it and delete a worktree nobody was asked about.
+    #[must_use]
+    pub fn with_reuse_policy_reset(mut self) -> Self {
+        match &mut self {
+            Self::Single { worktree_reuse, .. } | Self::Workspace { worktree_reuse, .. } => {
+                *worktree_reuse = WorktreeReusePolicy::Reuse;
+            }
+            Self::Standalone { .. } => {}
+        }
+        self
+    }
+}
+
 impl SpawnConfig {
     /// Capture the spawn-time config from a [`SpawnRequest`], dropping the
     /// fields a duplicate doesn't want to inherit.
     #[must_use]
     pub fn from_request(req: &SpawnRequest) -> Self {
         Self {
-            target: req.target.clone(),
+            target: req.target.clone().with_reuse_policy_reset(),
             mode: req.mode,
             dangerously_skip_permissions: req.dangerously_skip_permissions,
             agent_options: req.agent_options.clone(),
@@ -1470,6 +1499,23 @@ pub enum ClientMessage {
         branch_name: String,
         base_branch: Option<String>,
     },
+    /// Single-repo counterpart of [`ClientMessage::PreviewWorkspaceSpawn`]:
+    /// resolve where a spawn would fork from, and whether it would land on an
+    /// existing worktree, without creating anything. Replied with
+    /// [`DaemonMessage::SpawnPreview`].
+    PreviewSpawn {
+        repo_id: String,
+        branch_name: String,
+        base_branch: Option<String>,
+        use_worktree: bool,
+    },
+    /// Run `git fetch --prune` for a repo so subsequent previews compare
+    /// against current remote refs. Advisory and non-blocking: the daemon
+    /// answers [`DaemonMessage::RepoFetched`] when it settles, and a failure
+    /// never blocks spawning.
+    FetchRepo {
+        repo_id: String,
+    },
     ListSessions,
     SpawnSession(SpawnRequest),
     /// Clone an existing session: daemon reads its stored [`SpawnConfig`]
@@ -2222,6 +2268,11 @@ pub enum DaemonMessage {
         repo_id: String,
         branches: Vec<String>,
         current: Option<String>,
+        /// Remote-tracking branches as short names (`origin/main`), so the
+        /// base-branch picker can offer a ref that is actually current
+        /// rather than only long-stale local ones.
+        #[serde(default)]
+        remote_branches: Vec<String>,
     },
     /// Reply to [`ClientMessage::ListWorktrees`]. Lists all non-main
     /// worktrees for the given repo, each annotated with whether an active
@@ -2333,6 +2384,19 @@ pub enum DaemonMessage {
         workspace_id: String,
         branch_name: String,
         per_member: Vec<MemberSpawnPreview>,
+    },
+    /// Reply to [`ClientMessage::PreviewSpawn`].
+    SpawnPreview {
+        repo_id: String,
+        branch_name: String,
+        preview: MemberSpawnPreview,
+    },
+    /// Reply to [`ClientMessage::FetchRepo`]. `error` carries git's message
+    /// when the fetch failed; the client reports it as a freshness caveat
+    /// rather than an error, since a stale comparison is still usable.
+    RepoFetched {
+        repo_id: String,
+        error: Option<String>,
     },
     Commits {
         repo_id: String,
@@ -2669,8 +2733,61 @@ pub struct MemberSpawnPreview {
     pub repo_id: String,
     pub repo_name: String,
     pub branch_exists: bool,
+    /// Base branch *name* the daemon settled on — the caller's explicit
+    /// value, else the repo's default. `None` when the target branch
+    /// already exists and nothing will be created.
     pub effective_base: Option<String>,
     pub worktree_path: String,
+    /// The ref actually handed to `git worktree add`. Differs from
+    /// `effective_base` when the daemon upgraded a local branch name to its
+    /// remote-tracking counterpart (`main` → `origin/main`).
+    #[serde(default)]
+    pub resolved_base_ref: Option<String>,
+    /// Remote-tracking ref `effective_base` was compared against, when one
+    /// exists.
+    #[serde(default)]
+    pub base_remote_ref: Option<String>,
+    /// How many commits the *local* `effective_base` trails
+    /// `base_remote_ref`. Non-zero means the local branch is stale; the UI
+    /// surfaces it so forking from a long-untouched local ref stops being
+    /// a silent surprise.
+    #[serde(default)]
+    pub base_behind_remote: Option<u32>,
+    /// Whether a worktree directory already sits at `worktree_path`. When
+    /// true the daemon binds to it as-is unless the client asks for
+    /// [`WorktreeReusePolicy::RecreateFromBase`], and `effective_base` is
+    /// therefore ignored.
+    #[serde(default)]
+    pub worktree_exists: bool,
+    /// Abbreviated HEAD of the existing worktree, when there is one.
+    #[serde(default)]
+    pub existing_worktree_head: Option<String>,
+    /// Whether the existing worktree has uncommitted changes. Recreating it
+    /// would discard them, so the client must warn before offering that.
+    #[serde(default)]
+    pub existing_worktree_dirty: bool,
+    /// How many commits the existing worktree's HEAD trails the resolved
+    /// base. This is the number that catches "this branch forked from a
+    /// main that has since moved N commits".
+    #[serde(default)]
+    pub existing_worktree_behind_base: Option<u32>,
+}
+
+/// What to do when a worktree directory already exists at the path a spawn
+/// wants to use. Grows a catch-all so an older daemon decoding a newer
+/// choice falls back to the non-destructive path.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeReusePolicy {
+    /// Bind to the existing worktree untouched. The base branch is ignored —
+    /// the worktree keeps whatever fork point it was created with.
+    #[default]
+    Reuse,
+    /// Remove the existing worktree and re-add it from the resolved base.
+    /// Destructive: uncommitted work in that worktree is lost.
+    RecreateFromBase,
+    #[serde(other)]
+    Unknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -3209,6 +3326,7 @@ mod tests {
                 base_branch: None,
                 use_worktree: true,
                 checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
             },
             mode: SessionMode::Interactive,
             initial_prompt: None,
@@ -3246,6 +3364,7 @@ mod tests {
                 branch_name: "feat/x".to_string(),
                 base_branch: None,
                 use_worktree: true,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
             },
             mode: SessionMode::Interactive,
             initial_prompt: Some("refactor authentication".to_string()),
@@ -3275,6 +3394,7 @@ mod tests {
                 base_branch: None,
                 use_worktree: true,
                 checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
             },
             mode: SessionMode::Interactive,
             initial_prompt: Some("investigate".to_string()),

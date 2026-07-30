@@ -175,6 +175,9 @@ export type SpawnTarget =
       // Confirmed dirty-tree strategy for an in-place switch; null/omitted on
       // the first attempt (the daemon then asks via `checkout_confirm_required`).
       checkout_strategy?: CheckoutStrategy | null;
+      // What to do when a worktree already exists at the target path.
+      // Omitted means "reuse" — the non-destructive default.
+      worktree_reuse?: WorktreeReusePolicy;
     }
   | {
       kind: "workspace";
@@ -182,6 +185,7 @@ export type SpawnTarget =
       branch_name: string;
       base_branch: string | null;
       use_worktree: boolean;
+      worktree_reuse?: WorktreeReusePolicy;
     }
   | {
       kind: "standalone";
@@ -484,7 +488,33 @@ export interface MemberSpawnPreview {
   branch_exists: boolean;
   effective_base: string | null;
   worktree_path: string;
+  // The ref actually handed to `git worktree add`. Differs from
+  // effective_base when the daemon upgraded a local branch name to its
+  // remote-tracking counterpart (main -> origin/main).
+  resolved_base_ref?: string | null;
+  // Remote-tracking ref effective_base was compared against.
+  base_remote_ref?: string | null;
+  // Commits the local effective_base trails base_remote_ref.
+  base_behind_remote?: number | null;
+  // A worktree directory already sits at worktree_path. The daemon binds to
+  // it as-is unless the spawn asks for "recreate_from_base", so the base
+  // branch would otherwise be silently ignored.
+  worktree_exists?: boolean;
+  existing_worktree_head?: string | null;
+  existing_worktree_dirty?: boolean;
+  // Commits the existing worktree's HEAD trails the resolved base.
+  existing_worktree_behind_base?: number | null;
 }
+
+// What to do when a worktree already exists at the target path. Mirrors the
+// Rust WorktreeReusePolicy; "reuse" is the default and the non-destructive
+// choice. "unknown" is the forward-compat catch-all a newer daemon could echo
+// back through a persisted SpawnConfig — treat it as "reuse"; never send it.
+export type WorktreeReusePolicy = "reuse" | "recreate_from_base" | "unknown";
+
+// The subset the collision prompt can actually produce, so the UI can't
+// accidentally put the catch-all back on the wire.
+export type WorktreeReuseChoice = Exclude<WorktreeReusePolicy, "unknown">;
 
 export interface VscodeWorkspaceFolder {
   path: string;
@@ -677,6 +707,14 @@ export type ClientMessage =
       branch_name: string;
       base_branch: string | null;
     }
+  | {
+      type: "preview_spawn";
+      repo_id: string;
+      branch_name: string;
+      base_branch: string | null;
+      use_worktree: boolean;
+    }
+  | { type: "fetch_repo"; repo_id: string }
   | {
       type: "accept_vscode_workspace_suggestion";
       suggestion: VscodeWorkspaceSuggestion;
@@ -924,6 +962,10 @@ export type DaemonMessage =
       repo_id: string;
       branches: string[];
       current: string | null;
+      // Remote-tracking branches as short names ("origin/main"). Always
+      // emitted — serde has no skip_serializing_if here, and the handshake
+      // only admits a daemon on a matching protocol version.
+      remote_branches: string[];
     }
   | {
       type: "worktrees";
@@ -1004,6 +1046,19 @@ export type DaemonMessage =
       workspace_id: string;
       branch_name: string;
       per_member: MemberSpawnPreview[];
+    }
+  | {
+      type: "spawn_preview";
+      repo_id: string;
+      branch_name: string;
+      preview: MemberSpawnPreview;
+    }
+  | {
+      type: "repo_fetched";
+      repo_id: string;
+      // Non-null when the fetch failed. Advisory: previews still render
+      // against cached refs.
+      error: string | null;
     }
   | {
       type: "vscode_workspace_suggestion";

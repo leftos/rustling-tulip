@@ -8,7 +8,7 @@ use crate::pairing;
 use crate::paths::Dirs;
 use crate::pty::PtySpawnSpec;
 use crate::registry::{
-    add_repo, ensure_default_branch, persist_last_agent, persist_repo_last_spawn_config,
+    add_repo, persist_last_agent, persist_repo_last_spawn_config,
     persist_workspace_last_spawn_config, remove_repo, remove_workspace, reorder_containers,
     set_repo_appearance, set_repo_worktree_default, set_session_order, set_workspace_appearance,
     set_workspace_worktree_default, upsert_workspace,
@@ -21,7 +21,8 @@ use crate::state::AppState;
 use crate::tabs;
 use crate::tracer_client;
 use crate::{
-    git, git_inspect, git_write, headless, inject, osc_title, pty_state, vscode, workspace as ws,
+    git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan, vscode,
+    workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
 use axum::Json;
@@ -1357,8 +1358,31 @@ async fn dispatch(
             let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
                 workspace_id,
                 branch_name,
-                per_member: ws::previews(&resolved),
+                per_member: ws::previews(&resolved).await,
             });
+        }
+        ClientMessage::PreviewSpawn {
+            repo_id,
+            branch_name,
+            base_branch,
+            use_worktree,
+        } => {
+            let preview = preview_single_spawn(
+                hub,
+                &repo_id,
+                &branch_name,
+                base_branch.as_deref(),
+                use_worktree,
+            )
+            .await?;
+            let _ = out_tx.send(DaemonMessage::SpawnPreview {
+                repo_id,
+                branch_name,
+                preview,
+            });
+        }
+        ClientMessage::FetchRepo { repo_id } => {
+            fetch_repo(hub, repo_id, out_tx).await;
         }
         ClientMessage::AcceptVscodeWorkspaceSuggestion { suggestion, watch } => {
             accept_vscode_suggestion(hub, suggestion, watch, out_tx).await?;
@@ -1593,10 +1617,20 @@ async fn dispatch(
                 warn!(?err, %repo_id, path = %path.display(), "current_branch failed");
                 None
             });
+            // Same degrade-but-leave-a-trail policy as the local list: a repo
+            // with no remote legitimately has none, so an empty vec is not by
+            // itself an error signal.
+            let remote_branches = git::list_remote_branches(&path)
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(?err, %repo_id, path = %path.display(), "list_remote_branches failed; reporting none");
+                    Vec::new()
+                });
             let _ = out_tx.send(DaemonMessage::Branches {
                 repo_id,
                 branches,
                 current,
+                remote_branches,
             });
         }
         ClientMessage::ListWorktrees { repo_id } => {
@@ -2863,6 +2897,7 @@ pub(crate) async fn spawn_session(
             base_branch,
             use_worktree,
             checkout_strategy,
+            worktree_reuse,
         } => {
             spawn_single(
                 hub,
@@ -2871,6 +2906,7 @@ pub(crate) async fn spawn_session(
                 base_branch,
                 use_worktree,
                 checkout_strategy,
+                worktree_reuse,
             )
             .await?
         }
@@ -2879,7 +2915,18 @@ pub(crate) async fn spawn_session(
             branch_name,
             base_branch,
             use_worktree,
-        } => spawn_workspace(hub, &workspace_id, &branch_name, base_branch, use_worktree).await?,
+            worktree_reuse,
+        } => {
+            spawn_workspace(
+                hub,
+                &workspace_id,
+                &branch_name,
+                base_branch,
+                use_worktree,
+                worktree_reuse,
+            )
+            .await?
+        }
         SpawnTarget::Standalone { cwd } => spawn_standalone_shell(cwd.as_deref())?,
     };
     info!(
@@ -3810,6 +3857,165 @@ fn send_spawn_failure(out_tx: &mpsc::UnboundedSender<DaemonMessage>, err: &anyho
     let _ = out_tx.send(msg);
 }
 
+/// Resolve a single-repo spawn without touching the disk: which ref the
+/// branch would fork from, how stale that ref is, and whether a worktree is
+/// already sitting at the target path.
+///
+/// Deliberately mirrors `spawn_single`'s resolution rather than duplicating
+/// it — both call `spawn_plan::resolve_base_for_create`, so a preview can't
+/// promise a fork point the spawn won't honor.
+async fn preview_single_spawn(
+    hub: &Hub,
+    repo_id: &str,
+    branch_name: &str,
+    base_branch: Option<&str>,
+    use_worktree: bool,
+) -> anyhow::Result<protocol::MemberSpawnPreview> {
+    let repo = hub
+        .state
+        .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
+        .ok_or_else(|| anyhow!("unknown repo: {repo_id}"))?;
+    let repo_path = PathBuf::from(&repo.path);
+
+    let branch_exists = git::list_branches(&repo_path)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|b| b == branch_name);
+    // An existing branch is checked out as-is; nothing gets created from a
+    // base, so there is no fork point to report.
+    let base = if branch_exists {
+        None
+    } else {
+        Some(spawn_plan::resolve_base_for_create(&hub.state, &repo, base_branch).await)
+    };
+
+    let worktree_path = if use_worktree {
+        git::workspace_worktree_paths(
+            &hub.state.worktrees_dir(),
+            &[repo_path.as_path()],
+            branch_name,
+        )
+        .pop()
+        .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?
+    } else {
+        repo_path.clone()
+    };
+    let existing = (use_worktree && worktree_path.exists()).then_some(worktree_path.as_path());
+
+    let fork = spawn_plan::fork_point(&repo_path, base.as_deref(), base.as_deref(), existing).await;
+    Ok(protocol::MemberSpawnPreview {
+        repo_id: repo.id.clone(),
+        repo_name: repo.name.clone(),
+        branch_exists,
+        effective_base: base.clone(),
+        worktree_path: worktree_path.to_string_lossy().into_owned(),
+        resolved_base_ref: base,
+        base_remote_ref: fork.base_remote_ref,
+        base_behind_remote: fork.base_behind_remote,
+        worktree_exists: existing.is_some(),
+        existing_worktree_head: fork.existing_worktree_head,
+        existing_worktree_dirty: fork.existing_worktree_dirty,
+        existing_worktree_behind_base: fork.existing_worktree_behind_base,
+    })
+}
+
+/// Run a fetch for `repo_id` and report the outcome.
+///
+/// Failure is reported, never raised: a fetch is a freshness improvement, so
+/// an offline machine or an auth-expired remote must still leave the spawn
+/// dialog fully usable against cached refs.
+async fn fetch_repo(hub: &Hub, repo_id: String, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    let Some(repo_path) = hub.state.with_persisted(|s| {
+        s.repos
+            .iter()
+            .find(|r| r.id == repo_id)
+            .map(|r| r.path.clone())
+    }) else {
+        warn!(%repo_id, "fetch_repo: unknown repo");
+        return;
+    };
+    let error = match git::fetch(Path::new(&repo_path)).await {
+        Ok(()) => None,
+        Err(err) => {
+            warn!(?err, %repo_id, "fetch_repo: fetch failed; previews fall back to cached refs");
+            Some(format!("{err:#}"))
+        }
+    };
+    let _ = out_tx.send(DaemonMessage::RepoFetched { repo_id, error });
+}
+
+/// Apply `policy` to a worktree directory that already exists at
+/// `worktree_path`.
+///
+/// `Reuse` (and `Unknown`, which decodes from a client newer than this
+/// daemon) binds to it untouched — the historical behavior. Recreating drops
+/// the worktree and re-adds it from `base`, which discards anything
+/// uncommitted; the client only offers that after showing the user the
+/// worktree's dirty state.
+async fn recreate_or_reuse_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    base: &str,
+    policy: protocol::WorktreeReusePolicy,
+) -> anyhow::Result<()> {
+    match policy {
+        protocol::WorktreeReusePolicy::Reuse | protocol::WorktreeReusePolicy::Unknown => {
+            info!(
+                worktree = %worktree_path.display(),
+                branch_name,
+                "reusing existing worktree; base branch not applied"
+            );
+            Ok(())
+        }
+        protocol::WorktreeReusePolicy::RecreateFromBase => {
+            warn!(
+                worktree = %worktree_path.display(),
+                branch_name,
+                base,
+                "recreating existing worktree from base; uncommitted work there is discarded"
+            );
+            git::worktree_remove(repo_path, worktree_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "removing existing worktree at {} before recreating it",
+                        worktree_path.display()
+                    )
+                })?;
+            // The branch itself survives `worktree remove`, so re-adding with
+            // `-b` would fail on "branch already exists". Delete it too — the
+            // user asked for a fresh fork from `base`, not a rebind to the old
+            // branch tip.
+            if let Err(err) = git::delete_branch(repo_path, branch_name).await {
+                debug!(
+                    ?err,
+                    branch_name, "no local branch to delete before recreate"
+                );
+            }
+            git::worktree_add(repo_path, worktree_path, branch_name, Some(base))
+                .await
+                .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))
+        }
+    }
+}
+
+/// Record where a worktree actually ended up relative to its base. Cheap
+/// local git calls, and the one line in the log that answers "why is this
+/// branch missing work that landed weeks ago".
+async fn log_fork_point(repo_path: &Path, branch_name: &str, base: &str, worktree_path: &Path) {
+    let fork = spawn_plan::fork_point(repo_path, Some(base), Some(base), Some(worktree_path)).await;
+    info!(
+        branch_name,
+        base,
+        head = fork.existing_worktree_head.as_deref().unwrap_or("?"),
+        behind_base = fork.existing_worktree_behind_base.unwrap_or(0),
+        base_behind_remote = fork.base_behind_remote.unwrap_or(0),
+        "worktree fork point"
+    );
+}
+
 async fn spawn_single(
     hub: &Hub,
     repo_id: &str,
@@ -3817,6 +4023,7 @@ async fn spawn_single(
     base_branch: Option<String>,
     use_worktree: bool,
     checkout_strategy: Option<protocol::CheckoutStrategy>,
+    worktree_reuse: protocol::WorktreeReusePolicy,
 ) -> anyhow::Result<SpawnResolution> {
     let repo = hub
         .state
@@ -3840,31 +4047,11 @@ async fn spawn_single(
         return Ok((SessionKind::Single, vec![member], repo_path, label, None));
     }
 
-    // Resolve the base branch used when the target needs to be *created*.
-    // Priority: explicit caller value → repo's persisted default → lazy
-    // re-detection (covers entries that registered before detection
-    // succeeded) → the repo's current branch → "main" as a last resort.
-    // A literal "main" fallback was the historical default, but repos with
-    // only "master" / "trunk" never have main as a ref and the create-from
-    // step would fail outright; falling back to the current branch always
-    // yields a real, resolvable ref.
-    let base_for_create = if let Some(b) = base_branch {
-        b
-    } else if let Some(b) = repo.default_branch.clone() {
-        b
-    } else {
-        let detected = git::default_branch(&repo_path).await;
-        ensure_default_branch(&hub.state, &repo.id, detected.clone());
-        if let Some(b) = detected {
-            b
-        } else {
-            git::current_branch(&repo_path)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "main".to_string())
-        }
-    };
+    // Base branch used when the target needs to be *created*. See
+    // `spawn_plan::resolve_base_for_create` for the priority chain and why an
+    // auto-detected default is upgraded to its remote-tracking counterpart.
+    let base_for_create =
+        spawn_plan::resolve_base_for_create(&hub.state, &repo, base_branch.as_deref()).await;
 
     let working_path = if use_worktree {
         let mut paths = git::workspace_worktree_paths(
@@ -3876,13 +4063,22 @@ async fn spawn_single(
             .pop()
             .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?;
         // Refuse to bind a worktree that's already driving a live session.
-        // Without this the "dir already present, skipping add" reuse below
-        // would silently share one worktree across two sessions.
+        // Without this the reuse path below would silently share one worktree
+        // across two sessions.
         let in_use = active_sessions_using_worktree(hub, &worktree_path.to_string_lossy(), None);
         if !in_use.is_empty() {
             return Err(worktree_in_use_failure(branch_name, &in_use).into());
         }
-        if !worktree_path.exists() {
+        if worktree_path.exists() {
+            recreate_or_reuse_worktree(
+                &repo_path,
+                &worktree_path,
+                branch_name,
+                &base_for_create,
+                worktree_reuse,
+            )
+            .await?;
+        } else {
             git::worktree_add(
                 &repo_path,
                 &worktree_path,
@@ -3892,6 +4088,7 @@ async fn spawn_single(
             .await
             .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
         }
+        log_fork_point(&repo_path, branch_name, &base_for_create, &worktree_path).await;
         worktree_path
     } else {
         git::checkout_in_place(
@@ -3958,6 +4155,7 @@ async fn spawn_workspace(
     branch_name: &str,
     base_branch: Option<String>,
     use_worktree: bool,
+    worktree_reuse: protocol::WorktreeReusePolicy,
 ) -> anyhow::Result<SpawnResolution> {
     info!(
         workspace_id,
@@ -3984,9 +4182,16 @@ async fn spawn_workspace(
             }
         }
     }
-    ws::ensure_branches(&resolved, branch_name)
+    ws::ensure_branches(&resolved, branch_name, worktree_reuse)
         .await
         .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
+    if use_worktree {
+        for member in &resolved {
+            let repo_path = PathBuf::from(&member.repo.path);
+            let base = member.effective_base.clone().unwrap_or_default();
+            log_fork_point(&repo_path, branch_name, &base, &member.working_path).await;
+        }
+    }
 
     let primary = resolved
         .first()

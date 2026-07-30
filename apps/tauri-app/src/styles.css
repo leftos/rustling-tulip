@@ -2749,6 +2749,34 @@ button.tree-tab-pill:hover {
 
 .muted { color: var(--fg-muted); }
 .inline-note { margin-left: 6px; }
+span.danger { color: var(--err); }
+
+/* Advisory callout inside a form — used by the spawn dialog to surface a
+ * stale base branch or an existing worktree before the user commits. Warning
+ * coloring, not error: the spawn is still allowed, it just wouldn't do what
+ * it looks like it does. */
+.inline-warning {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--warn-soft);
+  font-size: var(--text-small);
+  line-height: 1.45;
+}
+.inline-warning code {
+  font-family: var(--font-mono);
+}
+.inline-warning .radio-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+.inline-warning .radio-row input {
+  margin-top: 3px;
+}
 .preset-description { margin-top: 0; }
 
 .modal-backdrop {

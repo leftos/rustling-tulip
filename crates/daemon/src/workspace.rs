@@ -2,12 +2,12 @@
 //! paths, and rendering preview rows.
 
 use crate::git;
-use crate::registry::ensure_default_branch;
+use crate::spawn_plan;
 use crate::state::AppState;
 use anyhow::{Context as _, anyhow};
-use protocol::{MemberSpawnPreview, RepoEntry, WorkspaceEntry};
+use protocol::{MemberSpawnPreview, RepoEntry, WorkspaceEntry, WorktreeReusePolicy};
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct ResolvedMember {
     pub repo: RepoEntry,
@@ -78,26 +78,9 @@ pub async fn resolve_workspace(
         let base = if exists {
             None
         } else {
-            // Same lazy-fallback chain as spawn_single: explicit caller →
-            // persisted default → re-detect (and persist) → current
-            // branch → "main" literal as a last resort.
-            let resolved_base = if let Some(b) = explicit_base.map(String::from) {
-                b
-            } else if let Some(b) = repo.default_branch.clone() {
-                b
-            } else {
-                let detected = git::default_branch(&path).await;
-                ensure_default_branch(state, &repo.id, detected.clone());
-                match detected {
-                    Some(b) => b,
-                    None => git::current_branch(&path)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| "main".to_string()),
-                }
-            };
-            Some(resolved_base)
+            // Same resolution as spawn_single, including the upgrade from an
+            // auto-detected local default to its remote-tracking counterpart.
+            Some(spawn_plan::resolve_base_for_create(state, &repo, explicit_base).await)
         };
         resolved.push(ResolvedMember {
             repo,
@@ -110,24 +93,49 @@ pub async fn resolve_workspace(
     Ok((workspace, resolved))
 }
 
-pub fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
-    resolved
-        .iter()
-        .map(|m| MemberSpawnPreview {
-            repo_id: m.repo.id.clone(),
-            repo_name: m.repo.name.clone(),
-            branch_exists: m.branch_exists,
-            effective_base: m.effective_base.clone(),
-            worktree_path: m.working_path.to_string_lossy().into_owned(),
-        })
-        .collect()
+/// Build one preview row per member, including the fork-point measurements
+/// that tell the user where each branch would actually be cut from.
+pub async fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
+    let mut out = Vec::with_capacity(resolved.len());
+    for member in resolved {
+        out.push(preview_for(member).await);
+    }
+    out
+}
+
+async fn preview_for(member: &ResolvedMember) -> MemberSpawnPreview {
+    let repo_path = PathBuf::from(&member.repo.path);
+    // Only a worktree member can collide with an existing directory; an
+    // in-place member's "working path" is the repo itself and always exists.
+    let existing = (member.use_worktree && member.working_path.exists())
+        .then_some(member.working_path.as_path());
+    let base = member.effective_base.as_deref();
+    let fork = spawn_plan::fork_point(&repo_path, base, base, existing).await;
+    MemberSpawnPreview {
+        repo_id: member.repo.id.clone(),
+        repo_name: member.repo.name.clone(),
+        branch_exists: member.branch_exists,
+        effective_base: member.effective_base.clone(),
+        worktree_path: member.working_path.to_string_lossy().into_owned(),
+        resolved_base_ref: member.effective_base.clone(),
+        base_remote_ref: fork.base_remote_ref,
+        base_behind_remote: fork.base_behind_remote,
+        worktree_exists: existing.is_some(),
+        existing_worktree_head: fork.existing_worktree_head,
+        existing_worktree_dirty: fork.existing_worktree_dirty,
+        existing_worktree_behind_base: fork.existing_worktree_behind_base,
+    }
 }
 
 /// Materialize each member's chosen branch. For `use_worktree` members, this
 /// adds a worktree (idempotent if the dir already exists). For in-place
 /// members, this errors on a dirty working tree and then checks out (or
 /// creates) the branch in the repo's primary directory.
-pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> anyhow::Result<()> {
+pub async fn ensure_branches(
+    resolved: &[ResolvedMember],
+    branch_name: &str,
+    worktree_reuse: WorktreeReusePolicy,
+) -> anyhow::Result<()> {
     info!(
         members = resolved.len(),
         branch_name, "ensure_branches: begin"
@@ -141,15 +149,44 @@ pub async fn ensure_branches(resolved: &[ResolvedMember], branch_name: &str) -> 
             "ensure_branches: member step"
         );
         if member.use_worktree {
-            if member.working_path.exists() {
-                info!(
-                    idx = i,
-                    worktree = %member.working_path.display(),
-                    "ensure_branches: worktree dir already present, skipping add"
-                );
-                continue;
-            }
             let repo_path = PathBuf::from(&member.repo.path);
+            if member.working_path.exists() {
+                match worktree_reuse {
+                    WorktreeReusePolicy::Reuse | WorktreeReusePolicy::Unknown => {
+                        info!(
+                            idx = i,
+                            worktree = %member.working_path.display(),
+                            "ensure_branches: worktree dir already present, reusing it as-is"
+                        );
+                        continue;
+                    }
+                    WorktreeReusePolicy::RecreateFromBase => {
+                        warn!(
+                            idx = i,
+                            worktree = %member.working_path.display(),
+                            branch_name,
+                            "ensure_branches: recreating worktree from base; uncommitted work there is discarded"
+                        );
+                        git::worktree_remove(&repo_path, &member.working_path)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "removing existing worktree at {} for {}",
+                                    member.working_path.display(),
+                                    member.repo.name
+                                )
+                            })?;
+                        // `worktree remove` leaves the branch, so a `-b` re-add
+                        // would fail on "already exists".
+                        if let Err(err) = git::delete_branch(&repo_path, branch_name).await {
+                            info!(
+                                ?err,
+                                branch_name, "no local branch to delete before recreate"
+                            );
+                        }
+                    }
+                }
+            }
             git::worktree_add(
                 &repo_path,
                 &member.working_path,
