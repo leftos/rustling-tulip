@@ -32,7 +32,7 @@ import {
 import {
   DEFAULT_CLAUDE_OPTIONS,
   tabGrid,
-  type CheckoutStrategy,
+  type CheckoutChoice,
   type ClientMessage,
   type ClonableLayout,
   type ContainerRef,
@@ -1351,7 +1351,7 @@ export default function App() {
   /// Resolve the checkout-confirm modal: resend the stashed spawn with the
   /// chosen strategy, then clear the prompt.
   const onCheckoutConfirm = useCallback(
-    (strategy: CheckoutStrategy) => {
+    (strategy: CheckoutChoice) => {
       const base = lastSpawnReqRef.current;
       const client = latestStateRef.current?.client;
       if (base && client && base.target.kind === "single") {
@@ -3833,6 +3833,14 @@ function handleMessage(
         message: "Daemon error",
         detail: msg.message,
       });
+      return;
+    // Routed to component-level `client.onMessage` subscribers rather than
+    // handled here. They still have to be named: without a case they fall
+    // through to the forward-compat tail below and log as unknown on every
+    // occurrence, which reads as a protocol gap during triage when it isn't.
+    case "shutdown_ack": // App.tsx's own daemon-shutdown flow
+    case "vscode_workspaces_scanned": // Sidebar.tsx
+    case "vscode_workspace_parsed": // WorkspaceCreator.tsx
       return;
   }
   // Forward-compat: a v(N+1) daemon may emit message types this v(N) client

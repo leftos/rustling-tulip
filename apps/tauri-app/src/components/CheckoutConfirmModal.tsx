@@ -1,4 +1,4 @@
-import type { CheckoutStrategy } from "../types";
+import type { CheckoutChoice } from "../types";
 import { useEscape } from "../utils/a11y";
 import Icon from "./Icon";
 
@@ -6,7 +6,7 @@ interface Props {
   branch: string;
   dirtyCount: number;
   /// User picked how to resolve the dirty tree.
-  onChoose: (strategy: CheckoutStrategy) => void;
+  onChoose: (strategy: CheckoutChoice) => void;
   onCancel: () => void;
 }
 

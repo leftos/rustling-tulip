@@ -85,6 +85,10 @@ export type SessionStatus =
   | "stopped"
   | "error";
 export type SessionMode = "interactive" | "headless" | "plain_shell";
+// Why a session raised an attention flag. Mirrors the Rust AttentionReason,
+// which is a closed enum — no serde(other) catch-all — so this union is
+// exhaustive.
+export type AttentionReason = "awaiting_input" | "stopped" | "error";
 
 export interface SessionMember {
   repo_id: string;
@@ -162,8 +166,15 @@ export interface SessionSnapshot {
 }
 
 // How to resolve a dirty working tree on an in-place checkout. Mirrors the Rust
-// `CheckoutStrategy`; the client only ever sends a confirmed choice.
-export type CheckoutStrategy = "carry" | "stash";
+// `CheckoutStrategy`. "unknown" is its serde(other) catch-all: reachable
+// daemon->client because SpawnTarget rides along inside a persisted
+// SpawnConfig (last_spawn_config, spawn_config_reply). Treat it as "no
+// strategy"; never send it.
+export type CheckoutStrategy = "carry" | "stash" | "unknown";
+
+// The subset the confirm modal can actually produce, so the UI can't put the
+// catch-all back on the wire.
+export type CheckoutChoice = Exclude<CheckoutStrategy, "unknown">;
 
 export type SpawnTarget =
   | {
@@ -619,6 +630,13 @@ export interface ClonableLayout {
 
 /// How a brand-new client seeds its per-client layout at first connect. Mirrors
 /// the Rust `InitLayoutKind` (internally tagged on `kind`).
+///
+/// Intentionally omits the Rust side's `#[serde(other)] Unknown`. This type
+/// only ever travels client -> daemon (`ClientMessage::InitLayout`); the
+/// catch-all exists so an *older daemon* can decode a newer client's choice
+/// and fall back to empty. Mirroring it here would let the layout chooser
+/// produce a variant the daemon treats as a fallback, which is the opposite
+/// of what the catch-all is for.
 export type InitLayoutKind =
   | { kind: "empty" }
   | { kind: "clone_legacy" }
@@ -1040,7 +1058,7 @@ export type DaemonMessage =
       config: SpawnConfig | null;
     }
   | { type: "pty_output"; session_id: string; data_b64: string }
-  | { type: "attention"; session_id: string; reason: string }
+  | { type: "attention"; session_id: string; reason: AttentionReason }
   | {
       type: "workspace_spawn_preview";
       workspace_id: string;
