@@ -30,6 +30,7 @@ Thumbs.db
 .env
 .env.local
 *.log
+__pycache__/
 
 # Claude
 .claude/settings.local.json

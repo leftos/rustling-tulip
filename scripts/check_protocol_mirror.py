@@ -7,13 +7,21 @@ hand to match -- there is no codegen (see CLAUDE.md). A variant added on the Rus
 side without its TS counterpart produces no compile error anywhere; it fails at
 runtime, as a message that silently falls through the dispatcher's default arm.
 
-This checks the one property that is both mechanical and worth catching: every
-`ClientMessage` / `DaemonMessage` variant's snake_case serde tag appears
-somewhere in the TS sources. It deliberately does NOT compare field-level shapes
--- that needs a real Rust parser, and the tag check catches the mistake people
-actually make (adding a variant and forgetting the mirror).
+Two mechanical properties are checked, both chosen because they are the
+mistakes people actually make:
 
-Exit 0 when in sync, 1 with the missing tags listed otherwise.
+1. Every `ClientMessage` / `DaemonMessage` variant's snake_case serde tag
+   appears somewhere in the TS sources.
+2. Every nested enum carrying `#[serde(other)] Unknown` has a matching
+   `"unknown"` arm in its TS mirror. Those catch-alls are the forward-compat
+   contract described in CLAUDE.md: the Rust side absorbs an unrecognized
+   value in place so the containing message keeps decoding. A TS union that
+   omits the arm claims a value it can actually receive is impossible, so a
+   `switch` over it type-checks as exhaustive when it isn't.
+
+Neither check compares field-level shapes -- that needs a real Rust parser.
+
+Exit 0 when in sync, 1 with the problems listed otherwise.
 """
 
 from __future__ import annotations
@@ -33,6 +41,19 @@ TS_SOURCES = [
 
 # Enums carrying `#[serde(tag = "type", rename_all = "snake_case")]`.
 CHECKED_ENUMS = ["ClientMessage", "DaemonMessage"]
+
+# Rust enums whose `#[serde(other)]` catch-all is deliberately absent from the
+# TS mirror, keyed to the reason. A catch-all only needs a TS arm when the enum
+# can travel daemon -> client; for a client -> daemon-only type the Rust
+# `Unknown` exists so an *older daemon* can decode a *newer client's* choice,
+# and mirroring it would let the UI emit a value the daemon treats as a
+# fallback. Add an entry only with that justification.
+CATCH_ALL_EXEMPT = {
+    "InitLayoutKind": (
+        "client -> daemon only (ClientMessage::InitLayout); the Rust Unknown "
+        "lets an older daemon decode a newer client's choice"
+    ),
+}
 
 
 def to_snake_case(name: str) -> str:
@@ -72,6 +93,97 @@ def variant_names(body: str) -> list[str]:
         depth += line.count("{") - line.count("}")
         depth += line.count("(") - line.count(")")
     return names
+
+
+def enums_with_catch_all(source: str) -> list[str]:
+    """Names of `pub enum`s that carry a `#[serde(other)]` variant."""
+    names: list[str] = []
+    for match in re.finditer(r"pub enum ([A-Za-z0-9_]+)\s*\{", source):
+        name = match.group(1)
+        if "#[serde(other)]" in enum_body(source, name):
+            names.append(name)
+    return names
+
+
+# String literals are listed before the comment alternatives so a `//` inside
+# one (a URL, say) is consumed as part of the string and never treated as the
+# start of a comment.
+TS_STRING_OR_COMMENT = re.compile(
+    r'"(?:\\.|[^"\\])*"'
+    r"|'(?:\\.|[^'\\])*'"
+    r"|`(?:\\.|[^`\\])*`"
+    r"|//[^\n]*"
+    r"|/\*.*?\*/",
+    re.DOTALL,
+)
+
+
+def strip_ts_comments(source: str) -> str:
+    """Blank out comments, preserving length and line structure.
+
+    `ts_type_body` scans for a terminating semicolon, and prose comments
+    routinely contain one -- without this, a declaration is truncated at the
+    first semicolon in a comment and the check reports a phantom drift.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        text = match.group(0)
+        if not text.startswith(("//", "/*")):
+            return text
+        return "".join("\n" if char == "\n" else " " for char in text)
+
+    return TS_STRING_OR_COMMENT.sub(blank, source)
+
+
+def ts_type_body(ts_blob: str, name: str) -> str | None:
+    """Right-hand side of `export type <name> = ...;`, or None if absent.
+
+    Scans to the first semicolon at bracket depth zero so a multi-line union
+    of object literals (`{ kind: "..." } | ...`) is captured whole. Expects a
+    comment-stripped blob -- see `strip_ts_comments`.
+    """
+    match = re.search(r"export type " + re.escape(name) + r"\s*=", ts_blob)
+    if not match:
+        return None
+    depth = 0
+    for index in range(match.end(), len(ts_blob)):
+        char = ts_blob[index]
+        if char in "{([":
+            depth += 1
+        elif char in "})]":
+            depth -= 1
+        elif char == ";" and depth == 0:
+            return ts_blob[match.end() : index]
+    return None
+
+
+def check_catch_alls(rust_source: str, ts_blob: str) -> list[str]:
+    """Problems found; empty when every catch-all is mirrored or exempted."""
+    problems: list[str] = []
+    checked = 0
+    ts_blob = strip_ts_comments(ts_blob)
+    for name in enums_with_catch_all(rust_source):
+        if name in CATCH_ALL_EXEMPT:
+            continue
+        body = ts_type_body(ts_blob, name)
+        if body is None:
+            problems.append(
+                f"{name}: has #[serde(other)] but no `export type {name}` in the "
+                f"TS sources"
+            )
+            continue
+        checked += 1
+        if '"unknown"' not in body:
+            problems.append(
+                f'{name}: has #[serde(other)] but its TS mirror has no "unknown" '
+                f"arm -- a value it can receive would type-check as impossible"
+            )
+    if not problems:
+        print(
+            f"serde(other) catch-alls: {checked} mirrored, "
+            f"{len(CATCH_ALL_EXEMPT)} exempt"
+        )
+    return problems
 
 
 def main() -> int:
@@ -117,8 +229,21 @@ def main() -> int:
             "in App.tsx's message dispatcher.",
             file=sys.stderr,
         )
-        return 1
-    return 0
+
+    catch_all_problems = check_catch_alls(rust_source, ts_blob)
+    if catch_all_problems:
+        failed = True
+        print("\nserde(other) catch-alls missing from the TS mirror:", file=sys.stderr)
+        for problem in catch_all_problems:
+            print(f"  - {problem}", file=sys.stderr)
+        print(
+            "\nAdd the arm to the TS union. If the enum only travels client -> "
+            "daemon, add it to CATCH_ALL_EXEMPT in this script with the reason "
+            "instead.",
+            file=sys.stderr,
+        )
+
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
