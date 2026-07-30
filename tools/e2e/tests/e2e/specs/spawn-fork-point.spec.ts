@@ -374,17 +374,72 @@ async function ensureWorktreeMode(
   });
 }
 
+/**
+ * Replace the contents of a React-controlled text input.
+ *
+ * Neither of the obvious approaches works here. `setValue` is `clearValue` +
+ * `addValue`, and the clear doesn't reach React's state, so the component
+ * re-renders its old value and the new text lands appended
+ * (`wt/jolly-koala` + `wt/x` = `wt/jolly-koalawt/x`). Select-all-then-type
+ * fails too — the WebView doesn't honour the synthetic Ctrl+A, producing
+ * `origin/mainmain`.
+ *
+ * Writing through the native value setter doesn't work either: it updates the
+ * DOM (so a naive read-back passes) but React's onChange never fires, so the
+ * component's state keeps the old value and the next re-render puts it back.
+ *
+ * What does work is real key events — focus, Backspace over the existing
+ * value, then type. Focus is set programmatically rather than by clicking,
+ * because the branch combobox's dropdown overlays the fields below it and
+ * would intercept the click.
+ */
+async function setFieldValue(
+  field: Awaited<DialogElement>,
+  value: string,
+  label: string,
+): Promise<void> {
+  const BACKSPACE = "";
+  await browser.execute((el) => {
+    (el as HTMLElement).focus();
+  }, field as unknown as HTMLElement);
+  const current = await field.getValue();
+  if (current.length > 0) {
+    // A string sends its characters in sequence; an array would be read as a
+    // chord and press them all at once.
+    await browser.keys(BACKSPACE.repeat(current.length));
+  }
+  await browser.keys(value);
+  await browser
+    .waitUntil(async () => (await field.getValue()) === value, {
+      timeout: 5_000,
+    })
+    .catch(async () => {
+      throw new Error(
+        `${label} settled on "${await field.getValue()}", expected "${value}"`,
+      );
+    });
+}
+
+/**
+ * Close the branch combobox's suggestion list, which otherwise covers the
+ * fields below it. It listens for a `mousedown` outside its wrapper — and a
+ * WebDriver click can't deliver one, because the open dropdown intercepts the
+ * click before it reaches whatever is underneath.
+ */
+async function dismissComboboxDropdown(): Promise<void> {
+  await browser.execute(() => {
+    document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  });
+}
+
 async function setBranchName(
   dialog: DialogElement,
   value: string,
 ): Promise<void> {
   const branch = await dialog.$('[data-testid="spawn-single-branch"]');
   await branch.waitForExist({ timeout: 10_000 });
-  await branch.setValue(value);
-  await browser.waitUntil(async () => (await branch.getValue()) === value, {
-    timeout: 5_000,
-    timeoutMsg: `branch field never settled on ${value}`,
-  });
+  await setFieldValue(branch, value, "branch field");
+  await dismissComboboxDropdown();
 }
 
 async function setBaseBranch(
@@ -393,14 +448,5 @@ async function setBaseBranch(
 ): Promise<void> {
   const base = await dialog.$('[data-testid="spawn-single-base-branch"]');
   await base.waitForExist({ timeout: 10_000 });
-  await base.setValue(value);
-  await browser
-    .waitUntil(async () => (await base.getValue()) === value, {
-      timeout: 5_000,
-    })
-    .catch(async () => {
-      throw new Error(
-        `base branch field settled on "${await base.getValue()}", expected "${value}"`,
-      );
-    });
+  await setFieldValue(base, value, "base branch field");
 }

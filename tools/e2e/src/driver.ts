@@ -188,6 +188,33 @@ function buildRustBinaries(): void {
  * check. Pass `forceFrontend` to nuke the frontend mtime gate; cargo always
  * decides for itself.
  */
+/**
+ * Assert the three binaries and the frontend bundle exist, without building.
+ *
+ * Callers that run once per spec file want this rather than
+ * `ensureTauriBinary`: the build has already happened in `onPrepare`, and
+ * re-running cargo + vite per spec costs a second each *and* serializes
+ * parallel workers behind cargo's target-directory lock.
+ */
+export function assertBinariesPresent(): string {
+  const appPath = tauriAppBinary();
+  const required: Array<[string, string]> = [
+    ["Tauri app", appPath],
+    ["daemon", daemonBinary()],
+    ["tracer", tracerBinary()],
+    ["frontend bundle", join(REPO_ROOT, "apps", "tauri-app", "dist", "index.html")],
+  ];
+  for (const [label, path] of required) {
+    if (!existsSync(path)) {
+      throw new Error(
+        `${label} missing at ${path}. onPrepare's build should have produced it — ` +
+          "check the build output at the top of this run.",
+      );
+    }
+  }
+  return appPath;
+}
+
 export async function ensureTauriBinary(opts: {
   forceFrontend?: boolean;
 } = {}): Promise<string> {

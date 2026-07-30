@@ -73,6 +73,35 @@ the real Tauri shell, bypasses the native "add repo" dialog by sending
 bundled fake-claude binary, and asserts the prompt banner appears in the
 xterm buffer.
 
+## Parallelism
+
+Specs run several at a time. `wdio.conf.ts` namespaces every shared resource
+by the worker's `WDIO_WORKER_ID`, so each spec file gets its own config dir
+(and therefore its own `daemon.json`, and therefore its own daemon), worktrees
+root, binary cache, tracer pipe prefix, and pair of driver ports
+(`4444 + slot*2` for tauri-driver, `+1` for the msedgedriver it fronts).
+
+Sharing any one of those is what previously forced `maxInstances: 1` — every
+worker would have read the same `daemon.json` and driven a single daemon,
+seeing each other's sessions. The binary cache matters for a subtler reason:
+daemon/tracer reaping is scoped by executable path, so a shared cache would
+let one worker's startup sweep kill another worker's live tracers.
+
+Worker count defaults to roughly one per two physical cores (clamped to 2–6).
+Override it when bisecting a failure that only appears under concurrency:
+
+```powershell
+$env:RT_E2E_WORKERS = "1"; pnpm test
+```
+
+The build happens once in `onPrepare`; `beforeSession` only asserts the
+binaries exist. Re-running cargo per spec file used to cost a second each
+*and* serialize workers behind cargo's target-directory lock.
+
+`tsconfig.json` includes the `DOM` lib because `browser.execute` callbacks are
+authored here but run in the WebView. (It can't say so inline — the repo's
+`check-json` hook rejects comments.)
+
 ## How it works
 
 - `src/handshake.ts` mirrors `crates/daemon/src/paths.rs` to find
@@ -80,9 +109,10 @@ xterm buffer.
   `RUSTLING_TULIP_WORKTREES_DIR`, `RUSTLING_TULIP_BINARIES_DIR`, and
   `RUSTLING_TULIP_TRACER_PIPE_PREFIX` so daemon state, sessions, logs,
   worktrees, cached process images, and tracer pipes all live under
-  `.tmp/e2e/`. The config override is honored by both `Dirs::ensure` in the
-  daemon and `config_dir` in the Tauri app; the binary override keeps test
-  daemon/tracer process cleanup scoped away from regular `rt.ps1` launches.
+  `.tmp/e2e/w-<cid>/`. The config override is honored by both `Dirs::ensure`
+  in the daemon and `config_dir` in the Tauri app; the binary override keeps
+  test daemon/tracer process cleanup scoped away from regular `rt.ps1`
+  launches — and away from sibling workers.
 - `src/ws-client.ts` opens a side-channel WebSocket to the daemon. The Tauri
   app already has its own WS client; the side channel exists so tests can
   send `add_repo` etc. without driving the OS file dialog (which is

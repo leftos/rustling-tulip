@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { browser } from "@wdio/globals";
 import { expect } from "chai";
 
+import { dismissLayoutChooser } from "../../../src/session-helpers.js";
 import { DaemonWsClient } from "../../../src/ws-client.js";
 import type { DaemonMessage, RepoEntry } from "../../../src/types.js";
 
@@ -56,6 +57,10 @@ describe("source-control sidebar", function () {
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
     await root.waitForExist({ timeout: APP_BOOT_TIMEOUT });
+    // Every spec file now gets its own daemon, so every spec is a first
+    // connect and gets the mandatory layout chooser. Its backdrop swallows
+    // clicks on the activity bar until it's resolved.
+    await dismissLayoutChooser(APP_BOOT_TIMEOUT);
 
     ws = await DaemonWsClient.open({ waitTimeoutMs: DAEMON_BOOT_TIMEOUT });
 
