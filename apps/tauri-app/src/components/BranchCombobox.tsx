@@ -77,7 +77,13 @@ export default function BranchCombobox({
       e.preventDefault();
       const row = rows[Math.min(active, rows.length - 1)];
       commit(row === CREATE_ROW ? trimmed : (row ?? trimmed));
-    } else if (e.key === "Escape") {
+    } else if (e.key === "Escape" && open) {
+      // Escape dismisses the suggestion list only. Without stopping
+      // propagation the event reaches the enclosing modal's document-level
+      // handler too, and closing the dropdown would take the whole spawn
+      // dialog — and everything typed into it — with it. Guarded on `open`
+      // so Escape still closes the dialog when no dropdown is showing.
+      e.stopPropagation();
       setOpen(false);
     }
   };

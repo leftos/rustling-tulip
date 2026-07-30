@@ -199,6 +199,33 @@ describe("spawn dialog fork points", function () {
     await closeSpawnDialog();
   });
 
+  it("dismisses the branch suggestions with Escape, keeping the dialog", async function () {
+    if (!registeredRepoId) throw new Error("setup failed");
+
+    const dialog = await openSpawnDialog();
+    await ensureWorktreeMode(dialog);
+    const branch = await dialog.$('[data-testid="spawn-single-branch"]');
+    await branch.waitForExist({ timeout: 10_000 });
+    await setFieldValue(branch, "wt/escape-check", "branch field");
+
+    const listbox = await dialog.$('[role="listbox"]');
+    await listbox.waitForExist({ timeout: 5_000 });
+
+    await browser.keys("Escape");
+    await listbox.waitForExist({ timeout: 5_000, reverse: true });
+    // The whole point: Escape belongs to the dropdown here, not the modal.
+    // Before this was fixed the key reached the modal's own handler too and
+    // took the dialog — and everything typed into it — with it.
+    expect(await dialog.isExisting(), "spawn dialog survives Escape").to.equal(
+      true,
+    );
+    expect(await branch.getValue()).to.equal("wt/escape-check");
+
+    // With no dropdown open, Escape falls through to the modal as usual.
+    await browser.keys("Escape");
+    await dialog.waitForExist({ timeout: 5_000, reverse: true });
+  });
+
   it("prompts instead of silently reusing a leftover worktree", async function () {
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 

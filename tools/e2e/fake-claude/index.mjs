@@ -19,9 +19,39 @@
  *     `--model`, and `--permission-mode` flags the daemon may pass.
  */
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const READY_BANNER = "[fake-claude] ready";
 const PROMPT = "fake-claude> ";
+
+// A crash here used to be invisible: node exits 1, the PTY closes, and the
+// daemon just reports "child exited code=1" with no cause — which reads as a
+// product bug and cost a long bisect to trace back here. Record it somewhere
+// that survives the PTY teardown, and on the PTY itself for good measure.
+const CRASH_LOG = join(tmpdir(), "fake-claude-crash.log");
+function reportFatal(kind, err) {
+  const detail = `${new Date().toISOString()} ${kind}: ${err?.stack ?? String(err)}\n`;
+  try {
+    appendFileSync(CRASH_LOG, detail);
+  } catch {
+    /* nothing more we can do */
+  }
+  try {
+    process.stderr.write(`[fake-claude] ${kind}: ${err?.stack ?? String(err)}\r\n`);
+  } catch {
+    /* stderr may already be gone */
+  }
+}
+process.on("uncaughtException", (err) => {
+  reportFatal("uncaughtException", err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  reportFatal("unhandledRejection", err);
+  process.exit(1);
+});
 
 const args = process.argv.slice(2);
 const flags = parseArgs(args);

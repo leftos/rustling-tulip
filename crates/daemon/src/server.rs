@@ -4366,6 +4366,16 @@ async fn discard_session(
     cleanup: &[protocol::CleanupAction],
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
+    // Discard drops the registry record and can delete worktrees from disk —
+    // the most destructive thing a client can ask for. It left no trail at
+    // all, which made "the session vanished" impossible to attribute from a
+    // log alone.
+    info!(
+        %session_id,
+        cleanup_targets = cleanup.len(),
+        remove_worktrees = cleanup.iter().filter(|c| c.remove_worktree).count(),
+        "discard_session: begin"
+    );
     let (members, has_per_session_worktree, session_label) =
         hub.sessions.get(session_id).map_or_else(
             || (Vec::new(), false, session_id.to_string()),
@@ -4589,6 +4599,28 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
         (guard.pty.clone(), guard.headless.clone())
     };
     let had_live_handle = pty.is_some() || headless_handle.is_some();
+    // Mark the session stopped BEFORE killing the child.
+    //
+    // The child's own exit watcher (`session::attach_lifecycle`) also marks it
+    // stopped, but *with* an exit code — and a client reads a
+    // running-to-stopped transition carrying an exit code as a self-exit,
+    // which for a worktree-less session means auto-discard. Killing first
+    // leaves a window where the exit watcher's snapshot is the first
+    // "stopped" the client ever sees, making a deliberate Stop
+    // indistinguishable from a crash and silently discarding a session the
+    // user only asked to stop. Claiming the transition here closes it: the
+    // watcher's later update finds the status already stopped.
+    //
+    // The handles were cloned above, so clearing them here doesn't affect the
+    // kills below.
+    hub.sessions.update(session_id, |r| {
+        r.status = protocol::SessionStatus::Stopped;
+        r.pty = None;
+        r.headless = None;
+        r.input_notifier = None;
+        r.is_inactive = false;
+        push_recent_action(r, "stopped by user".to_string());
+    });
     if let Some(pty) = pty {
         pty.kill();
     }
@@ -4618,14 +4650,6 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
             }
         }
     }
-    hub.sessions.update(session_id, |r| {
-        r.status = protocol::SessionStatus::Stopped;
-        r.pty = None;
-        r.headless = None;
-        r.input_notifier = None;
-        r.is_inactive = false;
-        push_recent_action(r, "stopped by user".to_string());
-    });
     orphan::try_delete_meta(&hub.dirs, session_id);
     Ok(())
 }
