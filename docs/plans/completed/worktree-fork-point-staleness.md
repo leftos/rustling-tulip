@@ -61,6 +61,26 @@ Two independent causes, both silent:
       origin/main" callout, and a Reuse / Recreate-from-base choice on
       collision with a data-loss warning when the existing worktree is dirty.
 
+## Follow-up: two bugs the e2e spec found
+
+Adding `tools/e2e/tests/e2e/specs/spawn-fork-point.spec.ts` surfaced two
+defects that unit tests and typecheck had both missed.
+
+- [x] **The base-branch field clobbered user input.** `defaultBranch` settles
+      asynchronously, and the background fetch revises it a *second* time a
+      beat later. The seed effect had no notion of "the user has typed here",
+      so a base branch typed right after opening the dialog was silently
+      overwritten. Seeding now stops on first edit and resumes on a
+      repo/workspace switch.
+- [x] **`branch_exists` blanked out the staleness figures.** Both preview
+      paths only resolved a base when the branch did *not* exist — but a
+      leftover worktree always has its branch, so the collision notice could
+      never say how stale that worktree was, in exactly the case the feature
+      exists for. Worse, the workspace recreate path passed that empty base to
+      `worktree add` *after* deleting the branch, which fails outright.
+      `ResolvedMember` now carries `resolved_base` alongside the
+      creation-only `effective_base`.
+
 ## Tests
 
 `crates/daemon/src/git.rs` grows a real-git integration harness
@@ -71,6 +91,17 @@ guard, ahead/behind counting, that a worktree based on `origin/main` skips
 the stale local branch, and that the remove → delete-branch → re-add recreate
 sequence actually moves the fork point (without the branch delete the re-add
 fails on "branch already exists" and the stale worktree survives).
+
+`workspace.rs` covers the multi-repo recreate path, which e2e does not reach:
+recreating a member whose branch already exists forks from `resolved_base`,
+and reuse leaves both HEAD and uncommitted work untouched.
+
+`spawn-fork-point.spec.ts` drives the real app against a fixture repo whose
+local `main` trails `origin/main`: the base field defaults to the remote ref,
+a stale explicit base is reported with its behind-count, a leftover worktree
+prompts rather than being silently reused, and choosing recreate leaves the
+worktree level with `origin/main` (asserted with `git rev-list` against the
+spawned session's actual worktree path, not against the UI's own claim).
 
 ## Deliberately not done
 

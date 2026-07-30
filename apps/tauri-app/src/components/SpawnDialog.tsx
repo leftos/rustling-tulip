@@ -1488,12 +1488,23 @@ function SingleForm({
     prefillTarget?.branch_name ?? null,
   );
 
-  const [baseBranch, setBaseBranch] = useState<string>(
+  const [baseBranch, setBaseBranchValue] = useState<string>(
     () => prefillTarget?.base_branch ?? "",
   );
+  // Auto-seeding stops the moment the user edits the field, and resumes on a
+  // repo switch. `defaultBranch` settles asynchronously — the branch list
+  // arrives over the WS, and the background fetch can revise it a second time
+  // seconds later — so without this the seed effect overwrites a base branch
+  // the user has already typed.
+  const baseBranchTouchedFor = useRef<string | null>(null);
+  const setBaseBranch = (value: string) => {
+    baseBranchTouchedFor.current = repoId;
+    setBaseBranchValue(value);
+  };
   useEffect(() => {
-    setBaseBranch(prefillTarget?.base_branch ?? defaultBranch);
-  }, [defaultBranch, prefillTarget?.base_branch]);
+    if (baseBranchTouchedFor.current === repoId) return;
+    setBaseBranchValue(prefillTarget?.base_branch ?? defaultBranch);
+  }, [repoId, defaultBranch, prefillTarget?.base_branch]);
 
   // Where this spawn would actually fork from. Requested whenever the inputs
   // that determine it change, so the user sees the fork point before
@@ -1910,12 +1921,20 @@ function WorkspaceForm({
     prefillTarget?.branch_name ?? null,
   );
 
-  const [baseBranch, setBaseBranch] = useState<string>(
+  const [baseBranch, setBaseBranchValue] = useState<string>(
     () => prefillTarget?.base_branch ?? "",
   );
+  // See SingleForm: the background fetch revises `defaultBranch` after the
+  // dialog is already open, so seeding has to stop once the user has typed.
+  const baseBranchTouchedFor = useRef<string | null>(null);
+  const setBaseBranch = (value: string) => {
+    baseBranchTouchedFor.current = workspaceId;
+    setBaseBranchValue(value);
+  };
   useEffect(() => {
-    setBaseBranch(prefillTarget?.base_branch ?? defaultBranch);
-  }, [defaultBranch, prefillTarget?.base_branch]);
+    if (baseBranchTouchedFor.current === workspaceId) return;
+    setBaseBranchValue(prefillTarget?.base_branch ?? defaultBranch);
+  }, [workspaceId, defaultBranch, prefillTarget?.base_branch]);
 
   const [preview, setPreview] = useState<MemberSpawnPreview[] | null>(null);
   const [reusePolicy, setReusePolicy] = useState<WorktreeReuseChoice>("reuse");

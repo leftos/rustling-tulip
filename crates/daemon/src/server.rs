@@ -3882,13 +3882,13 @@ async fn preview_single_spawn(
         .unwrap_or_default()
         .iter()
         .any(|b| b == branch_name);
-    // An existing branch is checked out as-is; nothing gets created from a
-    // base, so there is no fork point to report.
-    let base = if branch_exists {
-        None
-    } else {
-        Some(spawn_plan::resolve_base_for_create(&hub.state, &repo, base_branch).await)
-    };
+    // `effective_base` describes branch *creation*, so it stays empty when the
+    // branch already exists. The resolved ref is still computed either way:
+    // RecreateFromBase forks the worktree from it, and a leftover worktree
+    // always has its branch, so gating this on `branch_exists` would blank out
+    // the staleness figures in exactly the case they matter most.
+    let resolved_base = spawn_plan::resolve_base_for_create(&hub.state, &repo, base_branch).await;
+    let effective_base = (!branch_exists).then(|| resolved_base.clone());
 
     let worktree_path = if use_worktree {
         git::workspace_worktree_paths(
@@ -3903,14 +3903,20 @@ async fn preview_single_spawn(
     };
     let existing = (use_worktree && worktree_path.exists()).then_some(worktree_path.as_path());
 
-    let fork = spawn_plan::fork_point(&repo_path, base.as_deref(), base.as_deref(), existing).await;
+    let fork = spawn_plan::fork_point(
+        &repo_path,
+        Some(&resolved_base),
+        Some(&resolved_base),
+        existing,
+    )
+    .await;
     Ok(protocol::MemberSpawnPreview {
         repo_id: repo.id.clone(),
         repo_name: repo.name.clone(),
         branch_exists,
-        effective_base: base.clone(),
+        effective_base,
         worktree_path: worktree_path.to_string_lossy().into_owned(),
-        resolved_base_ref: base,
+        resolved_base_ref: Some(resolved_base),
         base_remote_ref: fork.base_remote_ref,
         base_behind_remote: fork.base_behind_remote,
         worktree_exists: existing.is_some(),
