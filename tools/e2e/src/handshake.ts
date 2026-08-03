@@ -80,9 +80,22 @@ export async function readHandshake(): Promise<DaemonHandshake> {
   const bytes = await readFile(path, "utf8");
   const parsed = JSON.parse(bytes) as DaemonHandshake;
   if (parsed.protocol_version !== PROTOCOL_VERSION) {
+    // Both numbers come from this checkout — the harness reads
+    // protocol-version.json, the daemon bakes it in at build time. So a daemon
+    // *behind* the harness means the running binary predates the current
+    // source, not that the mirrors need updating. That happens when
+    // `target/<profile>/rustling-tulipd.exe` is a plain copy rather than
+    // cargo's hardlink: cargo reports "Finished" while leaving it untouched.
+    const cause =
+      parsed.protocol_version < PROTOCOL_VERSION
+        ? "The running daemon binary is older than this checkout. Delete " +
+          "target/debug/rustling-tulipd.exe and target/debug/rt-tracer.exe, " +
+          "then re-run `cargo build -p daemon -p tracer`."
+        : "The daemon is newer than the harness — update src/types.ts to " +
+          "mirror the new protocol.";
     throw new Error(
       `daemon.json reports protocol_version=${parsed.protocol_version}, ` +
-        `harness speaks ${PROTOCOL_VERSION}. Update src/types.ts and bump.`,
+        `harness speaks ${PROTOCOL_VERSION}. ${cause}`,
     );
   }
   // Liveness: between sequential wdio specs, the previous Tauri session's
