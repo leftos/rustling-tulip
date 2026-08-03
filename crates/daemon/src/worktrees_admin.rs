@@ -17,29 +17,63 @@
 
 use anyhow::{Context as _, anyhow};
 use protocol::{
-    RootWorktreeEntry, RootWorktreeMember, RootWorktreeStatus, SessionSnapshot, SessionStatus,
+    PinnedMemberWorktree, RootWorktreeEntry, RootWorktreeMember, RootWorktreeStatus,
+    SessionSnapshot, SessionStatus, WorktreeLaunchTarget,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
-use crate::paths::simplify_path;
+use crate::paths::{normalize_path_key, simplify_path};
 use crate::session::SessionRegistry;
+use crate::state::AppState;
+
+/// The repo and workspace registries, flattened into the lookups launch
+/// resolution needs: originating repo path → repo id, and the workspaces each
+/// repo belongs to.
+struct LaunchIndex {
+    repo_by_path: HashMap<String, String>,
+    /// `(workspace_id, member_repo_ids)`, in registry order.
+    workspaces: Vec<(String, Vec<String>)>,
+}
+
+impl LaunchIndex {
+    fn build(state: &AppState) -> Self {
+        state.with_persisted(|s| Self {
+            repo_by_path: s
+                .repos
+                .iter()
+                .map(|r| (normalize_path_key(&r.path), r.id.clone()))
+                .collect(),
+            workspaces: s
+                .workspaces
+                .iter()
+                .map(|w| (w.id.clone(), w.member_repo_ids.clone()))
+                .collect(),
+        })
+    }
+}
 
 /// Walk the worktrees root and return one [`RootWorktreeEntry`] per
 /// `wt.<branch>/` group found, cross-referenced against the live and
-/// abandoned session registries. Best-effort: I/O failures inside the
-/// walk are logged and skipped, never propagated.
-pub fn scan_root(root: &Path, sessions: &SessionRegistry) -> Vec<RootWorktreeEntry> {
+/// abandoned session registries and resolved to a launch target where the
+/// originating repos are still registered. Best-effort: I/O failures inside
+/// the walk are logged and skipped, never propagated.
+pub fn scan_root(
+    root: &Path,
+    sessions: &SessionRegistry,
+    state: &AppState,
+) -> Vec<RootWorktreeEntry> {
     let snapshots = sessions.snapshots();
     let xref = build_session_xref(&snapshots);
+    let index = LaunchIndex::build(state);
 
     let mut entries: Vec<RootWorktreeEntry> = Vec::new();
     if !root.exists() {
         return entries;
     }
-    walk_for_wt_dirs(root, root, &xref, &mut entries, 0);
+    walk_for_wt_dirs(root, root, &xref, &index, &mut entries, 0);
 
     // Stable ordering: anchor asc, then branch asc — so the modal renders
     // deterministically across consecutive scans.
@@ -77,6 +111,7 @@ fn walk_for_wt_dirs(
     root: &Path,
     cur: &Path,
     xref: &HashMap<PathBuf, (String, bool)>,
+    index: &LaunchIndex,
     entries: &mut Vec<RootWorktreeEntry>,
     depth: usize,
 ) {
@@ -123,12 +158,13 @@ fn walk_for_wt_dirs(
                 branch_slug,
                 &member_paths,
                 xref,
+                index,
             ));
             // Don't descend INTO a wt dir — its children are member
             // worktrees, not nested groups.
             continue;
         }
-        walk_for_wt_dirs(root, &path, xref, entries, depth + 1);
+        walk_for_wt_dirs(root, &path, xref, index, entries, depth + 1);
     }
 }
 
@@ -390,12 +426,114 @@ fn wt_dir_for_member(member_path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Branch checked out in a member worktree, read straight from the worktree's
+/// admin `HEAD` file rather than by shelling out to git — `scan_root` is a
+/// synchronous disk walk and a group can have many members.
+///
+/// Returns `None` for a detached HEAD, an unreadable gitfile, or an
+/// unreachable admin directory.
+fn head_branch_for_worktree(worktree: &Path) -> Option<String> {
+    let gitdir = gitdir_for_worktree(worktree)?;
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let branch = head.trim().strip_prefix("ref: refs/heads/")?;
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+/// Read the `gitdir:` line out of a worktree's `.git` file — i.e.
+/// `<repo>/.git/worktrees/<name>`.
+fn gitdir_for_worktree(worktree: &Path) -> Option<PathBuf> {
+    let contents = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let line = contents.lines().find(|l| l.starts_with("gitdir:"))?;
+    Some(PathBuf::from(line.strip_prefix("gitdir:")?.trim()))
+}
+
+/// Map a group's members onto something spawnable: a registered repo for a
+/// single member, or the workspace containing them all for several. Returns
+/// the target, or the reason a "launch here" button should stay disabled.
+///
+/// Member directories whose originating repo isn't registered are dropped
+/// rather than blocking the whole group — a workspace whose other members
+/// still resolve stays launchable, and the dropped member gets a fresh
+/// worktree in the same group at spawn time.
+fn resolve_launch(
+    members: &[RootWorktreeMember],
+    index: &LaunchIndex,
+) -> (Option<WorktreeLaunchTarget>, Option<String>) {
+    if members.is_empty() {
+        return (
+            None,
+            Some("this group has no member worktrees on disk".to_string()),
+        );
+    }
+    let pins: Vec<PinnedMemberWorktree> = members
+        .iter()
+        .filter_map(|m| {
+            let repo_path = m.repo_path.as_deref()?;
+            let repo_id = index.repo_by_path.get(&normalize_path_key(repo_path))?;
+            Some(PinnedMemberWorktree {
+                repo_id: repo_id.clone(),
+                path: m.worktree_path.clone(),
+            })
+        })
+        .collect();
+
+    let Some(first) = pins.first() else {
+        let unreachable = members.iter().all(|m| m.repo_path.is_none());
+        let reason = if unreachable {
+            "the originating repo is no longer on disk".to_string()
+        } else {
+            let names: Vec<&str> = members
+                .iter()
+                .filter_map(|m| m.repo_path.as_deref())
+                .collect();
+            format!("not registered in rustling-tulip: {}", names.join(", "))
+        };
+        return (None, Some(reason));
+    };
+
+    let branch = head_branch_for_worktree(Path::new(&first.path));
+    if pins.len() == 1 {
+        return (
+            Some(WorktreeLaunchTarget::Single {
+                repo_id: first.repo_id.clone(),
+                branch,
+                worktree_path: first.path.clone(),
+            }),
+            None,
+        );
+    }
+
+    // Several members: the group is only spawnable as a workspace, and only
+    // through a workspace that has every one of them. Ties go to the tightest
+    // fit so a broad "everything" workspace doesn't shadow the specific one.
+    let workspace = index
+        .workspaces
+        .iter()
+        .filter(|(_, member_ids)| pins.iter().all(|p| member_ids.contains(&p.repo_id)))
+        .min_by_key(|(_, member_ids)| member_ids.len());
+    match workspace {
+        Some((workspace_id, _)) => (
+            Some(WorktreeLaunchTarget::Workspace {
+                workspace_id: workspace_id.clone(),
+                branch,
+                members: pins,
+            }),
+            None,
+        ),
+        None => (
+            None,
+            Some("no workspace contains all of this group's repos".to_string()),
+        ),
+    }
+}
+
 fn build_entry(
     wt_path: &Path,
     anchor_name: &str,
     branch_slug: &str,
     member_paths: &[PathBuf],
     xref: &HashMap<PathBuf, (String, bool)>,
+    index: &LaunchIndex,
 ) -> RootWorktreeEntry {
     let key = std::fs::canonicalize(wt_path)
         .map_or_else(|_| wt_path.to_path_buf(), |p| simplify_path(&p));
@@ -423,6 +561,7 @@ fn build_entry(
     members.sort_by(|a, b| a.repo_name_hint.cmp(&b.repo_name_hint));
 
     let (size_bytes, last_modified_unix) = group_size_and_mtime(wt_path);
+    let (launch, launch_blocked_reason) = resolve_launch(&members, index);
 
     RootWorktreeEntry {
         path: wt_path.to_string_lossy().into_owned(),
@@ -433,13 +572,18 @@ fn build_entry(
         session_id,
         size_bytes,
         last_modified_unix,
+        launch,
+        launch_blocked_reason,
     }
 }
 
 /// True iff this session is currently running a process — i.e., deleting
 /// its worktree would yank the rug out from under live work. Orphan
 /// (detached but process still alive) counts as live for safety.
-fn is_session_live(snap: &SessionSnapshot) -> bool {
+///
+/// Shared with the spawn dialog's worktree picker so "Active" means the same
+/// thing in both places.
+pub fn is_session_live(snap: &SessionSnapshot) -> bool {
     if snap.is_abandoned {
         return false;
     }
@@ -508,11 +652,14 @@ fn group_size_and_mtime(root: &Path) -> (Option<u64>, Option<i64>) {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
     clippy::print_stderr,
     clippy::cast_precision_loss,
     clippy::map_unwrap_or,
-    reason = "tests assert preconditions with unwrap; the live-disk probe \
-              prints scan results to stderr so the operator can read them"
+    reason = "tests assert preconditions with unwrap/expect and panic on an \
+              unexpected enum variant; the live-disk probe prints scan results \
+              to stderr so the operator can read them"
 )]
 mod tests {
     use super::*;
@@ -545,12 +692,8 @@ mod tests {
         }
     }
 
-    /// Build an empty `SessionRegistry` pointed at a temp config dir.
-    /// The xref it produces is empty, so every wt group `scan_root`
-    /// returns shows `RootWorktreeStatus::Stale` — useful for tests
-    /// that just want to verify the walker reaches the right dirs.
-    fn empty_registry(tmp: &std::path::Path) -> Arc<SessionRegistry> {
-        let dirs = crate::paths::Dirs {
+    fn test_dirs(tmp: &std::path::Path) -> crate::paths::Dirs {
+        crate::paths::Dirs {
             config: tmp.to_path_buf(),
             state_file: tmp.join("state.json"),
             handshake_file: tmp.join("daemon.json"),
@@ -560,13 +703,243 @@ mod tests {
             sessions_dir: tmp.join("sessions"),
             worktrees_dir: tmp.join("worktrees"),
             binaries_dir: tmp.join("binaries"),
-        };
-        SessionRegistry::new(dirs)
+        }
+    }
+
+    /// Build an empty `SessionRegistry` pointed at a temp config dir.
+    /// The xref it produces is empty, so every wt group `scan_root`
+    /// returns shows `RootWorktreeStatus::Stale` — useful for tests
+    /// that just want to verify the walker reaches the right dirs.
+    fn empty_registry(tmp: &std::path::Path) -> Arc<SessionRegistry> {
+        SessionRegistry::new(test_dirs(tmp))
+    }
+
+    /// Empty repo/workspace registry — every group resolves to no launch
+    /// target, which is what the walker-shape tests want.
+    fn empty_state(tmp: &std::path::Path) -> AppState {
+        AppState::load_or_default(&test_dirs(tmp)).unwrap()
     }
 
     fn touch(p: &std::path::Path) {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, b"").unwrap();
+    }
+
+    fn member(worktree_path: &str, repo_path: Option<&str>) -> RootWorktreeMember {
+        RootWorktreeMember {
+            worktree_path: worktree_path.to_string(),
+            repo_path: repo_path.map(str::to_string),
+            repo_name_hint: "hint".to_string(),
+        }
+    }
+
+    fn index(repos: &[(&str, &str)], workspaces: &[(&str, &[&str])]) -> LaunchIndex {
+        LaunchIndex {
+            repo_by_path: repos
+                .iter()
+                .map(|(path, id)| (normalize_path_key(path), (*id).to_string()))
+                .collect(),
+            workspaces: workspaces
+                .iter()
+                .map(|(id, members)| {
+                    (
+                        (*id).to_string(),
+                        members.iter().map(|m| (*m).to_string()).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_maps_a_lone_member_to_its_repo() {
+        let members = vec![member("X:/wt/wt.foo/X/dev/repo1", Some("X:/dev/repo1"))];
+        let (target, blocked) = resolve_launch(&members, &index(&[("X:/dev/repo1", "r1")], &[]));
+        assert!(blocked.is_none(), "unexpected block: {blocked:?}");
+        match target.expect("a registered single member must resolve") {
+            WorktreeLaunchTarget::Single {
+                repo_id,
+                worktree_path,
+                ..
+            } => {
+                assert_eq!(repo_id, "r1");
+                assert_eq!(worktree_path, "X:/wt/wt.foo/X/dev/repo1");
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_blocks_an_unregistered_repo() {
+        // The repo is on disk but was removed from the registry: there's no
+        // repo_id to build a spawn target from, so the button stays disabled
+        // with a reason rather than silently registering anything.
+        let members = vec![member("X:/wt/wt.foo/X/dev/repo1", Some("X:/dev/repo1"))];
+        let (target, blocked) = resolve_launch(&members, &index(&[], &[]));
+        assert!(target.is_none());
+        let reason = blocked.expect("an unregistered repo must explain itself");
+        assert!(reason.contains("not registered"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn resolve_launch_blocks_when_the_repo_is_gone_from_disk() {
+        let members = vec![member("X:/wt/wt.foo/X/dev/repo1", None)];
+        let (target, blocked) = resolve_launch(&members, &index(&[], &[]));
+        assert!(target.is_none());
+        let reason = blocked.expect("an unreachable repo must explain itself");
+        assert!(reason.contains("no longer on disk"), "unexpected: {reason}");
+    }
+
+    #[test]
+    fn resolve_launch_maps_several_members_to_their_workspace() {
+        let members = vec![
+            member("X:/wt/wt.foo/X/dev/api", Some("X:/dev/api")),
+            member("X:/wt/wt.foo/X/dev/web", Some("X:/dev/web")),
+        ];
+        let idx = index(
+            &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
+            &[("ws1", &["r-api", "r-web"])],
+        );
+        let (target, blocked) = resolve_launch(&members, &idx);
+        assert!(blocked.is_none(), "unexpected block: {blocked:?}");
+        match target.expect("a multi-member group must resolve to a workspace") {
+            WorktreeLaunchTarget::Workspace {
+                workspace_id,
+                members,
+                ..
+            } => {
+                assert_eq!(workspace_id, "ws1");
+                assert_eq!(members.len(), 2);
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_prefers_the_tightest_workspace() {
+        // Two workspaces contain both repos; the specific one should win over
+        // an "everything" workspace that merely happens to include them.
+        let members = vec![
+            member("X:/wt/wt.foo/X/dev/api", Some("X:/dev/api")),
+            member("X:/wt/wt.foo/X/dev/web", Some("X:/dev/web")),
+        ];
+        let idx = index(
+            &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
+            &[
+                ("everything", &["r-api", "r-web", "r-docs"]),
+                ("ws-pair", &["r-api", "r-web"]),
+            ],
+        );
+        let (target, _) = resolve_launch(&members, &idx);
+        match target.expect("must resolve") {
+            WorktreeLaunchTarget::Workspace { workspace_id, .. } => {
+                assert_eq!(workspace_id, "ws-pair");
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_blocks_members_no_workspace_covers() {
+        let members = vec![
+            member("X:/wt/wt.foo/X/dev/api", Some("X:/dev/api")),
+            member("X:/wt/wt.foo/X/dev/web", Some("X:/dev/web")),
+        ];
+        let idx = index(
+            &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
+            &[("ws1", &["r-api"])],
+        );
+        let (target, blocked) = resolve_launch(&members, &idx);
+        assert!(target.is_none());
+        assert!(
+            blocked
+                .expect("must explain itself")
+                .contains("no workspace")
+        );
+    }
+
+    #[test]
+    fn resolve_launch_drops_an_unresolvable_member_when_others_resolve() {
+        // A workspace member whose repo was unregistered shouldn't sink the
+        // whole group — the remaining members pin, and the dropped one gets a
+        // fresh worktree in the same group at spawn time.
+        let members = vec![
+            member("X:/wt/wt.foo/X/dev/api", Some("X:/dev/api")),
+            member("X:/wt/wt.foo/X/dev/web", Some("X:/dev/web")),
+            member("X:/wt/wt.foo/X/dev/gone", Some("X:/dev/gone")),
+        ];
+        let idx = index(
+            &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
+            &[("ws1", &["r-api", "r-web", "r-docs"])],
+        );
+        let (target, blocked) = resolve_launch(&members, &idx);
+        assert!(blocked.is_none(), "unexpected block: {blocked:?}");
+        match target.expect("must resolve from the surviving members") {
+            WorktreeLaunchTarget::Workspace { members, .. } => assert_eq!(members.len(), 2),
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_launch_blocks_an_empty_group() {
+        let (target, blocked) = resolve_launch(&[], &index(&[], &[]));
+        assert!(target.is_none());
+        assert!(blocked.expect("must explain itself").contains("no member"));
+    }
+
+    #[test]
+    fn head_branch_reads_the_worktree_admin_head() {
+        // The picker labels a pinned worktree with the branch it's really on,
+        // which lives in <repo>/.git/worktrees/<name>/HEAD — not in the
+        // group's directory name, which only ever records the branch the
+        // worktree was created for.
+        let tmp = Scratch::new();
+        let worktree = tmp.path().join("wt.old-name").join("repo");
+        let admin = tmp
+            .path()
+            .join("repo")
+            .join(".git")
+            .join("worktrees")
+            .join("w1");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/feature/renamed\n").unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            head_branch_for_worktree(&worktree).as_deref(),
+            Some("feature/renamed")
+        );
+    }
+
+    #[test]
+    fn head_branch_is_none_for_a_detached_worktree() {
+        let tmp = Scratch::new();
+        let worktree = tmp.path().join("wt.x").join("repo");
+        let admin = tmp
+            .path()
+            .join("repo")
+            .join(".git")
+            .join("worktrees")
+            .join("w1");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            admin.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        assert!(head_branch_for_worktree(&worktree).is_none());
     }
 
     #[test]
@@ -583,7 +956,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         assert_eq!(entries.len(), 1, "expected one wt group, got {entries:?}");
         let entry = &entries[0];
@@ -619,7 +993,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         let slugs: Vec<&str> = entries.iter().map(|e| e.branch_slug.as_str()).collect();
         assert_eq!(slugs, vec!["bar", "foo"]); // sorted by anchor asc
@@ -640,7 +1015,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch_slug, "outer");
@@ -659,7 +1035,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         assert_eq!(entries.len(), 1, "expected one wt group, got {entries:?}");
         let entry = &entries[0];
@@ -690,7 +1067,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
@@ -734,7 +1112,8 @@ mod tests {
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&root, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&root, &sessions, &state);
 
         assert_eq!(entries.len(), 2);
         let pairs: Vec<(&str, &str)> = entries
@@ -760,7 +1139,8 @@ mod tests {
         let path = PathBuf::from(&raw);
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
-        let entries = scan_root(&path, &sessions);
+        let state = empty_state(cfg_tmp.path());
+        let entries = scan_root(&path, &sessions, &state);
         eprintln!("=== scan_root({}) ===", path.display());
         eprintln!("found {} group(s):", entries.len());
         for e in &entries {

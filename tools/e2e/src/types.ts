@@ -209,6 +209,7 @@ export type ClientMessage =
       max_panes_per_tab_override: number | null;
     }
   | { type: "cancel_preset_launch"; job_id: string }
+  | { type: "inspect_worktrees_root" }
   | {
       type: "preview_preset";
       id: string;
@@ -218,6 +219,51 @@ export type ClientMessage =
       variable_values: Array<[string, string]>;
     }
   | { type: "shutdown" };
+
+// --- Worktrees root inspection -----------------------------------------------
+
+export type RootWorktreeStatus =
+  | { kind: "active" }
+  | { kind: "detached" }
+  | { kind: "stale" }
+  | { kind: "unknown" };
+
+export interface PinnedMemberWorktree {
+  repo_id: string;
+  path: string;
+}
+
+export type WorktreeLaunchTarget =
+  | {
+      kind: "single";
+      repo_id: string;
+      branch: string | null;
+      worktree_path: string;
+    }
+  | {
+      kind: "workspace";
+      workspace_id: string;
+      branch: string | null;
+      members: PinnedMemberWorktree[];
+    }
+  | { kind: "unknown" };
+
+export interface RootWorktreeEntry {
+  path: string;
+  anchor: string;
+  branch_slug: string;
+  members: Array<{
+    worktree_path: string;
+    repo_path: string | null;
+    repo_name_hint: string;
+  }>;
+  status: RootWorktreeStatus;
+  session_id: string | null;
+  size_bytes: number | null;
+  last_modified_unix: number | null;
+  launch: WorktreeLaunchTarget | null;
+  launch_blocked_reason: string | null;
+}
 
 // --- Daemon → Client ---------------------------------------------------------
 
@@ -258,6 +304,12 @@ export type DaemonMessage =
     }
   | { type: "preset_preview"; id: string; prompts: string[] }
   | { type: "preset_preview_error"; id: string; error: string }
+  | {
+      type: "worktrees_root_snapshot";
+      root: string;
+      is_override: boolean;
+      entries: RootWorktreeEntry[];
+    }
   | { type: "error"; message: string }
   // Catch-all for messages we don't model — keeps the union exhaustive
   // without forcing us to track every variant.

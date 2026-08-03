@@ -1490,6 +1490,9 @@ async fn spawn_one(
             // and an existing worktree is reused rather than recreated.
             checkout_strategy: None,
             worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            // A preset launches N fresh sessions; pinning them all to one
+            // existing directory is never what the user meant.
+            existing_worktree: None,
         },
         PresetSpawnKind::Workspace { workspace_id } => SpawnTarget::Workspace {
             workspace_id: workspace_id.clone(),
@@ -1497,6 +1500,7 @@ async fn spawn_one(
             base_branch: None,
             use_worktree: plan.use_worktree,
             worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktrees: Vec::new(),
         },
     };
     let req = SpawnRequest {

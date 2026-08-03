@@ -176,6 +176,20 @@ export type CheckoutStrategy = "carry" | "stash" | "unknown";
 // catch-all back on the wire.
 export type CheckoutChoice = Exclude<CheckoutStrategy, "unknown">;
 
+// One workspace member bound to a worktree directory that already exists.
+export interface PinnedMemberWorktree {
+  repo_id: string;
+  path: string;
+}
+
+// Where a session runs.
+//
+// Pinning (`existing_worktree` / `existing_worktrees`) addresses a worktree by
+// path instead of deriving one from the branch name, which stops matching as
+// soon as the worktree's checked-out branch no longer slugs back to its own
+// directory name. A pinned member skips derivation and creation and runs in the
+// named directory. Unlike `worktree_reuse`, a pin survives into the persisted
+// SpawnConfig, so resume/duplicate/"launch last again" land back in that tree.
 export type SpawnTarget =
   | {
       kind: "single";
@@ -189,6 +203,8 @@ export type SpawnTarget =
       // What to do when a worktree already exists at the target path.
       // Omitted means "reuse" — the non-destructive default.
       worktree_reuse?: WorktreeReusePolicy;
+      // Run in this existing worktree directory. Requires use_worktree.
+      existing_worktree?: string | null;
     }
   | {
       kind: "workspace";
@@ -197,6 +213,9 @@ export type SpawnTarget =
       base_branch: string | null;
       use_worktree: boolean;
       worktree_reuse?: WorktreeReusePolicy;
+      // Members bound to an existing worktree. Members omitted here get one
+      // created at the derived path, which lands in the same wt.<slug>/ group.
+      existing_worktrees?: PinnedMemberWorktree[];
     }
   | {
       kind: "standalone";
@@ -412,10 +431,18 @@ export interface CleanupAction {
 }
 
 export interface WorktreeInfo {
+  // Empty for a worktree in detached-HEAD state.
   branch: string;
   path: string;
-  // True if a non-stopped, non-parked session is currently using this path.
-  is_active: boolean;
+  // Whether a session is using this worktree, and if so whether it's still
+  // running. "active" entries are still launchable — behind a confirm.
+  status: RootWorktreeStatus;
+  // The `wt.<slug>/` group this belongs to, when it lives under the RT
+  // worktrees root. Null for worktrees created outside RT, which are listed
+  // and launchable but carry no group metadata.
+  group_path?: string | null;
+  size_bytes?: number | null;
+  last_modified_unix?: number | null;
 }
 
 // Status of one `wt.<branch>/` group reported by InspectWorktreesRoot.
@@ -457,7 +484,34 @@ export interface RootWorktreeEntry {
   // Most-recent modified timestamp across the group's contents, unix
   // seconds. Null if no readable metadata.
   last_modified_unix: number | null;
+  // What "launch a session here" would spawn, or null when the group can't
+  // be mapped onto a registered repo or workspace.
+  launch?: WorktreeLaunchTarget | null;
+  // Why `launch` is null, phrased for a disabled button's tooltip.
+  launch_blocked_reason?: string | null;
 }
+
+// How a `wt.<branch>/` group maps back onto something spawnable. Mirrors
+// `protocol::WorktreeLaunchTarget`. "unknown" is its serde(other) catch-all —
+// a target kind this build doesn't recognize; render it as launch-unavailable
+// rather than guessing.
+export type WorktreeLaunchTarget =
+  | {
+      kind: "single";
+      repo_id: string;
+      // Null for a detached HEAD; fall back to the group's branch slug.
+      branch: string | null;
+      worktree_path: string;
+    }
+  | {
+      kind: "workspace";
+      workspace_id: string;
+      branch: string | null;
+      // Workspace members this group has worktrees for. Members missing here
+      // get a fresh worktree at the derived path.
+      members: PinnedMemberWorktree[];
+    }
+  | { kind: "unknown" };
 
 // Surfaced inside WorktreeCleanupFailed: one process holding open file
 // handles inside a worktree dir the daemon couldn't remove. Populated

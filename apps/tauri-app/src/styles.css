@@ -2750,6 +2750,10 @@ button.tree-tab-pill:hover {
 .muted { color: var(--fg-muted); }
 .inline-note { margin-left: 6px; }
 span.danger { color: var(--err); }
+/* Inline caution next to a control the user can still use — e.g. picking a
+ * worktree another session is live in. Warning, not error: the action is
+ * allowed, it just has a consequence worth reading first. */
+.warning-text { color: var(--warn); }
 
 /* Advisory callout inside a form — used by the spawn dialog to surface a
  * stale base branch or an existing worktree before the user commits. Warning

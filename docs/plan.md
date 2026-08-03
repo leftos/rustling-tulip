@@ -55,6 +55,13 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 
 ## Open
 
+### Launch into an existing worktree — complete
+- [x] Address a worktree by path instead of by derived branch name, so a
+      worktree left behind by a session that is gone (`RootWorktreeStatus::Stale`)
+      can be launched into from the Manage Worktrees modal and the spawn dialog.
+      Design, decisions, and checklist in
+      [launch-into-existing-worktree.md](./plans/launch-into-existing-worktree.md).
+
 ### Bug hunt — complete
 Full-codebase audit, 2026-07-29 against `c4c2676`. **12 findings, all fixed**,
 one commit each with regression tests. Notable: the headless Stop path hung and

@@ -1350,9 +1350,14 @@ async fn dispatch(
                 &hub.state,
                 &hub.state.worktrees_dir(),
                 &workspace_id,
-                &branch_name,
-                base_branch.as_deref(),
-                true,
+                ws::ResolveRequest {
+                    branch_name: &branch_name,
+                    explicit_base: base_branch.as_deref(),
+                    use_worktree: true,
+                    // Preview answers "where would a fresh spawn land"; a pin
+                    // has no fork point to preview.
+                    pins: &[],
+                },
             )
             .await?;
             let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
@@ -1648,31 +1653,7 @@ async fn dispatch(
                 warn!(?err, %repo_id, path = %path.display(), "list_worktrees failed; reporting none");
                 Vec::new()
             });
-            // Mark worktrees currently in use by active (non-stopped, non-parked) sessions.
-            let active_paths: std::collections::HashSet<String> = hub
-                .sessions
-                .snapshots()
-                .into_iter()
-                .filter(|s| {
-                    !matches!(
-                        s.status,
-                        protocol::SessionStatus::Stopped | protocol::SessionStatus::Error
-                    ) && !s.is_inactive
-                })
-                .flat_map(|s| s.worktree_paths)
-                .collect();
-            let worktrees = raw
-                .into_iter()
-                .map(|(branch, path)| {
-                    let path_str = path.to_string_lossy().into_owned();
-                    let is_active = active_paths.contains(&path_str);
-                    protocol::WorktreeInfo {
-                        branch,
-                        path: path_str,
-                        is_active,
-                    }
-                })
-                .collect();
+            let worktrees = annotate_worktrees(hub, raw);
             let _ = out_tx.send(DaemonMessage::Worktrees { repo_id, worktrees });
         }
         ClientMessage::ListCommits {
@@ -2071,7 +2052,7 @@ async fn dispatch(
         ClientMessage::InspectWorktreesRoot => {
             let root = hub.state.worktrees_dir();
             let is_override = hub.state.worktrees_root_is_override();
-            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions);
+            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions, &hub.state);
             let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
                 root: root.to_string_lossy().into_owned(),
                 is_override,
@@ -2085,7 +2066,7 @@ async fn dispatch(
             // Push a fresh snapshot only to the requesting client. Other
             // windows with the modal open can refresh on demand.
             let is_override = hub.state.worktrees_root_is_override();
-            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions);
+            let entries = crate::worktrees_admin::scan_root(&root, &hub.sessions, &hub.state);
             let _ = out_tx.send(DaemonMessage::WorktreesRootSnapshot {
                 root: root.to_string_lossy().into_owned(),
                 is_override,
@@ -2881,6 +2862,7 @@ pub(crate) async fn spawn_session(
             "standalone targets only support plain_shell sessions"
         ));
     }
+    reject_pin_without_worktree(&target)?;
     let backend = crate::agents::backend_for(agent);
     if mode == SessionMode::Headless && !backend.supports_headless() {
         return Err(anyhow!(
@@ -2898,15 +2880,19 @@ pub(crate) async fn spawn_session(
             use_worktree,
             checkout_strategy,
             worktree_reuse,
+            existing_worktree,
         } => {
             spawn_single(
                 hub,
                 &repo_id,
-                &branch_name,
-                base_branch,
-                use_worktree,
-                checkout_strategy,
-                worktree_reuse,
+                SinglePlan {
+                    branch_name: &branch_name,
+                    base_branch,
+                    use_worktree,
+                    checkout_strategy,
+                    worktree_reuse,
+                    existing_worktree,
+                },
             )
             .await?
         }
@@ -2916,13 +2902,17 @@ pub(crate) async fn spawn_session(
             base_branch,
             use_worktree,
             worktree_reuse,
+            existing_worktrees,
         } => {
             spawn_workspace(
                 hub,
                 &workspace_id,
-                &branch_name,
-                base_branch,
-                use_worktree,
+                ws::ResolveRequest {
+                    branch_name: &branch_name,
+                    explicit_base: base_branch.as_deref(),
+                    use_worktree,
+                    pins: &existing_worktrees,
+                },
                 worktree_reuse,
             )
             .await?
@@ -3685,16 +3675,71 @@ struct SpawnFailure {
     hint: Option<String>,
 }
 
-/// Normalize a worktree path for comparison: strip trailing separators and
-/// lowercase on Windows (case-insensitive filesystem). Both sides come from
-/// the same path generator, so this is belt-and-suspenders against a stored
-/// vs. freshly-computed spelling mismatch.
-fn normalize_worktree_path(p: &str) -> String {
-    let trimmed = p.trim_end_matches(['/', '\\']);
-    if cfg!(windows) {
-        trimmed.to_lowercase()
+/// Decorate `git worktree list` output for the spawn dialog's existing-worktree
+/// picker: whether a session holds each worktree, and — for the ones under the
+/// RT worktrees root — which `wt.<slug>/` group they belong to plus its size
+/// and last-modified. Worktrees created outside RT are listed too and are
+/// equally launchable; they just carry no group metadata.
+fn annotate_worktrees(hub: &Hub, raw: Vec<(String, PathBuf)>) -> Vec<protocol::WorktreeInfo> {
+    let snapshots = hub.sessions.snapshots();
+    let groups =
+        crate::worktrees_admin::scan_root(&hub.state.worktrees_dir(), &hub.sessions, &hub.state);
+    let mut group_by_member: std::collections::HashMap<String, &protocol::RootWorktreeEntry> =
+        std::collections::HashMap::new();
+    for entry in &groups {
+        for member in &entry.members {
+            group_by_member.insert(
+                crate::paths::normalize_path_key(&member.worktree_path),
+                entry,
+            );
+        }
+    }
+    raw.into_iter()
+        .map(|(branch, path)| {
+            let path = path.to_string_lossy().into_owned();
+            let key = crate::paths::normalize_path_key(&path);
+            let group = group_by_member.get(&key).copied();
+            protocol::WorktreeInfo {
+                branch,
+                path,
+                status: worktree_status(&snapshots, &key),
+                group_path: group.map(|g| g.path.clone()),
+                size_bytes: group.and_then(|g| g.size_bytes),
+                last_modified_unix: group.and_then(|g| g.last_modified_unix),
+            }
+        })
+        .collect()
+}
+
+/// Per-path counterpart of the per-group classification the worktrees manager
+/// does: Active while a session is running in it, Detached while a stopped or
+/// parked session still claims it, Stale when nothing references it.
+fn worktree_status(
+    snapshots: &[protocol::SessionSnapshot],
+    key: &str,
+) -> protocol::RootWorktreeStatus {
+    let mut claimed_by_dead_session = false;
+    for snap in snapshots {
+        let uses_it = snap
+            .worktree_paths
+            .iter()
+            .any(|p| crate::paths::normalize_path_key(p) == key)
+            || snap
+                .members
+                .iter()
+                .any(|m| crate::paths::normalize_path_key(&m.worktree_path) == key);
+        if !uses_it {
+            continue;
+        }
+        if crate::worktrees_admin::is_session_live(snap) {
+            return protocol::RootWorktreeStatus::Active;
+        }
+        claimed_by_dead_session = true;
+    }
+    if claimed_by_dead_session {
+        protocol::RootWorktreeStatus::Detached
     } else {
-        trimmed.to_string()
+        protocol::RootWorktreeStatus::Stale
     }
 }
 
@@ -3708,7 +3753,7 @@ fn active_sessions_using_worktree(
     worktree_path: &str,
     exclude_id: Option<&str>,
 ) -> Vec<(String, String)> {
-    let target = normalize_worktree_path(worktree_path);
+    let target = crate::paths::normalize_path_key(worktree_path);
     hub.sessions
         .snapshots()
         .into_iter()
@@ -3722,10 +3767,10 @@ fn active_sessions_using_worktree(
         .filter(|s| {
             s.worktree_paths
                 .iter()
-                .any(|p| normalize_worktree_path(p) == target)
+                .any(|p| crate::paths::normalize_path_key(p) == target)
                 || s.members
                     .iter()
-                    .any(|m| normalize_worktree_path(&m.worktree_path) == target)
+                    .any(|m| crate::paths::normalize_path_key(&m.worktree_path) == target)
         })
         .map(|s| (s.id.clone(), s.label.clone()))
         .collect()
@@ -4022,15 +4067,83 @@ async fn log_fork_point(repo_path: &Path, branch_name: &str, base: &str, worktre
     );
 }
 
-async fn spawn_single(
-    hub: &Hub,
-    repo_id: &str,
-    branch_name: &str,
+/// Everything a single-repo spawn needs beyond the repo id. Grouped into a
+/// struct rather than passed positionally — the list crossed the readable
+/// arity a while back, and the two worktree-shaped fields
+/// (`worktree_reuse`, `existing_worktree`) are easy to transpose at a call
+/// site when they're bare positions.
+struct SinglePlan<'a> {
+    branch_name: &'a str,
     base_branch: Option<String>,
     use_worktree: bool,
     checkout_strategy: Option<protocol::CheckoutStrategy>,
     worktree_reuse: protocol::WorktreeReusePolicy,
+    existing_worktree: Option<String>,
+}
+
+/// A pin names a directory to run in; in-place mode runs in the repo itself.
+/// Asking for both is contradictory, and honoring either one silently would
+/// put the session somewhere the user didn't choose.
+fn reject_pin_without_worktree(target: &SpawnTarget) -> anyhow::Result<()> {
+    let pinned = match target {
+        SpawnTarget::Single {
+            use_worktree,
+            existing_worktree,
+            ..
+        } => !*use_worktree && existing_worktree.is_some(),
+        SpawnTarget::Workspace {
+            use_worktree,
+            existing_worktrees,
+            ..
+        } => !*use_worktree && !existing_worktrees.is_empty(),
+        SpawnTarget::Standalone { .. } => false,
+    };
+    if pinned {
+        return Err(anyhow!(
+            "cannot pin an existing worktree on an in-place spawn: pass use_worktree = true or drop the pin"
+        ));
+    }
+    Ok(())
+}
+
+/// Branch actually checked out in `worktree`, falling back to `requested` for
+/// a detached HEAD or an unreadable tree. Pinned spawns record this rather
+/// than the requested name so the sidebar shows the branch the agent will
+/// really be working on.
+async fn pinned_branch(worktree: &Path, requested: &str) -> String {
+    match git::current_branch(worktree).await {
+        Ok(Some(branch)) => branch,
+        Ok(None) => {
+            info!(
+                worktree = %worktree.display(),
+                requested, "pinned worktree is on a detached HEAD; labelling with the requested branch"
+            );
+            requested.to_string()
+        }
+        Err(err) => {
+            warn!(
+                ?err,
+                worktree = %worktree.display(),
+                "reading pinned worktree HEAD failed; labelling with the requested branch"
+            );
+            requested.to_string()
+        }
+    }
+}
+
+async fn spawn_single(
+    hub: &Hub,
+    repo_id: &str,
+    plan: SinglePlan<'_>,
 ) -> anyhow::Result<SpawnResolution> {
+    let SinglePlan {
+        branch_name,
+        base_branch,
+        use_worktree,
+        checkout_strategy,
+        worktree_reuse,
+        existing_worktree,
+    } = plan;
     let repo = hub
         .state
         .with_persisted(|s| s.repos.iter().find(|r| r.id == repo_id).cloned())
@@ -4043,6 +4156,12 @@ async fn spawn_single(
     // session label and sidebar grouping stay coherent, but no branch is
     // created or checked out.
     if !git::is_initialized(&repo_path).await {
+        if let Some(pinned) = existing_worktree {
+            return Err(anyhow!(
+                "cannot pin worktree {pinned}: {} is not a git repository",
+                repo.name
+            ));
+        }
         let member = SessionMember {
             repo_id: repo.id.clone(),
             repo_name: repo.name.clone(),
@@ -4059,7 +4178,24 @@ async fn spawn_single(
     let base_for_create =
         spawn_plan::resolve_base_for_create(&hub.state, &repo, base_branch.as_deref()).await;
 
-    let working_path = if use_worktree {
+    let (working_path, member_branch) = if let Some(pinned) = existing_worktree {
+        let worktree_path = crate::paths::resolve_existing_dir(&pinned)
+            .with_context(|| format!("pinned worktree for {}", repo.name))?;
+        // Deliberately no in-use refusal here. The client resolves a pin from
+        // a picker that shows which worktrees a live session already holds and
+        // confirms before sending one, so the pin *is* the acknowledgement.
+        let in_use = active_sessions_using_worktree(hub, &worktree_path.to_string_lossy(), None);
+        if !in_use.is_empty() {
+            let labels: Vec<&str> = in_use.iter().map(|(_, label)| label.as_str()).collect();
+            warn!(
+                worktree = %worktree_path.display(),
+                sharing_with = ?labels,
+                "spawning into a worktree a live session already holds"
+            );
+        }
+        let branch = pinned_branch(&worktree_path, branch_name).await;
+        (worktree_path, branch)
+    } else if use_worktree {
         let mut paths = git::workspace_worktree_paths(
             &hub.state.worktrees_dir(),
             &[repo_path.as_path()],
@@ -4095,7 +4231,7 @@ async fn spawn_single(
             .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
         }
         log_fork_point(&repo_path, branch_name, &base_for_create, &worktree_path).await;
-        worktree_path
+        (worktree_path, branch_name.to_string())
     } else {
         git::checkout_in_place(
             &repo_path,
@@ -4105,16 +4241,16 @@ async fn spawn_single(
         )
         .await
         .context("checking out branch in-place")?;
-        repo_path.clone()
+        (repo_path.clone(), branch_name.to_string())
     };
 
     let member = SessionMember {
         repo_id: repo.id.clone(),
         repo_name: repo.name.clone(),
-        branch: branch_name.to_string(),
+        branch: member_branch.clone(),
         worktree_path: working_path.to_string_lossy().into_owned(),
     };
-    let label = format!("{}: {branch_name}", repo.name);
+    let label = format!("{}: {member_branch}", repo.name);
     Ok((SessionKind::Single, vec![member], working_path, label, None))
 }
 
@@ -4158,34 +4294,38 @@ fn path_leaf_label(path: &Path) -> String {
 async fn spawn_workspace(
     hub: &Hub,
     workspace_id: &str,
-    branch_name: &str,
-    base_branch: Option<String>,
-    use_worktree: bool,
+    req: ws::ResolveRequest<'_>,
     worktree_reuse: protocol::WorktreeReusePolicy,
 ) -> anyhow::Result<SpawnResolution> {
+    let branch_name = req.branch_name;
+    let use_worktree = req.use_worktree;
     info!(
         workspace_id,
         branch_name, use_worktree, "spawn_workspace: begin"
     );
-    let (workspace, resolved) = ws::resolve_workspace(
-        &hub.state,
-        &hub.state.worktrees_dir(),
-        workspace_id,
-        branch_name,
-        base_branch.as_deref(),
-        use_worktree,
-    )
-    .await?;
+    let (workspace, resolved) =
+        ws::resolve_workspace(&hub.state, &hub.state.worktrees_dir(), workspace_id, req).await?;
     // Refuse to bind any member worktree that's already driving a live
     // session — mirrors the single-repo guard so a workspace re-spawn on a
     // branch whose worktrees already exist can't be shared across sessions.
+    // Pinned members are exempt: the client resolves a pin from a picker that
+    // shows which worktrees are live and confirms before sending one.
     if use_worktree {
         for member in &resolved {
             let in_use =
                 active_sessions_using_worktree(hub, &member.working_path.to_string_lossy(), None);
-            if !in_use.is_empty() {
+            if in_use.is_empty() {
+                continue;
+            }
+            if !member.pinned {
                 return Err(worktree_in_use_failure(branch_name, &in_use).into());
             }
+            let labels: Vec<&str> = in_use.iter().map(|(_, label)| label.as_str()).collect();
+            warn!(
+                worktree = %member.working_path.display(),
+                sharing_with = ?labels,
+                "spawning into a worktree a live session already holds"
+            );
         }
     }
     ws::ensure_branches(&resolved, branch_name, worktree_reuse)
@@ -4193,6 +4333,9 @@ async fn spawn_workspace(
         .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
     if use_worktree {
         for member in &resolved {
+            if member.pinned {
+                continue;
+            }
             let repo_path = PathBuf::from(&member.repo.path);
             let base = member.effective_base.clone().unwrap_or_default();
             log_fork_point(&repo_path, branch_name, &base, &member.working_path).await;
@@ -4204,15 +4347,22 @@ async fn spawn_workspace(
         .ok_or_else(|| anyhow!("workspace has no members"))?
         .working_path
         .clone();
-    let members: Vec<SessionMember> = resolved
-        .iter()
-        .map(|m| SessionMember {
-            repo_id: m.repo.id.clone(),
-            repo_name: m.repo.name.clone(),
-            branch: branch_name.to_string(),
-            worktree_path: m.working_path.to_string_lossy().into_owned(),
-        })
-        .collect();
+    let mut members: Vec<SessionMember> = Vec::with_capacity(resolved.len());
+    for member in &resolved {
+        // A pinned member runs on whatever its worktree already has checked
+        // out, which need not be the branch the group's directory is named for.
+        let branch = if member.pinned {
+            pinned_branch(&member.working_path, branch_name).await
+        } else {
+            branch_name.to_string()
+        };
+        members.push(SessionMember {
+            repo_id: member.repo.id.clone(),
+            repo_name: member.repo.name.clone(),
+            branch,
+            worktree_path: member.working_path.to_string_lossy().into_owned(),
+        });
+    }
     let label = format!("{}: {branch_name}", workspace.name);
     Ok((
         SessionKind::Workspace,
@@ -5318,6 +5468,66 @@ mod tests {
         // Old-shape Hello: empty range vec, scalar carries the version.
         let v = PROTOCOL_VERSION;
         assert_eq!(negotiate_protocol_version(v, &[]), Some(v));
+    }
+
+    fn single_target(use_worktree: bool, existing_worktree: Option<&str>) -> SpawnTarget {
+        SpawnTarget::Single {
+            repo_id: "r1".to_string(),
+            branch_name: "wt/x".to_string(),
+            base_branch: None,
+            use_worktree,
+            checkout_strategy: None,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktree: existing_worktree.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pinning_an_in_place_single_spawn_is_refused() {
+        // In-place runs in the repo; a pin names a different directory. Doing
+        // either silently would put the session somewhere unchosen.
+        let err = reject_pin_without_worktree(&single_target(false, Some("X:/wt/repo")))
+            .expect_err("pin + in-place must not be accepted");
+        assert!(
+            format!("{err:#}").contains("cannot pin an existing worktree"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn pinning_a_worktree_spawn_is_allowed() {
+        reject_pin_without_worktree(&single_target(true, Some("X:/wt/repo")))
+            .expect("a pin with use_worktree is the supported combination");
+    }
+
+    #[test]
+    fn an_unpinned_in_place_spawn_is_allowed() {
+        reject_pin_without_worktree(&single_target(false, None))
+            .expect("in-place without a pin is the ordinary case");
+    }
+
+    #[test]
+    fn pinning_an_in_place_workspace_spawn_is_refused() {
+        let target = SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/x".to_string(),
+            base_branch: None,
+            use_worktree: false,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktrees: vec![protocol::PinnedMemberWorktree {
+                repo_id: "r1".to_string(),
+                path: "X:/wt/repo".to_string(),
+            }],
+        };
+        reject_pin_without_worktree(&target).expect_err("pin + in-place must not be accepted");
+    }
+
+    /// A worktree nothing references is Stale; the picker uses that to tell a
+    /// leftover apart from one a stopped session still owns.
+    #[test]
+    fn worktree_status_is_stale_without_any_session() {
+        let status = worktree_status(&[], &crate::paths::normalize_path_key("X:/wt/repo"));
+        assert!(matches!(status, protocol::RootWorktreeStatus::Stale));
     }
 
     #[test]

@@ -425,6 +425,29 @@ pub struct SessionSnapshot {
     pub worktree_paths: Vec<String>,
 }
 
+/// One workspace member bound to a specific worktree directory that already
+/// exists on disk. See [`SpawnTarget::Workspace::existing_worktrees`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PinnedMemberWorktree {
+    pub repo_id: String,
+    /// Absolute path of the worktree directory to run this member in.
+    pub path: String,
+}
+
+/// Where a session runs.
+///
+/// **Pinning.** `Single::existing_worktree` and `Workspace::existing_worktrees`
+/// address a worktree by path instead of deriving one from the branch name.
+/// Derivation (`<root>/wt.<branch-slug>/<anchor>/<rel>`) stops matching reality
+/// as soon as the worktree's checked-out branch no longer slugs back to its own
+/// directory name — a branch switched inside the worktree, or a detached HEAD,
+/// derives a *different* path and silently creates a second worktree. A pinned
+/// member skips derivation and creation entirely and runs in the named
+/// directory; the daemon rejects a pin whose directory is gone rather than
+/// recreating it. Unlike [`WorktreeReusePolicy::RecreateFromBase`], a pin is a
+/// deliberate choice of target rather than a one-shot answer about a collision,
+/// so it survives into the persisted [`SpawnConfig`] and replays on resume,
+/// duplicate, and "launch last again".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnTarget {
@@ -454,6 +477,11 @@ pub enum SpawnTarget {
         /// (presets, duplicate, resume) that never saw a collision prompt.
         #[serde(default)]
         worktree_reuse: WorktreeReusePolicy,
+        /// Pin the spawn to this existing worktree directory instead of
+        /// deriving one from `branch_name`. See the module-level notes on
+        /// pinning below; requires `use_worktree = true`.
+        #[serde(default)]
+        existing_worktree: Option<String>,
     },
     Workspace {
         workspace_id: String,
@@ -467,6 +495,14 @@ pub enum SpawnTarget {
         /// See [`SpawnTarget::Single::worktree_reuse`]; applied to every member.
         #[serde(default)]
         worktree_reuse: WorktreeReusePolicy,
+        /// Members pinned to an existing worktree directory. Members absent
+        /// from this list derive their path from `branch_name` and are created
+        /// as usual, which lands them in the same `wt.<slug>/` group — so a
+        /// workspace that gained a repo since the group was made still
+        /// launches. Entries naming a repo that isn't a current member are
+        /// ignored. Requires `use_worktree = true`.
+        #[serde(default)]
+        existing_worktrees: Vec<PinnedMemberWorktree>,
     },
     Standalone {
         /// Absolute directory for a non-repo shell. `None` lets the daemon
@@ -2094,14 +2130,28 @@ pub enum ClientMessage {
 /// One entry in the `Worktrees` reply: a non-main git worktree for a repo.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeInfo {
-    /// Short branch name (e.g. `wt/brave-fox`, `feature/foo`).
+    /// Short branch name (e.g. `wt/brave-fox`, `feature/foo`). Empty for a
+    /// worktree in detached-HEAD state.
     pub branch: String,
     /// Absolute path to the worktree directory on disk.
     pub path: String,
-    /// True if a non-stopped, non-inactive session is currently using this
-    /// worktree path. Such worktrees should be shown as unavailable in the
-    /// spawn dialog's "use existing" picker.
-    pub is_active: bool,
+    /// Whether a session is using this worktree, and if so whether it's still
+    /// running. `Active` entries are still launchable — a second agent in a
+    /// live tree is allowed behind a confirm — but the picker flags them.
+    pub status: RootWorktreeStatus,
+    /// Absolute path of the `wt.<slug>/` group this worktree belongs to, when
+    /// it lives under the RT worktrees root. `None` for worktrees created
+    /// outside RT, which are listed and launchable but carry no group metadata.
+    #[serde(default)]
+    pub group_path: Option<String>,
+    /// Bytes used by the whole group. `None` when `group_path` is `None` or
+    /// the size walk failed.
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// Most recent modified time (unix seconds) across the group. `None` under
+    /// the same conditions as `size_bytes`.
+    #[serde(default)]
+    pub last_modified_unix: Option<i64>,
 }
 
 /// Status of one `wt.<branch>/` group as discovered by
@@ -2150,6 +2200,40 @@ pub struct RootWorktreeMember {
     pub repo_name_hint: String,
 }
 
+/// How a `wt.<branch>/` group maps back onto something spawnable. Resolved by
+/// the daemon from each member's originating repo, so the client can offer
+/// "launch a session here" without re-deriving the mapping itself.
+///
+/// New variants must default-deserialize through `#[serde(other)] Unknown` so
+/// a client speaking an older protocol still decodes the snapshot; an
+/// unrecognized target renders as "launch unavailable" rather than breaking
+/// the whole modal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorktreeLaunchTarget {
+    /// Single-member group whose originating repo is registered.
+    Single {
+        repo_id: String,
+        /// Branch checked out in the member worktree. `None` for a detached
+        /// HEAD; clients fall back to the group's branch slug for labelling.
+        branch: Option<String>,
+        /// The worktree directory to pin the spawn to.
+        worktree_path: String,
+    },
+    /// Multi-member group whose members are all repos of one workspace.
+    Workspace {
+        workspace_id: String,
+        /// Branch checked out in the first member worktree; see
+        /// [`WorktreeLaunchTarget::Single::branch`].
+        branch: Option<String>,
+        /// Members of that workspace this group has worktrees for. Workspace
+        /// members missing here get a fresh worktree at the derived path.
+        members: Vec<PinnedMemberWorktree>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
 /// One `wt.<branch>/` group under the worktrees root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RootWorktreeEntry {
@@ -2176,6 +2260,13 @@ pub struct RootWorktreeEntry {
     /// Most recent modified timestamp (unix seconds) across the group's
     /// member directories. `None` if no readable metadata.
     pub last_modified_unix: Option<i64>,
+    /// What a "launch a session here" would spawn, or `None` when the group
+    /// can't be mapped onto a registered repo or workspace.
+    #[serde(default)]
+    pub launch: Option<WorktreeLaunchTarget>,
+    /// Why `launch` is `None`, phrased for a disabled button's tooltip.
+    #[serde(default)]
+    pub launch_blocked_reason: Option<String>,
 }
 
 /// One process holding open handles inside a worktree directory that
@@ -3327,6 +3418,7 @@ mod tests {
                 use_worktree: true,
                 checkout_strategy: None,
                 worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
             },
             mode: SessionMode::Interactive,
             initial_prompt: None,
@@ -3365,6 +3457,7 @@ mod tests {
                 base_branch: None,
                 use_worktree: true,
                 worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktrees: Vec::new(),
             },
             mode: SessionMode::Interactive,
             initial_prompt: Some("refactor authentication".to_string()),
@@ -3395,6 +3488,7 @@ mod tests {
                 use_worktree: true,
                 checkout_strategy: None,
                 worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
             },
             mode: SessionMode::Interactive,
             initial_prompt: Some("investigate".to_string()),

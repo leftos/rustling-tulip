@@ -71,6 +71,89 @@ pub fn simplify_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Normalize a path for comparison: strip trailing separators, and on Windows
+/// also lowercase and unify separators. Used wherever a stored path is matched
+/// against a freshly-computed one — session worktree paths, repo paths read
+/// back out of a worktree's gitfile, and `git worktree list` output, which
+/// prints forward slashes even on Windows where everything else uses
+/// backslashes.
+///
+/// Separator unification is Windows-only on purpose: a backslash is a legal
+/// character in a POSIX filename, so collapsing it there would conflate
+/// genuinely different paths.
+#[must_use]
+pub fn normalize_path_key(p: &str) -> String {
+    let trimmed = p.trim_end_matches(['/', '\\']);
+    if cfg!(windows) {
+        trimmed.to_lowercase().replace('\\', "/")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Validate that `raw` names an existing directory and return it in the
+/// normalized form session records store paths in, so later cross-references
+/// (worktrees-root scan, in-use checks) match on it.
+///
+/// Used for caller-supplied worktree pins. A pin whose directory is gone is a
+/// hard error rather than something to recreate: pins replay out of persisted
+/// spawn configs, and quietly resurrecting a worktree the user deleted would be
+/// worse than reporting it missing.
+pub fn resolve_existing_dir(raw: &str) -> anyhow::Result<PathBuf> {
+    use anyhow::{Context as _, anyhow};
+
+    let path = PathBuf::from(raw);
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("no longer readable at {}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(anyhow!("not a directory: {}", path.display()));
+    }
+    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(simplify_path(&canonical))
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests assert preconditions with expect")]
+mod dir_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_existing_dir_rejects_a_missing_path() {
+        let missing = std::env::temp_dir().join("rt-pin-does-not-exist-1a2b3c");
+        let err = resolve_existing_dir(&missing.to_string_lossy())
+            .expect_err("a missing directory must not resolve");
+        assert!(
+            format!("{err:#}").contains("no longer readable"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn resolve_existing_dir_rejects_a_file() {
+        let file = std::env::temp_dir().join("rt-pin-is-a-file-1a2b3c");
+        std::fs::write(&file, b"").expect("writing the fixture file");
+        let err = resolve_existing_dir(&file.to_string_lossy())
+            .expect_err("a file must not resolve as a worktree");
+        assert!(
+            format!("{err:#}").contains("not a directory"),
+            "unexpected error: {err:#}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn resolve_existing_dir_normalizes_a_real_directory() {
+        let dir = std::env::temp_dir();
+        let out = resolve_existing_dir(&dir.to_string_lossy()).expect("temp dir must resolve");
+        assert!(out.is_dir());
+        assert!(
+            !out.to_string_lossy().starts_with(r"\\?\"),
+            "verbatim prefix should have been simplified: {}",
+            out.display()
+        );
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;

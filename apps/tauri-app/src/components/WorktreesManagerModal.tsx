@@ -13,6 +13,10 @@ interface Props {
   client: DaemonClient | null;
   worktreesRoot: { path: string; isOverride: boolean } | null;
   onClose: () => void;
+  /// Open the spawn dialog pinned to this group's worktrees. The modal closes
+  /// itself first — the spawn dialog is the next step of the same gesture, not
+  /// a second modal layered on top.
+  onLaunch: (entry: RootWorktreeEntry) => void;
 }
 
 interface SnapshotState {
@@ -41,6 +45,7 @@ export default function WorktreesManagerModal({
   client,
   worktreesRoot,
   onClose,
+  onLaunch,
 }: Props) {
   useEscape(onClose);
   useFocusReturn();
@@ -49,6 +54,11 @@ export default function WorktreesManagerModal({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<DeleteConfirmState | null>(null);
+  // Set only for a group a live session is already running in — launching a
+  // second agent into it is allowed, but not silently.
+  const [shareConfirm, setShareConfirm] = useState<RootWorktreeEntry | null>(
+    null,
+  );
 
   // Initial fetch + every reconnect.
   useEffect(() => {
@@ -147,6 +157,30 @@ export default function WorktreesManagerModal({
     });
   }, []);
 
+  const onAskLaunch = useCallback(
+    (entry: RootWorktreeEntry) => {
+      if (entry.status.kind === "active") {
+        setShareConfirm(entry);
+        return;
+      }
+      logToFile("info", `worktrees_manager: launching into ${entry.path}`);
+      onClose();
+      onLaunch(entry);
+    },
+    [onClose, onLaunch],
+  );
+
+  const onConfirmShare = useCallback(() => {
+    if (!shareConfirm) return;
+    logToFile(
+      "info",
+      `worktrees_manager: launching into ${shareConfirm.path} alongside a live session`,
+    );
+    setShareConfirm(null);
+    onClose();
+    onLaunch(shareConfirm);
+  }, [shareConfirm, onClose, onLaunch]);
+
   const rootLabel =
     snapshot?.root ?? worktreesRoot?.path ?? "(daemon not connected)";
   const isOverride = snapshot?.isOverride ?? worktreesRoot?.isOverride ?? false;
@@ -222,6 +256,7 @@ export default function WorktreesManagerModal({
                   key={entry.path}
                   entry={entry}
                   onDelete={() => onAskDeleteOne(entry)}
+                  onLaunch={() => onAskLaunch(entry)}
                   disabled={!client || pending}
                 />
               ))}
@@ -246,6 +281,13 @@ export default function WorktreesManagerModal({
           onConfirm={onConfirmDelete}
         />
       )}
+      {shareConfirm !== null && (
+        <ShareConfirmDialog
+          entry={shareConfirm}
+          onCancel={() => setShareConfirm(null)}
+          onConfirm={onConfirmShare}
+        />
+      )}
     </div>
   );
 }
@@ -253,10 +295,11 @@ export default function WorktreesManagerModal({
 interface RowProps {
   entry: RootWorktreeEntry;
   onDelete: () => void;
+  onLaunch: () => void;
   disabled: boolean;
 }
 
-function WorktreeRow({ entry, onDelete, disabled }: RowProps) {
+function WorktreeRow({ entry, onDelete, onLaunch, disabled }: RowProps) {
   const statusLabel = humanStatus(entry.status);
   const sizeLabel =
     entry.size_bytes === null ? "—" : humanSize(entry.size_bytes);
@@ -266,6 +309,14 @@ function WorktreeRow({ entry, onDelete, disabled }: RowProps) {
       : humanRelativeTime(entry.last_modified_unix);
   const deleteDisabled =
     disabled || entry.status.kind === "active";
+  const launchable =
+    entry.launch != null && entry.launch.kind !== "unknown";
+  const launchTitle = launchable
+    ? entry.status.kind === "active"
+      ? "Launch a second session in this worktree"
+      : "Launch a session in this worktree"
+    : (entry.launch_blocked_reason ??
+      "this build doesn't know how to launch this group");
   return (
     <li className="worktrees-row" data-testid="worktrees-manager-row">
       <div className="worktrees-row-header">
@@ -300,6 +351,15 @@ function WorktreeRow({ entry, onDelete, disabled }: RowProps) {
         </details>
       )}
       <div className="worktrees-row-actions">
+        <button
+          type="button"
+          onClick={onLaunch}
+          disabled={disabled || !launchable}
+          title={launchTitle}
+          data-testid="worktrees-manager-row-launch"
+        >
+          Launch session here
+        </button>
         <button
           type="button"
           className="danger"
@@ -375,6 +435,67 @@ function DeleteConfirmDialog({ confirm, onCancel, onConfirm }: ConfirmProps) {
             data-testid="worktrees-manager-confirm-ok"
           >
             Delete
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+interface ShareConfirmProps {
+  entry: RootWorktreeEntry;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/// Shown when the chosen group already has a live session in it. Two agents
+/// editing one tree is supported but rarely what someone means to do, so it
+/// takes a deliberate second click.
+function ShareConfirmDialog({
+  entry,
+  onCancel,
+  onConfirm,
+}: ShareConfirmProps) {
+  useEscape(onCancel);
+  return (
+    <div
+      className="modal-backdrop"
+      data-testid="worktrees-manager-share-confirm"
+    >
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <header className="modal-header">
+          <h2>Share this worktree?</h2>
+        </header>
+        <div className="modal-body">
+          <p>
+            A session is already running in <code>{entry.branch_slug}</code>.
+            Launching here puts a second agent in the same working tree.
+          </p>
+          <p className="settings-section-hint">
+            They will see each other's uncommitted edits, and concurrent writes
+            to the same file will overwrite one another.
+          </p>
+        </div>
+        <footer className="modal-footer">
+          <button
+            type="button"
+            onClick={onCancel}
+            data-testid="worktrees-manager-share-cancel"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={onConfirm}
+            data-testid="worktrees-manager-share-ok"
+          >
+            Launch anyway
           </button>
         </footer>
       </div>

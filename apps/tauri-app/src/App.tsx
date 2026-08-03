@@ -42,6 +42,7 @@ import {
   type PresetLaunchJobSnapshot,
   type PresetTarget,
   type RepoEntry,
+  type RootWorktreeEntry,
   type SessionSnapshot,
   type SpawnConfig,
   type SplitDirection,
@@ -50,6 +51,7 @@ import {
   type VscodeWorkspaceSuggestion,
   type WorkspaceEntry,
   type WorktreeCleanupFailure,
+  type WorktreeLaunchTarget,
 } from "./types";
 import ActivityBar, {
   type ActivitySection,
@@ -318,6 +320,12 @@ interface AppState {
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
+  /// Worktree group the spawn dialog is pinned to, set by "Launch session
+  /// here" in the worktrees manager. Kept separate from `spawnPrefill`:
+  /// prefill replays a past config's agent/mode/model, whereas a pin only
+  /// fixes *where* the session runs and leaves every other field on its
+  /// normal default.
+  spawnPin: WorktreeLaunchTarget | undefined;
   /// True once the WS has reached `kind: "open"` at least once this app
   /// lifetime. Drives the "Connecting to daemon…" overlay that blocks
   /// the entire UI on cold boot — once the daemon has answered once,
@@ -437,6 +445,7 @@ export default function App() {
     layoutChooser: null,
     importArrangement: null,
     worktreesManagerOpen: false,
+    spawnPin: undefined,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
     actionFailed: null,
@@ -1070,6 +1079,31 @@ export default function App() {
       spawnInitial: undefined,
       spawnInitialLocked: true,
       spawnPrefill: undefined,
+      spawnPin: undefined,
+    }));
+  }, []);
+
+  /// "Launch session here" from the worktrees manager. Opens the spawn dialog
+  /// locked to the group's repo or workspace and pinned to its worktrees, so
+  /// the agent, run mode, model, and prompt are all still chooseable — the
+  /// only thing the gesture decides is *where* the session runs.
+  const onLaunchIntoWorktree = useCallback((entry: RootWorktreeEntry) => {
+    const launch = entry.launch;
+    if (!launch || launch.kind === "unknown") return;
+    const initial: SpawnInitialTarget =
+      launch.kind === "single"
+        ? { kind: "repo", repo_id: launch.repo_id }
+        : { kind: "workspace", workspace_id: launch.workspace_id };
+    spawnTargetPaneRef.current = null;
+    spawnTargetTabRef.current = null;
+    setState((s) => ({
+      ...s,
+      worktreesManagerOpen: false,
+      spawnOpen: true,
+      spawnInitial: initial,
+      spawnInitialLocked: true,
+      spawnPrefill: undefined,
+      spawnPin: launch,
     }));
   }, []);
 
@@ -2845,6 +2879,7 @@ export default function App() {
           initialTarget={state.spawnInitial}
           lockInitialTarget={state.spawnInitialLocked}
           spawnPrefill={state.spawnPrefill}
+          spawnPin={state.spawnPin}
           canUseCurrentTab={canUseSpawnCurrentTab}
           currentTabName={
             canUseSpawnCurrentTab ? (spawnCurrentTab?.name ?? null) : null
@@ -3009,6 +3044,7 @@ export default function App() {
           onClose={() =>
             setState((s) => ({ ...s, worktreesManagerOpen: false }))
           }
+          onLaunch={onLaunchIntoWorktree}
         />
       )}
       {state.exitConfirmOpen && (

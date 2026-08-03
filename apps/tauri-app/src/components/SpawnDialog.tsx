@@ -15,11 +15,15 @@ import type {
   DaemonMessage,
   MemberSpawnPreview,
   PermissionMode,
+  PinnedMemberWorktree,
   RepoEntry,
+  RootWorktreeEntry,
+  RootWorktreeStatus,
   SpawnConfig,
   TabEntry,
   WorkspaceEntry,
   WorktreeInfo,
+  WorktreeLaunchTarget,
   WorktreeReuseChoice,
 } from "../types";
 import type { SpawnInitialTarget } from "./Sidebar";
@@ -43,6 +47,11 @@ interface Props {
   /// codex sandbox, and extra env vars from this config — overriding
   /// the usual Settings defaults. `undefined` for normal spawns.
   spawnPrefill?: SpawnConfig | undefined;
+  /// Worktree group this dialog was opened pinned to, from "Launch session
+  /// here" in the worktrees manager. Unlike `spawnPrefill` it decides only
+  /// *where* the session runs — agent, mode, model, and prompt keep their
+  /// normal defaults.
+  spawnPin?: WorktreeLaunchTarget | undefined;
   canUseCurrentTab: boolean;
   currentTabName: string | null;
   /// All existing tabs, surfaced as per-tab radios in the placement
@@ -228,6 +237,7 @@ export default function SpawnDialog({
   initialTarget,
   lockInitialTarget = true,
   spawnPrefill,
+  spawnPin,
   canUseCurrentTab,
   currentTabName,
   tabs,
@@ -448,6 +458,7 @@ export default function SpawnDialog({
                   advanced={advanced}
                   agent={agent}
                   spawnPrefill={spawnPrefill}
+                  spawnPin={spawnPin}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -467,6 +478,7 @@ export default function SpawnDialog({
                   advanced={advanced}
                   agent={agent}
                   spawnPrefill={spawnPrefill}
+                  spawnPin={spawnPin}
                   spawnPlacement={spawnPlacement}
                   onClose={onClose}
                   onSpawned={onSpawned}
@@ -1339,6 +1351,7 @@ function SingleForm({
   advanced,
   agent,
   spawnPrefill,
+  spawnPin,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -1357,6 +1370,7 @@ function SingleForm({
   advanced: AdvancedConfig;
   agent: Agent;
   spawnPrefill: SpawnConfig | undefined;
+  spawnPin: WorktreeLaunchTarget | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -1445,41 +1459,76 @@ function SingleForm({
   // check out a remote-tracking ref in place without detaching HEAD.
   const inPlaceDefault =
     currentBranch ?? repo?.default_branch ?? knownBranches[0] ?? "main";
+  /// Worktree this dialog was opened pinned to ("Launch session here" in the
+  /// worktrees manager). Non-null means the mode toggle and picker start on
+  /// that worktree instead of on a fresh one.
+  const pinned =
+    spawnPin?.kind === "single" && spawnPin.repo_id === repoId
+      ? spawnPin
+      : null;
+
   const [useWorktree, setUseWorktree] = useState<boolean>(
-    () => prefillTarget?.use_worktree ?? true,
+    () => pinned !== null || (prefillTarget?.use_worktree ?? true),
   );
   /// "new" creates a fresh worktree (auto-named or user-typed branch).
   /// "existing" picks an already-checked-out worktree from this repo —
-  /// useful for returning to a parked session's worktree, or one created
-  /// by another session that has since been removed.
-  const [worktreeMode, setWorktreeMode] = useState<"new" | "existing">("new");
+  /// useful for returning to a parked session's worktree, or one left behind
+  /// by a session that has since been discarded.
+  const [worktreeMode, setWorktreeMode] = useState<"new" | "existing">(
+    pinned !== null ? "existing" : "new",
+  );
   const [worktreeList, setWorktreeList] = useState<WorktreeInfo[]>([]);
+  /// False until the daemon's reply lands, so an empty list can say "none"
+  /// rather than claiming to still be loading forever.
+  const [worktreesLoaded, setWorktreesLoaded] = useState(false);
+  /// Absolute path of the picked worktree. The spawn is addressed by path
+  /// rather than by branch name: deriving the directory from the branch
+  /// silently creates a *second* worktree whenever the picked one has since
+  /// been switched to another branch or left on a detached HEAD.
+  const [selectedWorktree, setSelectedWorktree] = useState<string | null>(
+    pinned?.worktree_path ?? null,
+  );
 
   // Reset the persistent-preference seed when the chosen repo changes.
   useEffect(() => {
     setUseWorktree(
-      prefillTarget?.use_worktree ?? repo?.default_use_worktree ?? true,
+      pinned !== null ||
+        (prefillTarget?.use_worktree ?? repo?.default_use_worktree ?? true),
     );
     // Flip back to "new" on repo change — the existing worktree list
     // belongs to the previous repo and would be misleading.
-    setWorktreeMode("new");
+    setWorktreeMode(pinned !== null ? "existing" : "new");
+    setSelectedWorktree(pinned?.worktree_path ?? null);
     setWorktreeList([]);
-  }, [repo, prefillTarget?.use_worktree]);
+    setWorktreesLoaded(false);
+  }, [repo, prefillTarget?.use_worktree, pinned]);
 
   // Fetch the worktree list when entering "existing" mode for the current
   // repo. Mirrors the list_branches pattern above.
   useEffect(() => {
     if (!repoId || !useWorktree || worktreeMode !== "existing") return;
     setWorktreeList([]);
+    setWorktreesLoaded(false);
     client.send({ type: "list_worktrees", repo_id: repoId });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "worktrees" || detail.repo_id !== repoId) return;
       setWorktreeList(detail.worktrees);
+      setWorktreesLoaded(true);
     };
     window.addEventListener("rt:worktrees", handler);
     return () => window.removeEventListener("rt:worktrees", handler);
   }, [repoId, useWorktree, worktreeMode, client]);
+
+  // Adopt the list's spelling of the selected path once it arrives. A pin from
+  // the worktrees manager carries the scan's backslash form while the picker's
+  // options carry git's forward-slash form; without this the <select> can't
+  // match its own value and falls back to the placeholder.
+  useEffect(() => {
+    if (selectedWorktree === null) return;
+    const match = worktreeList.find((w) => samePath(w.path, selectedWorktree));
+    if (match && match.path !== selectedWorktree) setSelectedWorktree(match.path);
+  }, [worktreeList, selectedWorktree]);
 
   const branch = useBranchField(
     inPlaceDefault,
@@ -1553,12 +1602,9 @@ function SingleForm({
     client,
   ]);
 
-  /// Worktrees a user can still pick — entries already bound to a live
-  /// session are shown disabled (greyed) below, so we keep them in the
-  /// list rather than hiding (clarifies *why* a branch is unavailable).
-  const availableWorktreeCount = useMemo(
-    () => worktreeList.filter((w) => !w.is_active).length,
-    [worktreeList],
+  const selectedInfo = useMemo(
+    () => worktreeList.find((w) => samePath(w.path, selectedWorktree)) ?? null,
+    [worktreeList, selectedWorktree],
   );
 
   // Local-only until submit. Previously this fired
@@ -1574,20 +1620,17 @@ function SingleForm({
   // is setState; a fast double-click on the primary button could otherwise
   // fire two spawn_session messages before React unmounts the dialog.
   const submittedRef = useRef(false);
+  const [shareConfirmOpen, setShareConfirmOpen] = useState(false);
 
-  /// In "existing" mode the branch must match one of the worktrees the
-  /// daemon reported, AND that worktree must not be in active use. This
-  /// blocks the placeholder-not-yet-picked state from submitting silently.
-  const existingWorktreeOk =
-    !useWorktree ||
-    worktreeMode === "new" ||
-    worktreeList.some(
-      (w) => w.branch === branch.value.trim() && !w.is_active,
-    );
+  const pinningExisting = useWorktree && worktreeMode === "existing";
+  /// In "existing" mode something must actually be picked. The daemon
+  /// validates the directory itself, so list membership isn't required —
+  /// a pin can name a worktree git has since pruned from its own registry.
+  const existingWorktreeOk = !pinningExisting || selectedWorktree !== null;
 
   const canSubmit =
     !!repoId &&
-    branch.value.trim().length > 0 &&
+    (pinningExisting || branch.value.trim().length > 0) &&
     existingWorktreeOk &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
     envRowsAreValid(advanced.envRows);
@@ -1596,8 +1639,26 @@ function SingleForm({
       ? baseBranch.trim() || null
       : null;
 
+  /// Label the pinned session with the branch its worktree is really on. The
+  /// daemon re-reads HEAD and wins over this, but it needs a non-empty
+  /// fallback for a detached worktree.
+  const pinnedBranchName = () =>
+    pinned?.branch ??
+    selectedInfo?.branch ??
+    branchFromWorktreePath(selectedInfo?.group_path ?? selectedWorktree);
+
   const submit = () => {
     if (!canSubmit || submittedRef.current) return;
+    // Two agents in one working tree is supported but rarely intended.
+    if (pinningExisting && selectedInfo?.status.kind === "active") {
+      setShareConfirmOpen(true);
+      return;
+    }
+    sendSpawn();
+  };
+
+  const sendSpawn = () => {
+    if (submittedRef.current) return;
     submittedRef.current = true;
     // Successful submit consumes the cached branch suggestion so the
     // next dialog open generates a fresh one rather than re-pinning the
@@ -1618,7 +1679,9 @@ function SingleForm({
       target: {
         kind: "single",
         repo_id: repoId,
-        branch_name: branch.value.trim(),
+        branch_name: pinningExisting
+          ? pinnedBranchName()
+          : branch.value.trim(),
         base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
         // First attempt carries no strategy: a dirty in-place switch makes the
@@ -1626,6 +1689,7 @@ function SingleForm({
         // request with the chosen strategy.
         checkout_strategy: null,
         worktree_reuse: reusePolicy,
+        existing_worktree: pinningExisting ? selectedWorktree : null,
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
@@ -1687,33 +1751,53 @@ function SingleForm({
       )}
 
       {useWorktree && worktreeMode === "existing" ? (
-        <label className="field">
-          <span>Existing worktree</span>
-          <select
-            value={branch.value}
-            onChange={(e) => branch.setValue(e.target.value)}
-            data-testid="spawn-single-worktree-picker"
-          >
-            <option value="" disabled>
-              {worktreeList.length === 0
-                ? "Loading…"
-                : availableWorktreeCount === 0
-                  ? "(no available worktrees)"
-                  : "Choose a worktree…"}
-            </option>
-            {worktreeList.map((w) => (
-              <option
-                key={w.path}
-                value={w.branch}
-                disabled={w.is_active}
-                title={w.path}
-              >
-                {w.branch}
-                {w.is_active ? " (in use)" : ""}
+        <>
+          <label className="field">
+            <span>Existing worktree</span>
+            <select
+              value={selectedWorktree ?? ""}
+              onChange={(e) => setSelectedWorktree(e.target.value || null)}
+              data-testid="spawn-single-worktree-picker"
+            >
+              <option value="" disabled>
+                {worktreeList.length > 0
+                  ? "Choose a worktree…"
+                  : worktreesLoaded
+                    ? "This repo has no worktrees"
+                    : "Loading…"}
               </option>
-            ))}
-          </select>
-        </label>
+              {/* A pin can name a worktree git has pruned from its registry,
+                  so it isn't necessarily in the list — keep it selectable. */}
+              {pinned !== null &&
+                !worktreeList.some((w) =>
+                  samePath(w.path, pinned.worktree_path),
+                ) && (
+                  <option value={pinned.worktree_path}>
+                    {pinned.branch ?? branchFromWorktreePath(pinned.worktree_path)}
+                  </option>
+                )}
+              {worktreeList.map((w) => (
+                <option key={w.path} value={w.path} title={w.path}>
+                  {worktreeOptionLabel(w)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedWorktree !== null && (
+            <div className="muted small" data-testid="spawn-single-worktree-path">
+              Runs in <code>{selectedWorktree}</code>
+            </div>
+          )}
+          {selectedInfo?.status.kind === "active" && (
+            <div
+              className="warning-text small"
+              data-testid="spawn-single-worktree-active-warning"
+            >
+              A session is already running in this worktree. Launching puts a
+              second agent in the same working tree.
+            </div>
+          )}
+        </>
       ) : (
         <>
           <label className="field">
@@ -1803,8 +1887,141 @@ function SingleForm({
           Spawn
         </button>
       </div>
+      {shareConfirmOpen && (
+        <ShareWorktreeConfirm
+          onCancel={() => setShareConfirmOpen(false)}
+          onConfirm={() => {
+            setShareConfirmOpen(false);
+            sendSpawn();
+          }}
+        />
+      )}
     </>
   );
+}
+
+/// Second click required before two agents end up in one working tree. Shown
+/// by both spawn forms when the picked worktree already has a live session.
+function ShareWorktreeConfirm({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" data-testid="spawn-share-worktree-confirm">
+      <div
+        className="modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <header className="modal-header">
+          <h2>Share this worktree?</h2>
+        </header>
+        <div className="modal-body">
+          <p>
+            A session is already running in the worktree you picked. Both agents
+            will see each other's uncommitted edits, and concurrent writes to
+            the same file will overwrite one another.
+          </p>
+        </div>
+        <footer className="modal-footer">
+          <button
+            type="button"
+            onClick={onCancel}
+            data-testid="spawn-share-worktree-cancel"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="primary"
+            onClick={onConfirm}
+            data-testid="spawn-share-worktree-ok"
+          >
+            Launch anyway
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+/// Compare two worktree paths for identity. `git worktree list` prints forward
+/// slashes even on Windows, while the worktrees-root scan a pin comes from
+/// yields backslashes — so the same directory arrives spelled two ways and a
+/// raw string compare would show it twice in the picker.
+function samePath(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false;
+  const norm = (p: string) => {
+    const trimmed = p.replace(/[/\\]+$/, "");
+    return isWindowsPath(trimmed)
+      ? trimmed.toLowerCase().replace(/\\/g, "/")
+      : trimmed;
+  };
+  return norm(a) === norm(b);
+}
+
+/// A drive-letter or UNC prefix means Windows semantics — case-insensitive and
+/// separator-agnostic. Elsewhere a backslash is a legal filename character, so
+/// collapsing it would conflate genuinely different paths.
+function isWindowsPath(p: string): boolean {
+  return /^[a-zA-Z]:[/\\]/.test(p) || p.startsWith("\\\\");
+}
+
+/// Best-effort branch name for a worktree the daemon didn't report one for:
+/// strip the `wt.` prefix off a group directory, else use the path leaf. Only
+/// ever a label fallback — the daemon reads the real HEAD at spawn time.
+function branchFromWorktreePath(path: string | null): string {
+  const leaf = (path ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+  if (leaf.startsWith("wt.")) return leaf.slice(3);
+  return leaf || "worktree";
+}
+
+/// One picker row: branch (or a detached-HEAD marker), plus staleness, size,
+/// and age for worktrees RT manages. Non-RT worktrees show branch only.
+function worktreeOptionLabel(w: WorktreeInfo): string {
+  const name = w.branch || "(detached HEAD)";
+  const meta: string[] = [];
+  switch (w.status.kind) {
+    case "active":
+      meta.push("in use");
+      break;
+    case "detached":
+      meta.push("stopped session");
+      break;
+    case "stale":
+      // Only meaningful for a worktree RT manages; a hand-made one has no
+      // group to be stale relative to.
+      if (w.group_path) meta.push("stale");
+      break;
+    case "unknown":
+      break;
+  }
+  if (w.size_bytes != null) meta.push(humanSize(w.size_bytes));
+  if (w.last_modified_unix != null) {
+    meta.push(humanRelativeTime(w.last_modified_unix));
+  }
+  return meta.length > 0 ? `${name} — ${meta.join(", ")}` : name;
+}
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+function humanRelativeTime(unixSeconds: number): string {
+  const delta = Math.floor(Date.now() / 1000) - unixSeconds;
+  if (delta < 60) return "just now";
+  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+  return `${Math.floor(delta / 86400)}d ago`;
 }
 
 // ---------- workspace form ----------
@@ -1820,6 +2037,7 @@ function WorkspaceForm({
   advanced,
   agent,
   spawnPrefill,
+  spawnPin,
   spawnPlacement,
   onClose,
   onSpawned,
@@ -1836,6 +2054,7 @@ function WorkspaceForm({
   advanced: AdvancedConfig;
   agent: Agent;
   spawnPrefill: SpawnConfig | undefined;
+  spawnPin: WorktreeLaunchTarget | undefined;
   spawnPlacement: SpawnPlacement;
   onClose: () => void;
   onSpawned: (placement: SpawnPlacement) => void;
@@ -1869,6 +2088,54 @@ function WorkspaceForm({
     spawnPrefill.target.workspace_id === workspaceId
       ? spawnPrefill.target
       : null;
+
+  const pinned =
+    spawnPin?.kind === "workspace" && spawnPin.workspace_id === workspaceId
+      ? spawnPin
+      : null;
+
+  /// "existing" binds every member to a worktree group that already exists on
+  /// disk. Members the group has no worktree for still get one created, at the
+  /// derived path — which lands inside the same group.
+  const [worktreeMode, setWorktreeMode] = useState<"new" | "existing">(
+    pinned !== null ? "existing" : "new",
+  );
+  const [groupList, setGroupList] = useState<WorkspaceGroupOption[]>([]);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(
+    pinned !== null ? groupKey(pinned.members) : null,
+  );
+
+  // The worktrees-root snapshot is the only source that knows which groups map
+  // to this workspace — `list_worktrees` is per-repo and can't tell a
+  // workspace group from a single-repo one.
+  useEffect(() => {
+    if (worktreeMode !== "existing") return;
+    client.send({ type: "inspect_worktrees_root" });
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "worktrees_root_snapshot") return;
+      setGroupList(workspaceGroupOptions(detail.entries, workspaceId));
+    };
+    window.addEventListener("rt:worktrees_root_snapshot", handler);
+    return () =>
+      window.removeEventListener("rt:worktrees_root_snapshot", handler);
+  }, [worktreeMode, workspaceId, client]);
+
+  const selectedGroup = useMemo(() => {
+    const found = groupList.find((g) => g.key === selectedGroupKey);
+    if (found) return found;
+    // A pin stays selectable before (or without) a snapshot arriving.
+    if (pinned && selectedGroupKey === groupKey(pinned.members)) {
+      return {
+        key: groupKey(pinned.members),
+        label: pinned.branch ?? branchFromWorktreePath(pinned.members[0]?.path ?? null),
+        branch: pinned.branch,
+        members: pinned.members,
+        status: { kind: "stale" } as RootWorktreeStatus,
+      } satisfies WorkspaceGroupOption;
+    }
+    return null;
+  }, [groupList, selectedGroupKey, pinned]);
 
   // Background-fetch every member so the preview's staleness figures reflect
   // current remotes. Same non-blocking contract as SingleForm: a failure just
@@ -1984,16 +2251,30 @@ function WorkspaceForm({
 
   // Mirror SingleForm's double-click guard.
   const submittedRef = useRef(false);
+  const [shareConfirmOpen, setShareConfirmOpen] = useState(false);
 
+  const pinningExisting = useWorktree && worktreeMode === "existing";
   const canSpawn =
     !!workspaceId &&
-    branch.value.trim().length > 0 &&
+    (pinningExisting
+      ? selectedGroup !== null
+      : branch.value.trim().length > 0) &&
     (runMode === "headless" ? headlessPrompt.trim().length > 0 : true) &&
     envRowsAreValid(advanced.envRows);
-  const effectiveBaseBranch = useWorktree ? baseBranch.trim() || null : null;
+  const effectiveBaseBranch =
+    useWorktree && !pinningExisting ? baseBranch.trim() || null : null;
 
   const submit = () => {
     if (!canSpawn || submittedRef.current) return;
+    if (pinningExisting && selectedGroup?.status.kind === "active") {
+      setShareConfirmOpen(true);
+      return;
+    }
+    sendSpawn();
+  };
+
+  const sendSpawn = () => {
+    if (submittedRef.current) return;
     submittedRef.current = true;
     branchSuggestionCache.delete(`workspace:${workspaceId}`);
     if (
@@ -2012,10 +2293,18 @@ function WorkspaceForm({
       target: {
         kind: "workspace",
         workspace_id: workspaceId,
-        branch_name: branch.value.trim(),
+        // A pinned launch labels itself with the group's branch; members the
+        // group lacks derive their new worktree from the same name, which
+        // keeps them inside the same wt.<slug>/ directory.
+        branch_name: pinningExisting
+          ? (selectedGroup?.branch ?? selectedGroup?.label ?? "")
+          : branch.value.trim(),
         base_branch: effectiveBaseBranch,
         use_worktree: useWorktree,
         worktree_reuse: reusePolicy,
+        existing_worktrees: pinningExisting
+          ? (selectedGroup?.members ?? [])
+          : [],
       },
       mode: runMode,
       initial_prompt: runMode === "headless" ? headlessPrompt.trim() : null,
@@ -2035,38 +2324,40 @@ function WorkspaceForm({
 
   return (
     <>
-      <label className="field">
-        <span>
-          {useWorktree
-            ? "New worktree branch (same across all members)"
-            : "Branch (same across all members)"}
-        </span>
-        <div className="branch-with-dice">
-          <input
-            ref={branchInputRef}
-            type="text"
-            value={branch.value}
-            onChange={(e) => branch.setValue(e.target.value)}
-            placeholder={defaultBranch}
-            data-testid="spawn-workspace-branch"
-          />
-          {useWorktree && (
-            <button
-              type="button"
-              className="branch-dice"
-              onClick={() => {
-                branch.setValue(randomWorktreeBranchName());
-                branchInputRef.current?.focus();
-              }}
-              title="Generate a random worktree branch name"
-              aria-label="Generate a random worktree branch name"
-              data-testid="spawn-workspace-branch-random"
-            >
-              Random
-            </button>
-          )}
-        </div>
-      </label>
+      {!pinningExisting && (
+        <label className="field">
+          <span>
+            {useWorktree
+              ? "New worktree branch (same across all members)"
+              : "Branch (same across all members)"}
+          </span>
+          <div className="branch-with-dice">
+            <input
+              ref={branchInputRef}
+              type="text"
+              value={branch.value}
+              onChange={(e) => branch.setValue(e.target.value)}
+              placeholder={defaultBranch}
+              data-testid="spawn-workspace-branch"
+            />
+            {useWorktree && (
+              <button
+                type="button"
+                className="branch-dice"
+                onClick={() => {
+                  branch.setValue(randomWorktreeBranchName());
+                  branchInputRef.current?.focus();
+                }}
+                title="Generate a random worktree branch name"
+                aria-label="Generate a random worktree branch name"
+                data-testid="spawn-workspace-branch-random"
+              >
+                Random
+              </button>
+            )}
+          </div>
+        </label>
+      )}
 
       <label className="checkbox">
         <input
@@ -2084,6 +2375,82 @@ function WorkspaceForm({
       </label>
 
       {useWorktree && (
+        <div className="field" role="radiogroup" aria-label="Worktree mode">
+          <span>Worktrees</span>
+          <div className="segmented">
+            <button
+              type="button"
+              className={worktreeMode === "new" ? "active" : ""}
+              onClick={() => setWorktreeMode("new")}
+              data-testid="spawn-workspace-worktree-mode-new"
+            >
+              New worktrees
+            </button>
+            <button
+              type="button"
+              className={worktreeMode === "existing" ? "active" : ""}
+              onClick={() => setWorktreeMode("existing")}
+              data-testid="spawn-workspace-worktree-mode-existing"
+            >
+              Use existing
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pinningExisting && (
+        <>
+          <label className="field">
+            <span>Existing worktree group</span>
+            <select
+              value={selectedGroupKey ?? ""}
+              onChange={(e) => setSelectedGroupKey(e.target.value || null)}
+              data-testid="spawn-workspace-worktree-picker"
+            >
+              <option value="" disabled>
+                {groupList.length === 0
+                  ? "No worktree groups for this workspace"
+                  : "Choose a worktree group…"}
+              </option>
+              {selectedGroup !== null &&
+                !groupList.some((g) => g.key === selectedGroup.key) && (
+                  <option value={selectedGroup.key}>
+                    {selectedGroup.label}
+                  </option>
+                )}
+              {groupList.map((g) => (
+                <option key={g.key} value={g.key}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedGroup !== null && (
+            <div className="muted small" data-testid="spawn-workspace-worktree-members">
+              {selectedGroup.members.length} member
+              {selectedGroup.members.length === 1 ? "" : "s"} bound;
+              {" "}
+              {Math.max(
+                (workspace?.member_repo_ids.length ?? 0) -
+                  selectedGroup.members.length,
+                0,
+              )}{" "}
+              to be created
+            </div>
+          )}
+          {selectedGroup?.status.kind === "active" && (
+            <div
+              className="warning-text small"
+              data-testid="spawn-workspace-worktree-active-warning"
+            >
+              A session is already running in this group. Launching puts a
+              second agent in the same working trees.
+            </div>
+          )}
+        </>
+      )}
+
+      {useWorktree && !pinningExisting && (
         <>
           <label className="field">
             <span>Base branch (optional)</span>
@@ -2115,7 +2482,7 @@ function WorkspaceForm({
         </>
       )}
 
-      {useWorktree && preview && (
+      {useWorktree && !pinningExisting && preview && (
         <div className="preview-table" data-testid="spawn-workspace-preview-table">
           <table>
             <thead>
@@ -2182,6 +2549,66 @@ function WorkspaceForm({
           Spawn
         </button>
       </div>
+      {shareConfirmOpen && (
+        <ShareWorktreeConfirm
+          onCancel={() => setShareConfirmOpen(false)}
+          onConfirm={() => {
+            setShareConfirmOpen(false);
+            sendSpawn();
+          }}
+        />
+      )}
     </>
   );
+}
+
+/// One row of the workspace form's existing-group picker.
+interface WorkspaceGroupOption {
+  /// Stable identity: the member paths, which is what actually gets pinned.
+  key: string;
+  label: string;
+  branch: string | null;
+  members: PinnedMemberWorktree[];
+  status: RootWorktreeStatus;
+}
+
+function groupKey(members: PinnedMemberWorktree[]): string {
+  return members.map((m) => m.path).join("|");
+}
+
+/// Worktree groups from a root snapshot that this workspace can be launched
+/// into. A group qualifies when the daemon resolved it to this workspace —
+/// which it only does when every member repo it has on disk belongs here.
+function workspaceGroupOptions(
+  entries: RootWorktreeEntry[],
+  workspaceId: string,
+): WorkspaceGroupOption[] {
+  const out: WorkspaceGroupOption[] = [];
+  for (const entry of entries) {
+    const launch = entry.launch;
+    if (
+      !launch ||
+      launch.kind !== "workspace" ||
+      launch.workspace_id !== workspaceId
+    ) {
+      continue;
+    }
+    const name = launch.branch ?? entry.branch_slug;
+    const meta: string[] = [];
+    if (entry.status.kind === "active") meta.push("in use");
+    if (entry.status.kind === "detached") meta.push("stopped session");
+    if (entry.status.kind === "stale") meta.push("stale");
+    if (entry.size_bytes != null) meta.push(humanSize(entry.size_bytes));
+    if (entry.last_modified_unix != null) {
+      meta.push(humanRelativeTime(entry.last_modified_unix));
+    }
+    out.push({
+      key: groupKey(launch.members),
+      label: meta.length > 0 ? `${name} — ${meta.join(", ")}` : name,
+      branch: launch.branch,
+      members: launch.members,
+      status: entry.status,
+    });
+  }
+  return out;
 }
