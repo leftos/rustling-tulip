@@ -31,8 +31,17 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 test             # cargo test (workspace)
 .\rt.ps1 restart          # stop running daemon + relaunch
 .\rt.ps1 installer        # produce NSIS bundle
+.\rt.ps1 installer -Fast  # same, minus LTO + LZMA (dev iteration, not shippable)
 .\rt.ps1 help             # usage summary
 ```
+
+`installer` writes `target/release/bundle/nsis/rustling-tulip_<version>_x64-setup.exe`.
+It stages `rustling-tulipd` and `rt-tracer` into `apps/tauri-app/src-tauri/binaries/`
+as `<name>-<target-triple>.exe` and bundles both as Tauri `externalBin` sidecars, so
+the installed app is self-contained. The bundle is **unsigned** — see "Things that are
+deferred". Staging copies only when the target is older than the source, so a
+`target/release/` binary that cargo left stale silently ships stale; if a binary's
+timestamp looks wrong, delete it and rebuild rather than trusting "Finished".
 
 Raw cargo / pnpm equivalents when you need them:
 
@@ -128,7 +137,7 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
 **Multi-repo workspace sessions** spawn one `claude` process with `cwd = members[0].worktree_path` and `--add-dir <path>` for every additional member. Worktrees are created/reused per member via `git -C <repo> worktree add` under the shared `<worktrees-root>/wt.<branch-slug>/<sanitized-anchor>/` directory (see "Where things live on disk" — the layout preserves inter-member relative paths within a workspace). The "reuse-or-create" policy is encoded in `workspace.rs`. VS Code `.code-workspace` files are auto-detected when adding a repo and surfaced as a `VscodeWorkspaceSuggestion` event.
 
-**Tracer-backed PTY sessions (Phase C.3).** Every interactive and plain-shell PTY child is spawned under a per-session `rt-tracer.exe` supervisor process; the daemon talks to it over a named pipe at `\\.\pipe\rt-tracer-<session-id>`. The tracer owns the master ConPTY handle and survives daemon restarts — when the daemon dies the tracer keeps draining child output to its internal ring buffer (4 MB cap, oldest-bytes-drop on overflow), and a freshly-started daemon reattaches via `tracer_client::reattach` and replays the ring to catch up. Spawn site: `crates/daemon/src/tracer_client.rs::spawn`. Tracer ABI: `crates/tracer-protocol/src/lib.rs` — frozen surface; additive changes (new fields with `#[serde(default)]`, new variants with `#[serde(other)] Unknown`) are not a bump. Headless (`claude --print`) does NOT go through the tracer — it's piped stdio and lives in `crates/daemon/src/headless.rs`. The tracer binary must be present next to `rustling-tulipd.exe` (cargo builds both into `target/<profile>/`; production installers must bundle both — see "Things that are deferred").
+**Tracer-backed PTY sessions (Phase C.3).** Every interactive and plain-shell PTY child is spawned under a per-session `rt-tracer.exe` supervisor process; the daemon talks to it over a named pipe at `\\.\pipe\rt-tracer-<session-id>`. The tracer owns the master ConPTY handle and survives daemon restarts — when the daemon dies the tracer keeps draining child output to its internal ring buffer (4 MB cap, oldest-bytes-drop on overflow), and a freshly-started daemon reattaches via `tracer_client::reattach` and replays the ring to catch up. Spawn site: `crates/daemon/src/tracer_client.rs::spawn`. Tracer ABI: `crates/tracer-protocol/src/lib.rs` — frozen surface; additive changes (new fields with `#[serde(default)]`, new variants with `#[serde(other)] Unknown`) are not a bump. Headless (`claude --print`) does NOT go through the tracer — it's piped stdio and lives in `crates/daemon/src/headless.rs`. The tracer binary must be present next to `rustling-tulipd.exe`: `cargo build` emits both into `target/<profile>/` for the dev flow, and the installer ships both as Tauri `externalBin` sidecars (see "Common commands").
 
 **Live git watcher** (`crates/daemon/src/git_watch.rs`). Each registered repo gets a recursive `notify`-based watcher with a 750 ms debounce. Inside the debouncer callback, `classify_event` filters paths against a hand-maintained allowlist: only `.git/index`, `.git/HEAD`, `.git/refs/**`, a handful of in-progress operation markers, and any non-excluded working-tree path can wake the refresher. `.git/objects/`, `.git/logs/HEAD`, `FETCH_HEAD`, lock files, and well-known build/cache dirs (`target/`, `node_modules/`, `dist/`, `.next/`, `.venv/`, `__pycache__/`, …) are ignored so a `cargo build` or `pnpm install` doesn't spin up `git status` forever. The refresher tracks two flags — `status` and `stash` — and only invokes `git stash list` when a stash ref actually changed. The refresher parks while `Hub.client_count` is 0 (an RAII `ClientCountGuard` in `client_session` maintains the count); the next reconnect triggers one catch-up `repo_status` + `stash_list` before resuming event-driven refresh. **The pop-out window** is the same React bundle reloaded with `?session=<id>` — `App.tsx` branches on the query param to render `SessionWindow` instead of the full sidebar layout. The daemon already accepts multiple WS clients, so each window opens its own connection.
 
@@ -156,6 +165,6 @@ Frontend uses TypeScript strict + React 19 + xterm.js (`@xterm/xterm` + `@xterm/
 Don't go looking for these — they're explicitly out of scope until the corresponding plan item is unchecked:
 
 - **Auto-update** for the desktop app (`tauri-plugin-updater`) — deferred until a signed release pipeline exists.
-- **Production installer bundling** (Tauri `bundle.active = true` with both `rustling-tulipd.exe` and `rt-tracer.exe` as `externalBin` / `resources`) — deferred until a signed release pipeline exists. Dev flow works out of the box: `cargo build` emits both binaries into `target/<profile>/` and the supervisor + tracer-client find them via sibling-of-current-exe lookup.
+- **Code signing / notarization** of the installer and the binaries inside it — no signing cert, so the NSIS bundle `.\rt.ps1 installer` produces is unsigned and trips SmartScreen. This is the only remaining blocker for a release pipeline; bundling itself works (see "Common commands").
 - **Stage/unstage from the git panel** — the panel is read-only; `StageFiles` is in the protocol but not wired up.
 - **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync**, **mobile app** — explicit non-goals.
