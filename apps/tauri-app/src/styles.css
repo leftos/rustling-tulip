@@ -2754,6 +2754,9 @@ span.danger { color: var(--err); }
  * worktree another session is live in. Warning, not error: the action is
  * allowed, it just has a consequence worth reading first. */
 .warning-text { color: var(--warn); }
+/* Inline failure text — a daemon error surfaced next to the control that
+ * triggered it, rather than in a toast. */
+.error-text { color: var(--err); }
 
 /* Advisory callout inside a form — used by the spawn dialog to surface a
  * stale base branch or an existing worktree before the user commits. Warning
