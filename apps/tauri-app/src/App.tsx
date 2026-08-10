@@ -508,6 +508,15 @@ export default function App() {
   //     and click handlers may fire faster than React can commit a render. A
   //     synchronous ref guarantees one-shot semantics across those races.
   const seenSessionIdsRef = useRef(new Set<string>());
+  /// Last-processed status per session id, maintained synchronously by the
+  /// message handlers. The self-exit detector needs the status of the
+  /// PREVIOUS `session_updated` — `latestStateRef` reflects the last
+  /// committed render, so when the daemon's two stop snapshots (explicit
+  /// stop without exit code, then the exit watcher's with one) arrive
+  /// before React re-renders, both would compare against the stale
+  /// "working" status and the second would masquerade as a self-exit,
+  /// auto-discarding a session the user only asked to stop.
+  const sessionStatusRef = useRef(new Map<string, SessionSnapshot["status"]>());
   /// One-shot follow-up for the next freshly-spawned session id.
   ///   - `newTab`     : open a fresh tab containing the session.
   ///   - `replacePane`: drop the session into a specific empty pane (set when
@@ -700,6 +709,7 @@ export default function App() {
             ptyListenersRef.current,
             clientRef,
             seenSessionIdsRef,
+            sessionStatusRef,
             pendingSpawnIntentRef,
             pendingArrangementRef,
             pendingSessionImportRef,
@@ -3299,6 +3309,7 @@ function handleMessage(
   ptyListeners: Map<string, Set<(b64: string) => void>>,
   clientRef: React.MutableRefObject<DaemonClient | null>,
   seenSessionIdsRef: React.MutableRefObject<Set<string>>,
+  sessionStatusRef: React.MutableRefObject<Map<string, SessionSnapshot["status"]>>,
   pendingSpawnIntentRef: React.MutableRefObject<PendingSpawnIntent>,
   pendingArrangementRef: React.MutableRefObject<ArrangementConfig | null>,
   pendingSessionImportRef: React.MutableRefObject<{
@@ -3346,9 +3357,13 @@ function handleMessage(
       return;
     case "sessions": {
       // Initial snapshot. Seed the seen-set so a subsequent session_updated
-      // for one of these ids is recognized as not-new.
+      // for one of these ids is recognized as not-new, and the status map so
+      // the self-exit detector has a baseline.
       const incoming = msg.sessions;
-      for (const s of incoming) seenSessionIdsRef.current.add(s.id);
+      for (const s of incoming) {
+        seenSessionIdsRef.current.add(s.id);
+        sessionStatusRef.current.set(s.id, s.status);
+      }
       // On remote connections, stash the count mismatch so the `tabs` handler
       // can offer the import-arrangement modal. The `layout_init_required`
       // handler clears this if LayoutChooser will handle layout init instead.
@@ -3378,18 +3393,22 @@ function handleMessage(
       // active state with a child exit code, AND the session is not already
       // parked (is_inactive covers the park_session feedback loop). Explicit
       // Stop first emits a retained stopped snapshot without an exit code, so
-      // it does not take the auto-discard path for no-worktree sessions.
-      const prevSession = latestStateRef.current?.sessions.find(
-        (sn) => sn.id === session.id,
-      );
+      // it does not take the auto-discard path for no-worktree sessions. The
+      // previous status comes from sessionStatusRef, NOT latestStateRef: the
+      // ref map is updated synchronously per message, so the exit watcher's
+      // follow-up snapshot (with exit code) always compares against the
+      // explicit stop's "stopped" even when both arrive in the same render
+      // window.
+      const prevStatus = sessionStatusRef.current.get(session.id);
+      sessionStatusRef.current.set(session.id, session.status);
       const justSelfExited =
         !isNew &&
         session.status === "stopped" &&
         session.exit_code !== null &&
         !session.is_inactive &&
-        prevSession !== undefined &&
-        prevSession.status !== "stopped" &&
-        prevSession.status !== "error";
+        prevStatus !== undefined &&
+        prevStatus !== "stopped" &&
+        prevStatus !== "error";
       if (intent) {
         pendingSpawnIntentRef.current = null;
         // The Terminal mount for this session id is several React
@@ -3501,6 +3520,7 @@ function handleMessage(
       // without this, a stopped-then-removed session keeps its warning
       // glyph on whatever container would otherwise show it).
       seenSessionIdsRef.current.delete(msg.session_id);
+      sessionStatusRef.current.delete(msg.session_id);
       setState((s) => {
         let attention = s.attentionSessions;
         if (attention.has(msg.session_id)) {
