@@ -164,6 +164,21 @@ export default function SessionPane({
     );
   }, [session.id, tabId, paneId]);
 
+  const onNewSessionHere = useCallback(() => {
+    // Same event-dispatch pattern as Restart: App.tsx opens the spawn dialog
+    // targeted at this pane, and the stopped session is discarded once the
+    // new one takes the slot (cancelling the dialog leaves it untouched).
+    window.dispatchEvent(
+      new CustomEvent("rt:pane_session_new", {
+        detail: {
+          sessionId: session.id,
+          tabId: tabId ?? null,
+          paneId: paneId ?? null,
+        },
+      }),
+    );
+  }, [session.id, tabId, paneId]);
+
   const onDiscardWithWorktree = useCallback(() => {
     if (!client) return;
     client.send({
@@ -558,6 +573,18 @@ export default function SessionPane({
                   >
                     Restart
                   </button>
+                  {tabId && paneId && (
+                    // Grid-rendered panes only: the pop-out window renders no
+                    // SpawnDialog, so the button would open nothing there.
+                    <button
+                      type="button"
+                      onClick={onNewSessionHere}
+                      data-testid="session-new-here"
+                      title="Open the spawn dialog; the new session takes over this pane"
+                    >
+                      New session…
+                    </button>
+                  )}
                   {session.has_per_session_worktree && (
                     <button
                       type="button"

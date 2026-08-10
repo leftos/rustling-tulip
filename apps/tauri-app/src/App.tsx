@@ -537,12 +537,16 @@ export default function App() {
   } | null>(null);
 
   /// Captured when the spawn dialog is opened from an empty pane's "+ spawn"
-  /// button. Read at `onSpawned` to route current-tab placement into that pane.
-  /// Cleared on dialog close so a manual reopen from the toolbar doesn't
-  /// inherit a stale target.
-  const spawnTargetPaneRef = useRef<{ tabId: string; paneId: string } | null>(
-    null,
-  );
+  /// button or a stopped pane's "New session" button. Read at `onSpawned` to
+  /// route current-tab placement into that pane. `discardSessionId` carries
+  /// the stopped session occupying the pane, discarded once the new session
+  /// takes the slot (see PendingSpawnIntent). Cleared on dialog close so a
+  /// manual reopen from the toolbar doesn't inherit a stale target.
+  const spawnTargetPaneRef = useRef<{
+    tabId: string;
+    paneId: string;
+    discardSessionId?: string;
+  } | null>(null);
 
   /// Captured when the spawn dialog is opened from a tab container's
   /// right-click "Spawn session here" entry. Read at `onSpawned` to
@@ -1364,6 +1368,46 @@ export default function App() {
       window.removeEventListener("rt:pane_session_restart", handler);
   }, []);
 
+  // "New session" from a stopped session's pane: open the spawn dialog with
+  // the pane recorded as the placement target so the fresh session takes over
+  // the dead session's grid slot. The stopped session rides along as
+  // `discardSessionId` and is discarded only after the new session binds into
+  // the pane — cancelling the dialog (or overriding placement) leaves it
+  // untouched. Preselects the stopped session's repo/workspace, unlocked.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{
+          sessionId: string;
+          tabId: string | null;
+          paneId?: string | null;
+        }>
+      ).detail;
+      if (!detail || typeof detail.sessionId !== "string") return;
+      const cur = latestStateRef.current;
+      spawnTargetPaneRef.current =
+        detail.tabId && detail.paneId
+          ? {
+              tabId: detail.tabId,
+              paneId: detail.paneId,
+              discardSessionId: detail.sessionId,
+            }
+          : null;
+      spawnTargetTabRef.current = null;
+      const session = cur?.sessions.find((s) => s.id === detail.sessionId);
+      const preselect = session ? spawnTargetFromSession(session) : null;
+      setState((s) => ({
+        ...s,
+        spawnOpen: true,
+        spawnInitial: preselect ?? undefined,
+        spawnInitialLocked: false,
+        spawnPrefill: undefined,
+      }));
+    };
+    window.addEventListener("rt:pane_session_new", handler);
+    return () => window.removeEventListener("rt:pane_session_new", handler);
+  }, []);
+
   const onLaunchPreset = useCallback(
     (preset: PresetEntry, target: PresetTarget) => {
       setState((s) => ({ ...s, presetLaunch: { preset, target } }));
@@ -1433,6 +1477,9 @@ export default function App() {
         kind: "replacePane",
         tabId: paneTarget.tabId,
         paneId: paneTarget.paneId,
+        ...(paneTarget.discardSessionId
+          ? { discardSessionId: paneTarget.discardSessionId }
+          : {}),
       };
     } else if (tabTarget) {
       pendingSpawnIntentRef.current = { kind: "addToTab", tabId: tabTarget };

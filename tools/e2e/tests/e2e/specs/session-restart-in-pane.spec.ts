@@ -1,9 +1,11 @@
 /**
- * Restart-in-place coverage.
+ * Restart-in-place + spawn-into-pane coverage.
  *
  * Clicking Restart on a stopped session's pane must reuse that pane: the
  * respawned clone takes over the dead session's grid slot instead of the
- * pane collapsing and the clone landing unbound in the sidebar.
+ * pane collapsing and the clone landing unbound in the sidebar. The
+ * "New session…" button next to it opens the spawn dialog and routes the
+ * fresh session into the same slot.
  */
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -192,6 +194,44 @@ describe("session restart in pane", function () {
     await removedPromise;
 
     await expectTookOverPane(clone.id, tabCountBefore);
+  });
+
+  it("New session… routes a dialog spawn into the stopped pane", async function () {
+    if (!ws) throw new Error("setup failed");
+    const stoppedId = await spawnOpenAndStop("new-here-base");
+    const tabCountBefore = await countTabPills();
+
+    const newHereButton = await browser.$(
+      `[data-testid=session-pane][data-session-id="${stoppedId}"] [data-testid=session-new-here]`,
+    );
+    await newHereButton.waitForExist({ timeout: 5_000 });
+    await newHereButton.click();
+
+    const dialog = await browser.$("[data-testid=spawn-dialog]");
+    await dialog.waitForExist({ timeout: 5_000 });
+    const worktreeToggle = await browser.$(
+      "[data-testid=spawn-single-worktree]",
+    );
+    if (await worktreeToggle.isSelected()) {
+      await worktreeToggle.click();
+    }
+
+    const spawnedPromise = ws.waitFor(
+      (m): m is SessionUpdatedMessage =>
+        isSessionUpdated(m) && !cleanupSessionIds.includes(m.session.id),
+      { timeoutMs: 20_000 },
+    );
+    const removedPromise = ws.waitFor(
+      (m): m is DaemonMessage & { type: "session_removed"; session_id: string } =>
+        m.type === "session_removed" && m.session_id === stoppedId,
+      { timeoutMs: 20_000 },
+    );
+    await browser.$("[data-testid=spawn-single-submit]").click();
+    const fresh = (await spawnedPromise).session;
+    cleanupSessionIds.push(fresh.id);
+    await removedPromise;
+
+    await expectTookOverPane(fresh.id, tabCountBefore);
   });
 });
 
