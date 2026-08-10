@@ -514,14 +514,13 @@ export default function App() {
   ///                    the user opened the spawn dialog from that pane's
   ///                    "+ spawn" button).
   ///   - `addToTab`   : add the session to an existing tab.
+  /// `discardSessionId` optionally names a stopped predecessor to discard
+  /// AFTER the placement sends — ordering the discard behind the bind is what
+  /// keeps the daemon's `close_session_panes` from collapsing the very pane
+  /// the new session is about to take over (Restart / spawn-into-pane flows).
   /// Consumed by the `session_updated` handler the first time it sees an
   /// unseen session id.
-  const pendingSpawnIntentRef = useRef<
-    | { kind: "newTab" }
-    | { kind: "replacePane"; tabId: string; paneId: string }
-    | { kind: "addToTab"; tabId: string }
-    | null
-  >(null);
+  const pendingSpawnIntentRef = useRef<PendingSpawnIntent>(null);
 
   /// Set when the user picks an arrangement in LayoutChooser or
   /// ImportArrangementModal before the daemon replies with `tabs`. The `tabs`
@@ -1315,9 +1314,12 @@ export default function App() {
   }, [onAddSessionToTab]);
 
   // Restart-in-place from a stopped session's pane. Sequence matters: the
-  // daemon processes WS messages in order, so duplicate_session reads the
-  // stopped session's spawn_config BEFORE discard_session removes it. The
-  // pendingSpawnIntentRef routes the new clone:
+  // daemon processes WS messages in order, and discarding the stopped session
+  // collapses every pane bound to it (`close_session_panes`) — so the discard
+  // must NOT be sent here. It rides along as `discardSessionId` on the intent
+  // and goes out only after the clone's placement send, at which point the
+  // pane references the clone and the discard can't take the slot with it.
+  // The pendingSpawnIntentRef routes the new clone:
   //   - replacePane when tabId+paneId are known (grid-rendered pane): the
   //     new clone takes over the dead session's slot via
   //     replace_pane_session, so the restart looks like an in-place swap.
@@ -1341,21 +1343,21 @@ export default function App() {
           kind: "replacePane",
           tabId: detail.tabId,
           paneId: detail.paneId,
+          discardSessionId: detail.sessionId,
         };
       } else if (detail.tabId) {
         pendingSpawnIntentRef.current = {
           kind: "addToTab",
           tabId: detail.tabId,
+          discardSessionId: detail.sessionId,
         };
       } else {
-        pendingSpawnIntentRef.current = { kind: "newTab" };
+        pendingSpawnIntentRef.current = {
+          kind: "newTab",
+          discardSessionId: detail.sessionId,
+        };
       }
       client.send({ type: "duplicate_session", session_id: detail.sessionId });
-      client.send({
-        type: "discard_session",
-        session_id: detail.sessionId,
-        cleanup: [],
-      });
     };
     window.addEventListener("rt:pane_session_restart", handler);
     return () =>
@@ -3116,9 +3118,14 @@ function uniqueTabs(tabs: TabEntry[]): TabEntry[] {
 }
 
 type PendingSpawnIntent =
-  | { kind: "newTab" }
-  | { kind: "replacePane"; tabId: string; paneId: string }
-  | { kind: "addToTab"; tabId: string }
+  | { kind: "newTab"; discardSessionId?: string }
+  | {
+      kind: "replacePane";
+      tabId: string;
+      paneId: string;
+      discardSessionId?: string;
+    }
+  | { kind: "addToTab"; tabId: string; discardSessionId?: string }
   | null;
 
 /// Add the freshly spawned session to the existing `tabId`. Prefers a pane
@@ -3426,6 +3433,17 @@ function handleMessage(
         });
       } else if (intent?.kind === "addToTab") {
         sendAddSessionToTab(clientRef.current, intent.tabId, session, latestStateRef);
+      }
+      // Deferred predecessor discard (Restart / spawn-into-pane): sent after
+      // the placement messages so the daemon rebinds the pane to the new
+      // session before `close_session_panes` runs for the old one. A failed
+      // spawn never reaches this point, so the stopped session survives it.
+      if (intent?.discardSessionId) {
+        clientRef.current?.send({
+          type: "discard_session",
+          session_id: intent.discardSessionId,
+          cleanup: [],
+        });
       }
       return;
     }
