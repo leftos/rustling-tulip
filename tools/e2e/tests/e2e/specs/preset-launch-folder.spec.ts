@@ -102,8 +102,8 @@ describe("preset launch — folder source", function () {
   });
 
   it("preview_preset returns the 3 folder prompts with @-relative paths", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
     const fixturePath = fixtureRepo;
 
@@ -115,7 +115,7 @@ describe("preset launch — folder source", function () {
       (r: RepoEntry) =>
         r.path === fixturePath || r.path === fixturePath.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     // Send preview_preset for the folder source. The daemon resolves the
@@ -151,7 +151,7 @@ describe("preset launch — folder source", function () {
   });
 
   it("preview_preset reports an error for an unknown preset_id", async function () {
-    expect(ws, "ws").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
     if (!ws || !registeredRepoId) throw new Error("setup failed");
 
     const requestId = "test-preview-bad";

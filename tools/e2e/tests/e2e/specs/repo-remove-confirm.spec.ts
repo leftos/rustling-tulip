@@ -27,7 +27,6 @@ import {
 import type {
   DaemonMessage,
   RepoEntry,
-  SessionSnapshot,
 } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
@@ -83,8 +82,8 @@ describe("repo remove confirm modal", function () {
   });
 
   it("opens a 3-way modal when × clicked on a repo with live sessions, and dismisses via Cancel", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
     const fixturePath = fixtureRepo;
 
@@ -101,7 +100,7 @@ describe("repo remove confirm modal", function () {
       (r: RepoEntry) =>
         r.path === fixturePath || r.path === fixturePath.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     const session = await spawnSession(ws, {
@@ -132,7 +131,7 @@ describe("repo remove confirm modal", function () {
       `[data-session-id="${spawnedSessionId}"]`,
     );
     expect(await sessionItem.isExisting(), "spawned session listed in modal")
-      .to.be.true;
+      .to.equal(true);
 
     // Cancel → modal closes, repo and session both still present.
     const cancelBtn = await browser.$('[data-testid=repo-remove-cancel]');
@@ -145,7 +144,7 @@ describe("repo remove confirm modal", function () {
       `[data-testid=sidebar-container-repo][data-container-id="${registeredRepoId}"]`,
     );
     expect(await stillThere.isExisting(), "repo still in sidebar after cancel")
-      .to.be.true;
+      .to.equal(true);
   });
 
   it("'Remove anyway' removes the repo but keeps the session alive (migrates to Detached)", async function () {

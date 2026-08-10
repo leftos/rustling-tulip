@@ -87,7 +87,7 @@ describe("session stop lifecycle", function () {
       (r: RepoEntry) =>
         r.path === fixtureRepo || r.path === fixtureRepo!.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     const session = await spawnSession(ws, {
@@ -129,7 +129,7 @@ describe("session stop lifecycle", function () {
     const leaf = await browser.$(
       `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
     );
-    expect(await leaf.isExisting(), "session remains in sidebar").to.be.true;
+    expect(await leaf.isExisting(), "session remains in sidebar").to.equal(true);
     expect(await leaf.getAttribute("data-tab-binding-count")).to.not.equal("0");
 
     const removedPromise = ws.waitFor(

@@ -93,8 +93,8 @@ describe("rustling-tulip webview", function () {
   });
 
   it("registers a repo, spawns a session, and surfaces output in the xterm buffer", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
     const fixturePath = fixtureRepo;
 
@@ -107,7 +107,7 @@ describe("rustling-tulip webview", function () {
       (r: RepoEntry) =>
         r.path === fixturePath || r.path === fixturePath.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     // Spawn an interactive session against fake-claude.

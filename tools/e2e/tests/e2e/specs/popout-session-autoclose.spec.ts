@@ -31,7 +31,6 @@ import {
 import type {
   DaemonMessage,
   RepoEntry,
-  SessionSnapshot,
 } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;
@@ -88,8 +87,8 @@ describe("pop-out pane stop/discard lifecycle", function () {
   });
 
   it("keeps the pop-out open when stopped, then closes it when discarded", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
     const fixturePath = fixtureRepo;
 
@@ -105,7 +104,7 @@ describe("pop-out pane stop/discard lifecycle", function () {
       (r: RepoEntry) =>
         r.path === fixturePath || r.path === fixturePath.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     // Spawn an interactive session.
@@ -185,7 +184,7 @@ describe("pop-out pane stop/discard lifecycle", function () {
     expect(
       (await browser.getWindowHandles()).includes(reopened.handle),
       "pop-out remains open after stop",
-    ).to.be.true;
+    ).to.equal(true);
     await reopened.activate();
     const exited = await browser.$("[data-testid=session-exited]");
     await exited.waitForExist({ timeout: 10_000 });

@@ -16,7 +16,6 @@ import type {
   DaemonMessage,
   RepoEntry,
   RootWorktreeEntry,
-  SessionSnapshot,
 } from "../../../src/types.js";
 
 const APP_BOOT_TIMEOUT = 60_000;

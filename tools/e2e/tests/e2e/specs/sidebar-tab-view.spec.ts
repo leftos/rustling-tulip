@@ -34,7 +34,6 @@ import {
 import type {
   DaemonMessage,
   RepoEntry,
-  SessionSnapshot,
 } from "../../../src/types.js";
 
 /// Minimal shape we need for this spec. The full TabEntry has a grid tree;
@@ -114,15 +113,15 @@ describe("sidebar tab-view", function () {
 
     const reposBtn = await browser.$('[data-testid=sidebar-view-container]');
     const tabsBtn = await browser.$('[data-testid=sidebar-view-tab]');
-    expect(await reposBtn.isExisting()).to.be.true;
-    expect(await tabsBtn.isExisting()).to.be.true;
+    expect(await reposBtn.isExisting()).to.equal(true);
+    expect(await tabsBtn.isExisting()).to.equal(true);
     expect(await reposBtn.getAttribute("aria-selected")).to.equal("true");
     expect(await tabsBtn.getAttribute("aria-selected")).to.equal("false");
   });
 
   it("shows a tab pill on a spawned session leaf, and the same session under its tab in tab-view", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
     const fixturePath = fixtureRepo;
 
@@ -138,7 +137,7 @@ describe("sidebar tab-view", function () {
       (r: RepoEntry) =>
         r.path === fixturePath || r.path === fixturePath.replace(/\\/g, "/"),
     );
-    expect(fixture, "fixture repo registered").to.exist;
+    expect(fixture, "fixture repo registered").to.not.equal(undefined);
     registeredRepoId = fixture!.id;
 
     const session = await spawnSession(ws, {
@@ -174,7 +173,7 @@ describe("sidebar tab-view", function () {
       `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
     );
     const pill = await leaf.$('[data-testid=session-tab-pill]');
-    expect(await pill.isExisting(), "bound pill is present").to.be.true;
+    expect(await pill.isExisting(), "bound pill is present").to.equal(true);
     const pillText = await pill.getText();
     expect(pillText, "pill text").to.match(/^T:/);
 
@@ -199,7 +198,7 @@ describe("sidebar tab-view", function () {
     const leafInTabView = await browser.$(
       `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
     );
-    expect(await leafInTabView.isExisting(), "leaf in tab view").to.be.true;
+    expect(await leafInTabView.isExisting(), "leaf in tab view").to.equal(true);
   });
 
   it("clicking [unbound] on an unbound session opens a fresh tab via create_tab", async function () {
@@ -254,7 +253,7 @@ describe("sidebar tab-view", function () {
       `[data-testid=sidebar-session][data-session-id="${spawnedSessionId}"]`,
     );
     const unboundPill = await leaf.$('[data-testid=session-tab-pill-unbound]');
-    expect(await unboundPill.isExisting(), "unbound pill present").to.be.true;
+    expect(await unboundPill.isExisting(), "unbound pill present").to.equal(true);
     await unboundPill.click();
 
     // Wait for the leaf to flip back to bound.

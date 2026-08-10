@@ -86,8 +86,8 @@ describe("daemon error toast", function () {
         break;
       }
     }
-    expect(dismissed, "found and clicked dismiss on 'another_missing_tab' toast").to
-      .be.true;
+    expect(dismissed, "found and clicked dismiss on 'another_missing_tab' toast")
+      .to.equal(true);
 
     await browser.waitUntil(
       async () => {

@@ -80,8 +80,8 @@ describe("terminal paste", function () {
   });
 
   it("delivers a large paste byte-for-byte to the agent", async function () {
-    expect(ws, "ws").to.not.be.null;
-    expect(fixtureRepo, "fixtureRepo").to.not.be.null;
+    expect(ws, "ws").to.not.equal(null);
+    expect(fixtureRepo, "fixtureRepo").to.not.equal(null);
     if (!ws || !fixtureRepo) throw new Error("setup failed");
 
     const repo = await registerRepo(ws, fixtureRepo);
