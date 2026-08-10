@@ -272,7 +272,10 @@ function waitForRepoStatusWhere(
       const rec = m as unknown as RepoStatusMessage;
       return rec.repo_id === repoId && predicate(rec);
     },
-    { timeoutMs: 5_000 },
+    // Generous on purpose: under a full parallel suite run the refresher's
+    // 750 ms debounce + contended git invocations can push a status
+    // broadcast well past 5 s, which flaked this spec.
+    { timeoutMs: 15_000 },
   );
 }
 
