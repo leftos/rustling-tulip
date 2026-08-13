@@ -8,6 +8,7 @@ mod git_inspect;
 mod git_watch;
 mod git_write;
 mod headless;
+mod idle_exit;
 mod inject;
 mod lan;
 mod lock_finder;

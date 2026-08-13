@@ -76,6 +76,11 @@ local-ip-address = "0.6"
 # hand-typed address (see crates/daemon/src/discovery.rs).
 mdns-sd = { workspace = true }
 
+[dev-dependencies]
+# `test-util` enables the paused clock (`#[tokio::test(start_paused = true)]`)
+# used by the idle-exit watcher tests to fast-forward through grace periods.
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(windows)'.dependencies]
 # Restart Manager API for locating processes holding handles inside the
 # worktrees directory after a `git worktree remove` fails. 0.61 matches

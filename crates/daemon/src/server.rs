@@ -445,6 +445,19 @@ pub async fn run(
         pairing: Arc::new(AsyncMutex::new(None)),
     };
 
+    // Idle self-exit: once the last client disconnects and no session has a
+    // live child for a full grace period, flip the shutdown watch so a
+    // resident daemon doesn't pin a stale executable across app updates.
+    // Mirrors the HTTP /shutdown path (no drain): sidecars stay on disk, and
+    // abandoned sessions come back from them on the next daemon start.
+    crate::idle_exit::spawn(
+        Arc::clone(&hub.sessions),
+        client_count_rx,
+        hub.shutdown_tx.clone(),
+        Arc::clone(&hub.preset_cancellations),
+        crate::idle_exit::GRACE_PERIOD,
+    );
+
     let app = build_router(hub.clone());
 
     let bind_start = std::time::Instant::now();
