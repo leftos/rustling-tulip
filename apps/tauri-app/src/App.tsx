@@ -764,6 +764,59 @@ export default function App() {
     // refactoring the entire connection lifecycle.
   }, [connectionVersion]);
 
+  // Standby-resume watchdog. A suspended machine freezes JS timers, so a
+  // pending short interval firing far later than scheduled is a reliable
+  // "the system just resumed" signal. Two jobs:
+  //   1. Log the resume (with the connection state at that moment) so
+  //      app.log anchors wake incidents without consulting the OS event log
+  //      — the 8/13 session-loss investigation had no such anchor.
+  //   2. Probe a nominally-open WS. Standby can leave the socket half-open:
+  //      TCP is gone but no FIN/RST ever arrives, so `close` never fires,
+  //      the reconnect loop never runs, and the UI sits on stale sessions
+  //      with dead terminals. Any inbound message within the probe window
+  //      proves liveness (the list_repos reply, or any broadcast); silence
+  //      means half-open, and an explicit close() hands the socket to the
+  //      existing reconnect cycle.
+  useEffect(() => {
+    const TICK_MS = 30_000;
+    const JUMP_THRESHOLD_MS = 90_000;
+    const PROBE_TIMEOUT_MS = 3_000;
+    let last = Date.now();
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const gap = now - last;
+      last = now;
+      if (gap < JUMP_THRESHOLD_MS) return;
+      const client = clientRef.current;
+      const status = client?.state().kind ?? "no-client";
+      logToFile(
+        "info",
+        `system resume detected: ${TICK_MS / 1000}s tick fired after ${Math.round(gap / 1000)}s; connection=${status}`,
+      );
+      if (!client || client.state().kind !== "open") return;
+      let alive = false;
+      const unsubscribe = client.onMessage(() => {
+        alive = true;
+      });
+      client.send({ type: "list_repos" });
+      window.setTimeout(() => {
+        unsubscribe();
+        if (client !== clientRef.current) return;
+        if (alive) {
+          logToFile("info", "post-resume liveness probe: daemon replied");
+        } else {
+          logToFile(
+            "warn",
+            "post-resume liveness probe: no traffic within " +
+              `${PROBE_TIMEOUT_MS}ms on an open socket; forcing reconnect`,
+          );
+          client.close();
+        }
+      }, PROBE_TIMEOUT_MS);
+    }, TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     if (state.activeTabId) {
       localStorage.setItem(ACTIVE_TAB_KEY, state.activeTabId);
