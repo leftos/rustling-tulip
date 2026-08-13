@@ -654,23 +654,72 @@ export default function Terminal({
       });
 
       void (async () => {
-        const sb = await loadScrollback(client, sessionId);
-        if (scrollbackCancelled) return;
-        if (!sb.ok) {
-          // Say so rather than painting a blank terminal that looks like a
-          // session with no history. Live output still flows below.
-          term.writeln(
-            "\x1b[33m[could not load earlier output — the daemon did not respond]\x1b[0m",
+        // A one-shot request painted the scary "daemon did not respond" line
+        // the moment a single reply was slow — which is exactly what happens
+        // right after a standby resume, when the session is alive and the
+        // daemon just needs a few seconds. That message read as "session is
+        // lost" and invited users to stop a healthy session. Retry instead:
+        // the daemon replaces this client's PTY forwarder on every
+        // LoadScrollback, so re-requesting is safe. While retrying, keep a
+        // transient status line on screen (overwritten in place via \r) so
+        // the pane never sits silently blank.
+        const retryDelaysMs = [2000, 4000];
+        const clearTransient = () => term.write("\r\x1b[2K");
+        let sb = await loadScrollback(client, sessionId);
+        let attempt = 1;
+        while (!sb.ok && attempt <= retryDelaysMs.length) {
+          if (scrollbackCancelled) return;
+          term.write(
+            `\r\x1b[2K\x1b[33m[daemon is slow to respond — retrying (${attempt}/${retryDelaysMs.length})…]\x1b[0m`,
           );
           logToFile(
             "warn",
-            `scrollback request for session=${sessionId} timed out`,
+            `scrollback request for session=${sessionId} timed out; retry ${attempt}/${retryDelaysMs.length}`,
           );
-        } else if (sb.data_b64.length > 0) {
-          if (sb.truncated) {
-            term.writeln("\x1b[33m[earlier output discarded]\x1b[0m");
+          await new Promise((resolve) =>
+            setTimeout(resolve, retryDelaysMs[attempt - 1]),
+          );
+          if (scrollbackCancelled) return;
+          sb = await loadScrollback(client, sessionId);
+          attempt += 1;
+        }
+        if (scrollbackCancelled) return;
+        if (!sb.ok) {
+          // Say so rather than painting a blank terminal that looks like a
+          // session with no history — but don't imply the session is gone:
+          // its status (sidebar) is the authority, and live output still
+          // flows below if the daemon comes back.
+          clearTransient();
+          term.writeln(
+            "\x1b[33m[could not load earlier output — the daemon is not responding. " +
+              "The session itself may still be running; reopen this pane to retry.]\x1b[0m",
+          );
+          logToFile(
+            "warn",
+            `scrollback request for session=${sessionId} failed after ${attempt} attempts`,
+          );
+        } else {
+          clearTransient();
+          if (attempt > 1) {
+            // This snapshot came from a retry, so an aborted earlier
+            // forwarder may have streamed bytes into liveBuffer during the
+            // wait — bytes that are also inside this (newer) snapshot.
+            // Drop them rather than render them twice. The only bytes this
+            // can lose are from the daemon-side race between spawning the
+            // new forwarder and sending the reply — far narrower than the
+            // seconds-wide duplicate window it closes.
+            liveBuffer.length = 0;
+            logToFile(
+              "info",
+              `scrollback for session=${sessionId} loaded on attempt ${attempt}`,
+            );
           }
-          term.write(base64ToBytes(sb.data_b64));
+          if (sb.data_b64.length > 0) {
+            if (sb.truncated) {
+              term.writeln("\x1b[33m[earlier output discarded]\x1b[0m");
+            }
+            term.write(base64ToBytes(sb.data_b64));
+          }
         }
         // Drain any pty_output that landed during the loadScrollback await
         // so the user sees them right after history.
