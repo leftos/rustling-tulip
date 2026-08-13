@@ -196,14 +196,41 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
                 continue;
             }
         };
-        match load_meta_from_bytes(&bytes) {
-            Ok(meta) => out.push(meta),
+        // Two failure classes, handled differently:
+        //   - Bytes that aren't JSON at all (torn write, e.g. power loss or
+        //     standby mid-rewrite): permanently unreadable. Quarantine to
+        //     `meta.json.corrupt` so the bytes survive for post-mortem but
+        //     the scan stops re-warning about the same file on every boot.
+        //   - Valid JSON that fails migration (notably a future-version
+        //     sidecar after a downgrade): left in place on purpose — the
+        //     next upgrade can still recover that session.
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Err(err) => {
-                warn!(?err, path = %path.display(), "skipping malformed meta.json");
+                warn!(?err, path = %path.display(), "quarantining corrupt meta.json (not valid JSON)");
+                quarantine_meta(&path);
             }
+            Ok(value) => match migrate_sidecar(value) {
+                Ok(meta) => out.push(meta),
+                Err(err) => {
+                    warn!(?err, path = %path.display(), "skipping malformed meta.json");
+                }
+            },
         }
     }
     Ok(out)
+}
+
+/// Move an undecodable sidecar aside as `meta.json.corrupt`, replacing any
+/// earlier quarantined generation. Best-effort: a rename failure just means
+/// the warning repeats next boot.
+fn quarantine_meta(path: &std::path::Path) {
+    let mut target = path.as_os_str().to_owned();
+    target.push(".corrupt");
+    let target = PathBuf::from(target);
+    let _ = std::fs::remove_file(&target);
+    if let Err(err) = std::fs::rename(path, &target) {
+        warn!(?err, path = %path.display(), "failed to quarantine corrupt meta.json");
+    }
 }
 
 /// Decode a sidecar's bytes and route through [`migrate_sidecar`]. Rejects
@@ -575,6 +602,82 @@ pub fn try_update_recent_actions_tail(dirs: &Dirs, session_id: &str, new_tail: &
 )]
 mod tests {
     use super::*;
+
+    fn scratch_dirs(tag: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rt-orphan-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sessions")).expect("create sessions dir");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        }
+    }
+
+    fn write_sidecar(dirs: &Dirs, session_id: &str, bytes: &[u8]) -> PathBuf {
+        let dir = dirs.sessions_dir.join(session_id);
+        std::fs::create_dir_all(&dir).expect("create session dir");
+        let path = dir.join("meta.json");
+        std::fs::write(&path, bytes).expect("write meta.json");
+        path
+    }
+
+    #[test]
+    fn scan_quarantines_non_json_sidecars_but_keeps_future_versions() {
+        let dirs = scratch_dirs("quarantine");
+        let valid = br#"{
+            "session_id": "ok",
+            "pid": 1234,
+            "label": "test",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let valid_path = write_sidecar(&dirs, "ok", valid);
+        let corrupt_path = write_sidecar(&dirs, "corrupt", b"\x00\x00not json");
+        let future = br#"{
+            "on_disk_version": 999,
+            "session_id": "future",
+            "pid": 1234,
+            "label": "test",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let future_path = write_sidecar(&dirs, "future", future);
+
+        let metas = read_all_metas(&dirs).expect("scan sessions dir");
+        assert_eq!(metas.len(), 1, "only the valid sidecar loads");
+        assert_eq!(metas[0].session_id, "ok");
+
+        // Torn-write garbage: moved aside so the next boot doesn't re-warn.
+        assert!(!corrupt_path.exists(), "corrupt meta.json must be renamed");
+        let quarantined = corrupt_path.with_extension("json.corrupt");
+        assert_eq!(
+            std::fs::read(&quarantined).expect("read quarantined bytes"),
+            b"\x00\x00not json",
+            "quarantine must preserve the original bytes"
+        );
+
+        // Future-version sidecar: preserved in place for a later upgrade.
+        assert!(future_path.exists(), "future-version sidecar must survive");
+        // Valid sidecar untouched.
+        assert!(valid_path.exists());
+
+        // A second scan is quiet about the quarantined file and still loads
+        // the valid one.
+        let metas = read_all_metas(&dirs).expect("rescan sessions dir");
+        assert_eq!(metas.len(), 1);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
 
     #[test]
     fn legacy_sidecar_without_version_loads_with_default_v1() {
