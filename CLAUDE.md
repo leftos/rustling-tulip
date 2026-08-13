@@ -109,8 +109,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `state.json` — persisted repos + workspaces + tabs (see `crates/daemon/src/state.rs`).
 - `daemon.json` — handshake (port + auth_token + pid); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
-- `logs/daemon.log` — daemon tracing output. Truncated on each daemon start (see `crates/daemon/src/main.rs::init_tracing`).
-- `logs/app.log` — Tauri side log file, written via the `log_message` invoke command (see `apps/tauri-app/src-tauri/src/lib.rs`). Frontend code calls it through `apps/tauri-app/src/utils/logger.ts`. Truncated on each app boot.
+- `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
+- `logs/app.log` — Tauri side log file, written via the `log_message` invoke command (see `apps/tauri-app/src-tauri/src/lib.rs`). Frontend code calls it through `apps/tauri-app/src/utils/logger.ts`. Rotated on each app boot: the previous launch survives as `app.log.old`.
 
 When debugging spawn/connect/shutdown issues, both `daemon.log` and `app.log` together tell the full story — neither alone is enough.
 

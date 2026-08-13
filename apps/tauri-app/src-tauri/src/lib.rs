@@ -138,11 +138,24 @@ fn app_log_path() -> Result<PathBuf, String> {
     Ok(log_dir.join("app.log"))
 }
 
-/// Truncate `app.log` (creating it if missing). Called once on app startup so
-/// each launch produces a clean log file rather than ever-growing append. The
-/// daemon mirrors this on its side with truncate-on-start for `daemon.log`.
-fn truncate_app_log() -> Result<(), String> {
+/// Rotate `app.log` to `app.log.old` and start a fresh, empty `app.log`.
+/// Called once on app startup so each launch logs to a clean file while the
+/// previous launch's log survives one more generation — the record of what a
+/// misbehaving app instance did (a failed reconnect, an exit-dialog click) is
+/// only ever needed AFTER the user has restarted the app, which is exactly
+/// when truncate-on-start used to destroy it. The daemon mirrors this on its
+/// side for `daemon.log`.
+fn rotate_app_log() -> Result<(), String> {
     let path = app_log_path()?;
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+        let old = path.with_extension("log.old");
+        // Windows rename fails when the target exists; drop the older
+        // generation first (best-effort — rename reports the definitive
+        // error).
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&path, &old)
+            .map_err(|e| format!("rotate {} -> {}: {e}", path.display(), old.display()))?;
+    }
     std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -821,8 +834,8 @@ pub fn run() {
         ])
         .setup(|_app| {
             info!("rustling-tulip Tauri app starting");
-            if let Err(err) = truncate_app_log() {
-                tracing::warn!(err, "failed to truncate app.log on boot");
+            if let Err(err) = rotate_app_log() {
+                tracing::warn!(err, "failed to rotate app.log on boot");
             }
             let rt_claude = std::env::var("RUSTLING_TULIP_CLAUDE")
                 .unwrap_or_else(|_| "(unset)".to_string());

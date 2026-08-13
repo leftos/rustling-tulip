@@ -293,13 +293,17 @@ fn init_tracing(dirs: &paths::Dirs) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,daemon=debug,tower_http=info"));
 
-    // Truncate-on-start so each launch's log is a clean slate. Falls back
-    // silently to stderr if the file can't be opened (e.g. ACL issues) —
-    // since the supervisor redirects stderr to NUL on Windows the user
-    // wouldn't see those logs anyway, but losing the writer must not panic.
+    // Rotate-then-truncate so each launch's log is a clean slate while the
+    // previous run's log survives as `daemon.log.old` — the record of what a
+    // dying/misbehaving daemon did is only ever needed AFTER its successor
+    // has started. Falls back silently to stderr if the file can't be opened
+    // (e.g. ACL issues) — since the supervisor redirects stderr to NUL on
+    // Windows the user wouldn't see those logs anyway, but losing the writer
+    // must not panic.
     let log_dir = dirs.config.join("logs");
     let dir_create_err = std::fs::create_dir_all(&log_dir).err();
     let log_path = log_dir.join("daemon.log");
+    let rotate_err = rotate_log(&log_path).err();
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -332,12 +336,71 @@ fn init_tracing(dirs: &paths::Dirs) {
             }
         }
     }
+    if let Some(err) = rotate_err {
+        tracing::warn!(?err, path = %log_path.display(), "previous log rotation failed (continuing)");
+    }
+}
+
+/// Rotate `path` to `<path>.old`, replacing any earlier generation. A missing
+/// or empty log is left alone (nothing worth keeping). Runs before the
+/// tracing subscriber exists, so the error is returned for the caller to log
+/// once a writer is up; rotation failure must never block startup.
+fn rotate_log(path: &Path) -> std::io::Result<()> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > 0 => {}
+        _ => return Ok(()),
+    }
+    let mut old = path.as_os_str().to_owned();
+    old.push(".old");
+    let old = PathBuf::from(old);
+    // Windows rename fails when the target exists; drop the older generation
+    // first (best-effort — rename reports the definitive error).
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(path, &old)
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
-    use super::{is_tracer_image, path_is_under};
+    use super::{is_tracer_image, path_is_under, rotate_log};
     use std::path::Path;
+
+    #[test]
+    fn rotate_log_moves_previous_generation_aside() {
+        let dir = std::env::temp_dir().join(format!("rt-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let log = dir.join("daemon.log");
+        let old = dir.join("daemon.log.old");
+
+        // Missing log: nothing to do, no error.
+        rotate_log(&log).expect("rotating a missing log is a no-op");
+        assert!(!old.exists());
+
+        // Empty log: left alone (nothing worth keeping).
+        std::fs::write(&log, b"").expect("write empty log");
+        rotate_log(&log).expect("rotating an empty log is a no-op");
+        assert!(log.exists());
+        assert!(!old.exists());
+
+        // Non-empty log: moved to .old.
+        std::fs::write(&log, b"first run").expect("write log");
+        rotate_log(&log).expect("rotate non-empty log");
+        assert!(!log.exists());
+        assert_eq!(std::fs::read(&old).expect("read rotated log"), b"first run");
+
+        // Next rotation replaces the previous generation.
+        std::fs::write(&log, b"second run").expect("write log again");
+        rotate_log(&log).expect("rotate over existing .old");
+        assert_eq!(
+            std::fs::read(&old).expect("read rotated log"),
+            b"second run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn matches_template_names() {
