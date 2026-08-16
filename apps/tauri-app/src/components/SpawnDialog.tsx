@@ -1808,7 +1808,7 @@ function SingleForm({
                 onChange={branch.setValue}
                 branches={knownBranches}
                 currentBranch={currentBranch}
-                placeholder={useWorktree ? defaultBranch : inPlaceDefault}
+                placeholder={useWorktree ? localDefaultBranch : inPlaceDefault}
                 inputRef={branchInputRef}
                 testId="spawn-single-branch"
               />
@@ -2181,8 +2181,12 @@ function WorkspaceForm({
     );
   }, [workspace, prefillTarget?.use_worktree]);
 
+  // The branch NAME field must seed with the local default: `defaultBranch`
+  // prefers the remote-tracking ref (`origin/main`), which is only ever a
+  // valid *base*. Naming a branch after it creates a local
+  // `refs/heads/origin/main` and makes the ref ambiguous repo-wide.
   const branch = useBranchField(
-    defaultBranch,
+    localDefaultBranch,
     useWorktree,
     `workspace:${workspaceId}`,
     prefillTarget?.branch_name ?? null,
@@ -2337,7 +2341,7 @@ function WorkspaceForm({
               type="text"
               value={branch.value}
               onChange={(e) => branch.setValue(e.target.value)}
-              placeholder={defaultBranch}
+              placeholder={localDefaultBranch}
               data-testid="spawn-workspace-branch"
             />
             {useWorktree && (

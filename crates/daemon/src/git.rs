@@ -335,6 +335,21 @@ pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)
     Ok(all_blocks.into_iter().skip(1).collect())
 }
 
+/// Error when `branch` names an existing remote-tracking ref (`origin/main`).
+///
+/// Creating a *local* branch by that name materializes `refs/heads/origin/main`
+/// alongside `refs/remotes/origin/main`, after which every bare `origin/main`
+/// reference is ambiguous. Callers that are about to create or check out a
+/// branch run this first so the request fails loudly instead.
+async fn ensure_not_remote_tracking(repo: &Path, branch: &str) -> anyhow::Result<()> {
+    if full_ref_exists(repo, &format!("refs/remotes/{branch}")).await {
+        return Err(anyhow!(
+            "'{branch}' names a remote-tracking ref — pick a local branch name, or use '{branch}' as the base branch instead"
+        ));
+    }
+    Ok(())
+}
+
 /// Add a worktree at `target_path` checking out `branch`. If `create_from_base`
 /// is `Some(base)`, the branch is created off `base` first.
 pub async fn worktree_add(
@@ -343,6 +358,9 @@ pub async fn worktree_add(
     branch: &str,
     create_from_base: Option<&str>,
 ) -> anyhow::Result<()> {
+    if create_from_base.is_some() {
+        ensure_not_remote_tracking(repo, branch).await?;
+    }
     if let Some(parent) = target_path.parent() {
         std::fs::create_dir_all(parent).context("creating worktree parent dir")?;
     }
@@ -449,6 +467,7 @@ pub async fn checkout_in_place(
     if current_branch(repo).await.ok().flatten().as_deref() == Some(branch) {
         return Ok(());
     }
+    ensure_not_remote_tracking(repo, branch).await?;
     let carry = matches!(strategy, Some(protocol::CheckoutStrategy::Carry));
     let stash = matches!(strategy, Some(protocol::CheckoutStrategy::Stash));
     if !carry && !stash && !is_clean(repo).await? {
@@ -466,9 +485,10 @@ pub async fn checkout_in_place(
         .await
         .context("stashing changes before in-place switch")?;
     }
-    let branch_exists = run_git(repo, &["rev-parse", "--verify", branch])
-        .await
-        .is_ok();
+    // "Exists" must mean the *local* branch exists. `rev-parse --verify`
+    // would DWIM the name onto a tag or remote-tracking ref and report
+    // success, sending the checkout below to a detached HEAD.
+    let branch_exists = full_ref_exists(repo, &format!("refs/heads/{branch}")).await;
     if branch_exists {
         run_git(repo, &["checkout", branch]).await.map(|_| ())
     } else {
@@ -1138,6 +1158,74 @@ mod tests {
             stashes.contains("switching to feature"),
             "stash left for the user to pop: {stashes:?}"
         );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Creating a worktree branch named after a remote-tracking ref would
+    /// materialize `refs/heads/origin/main`, making every later `origin/main`
+    /// reference ambiguous. The add must refuse instead.
+    #[tokio::test]
+    async fn worktree_add_rejects_remote_tracking_branch_name() {
+        let repo = init_stale_repo("wt-remote-name", 1).await;
+        let wt = repo.with_file_name("rt-wt-remote-name-tree");
+        let _ = std::fs::remove_dir_all(&wt);
+
+        let result = worktree_add(&repo, &wt, "origin/main", Some("origin/main")).await;
+        assert!(
+            result.is_err(),
+            "branch name shadowing a remote-tracking ref must refuse"
+        );
+        let message = format!("{:#}", result.expect_err("checked above"));
+        assert!(
+            message.contains("remote-tracking"),
+            "error names the cause: {message}"
+        );
+        assert!(
+            !full_ref_exists(&repo, "refs/heads/origin/main").await,
+            "no shadowing local branch was created"
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        cleanup_stale_repo(&repo);
+    }
+
+    #[tokio::test]
+    async fn checkout_in_place_rejects_remote_tracking_branch_name() {
+        let repo = init_stale_repo("co-remote-name", 1).await;
+        let result = checkout_in_place(&repo, "origin/main", Some("main"), None).await;
+        assert!(
+            result.is_err(),
+            "in-place checkout of a remote-tracking name must refuse"
+        );
+        assert_eq!(
+            current_branch(&repo).await.expect("branch").as_deref(),
+            Some("main"),
+            "stays attached to the original branch"
+        );
+        assert!(
+            !full_ref_exists(&repo, "refs/heads/origin/main").await,
+            "no shadowing local branch was created"
+        );
+        cleanup_stale_repo(&repo);
+    }
+
+    /// The existence probe must mean "local branch exists", not "the name
+    /// resolves to something". A tag sharing the name used to win the probe,
+    /// so the checkout landed on the tag as a detached HEAD instead of
+    /// creating the requested branch.
+    #[tokio::test]
+    async fn checkout_creates_branch_even_when_a_tag_shadows_the_name() {
+        let repo = init_repo("co-tag-shadow").await;
+        run_git(&repo, &["tag", "v-shadow"]).await.expect("tag");
+        checkout_in_place(&repo, "v-shadow", Some("main"), None)
+            .await
+            .expect("checkout creates the branch");
+        // `--abbrev-ref` would print `heads/v-shadow` here (the tag makes the
+        // bare name ambiguous), so assert on the full symbolic ref instead.
+        let head = run_git(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .expect("HEAD is attached to a branch, not detached on the tag");
+        assert_eq!(head.trim(), "refs/heads/v-shadow");
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

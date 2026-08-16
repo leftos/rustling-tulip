@@ -24,6 +24,12 @@ export interface AppearanceOverrides {
   terminal_font_bold: boolean | null;
 }
 
+export interface WorkspaceEntry {
+  id: string;
+  name: string;
+  member_repo_ids: string[];
+}
+
 export type SessionStatus =
   | "spawning"
   | "idle"
@@ -152,6 +158,13 @@ export type ClientMessage =
   | { type: "add_repo"; path: string; name: string | null }
   | { type: "scan_vscode_workspaces"; path: string }
   | { type: "remove_repo"; repo_id: string }
+  | {
+      type: "upsert_workspace";
+      id: string | null;
+      name: string;
+      member_repo_ids: string[];
+    }
+  | { type: "remove_workspace"; workspace_id: string }
   | { type: "list_sessions" }
   | { type: "spawn_session"; [k: string]: unknown }
   | { type: "attach"; session_id: string }
@@ -271,6 +284,7 @@ export type DaemonMessage =
   | { type: "welcome"; protocol_version: number }
   | { type: "auth_failed"; reason: string }
   | { type: "repos"; repos: RepoEntry[] }
+  | { type: "workspaces"; workspaces: WorkspaceEntry[] }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
   | {
