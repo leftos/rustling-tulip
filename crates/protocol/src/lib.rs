@@ -2862,6 +2862,16 @@ pub struct MemberSpawnPreview {
     /// main that has since moved N commits".
     #[serde(default)]
     pub existing_worktree_behind_base: Option<u32>,
+    /// Abbreviated tip of a pre-existing branch when it exists but no
+    /// worktree directory does — the leftover a discarded session leaves
+    /// behind. A fresh worktree add attaches that branch at this tip
+    /// unless the spawn asks for
+    /// [`WorktreeReusePolicy::RecreateFromBase`].
+    #[serde(default)]
+    pub existing_branch_head: Option<String>,
+    /// How many commits that branch-only leftover trails the resolved base.
+    #[serde(default)]
+    pub existing_branch_behind_base: Option<u32>,
 }
 
 /// What to do when a worktree directory already exists at the path a spawn

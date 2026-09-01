@@ -1188,11 +1188,13 @@ function BaseStalenessNotice({
 }
 
 /// Collision callout plus the reuse/recreate choice, shown when a worktree
-/// already sits at the path this spawn would use.
+/// already sits at the path this spawn would use — or when only the branch
+/// survives (the leftover a discarded session leaves behind), which a fresh
+/// worktree add would silently attach at its old tip.
 ///
 /// Reuse is the default and keeps the historical behavior; the important part
-/// is that it stops being silent, since a reused worktree ignores the base
-/// branch entirely and keeps whatever fork point it was created with.
+/// is that it stops being silent, since a reused worktree or branch ignores
+/// the base branch entirely and keeps whatever fork point it was created with.
 function WorktreeCollisionNotice({
   preview,
   policy,
@@ -1204,13 +1206,21 @@ function WorktreeCollisionNotice({
   onPolicyChange: (next: WorktreeReuseChoice) => void;
   idPrefix: string;
 }) {
-  if (!preview?.worktree_exists) return null;
-  const behind = preview.existing_worktree_behind_base ?? 0;
-  const head = preview.existing_worktree_head;
+  if (!preview) return null;
+  const branchOnly = !preview.worktree_exists && preview.branch_exists;
+  if (!preview.worktree_exists && !branchOnly) return null;
+  const behind = branchOnly
+    ? (preview.existing_branch_behind_base ?? 0)
+    : (preview.existing_worktree_behind_base ?? 0);
+  const head = branchOnly
+    ? preview.existing_branch_head
+    : preview.existing_worktree_head;
   return (
     <div className="inline-warning" data-testid={`${idPrefix}-collision`}>
       <div>
-        A worktree already exists at this path
+        {branchOnly
+          ? "A branch with this name already exists (its worktree was deleted)"
+          : "A worktree already exists at this path"}
         {head ? (
           <>
             {" "}
@@ -1234,7 +1244,7 @@ function WorktreeCollisionNotice({
           data-testid={`${idPrefix}-collision-reuse`}
         />
         <span>
-          Reuse it as-is
+          {branchOnly ? "Attach it as-is" : "Reuse it as-is"}
           <span className="muted small inline-note">
             (keeps its existing fork point; the base branch is not applied)
           </span>
@@ -1250,13 +1260,15 @@ function WorktreeCollisionNotice({
         />
         <span>
           Recreate from the base branch
-          {preview.existing_worktree_dirty ? (
+          {!branchOnly && preview.existing_worktree_dirty ? (
             <span className="danger small inline-note">
               (discards uncommitted changes in that worktree)
             </span>
           ) : (
             <span className="muted small inline-note">
-              (deletes and re-adds the worktree)
+              {branchOnly
+                ? "(deletes the old branch and forks fresh)"
+                : "(deletes and re-adds the worktree)"}
             </span>
           )}
         </span>
@@ -2530,7 +2542,9 @@ function WorkspaceForm({
             </tbody>
           </table>
           <WorktreeCollisionNotice
-            preview={preview.find((m) => m.worktree_exists) ?? null}
+            preview={
+              preview.find((m) => m.worktree_exists || m.branch_exists) ?? null
+            }
             policy={reusePolicy}
             onPolicyChange={setReusePolicy}
             idPrefix="spawn-workspace"

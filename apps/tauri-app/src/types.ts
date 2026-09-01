@@ -569,6 +569,13 @@ export interface MemberSpawnPreview {
   existing_worktree_dirty?: boolean;
   // Commits the existing worktree's HEAD trails the resolved base.
   existing_worktree_behind_base?: number | null;
+  // Tip of a pre-existing branch when it exists but no worktree directory
+  // does — the leftover a discarded session leaves behind. A fresh worktree
+  // add attaches that branch at this tip unless the spawn asks for
+  // "recreate_from_base".
+  existing_branch_head?: string | null;
+  // Commits that branch-only leftover trails the resolved base.
+  existing_branch_behind_base?: number | null;
 }
 
 // What to do when a worktree already exists at the target path. Mirrors the

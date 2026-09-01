@@ -66,10 +66,17 @@ pub struct ForkPoint {
     pub existing_worktree_dirty: bool,
     /// Commits the existing worktree's HEAD trails the resolved base.
     pub existing_worktree_behind_base: Option<u32>,
+    /// Abbreviated tip of a pre-existing branch that has no worktree — the
+    /// leftover a discarded session leaves behind. A plain `worktree add`
+    /// would attach the branch at this tip, base branch ignored.
+    pub existing_branch_head: Option<String>,
+    /// Commits that branch-only leftover trails the resolved base.
+    pub existing_branch_behind_base: Option<u32>,
 }
 
-/// Measure `base` against its remote, and any pre-existing worktree against
-/// `resolved_base`.
+/// Measure `base` against its remote, any pre-existing worktree against
+/// `resolved_base`, and — when there is no worktree — a pre-existing branch
+/// of the same name against `resolved_base`.
 ///
 /// Every field degrades to `None`/`false` rather than erroring: this feeds an
 /// advisory display, and a repo that has never been fetched (or has no
@@ -79,6 +86,7 @@ pub async fn fork_point(
     base: Option<&str>,
     resolved_base: Option<&str>,
     existing_worktree: Option<&Path>,
+    existing_branch: Option<&str>,
 ) -> ForkPoint {
     let mut out = ForkPoint::default();
 
@@ -102,6 +110,15 @@ pub async fn fork_point(
             .is_ok_and(|files| !files.is_empty());
         if let Some(base) = resolved_base {
             out.existing_worktree_behind_base = git::ahead_behind(worktree, "HEAD", base)
+                .await
+                .map(|(_, behind)| behind);
+        }
+    } else if let Some(branch) = existing_branch {
+        // The worktree-exists case already measures the branch through the
+        // worktree's HEAD; this arm covers the branch-only leftover.
+        out.existing_branch_head = git::ref_short_sha(repo_path, branch).await;
+        if let Some(base) = resolved_base {
+            out.existing_branch_behind_base = git::ahead_behind(repo_path, branch, base)
                 .await
                 .map(|(_, behind)| behind);
         }

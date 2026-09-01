@@ -138,22 +138,26 @@ pub async fn resolve_workspace(
 
 /// Build one preview row per member, including the fork-point measurements
 /// that tell the user where each branch would actually be cut from.
-pub async fn previews(resolved: &[ResolvedMember]) -> Vec<MemberSpawnPreview> {
+pub async fn previews(resolved: &[ResolvedMember], branch_name: &str) -> Vec<MemberSpawnPreview> {
     let mut out = Vec::with_capacity(resolved.len());
     for member in resolved {
-        out.push(preview_for(member).await);
+        out.push(preview_for(member, branch_name).await);
     }
     out
 }
 
-async fn preview_for(member: &ResolvedMember) -> MemberSpawnPreview {
+async fn preview_for(member: &ResolvedMember, branch_name: &str) -> MemberSpawnPreview {
     let repo_path = PathBuf::from(&member.repo.path);
     // Only a worktree member can collide with an existing directory; an
     // in-place member's "working path" is the repo itself and always exists.
     let existing = (member.use_worktree && member.working_path.exists())
         .then_some(member.working_path.as_path());
+    // A branch with no worktree is the leftover a discarded session leaves
+    // behind; a plain add would attach it at its old tip, so measure it.
+    let leftover_branch =
+        (member.use_worktree && member.branch_exists && existing.is_none()).then_some(branch_name);
     let base = Some(member.resolved_base.as_str());
-    let fork = spawn_plan::fork_point(&repo_path, base, base, existing).await;
+    let fork = spawn_plan::fork_point(&repo_path, base, base, existing, leftover_branch).await;
     MemberSpawnPreview {
         repo_id: member.repo.id.clone(),
         repo_name: member.repo.name.clone(),
@@ -167,6 +171,8 @@ async fn preview_for(member: &ResolvedMember) -> MemberSpawnPreview {
         existing_worktree_head: fork.existing_worktree_head,
         existing_worktree_dirty: fork.existing_worktree_dirty,
         existing_worktree_behind_base: fork.existing_worktree_behind_base,
+        existing_branch_head: fork.existing_branch_head,
+        existing_branch_behind_base: fork.existing_branch_behind_base,
     }
 }
 
@@ -206,43 +212,53 @@ pub async fn ensure_branches(
             // deleted first, so the member is creating one either way and has
             // to fork from the resolved base.
             let mut create_from = member.effective_base.as_deref();
-            if member.working_path.exists() {
-                match worktree_reuse {
-                    WorktreeReusePolicy::Reuse | WorktreeReusePolicy::Unknown => {
-                        info!(
-                            idx = i,
-                            worktree = %member.working_path.display(),
-                            "ensure_branches: worktree dir already present, reusing it as-is"
-                        );
-                        continue;
-                    }
-                    WorktreeReusePolicy::RecreateFromBase => {
-                        warn!(
-                            idx = i,
-                            worktree = %member.working_path.display(),
-                            branch_name,
-                            "ensure_branches: recreating worktree from base; uncommitted work there is discarded"
-                        );
-                        git::worktree_remove(&repo_path, &member.working_path)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "removing existing worktree at {} for {}",
-                                    member.working_path.display(),
-                                    member.repo.name
-                                )
-                            })?;
-                        // `worktree remove` leaves the branch, so a `-b` re-add
-                        // would fail on "already exists".
-                        if let Err(err) = git::delete_branch(&repo_path, branch_name).await {
-                            info!(
-                                ?err,
-                                branch_name, "no local branch to delete before recreate"
-                            );
-                        }
-                        create_from = Some(&member.resolved_base);
-                    }
+            let dir_exists = member.working_path.exists();
+            if dir_exists
+                && matches!(
+                    worktree_reuse,
+                    WorktreeReusePolicy::Reuse | WorktreeReusePolicy::Unknown
+                )
+            {
+                info!(
+                    idx = i,
+                    worktree = %member.working_path.display(),
+                    "ensure_branches: worktree dir already present, reusing it as-is"
+                );
+                continue;
+            }
+            // Recreate covers both a full leftover (dir + branch) and a
+            // branch-only leftover from a discarded session — either way the
+            // user asked for a fresh fork from the resolved base, not a
+            // rebind to the old branch tip.
+            if matches!(worktree_reuse, WorktreeReusePolicy::RecreateFromBase)
+                && (dir_exists || member.branch_exists)
+            {
+                if dir_exists {
+                    warn!(
+                        idx = i,
+                        worktree = %member.working_path.display(),
+                        branch_name,
+                        "ensure_branches: recreating worktree from base; uncommitted work there is discarded"
+                    );
+                    git::worktree_remove(&repo_path, &member.working_path)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "removing existing worktree at {} for {}",
+                                member.working_path.display(),
+                                member.repo.name
+                            )
+                        })?;
                 }
+                // `worktree remove` leaves the branch, so a `-b` re-add
+                // would fail on "already exists".
+                if let Err(err) = git::delete_branch(&repo_path, branch_name).await {
+                    info!(
+                        ?err,
+                        branch_name, "no local branch to delete before recreate"
+                    );
+                }
+                create_from = Some(&member.resolved_base);
             }
             git::worktree_add(&repo_path, &member.working_path, branch_name, create_from)
                 .await
@@ -342,22 +358,7 @@ mod tests {
     /// branch tip and left the stale fork point in place.
     #[tokio::test]
     async fn recreate_forks_an_existing_branch_from_the_resolved_base() {
-        let root = std::env::temp_dir().join(format!("rt-ws-recreate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-        git(&repo, &["init", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@example.com"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        git(&repo, &["config", "commit.gpgsign", "false"]);
-        commit(&repo, "seed.txt");
-        // `release` stands in for the base that moved on; `wt/x` is cut from
-        // the older `main`, exactly like a branch forked before work landed.
-        git(&repo, &["branch", "wt/x"]);
-        git(&repo, &["checkout", "-b", "release"]);
-        commit(&repo, "landed.txt");
-        git(&repo, &["checkout", "main"]);
-
+        let (root, repo) = seed_branch_only_leftover("recreate");
         let worktree = root.join("wt");
         git(
             &repo,
@@ -387,20 +388,7 @@ mod tests {
     /// non-destructive half of the collision prompt.
     #[tokio::test]
     async fn reuse_leaves_an_existing_worktree_alone() {
-        let root = std::env::temp_dir().join(format!("rt-ws-reuse-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let repo = root.join("repo");
-        std::fs::create_dir_all(&repo).expect("create repo dir");
-        git(&repo, &["init", "-b", "main"]);
-        git(&repo, &["config", "user.email", "t@example.com"]);
-        git(&repo, &["config", "user.name", "Test"]);
-        git(&repo, &["config", "commit.gpgsign", "false"]);
-        commit(&repo, "seed.txt");
-        git(&repo, &["branch", "wt/x"]);
-        git(&repo, &["checkout", "-b", "release"]);
-        commit(&repo, "landed.txt");
-        git(&repo, &["checkout", "main"]);
-
+        let (root, repo) = seed_branch_only_leftover("reuse");
         let worktree = root.join("wt");
         git(
             &repo,
@@ -418,6 +406,73 @@ mod tests {
         assert!(
             worktree.join("scratch.txt").exists(),
             "reuse must not discard uncommitted work"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Seed a repo where `wt/x` exists at the old `main` tip with no worktree
+    /// attached — exactly what "close session and delete worktree" leaves
+    /// behind — while `release` stands in for a base that moved on.
+    fn seed_branch_only_leftover(tag: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("rt-ws-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        commit(&repo, "seed.txt");
+        git(&repo, &["branch", "wt/x"]);
+        git(&repo, &["checkout", "-b", "release"]);
+        commit(&repo, "landed.txt");
+        git(&repo, &["checkout", "main"]);
+        (root, repo)
+    }
+
+    /// The stale-pin bug: a discarded session leaves its branch behind, and a
+    /// later spawn of the same name silently attached it at the old tip.
+    /// Under `RecreateFromBase` the leftover branch must be deleted and the
+    /// worktree forked fresh from the resolved base.
+    #[tokio::test]
+    async fn recreate_forks_a_branch_only_leftover_from_the_resolved_base() {
+        let (root, repo) = seed_branch_only_leftover("recreate-branch-only");
+        let worktree = root.join("wt");
+        assert!(!worktree.exists(), "precondition: no worktree dir");
+
+        let resolved = vec![member(&repo, worktree.clone(), "release")];
+        ensure_branches(&resolved, "wt/x", WorktreeReusePolicy::RecreateFromBase)
+            .await
+            .expect("recreate from base");
+
+        assert_eq!(
+            rev(&worktree, "HEAD"),
+            rev(&repo, "release"),
+            "worktree must fork from the resolved base, not the leftover tip"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reuse (the default) attaches a branch-only leftover at its old tip —
+    /// the historical behavior, kept deliberately and now surfaced by the
+    /// collision prompt instead of happening silently.
+    #[tokio::test]
+    async fn reuse_attaches_a_branch_only_leftover_at_its_old_tip() {
+        let (root, repo) = seed_branch_only_leftover("reuse-branch-only");
+        let worktree = root.join("wt");
+        let old_tip = rev(&repo, "wt/x");
+
+        let resolved = vec![member(&repo, worktree.clone(), "release")];
+        ensure_branches(&resolved, "wt/x", WorktreeReusePolicy::Reuse)
+            .await
+            .expect("reuse");
+
+        assert_eq!(
+            rev(&worktree, "HEAD"),
+            old_tip,
+            "reuse must attach the existing branch at its old tip"
         );
 
         let _ = std::fs::remove_dir_all(&root);

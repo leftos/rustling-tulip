@@ -1373,10 +1373,11 @@ async fn dispatch(
                 },
             )
             .await?;
+            let per_member = ws::previews(&resolved, &branch_name).await;
             let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
                 workspace_id,
                 branch_name,
-                per_member: ws::previews(&resolved).await,
+                per_member,
             });
         }
         ClientMessage::PreviewSpawn {
@@ -3960,12 +3961,17 @@ async fn preview_single_spawn(
         repo_path.clone()
     };
     let existing = (use_worktree && worktree_path.exists()).then_some(worktree_path.as_path());
+    // Branch exists but no worktree does: the leftover a discarded session
+    // leaves behind. A plain add would attach it at its old tip.
+    let leftover_branch =
+        (use_worktree && branch_exists && existing.is_none()).then_some(branch_name);
 
     let fork = spawn_plan::fork_point(
         &repo_path,
         Some(&resolved_base),
         Some(&resolved_base),
         existing,
+        leftover_branch,
     )
     .await;
     Ok(protocol::MemberSpawnPreview {
@@ -3981,6 +3987,8 @@ async fn preview_single_spawn(
         existing_worktree_head: fork.existing_worktree_head,
         existing_worktree_dirty: fork.existing_worktree_dirty,
         existing_worktree_behind_base: fork.existing_worktree_behind_base,
+        existing_branch_head: fork.existing_branch_head,
+        existing_branch_behind_base: fork.existing_branch_behind_base,
     })
 }
 
@@ -4007,6 +4015,60 @@ async fn fetch_repo(hub: &Hub, repo_id: String, out_tx: &mpsc::UnboundedSender<D
         }
     };
     let _ = out_tx.send(DaemonMessage::RepoFetched { repo_id, error });
+}
+
+/// Create or bind the single-repo worktree at `worktree_path`, whatever
+/// state the target is in: a directory already present (delegated to
+/// [`recreate_or_reuse_worktree`]), a branch-only leftover from a discarded
+/// session, or nothing at all (a plain add from `base`).
+///
+/// The branch-only case is the stale-pin trap: a `-b` add against the
+/// leftover branch fails on "already exists", while attaching it silently
+/// pins the session to the old fork point. Reuse attaches it at its old tip
+/// deliberately (the collision prompt showed the user that tip); recreate
+/// deletes the branch and forks fresh from `base`.
+async fn materialize_single_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    base: &str,
+    policy: protocol::WorktreeReusePolicy,
+) -> anyhow::Result<()> {
+    if worktree_path.exists() {
+        return recreate_or_reuse_worktree(repo_path, worktree_path, branch_name, base, policy)
+            .await;
+    }
+    let branch_exists = git::list_branches(repo_path)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|b| b == branch_name);
+    let create_from = if branch_exists {
+        match policy {
+            protocol::WorktreeReusePolicy::Reuse | protocol::WorktreeReusePolicy::Unknown => {
+                info!(
+                    branch_name,
+                    "attaching pre-existing branch at its current tip; base branch not applied"
+                );
+                None
+            }
+            protocol::WorktreeReusePolicy::RecreateFromBase => {
+                warn!(
+                    branch_name,
+                    base, "deleting leftover branch and forking fresh from base"
+                );
+                if let Err(err) = git::delete_branch(repo_path, branch_name).await {
+                    debug!(?err, branch_name, "leftover branch delete failed");
+                }
+                Some(base)
+            }
+        }
+    } else {
+        Some(base)
+    };
+    git::worktree_add(repo_path, worktree_path, branch_name, create_from)
+        .await
+        .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))
 }
 
 /// Apply `policy` to a worktree directory that already exists at
@@ -4069,7 +4131,8 @@ async fn recreate_or_reuse_worktree(
 /// local git calls, and the one line in the log that answers "why is this
 /// branch missing work that landed weeks ago".
 async fn log_fork_point(repo_path: &Path, branch_name: &str, base: &str, worktree_path: &Path) {
-    let fork = spawn_plan::fork_point(repo_path, Some(base), Some(base), Some(worktree_path)).await;
+    let fork =
+        spawn_plan::fork_point(repo_path, Some(base), Some(base), Some(worktree_path), None).await;
     info!(
         branch_name,
         base,
@@ -4224,25 +4287,14 @@ async fn spawn_single(
         if !in_use.is_empty() {
             return Err(worktree_in_use_failure(branch_name, &in_use).into());
         }
-        if worktree_path.exists() {
-            recreate_or_reuse_worktree(
-                &repo_path,
-                &worktree_path,
-                branch_name,
-                &base_for_create,
-                worktree_reuse,
-            )
-            .await?;
-        } else {
-            git::worktree_add(
-                &repo_path,
-                &worktree_path,
-                branch_name,
-                Some(&base_for_create),
-            )
-            .await
-            .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
-        }
+        materialize_single_worktree(
+            &repo_path,
+            &worktree_path,
+            branch_name,
+            &base_for_create,
+            worktree_reuse,
+        )
+        .await?;
         log_fork_point(&repo_path, branch_name, &base_for_create, &worktree_path).await;
         (worktree_path, branch_name.to_string())
     } else {
@@ -4523,6 +4575,60 @@ async fn park_session(hub: &Hub, session_id: &str) {
 /// fs fallback), emits [`DaemonMessage::WorktreeCleanupFailed`] back to the
 /// requesting client with the list of processes holding the dir open so the
 /// user can decide whether to kill them and retry.
+/// Snapshot the discard-relevant state of a session record: its members,
+/// whether it owns per-session worktrees, and its label for failure
+/// messages. Missing sessions fall back to empty/id defaults so a repeated
+/// discard stays a no-op instead of an error.
+fn discard_snapshot(hub: &Hub, session_id: &str) -> (Vec<SessionMember>, bool, String) {
+    hub.sessions.get(session_id).map_or_else(
+        || (Vec::new(), false, session_id.to_string()),
+        |rec| {
+            let guard = crate::sync::lock(&rec);
+            let spawned_with_worktree =
+                guard
+                    .spawn_config
+                    .as_ref()
+                    .is_some_and(|cfg| match &cfg.target {
+                        SpawnTarget::Single { use_worktree, .. }
+                        | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+                        SpawnTarget::Standalone { .. } => false,
+                    });
+            (
+                guard.members.clone(),
+                spawned_with_worktree || !guard.worktree_paths.is_empty(),
+                guard.label.clone(),
+            )
+        },
+    )
+}
+
+/// Reap the branch a removed session worktree leaves behind. `git worktree
+/// remove` never deletes the branch it had checked out, and left alone that
+/// branch pins a future spawn of the same name to this session's old fork
+/// point. Deleted only when it holds no unique commits; a branch with
+/// unmerged work survives (`git branch -d` semantics). Failure is logged,
+/// never raised — the worktree the user asked to delete is already gone.
+async fn reap_discarded_session_branch(repo_path: &str, branch: &str) {
+    match git::delete_branch_if_merged(Path::new(repo_path), branch).await {
+        Ok(true) => info!(
+            branch,
+            repo = %repo_path,
+            "discard_session: deleted the session branch (fully merged)"
+        ),
+        Ok(false) => info!(
+            branch,
+            repo = %repo_path,
+            "discard_session: kept the session branch — it has unmerged commits"
+        ),
+        Err(err) => warn!(
+            ?err,
+            branch,
+            repo = %repo_path,
+            "discard_session: session branch delete failed; branch left in place"
+        ),
+    }
+}
+
 async fn discard_session(
     hub: &Hub,
     session_id: &str,
@@ -4539,27 +4645,7 @@ async fn discard_session(
         remove_worktrees = cleanup.iter().filter(|c| c.remove_worktree).count(),
         "discard_session: begin"
     );
-    let (members, has_per_session_worktree, session_label) =
-        hub.sessions.get(session_id).map_or_else(
-            || (Vec::new(), false, session_id.to_string()),
-            |rec| {
-                let guard = crate::sync::lock(&rec);
-                let spawned_with_worktree =
-                    guard
-                        .spawn_config
-                        .as_ref()
-                        .is_some_and(|cfg| match &cfg.target {
-                            SpawnTarget::Single { use_worktree, .. }
-                            | SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
-                            SpawnTarget::Standalone { .. } => false,
-                        });
-                (
-                    guard.members.clone(),
-                    spawned_with_worktree || !guard.worktree_paths.is_empty(),
-                    guard.label.clone(),
-                )
-            },
-        );
+    let (members, has_per_session_worktree, session_label) = discard_snapshot(hub, session_id);
 
     // Refuse the whole discard if any worktree it would remove is still in
     // use by another live session. The user must close the other session(s)
@@ -4612,7 +4698,13 @@ async fn discard_session(
         };
         let worktree_path = PathBuf::from(&member.worktree_path);
         match crate::worktree_cleanup::remove_member(Path::new(&repo_path), &worktree_path).await {
-            crate::worktree_cleanup::CleanupOutcome::Removed => {}
+            crate::worktree_cleanup::CleanupOutcome::Removed => {
+                // Gated to worktrees under the daemon's own root so a pinned
+                // external worktree never loses its branch.
+                if worktree_path.starts_with(&worktrees_root) {
+                    reap_discarded_session_branch(&repo_path, &member.branch).await;
+                }
+            }
             crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
                 warn!(
                     %reason,

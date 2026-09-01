@@ -382,6 +382,38 @@ pub async fn delete_branch(repo: &Path, branch: &str) -> anyhow::Result<()> {
     run_git(repo, &["branch", "-D", branch]).await.map(|_| ())
 }
 
+/// `git branch -d <branch>` — the non-force delete git refuses when the
+/// branch tip is not reachable from its upstream (or from `HEAD` when no
+/// upstream is set). Used on session discard to reap the session branch a
+/// `worktree remove` leaves behind, without ever destroying commits that
+/// exist nowhere else. `Ok(true)` = deleted, `Ok(false)` = kept because
+/// the branch still has unmerged commits.
+pub async fn delete_branch_if_merged(repo: &Path, branch: &str) -> anyhow::Result<bool> {
+    match run_git(repo, &["branch", "-d", branch]).await {
+        Ok(_) => Ok(true),
+        Err(err) => {
+            if format!("{err:#}")
+                .to_lowercase()
+                .contains("not fully merged")
+            {
+                return Ok(false);
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Abbreviated SHA of an arbitrary ref in `repo` — the branch-name
+/// counterpart of [`head_short_sha`], for refs that aren't checked out
+/// anywhere.
+pub async fn ref_short_sha(repo: &Path, refname: &str) -> Option<String> {
+    let stdout = run_git(repo, &["rev-parse", "--short", refname])
+        .await
+        .ok()?;
+    let trimmed = stdout.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 pub async fn worktree_remove(repo: &Path, target_path: &Path) -> anyhow::Result<()> {
     let target_str = target_path.to_string_lossy();
     run_git(repo, &["worktree", "remove", "--force", &target_str])
@@ -1010,6 +1042,81 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&wt);
+        cleanup_stale_repo(&repo);
+    }
+
+    /// The discard-side reaper: a session branch whose commits all exist
+    /// elsewhere is deleted; one holding unique commits survives. Mirrors
+    /// the worktree-delete → branch-reap sequence `discard_session` runs.
+    #[tokio::test]
+    async fn delete_branch_if_merged_reaps_only_safe_branches() {
+        let repo = init_repo("branch-reap").await;
+        run_git(&repo, &["branch", "merged"])
+            .await
+            .expect("create merged branch");
+        assert!(
+            delete_branch_if_merged(&repo, "merged")
+                .await
+                .expect("delete merged branch"),
+            "a branch level with main must be reaped"
+        );
+        assert!(
+            !list_branches(&repo)
+                .await
+                .expect("list")
+                .contains(&"merged".to_string()),
+            "reaped branch must be gone"
+        );
+
+        run_git(&repo, &["checkout", "-b", "ahead"])
+            .await
+            .expect("checkout ahead");
+        write_file(&repo, "unique.txt", "only here\n");
+        run_git(&repo, &["add", "."]).await.expect("add");
+        run_git(&repo, &["commit", "-m", "unique"])
+            .await
+            .expect("commit");
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+        assert!(
+            !delete_branch_if_merged(&repo, "ahead")
+                .await
+                .expect("refusal is Ok(false), not an error"),
+            "a branch with unique commits must be kept"
+        );
+        assert!(
+            list_branches(&repo)
+                .await
+                .expect("list")
+                .contains(&"ahead".to_string()),
+            "kept branch must still exist"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A leftover branch that trails its upstream — the "behind N" shape
+    /// every discarded session leaves once its work has been merged — is
+    /// fully merged by definition and gets reaped.
+    #[tokio::test]
+    async fn delete_branch_if_merged_reaps_a_behind_only_leftover() {
+        let repo = init_stale_repo("branch-reap-behind", 3).await;
+        run_git(&repo, &["branch", "wt/leftover", "main"])
+            .await
+            .expect("create leftover branch");
+        run_git(
+            &repo,
+            &["branch", "--set-upstream-to=origin/main", "wt/leftover"],
+        )
+        .await
+        .expect("set upstream");
+        assert!(
+            delete_branch_if_merged(&repo, "wt/leftover")
+                .await
+                .expect("reap behind-only leftover"),
+            "a branch merged into its upstream must be reaped"
+        );
         cleanup_stale_repo(&repo);
     }
 
