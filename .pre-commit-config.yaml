@@ -9,12 +9,12 @@
 # There is no CI in this repo, so these hooks are the only automated gates.
 # They are split by cost:
 #
-#   pre-commit — fast, file-scoped checks. Must stay well under a second or
-#                people start passing --no-verify, and a bypassed hook gates
-#                nothing.
-#   pre-push   — the real build gates (clippy, tests, typecheck). Slower, but
-#                they run per push rather than per commit, and this is the last
-#                point before code leaves the machine.
+#   pre-commit — hygiene plus the lint gates (fmt, clippy, tsc, oxlint), so
+#                every commit is warning-free without a per-edit hook adding
+#                latency inside the editing loop.
+#   pre-push   — the test suites (cargo test, vitest) and the protocol-mirror
+#                check. Slower, but they run per push rather than per commit,
+#                and this is the last point before code leaves the machine.
 #
 # Anything needing the network (`cargo deny check` wants the advisory DB) is
 # deliberately left out: a hook that fails on a plane is a hook that gets
@@ -65,7 +65,7 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]
 
       - id: cargo-test
         name: cargo test
@@ -83,7 +83,15 @@ repos:
         language: system
         files: ^apps/tauri-app/(src/|.*\.json$|.*\.ts$)
         pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]
+
+      - id: oxlint
+        name: oxlint
+        entry: pnpm --dir apps/tauri-app exec oxlint src
+        language: system
+        files: ^apps/tauri-app/src/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [pre-commit]
 
       - id: vitest
         name: vitest run
