@@ -9,8 +9,10 @@
 //!   (spinner glyph, elapsed-time counter, progress text) is busy even when its
 //!   byte volume dips below the echo budget, so a title change counts as
 //!   activity (see [`crate::osc_title::TitleActivity`])
-//! - an idle timeout: after N ms of silence following recent output, the
-//!   session settles back to `idle` (still attached, just nothing to do)
+//! - an idle timeout with hysteresis: promotion to `working` happens on the
+//!   first qualifying chunk, but demotion back to `idle` waits for
+//!   [`IDLE_AFTER`] of silence, so a TUI element that repaints once a second
+//!   (elapsed-time counter, slow spinner) holds `working` instead of flapping
 
 use crate::osc_title::TitleActivity;
 use crate::session::{SessionRegistry, push_recent_action};
@@ -23,7 +25,14 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 
-const IDLE_AFTER: Duration = Duration::from_millis(800);
+/// Silence required before a `Working` / `AwaitingInput` session settles back
+/// to `Idle`. Deliberately asymmetric with promotion (which is immediate): the
+/// slowest thing Claude's TUI repaints while busy is the elapsed-time counter
+/// at 1 Hz, and an 800 ms timeout sat inside that gap, so the dot flickered
+/// blue / grey once a second. 2.5 s clears a 1 Hz cadence with room for
+/// scheduler jitter while still reading as "idle" promptly once the model
+/// really stops.
+const IDLE_AFTER: Duration = Duration::from_millis(2500);
 const SCROLLBACK_BYTES: usize = 8 * 1024;
 
 /// Sliding window used to compare input vs output byte volume. Chosen to be
@@ -471,5 +480,173 @@ mod tests {
     #[test]
     fn shell_command_output_marks_working() {
         assert!(shell_output_is_working(8, 1_200));
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod hysteresis_tests {
+    use super::{IDLE_AFTER, watch, watch_plain_shell};
+    use crate::paths::Dirs;
+    use crate::session::{SessionRecord, SessionRegistry};
+    use chrono::Utc;
+    use protocol::{
+        Agent, AppearanceOverrides, SessionKind, SessionMetrics, SessionMode, SessionStatus,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{broadcast, mpsc};
+
+    /// Cadence of the slowest TUI element the watcher must ride through
+    /// without demoting: an elapsed-time counter repainting once a second.
+    const HEARTBEAT: Duration = Duration::from_secs(1);
+
+    fn scratch_dirs(tag: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rt-pty-state-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        }
+    }
+
+    fn test_record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.to_string(),
+            label: id.to_string(),
+            default_label: id.to_string(),
+            user_label: None,
+            kind: SessionKind::Standalone,
+            members: Vec::new(),
+            mode: SessionMode::Interactive,
+            started_at: Utc::now(),
+            status: SessionStatus::Idle,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+            workspace_id: None,
+            agent: Agent::default(),
+            terminal_title: None,
+            program_name: None,
+            current_cwd: None,
+            appearance: AppearanceOverrides::default(),
+            spawn_config: None,
+            is_abandoned: false,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
+            last_prompt: None,
+            input_notifier: None,
+            scrollback_snapshot_req: None,
+        }
+    }
+
+    struct Harness {
+        registry: Arc<SessionRegistry>,
+        output: broadcast::Sender<Vec<u8>>,
+        _input: mpsc::UnboundedSender<usize>,
+        _attention: mpsc::UnboundedReceiver<super::AttentionEvent>,
+    }
+
+    const SESSION: &str = "s1";
+
+    fn start(tag: &str, plain_shell: bool) -> Harness {
+        let registry = SessionRegistry::new(scratch_dirs(tag));
+        registry.insert(test_record(SESSION));
+        let (output, output_rx) = broadcast::channel(64);
+        let (input, input_rx) = mpsc::unbounded_channel();
+        let (attention_tx, attention_rx) = mpsc::unbounded_channel();
+        if plain_shell {
+            watch_plain_shell(&registry, SESSION.to_string(), output_rx, input_rx);
+        } else {
+            watch(
+                &registry,
+                SESSION.to_string(),
+                output_rx,
+                input_rx,
+                attention_tx,
+            );
+        }
+        Harness {
+            registry,
+            output,
+            _input: input,
+            _attention: attention_rx,
+        }
+    }
+
+    impl Harness {
+        fn status(&self) -> SessionStatus {
+            let rec = self.registry.get(SESSION).expect("session registered");
+            let guard = rec.lock().expect("record lock");
+            guard.status
+        }
+
+        /// Emit one elapsed-time title repaint, e.g. `ESC ] 0 ; ⠋ 3s BEL`.
+        fn heartbeat(&self, tick: u32) {
+            let frame = format!("\x1b]0;\u{280b} {tick}s\x07");
+            self.output
+                .send(frame.into_bytes())
+                .expect("watcher still subscribed");
+        }
+    }
+
+    /// Let the spawned watcher task run until it has nothing left to poll,
+    /// without advancing the paused clock.
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn assert_heartbeat_holds_working(h: &Harness) {
+        for tick in 0..5 {
+            h.heartbeat(tick);
+            settle().await;
+            assert_eq!(h.status(), SessionStatus::Working, "tick {tick} promoted");
+            tokio::time::sleep(HEARTBEAT).await;
+            settle().await;
+            assert_eq!(
+                h.status(),
+                SessionStatus::Working,
+                "tick {tick}: demoted to idle between once-a-second repaints"
+            );
+        }
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Idle, "silence past IDLE_AFTER");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn once_a_second_repaint_does_not_flicker_agent_session() {
+        let h = start("agent", false);
+        assert_heartbeat_holds_working(&h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn once_a_second_repaint_does_not_flicker_plain_shell() {
+        let h = start("shell", true);
+        assert_heartbeat_holds_working(&h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn promotion_is_immediate() {
+        let h = start("promote", false);
+        assert_eq!(h.status(), SessionStatus::Idle);
+        h.heartbeat(0);
+        settle().await;
+        assert_eq!(h.status(), SessionStatus::Working);
     }
 }
