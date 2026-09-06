@@ -1,6 +1,7 @@
 //! WebSocket server, message dispatch, and session orchestration glue.
 
 use crate::agents::CommonSpawnFields;
+use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::discovery;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
@@ -37,11 +38,11 @@ use chrono::Utc;
 use directories::UserDirs;
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{
-    Agent, AgentOptions, AppearanceOverrides, AttentionReason, ClientMessage, ClonableLayout,
-    DaemonHandshake, DaemonMessage, InboundClientMessage, InitLayoutKind, PROTOCOL_VERSION,
-    PaneDropEdge, PresetLaunchJobSnapshot, SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember,
-    SessionMetrics, SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
-    VscodeWorkspaceSuggestion,
+    Agent, AgentOptions, AppearanceOverrides, AttentionReason, BranchCleanup, ClientMessage,
+    ClonableLayout, DaemonHandshake, DaemonMessage, InboundClientMessage, InitLayoutKind,
+    MemberBranchFate, PROTOCOL_VERSION, PaneDropEdge, PresetLaunchJobSnapshot,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
+    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -1600,6 +1601,9 @@ async fn dispatch(
             cleanup,
         } => {
             discard_session(hub, &session_id, &cleanup, out_tx).await;
+        }
+        ClientMessage::PreviewDiscard { session_id } => {
+            preview_discard(hub, &session_id, out_tx).await;
         }
         ClientMessage::RetryWorktreeCleanup {
             session_id,
@@ -4602,23 +4606,69 @@ fn discard_snapshot(hub: &Hub, session_id: &str) -> (Vec<SessionMember>, bool, S
     )
 }
 
-/// Reap the branch a removed session worktree leaves behind. `git worktree
-/// remove` never deletes the branch it had checked out, and left alone that
-/// branch pins a future spawn of the same name to this session's old fork
-/// point. Deleted only when it holds no unique commits; a branch with
-/// unmerged work survives (`git branch -d` semantics). Failure is logged,
-/// never raised — the worktree the user asked to delete is already gone.
-async fn reap_discarded_session_branch(repo_path: &str, branch: &str) {
-    match git::delete_branch_if_merged(Path::new(repo_path), branch).await {
-        Ok(true) => info!(
+/// Reap the branch a removed session worktree leaves behind, per the
+/// caller's [`BranchCleanup`] choice.
+///
+/// `git worktree remove` never deletes the branch it had checked out, and
+/// left alone that branch pins a future spawn of the same name to this
+/// session's old fork point. `Keep` leaves it regardless; `Delete` removes it
+/// unconditionally; `Auto` (and any mode this build does not know) deletes it
+/// only when its commits already exist in one of `targets`, by ancestry or by
+/// patch equivalence. Failure is logged, never raised — the worktree the
+/// user asked to delete is already gone.
+async fn reap_discarded_session_branch(
+    repo_path: &str,
+    branch: &str,
+    mode: BranchCleanup,
+    targets: &[String],
+) {
+    match mode {
+        BranchCleanup::Keep => {
+            info!(
+                branch,
+                repo = %repo_path,
+                "discard_session: keeping the session branch at the user's request"
+            );
+            return;
+        }
+        BranchCleanup::Delete => {
+            force_delete_session_branch(repo_path, branch, "at the user's request").await;
+            return;
+        }
+        BranchCleanup::Auto | BranchCleanup::Unknown => {}
+    }
+
+    match git::branch_merge_status(Path::new(repo_path), branch, targets).await {
+        Ok(git::BranchMergeStatus::Merged { into, via }) => {
+            let reason = format!("already in {into} ({via:?})");
+            force_delete_session_branch(repo_path, branch, &reason).await;
+        }
+        Ok(git::BranchMergeStatus::Unmerged { unique_commits }) => info!(
             branch,
             repo = %repo_path,
-            "discard_session: deleted the session branch (fully merged)"
-        ),
-        Ok(false) => info!(
-            branch,
-            repo = %repo_path,
+            unique_commits,
+            ?targets,
             "discard_session: kept the session branch — it has unmerged commits"
+        ),
+        Err(err) => warn!(
+            ?err,
+            branch,
+            repo = %repo_path,
+            ?targets,
+            "discard_session: merge check failed; branch left in place"
+        ),
+    }
+}
+
+/// `git branch -D` with the outcome logged either way. `why` is folded into
+/// the success line so the log says what licensed the delete.
+async fn force_delete_session_branch(repo_path: &str, branch: &str, why: &str) {
+    match git::delete_branch(Path::new(repo_path), branch).await {
+        Ok(()) => info!(
+            branch,
+            repo = %repo_path,
+            why,
+            "discard_session: deleted the session branch"
         ),
         Err(err) => warn!(
             ?err,
@@ -4627,6 +4677,94 @@ async fn reap_discarded_session_branch(repo_path: &str, branch: &str) {
             "discard_session: session branch delete failed; branch left in place"
         ),
     }
+}
+
+/// Answer [`ClientMessage::PreviewDiscard`]: what would happen to each
+/// member's branch if the user confirmed the discard right now. Read-only.
+/// An unknown session, or one with no per-session worktrees, yields an empty
+/// member list — the same no-op stance a repeat discard takes.
+async fn preview_discard(
+    hub: &Hub,
+    session_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let (members, has_per_session_worktree, _) = discard_snapshot(hub, session_id);
+    let SessionBase::Repo(explicit_base) = session_spawn_base(hub, session_id) else {
+        info!(
+            session_id,
+            "preview_discard: standalone session has no branches"
+        );
+        let _ = out_tx.send(DaemonMessage::DiscardPreview {
+            session_id: session_id.to_string(),
+            members: Vec::new(),
+        });
+        return;
+    };
+    if members.is_empty() {
+        info!(session_id, "preview_discard: no members to preview");
+    }
+
+    let worktrees_root = hub.state.worktrees_dir();
+    let mut fates: Vec<MemberBranchFate> = Vec::new();
+    for member in &members {
+        let fate = if has_per_session_worktree {
+            member_fate(hub, member, explicit_base.as_deref(), &worktrees_root).await
+        } else {
+            // An in-place session runs in the repo itself; its branch is not
+            // the daemon's to reap.
+            protocol::BranchFate::Untouched {
+                reason: protocol::UntouchedReason::ExternalWorktree,
+            }
+        };
+        fates.push(MemberBranchFate {
+            repo_id: member.repo_id.clone(),
+            repo_name: member.repo_name.clone(),
+            branch: member.branch.clone(),
+            fate,
+        });
+    }
+
+    let _ = out_tx.send(DaemonMessage::DiscardPreview {
+        session_id: session_id.to_string(),
+        members: fates,
+    });
+}
+
+/// Resolve one member's targets and run the fate rules against them.
+async fn member_fate(
+    hub: &Hub,
+    member: &SessionMember,
+    explicit_base: Option<&str>,
+    worktrees_root: &Path,
+) -> protocol::BranchFate {
+    let Some(repo) = hub
+        .state
+        .with_persisted(|s| s.repos.iter().find(|r| r.id == member.repo_id).cloned())
+    else {
+        return protocol::BranchFate::Untouched {
+            reason: protocol::UntouchedReason::ExternalWorktree,
+        };
+    };
+    let targets = branch_fate::merge_targets(&hub.state, &repo, explicit_base).await;
+    branch_fate::member_branch_fate(FateInput {
+        repo_path: Path::new(&repo.path),
+        member_worktree: Path::new(&member.worktree_path),
+        worktrees_root,
+        branch: &member.branch,
+        targets: &targets,
+    })
+    .await
+}
+
+/// The base branch a session's members forked from, per its stored spawn
+/// config. A session that is already gone reads as repo-backed with no
+/// explicit base, which re-derives the repo default rather than guessing.
+fn session_spawn_base(hub: &Hub, session_id: &str) -> SessionBase {
+    hub.sessions
+        .get(session_id)
+        .map_or(SessionBase::Repo(None), |rec| {
+            branch_fate::session_base(crate::sync::lock(&rec).spawn_config.as_ref())
+        })
 }
 
 async fn discard_session(
@@ -4646,6 +4784,10 @@ async fn discard_session(
         "discard_session: begin"
     );
     let (members, has_per_session_worktree, session_label) = discard_snapshot(hub, session_id);
+    let explicit_base = match session_spawn_base(hub, session_id) {
+        SessionBase::Repo(base) => base,
+        SessionBase::Standalone => None,
+    };
 
     // Refuse the whole discard if any worktree it would remove is still in
     // use by another live session. The user must close the other session(s)
@@ -4687,14 +4829,19 @@ async fn discard_session(
         let Some(member) = members.iter().find(|m| m.repo_id == action.repo_id) else {
             continue;
         };
-        let repo_path = hub.state.with_persisted(|s| {
-            s.repos
-                .iter()
-                .find(|r| r.id == member.repo_id)
-                .map(|r| r.path.clone())
-        });
-        let Some(repo_path) = repo_path else {
+        let repo = hub
+            .state
+            .with_persisted(|s| s.repos.iter().find(|r| r.id == member.repo_id).cloned());
+        let Some(repo) = repo else {
             continue;
+        };
+        let repo_path = repo.path.clone();
+        // Resolved while the session record is still intact, and only for the
+        // mode that consults them.
+        let targets = if matches!(action.branch, BranchCleanup::Auto | BranchCleanup::Unknown) {
+            branch_fate::merge_targets(&hub.state, &repo, explicit_base.as_deref()).await
+        } else {
+            Vec::new()
         };
         let worktree_path = PathBuf::from(&member.worktree_path);
         match crate::worktree_cleanup::remove_member(Path::new(&repo_path), &worktree_path).await {
@@ -4702,7 +4849,13 @@ async fn discard_session(
                 // Gated to worktrees under the daemon's own root so a pinned
                 // external worktree never loses its branch.
                 if worktree_path.starts_with(&worktrees_root) {
-                    reap_discarded_session_branch(&repo_path, &member.branch).await;
+                    reap_discarded_session_branch(
+                        &repo_path,
+                        &member.branch,
+                        action.branch,
+                        &targets,
+                    )
+                    .await;
                 }
             }
             crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {

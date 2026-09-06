@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -158,10 +159,11 @@ describe("pane close stop cleanup", function () {
   });
 
   it("offers separate session and worktree choices for worktree sessions", async function () {
-    if (!ws || !registeredRepoId) throw new Error("setup failed");
+    if (!ws || !registeredRepoId || !fixtureRepo) throw new Error("setup failed");
 
+    const branch = "rt-e2e-pane-close-stop-worktree";
     const spawn = await spawnPlainShell(ws, registeredRepoId, {
-      branchName: "rt-e2e-pane-close-stop-worktree",
+      branchName: branch,
       label: "pane-close-stop-worktree-shell",
       useWorktree: true,
     });
@@ -192,16 +194,70 @@ describe("pane close stop cleanup", function () {
       "Close pane, don't keep session, delete worktree",
     );
 
+    // The delete-worktree choice hands over to the branch-fate confirm
+    // instead of discarding straight away. This branch was cut from main and
+    // never committed to, so every target reports it as already landed and
+    // the dialog offers the single unambiguous delete.
     const paneId = await getGridPaneIdForSession(spawn.id);
+    await clickDialogButton(
+      dialog,
+      "pane-close-dialog-close-session-delete-worktree",
+    );
+    const fateDialog = await openDeleteWorktreeDialog();
+
+    const members = await fateDialog.$$('[data-testid="delete-worktree-member"]');
+    expect(members.length, "one member row for a single-repo session").to.equal(1);
+    const memberText = await members[0]!.getText();
+    expect(memberText).to.contain(branch);
+    expect(memberText).to.contain("already merged into main");
+
+    await expectButtonText(
+      fateDialog,
+      "delete-worktree-and-branch",
+      "Delete worktree and branch",
+    );
+    await expectMissingButton(fateDialog, "delete-worktree-keep-branch");
+
     const removed = waitForSessionRemoved(ws, spawn.id);
-    await clickDialogButton(dialog, "pane-close-dialog-close-session-keep-worktree");
+    await clickDialogButton(fateDialog, "delete-worktree-and-branch");
     await removed;
     spawnedSessionIds.delete(spawn.id);
 
     await expectSessionRemovedFromSidebar(spawn.id);
     await expectGridPaneRemoved(paneId);
+
+    expect(
+      existsSync(retainedWorktreePath),
+      "worktree directory removed from disk",
+    ).to.equal(false);
+    expect(
+      gitOutput(fixtureRepo, ["branch", "--list", branch]),
+      "session branch reaped",
+    ).to.equal("");
   });
 });
+
+/**
+ * Wait for the branch-fate confirm to open and finish its `preview_discard`
+ * round trip, so button labels and member rows are the daemon's answer rather
+ * than the loading placeholder.
+ */
+async function openDeleteWorktreeDialog() {
+  const dialog = await browser.$('[data-testid="delete-worktree-dialog"]');
+  await dialog.waitForExist({ timeout: 10_000 });
+  const loading = await dialog.$(
+    '[data-testid="delete-worktree-dialog-loading"]',
+  );
+  await loading.waitForExist({ timeout: 15_000, reverse: true });
+  const timedOut = await dialog.$(
+    '[data-testid="delete-worktree-dialog-timeout"]',
+  );
+  expect(
+    await timedOut.isExisting(),
+    "daemon answered preview_discard before the dialog timed out",
+  ).to.equal(false);
+  return dialog;
+}
 
 async function spawnPlainShell(
   ws: DaemonWsClient,
@@ -388,4 +444,9 @@ function isSessionUpdated(
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+/** `runGit`, but captures trimmed stdout — for assertions on git's answer. */
+function gitOutput(cwd: string, args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }

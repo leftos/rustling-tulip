@@ -1970,6 +1970,26 @@ button.tree-tab-pill:hover {
   flex-wrap: wrap;
   gap: 0.4rem;
 }
+.delete-worktree-members {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.delete-worktree-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.delete-worktree-member-repo { font-weight: 600; }
+.delete-worktree-member-fate {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
 .exit-confirm-footer {
   flex-wrap: wrap;
   gap: 0.4rem;
@@ -2806,6 +2826,8 @@ span.danger { color: var(--err); }
 .modal-backdrop-destructive { z-index: 120; }
 .modal-backdrop-vscode { z-index: 130; }
 .modal-backdrop-exit { z-index: 140; }
+/* Above the exit dialog: these prompts open from inside it. */
+.modal-backdrop-exit-queue { z-index: 150; }
 .modal {
   background: var(--bg-elev);
   border: 1px solid var(--border);

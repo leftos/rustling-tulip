@@ -1089,6 +1089,7 @@ function ContainerNode(p: ContainerNodeProps) {
           cleanup: s.members.map((m) => ({
             repo_id: m.repo_id,
             remove_worktree: false,
+            branch: "auto" as const,
           })),
         });
       }

@@ -129,6 +129,7 @@ export default function SessionPane({
       cleanup: session.members.map((m) => ({
         repo_id: m.repo_id,
         remove_worktree: false,
+        branch: "auto" as const,
       })),
     });
     setConfirming(false);
@@ -179,14 +180,26 @@ export default function SessionPane({
     );
   }, [session.id, tabId, paneId]);
 
+  /// Stopped-pane overlay's remove button. With a per-session worktree this
+  /// deletes it, so it goes through App.tsx's branch-fate confirm; without
+  /// one there is nothing to lose and the discard goes straight out.
   const onDiscardWithWorktree = useCallback(() => {
+    if (session.has_per_session_worktree) {
+      window.dispatchEvent(
+        new CustomEvent("rt:request_delete_worktree", {
+          detail: { sessionId: session.id, closePane: null },
+        }),
+      );
+      return;
+    }
     if (!client) return;
     client.send({
       type: "discard_session",
       session_id: session.id,
       cleanup: session.members.map((m) => ({
         repo_id: m.repo_id,
-        remove_worktree: session.has_per_session_worktree,
+        remove_worktree: false,
+        branch: "auto" as const,
       })),
     });
   }, [client, session]);

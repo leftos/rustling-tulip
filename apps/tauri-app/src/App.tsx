@@ -32,6 +32,7 @@ import {
 import {
   DEFAULT_CLAUDE_OPTIONS,
   tabGrid,
+  type BranchCleanup,
   type CheckoutChoice,
   type ClientMessage,
   type ClonableLayout,
@@ -78,6 +79,7 @@ import WorktreeCleanupFailedDialog from "./components/WorktreeCleanupFailedDialo
 import ActionFailedModal from "./components/ActionFailedModal";
 import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
 import RepoRemoveDialog from "./components/RepoRemoveDialog";
+import DeleteWorktreeDialog from "./components/DeleteWorktreeDialog";
 import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
 import ExitConfirmDialog from "./components/ExitConfirmDialog";
@@ -127,6 +129,13 @@ import {
 } from "./utils/fontSize";
 import { resolveAppearance, resolveAppearanceLayers } from "./utils/appearance";
 import { computeWindowTitle } from "./utils/windowTitle";
+import {
+  exitProgress,
+  recordExitChoice,
+  skipVanished,
+  startExitQueue,
+  type ExitWorktreeQueue,
+} from "./utils/exitWorktreeQueue";
 
 /// Pop-out windows: launched with either `?pane=<id>` (pane-backed pop-out),
 /// `?tab=<id>` (per-tab pop-out), or `?session=<id>` (legacy single-session
@@ -233,6 +242,10 @@ interface AppState {
   attentionSessions: Set<string>;
   exitConfirmOpen: boolean;
   exitInFlight: boolean;
+  /// Open while "Stop sessions, remove worktrees" walks the worktree
+  /// sessions one at a time for a branch fate. Null when no walk is in
+  /// progress; the shutdown only goes out once the walk is finished.
+  exitWorktreeQueue: ExitWorktreeQueue | null;
   /// True once `onStopAndQuit` has sent `shutdown` to the daemon and 2 s
   /// have elapsed without the WS connection closing. Surfaces a warning
   /// banner + Force-quit button in the exit dialog so the user isn't
@@ -341,6 +354,20 @@ interface AppState {
   /// spawn, blocked discard) shown as a blocking modal. `null` when none is
   /// pending; a newer event replaces an unacknowledged one.
   actionFailed: ActionFailedInfo | null;
+  /// Pending "delete this session's worktree" confirmation, set by the
+  /// `rt:request_delete_worktree` event. The DeleteWorktreeDialog renders it
+  /// and App performs the sends on confirm. `null` when none is pending.
+  deleteWorktreeRequest: DeleteWorktreeRequest | null;
+}
+
+/// Payload of the `rt:request_delete_worktree` window event, which is the
+/// only way a worktree gets deleted: every entry point dispatches it instead
+/// of sending `discard_session` itself. `closePane` is set when the gesture
+/// also removes a pane from a tab (the pane-close dialog); the dispatcher is
+/// responsible for any undo snapshot it wants taken first.
+interface DeleteWorktreeRequest {
+  sessionId: string;
+  closePane: { tabId: string; paneId: string } | null;
 }
 
 interface WorktreeCleanupQueueEntry {
@@ -424,6 +451,7 @@ export default function App() {
     attentionSessions: new Set(),
     exitConfirmOpen: false,
     exitInFlight: false,
+    exitWorktreeQueue: null,
     exitStuck: false,
     settingsOpen: false,
     presetLaunch: null,
@@ -449,6 +477,7 @@ export default function App() {
     hasEverConnected: false,
     worktreeCleanupQueue: [],
     actionFailed: null,
+    deleteWorktreeRequest: null,
   });
   // Bumped to force the connection useEffect to re-run (e.g. when the
   // user clicks Restart from the DaemonFooter while the daemon is in
@@ -1471,6 +1500,92 @@ export default function App() {
     return () => window.removeEventListener("rt:pane_session_new", handler);
   }, []);
 
+  /// Every "delete the worktree" gesture — the pane-close dialog, the two
+  /// context-menu remove entries, "Stop and delete worktree", and the
+  /// stopped-pane overlay — dispatches `rt:request_delete_worktree` instead
+  /// of sending `discard_session` itself, so the branch-fate confirm is the
+  /// single gate in front of a worktree deletion.
+  ///
+  /// Event detail: `{ sessionId: string; closePane: { tabId, paneId } | null }`.
+  /// `closePane` is set only when the gesture also removes the pane from its
+  /// tab; the dispatcher takes any undo snapshot it wants before dispatching.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DeleteWorktreeRequest>).detail;
+      if (!detail || typeof detail.sessionId !== "string") return;
+      setState((s) => ({
+        ...s,
+        deleteWorktreeRequest: {
+          sessionId: detail.sessionId,
+          closePane: detail.closePane ?? null,
+        },
+      }));
+    };
+    window.addEventListener("rt:request_delete_worktree", handler);
+    return () =>
+      window.removeEventListener("rt:request_delete_worktree", handler);
+  }, []);
+
+  /// Answer from the DeleteWorktreeDialog: close the pane if the gesture
+  /// included one, stop the session if it's still alive (keeping the worktree
+  /// so the discard owns the removal), then discard with the chosen branch
+  /// fate.
+  const onConfirmDeleteWorktree = useCallback((branch: BranchCleanup) => {
+    const cur = latestStateRef.current;
+    const request = cur?.deleteWorktreeRequest;
+    const client = cur?.client;
+    const session = cur?.sessions.find((s) => s.id === request?.sessionId);
+    if (client && request && session) {
+      if (request.closePane) {
+        client.send({
+          type: "close_pane",
+          tab_id: request.closePane.tabId,
+          pane_id: request.closePane.paneId,
+        });
+      }
+      if (session.status !== "stopped" && session.status !== "error") {
+        client.send({
+          type: "stop_session",
+          session_id: session.id,
+          cleanup: session.members.map((m) => ({
+            repo_id: m.repo_id,
+            remove_worktree: false,
+            branch: "auto" as const,
+          })),
+        });
+      }
+      client.send({
+        type: "discard_session",
+        session_id: session.id,
+        cleanup: session.members.map((m) => ({
+          repo_id: m.repo_id,
+          remove_worktree: true,
+          branch,
+        })),
+      });
+    }
+    setState((s) => ({ ...s, deleteWorktreeRequest: null }));
+  }, []);
+
+  const onCancelDeleteWorktree = useCallback(() => {
+    setState((s) => ({ ...s, deleteWorktreeRequest: null }));
+  }, []);
+
+  const deleteWorktreeSession = useMemo<SessionSnapshot | null>(() => {
+    const request = state.deleteWorktreeRequest;
+    if (!request) return null;
+    return state.sessions.find((s) => s.id === request.sessionId) ?? null;
+  }, [state.deleteWorktreeRequest, state.sessions]);
+
+  // The session can disappear while the confirm is open — another window
+  // discarded it, or the daemon dropped it. Retire the request instead of
+  // leaving a dialog pointed at nothing.
+  useEffect(() => {
+    if (state.deleteWorktreeRequest === null) return;
+    if (deleteWorktreeSession !== null) return;
+    setState((s) => ({ ...s, deleteWorktreeRequest: null }));
+  }, [state.deleteWorktreeRequest, deleteWorktreeSession]);
+
   const onLaunchPreset = useCallback(
     (preset: PresetEntry, target: PresetTarget) => {
       setState((s) => ({ ...s, presetLaunch: { preset, target } }));
@@ -1960,8 +2075,14 @@ export default function App() {
     void closeMainWindow();
   }, [closeMainWindow]);
 
+  /// `branchChoices` carries the per-session branch fate collected by the
+  /// worktree walk; a session with no entry falls back to "auto". Empty for
+  /// the modes that don't remove worktrees.
   const sendShutdown = useCallback(
-    (mode: "stopKeepWorktrees" | "stopRemoveWorktrees" | "abandon") => {
+    (
+      mode: "stopKeepWorktrees" | "stopRemoveWorktrees" | "abandon",
+      branchChoices: Record<string, BranchCleanup>,
+    ) => {
       const drain = mode === "stopKeepWorktrees";
       const tag =
         mode === "stopRemoveWorktrees"
@@ -2018,9 +2139,11 @@ export default function App() {
           (session) => session.status !== "stopped" && !session.is_orphan,
         );
         for (const session of activeSessions) {
+          const branch = branchChoices[session.id] ?? "auto";
           const cleanup = session.members.map((member) => ({
             repo_id: member.repo_id,
             remove_worktree: session.has_per_session_worktree,
+            branch,
           }));
           client.send({
             type: "stop_session",
@@ -2028,6 +2151,7 @@ export default function App() {
             cleanup: cleanup.map((action) => ({
               ...action,
               remove_worktree: false,
+              branch: "auto" as const,
             })),
           });
           client.send({
@@ -2044,17 +2168,69 @@ export default function App() {
   );
 
   const onStopAndQuit = useCallback(
-    () => sendShutdown("stopKeepWorktrees"),
+    () => sendShutdown("stopKeepWorktrees", {}),
     [sendShutdown],
   );
-  const onStopAndQuitRemoveWorktrees = useCallback(
-    () => sendShutdown("stopRemoveWorktrees"),
-    [sendShutdown],
-  );
+  /// Every worktree the quit is about to delete gets its own branch-fate
+  /// confirm first. The shutdown waits for the last answer; with no
+  /// worktree session to ask about it goes out immediately.
+  const onStopAndQuitRemoveWorktrees = useCallback(() => {
+    const queue = startExitQueue(latestStateRef.current?.sessions ?? []);
+    if (!queue) {
+      sendShutdown("stopRemoveWorktrees", {});
+      return;
+    }
+    logToFile(
+      "info",
+      `exit modal: Stop sessions, remove worktrees — asking branch fate for ${queue.total} session(s)`,
+    );
+    setState((s) => ({ ...s, exitWorktreeQueue: queue }));
+  }, [sendShutdown]);
   const onAbandonAndQuit = useCallback(
-    () => sendShutdown("abandon"),
+    () => sendShutdown("abandon", {}),
     [sendShutdown],
   );
+
+  const onConfirmExitWorktree = useCallback(
+    (branch: BranchCleanup) => {
+      const queue = latestStateRef.current?.exitWorktreeQueue;
+      const sessionId = queue?.pending[0];
+      if (!queue || sessionId === undefined) return;
+      logToFile("info", `exit modal: worktree ${sessionId} -> branch ${branch}`);
+      const next = recordExitChoice(queue, sessionId, branch);
+      const done = next.pending.length === 0;
+      setState((s) => ({ ...s, exitWorktreeQueue: done ? null : next }));
+      if (done) sendShutdown("stopRemoveWorktrees", next.choices);
+    },
+    [sendShutdown],
+  );
+
+  /// Backing out of a branch-fate prompt abandons the whole walk and sends
+  /// no shutdown; the exit dialog is still up so another option is one
+  /// click away.
+  const onCancelExitWorktree = useCallback(() => {
+    logToFile("info", "exit modal: branch fate cancelled; quit not sent");
+    setState((s) => ({ ...s, exitWorktreeQueue: null }));
+  }, []);
+
+  const exitWorktreeSession = useMemo<SessionSnapshot | null>(() => {
+    const sessionId = state.exitWorktreeQueue?.pending[0];
+    if (sessionId === undefined) return null;
+    return state.sessions.find((s) => s.id === sessionId) ?? null;
+  }, [state.exitWorktreeQueue, state.sessions]);
+
+  // Sessions can end or be discarded from another window mid-walk. Drop
+  // them from the queue (they shut down under "auto"), and when that
+  // empties the queue run the shutdown the walk was collecting answers for.
+  useEffect(() => {
+    const queue = state.exitWorktreeQueue;
+    if (!queue) return;
+    const next = skipVanished(queue, new Set(state.sessions.map((s) => s.id)));
+    if (next.pending.length === queue.pending.length) return;
+    const done = next.pending.length === 0;
+    setState((s) => ({ ...s, exitWorktreeQueue: done ? null : next }));
+    if (done) sendShutdown("stopRemoveWorktrees", next.choices);
+  }, [state.exitWorktreeQueue, state.sessions, sendShutdown]);
 
   /// DaemonFooter — force-stop the daemon and suppress auto-reconnect.
   /// The Tauri-side `stop_daemon` kills the pid + removes the handshake;
@@ -2489,6 +2665,7 @@ export default function App() {
         cleanup: session.members.map((member) => ({
           repo_id: member.repo_id,
           remove_worktree: false,
+          branch: "auto" as const,
         })),
       });
     }
@@ -2578,7 +2755,9 @@ export default function App() {
     state.repoRemove !== null ||
     state.settingsOpen ||
     state.vscodeQueue.length > 0 ||
-    state.worktreeCleanupQueue.length > 0;
+    state.worktreeCleanupQueue.length > 0 ||
+    state.deleteWorktreeRequest !== null ||
+    state.exitWorktreeQueue !== null;
   const shortcuts = useMemo<KeyboardShortcut[]>(() => {
     if (
       anyModalOpen ||
@@ -3165,6 +3344,7 @@ export default function App() {
           activeWorktreeSessionCount={activeWorktreeSessionCount}
           orphanSessionCount={orphanSessionCount}
           busy={state.exitInFlight}
+          escapeDisabled={state.exitWorktreeQueue !== null}
           stuck={state.exitStuck}
           onStopAndQuit={onStopAndQuit}
           onStopAndQuitRemoveWorktrees={onStopAndQuitRemoveWorktrees}
@@ -3174,12 +3354,31 @@ export default function App() {
           onCancel={onExitCancel}
         />
       )}
+      {state.exitWorktreeQueue && exitWorktreeSession && state.client && (
+        <DeleteWorktreeDialog
+          key={exitWorktreeSession.id}
+          session={exitWorktreeSession}
+          client={state.client}
+          progress={exitProgress(state.exitWorktreeQueue)}
+          layer="exit-queue"
+          onCancel={onCancelExitWorktree}
+          onConfirm={onConfirmExitWorktree}
+        />
+      )}
       <ErrorToast toasts={state.toasts} onDismiss={onDismissToast} />
       <UndoShelf
         entries={state.undoEntries}
         onUndo={onUndo}
         onDismiss={onDismissUndo}
       />
+      {deleteWorktreeSession && state.client && (
+        <DeleteWorktreeDialog
+          session={deleteWorktreeSession}
+          client={state.client}
+          onCancel={onCancelDeleteWorktree}
+          onConfirm={onConfirmDeleteWorktree}
+        />
+      )}
       {state.repoRemove && (
         <RepoRemoveDialog
           repoName={state.repoRemove.repoName}
@@ -3910,6 +4109,7 @@ function handleMessage(
       return;
     case "branches":
     case "worktrees":
+    case "discard_preview":
     case "workspace_spawn_preview":
     case "spawn_preview":
     case "repo_fetched":

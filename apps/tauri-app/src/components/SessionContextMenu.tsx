@@ -181,26 +181,33 @@ export default function SessionContextMenu({
     onClose();
   };
 
+  /// App.tsx owns every worktree deletion: it runs the branch-fate confirm
+  /// and then sends close_pane / stop_session / discard_session itself.
+  const requestDeleteWorktree = () => {
+    window.dispatchEvent(
+      new CustomEvent("rt:request_delete_worktree", {
+        detail: { sessionId: s.id, closePane: null },
+      }),
+    );
+    onClose();
+  };
+
   const sendStop = (removeWorktree: boolean) => {
+    if (removeWorktree) {
+      requestDeleteWorktree();
+      return;
+    }
     const cleanup = s.members.map((m) => ({
       repo_id: m.repo_id,
-      remove_worktree: removeWorktree,
+      remove_worktree: false,
+      branch: "auto" as const,
     }));
     client.send({
       type: "stop_session",
       session_id: s.id,
-      cleanup: cleanup.map((action) => ({
-        ...action,
-        remove_worktree: false,
-      })),
+      cleanup,
     });
-    if (removeWorktree) {
-      client.send({
-        type: "discard_session",
-        session_id: s.id,
-        cleanup,
-      });
-    } else if (sourceBinding === null) {
+    if (sourceBinding === null) {
       // Unbound running session: leaving it in `stopped` state would
       // strand a no-pane entry in the sidebar that the user has to
       // remove via a second right-click. Park it (worktree retained,
@@ -220,12 +227,17 @@ export default function SessionContextMenu({
   };
 
   const sendDiscard = (removeWorktree: boolean) => {
+    if (removeWorktree) {
+      requestDeleteWorktree();
+      return;
+    }
     client.send({
       type: "discard_session",
       session_id: s.id,
       cleanup: s.members.map((m) => ({
         repo_id: m.repo_id,
-        remove_worktree: removeWorktree,
+        remove_worktree: false,
+        branch: "auto" as const,
       })),
     });
     onClose();

@@ -72,7 +72,9 @@ describe("rustling-tulip webview", function () {
           type: "stop_session",
           session_id: spawnedSessionId,
           cleanup: registeredRepoId
-            ? [{ repo_id: registeredRepoId, remove_worktree: false }]
+            ? [
+                { repo_id: registeredRepoId, remove_worktree: false, branch: "auto" },
+              ]
             : [],
         });
         await delay(500);

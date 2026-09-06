@@ -151,6 +151,30 @@ describe("exit confirmation with worktree sessions", function () {
       join(repoRoot, ".tmp", "e2e", "exit-confirm-worktrees.png"),
     );
 
+    // "Stop sessions, remove worktrees" walks the worktree sessions through
+    // the branch-fate confirm one at a time before any shutdown is sent.
+    // Backing out of that prompt abandons the walk and leaves the exit
+    // dialog up, so the quit is never half-committed.
+    await (await dialog.$('[data-testid="exit-stop-remove-worktrees"]')).click();
+    const fateDialog = await browser.$(
+      '[data-testid="delete-worktree-dialog"]',
+    );
+    await fateDialog.waitForExist({ timeout: 10_000 });
+    const header = await fateDialog.$(".modal-header");
+    expect(await header.getText()).to.contain("Session 1 of 1");
+
+    await (await fateDialog.$('[data-testid="delete-worktree-cancel"]')).click();
+    await fateDialog.waitForExist({ timeout: 5_000, reverse: true });
+
+    expect(await dialog.isExisting(), "exit dialog stays open").to.equal(true);
+    const removeWorktrees = await dialog.$(
+      '[data-testid="exit-stop-remove-worktrees"]',
+    );
+    expect(
+      await removeWorktrees.isEnabled(),
+      "remove-worktrees stays clickable after cancelling the branch prompt",
+    ).to.equal(true);
+
     await (await dialog.$('[data-testid="exit-cancel"]')).click();
     await dialog.waitForExist({ timeout: 5_000, reverse: true });
   });

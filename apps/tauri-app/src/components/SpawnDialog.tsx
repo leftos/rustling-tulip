@@ -1466,6 +1466,13 @@ function SingleForm({
     () => preferRemoteBase(localDefaultBranch, remoteBranches),
     [localDefaultBranch, remoteBranches],
   );
+  // Every ref that can serve as a worktree base: remote-tracking refs first,
+  // because the base normally wants the remote counterpart, then locals.
+  // Deduped so a name carried by both lists is offered once.
+  const baseBranchOptions = useMemo(
+    () => [...new Set([...remoteBranches, ...knownBranches])],
+    [remoteBranches, knownBranches],
+  );
   // The in-place "Branch" field defaults to the branch you're already on (so
   // spawning in place is a no-op checkout). It stays a local name — you can't
   // check out a remote-tracking ref in place without detaching HEAD.
@@ -1846,22 +1853,15 @@ function SingleForm({
             <>
               <label className="field">
                 <span>Base branch (optional)</span>
-                <input
-                  type="text"
+                <BranchCombobox
                   value={baseBranch}
-                  onChange={(e) => setBaseBranch(e.target.value)}
+                  onChange={setBaseBranch}
+                  branches={baseBranchOptions}
+                  currentBranch={currentBranch}
                   placeholder={defaultBranch}
-                  list={`spawn-single-base-options-${repoId}`}
-                  data-testid="spawn-single-base-branch"
+                  testId="spawn-single-base-branch"
+                  allowCreate={false}
                 />
-                <datalist id={`spawn-single-base-options-${repoId}`}>
-                  {remoteBranches.map((b) => (
-                    <option key={`remote-${b}`} value={b} />
-                  ))}
-                  {knownBranches.map((b) => (
-                    <option key={`local-${b}`} value={b} />
-                  ))}
-                </datalist>
               </label>
               {fetchState === "failed" && (
                 <div className="muted small" data-testid="spawn-single-fetch-failed">
@@ -2160,19 +2160,25 @@ function WorkspaceForm({
     }
   }, [memberIds, client]);
 
-  // Remote-tracking refs for the first member drive the base-branch default.
-  // Members are expected to share a default branch name; the daemon resolves
-  // each member's base independently at spawn time regardless.
+  // The first member's refs drive the base-branch default and the base
+  // picker. Members are expected to share a default branch name; the daemon
+  // resolves each member's base independently at spawn time regardless.
   const [remoteBranches, setRemoteBranches] = useState<string[]>([]);
+  const [knownBranches, setKnownBranches] = useState<string[]>([]);
+  const [currentBranch, setCurrentBranch] = useState<string | null>(null);
   useEffect(() => {
     const id = firstMember?.id;
     if (!id) return;
     setRemoteBranches([]);
+    setKnownBranches([]);
+    setCurrentBranch(null);
     client.send({ type: "list_branches", repo_id: id });
     const handler = (ev: Event) => {
       const detail = (ev as CustomEvent<DaemonMessage>).detail;
       if (detail.type !== "branches" || detail.repo_id !== id) return;
       setRemoteBranches(detail.remote_branches);
+      setKnownBranches(detail.branches);
+      setCurrentBranch(detail.current);
     };
     window.addEventListener("rt:branches", handler);
     return () => window.removeEventListener("rt:branches", handler);
@@ -2182,6 +2188,13 @@ function WorkspaceForm({
   const defaultBranch = useMemo(
     () => preferRemoteBase(localDefaultBranch, remoteBranches),
     [localDefaultBranch, remoteBranches],
+  );
+  // Every ref that can serve as a worktree base: remote-tracking refs first,
+  // because the base normally wants the remote counterpart, then locals.
+  // Deduped so a name carried by both lists is offered once.
+  const baseBranchOptions = useMemo(
+    () => [...new Set([...remoteBranches, ...knownBranches])],
+    [remoteBranches, knownBranches],
   );
   const [useWorktree, setUseWorktree] = useState<boolean>(
     () => prefillTarget?.use_worktree ?? true,
@@ -2470,19 +2483,15 @@ function WorkspaceForm({
         <>
           <label className="field">
             <span>Base branch (optional)</span>
-            <input
-              type="text"
+            <BranchCombobox
               value={baseBranch}
-              onChange={(e) => setBaseBranch(e.target.value)}
+              onChange={setBaseBranch}
+              branches={baseBranchOptions}
+              currentBranch={currentBranch}
               placeholder={defaultBranch}
-              list={`spawn-workspace-base-options-${workspaceId}`}
-              data-testid="spawn-workspace-base-branch"
+              testId="spawn-workspace-base-branch"
+              allowCreate={false}
             />
-            <datalist id={`spawn-workspace-base-options-${workspaceId}`}>
-              {remoteBranches.map((b) => (
-                <option key={`remote-${b}`} value={b} />
-              ))}
-            </datalist>
           </label>
 
           <div className="modal-footer-inline">

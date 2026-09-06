@@ -734,6 +734,95 @@ impl SpawnConfig {
 pub struct CleanupAction {
     pub repo_id: String,
     pub remove_worktree: bool,
+    /// What to do with the session branch once the worktree is gone.
+    /// Absent on the wire from clients that predate the choice, which
+    /// decodes to [`BranchCleanup::Auto`] — the historical behaviour.
+    #[serde(default)]
+    pub branch: BranchCleanup,
+}
+
+/// The user's answer to "what happens to the session branch?" when a discard
+/// removes a worktree. Only consulted for worktrees under the daemon's own
+/// worktrees root; a branch checked out somewhere else is never touched.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchCleanup {
+    /// Delete the branch only when the daemon judges it merged — by ancestry
+    /// or by patch equivalence — into the session's base branch or that
+    /// base's remote-tracking counterpart. Otherwise the branch survives.
+    #[default]
+    Auto,
+    /// Never touch the branch, however merged it looks.
+    Keep,
+    /// Delete the branch unconditionally (`git branch -D`), discarding any
+    /// commits that exist nowhere else.
+    Delete,
+    /// A value this build does not know. Treated exactly like [`Self::Auto`].
+    #[serde(other)]
+    Unknown,
+}
+
+/// One member repo's branch and what a discard would do to it. Carried by
+/// [`DaemonMessage::DiscardPreview`] so the confirm dialog can name the
+/// outcome per repo instead of guessing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemberBranchFate {
+    pub repo_id: String,
+    pub repo_name: String,
+    pub branch: String,
+    pub fate: BranchFate,
+}
+
+/// What the daemon would do with one member's branch under
+/// [`BranchCleanup::Auto`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BranchFate {
+    /// Every commit on the branch already exists in `into`, so the branch
+    /// would be deleted. `via` says how that was established.
+    WillDelete { into: String, via: MergeEvidence },
+    /// The branch holds work that landed nowhere the daemon checked, so it
+    /// survives unless the user explicitly asks for a delete.
+    KeptByDefault {
+        /// Commits unique to the branch, counted against the closest target.
+        /// `None` when git could not answer and the count is unknown.
+        unique_commits: Option<u32>,
+        /// Refs the branch was measured against, in the order they were tried.
+        checked_against: Vec<String>,
+    },
+    /// The daemon will not delete this branch under any [`BranchCleanup`].
+    Untouched { reason: UntouchedReason },
+    /// A fate this build does not know how to render.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a [`BranchFate::WillDelete`] was established.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeEvidence {
+    /// The branch tip is reachable from the target (`merge-base --is-ancestor`).
+    Ancestry,
+    /// The branch introduces no patch the target does not already carry
+    /// (`git cherry` printed no `+` lines) — a cherry-picked or rebased land.
+    PatchEquivalent,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Why a branch is off-limits to the discard reaper.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UntouchedReason {
+    /// The member's working tree is not under the daemon's worktrees root —
+    /// an in-place checkout or a pinned external worktree.
+    ExternalWorktree,
+    /// Another worktree currently has the branch checked out.
+    CheckedOutElsewhere,
+    /// No `refs/heads/<branch>` in the repo; nothing left to delete.
+    BranchMissing,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1646,6 +1735,14 @@ pub enum ClientMessage {
         session_id: String,
         cleanup: Vec<CleanupAction>,
     },
+    /// Compute what a discard would do to each member's branch, so the
+    /// confirm dialog can name the outcome before the user commits to it.
+    /// Purely a read: nothing is deleted, moved, or persisted. Answered with
+    /// [`DaemonMessage::DiscardPreview`]; an unknown session yields an empty
+    /// member list rather than an error.
+    PreviewDiscard {
+        session_id: String,
+    },
     /// List all non-main git worktrees for a registered repo. Returns a
     /// `Worktrees` reply keyed on `repo_id`. Each entry is marked with
     /// whether an active (non-stopped) session is currently using it.
@@ -2341,6 +2438,12 @@ pub enum DaemonMessage {
     /// Additive on top of protocol v15 (no version bump): older clients
     /// route this through `InboundDaemonMessage::Unknown` and ignore it.
     ShutdownAck {},
+    /// Per-member branch fate for a pending discard. Reply to
+    /// [`ClientMessage::PreviewDiscard`].
+    DiscardPreview {
+        session_id: String,
+        members: Vec<MemberBranchFate>,
+    },
     Repos {
         repos: Vec<RepoEntry>,
     },
@@ -3888,5 +3991,81 @@ mod tests {
         let json = serde_json::to_string(&preset).expect("serialize");
         assert!(json.contains(r#""agent_options""#));
         assert!(!json.contains(r#""codex_sandbox""#));
+    }
+
+    #[test]
+    fn cleanup_action_without_branch_defaults_to_auto() {
+        // Every shipped client predates the field; their discards must keep
+        // meaning "reap the branch if it looks merged".
+        let json = r#"{"repo_id":"r1","remove_worktree":true}"#;
+        let action: CleanupAction = serde_json::from_str(json).expect("parse");
+        assert_eq!(
+            action,
+            CleanupAction {
+                repo_id: "r1".to_string(),
+                remove_worktree: true,
+                branch: BranchCleanup::Auto,
+            }
+        );
+    }
+
+    #[test]
+    fn cleanup_action_unknown_branch_mode_decodes_to_unknown() {
+        let json = r#"{"repo_id":"r1","remove_worktree":true,"branch":"nope"}"#;
+        let action: CleanupAction = serde_json::from_str(json).expect("parse");
+        assert_eq!(action.branch, BranchCleanup::Unknown);
+    }
+
+    #[test]
+    fn branch_fate_round_trips_and_absorbs_unknown_kinds() {
+        let cases = vec![
+            BranchFate::WillDelete {
+                into: "origin/main".to_string(),
+                via: MergeEvidence::PatchEquivalent,
+            },
+            BranchFate::KeptByDefault {
+                unique_commits: Some(3),
+                checked_against: vec!["origin/main".to_string(), "main".to_string()],
+            },
+            BranchFate::KeptByDefault {
+                unique_commits: None,
+                checked_against: Vec::new(),
+            },
+            BranchFate::Untouched {
+                reason: UntouchedReason::CheckedOutElsewhere,
+            },
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).expect("serialize");
+            let decoded: BranchFate = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(original, decoded);
+        }
+
+        // A kind from a newer daemon must not break the containing message.
+        let decoded: BranchFate =
+            serde_json::from_str(r#"{"kind":"something_new"}"#).expect("parse unknown kind");
+        assert_eq!(decoded, BranchFate::Unknown);
+        let reason: UntouchedReason =
+            serde_json::from_str(r#""moon_phase""#).expect("parse unknown reason");
+        assert_eq!(reason, UntouchedReason::Unknown);
+        let evidence: MergeEvidence =
+            serde_json::from_str(r#""vibes""#).expect("parse unknown evidence");
+        assert_eq!(evidence, MergeEvidence::Unknown);
+    }
+
+    #[test]
+    fn discard_preview_round_trips() {
+        let original = MemberBranchFate {
+            repo_id: "r1".to_string(),
+            repo_name: "repo".to_string(),
+            branch: "wt/feature".to_string(),
+            fate: BranchFate::WillDelete {
+                into: "main".to_string(),
+                via: MergeEvidence::Ancestry,
+            },
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let decoded: MemberBranchFate = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, decoded);
     }
 }

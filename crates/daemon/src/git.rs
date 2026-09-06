@@ -312,6 +312,13 @@ pub async fn fetch(repo: &Path) -> anyhow::Result<()> {
 /// in the porcelain output) are included with an empty branch string.
 pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
     let stdout = run_git(repo, &["worktree", "list", "--porcelain"]).await?;
+    // First entry is always the main worktree; skip it.
+    Ok(parse_worktree_list(&stdout).into_iter().skip(1).collect())
+}
+
+/// Every worktree in `git worktree list --porcelain` output as `(branch, path)`
+/// pairs, main worktree first. Detached-HEAD worktrees carry an empty branch.
+fn parse_worktree_list(stdout: &str) -> Vec<(String, PathBuf)> {
     let mut all_blocks: Vec<(String, PathBuf)> = Vec::new();
     let mut current_path: Option<PathBuf> = None;
     let mut current_branch = String::new();
@@ -330,9 +337,23 @@ pub async fn list_worktrees(repo: &Path) -> anyhow::Result<Vec<(String, PathBuf)
     if let Some(path) = current_path.take() {
         all_blocks.push((std::mem::take(&mut current_branch), path));
     }
+    all_blocks
+}
 
-    // First entry is always the main worktree; skip it.
-    Ok(all_blocks.into_iter().skip(1).collect())
+/// Path of the worktree that currently has `branch` checked out, main
+/// worktree included. `None` when no worktree holds it (or git failed).
+///
+/// A branch checked out anywhere is undeletable, so the discard path uses
+/// this to tell the session own worktree apart from any other holder before
+/// it considers reaping.
+pub async fn worktree_holding_branch(repo: &Path, branch: &str) -> Option<PathBuf> {
+    let stdout = run_git(repo, &["worktree", "list", "--porcelain"])
+        .await
+        .ok()?;
+    parse_worktree_list(&stdout)
+        .into_iter()
+        .find(|(b, _)| b == branch)
+        .map(|(_, path)| path)
 }
 
 /// Error when `branch` names an existing remote-tracking ref (`origin/main`).
@@ -382,25 +403,94 @@ pub async fn delete_branch(repo: &Path, branch: &str) -> anyhow::Result<()> {
     run_git(repo, &["branch", "-D", branch]).await.map(|_| ())
 }
 
-/// `git branch -d <branch>` — the non-force delete git refuses when the
-/// branch tip is not reachable from its upstream (or from `HEAD` when no
-/// upstream is set). Used on session discard to reap the session branch a
-/// `worktree remove` leaves behind, without ever destroying commits that
-/// exist nowhere else. `Ok(true)` = deleted, `Ok(false)` = kept because
-/// the branch still has unmerged commits.
-pub async fn delete_branch_if_merged(repo: &Path, branch: &str) -> anyhow::Result<bool> {
-    match run_git(repo, &["branch", "-d", branch]).await {
-        Ok(_) => Ok(true),
-        Err(err) => {
-            if format!("{err:#}")
-                .to_lowercase()
-                .contains("not fully merged")
-            {
-                return Ok(false);
-            }
-            Err(err)
-        }
+/// Whether the work on a branch already exists somewhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchMergeStatus {
+    /// Every commit on the branch is carried by `into`, established `via`.
+    Merged {
+        into: String,
+        via: protocol::MergeEvidence,
+    },
+    /// The branch introduces `unique_commits` patches no target carries,
+    /// counted against whichever target it is closest to.
+    Unmerged { unique_commits: u32 },
+}
+
+/// Measure `branch` against `targets` (highest-priority target first).
+///
+/// A target counts as carrying the branch when the branch tip is reachable
+/// from it (`merge-base --is-ancestor`) or when `git cherry` finds no patch
+/// the target is missing. The second test is what makes a cherry-picked,
+/// rebased, or otherwise-rewritten land readable; a squash merge or a
+/// conflict-edited pick still reads as unique, which errs on the safe side.
+///
+/// Targets whose git calls fail are skipped. Errors when `branch` does not
+/// exist, when `targets` is empty, or when every target was skipped — none
+/// of those support a keep-or-delete conclusion.
+pub async fn branch_merge_status(
+    repo: &Path,
+    branch: &str,
+    targets: &[String],
+) -> anyhow::Result<BranchMergeStatus> {
+    // `merge-base --is-ancestor` exits 1 for "not an ancestor" and 128 for a
+    // bad ref, and `run_git` collapses both into `Err`. Verifying the refs up
+    // front is what lets a later failure be read as the honest answer.
+    if !full_ref_exists(repo, &format!("refs/heads/{branch}")).await {
+        return Err(anyhow!(
+            "branch {branch} does not exist in {}",
+            repo.display()
+        ));
     }
+
+    let mut closest: Option<u32> = None;
+    for target in targets {
+        if run_git(repo, &["rev-parse", "--verify", "--quiet", target])
+            .await
+            .is_err()
+        {
+            debug!(
+                branch,
+                target, "branch_merge_status: skipping missing target"
+            );
+            continue;
+        }
+        if run_git(repo, &["merge-base", "--is-ancestor", branch, target])
+            .await
+            .is_ok()
+        {
+            return Ok(BranchMergeStatus::Merged {
+                into: target.clone(),
+                via: protocol::MergeEvidence::Ancestry,
+            });
+        }
+        let stdout = match run_git(repo, &["cherry", target, branch]).await {
+            Ok(stdout) => stdout,
+            Err(err) => {
+                debug!(?err, branch, target, "branch_merge_status: cherry failed");
+                continue;
+            }
+        };
+        // `git cherry` prints `+ <sha>` for a patch the target lacks and
+        // `- <sha>` for one it already carries.
+        let unique = u32::try_from(stdout.lines().filter(|l| l.starts_with('+')).count())
+            .unwrap_or(u32::MAX);
+        if unique == 0 {
+            return Ok(BranchMergeStatus::Merged {
+                into: target.clone(),
+                via: protocol::MergeEvidence::PatchEquivalent,
+            });
+        }
+        closest = Some(closest.map_or(unique, |best: u32| best.min(unique)));
+    }
+
+    closest.map_or_else(
+        || {
+            Err(anyhow!(
+                "no usable merge target for branch {branch} among {targets:?}"
+            ))
+        },
+        |unique_commits| Ok(BranchMergeStatus::Unmerged { unique_commits }),
+    )
 }
 
 /// Abbreviated SHA of an arbitrary ref in `repo` — the branch-name
@@ -1045,79 +1135,217 @@ mod tests {
         cleanup_stale_repo(&repo);
     }
 
-    /// The discard-side reaper: a session branch whose commits all exist
-    /// elsewhere is deleted; one holding unique commits survives. Mirrors
-    /// the worktree-delete → branch-reap sequence `discard_session` runs.
-    #[tokio::test]
-    async fn delete_branch_if_merged_reaps_only_safe_branches() {
-        let repo = init_repo("branch-reap").await;
-        run_git(&repo, &["branch", "merged"])
-            .await
-            .expect("create merged branch");
-        assert!(
-            delete_branch_if_merged(&repo, "merged")
-                .await
-                .expect("delete merged branch"),
-            "a branch level with main must be reaped"
-        );
-        assert!(
-            !list_branches(&repo)
-                .await
-                .expect("list")
-                .contains(&"merged".to_string()),
-            "reaped branch must be gone"
-        );
-
-        run_git(&repo, &["checkout", "-b", "ahead"])
-            .await
-            .expect("checkout ahead");
-        write_file(&repo, "unique.txt", "only here\n");
-        run_git(&repo, &["add", "."]).await.expect("add");
-        run_git(&repo, &["commit", "-m", "unique"])
+    /// Commit `body` to `name` on the current branch and return its sha.
+    async fn commit_file(repo: &Path, name: &str, body: &str) -> String {
+        write_file(repo, name, body);
+        run_git(repo, &["add", "."]).await.expect("add");
+        run_git(repo, &["commit", "-m", name])
             .await
             .expect("commit");
-        run_git(&repo, &["checkout", "main"])
+        run_git(repo, &["rev-parse", "HEAD"])
             .await
-            .expect("back to main");
-        assert!(
-            !delete_branch_if_merged(&repo, "ahead")
-                .await
-                .expect("refusal is Ok(false), not an error"),
-            "a branch with unique commits must be kept"
-        );
-        assert!(
-            list_branches(&repo)
-                .await
-                .expect("list")
-                .contains(&"ahead".to_string()),
-            "kept branch must still exist"
-        );
+            .expect("rev-parse")
+            .trim()
+            .to_string()
+    }
 
+    /// A branch that never moved off its base carries nothing unique, and
+    /// ancestry is the cheapest way to say so.
+    #[tokio::test]
+    async fn branch_merge_status_reports_ancestry_for_an_untouched_branch() {
+        let repo = init_repo("merge-ancestry").await;
+        run_git(&repo, &["branch", "wt/fresh"])
+            .await
+            .expect("create branch");
+        let status = branch_merge_status(&repo, "wt/fresh", &["main".to_string()])
+            .await
+            .expect("status");
+        assert_eq!(
+            status,
+            BranchMergeStatus::Merged {
+                into: "main".to_string(),
+                via: protocol::MergeEvidence::Ancestry,
+            }
+        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// A leftover branch that trails its upstream — the "behind N" shape
-    /// every discarded session leaves once its work has been merged — is
-    /// fully merged by definition and gets reaped.
+    /// The case the old `git branch -d` rule got wrong: the work landed on
+    /// main under a different sha, so ancestry says no but the patch is
+    /// already there.
     #[tokio::test]
-    async fn delete_branch_if_merged_reaps_a_behind_only_leftover() {
-        let repo = init_stale_repo("branch-reap-behind", 3).await;
-        run_git(&repo, &["branch", "wt/leftover", "main"])
+    async fn branch_merge_status_sees_a_cherry_picked_land() {
+        let repo = init_repo("merge-cherry").await;
+        run_git(&repo, &["checkout", "-b", "wt/picked"])
             .await
-            .expect("create leftover branch");
-        run_git(
-            &repo,
-            &["branch", "--set-upstream-to=origin/main", "wt/leftover"],
-        )
-        .await
-        .expect("set upstream");
-        assert!(
-            delete_branch_if_merged(&repo, "wt/leftover")
-                .await
-                .expect("reap behind-only leftover"),
-            "a branch merged into its upstream must be reaped"
+            .expect("checkout branch");
+        let sha = commit_file(&repo, "picked.txt", "landed elsewhere\n").await;
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+        // Move main off the fork point first: cherry-picking onto the exact
+        // parent reproduces the original commit byte for byte, which would
+        // fast-forward main and make this an ancestry case instead.
+        commit_file(&repo, "main-only.txt", "diverged\n").await;
+        run_git(&repo, &["cherry-pick", &sha])
+            .await
+            .expect("cherry-pick onto main");
+
+        let status = branch_merge_status(&repo, "wt/picked", &["main".to_string()])
+            .await
+            .expect("status");
+        assert_eq!(
+            status,
+            BranchMergeStatus::Merged {
+                into: "main".to_string(),
+                via: protocol::MergeEvidence::PatchEquivalent,
+            }
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Work pushed straight to the remote leaves the stale local `main`
+    /// unaware of it; the remote-tracking target is the one that answers.
+    #[tokio::test]
+    async fn branch_merge_status_finds_a_remote_only_land() {
+        let repo = init_stale_repo("merge-remote", 0).await;
+        run_git(&repo, &["checkout", "-b", "wt/pushed"])
+            .await
+            .expect("checkout branch");
+        commit_file(&repo, "pushed.txt", "on the remote\n").await;
+        run_git(&repo, &["push", "origin", "wt/pushed:main"])
+            .await
+            .expect("push onto origin main");
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+        fetch(&repo).await.expect("fetch");
+
+        let targets = vec!["main".to_string(), "origin/main".to_string()];
+        let status = branch_merge_status(&repo, "wt/pushed", &targets)
+            .await
+            .expect("status");
+        assert_eq!(
+            status,
+            BranchMergeStatus::Merged {
+                into: "origin/main".to_string(),
+                via: protocol::MergeEvidence::Ancestry,
+            },
+            "local main is stale; origin/main is the target that carries the work"
         );
         cleanup_stale_repo(&repo);
+    }
+
+    /// Nothing landed anywhere: the count is what the confirm dialog shows.
+    #[tokio::test]
+    async fn branch_merge_status_counts_unique_commits() {
+        let repo = init_repo("merge-unique").await;
+        run_git(&repo, &["checkout", "-b", "wt/unique"])
+            .await
+            .expect("checkout branch");
+        commit_file(&repo, "one.txt", "first\n").await;
+        commit_file(&repo, "two.txt", "second\n").await;
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+
+        let status = branch_merge_status(&repo, "wt/unique", &["main".to_string()])
+            .await
+            .expect("status");
+        assert_eq!(status, BranchMergeStatus::Unmerged { unique_commits: 2 });
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A partially-landed branch still counts as unmerged, and the count
+    /// excludes the commit that was picked across.
+    #[tokio::test]
+    async fn branch_merge_status_excludes_the_landed_half_from_the_count() {
+        let repo = init_repo("merge-mixed").await;
+        run_git(&repo, &["checkout", "-b", "wt/mixed"])
+            .await
+            .expect("checkout branch");
+        let landed = commit_file(&repo, "landed.txt", "goes to main\n").await;
+        commit_file(&repo, "stays.txt", "only here\n").await;
+        run_git(&repo, &["checkout", "main"])
+            .await
+            .expect("back to main");
+        run_git(&repo, &["cherry-pick", &landed])
+            .await
+            .expect("cherry-pick the first commit");
+
+        let status = branch_merge_status(&repo, "wt/mixed", &["main".to_string()])
+            .await
+            .expect("status");
+        assert_eq!(status, BranchMergeStatus::Unmerged { unique_commits: 1 });
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// Both no-answer shapes are errors, never a silent "merged" that would
+    /// license a delete.
+    #[tokio::test]
+    async fn branch_merge_status_errs_without_a_branch_or_a_target() {
+        let repo = init_repo("merge-errors").await;
+        assert!(
+            branch_merge_status(&repo, "wt/ghost", &["main".to_string()])
+                .await
+                .is_err(),
+            "a missing branch has no merge status"
+        );
+        run_git(&repo, &["branch", "wt/real"])
+            .await
+            .expect("create branch");
+        assert!(
+            branch_merge_status(&repo, "wt/real", &[]).await.is_err(),
+            "nothing to measure against is an error, not a merge"
+        );
+        assert!(
+            branch_merge_status(&repo, "wt/real", &["origin/nope".to_string()])
+                .await
+                .is_err(),
+            "every target skipped is an error, not a merge"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[tokio::test]
+    async fn worktree_holding_branch_finds_the_checkout() {
+        let repo = init_repo("holder").await;
+        let wt = repo.with_file_name(format!(
+            "{}-wt",
+            repo.file_name()
+                .expect("repo leaf")
+                .to_string_lossy()
+                .into_owned()
+        ));
+        let _ = std::fs::remove_dir_all(&wt);
+        worktree_add(&repo, &wt, "wt/held", Some("main"))
+            .await
+            .expect("worktree add");
+        run_git(&repo, &["branch", "wt/loose"])
+            .await
+            .expect("create loose branch");
+
+        let holder = worktree_holding_branch(&repo, "wt/held")
+            .await
+            .expect("held branch has a worktree");
+        assert_eq!(
+            crate::paths::normalize_path_key(&holder.to_string_lossy()),
+            crate::paths::normalize_path_key(&wt.to_string_lossy())
+        );
+        assert!(
+            worktree_holding_branch(&repo, "wt/loose").await.is_none(),
+            "a branch with no worktree is held by nobody"
+        );
+        assert_eq!(
+            worktree_holding_branch(&repo, "main")
+                .await
+                .map(|p| crate::paths::normalize_path_key(&p.to_string_lossy())),
+            Some(crate::paths::normalize_path_key(&repo.to_string_lossy())),
+            "the main worktree counts as a holder"
+        );
+
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[tokio::test]

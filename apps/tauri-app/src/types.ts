@@ -428,7 +428,57 @@ export interface PresetEntry {
 export interface CleanupAction {
   repo_id: string;
   remove_worktree: boolean;
+  // What happens to the session branch once the worktree is gone. Only
+  // consulted when `remove_worktree` is true. Required here (the Rust side
+  // defaults it) so every call site has to state its intent.
+  branch: BranchCleanup;
 }
+
+// "auto" deletes the branch only when the daemon judges it merged — by
+// ancestry or by patch equivalence — into the session's base branch or that
+// base's remote-tracking counterpart. "keep" never touches it. "delete" is
+// an unconditional `git branch -D`.
+export type BranchCleanup = "auto" | "keep" | "delete";
+
+// One member repo's branch and what a discard would do to it. Carried by
+// `discard_preview` so the confirm dialog can name the outcome per repo.
+export interface MemberBranchFate {
+  repo_id: string;
+  repo_name: string;
+  branch: string;
+  fate: BranchFate;
+}
+
+// What the daemon would do with one member's branch under `BranchCleanup`
+// "auto". Tagged on `kind`. The daemon may grow variants, so every consumer
+// must carry a default branch for a tag this build doesn't know.
+export type BranchFate =
+  | { kind: "will_delete"; into: string; via: MergeEvidence }
+  | {
+      kind: "kept_by_default";
+      // Commits unique to the branch, counted against the closest target.
+      // Null when git could not answer and the count is unknown.
+      unique_commits: number | null;
+      // Refs the branch was measured against, in the order they were tried.
+      checked_against: string[];
+    }
+  | { kind: "untouched"; reason: UntouchedReason }
+  | { kind: "unknown" };
+
+// How a `will_delete` was established: the branch tip is reachable from the
+// target, or the branch introduces no patch the target doesn't already carry.
+// "unknown" is the Rust enum's serde(other) catch-all: a daemon-side fallback,
+// never sent on purpose. Treat it as "no evidence given".
+export type MergeEvidence = "ancestry" | "patch_equivalent" | "unknown";
+
+// Why a branch is off-limits to the discard reaper, whatever the
+// `BranchCleanup` says. "unknown" is the Rust enum's serde(other) catch-all: a
+// daemon-side fallback, never sent on purpose. Treat it as "no reason given".
+export type UntouchedReason =
+  | "external_worktree"
+  | "checked_out_elsewhere"
+  | "branch_missing"
+  | "unknown";
 
 export interface WorktreeInfo {
   // Empty for a worktree in detached-HEAD state.
@@ -777,6 +827,10 @@ export type ClientMessage =
   | { type: "discard_abandoned"; session_id: string }
   | { type: "park_session"; session_id: string }
   | { type: "discard_session"; session_id: string; cleanup: CleanupAction[] }
+  // Read-only "what would a discard do to each member's branch?" query.
+  // Answered with `discard_preview`; an unknown session yields an empty
+  // member list rather than an error.
+  | { type: "preview_discard"; session_id: string }
   | { type: "resume_all_abandoned" }
   | { type: "list_branches"; repo_id: string }
   | { type: "list_worktrees"; repo_id: string }
@@ -1097,6 +1151,12 @@ export type DaemonMessage =
       session_id: string;
       session_label: string;
       failures: WorktreeCleanupFailure[];
+    }
+  // Per-member branch fate for a pending discard. Reply to `preview_discard`.
+  | {
+      type: "discard_preview";
+      session_id: string;
+      members: MemberBranchFate[];
     }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }

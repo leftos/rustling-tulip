@@ -85,6 +85,54 @@ export interface VscodeWorkspaceSuggestion {
   folders: VscodeWorkspaceFolder[];
 }
 
+/**
+ * What `stop_session` / `discard_session` do to one member repo. Mirrors
+ * `protocol::CleanupAction` and `apps/tauri-app/src/types.ts`.
+ */
+export interface CleanupAction {
+  repo_id: string;
+  remove_worktree: boolean;
+  /** Only consulted when `remove_worktree` is true. Required here so every
+   *  call site states its intent, matching the app-side mirror. */
+  branch: BranchCleanup;
+}
+
+/**
+ * "auto" deletes the branch only when the daemon judges it merged — by
+ * ancestry or by patch equivalence — into the session's base branch or that
+ * base's remote-tracking counterpart. "keep" never touches it. "delete" is
+ * an unconditional `git branch -D`.
+ */
+export type BranchCleanup = "auto" | "keep" | "delete";
+
+/** One member repo's branch and what a discard would do to it. */
+export interface MemberBranchFate {
+  repo_id: string;
+  repo_name: string;
+  branch: string;
+  fate: BranchFate;
+}
+
+/** How a `will_delete` was established. */
+export type MergeEvidence = "ancestry" | "patch_equivalent";
+
+/** Why a branch is off-limits to the discard reaper. */
+export type UntouchedReason =
+  | "external_worktree"
+  | "checked_out_elsewhere"
+  | "branch_missing";
+
+/** What the daemon would do with one member's branch under "auto". */
+export type BranchFate =
+  | { kind: "will_delete"; into: string; via: MergeEvidence }
+  | {
+      kind: "kept_by_default";
+      unique_commits: number | null;
+      checked_against: string[];
+    }
+  | { kind: "untouched"; reason: UntouchedReason }
+  | { kind: "unknown" };
+
 export type SplitDirection = "horizontal" | "vertical";
 export type SplitPlace = "first" | "second";
 
@@ -187,8 +235,11 @@ export type ClientMessage =
       appearance: AppearanceOverrides;
     }
   | { type: "load_scrollback"; session_id: string }
-  | { type: "stop_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
-  | { type: "discard_session"; session_id: string; cleanup: Array<{ repo_id: string; remove_worktree: boolean }> }
+  | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
+  | { type: "discard_session"; session_id: string; cleanup: CleanupAction[] }
+  // Read-only "what would a discard do to each member's branch?" query,
+  // answered with `discard_preview`.
+  | { type: "preview_discard"; session_id: string }
   | { type: "list_tabs" }
   | {
       type: "create_tab";
@@ -293,6 +344,12 @@ export type DaemonMessage =
       suggestions: VscodeWorkspaceSuggestion[];
     }
   | { type: "session_removed"; session_id: string }
+  // Per-member branch fate for a pending discard. Reply to `preview_discard`.
+  | {
+      type: "discard_preview";
+      session_id: string;
+      members: MemberBranchFate[];
+    }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "pty_output"; session_id: string; data_b64: string }
   | {

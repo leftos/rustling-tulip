@@ -11,6 +11,11 @@ interface Props {
   /// `claude` processes. Surfaced so the user can act on that knowledge.
   orphanSessionCount: number;
   busy: boolean;
+  /// Suppress this dialog's Escape handler while another dialog is stacked
+  /// on top of it. `useEscape` binds at the document level, so without this
+  /// one Escape press would dismiss both layers at once. Unlike `busy` it
+  /// leaves the buttons live and their labels alone.
+  escapeDisabled: boolean;
   /// True once the 2 s shutdown grace window has elapsed without the
   /// daemon's WS connection closing. Without this the dialog sits in
   /// "Stopping…" forever — App.tsx used to auto-close the window after
@@ -40,6 +45,7 @@ export default function ExitConfirmDialog({
   activeWorktreeSessionCount,
   orphanSessionCount,
   busy,
+  escapeDisabled,
   stuck,
   onStopAndQuit,
   onStopAndQuitRemoveWorktrees,
@@ -50,9 +56,10 @@ export default function ExitConfirmDialog({
 }: Props) {
   const quitLeaveRef = useRef<HTMLButtonElement | null>(null);
   const hasActiveWorktreeSessions = activeWorktreeSessionCount > 0;
-  // Escape dismisses while not busy. Autofocus the primary action since it
-  // keeps sessions running and does not destroy worktrees.
-  useEscape(onCancel, !busy);
+  // Escape dismisses while not busy and nothing is stacked above. Autofocus
+  // the primary action since it keeps sessions running and does not destroy
+  // worktrees.
+  useEscape(onCancel, !busy && !escapeDisabled);
   useAutoFocus(quitLeaveRef);
   useFocusReturn();
   return (

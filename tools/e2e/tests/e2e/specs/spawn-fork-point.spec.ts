@@ -476,4 +476,5 @@ async function setBaseBranch(
   const base = await dialog.$('[data-testid="spawn-single-base-branch"]');
   await base.waitForExist({ timeout: 10_000 });
   await setFieldValue(base, value, "base branch field");
+  await dismissComboboxDropdown();
 }

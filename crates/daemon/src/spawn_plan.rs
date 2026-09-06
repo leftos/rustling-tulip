@@ -28,25 +28,42 @@ pub async fn resolve_base_for_create(
     repo: &RepoEntry,
     explicit_base: Option<&str>,
 ) -> String {
+    let local = local_base_name(state, repo, explicit_base).await;
+    if explicit_base.is_some() {
+        return local;
+    }
+    git::resolve_base_ref(Path::new(&repo.path), &local).await
+}
+
+/// The base branch name before any remote-tracking upgrade: the explicit
+/// caller value, or the same detection chain [`resolve_base_for_create`]
+/// walks (persisted default → lazy re-detection → current branch → `main`).
+///
+/// Callers that need both the local name and its remote counterpart start
+/// here; [`resolve_base_for_create`] is the "just give me the fork point"
+/// wrapper on top.
+pub async fn local_base_name(
+    state: &AppState,
+    repo: &RepoEntry,
+    explicit_base: Option<&str>,
+) -> String {
     if let Some(base) = explicit_base {
         return base.to_string();
     }
     let repo_path = Path::new(&repo.path);
-    let local = if let Some(branch) = repo.default_branch.clone() {
-        branch
-    } else {
-        let detected = git::default_branch(repo_path).await;
-        ensure_default_branch(state, &repo.id, detected.clone());
-        match detected {
-            Some(branch) => branch,
-            None => git::current_branch(repo_path)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "main".to_string()),
-        }
-    };
-    git::resolve_base_ref(repo_path, &local).await
+    if let Some(branch) = repo.default_branch.clone() {
+        return branch;
+    }
+    let detected = git::default_branch(repo_path).await;
+    ensure_default_branch(state, &repo.id, detected.clone());
+    match detected {
+        Some(branch) => branch,
+        None => git::current_branch(repo_path)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "main".to_string()),
+    }
 }
 
 /// Git facts about where a spawn would fork from.

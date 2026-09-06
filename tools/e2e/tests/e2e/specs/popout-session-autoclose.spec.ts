@@ -66,7 +66,9 @@ describe("pop-out pane stop/discard lifecycle", function () {
           type: "discard_session",
           session_id: spawnedSessionId,
           cleanup: registeredRepoId
-            ? [{ repo_id: registeredRepoId, remove_worktree: false }]
+            ? [
+                { repo_id: registeredRepoId, remove_worktree: false, branch: "auto" },
+              ]
             : [],
         });
         await delay(500);
@@ -178,7 +180,9 @@ describe("pop-out pane stop/discard lifecycle", function () {
     ws.send({
       type: "stop_session",
       session_id: sessionId,
-      cleanup: [{ repo_id: registeredRepoId, remove_worktree: false }],
+      cleanup: [
+        { repo_id: registeredRepoId, remove_worktree: false, branch: "auto" },
+      ],
     });
     await delay(500);
     expect(
@@ -195,7 +199,9 @@ describe("pop-out pane stop/discard lifecycle", function () {
     ws.send({
       type: "discard_session",
       session_id: sessionId,
-      cleanup: [{ repo_id: registeredRepoId, remove_worktree: false }],
+      cleanup: [
+        { repo_id: registeredRepoId, remove_worktree: false, branch: "auto" },
+      ],
     });
     spawnedSessionId = null;
     await reopened.waitForClose({ timeoutMs: 10_000 });

@@ -393,36 +393,45 @@ function PaneChrome(props: PaneChromeProps) {
     client.send({ type: "close_pane", tab_id: tabId, pane_id: node.pane_id });
   }, [client, session, tab, tabId, node.pane_id, onTabsSnapshotUndo]);
 
-  const closePaneAndDiscardSession = useCallback(
-    (removeWorktree: boolean) => {
-      if (!session) return;
-      const cleanup = session.members.map((m) => ({
-        repo_id: m.repo_id,
-        remove_worktree: removeWorktree,
-      }));
+  const closePaneAndDiscardSession = useCallback(() => {
+    if (!session) return;
+    const cleanup = session.members.map((m) => ({
+      repo_id: m.repo_id,
+      remove_worktree: false,
+      branch: "auto" as const,
+    }));
+    client.send({
+      type: "close_pane",
+      tab_id: tabId,
+      pane_id: node.pane_id,
+    });
+    if (session.status !== "stopped" && session.status !== "error") {
       client.send({
-        type: "close_pane",
-        tab_id: tabId,
-        pane_id: node.pane_id,
-      });
-      if (session.status !== "stopped" && session.status !== "error") {
-        client.send({
-          type: "stop_session",
-          session_id: session.id,
-          cleanup: cleanup.map((action) => ({
-            ...action,
-            remove_worktree: false,
-          })),
-        });
-      }
-      client.send({
-        type: "discard_session",
+        type: "stop_session",
         session_id: session.id,
         cleanup,
       });
-    },
-    [client, node.pane_id, session, tabId],
-  );
+    }
+    client.send({
+      type: "discard_session",
+      session_id: session.id,
+      cleanup,
+    });
+  }, [client, node.pane_id, session, tabId]);
+
+  /// Worktree-deleting variant. App.tsx owns the branch-fate confirm and the
+  /// sends that follow it, so this only hands over the pane coordinates.
+  const requestDeleteWorktree = useCallback(() => {
+    if (!session) return;
+    window.dispatchEvent(
+      new CustomEvent("rt:request_delete_worktree", {
+        detail: {
+          sessionId: session.id,
+          closePane: { tabId, paneId: node.pane_id },
+        },
+      }),
+    );
+  }, [node.pane_id, session, tabId]);
 
   // Pane × button: empty pane closes immediately (nothing to protect);
   // bound pane opens the 4-option confirm dialog. Previously × sent
@@ -646,11 +655,11 @@ function PaneChrome(props: PaneChromeProps) {
             setCloseConfirm(false);
           }}
           onClosePaneDiscardSessionKeepWorktree={() => {
-            closePaneAndDiscardSession(false);
+            closePaneAndDiscardSession();
             setCloseConfirm(false);
           }}
           onClosePaneDiscardSessionRemoveWorktree={() => {
-            closePaneAndDiscardSession(true);
+            requestDeleteWorktree();
             setCloseConfirm(false);
           }}
         />
