@@ -53,6 +53,11 @@ CATCH_ALL_EXEMPT = {
         "client -> daemon only (ClientMessage::InitLayout); the Rust Unknown "
         "lets an older daemon decode a newer client's choice"
     ),
+    "BranchCleanup": (
+        "client -> daemon only (CleanupAction.branch on StopSession / "
+        "DiscardSession); the Rust Unknown lets an older daemon decode a "
+        "newer client's choice as Auto"
+    ),
 }
 
 
