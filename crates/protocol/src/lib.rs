@@ -675,8 +675,11 @@ impl SpawnTarget {
     ///
     /// `RecreateFromBase` is a one-shot answer the user gave about one
     /// specific collision they were shown. It must not survive into a
-    /// persisted [`SpawnConfig`], where "launch last again" or a duplicate
-    /// would replay it and delete a worktree nobody was asked about.
+    /// persisted [`SpawnConfig`], where the paths that replay the stored
+    /// policy — "launch last again" from the dialog and resuming an
+    /// abandoned session — would delete a worktree nobody was asked about.
+    /// A duplicate of a worktree session replays no policy at all; see
+    /// [`SpawnConfig::to_duplicate_request`].
     #[must_use]
     pub fn with_reuse_policy_reset(mut self) -> Self {
         match &mut self {
@@ -686,6 +689,22 @@ impl SpawnTarget {
             Self::Standalone { .. } => {}
         }
         self
+    }
+
+    /// Which repo or workspace a branch-name suggestion for this target would
+    /// be about. `None` for a standalone shell — it has no repo to name a
+    /// branch in.
+    #[must_use]
+    pub fn suggest_target(&self) -> Option<SuggestTarget> {
+        match self {
+            Self::Single { repo_id, .. } => Some(SuggestTarget::Repo {
+                repo_id: repo_id.clone(),
+            }),
+            Self::Workspace { workspace_id, .. } => Some(SuggestTarget::Workspace {
+                workspace_id: workspace_id.clone(),
+            }),
+            Self::Standalone { .. } => None,
+        }
     }
 }
 
@@ -721,6 +740,33 @@ impl SpawnConfig {
             extra_env: self.extra_env.clone(),
             prompt_injector: None,
         }
+    }
+
+    /// Build the request for a duplicate. A worktree target gets
+    /// `fresh_branch` and [`WorktreeReusePolicy::RefuseLeftover`] so the clone
+    /// runs on its own branch and never attaches a leftover; in-place and
+    /// standalone targets clone verbatim.
+    #[must_use]
+    pub fn to_duplicate_request(&self, fresh_branch: Option<String>) -> SpawnRequest {
+        let mut req = self.to_clone_request();
+        if let Some(fresh) = fresh_branch
+            && let SpawnTarget::Single {
+                branch_name,
+                use_worktree: true,
+                worktree_reuse,
+                ..
+            }
+            | SpawnTarget::Workspace {
+                branch_name,
+                use_worktree: true,
+                worktree_reuse,
+                ..
+            } = &mut req.target
+        {
+            *branch_name = fresh;
+            *worktree_reuse = WorktreeReusePolicy::RefuseLeftover;
+        }
+        req
     }
 
     /// Convenience accessor — the agent kind selected by `agent_options`.
@@ -1648,6 +1694,12 @@ pub enum ClientMessage {
     /// permission mode, sandbox, skip-perms flag, and extra env vars. The
     /// new session gets a freshly generated label and no initial prompt —
     /// it's a fresh process with the same config, not a continuation.
+    ///
+    /// A duplicate of a *worktree* session lands on a fresh branch the daemon
+    /// picks (and refuses any leftover under that name) rather than the
+    /// source's branch, so the clone gets its own checkout instead of
+    /// competing for the directory the source holds. In-place duplicates keep
+    /// the source's branch. See [`SpawnConfig::to_duplicate_request`].
     DuplicateSession {
         session_id: String,
     },
@@ -3683,6 +3735,150 @@ mod tests {
         assert_eq!(req, decoded);
         assert!(json.contains(r#""kind":"standalone""#));
         assert!(json.contains(r#""mode":"plain_shell""#));
+    }
+
+    fn duplicate_source_config(target: SpawnTarget) -> SpawnConfig {
+        SpawnConfig {
+            target,
+            mode: SessionMode::PlainShell,
+            dangerously_skip_permissions: true,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
+            model: Some("sonnet-4".to_string()),
+            extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
+        }
+    }
+
+    fn single_target(branch: &str, use_worktree: bool) -> SpawnTarget {
+        SpawnTarget::Single {
+            repo_id: "r1".to_string(),
+            branch_name: branch.to_string(),
+            base_branch: Some("main".to_string()),
+            use_worktree,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_request_renames_a_worktree_single() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let req = config.to_duplicate_request(Some("wt/brave-lynx".to_string()));
+
+        match req.target {
+            SpawnTarget::Single {
+                ref branch_name,
+                worktree_reuse,
+                use_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/brave-lynx");
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover);
+                assert!(use_worktree);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+        // Everything that isn't the branch or the collision policy is the
+        // verbatim clone.
+        assert_eq!(req.mode, config.mode);
+        assert_eq!(req.model, config.model);
+        assert_eq!(req.extra_env, config.extra_env);
+        assert!(req.dangerously_skip_permissions);
+        assert_eq!(req.label, None);
+        assert_eq!(req.initial_prompt, None);
+        assert_eq!(
+            config.target.suggest_target(),
+            Some(SuggestTarget::Repo {
+                repo_id: "r1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_request_renames_a_worktree_workspace() {
+        let config = duplicate_source_config(SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/sleepy-otter".to_string(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktrees: Vec::new(),
+        });
+        let req = config.to_duplicate_request(Some("wt/kind-gecko".to_string()));
+
+        match req.target {
+            SpawnTarget::Workspace {
+                ref branch_name,
+                worktree_reuse,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/kind-gecko");
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover);
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+        assert_eq!(
+            config.target.suggest_target(),
+            Some(SuggestTarget::Workspace {
+                workspace_id: "ws1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_request_keeps_an_in_place_branch() {
+        let config = duplicate_source_config(single_target("main", false));
+        let req = config.to_duplicate_request(Some("wt/witty-hawk".to_string()));
+
+        match req.target {
+            SpawnTarget::Single {
+                ref branch_name,
+                worktree_reuse,
+                use_worktree,
+                ..
+            } => {
+                assert_eq!(
+                    branch_name, "main",
+                    "an in-place duplicate stays on its branch"
+                );
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::Reuse);
+                assert!(!use_worktree);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_request_leaves_a_standalone_shell_alone() {
+        let config = duplicate_source_config(SpawnTarget::Standalone {
+            cwd: Some("X:/scratch".to_string()),
+        });
+        let req = config.to_duplicate_request(Some("wt/quick-fox".to_string()));
+
+        assert_eq!(req.target, config.target);
+        assert_eq!(req, config.to_clone_request());
+        assert_eq!(config.target.suggest_target(), None);
+    }
+
+    #[test]
+    fn duplicate_request_without_a_fresh_name_is_the_plain_clone() {
+        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let req = config.to_duplicate_request(None);
+
+        match req.target {
+            SpawnTarget::Single {
+                ref branch_name,
+                worktree_reuse,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/sleepy-otter");
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::Reuse);
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+        assert_eq!(req, config.to_clone_request());
     }
 
     #[test]

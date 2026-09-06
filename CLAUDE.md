@@ -158,7 +158,7 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 
 Workspace `Cargo.toml` enforces clippy pedantic + denies on `unwrap_used`, `panic`, `dbg_macro`, `todo`, `print_*`, `exit`, etc. Use `tracing::{error,warn,info,debug}` instead of `println!`. Use `expect_used = "warn"` — prefer `?` and `anyhow::Context`. The two existing `.expect()` allowances live in `apps/tauri-app/src-tauri/src/lib.rs` for Tauri builder errors with explicit `#[expect(... reason = "...")]`.
 
-Rust edition 2024, pinned to 1.87 via `rust-toolchain.toml`. Profile `release` uses `lto = "thin"`, `codegen-units = 1`, `strip = true`.
+Rust edition 2024 on the `stable` channel (`rust-toolchain.toml` pins the channel, not a version; let-chains and other current features are in use). Profile `release` uses `lto = "thin"`, `codegen-units = 1`, `strip = true`.
 
 Frontend uses TypeScript strict + React 19 + xterm.js (`@xterm/xterm` + `@xterm/addon-fit`). PTY output is high-volume — keep it out of React state, use a `Map<sessionId, Set<listener>>` ref pattern (see `App.tsx`). Monaco editor (`monaco-editor`) is used for diff viewing in the source-control sidebar.
 

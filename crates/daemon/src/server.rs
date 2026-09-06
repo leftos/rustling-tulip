@@ -1457,7 +1457,17 @@ async fn dispatch(
                     "session {session_id} has no stored spawn config; cannot duplicate"
                 ));
             };
-            let req = stored.to_clone_request();
+            // A worktree duplicate runs on its own branch: the source still
+            // holds its checkout, and a name the daemon picks can't attach a
+            // leftover the user was never shown.
+            let fresh = match stored.target.suggest_target() {
+                Some(target) if target_uses_worktree(&stored.target) => Some(
+                    branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?,
+                ),
+                _ => None,
+            };
+            info!(source = %session_id, ?fresh, "duplicate_session: spawning");
+            let req = stored.to_duplicate_request(fresh);
             match spawn_session(hub, req).await {
                 Ok(snap) => {
                     let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
@@ -2614,6 +2624,16 @@ fn diff_tab_name(path: &str, against: Option<&str>) -> String {
 
 fn short_rev(rev: &str) -> &str {
     if rev.len() > 7 { &rev[..7] } else { rev }
+}
+
+/// Whether a spawn target runs in a daemon-managed worktree. A standalone
+/// shell has no repo and never does.
+fn target_uses_worktree(target: &protocol::SpawnTarget) -> bool {
+    match target {
+        protocol::SpawnTarget::Single { use_worktree, .. }
+        | protocol::SpawnTarget::Workspace { use_worktree, .. } => *use_worktree,
+        protocol::SpawnTarget::Standalone { .. } => false,
+    }
 }
 
 /// Derive the on-disk worktree paths from a `SpawnConfig` + the session's

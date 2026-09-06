@@ -259,6 +259,10 @@ export type ClientMessage =
   | { type: "load_scrollback"; session_id: string }
   | { type: "stop_session"; session_id: string; cleanup: CleanupAction[] }
   | { type: "discard_session"; session_id: string; cleanup: CleanupAction[] }
+  // Spawn a second session from a source session's stored spawn config. A
+  // worktree source's clone lands on a fresh daemon-picked branch; an in-place
+  // source's clone keeps the source's branch.
+  | { type: "duplicate_session"; session_id: string }
   // Read-only "what would a discard do to each member's branch?" query,
   // answered with `discard_preview`.
   | { type: "preview_discard"; session_id: string }

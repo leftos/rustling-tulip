@@ -369,7 +369,9 @@ export default function SessionContextMenu({
               disabled={!canDuplicate}
               title={
                 canDuplicate
-                  ? "Clone this session into a new or existing tab."
+                  ? s.has_per_session_worktree
+                    ? "Clone this session onto a fresh branch, into a new or existing tab."
+                    : "Clone this session into a new or existing tab."
                   : "Headless sessions can't be duplicated; they're one-shot kickoffs."
               }
               dataTestId="session-context-duplicate-menu"
