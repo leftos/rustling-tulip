@@ -58,6 +58,11 @@ CATCH_ALL_EXEMPT = {
         "DiscardSession); the Rust Unknown lets an older daemon decode a "
         "newer client's choice as Auto"
     ),
+    "SuggestTarget": (
+        "round-tripped echo (ClientMessage::SuggestBranchName -> "
+        "DaemonMessage::BranchNameSuggestion): the daemon only ever sends back "
+        "the variant the client sent it, so a client cannot receive Unknown"
+    ),
 }
 
 

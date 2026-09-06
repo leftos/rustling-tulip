@@ -630,13 +630,34 @@ export interface MemberSpawnPreview {
 
 // What to do when a worktree already exists at the target path. Mirrors the
 // Rust WorktreeReusePolicy; "reuse" is the default and the non-destructive
-// choice. "unknown" is the forward-compat catch-all a newer daemon could echo
-// back through a persisted SpawnConfig — treat it as "reuse"; never send it.
-export type WorktreeReusePolicy = "reuse" | "recreate_from_base" | "unknown";
+// choice. "refuse_leftover" creates fresh and fails the spawn outright when
+// the branch or the worktree directory is already there — sent by callers
+// that never showed a collision prompt (launch-last, presets), so a stale
+// leftover is never attached silently. "unknown" is the forward-compat
+// catch-all a newer daemon could echo back through a persisted SpawnConfig —
+// treat it as "reuse"; never send it.
+export type WorktreeReusePolicy =
+  | "reuse"
+  | "recreate_from_base"
+  | "refuse_leftover"
+  | "unknown";
 
 // The subset the collision prompt can actually produce, so the UI can't
-// accidentally put the catch-all back on the wire.
-export type WorktreeReuseChoice = Exclude<WorktreeReusePolicy, "unknown">;
+// accidentally put the catch-all — or the refusal, which exists precisely for
+// the spawns that never prompt — back on the wire.
+export type WorktreeReuseChoice = Exclude<
+  WorktreeReusePolicy,
+  "unknown" | "refuse_leftover"
+>;
+
+// Which repo or workspace a branch-name suggestion is for. The daemon echoes
+// the value it was sent on `branch_name_suggestion`, so a client with several
+// open spawn forms routes the reply to the form that asked. The Rust enum
+// carries a catch-all for an older daemon decoding a newer client, but this
+// side only ever sees back what it sent — hence no "unknown" arm.
+export type SuggestTarget =
+  | { kind: "repo"; repo_id: string }
+  | { kind: "workspace"; workspace_id: string };
 
 export interface VscodeWorkspaceFolder {
   path: string;
@@ -834,6 +855,9 @@ export type ClientMessage =
   | { type: "resume_all_abandoned" }
   | { type: "list_branches"; repo_id: string }
   | { type: "list_worktrees"; repo_id: string }
+  // Ask for a `wt/<adjective>-<noun>` branch name that exists in no member
+  // repo's local or remote refs. Answered with `branch_name_suggestion`.
+  | { type: "suggest_branch_name"; target: SuggestTarget }
   | {
       type: "preview_workspace_spawn";
       workspace_id: string;
@@ -1158,6 +1182,9 @@ export type DaemonMessage =
       session_id: string;
       members: MemberBranchFate[];
     }
+  // A branch name free in every member repo. Reply to `suggest_branch_name`;
+  // `target` echoes the request.
+  | { type: "branch_name_suggestion"; target: SuggestTarget; name: string }
   | { type: "sessions"; sessions: SessionSnapshot[] }
   | { type: "session_updated"; session: SessionSnapshot }
   | { type: "session_removed"; session_id: string }

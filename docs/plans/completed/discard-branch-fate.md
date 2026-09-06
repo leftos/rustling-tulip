@@ -96,4 +96,4 @@ spawn's collision prompt.
 ## Follow-up
 
 The random-name collision that makes leftover branches dangerous in the
-first place is tracked in `docs/plans/worktree-branch-leftovers.md`.
+first place is shipped the same day; see `docs/plans/completed/worktree-branch-leftovers.md`.

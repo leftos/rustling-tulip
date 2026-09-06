@@ -9,6 +9,7 @@ import { expect } from "chai";
 
 import { DaemonWsClient } from "../../../src/ws-client.js";
 import { dismissLayoutChooser } from "../../../src/session-helpers.js";
+import { waitForBranchSuggestion } from "../../../src/spawn-dialog.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -149,6 +150,9 @@ describe("workspace spawn dialog branch seeding", function () {
       timeoutMsg: `base branch seeded with "${await base.getValue()}", expected origin/main`,
     });
 
+    // The name comes from the daemon now, so the field is empty until
+    // `branch_name_suggestion` lands.
+    await waitForBranchSuggestion(dialog);
     const branch = await dialog.$('[data-testid="spawn-workspace-branch"]');
     expect(await branch.getValue()).to.match(
       /^wt\//,

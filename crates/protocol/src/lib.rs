@@ -1749,6 +1749,12 @@ pub enum ClientMessage {
     ListWorktrees {
         repo_id: String,
     },
+    /// Ask the daemon for a `wt/<adjective>-<noun>` branch name that exists in
+    /// no member repo's local or remote refs. Answered with
+    /// [`DaemonMessage::BranchNameSuggestion`].
+    SuggestBranchName {
+        target: SuggestTarget,
+    },
     /// Resume every session currently in the abandoned bucket. The daemon
     /// iterates and re-spawns each one; per-session failures (missing
     /// spawn config, spawn error) are surfaced as `Error` messages but
@@ -2475,6 +2481,13 @@ pub enum DaemonMessage {
         repo_id: String,
         worktrees: Vec<WorktreeInfo>,
     },
+    /// Reply to [`ClientMessage::SuggestBranchName`]: a branch name free in
+    /// every member repo. `target` echoes the request so a client with several
+    /// open spawn forms can route the reply to the one that asked.
+    BranchNameSuggestion {
+        target: SuggestTarget,
+        name: String,
+    },
     /// Broadcast whenever the worktrees root changes — fired both in
     /// response to [`ClientMessage::SetWorktreesRoot`] and at first
     /// `Welcome` so a freshly-connected client knows the current value
@@ -2990,6 +3003,31 @@ pub enum WorktreeReusePolicy {
     /// Remove the existing worktree and re-add it from the resolved base.
     /// Destructive: uncommitted work in that worktree is lost.
     RecreateFromBase,
+    /// Create a fresh branch and worktree, and refuse the spawn outright when
+    /// either the worktree directory or the branch already exists — the
+    /// leftover of a discarded session.
+    ///
+    /// Sent by callers that never showed a collision prompt (launch-last,
+    /// presets) so a stale leftover is never attached silently. Not the serde
+    /// default: an older client's omitted field still means [`Self::Reuse`].
+    RefuseLeftover,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Which repo or workspace a branch-name suggestion is for.
+///
+/// Echoed back on [`DaemonMessage::BranchNameSuggestion`] so a client with
+/// several open spawn forms can route the reply to the one that asked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SuggestTarget {
+    Repo {
+        repo_id: String,
+    },
+    Workspace {
+        workspace_id: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -4051,6 +4089,80 @@ mod tests {
         let evidence: MergeEvidence =
             serde_json::from_str(r#""vibes""#).expect("parse unknown evidence");
         assert_eq!(evidence, MergeEvidence::Unknown);
+    }
+
+    #[test]
+    fn suggest_target_round_trips_and_absorbs_unknown_kinds() {
+        let cases = vec![
+            SuggestTarget::Repo {
+                repo_id: "r1".to_string(),
+            },
+            SuggestTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+            },
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).expect("serialize");
+            let decoded: SuggestTarget = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(original, decoded);
+        }
+
+        let decoded: SuggestTarget =
+            serde_json::from_str(r#"{"kind":"something_new"}"#).expect("parse unknown kind");
+        assert_eq!(decoded, SuggestTarget::Unknown);
+    }
+
+    #[test]
+    fn refuse_leftover_policy_decodes() {
+        let policy: WorktreeReusePolicy =
+            serde_json::from_str(r#""refuse_leftover""#).expect("parse policy");
+        assert_eq!(policy, WorktreeReusePolicy::RefuseLeftover);
+        assert_eq!(
+            serde_json::to_string(&WorktreeReusePolicy::RefuseLeftover).expect("serialize"),
+            r#""refuse_leftover""#
+        );
+        // The omitted field still means Reuse for every already-shipped client.
+        assert_eq!(WorktreeReusePolicy::default(), WorktreeReusePolicy::Reuse);
+    }
+
+    #[test]
+    fn suggest_branch_name_message_round_trips() {
+        let msg = ClientMessage::SuggestBranchName {
+            target: SuggestTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""type":"suggest_branch_name""#));
+        assert!(json.contains(r#""kind":"workspace""#));
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            ClientMessage::SuggestBranchName { target } => assert_eq!(
+                target,
+                SuggestTarget::Workspace {
+                    workspace_id: "ws1".to_string()
+                }
+            ),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_name_suggestion_message_round_trips() {
+        let json = r#"{"type":"branch_name_suggestion","target":{"kind":"repo","repo_id":"r1"},"name":"wt/brave-otter"}"#;
+        let decoded: DaemonMessage = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            DaemonMessage::BranchNameSuggestion { target, name } => {
+                assert_eq!(
+                    target,
+                    SuggestTarget::Repo {
+                        repo_id: "r1".to_string()
+                    }
+                );
+                assert_eq!(name, "wt/brave-otter");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]

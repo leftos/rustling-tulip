@@ -20,22 +20,29 @@ Tauri window.
 cargo install tauri-driver --locked
 cargo install --git https://github.com/chippers/msedgedriver-tool
 
-# 2. Have msedgedriver-tool download a matching Edge WebDriver next to itself.
-#    (It picks the version that matches your installed Microsoft Edge runtime.)
-& "$HOME/.cargo/bin/msedgedriver-tool.exe"
+# 2. Have msedgedriver-tool download an Edge WebDriver matching your installed
+#    Edge/WebView2 runtime. It extracts msedgedriver.exe into its *cwd*, so run
+#    it from a scratch directory and move the binary where you want it.
+cd $env:TEMP; & "$HOME/.cargo/bin/msedgedriver-tool.exe"; Move-Item -Force msedgedriver.exe "$HOME/.cargo/bin/msedgedriver.exe"
 
 # 3. Make sure msedgedriver.exe is on PATH (or copy it next to tauri-driver.exe).
 $env:PATH = "$HOME/.cargo/bin;$env:PATH"
 
-# 4. Install Node deps for this package.
-cd tools/e2e
+# 4. Install Node deps for this package (step 2 left you in $env:TEMP).
+cd <repo>/tools/e2e
 pnpm install
 
-# 5. Sanity check.
-pnpm doctor
+# 5. Sanity check. `pnpm run doctor`, not `pnpm doctor` — pnpm has a builtin
+#    command by that name that shadows the script and prints nothing.
+pnpm run doctor
 ```
 
-The `doctor` script reports anything missing with copy-pasteable fixes.
+The `doctor` script reports anything missing with copy-pasteable fixes. It also
+compares `msedgedriver --version` against the WebView2 Evergreen runtime version
+in the registry and fails on a major mismatch — Edge/WebView2 auto-updates, and a
+driver left behind produces `session not created: This version of Microsoft Edge
+WebDriver only supports Microsoft Edge version <N>` on every spec. The fix is
+step 2 above; doctor prints it verbatim.
 
 ## Interactive driving
 

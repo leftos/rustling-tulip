@@ -168,6 +168,28 @@ export type PresetTarget =
   | { kind: "repo"; repo_id: string }
   | { kind: "workspace"; workspace_id: string };
 
+/**
+ * What a spawn does when the worktree directory — or the branch — it was
+ * asked for is already there. Mirrors `protocol::WorktreeReusePolicy` and
+ * `apps/tauri-app/src/types.ts`. "reuse" is the serde default and what an
+ * omitted field means; "refuse_leftover" fails the spawn outright and is what
+ * callers that never showed a collision prompt (launch-last, presets) send.
+ */
+export type WorktreeReusePolicy =
+  | "reuse"
+  | "recreate_from_base"
+  | "refuse_leftover"
+  | "unknown";
+
+/**
+ * Which repo or workspace a branch-name suggestion is for. Mirrors
+ * `protocol::SuggestTarget` (tagged on `kind`); the daemon echoes the value it
+ * was sent back on `branch_name_suggestion`.
+ */
+export type SuggestTarget =
+  | { kind: "repo"; repo_id: string }
+  | { kind: "workspace"; workspace_id: string };
+
 export type PresetLaunchJobStatus =
   | "resolving"
   | "running_scripts"
@@ -261,6 +283,9 @@ export type ClientMessage =
   | { type: "stage_files"; repo_id: string; paths: string[] }
   | { type: "unstage_files"; repo_id: string; paths: string[] }
   | { type: "commit_repo"; repo_id: string; message: string }
+  // Ask for a `wt/<adjective>-<noun>` branch name that exists in no member
+  // repo's local or remote refs. Answered with `branch_name_suggestion`.
+  | { type: "suggest_branch_name"; target: SuggestTarget }
   | { type: "list_presets"; target: PresetTarget }
   | {
       type: "launch_preset";
@@ -350,6 +375,9 @@ export type DaemonMessage =
       session_id: string;
       members: MemberBranchFate[];
     }
+  // A branch name free in every member repo behind `target`. Reply to
+  // `suggest_branch_name`; `target` echoes the request.
+  | { type: "branch_name_suggestion"; target: SuggestTarget; name: string }
   | { type: "tab_updated"; tab: TabEntry }
   | { type: "pty_output"; session_id: string; data_b64: string }
   | {

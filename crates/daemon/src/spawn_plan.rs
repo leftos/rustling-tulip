@@ -8,7 +8,19 @@ use crate::git;
 use crate::registry::ensure_default_branch;
 use crate::state::AppState;
 use protocol::RepoEntry;
+use std::fmt::Write as _;
 use std::path::Path;
+
+/// Structured spawn-time failure carried out of the spawn pipeline so the
+/// dispatcher can render it as a blocking `ActionFailed` modal with an
+/// actionable hint, instead of a bare error toast that drops the git reason.
+#[derive(Debug, thiserror::Error)]
+#[error("{title}: {detail}")]
+pub struct SpawnFailure {
+    pub title: String,
+    pub detail: String,
+    pub hint: Option<String>,
+}
 
 /// Resolve the ref a *new* branch should be created from.
 ///
@@ -142,4 +154,127 @@ pub async fn fork_point(
     }
 
     out
+}
+
+/// The failure a [`protocol::WorktreeReusePolicy::RefuseLeftover`] spawn
+/// raises when the name it was handed is already on disk.
+///
+/// The caller never showed the user a collision panel — the name was picked
+/// automatically — so the message has to carry everything that panel would
+/// have: which branch, where it lives, what it points at, and how far behind
+/// the base it is.
+pub fn leftover_refusal(
+    repo_name: &str,
+    branch: &str,
+    base: &str,
+    fork: &ForkPoint,
+    worktree_path: &Path,
+) -> SpawnFailure {
+    let mut detail = if let Some(head) = &fork.existing_branch_head {
+        let mut line = format!("Branch '{branch}' already exists in {repo_name} at {head}");
+        append_behind(&mut line, fork.existing_branch_behind_base, base);
+        line.push_str(", with no worktree attached. ");
+        line
+    } else {
+        let mut line = format!(
+            "A worktree for branch '{branch}' already exists in {repo_name} at {}",
+            worktree_path.display()
+        );
+        if let Some(head) = &fork.existing_worktree_head {
+            let _ = write!(line, " (HEAD {head}");
+            append_behind(&mut line, fork.existing_worktree_behind_base, base);
+            if fork.existing_worktree_dirty {
+                line.push_str(", with uncommitted changes");
+            }
+            line.push(')');
+        }
+        line.push_str(". ");
+        line
+    };
+    detail.push_str(
+        "This launch picked the branch name automatically and will not attach to old code.",
+    );
+    SpawnFailure {
+        title: "Leftover branch in the way".to_string(),
+        detail,
+        hint: Some(format!(
+            "Open the spawn dialog for this repo or workspace to reuse the leftover at its tip or recreate it from {base}, or delete the branch."
+        )),
+    }
+}
+
+/// `, 3 commits behind origin/main` — omitted entirely when the comparison
+/// wasn't available, rather than claiming a misleading zero.
+fn append_behind(line: &mut String, behind: Option<u32>, base: &str) {
+    if let Some(behind) = behind {
+        let plural = if behind == 1 { "" } else { "s" };
+        let _ = write!(line, ", {behind} commit{plural} behind {base}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A branch-only leftover must name its tip and its distance from the
+    /// base: those two numbers are the whole reason the spawn is refused.
+    #[test]
+    fn refusal_names_a_branch_only_leftover_tip_and_staleness() {
+        let fork = ForkPoint {
+            existing_branch_head: Some("abc1234".to_string()),
+            existing_branch_behind_base: Some(7),
+            ..ForkPoint::default()
+        };
+        let failure = leftover_refusal(
+            "fixture",
+            "wt/brave-otter",
+            "origin/main",
+            &fork,
+            Path::new("X:/wt/fixture"),
+        );
+        assert_eq!(failure.title, "Leftover branch in the way");
+        assert!(failure.detail.contains("wt/brave-otter"), "{failure:?}");
+        assert!(failure.detail.contains("fixture"), "{failure:?}");
+        assert!(failure.detail.contains("abc1234"), "{failure:?}");
+        assert!(
+            failure.detail.contains("7 commits behind origin/main"),
+            "{failure:?}"
+        );
+        assert!(
+            failure
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("origin/main")),
+            "{failure:?}"
+        );
+    }
+
+    /// A leftover directory names the path, its HEAD, its staleness, and that
+    /// it has uncommitted work — deleting it blind would lose that work.
+    #[test]
+    fn refusal_names_a_leftover_worktree_path_head_and_dirt() {
+        let fork = ForkPoint {
+            existing_worktree_head: Some("def5678".to_string()),
+            existing_worktree_behind_base: Some(1),
+            existing_worktree_dirty: true,
+            ..ForkPoint::default()
+        };
+        let failure = leftover_refusal(
+            "fixture",
+            "wt/brave-otter",
+            "main",
+            &fork,
+            Path::new("X:/wt/fixture"),
+        );
+        assert!(failure.detail.contains("X:/wt/fixture"), "{failure:?}");
+        assert!(failure.detail.contains("def5678"), "{failure:?}");
+        assert!(
+            failure.detail.contains("1 commit behind main"),
+            "{failure:?}"
+        );
+        assert!(
+            failure.detail.contains("uncommitted changes"),
+            "{failure:?}"
+        );
+    }
 }

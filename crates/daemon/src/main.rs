@@ -3,6 +3,7 @@
 mod agents;
 mod binary_cache;
 mod branch_fate;
+mod branch_names;
 mod discovery;
 mod git;
 mod git_inspect;

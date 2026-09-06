@@ -13,6 +13,7 @@ import {
   isSessionUpdated,
   spawnSession,
 } from "../../../src/session-helpers.js";
+import { waitForBranchSuggestion } from "../../../src/spawn-dialog.js";
 import type {
   DaemonMessage,
   RepoEntry,
@@ -206,6 +207,9 @@ describe("spawn dialog fork points", function () {
     await ensureWorktreeMode(dialog);
     const branch = await dialog.$('[data-testid="spawn-single-branch"]');
     await branch.waitForExist({ timeout: 10_000 });
+    // Typing before the daemon's suggestion lands would have the reply
+    // overwrite what was typed.
+    await waitForBranchSuggestion(dialog);
     await setFieldValue(branch, "wt/escape-check", "branch field");
 
     const listbox = await dialog.$('[role="listbox"]');
@@ -465,6 +469,9 @@ async function setBranchName(
 ): Promise<void> {
   const branch = await dialog.$('[data-testid="spawn-single-branch"]');
   await branch.waitForExist({ timeout: 10_000 });
+  // The field is empty until the daemon answers, and a reply that lands after
+  // the typing would replace it.
+  await waitForBranchSuggestion(dialog);
   await setFieldValue(branch, value, "branch field");
   await dismissComboboxDropdown();
 }

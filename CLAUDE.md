@@ -77,7 +77,9 @@ The suite lives in `tools/e2e/` and uses WebdriverIO + tauri-driver. One-time ma
 ```powershell
 cargo install tauri-driver --locked
 cargo install --git https://github.com/chippers/msedgedriver-tool
-& "$HOME/.cargo/bin/msedgedriver-tool.exe"   # downloads matching Edge WebDriver
+# msedgedriver-tool extracts msedgedriver.exe into its cwd — run it from a
+# scratch dir, then move the driver onto PATH.
+cd $env:TEMP; & "$HOME/.cargo/bin/msedgedriver-tool.exe"; Move-Item -Force msedgedriver.exe "$HOME/.cargo/bin/msedgedriver.exe"
 ```
 
 Running tests:
@@ -85,7 +87,11 @@ Running tests:
 ```powershell
 cd tools/e2e
 pnpm install              # one-time dep install
-pnpm doctor               # validate tauri-driver + msedgedriver are on PATH
+pnpm run doctor           # validate tauri-driver + msedgedriver are on PATH, and
+                          # that msedgedriver's major matches the installed WebView2
+                          # (Edge auto-updates; a stale driver fails every spec).
+                          # `run` is required: bare `pnpm doctor` hits pnpm's own
+                          # builtin doctor command and prints nothing.
 pnpm test                 # run all WebdriverIO specs
 pnpm host                 # start interactive test host (accepts JSON commands over stdin)
 ```

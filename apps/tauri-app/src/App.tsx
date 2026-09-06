@@ -46,6 +46,7 @@ import {
   type RootWorktreeEntry,
   type SessionSnapshot,
   type SpawnConfig,
+  type SpawnTarget,
   type SplitDirection,
   type SplitPlace,
   type TabEntry,
@@ -101,7 +102,12 @@ import {
   notifyRemoteUnavailable,
   type RemoteUnavailableDetail,
 } from "./utils/remoteMode";
-import { randomWorktreeBranchName } from "./utils/randomName";
+import {
+  BRANCH_SUGGESTION_TIMEOUT_MS,
+  matchesSuggestion,
+  suggestTargetFor,
+  suggestTargetKey,
+} from "./utils/branchSuggestion";
 import {
   balanceSplitDirection,
   collectPanes,
@@ -559,6 +565,12 @@ export default function App() {
   /// Consumed by the `session_updated` handler the first time it sees an
   /// unseen session id.
   const pendingSpawnIntentRef = useRef<PendingSpawnIntent>(null);
+
+  /// Launch-last replays waiting on the daemon to name their branch, keyed by
+  /// `suggestTargetKey` so a reply routes back to the gesture that asked.
+  const pendingLaunchLastRef = useRef<Map<string, PendingLaunchLast>>(
+    new Map(),
+  );
 
   /// Set when the user picks an arrangement in LayoutChooser or
   /// ImportArrangementModal before the daemon replies with `tabs`. The `tabs`
@@ -1220,16 +1232,60 @@ export default function App() {
     [],
   );
 
+  /// Send a launch-last replay. `intent` was resolved when the user clicked,
+  /// so a wait on the daemon can't move the session to a tab they have since
+  /// switched to. `name` is the branch the daemon picked for a worktree
+  /// launch — passing it also flips the spawn to `refuse_leftover`, so a name
+  /// that turns out to be taken between suggestion and spawn fails loudly
+  /// instead of attaching a stale branch. `null` is the in-place case: the
+  /// saved branch is replayed verbatim and the reuse policy is left alone.
+  const performLaunchLast = useCallback(
+    (
+      config: SpawnConfig,
+      target: LaunchLastSpawnTarget,
+      intent: PendingSpawnIntent,
+      name: string | null,
+    ) => {
+      const client = latestStateRef.current?.client;
+      if (!client) return;
+      const nextTarget: LaunchLastSpawnTarget =
+        name === null
+          ? target
+          : { ...target, branch_name: name, worktree_reuse: "refuse_leftover" };
+      pendingSpawnIntentRef.current = intent;
+      client.send({
+        type: "spawn_session",
+        label: null,
+        target: nextTarget,
+        mode: config.mode,
+        initial_prompt: null,
+        dangerously_skip_permissions: config.dangerously_skip_permissions,
+        agent_options: config.agent_options,
+        model: config.model,
+        extra_env: config.extra_env,
+        prompt_injector: null,
+      });
+      pushToast(setState, {
+        severity: "info",
+        message: "Spawning session…",
+        detail: "Worktree creation may take a few seconds.",
+      });
+    },
+    [],
+  );
+
   /// "Launch last again" from the sidebar (double-click on a container or
   /// the matching context-menu submenu). Reads the targeted repo/workspace's
   /// `last_spawn_config` and replays it. When no config is saved yet, falls
   /// back to opening the spawn dialog pre-targeted to the container.
   ///
-  /// Branch policy: for `use_worktree === true` we regenerate `branch_name`
-  /// with a fresh `wt/<adjective>-<noun>` so each relaunch lands on its own
-  /// branch instead of colliding with the still-running prior session.
-  /// `use_worktree === false` reuses the saved branch verbatim — that mode
-  /// targets a real branch (e.g. `main`, `feature/x`) by the user's choice.
+  /// Branch policy: for `use_worktree === true` the daemon names the branch —
+  /// it is the only side that can check every member repo's refs — so the
+  /// replay waits for `branch_name_suggestion` and then spawns with
+  /// `refuse_leftover`, which fails the spawn rather than attaching a
+  /// leftover branch nobody was asked about. `use_worktree === false` spawns
+  /// straight away with the saved branch: that mode targets a real branch
+  /// (e.g. `main`, `feature/x`) by the user's choice.
   const onLaunchLast = useCallback(
     (target: SpawnInitialTarget, placement: LaunchLastPlacement) => {
       const s = latestStateRef.current;
@@ -1240,7 +1296,8 @@ export default function App() {
         onOpenSpawn(target);
         return;
       }
-      if (config.target.kind === "standalone") {
+      const spawnTarget = config.target;
+      if (spawnTarget.kind === "standalone") {
         onOpenSpawn(target);
         return;
       }
@@ -1262,49 +1319,57 @@ export default function App() {
         });
         return;
       }
-      const nextTarget = {
-        ...config.target,
-        branch_name: config.target.use_worktree
-          ? randomWorktreeBranchName()
-          : config.target.branch_name,
-      };
-      const activeTab = s.tabs.find((t) => t.id === s.activeTabId);
-      const activeTabCanHost = activeTab ? tabGrid(activeTab) !== null : false;
-      let intent: PendingSpawnIntent;
-      if (placement.kind === "new_tab") {
-        intent = { kind: "newTab" };
-      } else if (placement.kind === "tab") {
-        const targetTab = s.tabs.find((t) => t.id === placement.tabId);
-        const canHost = targetTab ? tabGrid(targetTab) !== null : false;
-        intent = canHost
-          ? { kind: "addToTab", tabId: placement.tabId }
-          : { kind: "newTab" };
-      } else if (activeTab && activeTabCanHost) {
-        intent = { kind: "addToTab", tabId: activeTab.id };
-      } else {
-        intent = { kind: "newTab" };
+      const intent = resolveLaunchIntent(s.tabs, s.activeTabId, placement);
+      if (!spawnTarget.use_worktree) {
+        performLaunchLast(config, spawnTarget, intent, null);
+        return;
       }
-      pendingSpawnIntentRef.current = intent;
-      client.send({
-        type: "spawn_session",
-        label: null,
-        target: nextTarget,
-        mode: config.mode,
-        initial_prompt: null,
-        dangerously_skip_permissions: config.dangerously_skip_permissions,
-        agent_options: config.agent_options,
-        model: config.model,
-        extra_env: config.extra_env,
-        prompt_injector: null,
+      const suggestTarget = suggestTargetFor(
+        target.kind === "repo"
+          ? { kind: "repo", id: target.repo_id }
+          : { kind: "workspace", id: target.workspace_id },
+      );
+      const key = suggestTargetKey(suggestTarget);
+      const inFlight = pendingLaunchLastRef.current.get(key);
+      if (inFlight) window.clearTimeout(inFlight.timer);
+      const timer = window.setTimeout(() => {
+        pendingLaunchLastRef.current.delete(key);
+        pushToast(setState, {
+          severity: "error",
+          message: "Couldn't pick a branch name for launch-last",
+          detail:
+            "The daemon didn't answer in time. Try again, or use the spawn dialog.",
+        });
+      }, BRANCH_SUGGESTION_TIMEOUT_MS);
+      pendingLaunchLastRef.current.set(key, {
+        config,
+        target: spawnTarget,
+        intent,
+        timer,
       });
-      pushToast(setState, {
-        severity: "info",
-        message: "Spawning session…",
-        detail: "Worktree creation may take a few seconds.",
-      });
+      client.send({ type: "suggest_branch_name", target: suggestTarget });
     },
-    [onOpenSpawn],
+    [onOpenSpawn, performLaunchLast],
   );
+
+  /// Answer to a launch-last branch request: spawn the replay that was
+  /// waiting on the name. Suggestions for a spawn-dialog form carry a key
+  /// nothing here waits on and fall through.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      for (const [key, pending] of pendingLaunchLastRef.current) {
+        const name = matchesSuggestion(detail, key);
+        if (name === null) continue;
+        window.clearTimeout(pending.timer);
+        pendingLaunchLastRef.current.delete(key);
+        performLaunchLast(pending.config, pending.target, pending.intent, name);
+      }
+    };
+    window.addEventListener("rt:branch_name_suggestion", handler);
+    return () =>
+      window.removeEventListener("rt:branch_name_suggestion", handler);
+  }, [performLaunchLast]);
 
   const onEditLastSpawn = useCallback((target: SpawnInitialTarget) => {
     const s = latestStateRef.current;
@@ -3426,6 +3491,45 @@ function uniqueTabs(tabs: TabEntry[]): TabEntry[] {
   return next;
 }
 
+/// The two spawn targets "launch last again" can replay. A standalone shell
+/// has no repo to fork from, so it reopens the dialog instead.
+type LaunchLastSpawnTarget = Exclude<SpawnTarget, { kind: "standalone" }>;
+
+/// A launch-last replay held while the daemon picks a branch name for its
+/// worktree. `intent` is resolved when the user clicks, not when the reply
+/// lands, so a "current tab" launch goes to the tab they were looking at.
+/// `timer` is the give-up timeout that drops the entry.
+interface PendingLaunchLast {
+  config: SpawnConfig;
+  target: LaunchLastSpawnTarget;
+  intent: PendingSpawnIntent;
+  timer: number;
+}
+
+/// Where a "launch last again" gesture puts the session it is about to ask
+/// for. `current_tab` and a named tab both fall back to a fresh tab when the
+/// tab in question can't host panes (it holds a diff or a single full-bleed
+/// view), which is also what happens when the named tab is already gone.
+function resolveLaunchIntent(
+  tabs: TabEntry[],
+  activeTabId: string | null,
+  placement: LaunchLastPlacement,
+): PendingSpawnIntent {
+  if (placement.kind === "new_tab") return { kind: "newTab" };
+  if (placement.kind === "tab") {
+    const targetTab = tabs.find((t) => t.id === placement.tabId);
+    const canHost = targetTab ? tabGrid(targetTab) !== null : false;
+    return canHost
+      ? { kind: "addToTab", tabId: placement.tabId }
+      : { kind: "newTab" };
+  }
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+  const canHost = activeTab ? tabGrid(activeTab) !== null : false;
+  return activeTab && canHost
+    ? { kind: "addToTab", tabId: activeTab.id }
+    : { kind: "newTab" };
+}
+
 type PendingSpawnIntent =
   | { kind: "newTab"; discardSessionId?: string }
   | {
@@ -4110,6 +4214,7 @@ function handleMessage(
     case "branches":
     case "worktrees":
     case "discard_preview":
+    case "branch_name_suggestion":
     case "workspace_spawn_preview":
     case "spawn_preview":
     case "repo_fetched":

@@ -176,6 +176,56 @@ async fn preview_for(member: &ResolvedMember, branch_name: &str) -> MemberSpawnP
     }
 }
 
+/// Refuse the whole spawn when any member already has the branch or its
+/// worktree directory.
+///
+/// Runs before anything is created: a workspace spawn that failed halfway
+/// would leave some members' worktrees on disk for a session that never
+/// started, and the next attempt would then see leftovers it didn't make.
+/// Pinned members are exempt — a pin *is* the user naming an existing
+/// directory.
+async fn refuse_member_leftovers(
+    resolved: &[ResolvedMember],
+    branch_name: &str,
+) -> anyhow::Result<()> {
+    for member in resolved {
+        if member.pinned || !member.use_worktree {
+            continue;
+        }
+        let dir_exists = member.working_path.exists();
+        if !dir_exists && !member.branch_exists {
+            continue;
+        }
+        let repo_path = PathBuf::from(&member.repo.path);
+        let base = member.resolved_base.as_str();
+        let existing = dir_exists.then_some(member.working_path.as_path());
+        let leftover_branch = existing.is_none().then_some(branch_name);
+        let fork = spawn_plan::fork_point(
+            &repo_path,
+            Some(base),
+            Some(base),
+            existing,
+            leftover_branch,
+        )
+        .await;
+        warn!(
+            repo_id = %member.repo.id,
+            branch_name,
+            worktree = %member.working_path.display(),
+            "ensure_branches: refusing to spawn onto a leftover branch or worktree"
+        );
+        return Err(spawn_plan::leftover_refusal(
+            &member.repo.name,
+            branch_name,
+            base,
+            &fork,
+            &member.working_path,
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Materialize each member's chosen branch. For `use_worktree` members, this
 /// adds a worktree (idempotent if the dir already exists). For in-place
 /// members, this errors on a dirty working tree and then checks out (or
@@ -189,6 +239,9 @@ pub async fn ensure_branches(
         members = resolved.len(),
         branch_name, "ensure_branches: begin"
     );
+    if matches!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover) {
+        refuse_member_leftovers(resolved, branch_name).await?;
+    }
     for (i, member) in resolved.iter().enumerate() {
         info!(
             idx = i,
@@ -211,6 +264,9 @@ pub async fn ensure_branches(
             // attach that branch as-is. A recreate overrides it: the branch is
             // deleted first, so the member is creating one either way and has
             // to fork from the resolved base.
+            // Under `RefuseLeftover` neither branch nor directory exists —
+            // `refuse_member_leftovers` already returned otherwise — so the
+            // member falls through to a plain create from `effective_base`.
             let mut create_from = member.effective_base.as_deref();
             let dir_exists = member.working_path.exists();
             if dir_exists
@@ -476,6 +532,68 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A workspace spawn is all-or-nothing: one member's leftover must stop
+    /// the whole launch before any *other* member's worktree is created, or
+    /// the retry inherits directories nobody asked for.
+    #[tokio::test]
+    async fn refuse_leftover_stops_before_creating_any_member() {
+        let root = std::env::temp_dir().join(format!("rt-ws-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch root");
+
+        let clean = seed_member(&root, "clean", false);
+        let leftover = seed_member(&root, "leftover", true);
+        let clean_worktree = root.join("wt-clean");
+        let leftover_worktree = root.join("wt-leftover");
+
+        let mut first = member(&clean, clean_worktree.clone(), "release");
+        first.branch_exists = false;
+        first.effective_base = Some("release".to_string());
+        let second = member(&leftover, leftover_worktree.clone(), "release");
+
+        let err = ensure_branches(
+            &[first, second],
+            "wt/x",
+            WorktreeReusePolicy::RefuseLeftover,
+        )
+        .await
+        .expect_err("a member with a leftover branch must refuse the spawn");
+        let failure = err
+            .downcast_ref::<spawn_plan::SpawnFailure>()
+            .expect("refusal must be a SpawnFailure");
+        assert_eq!(failure.title, "Leftover branch in the way");
+
+        assert!(
+            !clean_worktree.exists(),
+            "no member may be created once another member is refused"
+        );
+        assert!(
+            !leftover_worktree.exists(),
+            "the refused member is untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A member repo with one commit on `main`, a `release` branch one commit
+    /// ahead, and optionally the `wt/x` leftover a discarded session leaves.
+    fn seed_member(root: &Path, name: &str, with_leftover_branch: bool) -> PathBuf {
+        let repo = root.join(name);
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        commit(&repo, "seed.txt");
+        if with_leftover_branch {
+            git(&repo, &["branch", "wt/x"]);
+        }
+        git(&repo, &["checkout", "-b", "release"]);
+        commit(&repo, "landed.txt");
+        git(&repo, &["checkout", "main"]);
+        repo
     }
 
     /// A pinned member runs in whatever its worktree already has checked out.

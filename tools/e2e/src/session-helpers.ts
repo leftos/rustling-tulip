@@ -7,6 +7,7 @@ import type {
   DaemonMessage,
   SessionMode,
   SessionSnapshot,
+  WorktreeReusePolicy,
 } from "./types.js";
 
 /**
@@ -37,6 +38,10 @@ export interface SpawnOptions {
   branchName?: string;
   baseBranch?: string | null;
   useWorktree?: boolean;
+  /** What the spawn does when the branch or worktree is already there. Omitted
+   *  by default, which the daemon reads as `reuse` — the historical behaviour
+   *  every existing spec relies on. */
+  worktreeReuse?: WorktreeReusePolicy;
   mode?: SessionMode;
   agentOptions?: AgentOptions;
   initialPrompt?: string | null;
@@ -54,6 +59,10 @@ export interface SpawnOptions {
  * rather than a hunt through every spec. Mirrors `protocol::SpawnRequest`:
  * per-agent options live under `agent_options` (tagged by `kind`), not the
  * old flat `agent` / `permission_mode` / `codex_sandbox` fields.
+ *
+ * `worktreeReuse` lands on the *target* (that's where `SpawnRequest` carries
+ * it) and is left off the wire entirely when the caller didn't ask for one, so
+ * the daemon's serde default applies exactly as before.
  */
 export function buildSpawnMessage(options: SpawnOptions): ClientMessage {
   return {
@@ -65,6 +74,9 @@ export function buildSpawnMessage(options: SpawnOptions): ClientMessage {
       branch_name: options.branchName ?? "main",
       base_branch: options.baseBranch ?? null,
       use_worktree: options.useWorktree ?? false,
+      ...(options.worktreeReuse
+        ? { worktree_reuse: options.worktreeReuse }
+        : {}),
     },
     mode: options.mode ?? "interactive",
     initial_prompt: options.initialPrompt ?? null,

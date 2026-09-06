@@ -4,7 +4,12 @@ import { CLAUDE_MODELS } from "../constants";
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 import { useIsRemote } from "../utils/remoteMode";
 import BranchCombobox from "./BranchCombobox";
-import { randomWorktreeBranchName } from "../utils/randomName";
+import {
+  BRANCH_SUGGESTION_TIMEOUT_MS,
+  matchesSuggestion,
+  suggestTargetFor,
+  suggestTargetKey,
+} from "../utils/branchSuggestion";
 import { loadSettings } from "../utils/settings";
 import type {
   Agent,
@@ -20,6 +25,7 @@ import type {
   RootWorktreeEntry,
   RootWorktreeStatus,
   SpawnConfig,
+  SuggestTarget,
   TabEntry,
   WorkspaceEntry,
   WorktreeInfo,
@@ -87,9 +93,11 @@ type TargetSelection =
   | { kind: "workspace"; id: string };
 
 /// Serialize a target for use as a React `key`. Remounting the form on
-/// every target switch — cheap state reset, no manual sync needed.
+/// every target switch — cheap state reset, no manual sync needed. Same
+/// spelling as the branch-suggestion routing key, so a form's cached
+/// suggestion and its React identity never disagree about which target it is.
 function targetKey(t: TargetSelection): string {
-  return `${t.kind}:${t.id}`;
+  return suggestTargetKey(suggestTargetFor(t));
 }
 
 /// Where the spawned session lands. `current_tab` resolves to whichever
@@ -1124,21 +1132,10 @@ function SpawnPlacementPicker({
   );
 }
 
-/// Branch field shared by both forms. Behavior:
-///   * When editing a saved spawn config, seed with its saved branch name.
-///   * On mount / when `defaultBranch` changes (entity switch): if
-///     `useWorktree`, seed with a random `wt/<adj>-<noun>` (because
-///     worktree-adding the default branch fails — it's already checked out
-///     in the primary worktree); otherwise seed with `defaultBranch`.
-///   * When `useWorktree` flips true while value still equals the default:
-///     swap in a random name.
-///   * When `useWorktree` flips false while value is the auto-applied
-///     random one (i.e. user hasn't touched it): revert to `defaultBranch`.
-///   * Any manual edit disables the auto rule until the next entity switch.
-///
-/// `targetKey` keys the suggestion across dialog opens — if the user
-/// cancels and reopens with the same target, the suggested random name
-/// is preserved (audit: previously regenerated on every reopen).
+/// Names the daemon has suggested, keyed by `suggestTargetKey`. Keeps the
+/// suggestion across dialog opens — if the user cancels and reopens with the
+/// same target, the name they saw is still there instead of a second round
+/// trip producing a different one.
 const branchSuggestionCache = new Map<string, string>();
 
 /// Given the repo's local default branch and the remote-tracking refs the
@@ -1277,27 +1274,115 @@ function WorktreeCollisionNotice({
   );
 }
 
-function useBranchField(
-  defaultBranch: string,
-  useWorktree: boolean,
-  targetKey: string,
-  prefillValue: string | null,
+/// One target's request/reply cycle for `suggest_branch_name`. `pending` is
+/// true from the send until the reply or the give-up timeout, and `onName`
+/// receives every name that comes back for this target.
+function useBranchSuggestion(
+  client: DaemonClient,
+  target: SuggestTarget,
+  onName: (name: string) => void,
 ) {
-  const initial = prefillValue ?? (useWorktree
-    ? (branchSuggestionCache.get(targetKey) ?? randomWorktreeBranchName())
-    : defaultBranch);
-  if (
-    prefillValue === null &&
-    useWorktree &&
-    !branchSuggestionCache.has(targetKey)
-  ) {
-    branchSuggestionCache.set(targetKey, initial);
-  }
-  const [value, setValue] = useState<string>(initial);
-  // Track whether the random rule should still fire. Reset to true whenever
+  const key = suggestTargetKey(target);
+  const [pending, setPending] = useState(false);
+  // The target a send is outstanding for. Keeps a toggle back and forth from
+  // asking twice, and is cleared by the reply, the timeout, or a dice press.
+  const inFlightRef = useRef<string | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const targetRef = useRef(target);
+  targetRef.current = target;
+  const onNameRef = useRef(onName);
+  onNameRef.current = onName;
+
+  const clearTimer = () => {
+    if (timerRef.current === null) return;
+    window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+  };
+
+  /// `force` is the dice button: it wants a different name even though the
+  /// previous request may still be outstanding.
+  const request = useCallback(
+    (force: boolean) => {
+      if (!force && inFlightRef.current === key) return;
+      inFlightRef.current = key;
+      clearTimer();
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        inFlightRef.current = null;
+        setPending(false);
+      }, BRANCH_SUGGESTION_TIMEOUT_MS);
+      setPending(true);
+      client.send({ type: "suggest_branch_name", target: targetRef.current });
+    },
+    [client, key],
+  );
+
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      const name = matchesSuggestion(detail, key);
+      if (name === null) return;
+      inFlightRef.current = null;
+      clearTimer();
+      setPending(false);
+      onNameRef.current(name);
+    };
+    window.addEventListener("rt:branch_name_suggestion", handler);
+    return () =>
+      window.removeEventListener("rt:branch_name_suggestion", handler);
+  }, [key]);
+
+  useEffect(() => clearTimer, []);
+
+  return { pending, request };
+}
+
+interface BranchFieldOptions {
+  /// Branch an in-place spawn would run on — the seed and the fallback for
+  /// worktree mode being switched off.
+  defaultBranch: string;
+  useWorktree: boolean;
+  /// Repo or workspace the field is for. Keys both the suggestion cache and
+  /// the reply routing.
+  target: SuggestTarget;
+  /// Saved branch name when editing a spawn config. Non-null pins the field:
+  /// no suggestion is requested and no auto rule fires.
+  prefillValue: string | null;
+  client: DaemonClient;
+}
+
+/// Branch field shared by both forms. Behavior:
+///   * When editing a saved spawn config, seed with its saved branch name.
+///   * On mount / when `defaultBranch` changes (entity switch): if
+///     `useWorktree`, show the cached suggestion or ask the daemon for one
+///     (the default branch can't be used — it's already checked out in the
+///     primary worktree); otherwise seed with `defaultBranch`.
+///   * When `useWorktree` flips true while value still equals the default:
+///     swap in the suggestion.
+///   * When `useWorktree` flips false while value is the auto-applied
+///     suggestion (i.e. user hasn't touched it): revert to `defaultBranch`.
+///   * Any manual edit disables the auto rule until the next entity switch.
+function useBranchField(opts: BranchFieldOptions) {
+  const { defaultBranch, useWorktree, target, prefillValue, client } = opts;
+  const key = suggestTargetKey(target);
+  const [value, setValue] = useState<string>(
+    () =>
+      prefillValue ??
+      (useWorktree ? (branchSuggestionCache.get(key) ?? "") : defaultBranch),
+  );
+  // Track whether the auto rule should still fire. Reset to true whenever
   // the entity (and therefore `defaultBranch`) changes; flipped to false the
   // moment the user edits the field by hand.
   const allowAutoRef = useRef(prefillValue === null);
+  // A reply can land after the user switched back to in-place mode, where a
+  // `wt/` name would be wrong to apply — but still worth caching.
+  const worktreeRef = useRef(useWorktree);
+  worktreeRef.current = useWorktree;
+
+  const { pending, request } = useBranchSuggestion(client, target, (name) => {
+    branchSuggestionCache.set(key, name);
+    if (allowAutoRef.current && worktreeRef.current) setValue(name);
+  });
 
   useEffect(() => {
     allowAutoRef.current = prefillValue === null;
@@ -1305,34 +1390,31 @@ function useBranchField(
       setValue(prefillValue);
       return;
     }
-    if (useWorktree && defaultBranch) {
-      const cached = branchSuggestionCache.get(targetKey);
-      const next = cached ?? randomWorktreeBranchName();
-      if (!cached) branchSuggestionCache.set(targetKey, next);
-      setValue(next);
+    if (useWorktree) {
+      const cached = branchSuggestionCache.get(key);
+      setValue(cached ?? "");
+      if (cached === undefined) request(false);
     } else {
       setValue(defaultBranch);
     }
     // The use_worktree effect below picks up the rest after a toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [defaultBranch, targetKey, prefillValue]);
+  }, [defaultBranch, key, prefillValue]);
 
   useEffect(() => {
-    if (!allowAutoRef.current) return;
+    if (!allowAutoRef.current || prefillValue !== null) return;
     if (useWorktree) {
-      // Toggling worktree on while still on the default → suggest a random.
-      if (value === defaultBranch && defaultBranch) {
-        const cached = branchSuggestionCache.get(targetKey);
-        const next = cached ?? randomWorktreeBranchName();
-        if (!cached) branchSuggestionCache.set(targetKey, next);
-        setValue(next);
+      // Toggling worktree on while still on the default → ask for a name.
+      if (value === defaultBranch) {
+        const cached = branchSuggestionCache.get(key);
+        setValue(cached ?? "");
+        if (cached === undefined) request(false);
       }
-    } else {
-      // Toggling worktree off while still on our auto-suggested random →
-      // revert to the default so the field doesn't keep an irrelevant name.
-      if (value.startsWith("wt/") && defaultBranch) {
-        setValue(defaultBranch);
-      }
+    } else if (value.startsWith("wt/") || value === "") {
+      // Toggling worktree off while still on the auto-applied suggestion (or
+      // while waiting for one) → revert to the default so the field doesn't
+      // keep, or wait for, an irrelevant name.
+      setValue(defaultBranch);
     }
     // We deliberately ignore `value` from deps — this effect is meant to
     // fire on toggle, not on every keystroke.
@@ -1344,11 +1426,32 @@ function useBranchField(
     // User-edited the field — drop the cached suggestion so a later
     // reopen suggests a fresh one rather than re-pinning the value
     // they just walked away from.
-    branchSuggestionCache.delete(targetKey);
+    branchSuggestionCache.delete(key);
     setValue(next);
   };
 
-  return { value, setValue: onChange };
+  /// Dice button: drop the cached name and ask for another one. The current
+  /// value stays put until the reply lands, so the form never goes briefly
+  /// unsubmittable.
+  const requestFresh = () => {
+    branchSuggestionCache.delete(key);
+    allowAutoRef.current = true;
+    request(true);
+  };
+
+  return { value, setValue: onChange, pending, requestFresh };
+}
+
+/// Placeholder for the branch field. Worktree mode has no default to offer —
+/// the name comes from the daemon — so it reports what the field is waiting
+/// for instead of a branch that would be wrong to create a worktree for.
+function branchPlaceholder(
+  useWorktree: boolean,
+  pending: boolean,
+  inPlaceDefault: string,
+): string {
+  if (!useWorktree) return inPlaceDefault;
+  return pending ? "Picking a branch name…" : "Type a branch name";
 }
 
 // ---------- single-repo form ----------
@@ -1549,12 +1652,17 @@ function SingleForm({
     if (match && match.path !== selectedWorktree) setSelectedWorktree(match.path);
   }, [worktreeList, selectedWorktree]);
 
-  const branch = useBranchField(
-    inPlaceDefault,
-    useWorktree,
-    `repo:${repoId}`,
-    prefillTarget?.branch_name ?? null,
+  const suggestTarget = useMemo<SuggestTarget>(
+    () => suggestTargetFor({ kind: "repo", id: repoId }),
+    [repoId],
   );
+  const branch = useBranchField({
+    defaultBranch: inPlaceDefault,
+    useWorktree,
+    target: suggestTarget,
+    prefillValue: prefillTarget?.branch_name ?? null,
+    client,
+  });
 
   const [baseBranch, setBaseBranchValue] = useState<string>(
     () => prefillTarget?.base_branch ?? "",
@@ -1682,7 +1790,7 @@ function SingleForm({
     // Successful submit consumes the cached branch suggestion so the
     // next dialog open generates a fresh one rather than re-pinning the
     // name the user just spawned with.
-    branchSuggestionCache.delete(`repo:${repoId}`);
+    branchSuggestionCache.delete(suggestTargetKey(suggestTarget));
     // Persist the worktree-toggle choice as the new default for this repo
     // only on successful submit, so cancellation leaves the setting intact.
     if (repo && useWorktree !== (repo.default_use_worktree ?? true)) {
@@ -1827,7 +1935,11 @@ function SingleForm({
                 onChange={branch.setValue}
                 branches={knownBranches}
                 currentBranch={currentBranch}
-                placeholder={useWorktree ? localDefaultBranch : inPlaceDefault}
+                placeholder={branchPlaceholder(
+                  useWorktree,
+                  branch.pending,
+                  inPlaceDefault,
+                )}
                 inputRef={branchInputRef}
                 testId="spawn-single-branch"
               />
@@ -1836,7 +1948,7 @@ function SingleForm({
                   type="button"
                   className="branch-dice"
                   onClick={() => {
-                    branch.setValue(randomWorktreeBranchName());
+                    branch.requestFresh();
                     branchInputRef.current?.focus();
                   }}
                   title="Generate a random worktree branch name"
@@ -1847,6 +1959,11 @@ function SingleForm({
                 </button>
               )}
             </div>
+            {useWorktree && branch.pending && (
+              <span className="muted small" data-testid="spawn-branch-suggesting">
+                Picking a name no existing branch uses…
+              </span>
+            )}
           </label>
 
           {useWorktree && worktreeMode === "new" && (
@@ -2210,12 +2327,17 @@ function WorkspaceForm({
   // prefers the remote-tracking ref (`origin/main`), which is only ever a
   // valid *base*. Naming a branch after it creates a local
   // `refs/heads/origin/main` and makes the ref ambiguous repo-wide.
-  const branch = useBranchField(
-    localDefaultBranch,
-    useWorktree,
-    `workspace:${workspaceId}`,
-    prefillTarget?.branch_name ?? null,
+  const suggestTarget = useMemo<SuggestTarget>(
+    () => suggestTargetFor({ kind: "workspace", id: workspaceId }),
+    [workspaceId],
   );
+  const branch = useBranchField({
+    defaultBranch: localDefaultBranch,
+    useWorktree,
+    target: suggestTarget,
+    prefillValue: prefillTarget?.branch_name ?? null,
+    client,
+  });
 
   const [baseBranch, setBaseBranchValue] = useState<string>(
     () => prefillTarget?.base_branch ?? "",
@@ -2305,7 +2427,7 @@ function WorkspaceForm({
   const sendSpawn = () => {
     if (submittedRef.current) return;
     submittedRef.current = true;
-    branchSuggestionCache.delete(`workspace:${workspaceId}`);
+    branchSuggestionCache.delete(suggestTargetKey(suggestTarget));
     if (
       workspace &&
       useWorktree !== (workspace.default_use_worktree ?? true)
@@ -2366,7 +2488,11 @@ function WorkspaceForm({
               type="text"
               value={branch.value}
               onChange={(e) => branch.setValue(e.target.value)}
-              placeholder={localDefaultBranch}
+              placeholder={branchPlaceholder(
+                useWorktree,
+                branch.pending,
+                localDefaultBranch,
+              )}
               data-testid="spawn-workspace-branch"
             />
             {useWorktree && (
@@ -2374,7 +2500,7 @@ function WorkspaceForm({
                 type="button"
                 className="branch-dice"
                 onClick={() => {
-                  branch.setValue(randomWorktreeBranchName());
+                  branch.requestFresh();
                   branchInputRef.current?.focus();
                 }}
                 title="Generate a random worktree branch name"
@@ -2385,6 +2511,11 @@ function WorkspaceForm({
               </button>
             )}
           </div>
+          {useWorktree && branch.pending && (
+            <span className="muted small" data-testid="spawn-branch-suggesting">
+              Picking a name no existing branch uses…
+            </span>
+          )}
         </label>
       )}
 

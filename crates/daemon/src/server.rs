@@ -2,6 +2,7 @@
 
 use crate::agents::CommonSpawnFields;
 use crate::branch_fate::{self, FateInput, SessionBase};
+use crate::branch_names;
 use crate::discovery;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
@@ -1673,6 +1674,11 @@ async fn dispatch(
             });
             let worktrees = annotate_worktrees(hub, raw);
             let _ = out_tx.send(DaemonMessage::Worktrees { repo_id, worktrees });
+        }
+        ClientMessage::SuggestBranchName { target } => {
+            let name =
+                branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?;
+            let _ = out_tx.send(DaemonMessage::BranchNameSuggestion { target, name });
         }
         ClientMessage::ListCommits {
             repo_id,
@@ -3682,17 +3688,6 @@ type SpawnResolution = (
     Option<String>,
 );
 
-/// Structured spawn-time failure carried out of the spawn pipeline so the
-/// dispatcher can render it as a blocking `ActionFailed` modal with an
-/// actionable hint, instead of a bare error toast that drops the git reason.
-#[derive(Debug, thiserror::Error)]
-#[error("{title}: {detail}")]
-struct SpawnFailure {
-    title: String,
-    detail: String,
-    hint: Option<String>,
-}
-
 /// Decorate `git worktree list` output for the spawn dialog's existing-worktree
 /// picker: whether a session holds each worktree, and — for the ones under the
 /// RT worktrees root — which `wt.<slug>/` group they belong to plus its size
@@ -3848,13 +3843,16 @@ fn blocked_discard_message(
 /// to a live session — the collision that previously slipped through the
 /// "worktree dir already present, skipping add" reuse and corrupted the other
 /// session on discard.
-fn worktree_in_use_failure(branch_name: &str, users: &[(String, String)]) -> SpawnFailure {
+fn worktree_in_use_failure(
+    branch_name: &str,
+    users: &[(String, String)],
+) -> spawn_plan::SpawnFailure {
     let labels = users
         .iter()
         .map(|(_, label)| label.clone())
         .collect::<Vec<_>>()
         .join(", ");
-    SpawnFailure {
+    spawn_plan::SpawnFailure {
         title: "Worktree already in use".to_string(),
         detail: format!(
             "The worktree for branch '{branch_name}' is already in use by another live session ({labels}). Two sessions can't share one worktree."
@@ -3869,11 +3867,11 @@ fn worktree_in_use_failure(branch_name: &str, users: &[(String, String)]) -> Spa
 /// Map a raw `git worktree add` failure to a tailored `SpawnFailure`. Known
 /// git refusals (branch already checked out, path already exists) get an
 /// actionable message; anything else falls back to git's full stderr chain.
-fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> SpawnFailure {
+fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> spawn_plan::SpawnFailure {
     let chain = format!("{err:#}");
     let lower = chain.to_lowercase();
     if lower.contains("already checked out") || lower.contains("already used by worktree") {
-        SpawnFailure {
+        spawn_plan::SpawnFailure {
             title: "Branch already checked out".to_string(),
             detail: format!(
                 "Git won't create a worktree for '{branch_name}' because that branch is already checked out elsewhere — a branch can only be checked out in one worktree at a time."
@@ -3884,7 +3882,7 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> SpawnFailu
             ),
         }
     } else if lower.contains("already exists") {
-        SpawnFailure {
+        spawn_plan::SpawnFailure {
             title: "Worktree path already exists".to_string(),
             detail: format!("A directory for this worktree already exists on disk.\n\n{chain}"),
             hint: Some(
@@ -3893,7 +3891,7 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> SpawnFailu
             ),
         }
     } else {
-        SpawnFailure {
+        spawn_plan::SpawnFailure {
             title: "Couldn't create worktree".to_string(),
             detail: chain,
             hint: None,
@@ -3905,7 +3903,7 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> SpawnFailu
 /// modal. Uses the structured `SpawnFailure` fields when present; otherwise
 /// surfaces the full anyhow chain under a generic title.
 fn send_spawn_failure(out_tx: &mpsc::UnboundedSender<DaemonMessage>, err: &anyhow::Error) {
-    let msg = err.downcast_ref::<SpawnFailure>().map_or_else(
+    let msg = err.downcast_ref::<spawn_plan::SpawnFailure>().map_or_else(
         || DaemonMessage::ActionFailed {
             title: "Couldn't start session".to_string(),
             detail: format!("{err:#}"),
@@ -4021,6 +4019,39 @@ async fn fetch_repo(hub: &Hub, repo_id: String, out_tx: &mpsc::UnboundedSender<D
     let _ = out_tx.send(DaemonMessage::RepoFetched { repo_id, error });
 }
 
+/// Measure the leftover sitting where a spawn wanted to go, the same way the
+/// spawn dialog's preview measures it, and wrap it in the refusal the client
+/// renders as a blocking modal.
+///
+/// A leftover directory is described through its own HEAD; a branch with no
+/// directory through the branch tip. Nothing is mutated — the caller returns
+/// this instead of creating anything.
+async fn leftover_refusal_for(
+    repo_name: &str,
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    base: &str,
+) -> anyhow::Error {
+    let existing = worktree_path.exists().then_some(worktree_path);
+    let leftover_branch = existing.is_none().then_some(branch_name);
+    let fork =
+        spawn_plan::fork_point(repo_path, Some(base), Some(base), existing, leftover_branch).await;
+    warn!(
+        branch_name,
+        base,
+        worktree = %worktree_path.display(),
+        "refusing to spawn onto a leftover branch or worktree"
+    );
+    anyhow::Error::new(spawn_plan::leftover_refusal(
+        repo_name,
+        branch_name,
+        base,
+        &fork,
+        worktree_path,
+    ))
+}
+
 /// Create or bind the single-repo worktree at `worktree_path`, whatever
 /// state the target is in: a directory already present (delegated to
 /// [`recreate_or_reuse_worktree`]), a branch-only leftover from a discarded
@@ -4030,8 +4061,11 @@ async fn fetch_repo(hub: &Hub, repo_id: String, out_tx: &mpsc::UnboundedSender<D
 /// leftover branch fails on "already exists", while attaching it silently
 /// pins the session to the old fork point. Reuse attaches it at its old tip
 /// deliberately (the collision prompt showed the user that tip); recreate
-/// deletes the branch and forks fresh from `base`.
+/// deletes the branch and forks fresh from `base`; refuse raises a
+/// [`spawn_plan::leftover_refusal`] before anything is created, because the
+/// caller picked the name automatically and nobody was asked about it.
 async fn materialize_single_worktree(
+    repo_name: &str,
     repo_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
@@ -4039,8 +4073,15 @@ async fn materialize_single_worktree(
     policy: protocol::WorktreeReusePolicy,
 ) -> anyhow::Result<()> {
     if worktree_path.exists() {
-        return recreate_or_reuse_worktree(repo_path, worktree_path, branch_name, base, policy)
-            .await;
+        return recreate_or_reuse_worktree(
+            repo_name,
+            repo_path,
+            worktree_path,
+            branch_name,
+            base,
+            policy,
+        )
+        .await;
     }
     let branch_exists = git::list_branches(repo_path)
         .await
@@ -4066,6 +4107,16 @@ async fn materialize_single_worktree(
                 }
                 Some(base)
             }
+            protocol::WorktreeReusePolicy::RefuseLeftover => {
+                return Err(leftover_refusal_for(
+                    repo_name,
+                    repo_path,
+                    worktree_path,
+                    branch_name,
+                    base,
+                )
+                .await);
+            }
         }
     } else {
         Some(base)
@@ -4082,8 +4133,9 @@ async fn materialize_single_worktree(
 /// daemon) binds to it untouched — the historical behavior. Recreating drops
 /// the worktree and re-adds it from `base`, which discards anything
 /// uncommitted; the client only offers that after showing the user the
-/// worktree's dirty state.
+/// worktree's dirty state. Refusing raises before either happens.
 async fn recreate_or_reuse_worktree(
+    repo_name: &str,
     repo_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
@@ -4091,6 +4143,9 @@ async fn recreate_or_reuse_worktree(
     policy: protocol::WorktreeReusePolicy,
 ) -> anyhow::Result<()> {
     match policy {
+        protocol::WorktreeReusePolicy::RefuseLeftover => {
+            Err(leftover_refusal_for(repo_name, repo_path, worktree_path, branch_name, base).await)
+        }
         protocol::WorktreeReusePolicy::Reuse | protocol::WorktreeReusePolicy::Unknown => {
             info!(
                 worktree = %worktree_path.display(),
@@ -4292,6 +4347,7 @@ async fn spawn_single(
             return Err(worktree_in_use_failure(branch_name, &in_use).into());
         }
         materialize_single_worktree(
+            &repo.name,
             &repo_path,
             &worktree_path,
             branch_name,
@@ -5801,6 +5857,163 @@ mod tests {
 
     // Per-agent argv builders + workspace-prelude tests live in the
     // `crate::agents` submodules now.
+
+    mod refuse_leftover {
+        use super::super::materialize_single_worktree;
+        use crate::spawn_plan::SpawnFailure;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+
+        fn git(cwd: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        fn commit(repo: &Path, name: &str) {
+            std::fs::write(repo.join(name), "x\n").expect("write file");
+            git(repo, &["add", "."]);
+            git(repo, &["commit", "-m", name]);
+        }
+
+        fn rev(repo: &Path, refname: &str) -> String {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["rev-parse", refname])
+                .output()
+                .expect("spawn git");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// A repo where `wt/x` sits at the old `main` tip with no worktree
+        /// attached — what "close session and delete worktree" leaves behind
+        /// — while `release` stands in for a base that moved on.
+        fn seed_branch_only_leftover(tag: &str) -> (PathBuf, PathBuf) {
+            let root = std::env::temp_dir().join(format!("rt-refuse-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let repo = root.join("repo");
+            std::fs::create_dir_all(&repo).expect("create repo dir");
+            git(&repo, &["init", "-b", "main"]);
+            git(&repo, &["config", "user.email", "t@example.com"]);
+            git(&repo, &["config", "user.name", "Test"]);
+            git(&repo, &["config", "commit.gpgsign", "false"]);
+            commit(&repo, "seed.txt");
+            git(&repo, &["branch", "wt/x"]);
+            git(&repo, &["checkout", "-b", "release"]);
+            commit(&repo, "landed.txt");
+            git(&repo, &["checkout", "main"]);
+            (root, repo)
+        }
+
+        fn refusal_title(err: &anyhow::Error) -> String {
+            err.downcast_ref::<SpawnFailure>().map_or_else(
+                || format!("not a SpawnFailure: {err:#}"),
+                |failure| failure.title.clone(),
+            )
+        }
+
+        /// The trap this policy exists for: a branch a discarded session left
+        /// behind must stop the spawn, not get attached at its stale tip.
+        #[tokio::test]
+        async fn a_branch_only_leftover_is_refused_without_creating_anything() {
+            let (root, repo) = seed_branch_only_leftover("branch-only");
+            let worktree = root.join("wt");
+
+            let err = materialize_single_worktree(
+                "fixture",
+                &repo,
+                &worktree,
+                "wt/x",
+                "release",
+                protocol::WorktreeReusePolicy::RefuseLeftover,
+            )
+            .await
+            .expect_err("a leftover branch must refuse the spawn");
+
+            assert_eq!(refusal_title(&err), "Leftover branch in the way");
+            assert!(!worktree.exists(), "no worktree may be created");
+            let listed = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["worktree", "list"])
+                .output()
+                .expect("spawn git");
+            let listed = String::from_utf8_lossy(&listed.stdout);
+            assert!(
+                !listed.contains("wt/x"),
+                "the leftover branch must still have no worktree: {listed}"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        #[tokio::test]
+        async fn a_leftover_worktree_directory_is_refused() {
+            let (root, repo) = seed_branch_only_leftover("dir");
+            let worktree = root.join("wt");
+            git(
+                &repo,
+                &["worktree", "add", &worktree.to_string_lossy(), "wt/x"],
+            );
+            let before = rev(&worktree, "HEAD");
+
+            let err = materialize_single_worktree(
+                "fixture",
+                &repo,
+                &worktree,
+                "wt/x",
+                "release",
+                protocol::WorktreeReusePolicy::RefuseLeftover,
+            )
+            .await
+            .expect_err("a leftover worktree must refuse the spawn");
+
+            assert_eq!(refusal_title(&err), "Leftover branch in the way");
+            assert_eq!(
+                rev(&worktree, "HEAD"),
+                before,
+                "the refusal must not touch the existing worktree"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        /// Refusing is only about leftovers: a name nothing has claimed still
+        /// gets its worktree, forked from the resolved base.
+        #[tokio::test]
+        async fn a_clean_name_is_created_from_the_base() {
+            let (root, repo) = seed_branch_only_leftover("clean");
+            let worktree = root.join("wt-fresh");
+
+            materialize_single_worktree(
+                "fixture",
+                &repo,
+                &worktree,
+                "wt/fresh",
+                "release",
+                protocol::WorktreeReusePolicy::RefuseLeftover,
+            )
+            .await
+            .expect("a free name must still be created");
+
+            assert_eq!(
+                rev(&worktree, "HEAD"),
+                rev(&repo, "release"),
+                "a fresh worktree must fork from the resolved base"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
 
     #[cfg(windows)]
     mod npm_shim {

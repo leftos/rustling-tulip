@@ -1486,10 +1486,11 @@ async fn spawn_one(
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
-            // Preset launches don't prompt; a dirty in-place tree still errors,
-            // and an existing worktree is reused rather than recreated.
+            // Preset launches don't prompt; a dirty in-place tree still errors.
             checkout_strategy: None,
-            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            // Nobody saw a collision prompt here, so a leftover branch or
+            // worktree is refused rather than silently attached at its old tip.
+            worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
             // A preset launches N fresh sessions; pinning them all to one
             // existing directory is never what the user meant.
             existing_worktree: None,
@@ -1499,7 +1500,8 @@ async fn spawn_one(
             branch_name: plan.branch_names[i].clone(),
             base_branch: None,
             use_worktree: plan.use_worktree,
-            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            // See the single-repo arm: a leftover is refused, not attached.
+            worktree_reuse: protocol::WorktreeReusePolicy::RefuseLeftover,
             existing_worktrees: Vec::new(),
         },
     };
