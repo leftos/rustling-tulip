@@ -13,9 +13,11 @@ import {
   buildSpawnMessage,
   dismissLayoutChooser,
   isSessionUpdated,
+  spawnSession,
 } from "../../../src/session-helpers.js";
 import type { SessionUpdatedMessage } from "../../../src/session-helpers.js";
 import type {
+  CleanupAction,
   DaemonMessage,
   RepoEntry,
   SessionSnapshot,
@@ -33,6 +35,8 @@ const SOURCE_BRANCH = "rt-e2e-dup-source";
 const SECOND_SOURCE_BRANCH = "rt-e2e-dup-source2";
 /** Branch a branch-only leftover is staged on. */
 const LEFTOVER_BRANCH = "rt-e2e-dup-leftover";
+/** Branch the hand-made worktree the pinned source is launched into sits on. */
+const PIN_BRANCH = "rt-e2e-dup-pin";
 /** The `wt/<adjective>-<noun>` shape `branch_names::suggest` hands out. */
 const POOL_NAME = /^wt\/[a-z]+-[a-z]+$/;
 
@@ -54,6 +58,8 @@ describe("duplicating a session", function () {
   const spawned = new Map<string, { worktree: boolean }>();
   /** Every `action_failed` the daemon sent, in arrival order. */
   const actionFailures: ActionFailedMessage[] = [];
+  /** The worktree made by hand for the pin test, until that test removes it. */
+  let pinnedWorktree: string | null = null;
 
   before(async function () {
     const root = await browser.$("[data-testid=app-root]");
@@ -112,6 +118,15 @@ describe("duplicating a session", function () {
         runGit(fixtureRepo, ["branch", "-D", LEFTOVER_BRANCH]);
       } catch {
         /* already gone */
+      }
+      // Only reached when the pin test failed before its own cleanup ran.
+      if (pinnedWorktree) {
+        try {
+          runGit(fixtureRepo, ["worktree", "remove", "--force", pinnedWorktree]);
+          runGit(fixtureRepo, ["branch", "-D", PIN_BRANCH]);
+        } catch {
+          /* best-effort cleanup */
+        }
       }
       try {
         runGit(fixtureRepo, ["worktree", "prune"]);
@@ -259,6 +274,87 @@ describe("duplicating a session", function () {
       "the duplicate reported no failure",
     ).to.deep.equal([]);
   });
+
+  it("gives a pinned duplicate its own worktree", async function () {
+    if (!ws || !repoId || !fixtureRepo) throw new Error("setup failed");
+    const worktreesRoot = process.env["RUSTLING_TULIP_WORKTREES_DIR"];
+    if (!worktreesRoot) {
+      throw new Error("RUSTLING_TULIP_WORKTREES_DIR is not set for this run");
+    }
+
+    // A worktree git made, outside the daemon's root and under a name the
+    // daemon derives from nothing — the shape a pin addresses.
+    const pinDir = resolve(fixtureRepo, "..", "rt-e2e-dup-pin-wt");
+    runGit(fixtureRepo, ["worktree", "add", pinDir, "-b", PIN_BRANCH]);
+    pinnedWorktree = pinDir;
+
+    const source = await spawnSession(ws, {
+      label: "dup-pinned-source",
+      mode: "plain_shell",
+      target: {
+        kind: "single",
+        repo_id: repoId,
+        branch_name: PIN_BRANCH,
+        base_branch: null,
+        use_worktree: true,
+        existing_worktree: pinDir,
+      },
+      timeoutMs: 30_000,
+    });
+    // Registered as worktree-less: the directory it holds belongs to git, not
+    // to the daemon, so the shared cleanup must not ask for its removal.
+    remember(spawned, source, false);
+    expect(
+      normalize(source.members[0]?.worktree_path ?? ""),
+      "the source runs in the pinned directory",
+    ).to.equal(normalize(pinDir));
+
+    const clone = await duplicate(ws, source, spawned, actionFailures);
+    remember(spawned, clone, true);
+
+    expect(
+      clone.members[0]?.branch,
+      "the clone ran on a pool name from the daemon",
+    ).to.match(POOL_NAME);
+
+    const cloneWorktree = clone.members[0]?.worktree_path ?? "";
+    expect(
+      normalize(cloneWorktree),
+      "the clone did not inherit the pin",
+    ).to.not.equal(normalize(pinDir));
+    expect(
+      normalize(cloneWorktree).startsWith(`${normalize(worktreesRoot)}/`),
+      `the clone must live under ${worktreesRoot}, got ${cloneWorktree}`,
+    ).to.equal(true);
+    expect(
+      existsSync(cloneWorktree),
+      "the clone's worktree exists on disk",
+    ).to.equal(true);
+
+    const sessions = await listSessions(ws);
+    const sourceNow = sessions.find((s) => s.id === source.id);
+    expect(sourceNow, "the pinned source is still registered").to.not.equal(
+      undefined,
+    );
+    expect(
+      sourceNow?.status,
+      "duplicating leaves the pinned source running",
+    ).to.not.equal("stopped");
+
+    // Explicit teardown: the shared `after` would ask the daemon to remove the
+    // source's worktree, and that one belongs to git.
+    await discardSession(ws, clone.id, [
+      { repo_id: repoId, remove_worktree: true, branch: "delete" },
+    ]);
+    spawned.delete(clone.id);
+    await discardSession(ws, source.id, [
+      { repo_id: repoId, remove_worktree: false, branch: "auto" },
+    ]);
+    spawned.delete(source.id);
+    runGit(fixtureRepo, ["worktree", "remove", "--force", pinDir]);
+    runGit(fixtureRepo, ["branch", "-D", PIN_BRANCH]);
+    pinnedWorktree = null;
+  });
 });
 
 // ---------- daemon round trips ----------
@@ -369,6 +465,33 @@ function remember(
   worktree: boolean,
 ): void {
   spawned.set(session.id, { worktree });
+}
+
+/**
+ * Stop a session and discard its record, resolving once the daemon confirms
+ * the removal — the point after which its directories are free.
+ */
+async function discardSession(
+  ws: DaemonWsClient,
+  sessionId: string,
+  cleanup: CleanupAction[],
+): Promise<void> {
+  ws.send({ type: "stop_session", session_id: sessionId, cleanup: [] });
+  await delay(500);
+  const removed = waitForSessionRemoved(ws, sessionId);
+  ws.send({ type: "discard_session", session_id: sessionId, cleanup });
+  await removed;
+}
+
+/**
+ * Compare paths the way the other specs do: on Windows the daemon and node
+ * disagree about both separator and case.
+ */
+function normalize(p: string): string {
+  const trimmed = p.replace(/[/\\]+$/, "");
+  return process.platform === "win32"
+    ? trimmed.toLowerCase().replace(/\\/g, "/")
+    : trimmed;
 }
 
 // ---------- fixtures ----------

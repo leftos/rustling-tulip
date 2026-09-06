@@ -446,8 +446,10 @@ pub struct PinnedMemberWorktree {
 /// directory; the daemon rejects a pin whose directory is gone rather than
 /// recreating it. Unlike [`WorktreeReusePolicy::RecreateFromBase`], a pin is a
 /// deliberate choice of target rather than a one-shot answer about a collision,
-/// so it survives into the persisted [`SpawnConfig`] and replays on resume,
-/// duplicate, and "launch last again".
+/// so it survives into the persisted [`SpawnConfig`] and replays on resume and
+/// "launch last again". A duplicate is the exception: it always gets a fresh
+/// branch and a directory of its own, so
+/// [`SpawnConfig::to_duplicate_request`] drops the pin.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnTarget {
@@ -743,28 +745,44 @@ impl SpawnConfig {
     }
 
     /// Build the request for a duplicate. A worktree target gets
-    /// `fresh_branch` and [`WorktreeReusePolicy::RefuseLeftover`] so the clone
-    /// runs on its own branch and never attaches a leftover; in-place and
-    /// standalone targets clone verbatim.
+    /// `fresh_branch`, [`WorktreeReusePolicy::RefuseLeftover`] and no worktree
+    /// pin, so the clone runs on its own branch in a directory of its own and
+    /// never attaches a leftover. A duplicate never shares the source's
+    /// directory, pinned or not: the pin goes with the branch it was cloned
+    /// alongside, and the clone derives its path from `fresh_branch` like any
+    /// other fresh spawn. In-place and standalone targets clone verbatim.
     #[must_use]
     pub fn to_duplicate_request(&self, fresh_branch: Option<String>) -> SpawnRequest {
         let mut req = self.to_clone_request();
-        if let Some(fresh) = fresh_branch
-            && let SpawnTarget::Single {
+        let Some(fresh) = fresh_branch else {
+            return req;
+        };
+        match &mut req.target {
+            SpawnTarget::Single {
                 branch_name,
                 use_worktree: true,
                 worktree_reuse,
+                existing_worktree,
                 ..
+            } => {
+                *branch_name = fresh;
+                *worktree_reuse = WorktreeReusePolicy::RefuseLeftover;
+                *existing_worktree = None;
             }
-            | SpawnTarget::Workspace {
+            SpawnTarget::Workspace {
                 branch_name,
                 use_worktree: true,
                 worktree_reuse,
+                existing_worktrees,
                 ..
-            } = &mut req.target
-        {
-            *branch_name = fresh;
-            *worktree_reuse = WorktreeReusePolicy::RefuseLeftover;
+            } => {
+                *branch_name = fresh;
+                *worktree_reuse = WorktreeReusePolicy::RefuseLeftover;
+                existing_worktrees.clear();
+            }
+            SpawnTarget::Single { .. }
+            | SpawnTarget::Workspace { .. }
+            | SpawnTarget::Standalone { .. } => {}
         }
         req
     }
@@ -3762,6 +3780,20 @@ mod tests {
         }
     }
 
+    /// A worktree single target bound to an existing directory — the shape a
+    /// session launched into a worktree by path persists.
+    fn pinned_single_target(branch: &str, pin: &str) -> SpawnTarget {
+        SpawnTarget::Single {
+            repo_id: "r1".to_string(),
+            branch_name: branch.to_string(),
+            base_branch: Some("main".to_string()),
+            use_worktree: true,
+            checkout_strategy: None,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktree: Some(pin.to_string()),
+        }
+    }
+
     #[test]
     fn duplicate_request_renames_a_worktree_single() {
         let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
@@ -3848,6 +3880,10 @@ mod tests {
             }
             other => panic!("expected a single target, got {other:?}"),
         }
+        assert_eq!(
+            req.target, config.target,
+            "an in-place duplicate clones its target verbatim"
+        );
     }
 
     #[test]
@@ -3864,21 +3900,111 @@ mod tests {
 
     #[test]
     fn duplicate_request_without_a_fresh_name_is_the_plain_clone() {
-        let config = duplicate_source_config(single_target("wt/sleepy-otter", true));
+        let config = duplicate_source_config(pinned_single_target(
+            "wt/sleepy-otter",
+            "X:/worktrees/pinned-otter",
+        ));
         let req = config.to_duplicate_request(None);
 
         match req.target {
             SpawnTarget::Single {
                 ref branch_name,
                 worktree_reuse,
+                ref existing_worktree,
                 ..
             } => {
                 assert_eq!(branch_name, "wt/sleepy-otter");
                 assert_eq!(worktree_reuse, WorktreeReusePolicy::Reuse);
+                assert_eq!(
+                    existing_worktree.as_deref(),
+                    Some("X:/worktrees/pinned-otter"),
+                    "no fresh name means no substitution: resume replays the pin"
+                );
             }
             other => panic!("expected a single target, got {other:?}"),
         }
         assert_eq!(req, config.to_clone_request());
+    }
+
+    #[test]
+    fn duplicate_request_drops_a_single_pin() {
+        let config = duplicate_source_config(pinned_single_target(
+            "wt/sleepy-otter",
+            "X:/worktrees/pinned-otter",
+        ));
+        match &config.target {
+            SpawnTarget::Single {
+                existing_worktree, ..
+            } => assert!(existing_worktree.is_some(), "the source is pinned"),
+            other => panic!("expected a single target, got {other:?}"),
+        }
+
+        let req = config.to_duplicate_request(Some("wt/brave-lynx".to_string()));
+
+        match req.target {
+            SpawnTarget::Single {
+                ref branch_name,
+                worktree_reuse,
+                ref existing_worktree,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/brave-lynx");
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover);
+                assert_eq!(
+                    existing_worktree.as_deref(),
+                    None,
+                    "a duplicate never runs in the source's pinned directory"
+                );
+            }
+            other => panic!("expected a single target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_request_drops_workspace_pins() {
+        let config = duplicate_source_config(SpawnTarget::Workspace {
+            workspace_id: "ws1".to_string(),
+            branch_name: "wt/sleepy-otter".to_string(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktrees: vec![
+                PinnedMemberWorktree {
+                    repo_id: "r1".to_string(),
+                    path: "X:/worktrees/pinned-otter/r1".to_string(),
+                },
+                PinnedMemberWorktree {
+                    repo_id: "r2".to_string(),
+                    path: "X:/worktrees/pinned-otter/r2".to_string(),
+                },
+            ],
+        });
+        match &config.target {
+            SpawnTarget::Workspace {
+                existing_worktrees, ..
+            } => assert_eq!(existing_worktrees.len(), 2, "the source is pinned"),
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
+
+        let req = config.to_duplicate_request(Some("wt/kind-gecko".to_string()));
+
+        match req.target {
+            SpawnTarget::Workspace {
+                ref branch_name,
+                worktree_reuse,
+                ref existing_worktrees,
+                ..
+            } => {
+                assert_eq!(branch_name, "wt/kind-gecko");
+                assert_eq!(worktree_reuse, WorktreeReusePolicy::RefuseLeftover);
+                assert_eq!(
+                    existing_worktrees,
+                    &Vec::new(),
+                    "every member of a duplicate gets its own directory"
+                );
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
     }
 
     #[test]
