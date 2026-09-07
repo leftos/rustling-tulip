@@ -2050,6 +2050,15 @@ pub enum ClientMessage {
         enabled: bool,
         port: u16,
     },
+    /// Turn the keep-awake hold on or off. While enabled the daemon asks the
+    /// OS not to idle-sleep the machine for as long as any session has a live
+    /// child (the display still sleeps on its own timer). The daemon persists
+    /// the setting in `state.json` — so it applies with no window open —
+    /// re-evaluates the hold immediately, then broadcasts
+    /// [`DaemonMessage::KeepAwakeStatus`] to every connected client.
+    SetKeepAwake {
+        enabled: bool,
+    },
     /// Begin a pairing window. The daemon generates a short numeric code and
     /// replies — to this connection only, so the code never reaches other
     /// clients — with [`DaemonMessage::PairingStarted`]. A discovering device
@@ -2579,6 +2588,17 @@ pub enum DaemonMessage {
         port: u16,
         fingerprint: Option<String>,
         addresses: Vec<String>,
+    },
+    /// Current keep-awake state. Broadcast in response to
+    /// [`ClientMessage::SetKeepAwake`] and whenever the hold engages or
+    /// releases as sessions start and stop, and sent once at initial state so
+    /// a freshly-connected client can render the Settings UI without polling.
+    /// `enabled` is the persisted user setting; `active` is true iff the OS
+    /// hold is currently engaged — the setting is on *and* at least one
+    /// session has a live child.
+    KeepAwakeStatus {
+        enabled: bool,
+        active: bool,
     },
     /// Reply to [`ClientMessage::StartPairing`], sent only to the requesting
     /// connection (the code must never reach other clients). `code` is the

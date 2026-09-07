@@ -83,9 +83,12 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 # Restart Manager API for locating processes holding handles inside the
-# worktrees directory after a `git worktree remove` fails. 0.61 matches
-# the version already pulled transitively by the existing dep graph.
+# worktrees directory after a `git worktree remove` fails, plus the Power
+# API (`SetThreadExecutionState`) backing the keep-awake hold that stops the
+# host idle-sleeping while a session is live. 0.61 matches the version
+# already pulled transitively by the existing dep graph.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Power",
     "Win32_System_RestartManager",
 ] }

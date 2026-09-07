@@ -12,6 +12,7 @@ mod git_write;
 mod headless;
 mod idle_exit;
 mod inject;
+mod keep_awake;
 mod lan;
 mod lock_finder;
 mod orphan;

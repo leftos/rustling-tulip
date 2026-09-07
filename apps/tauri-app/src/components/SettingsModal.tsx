@@ -42,6 +42,9 @@ interface Props {
   /// The local daemon's auth token, for assembling the remote connection
   /// code. `null` until the first connect.
   daemonToken: string | null;
+  /// Keep-awake state, mirrored from the daemon's `keep_awake_status`
+  /// broadcast. `null` before the initial state push lands.
+  keepAwake: { enabled: boolean; active: boolean } | null;
 }
 
 type PermissionState = "granted" | "denied" | "default" | "unknown";
@@ -82,6 +85,7 @@ export default function SettingsModal({
   onOpenWorktreesManager,
   lanStatus,
   daemonToken,
+  keepAwake,
 }: Props) {
   const closeRef = useRef<HTMLButtonElement | null>(null);
   useEscape(onClose);
@@ -163,7 +167,12 @@ export default function SettingsModal({
             aria-labelledby={`settings-tab-${activeTab}`}
           >
             {activeTab === "general" && (
-              <GeneralPanel settings={settings} update={update} />
+              <GeneralPanel
+                settings={settings}
+                update={update}
+                client={client}
+                keepAwake={keepAwake}
+              />
             )}
             {activeTab === "notifications" && (
               <NotificationsPanel settings={settings} update={update} />
@@ -224,9 +233,52 @@ interface PanelProps {
   update: (mut: (s: Settings) => Settings) => void;
 }
 
-function GeneralPanel({ settings, update }: PanelProps) {
+interface GeneralPanelProps extends PanelProps {
+  /// Daemon connection used to send `set_keep_awake`. `null` while
+  /// disconnected, which disables the toggle.
+  client: DaemonClient | null;
+  /// Keep-awake state from the daemon. `null` before the initial state push.
+  keepAwake: { enabled: boolean; active: boolean } | null;
+}
+
+function GeneralPanel({
+  settings,
+  update,
+  client,
+  keepAwake,
+}: GeneralPanelProps) {
+  const onToggleKeepAwake = useCallback(() => {
+    if (!client || keepAwake === null) return;
+    client.send({ type: "set_keep_awake", enabled: !keepAwake.enabled });
+  }, [client, keepAwake]);
+
   return (
     <>
+      <section className="settings-section" data-testid="settings-section-power">
+        <h3>Power</h3>
+        <div className="settings-row">
+          <button
+            type="button"
+            onClick={onToggleKeepAwake}
+            disabled={client === null || keepAwake === null}
+            data-testid="settings-keep-awake-toggle"
+          >
+            {keepAwake?.enabled
+              ? "Allow sleep while sessions run"
+              : "Keep this machine awake while sessions run"}
+          </button>
+          <span className="settings-section-hint">
+            {keepAwake === null
+              ? "(daemon not connected)"
+              : keepAwake.enabled
+                ? keepAwake.active
+                  ? "Holding the machine awake — a session is live."
+                  : "Sleep is allowed until a session starts."
+                : "The machine may sleep while sessions run."}
+          </span>
+        </div>
+      </section>
+
       <section
         className="settings-section"
         data-testid="settings-section-sidebar"

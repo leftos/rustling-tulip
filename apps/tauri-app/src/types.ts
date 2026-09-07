@@ -982,6 +982,10 @@ export type ClientMessage =
   // port. Daemon persists to lan.json, binds/tears down the listener live,
   // then broadcasts `lan_status`. Loopback access is unaffected.
   | { type: "configure_lan"; enabled: boolean; port: number }
+  // Turn the keep-awake hold on or off. While enabled the daemon asks the OS
+  // not to idle-sleep the machine for as long as a session has a live child.
+  // Persisted daemon-side; broadcasts `keep_awake_status` back.
+  | { type: "set_keep_awake"; enabled: boolean }
   // Begin a pairing window. The daemon generates a short numeric code and
   // replies (to this connection only) with `pairing_started`. A discovering
   // device submits the code to the daemon's /pair endpoint over pinned TLS to
@@ -1144,6 +1148,15 @@ export type DaemonMessage =
       port: number;
       fingerprint: string | null;
       addresses: string[];
+    }
+  // Current keep-awake state. Broadcast in response to `set_keep_awake`, when
+  // the hold engages/releases as sessions start and stop, and once at initial
+  // state. `enabled` is the persisted setting; `active` is true only while the
+  // OS hold is engaged (setting on and at least one session live).
+  | {
+      type: "keep_awake_status";
+      enabled: boolean;
+      active: boolean;
     }
   // Reply to `start_pairing`, sent only to the requesting connection (the code
   // must never reach other clients). `code` is the short pairing code to read

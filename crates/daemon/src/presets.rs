@@ -2419,6 +2419,11 @@ mod tests {
         let (preset_events, preset_rx) = broadcast::channel(16);
         let (state_events, _) = broadcast::channel(16);
         let (client_count, _) = watch::channel(0);
+        let (keep_awake_enabled, _) = watch::channel(true);
+        let (_, keep_awake_status) = watch::channel(crate::keep_awake::Status {
+            enabled: true,
+            active: false,
+        });
         let hub = Hub {
             state,
             sessions,
@@ -2434,6 +2439,8 @@ mod tests {
             lan_handle: Arc::new(AsyncMutex::new(None)),
             advertiser: Arc::new(AsyncMutex::new(None)),
             pairing: Arc::new(AsyncMutex::new(None)),
+            keep_awake_enabled: Arc::new(keep_awake_enabled),
+            keep_awake_status,
         };
         (hub, preset_rx, scratch)
     }

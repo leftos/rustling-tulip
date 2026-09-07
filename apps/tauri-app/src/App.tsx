@@ -306,6 +306,11 @@ interface AppState {
     fingerprint: string | null;
     addresses: string[];
   } | null;
+  /// Keep-awake state, mirrored from the daemon's `keep_awake_status`
+  /// broadcast (first delivery in the initial-state push after Welcome, then
+  /// on every `set_keep_awake` and whenever the hold engages or releases as
+  /// sessions start and stop). `null` only until that first broadcast lands.
+  keepAwake: { enabled: boolean; active: boolean } | null;
   /// The local daemon's auth token, captured from the handshake on connect.
   /// Used by the Remote access settings panel to assemble the connection code
   /// the host hands to a remote client. `null` until the first connect.
@@ -472,6 +477,7 @@ export default function App() {
     sessionOrder: new Map(),
     worktreesRoot: null,
     lanStatus: null,
+    keepAwake: null,
     daemonToken: null,
     connectionTarget: loadConnectionTarget(),
     remoteProfiles: [],
@@ -3334,6 +3340,7 @@ export default function App() {
           client={state.client}
           worktreesRoot={state.worktreesRoot}
           lanStatus={state.lanStatus}
+          keepAwake={state.keepAwake}
           daemonToken={state.daemonToken}
           onOpenWorktreesManager={() =>
             setState((s) => ({ ...s, worktreesManagerOpen: true }))
@@ -4164,6 +4171,12 @@ function handleMessage(
           fingerprint: msg.fingerprint,
           addresses: msg.addresses,
         },
+      }));
+      return;
+    case "keep_awake_status":
+      setState((s) => ({
+        ...s,
+        keepAwake: { enabled: msg.enabled, active: msg.active },
       }));
       return;
     case "pairing_started":

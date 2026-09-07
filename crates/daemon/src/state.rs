@@ -29,7 +29,13 @@ pub struct ClientLayout {
     pub tabs: Vec<TabEntry>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// serde default for [`PersistedState::keep_awake`]. A state.json written
+/// before the setting existed must load as enabled, matching a fresh install.
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PersistedState {
     pub repos: Vec<RepoEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
@@ -63,6 +69,30 @@ pub struct PersistedState {
     /// effect on the next session without a daemon restart.
     #[serde(default)]
     pub worktrees_root_override: Option<String>,
+    /// Host setting: hold the OS awake while any session has a live child.
+    /// Lives here rather than in the app so it applies with no window open —
+    /// the daemon outlives the window. Old state.json files (and a fresh
+    /// install) default to enabled; see [`default_true`].
+    #[serde(default = "default_true")]
+    pub keep_awake: bool,
+}
+
+/// Hand-written so a fresh install (no state.json) matches what serde
+/// produces for a file without the field: `keep_awake` on. A derived
+/// `Default` would silently start with the hold disabled.
+impl Default for PersistedState {
+    fn default() -> Self {
+        Self {
+            repos: Vec::new(),
+            workspaces: Vec::new(),
+            layouts: HashMap::new(),
+            legacy_tabs: Vec::new(),
+            container_order: Vec::new(),
+            session_order: HashMap::new(),
+            worktrees_root_override: None,
+            keep_awake: default_true(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -167,6 +197,20 @@ impl AppState {
             s.worktrees_root_override = normalized;
         })?;
         Ok((self.worktrees_dir(), self.worktrees_root_is_override()))
+    }
+
+    /// Whether the daemon should hold the OS awake while a session is live.
+    /// Read at startup to seed the keep-awake watcher's setting watch.
+    pub fn keep_awake(&self) -> bool {
+        self.with_persisted(|s| s.keep_awake)
+    }
+
+    /// Persist the keep-awake setting. The caller re-publishes it on the
+    /// watch so the running watcher re-derives the hold without a restart.
+    pub fn set_keep_awake(&self, enabled: bool) -> anyhow::Result<()> {
+        self.mutate(|s| {
+            s.keep_awake = enabled;
+        })
     }
 
     /// Clone of a client's tab layout. Empty when the client has no layout yet.
@@ -368,6 +412,48 @@ mod tests {
         assert!(
             state.client_layout("c").is_empty(),
             "unknown client is empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn keep_awake_defaults_to_enabled_for_old_state_files() {
+        let json = r#"{"repos": [], "workspaces": []}"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parse old state");
+        assert!(
+            state.keep_awake,
+            "a state.json predating the setting must load as enabled"
+        );
+    }
+
+    #[test]
+    fn set_keep_awake_round_trips_through_disk() {
+        let dirs = scratch_dirs("keepawake");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert!(state.keep_awake(), "fresh state starts enabled");
+        state
+            .set_keep_awake(false)
+            .expect("persist keep_awake=false");
+        assert!(!state.keep_awake());
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert!(
+            !reloaded.keep_awake(),
+            "the disabled setting survives a reload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn fresh_install_without_state_file_keeps_awake() {
+        let dirs = scratch_dirs("keepawake-fresh");
+        assert!(!dirs.state_file.exists(), "scratch dir starts empty");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        assert!(
+            state.keep_awake(),
+            "a fresh install must default to holding the machine awake"
         );
 
         let _ = std::fs::remove_dir_all(&dirs.config);

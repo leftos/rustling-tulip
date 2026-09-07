@@ -57,7 +57,11 @@ pub fn spawn(
 /// running. `Stopped`/`Error` records are inert, and abandoned records come
 /// back from their sidecars on the next daemon start, so neither blocks.
 /// Orphans (live-but-detached children) conservatively DO block.
-fn blocks_exit(status: SessionStatus, is_abandoned: bool) -> bool {
+///
+/// Shared with [`crate::keep_awake`]: the OS keep-awake hold must cover
+/// exactly the sessions that keep this process resident, so both watchers
+/// answer "is anything live?" the same way and can never disagree.
+pub(crate) fn blocks_exit(status: SessionStatus, is_abandoned: bool) -> bool {
     !is_abandoned && !matches!(status, SessionStatus::Stopped | SessionStatus::Error)
 }
 

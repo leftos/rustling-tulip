@@ -106,6 +106,15 @@ pub struct Hub {
     /// [`ClientMessage::CancelPairing`] consume/clear it. `None` when no
     /// pairing is in progress.
     pub pairing: Arc<AsyncMutex<Option<pairing::PairingSession>>>,
+    /// The persisted keep-awake setting, published to the watcher.
+    /// [`ClientMessage::SetKeepAwake`] writes it here after saving to
+    /// `state.json`; the watcher re-derives the OS hold and broadcasts the
+    /// resulting status itself.
+    pub keep_awake_enabled: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Latest keep-awake status from the watcher, read by the initial-state
+    /// push so a freshly-connected client renders the toggle correctly
+    /// without waiting for the next broadcast.
+    pub keep_awake_status: tokio::sync::watch::Receiver<crate::keep_awake::Status>,
 }
 
 impl Hub {
@@ -193,6 +202,14 @@ pub enum StateEvent {
     /// including a remote laptop — is safe.
     PairingEnded {
         reason: protocol::PairingEndReason,
+    },
+    /// Broadcast by the keep-awake watcher whenever the setting changes or the
+    /// hold engages/releases as sessions come and go, so every connected
+    /// client's Settings UI reflects it without polling. Mirrors
+    /// [`protocol::DaemonMessage::KeepAwakeStatus`].
+    KeepAwakeStatus {
+        enabled: bool,
+        active: bool,
     },
 }
 
@@ -376,6 +393,34 @@ async fn reattach_one(
     }
 }
 
+/// Wire up the keep-awake watcher: seed its setting watch from persisted
+/// state, spawn the task, and hand back the two ends the [`Hub`] keeps — the
+/// setting sender (written by [`ClientMessage::SetKeepAwake`]) and the status
+/// receiver (read by the initial-state push).
+fn start_keep_awake(
+    state: &AppState,
+    sessions: &Arc<SessionRegistry>,
+    state_events: &broadcast::Sender<StateEvent>,
+) -> (
+    tokio::sync::watch::Sender<bool>,
+    tokio::sync::watch::Receiver<crate::keep_awake::Status>,
+) {
+    let enabled = state.keep_awake();
+    let (enabled_tx, enabled_rx) = tokio::sync::watch::channel(enabled);
+    let (status_tx, status_rx) = tokio::sync::watch::channel(crate::keep_awake::Status {
+        enabled,
+        active: false,
+    });
+    crate::keep_awake::spawn(
+        Arc::clone(sessions),
+        enabled_rx,
+        status_tx,
+        state_events.clone(),
+        crate::keep_awake::native(),
+    );
+    (enabled_tx, status_rx)
+}
+
 pub async fn run(
     state: Arc<AppState>,
     dirs: Dirs,
@@ -430,6 +475,11 @@ pub async fn run(
     // 0 — see `crates/daemon/src/git_watch.rs`.
     crate::git_watch::start(&state, &sessions, &state_events, &client_count_rx);
 
+    // Keep the host awake for as long as a session has a live child, so an
+    // aggressive power plan can't sleep the machine out from under a running
+    // task. Same liveness predicate as the idle-exit watcher below.
+    let (keep_awake_tx, keep_awake_status_rx) = start_keep_awake(&state, &sessions, &state_events);
+
     let hub = Hub {
         state,
         sessions,
@@ -445,6 +495,8 @@ pub async fn run(
         lan_handle: Arc::new(AsyncMutex::new(None)),
         advertiser: Arc::new(AsyncMutex::new(None)),
         pairing: Arc::new(AsyncMutex::new(None)),
+        keep_awake_enabled: Arc::new(keep_awake_tx),
+        keep_awake_status: keep_awake_status_rx,
     };
 
     // Idle self-exit: once the last client disconnects and no session has a
@@ -996,6 +1048,9 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::PairingEnded { reason }) => {
                     let _ = out_tx.send(DaemonMessage::PairingEnded { reason });
                 }
+                Ok(StateEvent::KeepAwakeStatus { enabled, active }) => {
+                    let _ = out_tx.send(DaemonMessage::KeepAwakeStatus { enabled, active });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                 }
@@ -1256,6 +1311,11 @@ fn push_initial_state(
         port: lan_cfg.as_ref().map_or(lan::DEFAULT_LAN_PORT, |c| c.port),
         fingerprint: lan::fingerprint(&hub.dirs),
         addresses: lan::detect_addresses(),
+    });
+    let keep_awake = *hub.keep_awake_status.borrow();
+    let _ = out_tx.send(DaemonMessage::KeepAwakeStatus {
+        enabled: keep_awake.enabled,
+        active: keep_awake.active,
     });
 }
 
@@ -2062,6 +2122,11 @@ async fn dispatch(
                 fingerprint: lan::fingerprint(&hub.dirs),
                 addresses: lan::detect_addresses(),
             });
+        }
+        ClientMessage::SetKeepAwake { enabled } => {
+            hub.state.set_keep_awake(enabled)?;
+            hub.keep_awake_enabled.send_replace(enabled);
+            info!(enabled, "keep-awake setting changed");
         }
         ClientMessage::StartPairing => {
             // Open a fresh pairing window and hand the code back to *this*

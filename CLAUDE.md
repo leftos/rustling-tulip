@@ -112,7 +112,7 @@ The `fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI 
 
 Both sides resolve the config dir via the `directories` crate as `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`. On Windows that expands to `%APPDATA%\leftos\rustling-tulip\config\` (note the `leftos\` + `\config\` segments — `directories` inserts them, so a plain `%APPDATA%\rustling-tulip\` path is wrong). Layout under that root:
 
-- `state.json` — persisted repos + workspaces + tabs (see `crates/daemon/src/state.rs`).
+- `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings (`worktrees_root_override`, `keep_awake`) that must apply with no window open (see `crates/daemon/src/state.rs`).
 - `daemon.json` — handshake (port + auth_token + pid); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
@@ -129,7 +129,7 @@ Worktrees live under a **separate** root resolved via `ProjectDirs::data_local_d
 **When to bump `protocol-version.json`.** *Additive* changes (new variant on a tagged enum, new `#[serde(default)]` field on a struct, new message type) are NOT a protocol bump. The range-based handshake (`SUPPORTED_PROTOCOL_VERSIONS`) + the `InboundClientMessage::Unknown` / `InboundDaemonMessage::Unknown` parse wrappers absorb unknown top-level types. Nested enums that grow over time (`TabLayout`, `RearrangeLayout`, `InjectorStep`, `PresetVariableKind`) each carry a `#[serde(other)] Unknown` unit variant that absorbs unrecognized values *in place* — the containing message keeps decoding. *Breaking* changes — renaming a field, removing a variant, changing semantics — DO require a bump. When bumping, keep the current version and every still-decodable prior version in `supported` (for example, a v18 daemon/client that can still speak v17 should advertise `[18, 17]`, not `[18]`). Only make `supported` a singleton when the new app cannot safely consume the older daemon's runtime messages. In that singleton case, verify `daemon_supervisor::ensure_running` can retire the old healthy daemon through the HTTP `/shutdown` path and spawn the new daemon so tracer-backed sessions reattach instead of leaving the app stuck at `auth_failed`. New nested enums should follow the same `#[serde(other)]` pattern from day one.
 
 **On-disk layout under `%APPDATA%\rustling-tulip\`** (see `crates/daemon/src/paths.rs`):
-- `state.json` — repo + workspace registry only (never sessions)
+- `state.json` — repo + workspace registry plus host settings (never sessions)
 - `daemon.json` — handshake (port, token, pid)
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to 1.5 MB on overflow), replayed via `LoadScrollback` on attach
