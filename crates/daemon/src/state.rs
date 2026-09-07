@@ -1,7 +1,10 @@
-//! Persisted daemon state: registries of repos and workspaces.
+//! Persisted daemon state (`state.json`): the repo and workspace registries,
+//! per-client tab layouts and ordering, and the host settings that must apply
+//! with no window open (worktrees root override, keep-awake).
 //!
-//! Sessions are *not* persisted across daemon restarts in Phase 1 — they're owned
-//! by the daemon process. Phase 5 will add orphan recovery.
+//! Sessions are deliberately *not* stored here. They're rebuilt from their
+//! per-session `meta.json` sidecars on startup (see `orphan.rs`), so the daemon
+//! can restart without a single fragile state blob.
 
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
