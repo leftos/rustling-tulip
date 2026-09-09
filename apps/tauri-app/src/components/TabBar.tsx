@@ -115,6 +115,15 @@ export default function TabBar({
       ) {
         return;
       }
+      // A middle-button press anywhere on the armed tab's pill is the
+      // second half of a middle-click close — leave the arm in place so
+      // the auxclick handler can confirm it.
+      if (
+        e.button === 1 &&
+        target?.closest?.(`[data-testid="tab-pill"][data-tab-id="${confirmingCloseId}"]`)
+      ) {
+        return;
+      }
       setConfirmingCloseId(null);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -424,6 +433,14 @@ export default function TabBar({
               aria-selected={isActive}
               draggable={!isRenaming}
               onClick={(e) => !isRenaming && onPillClick(t.id, e)}
+              onMouseDown={(e) => {
+                // Middle button: suppress Chromium's autoscroll cursor so
+                // the press reads as a tab action, not a page gesture.
+                if (e.button === 1) e.preventDefault();
+              }}
+              onAuxClick={(e) => {
+                if (e.button === 1 && !isRenaming) onCloseTab(t.id, e);
+              }}
               onContextMenu={(e) => onContextMenu(t.id, e)}
               onDoubleClick={() => setRenamingTabId(t.id)}
               onDragStart={(e) => onDragStart(t.id, e)}
