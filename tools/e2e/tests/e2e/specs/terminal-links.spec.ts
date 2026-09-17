@@ -20,14 +20,28 @@ type SessionUpdatedMessage = DaemonMessage & {
   session: SessionSnapshot;
 };
 
+interface TerminalLinkCandidate {
+  path: string;
+  line: number | null;
+  column: number | null;
+}
+
 interface TerminalLinkEvent {
   kind: "url" | "path";
   text: string;
   target: string;
   line: number | null;
   column: number | null;
+  candidates: TerminalLinkCandidate[];
   baseDirs: string[];
 }
+
+/// Long enough that the path is guaranteed to soft-wrap any pane width the
+/// app can be laid out at.
+const WRAPPED_PATH = `src/${Array.from(
+  { length: 12 },
+  (_, index) => `wrapped-path-segment-${index}`,
+).join("/")}/target-file.ts`;
 
 const APP_BOOT_TIMEOUT = 60_000;
 const DAEMON_BOOT_TIMEOUT = 30_000;
@@ -124,6 +138,35 @@ describe("terminal links", function () {
     expect(pathEvent.column).to.equal(2);
     expect(pathEvent.baseDirs.some((dir) => pathsEqual(dir, cwd))).to.equal(true);
   });
+
+  it("stitches a path that soft-wraps across two rows", async function () {
+    if (!ws || !spawnedSessionId) throw new Error("setup failed");
+    const sessionId = spawnedSessionId;
+    const head = `WRAP ${WRAPPED_PATH.slice(0, 20)}`;
+
+    ws.send({
+      type: "send_input",
+      session_id: sessionId,
+      data_b64: Buffer.from(wrappedOutputCommand(WRAPPED_PATH)).toString("base64"),
+    });
+    await waitForBufferText(sessionId, head, SESSION_OUTPUT_TIMEOUT);
+
+    // The fragment to click is read back off the buffer rather than guessed:
+    // where the row break falls depends on the pane's width.
+    const fragment = await wrappedTailFragment(sessionId, head);
+    expect(fragment.length).to.be.greaterThan(0);
+
+    await resetLinkEvents();
+    await focusTerminal(sessionId);
+    await clickTerminalText(sessionId, fragment, true);
+
+    const wrapEvent = await waitForTerminalLinkEvent(sessionId, 0);
+    expect(wrapEvent.kind).to.equal("path");
+    expect(wrapEvent.target).to.equal(WRAPPED_PATH);
+    // A soft wrap is flagged by the buffer, so there is nothing to fall back to.
+    expect(wrapEvent.candidates).to.have.length(1);
+    expect(wrapEvent.candidates[0]?.path).to.equal(WRAPPED_PATH);
+  });
 });
 
 async function spawnStandaloneShell(
@@ -166,6 +209,35 @@ async function removeLinkListener(): Promise<void> {
     }
     delete globalThis.__rtTerminalLinkEvents;
   `).catch(() => undefined);
+}
+
+async function resetLinkEvents(): Promise<void> {
+  await browser.execute(`
+    globalThis.__rtTerminalLinkEvents = [];
+  `);
+}
+
+/// The first row of the soft-wrapped continuation of the line holding `head`,
+/// cut down to a slice short enough to sit inside one row.
+async function wrappedTailFragment(
+  sessionId: string,
+  head: string,
+): Promise<string> {
+  return (await browser.execute(`
+    const sessionId = ${JSON.stringify(sessionId)};
+    const head = ${JSON.stringify(head)};
+    const term = globalThis.__rt_terms && globalThis.__rt_terms.get(sessionId);
+    if (!term) throw new Error("terminal not found");
+    const buf = term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line || !line.translateToString(true).includes(head)) continue;
+      const next = buf.getLine(i + 1);
+      if (!next || !next.isWrapped) continue;
+      return next.translateToString(true).slice(0, 12);
+    }
+    return "";
+  `)) as unknown as string;
 }
 
 async function terminalLinkEvents(): Promise<TerminalLinkEvent[]> {
@@ -339,6 +411,13 @@ function linkOutputCommand(url: string, filePath: string): string {
     return `Write-Output "LINK ${url}"; Write-Output "FILE ${filePath}"\r`;
   }
   return `printf 'LINK ${url}\\nFILE ${filePath}\\n'\r`;
+}
+
+function wrappedOutputCommand(path: string): string {
+  if (platform() === "win32") {
+    return `Write-Output "WRAP ${path}"\r`;
+  }
+  return `printf 'WRAP ${path}\\n'\r`;
 }
 
 function pathsEqual(actual: string, expected: string): boolean {

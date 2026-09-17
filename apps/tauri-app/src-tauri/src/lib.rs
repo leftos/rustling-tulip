@@ -324,12 +324,20 @@ async fn reveal_in_explorer(path: String) -> Result<(), String> {
     if !pb.exists() {
         return Err(format!("path does not exist: {path}"));
     }
+    open_dir_in_file_manager(&pb)
+}
+
+/// Hand a directory to the OS file manager. Shared by `reveal_in_explorer` and
+/// by the terminal-link opener, which uses it instead of the shell's default
+/// verb because `SHOpenFolderAndSelectItems` reveals a folder rather than
+/// opening it.
+fn open_dir_in_file_manager(pb: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("explorer.exe")
-            .arg(&pb)
+            .arg(pb)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -337,14 +345,14 @@ async fn reveal_in_explorer(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&pb)
+            .arg(pb)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::process::Command::new("xdg-open")
-            .arg(&pb)
+            .arg(pb)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -357,15 +365,78 @@ async fn open_url(url: String) -> Result<(), String> {
     open_with_system_handler(validated)
 }
 
-#[tauri::command]
-async fn open_path_in_vscode(
+/// One reading of a path a terminal link was detected in. A link stitched
+/// across a hard row break sends the merged path first and the fragments that
+/// were actually on screen after it.
+#[derive(Debug, serde::Deserialize)]
+struct TerminalPathCandidate {
     path: String,
-    base_dirs: Vec<String>,
     line: Option<u32>,
     column: Option<u32>,
+}
+
+/// How a resolved terminal path gets opened.
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalOpenAction {
+    /// The link carried a `:line[:col]` reference. No OS handler can honor
+    /// one, so the suffix is itself the request for an editor.
+    VsCode {
+        path: PathBuf,
+        line: u32,
+        column: Option<u32>,
+    },
+    /// A plain path: the OS picks the app, including its own "how do you want
+    /// to open this file?" picker for an unassociated type.
+    DefaultApp(PathBuf),
+}
+
+#[tauri::command]
+async fn open_terminal_path(
+    candidates: Vec<TerminalPathCandidate>,
+    base_dirs: Vec<String>,
 ) -> Result<(), String> {
-    let resolved = resolve_existing_terminal_path(&path, &base_dirs)?;
-    spawn_vscode(&resolved, line, column)
+    match select_terminal_open(&candidates, &base_dirs)? {
+        TerminalOpenAction::VsCode { path, line, column } => {
+            spawn_vscode(&path, Some(line), column)
+        }
+        TerminalOpenAction::DefaultApp(path) => open_with_default_app(&path),
+    }
+}
+
+/// Take the first candidate that exists on disk — the longest reading wins,
+/// so an over-eager wrap stitch degrades to the fragment that was on screen.
+fn select_terminal_open(
+    candidates: &[TerminalPathCandidate],
+    base_dirs: &[String],
+) -> Result<TerminalOpenAction, String> {
+    let mut last_error = "no path candidates to open".to_string();
+    for candidate in candidates {
+        match resolve_existing_terminal_path(&candidate.path, base_dirs) {
+            Ok(resolved) => {
+                return Ok(match candidate.line {
+                    Some(line) => TerminalOpenAction::VsCode {
+                        path: resolved,
+                        line,
+                        column: candidate.column,
+                    },
+                    None => TerminalOpenAction::DefaultApp(resolved),
+                });
+            }
+            Err(err) => last_error = err,
+        }
+    }
+    Err(last_error)
+}
+
+/// Open a path with whatever the OS has registered for it. Files go through
+/// the opener plugin, which is a real `ShellExecuteExW` with the default verb
+/// on Windows; directories go to the file manager.
+fn open_with_default_app(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return open_dir_in_file_manager(path);
+    }
+    tauri_plugin_opener::open_path(path, None::<&str>)
+        .map_err(|e| format!("open {}: {e}", path.display()))
 }
 
 /// Open one or more folders/files in a single VS Code window. The first path
@@ -579,7 +650,10 @@ fn vscode_commands() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_existing_terminal_path, simplify_path, validate_http_url};
+    use super::{
+        TerminalOpenAction, TerminalPathCandidate, resolve_existing_terminal_path,
+        select_terminal_open, simplify_path, validate_http_url,
+    };
     use std::fs;
     #[cfg(windows)]
     use std::path::{Path, PathBuf};
@@ -627,6 +701,73 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn select_terminal_open_takes_the_stitched_candidate_when_it_exists() -> Result<(), String> {
+        let root = unique_temp_dir("stitched")?;
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let file = root.join("notes-file.txt");
+        fs::write(&file, "merged\n").map_err(|e| e.to_string())?;
+        let base_dirs = [root.to_string_lossy().into_owned()];
+
+        let action = select_terminal_open(
+            &[
+                candidate("notes-file.txt", None, None),
+                candidate("notes-file.", None, None),
+            ],
+            &base_dirs,
+        );
+
+        let expected = simplify_path(&file.canonicalize().map_err(|e| e.to_string())?);
+        fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        assert_eq!(action?, TerminalOpenAction::DefaultApp(expected));
+        Ok(())
+    }
+
+    #[test]
+    fn select_terminal_open_falls_back_to_the_fragment() -> Result<(), String> {
+        let root = unique_temp_dir("fragment")?;
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let file = root.join("notes-file.txt");
+        fs::write(&file, "fragment\n").map_err(|e| e.to_string())?;
+        let base_dirs = [root.to_string_lossy().into_owned()];
+
+        let action = select_terminal_open(
+            &[
+                candidate("notes-file.txtdone", None, None),
+                candidate("notes-file.txt", None, None),
+            ],
+            &base_dirs,
+        );
+
+        let expected = simplify_path(&file.canonicalize().map_err(|e| e.to_string())?);
+        fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        assert_eq!(action?, TerminalOpenAction::DefaultApp(expected));
+        Ok(())
+    }
+
+    #[test]
+    fn select_terminal_open_routes_a_line_ref_to_vscode() -> Result<(), String> {
+        let root = unique_temp_dir("lineref")?;
+        fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let file = root.join("main.rs");
+        fs::write(&file, "fn main() {}\n").map_err(|e| e.to_string())?;
+        let base_dirs = [root.to_string_lossy().into_owned()];
+
+        let action = select_terminal_open(&[candidate("main.rs", Some(42), Some(7))], &base_dirs);
+
+        let expected = simplify_path(&file.canonicalize().map_err(|e| e.to_string())?);
+        fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        assert_eq!(
+            action?,
+            TerminalOpenAction::VsCode {
+                path: expected,
+                line: 42,
+                column: Some(7),
+            }
+        );
+        Ok(())
+    }
+
     #[cfg(windows)]
     #[test]
     fn simplify_path_strips_drive_verbatim_prefix() {
@@ -646,6 +787,14 @@ mod tests {
     fn simplify_path_leaves_normal_paths_alone() {
         let out = simplify_path(Path::new(r"C:\Users\foo\repo"));
         assert_eq!(out, PathBuf::from(r"C:\Users\foo\repo"));
+    }
+
+    fn candidate(path: &str, line: Option<u32>, column: Option<u32>) -> TerminalPathCandidate {
+        TerminalPathCandidate {
+            path: path.to_string(),
+            line,
+            column,
+        }
     }
 
     fn unique_temp_dir(label: &str) -> Result<std::path::PathBuf, String> {
@@ -816,7 +965,7 @@ pub fn run() {
             open_tab_window,
             reveal_in_explorer,
             open_url,
-            open_path_in_vscode,
+            open_terminal_path,
             open_folders_in_vscode,
             log_message,
             read_clipboard_text,

@@ -298,7 +298,7 @@ leaf-cert fingerprint; pass a dummy SNI.
 ### Phase 6 — Remote-mode UI degradation (hide local-FS actions)
 - [x] Gate on `isRemote` via `RemoteModeContext` + `notifyRemoteUnavailable`
       (window-event toast). Covered: add-repo, add-repo-path, create-workspace,
-      `reveal_in_explorer`, `open_path_in_vscode`, `open_folders_in_vscode`, the VS
+      `reveal_in_explorer`, `open_terminal_path`, `open_folders_in_vscode`, the VS
       Code workspace suggestion, and all directory/file Browse/Pick affordances.
       Buttons disable + tooltip; readonly path fields become typeable so a host
       path can still be entered; click-only handlers (terminal links) toast.

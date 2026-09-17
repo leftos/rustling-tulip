@@ -2093,23 +2093,21 @@ function openContainerInVscode(
 ): void {
   if (c.kind === "repo") {
     if (!c.fsPath) return;
-    void invoke("open_path_in_vscode", {
-      path: c.fsPath,
-      baseDirs: [],
-    }).catch((err: unknown) => {
-      console.error("open_path_in_vscode failed", err);
-    });
+    void invoke("open_folders_in_vscode", { paths: [c.fsPath] }).catch(
+      (err: unknown) => {
+        console.error("open_folders_in_vscode failed", err);
+      },
+    );
     return;
   }
   if (c.kind !== "workspace") return;
   const ws = workspaces.find((w) => w.id === c.id);
   if (!ws) return;
   if (ws.linked_vscode_workspace) {
-    void invoke("open_path_in_vscode", {
-      path: ws.linked_vscode_workspace,
-      baseDirs: [],
+    void invoke("open_folders_in_vscode", {
+      paths: [ws.linked_vscode_workspace],
     }).catch((err: unknown) => {
-      console.error("open_path_in_vscode failed", err);
+      console.error("open_folders_in_vscode failed", err);
     });
     return;
   }

@@ -28,8 +28,11 @@ import { loadSettings } from "../utils/settings";
 import type { EffectiveAppearance } from "../utils/appearance";
 import { buildTerminalTheme } from "../utils/terminalTheme";
 import {
-  detectTerminalLinks,
+  canStitch,
+  detectTerminalRowLinks,
   type DetectedTerminalLink,
+  type TerminalLinkCandidate,
+  type TerminalRow,
 } from "../utils/terminalLinks";
 
 /// Historical cascade — preserved as the fallback when the user hasn't
@@ -102,6 +105,10 @@ interface TerminalLinkOpenDetail {
   target: string;
   line: number | null;
   column: number | null;
+  /// Readings of the path, longest first. `target`/`line`/`column` mirror
+  /// `candidates[0]`; the shorter entries are the un-stitched fragments the
+  /// backend falls back to when the merged path doesn't exist on disk.
+  candidates: TerminalLinkCandidate[];
   baseDirs: string[];
 }
 
@@ -121,20 +128,18 @@ function openTerminalLink(detail: TerminalLinkOpenDetail, isRemote: boolean): vo
     return;
   }
 
-  // A file path resolves on the *host's* filesystem; opening it in the
-  // client's VS Code is meaningless over a remote connection.
+  // A file path resolves on the *host's* filesystem; handing it to an app on
+  // the client is meaningless over a remote connection.
   if (isRemote) {
-    notifyRemoteUnavailable("Open in VS Code");
+    notifyRemoteUnavailable("Open path");
     return;
   }
 
-  void invoke("open_path_in_vscode", {
-    path: detail.target,
+  void invoke("open_terminal_path", {
+    candidates: detail.candidates,
     baseDirs: detail.baseDirs,
-    line: detail.line,
-    column: detail.column,
   }).catch((err: unknown) => {
-    console.warn("open_path_in_vscode failed", detail.target, err);
+    console.warn("open_terminal_path failed", detail.target, err);
   });
 }
 
@@ -148,9 +153,15 @@ function terminalLinkDetail(
     target: link.target,
     line: link.line,
     column: link.column,
+    candidates: link.candidates,
     baseDirs,
   };
 }
+
+/// Rows either side of the hovered one that a link may be stitched across.
+/// Bounds the provider's walk so a buffer of glued-together rows can't stall
+/// a hover.
+const LINK_ROW_WINDOW = 64;
 
 export default function Terminal({
   sessionId,
@@ -518,17 +529,63 @@ export default function Terminal({
       };
       const linkProvider: ILinkProvider = {
         provideLinks(bufferLineNumber, callback) {
-          const line = term.buffer.active.getLine(bufferLineNumber - 1);
-          if (!line) {
+          const buffer = term.buffer.active;
+          const hoveredRow = bufferLineNumber - 1;
+          const readRow = (index: number): TerminalRow | null => {
+            const line = buffer.getLine(index);
+            if (!line) return null;
+            return {
+              text: line.translateToString(false),
+              isWrapped: line.isWrapped,
+            };
+          };
+          if (!readRow(hoveredRow)) {
             callback(undefined);
             return;
           }
-          const links = detectTerminalLinks(line.translateToString(true)).map(
-            (link): ILink => {
+          // Widen to the logical line the hovered row belongs to: a soft wrap
+          // the buffer flagged, or a hard break `canStitch` accepts.
+          let firstRow = hoveredRow;
+          while (firstRow > 0 && hoveredRow - firstRow < LINK_ROW_WINDOW) {
+            const current = readRow(firstRow);
+            const previous = readRow(firstRow - 1);
+            if (!current || !previous) break;
+            if (!current.isWrapped && !canStitch(previous, current, term.cols)) {
+              break;
+            }
+            firstRow -= 1;
+          }
+          let lastRow = hoveredRow;
+          while (
+            lastRow + 1 < buffer.length &&
+            lastRow - firstRow < LINK_ROW_WINDOW
+          ) {
+            const current = readRow(lastRow);
+            const next = readRow(lastRow + 1);
+            if (!current || !next) break;
+            if (!next.isWrapped && !canStitch(current, next, term.cols)) break;
+            lastRow += 1;
+          }
+          const rows: TerminalRow[] = [];
+          for (let index = firstRow; index <= lastRow; index += 1) {
+            const row = readRow(index);
+            if (!row) break;
+            rows.push(row);
+          }
+          const hoveredOffset = hoveredRow - firstRow;
+          const links = detectTerminalRowLinks(rows, term.cols)
+            .filter(
+              (link) =>
+                link.startRow <= hoveredOffset && link.endRow >= hoveredOffset,
+            )
+            .map((link): ILink => {
               const terminalLink: ILink = {
                 range: {
-                  start: { x: link.startIndex + 1, y: bufferLineNumber },
-                  end: { x: link.endIndex + 1, y: bufferLineNumber },
+                  start: {
+                    x: link.startColumn + 1,
+                    y: firstRow + link.startRow + 1,
+                  },
+                  end: { x: link.endColumn + 1, y: firstRow + link.endRow + 1 },
                 },
                 text: link.text,
                 decorations: {
@@ -551,8 +608,7 @@ export default function Terminal({
               };
               providedTerminalLinks.add(terminalLink);
               return terminalLink;
-            },
-          );
+            });
           callback(links.length > 0 ? links : undefined);
         },
       };
