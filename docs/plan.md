@@ -24,9 +24,7 @@ worktrees created automatically. Daemon keeps everything alive across app restar
                                     └────────────────────────────┘
 ```
 
-Daemon is a standalone Rust binary; Tauri app is a client. No Anthropic API calls — the
-daemon shells out to the `claude` or `codex` CLI. Wire protocol is JSON over localhost
-WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
+Daemon is a standalone Rust binary; Tauri app is a client. No Anthropic API calls — the daemon shells out to the `claude` or `codex` CLI. Wire protocol is JSON over localhost WebSocket (see `crates/protocol/src/lib.rs`); the current version and the versions still supported are in `protocol-version.json`.
 
 ## Shipped
 

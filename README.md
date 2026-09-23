@@ -28,9 +28,7 @@ pnpm tauri dev
 
 ## Run
 
-The Tauri app auto-starts the daemon if it isn't already running.
-Daemon listens on a random loopback port; connection details are written to
-`%APPDATA%\rustling-tulip\daemon.json`.
+The Tauri app auto-starts the daemon if it isn't already running. Daemon listens on a random loopback port; connection details are written to `%APPDATA%\leftos\rustling-tulip\config\daemon.json` (override the directory with `RUSTLING_TULIP_CONFIG_DIR`).
 
 ## Phase status
 
