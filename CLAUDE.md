@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project shape
 
+**Migration in progress:** the Tauri client is being replaced by a native GPUI client (`apps/native`, plan in `docs/plans/native-client.md`). The Tauri app is frozen to bug fixes; new client features go to the native client only (user, 2026-09-23).
+
 `rustling-tulip` is a Tauri desktop client + a long-lived Rust daemon that orchestrates many parallel `claude` CLI sessions across single repos and multi-repo "workspaces". The daemon owns all PTYs and child processes; the Tauri app is just a client. **No code in this repo calls the Anthropic API directly** — the daemon always shells out to the `claude` CLI, which is the stable boundary.
 
 ```

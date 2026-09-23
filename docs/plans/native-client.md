@@ -2,20 +2,44 @@
 
 Decision (user, 2026-09-23): move the desktop client off the web stack. The daemon, tracer and `crates/protocol` stay as they are; only `apps/tauri-app` is replaced. Chosen stack: GPUI (Zed's UI framework) + `alacritty_terminal`, with Iced as the fallback if GPUI's API churn becomes a problem. The native client can run side by side with the Tauri app against the same daemon (it accepts multiple clients), so parity is reached feature by feature before Tauri is retired.
 
+Rulings (user, 2026-09-23):
+
+- **Crate:** the client is a main-workspace member at `apps/native`, under the workspace lints, prek clippy/test and `cargo deny check`.
+- **Tauri freeze:** `apps/tauri-app` takes bug fixes only. Every new feature goes to the native client, so the parity checklist stops growing. Tauri is deleted at cutover (Phase 6).
+- **Landing:** each item is committed and pushed to `main` as soon as it is green.
+
+What each feature must do is in [native-client-parity.md](./native-client-parity.md): tick its lines there as native items land.
+
 ## Spike
 
-`spikes/native-client/` is a standalone cargo workspace (kept out of the main workspace's build, clippy and cargo-deny). It reads `daemon.json`, connects, sends `Hello`, picks a session, loads its scrollback, then streams `PtyOutput` into `alacritty_terminal` and paints the grid with GPUI. Keys, paste (Ctrl+Shift+V, bracketed when the child asks) and wheel scrollback work.
+`spikes/native-client/` is a standalone cargo workspace (kept out of the main workspace's build, clippy and cargo-deny). It reads `daemon.json`, connects, sends `Hello`, picks a session, loads its scrollback, then streams `PtyOutput` into `alacritty_terminal` and paints the grid with GPUI. Keys, paste (Ctrl+Shift+V, bracketed when the child asks) and wheel scrollback work. It is the reference for P1.1 and is deleted in that item.
 
-```powershell
-cd spikes/native-client
-cargo run --release -- <session-id>   # omit the id to attach to the first live interactive/shell session
-```
-
-Known spike limits: it sends `Resize`, so the attached session's PTY follows this window's size (the Tauri pane attached to the same session resizes it back); terminal replies (`PtyWrite`, e.g. cursor-position reports) are dropped so the child doesn't get two answers; no selection/copy, no IME, no link detection; wide glyphs are shaped per glyph, not verified against CJK/emoji.
+Known spike limits: it sends `Resize`, so the attached session's PTY follows this window's size; terminal replies (`PtyWrite`) are dropped; no selection/copy, no IME, no link detection; wide glyphs are not verified against CJK/emoji.
 
 - [x] Spike: GPUI window attaches to a daemon session and renders it with `alacritty_terminal`
-- [x] Hand-test the spike against a plain-shell session and against `claude` (colors, cursor, typing echo, scrollback, resize)
-- [ ] Decide the client's crate layout in the main workspace (lints, cargo-deny licenses for GPUI's tree)
-- [ ] Inventory the Tauri app's features into a parity checklist (sidebar, tabs/panes, spawn dialog, source-control panel + diff view, settings, pop-out windows, notifications)
-- [ ] Choose the diff-view approach (the Monaco replacement)
-- [ ] Replace the WebdriverIO e2e suite's driver
+- [x] Hand-test the spike against a plain-shell session and against `claude`
+- [x] Inventory the Tauri app's features into a parity checklist
+- [x] Split the parity checklist into migration phases (below)
+
+## Phase 1 — daily driver
+
+Goal: the native client replaces the Tauri app for everyday work on the local machine: connect, see sessions, spawn, and work in tabs of split terminal panes. Items are in dependency order; P1.1 comes first, and P1.2 comes before P1.3.
+
+- [ ] **P1.1 Crate.** Create `apps/native` (binary `rustling-tulip-native`) as a workspace member from the spike's code: GPUI 0.2.2, `alacritty_terminal` 0.26, `crates/protocol`. `.\rt.ps1 clippy`, `cargo test --workspace` and `cargo deny check` pass: add any licence GPUI's tree needs to `deny.toml` with a one-line justification like the existing entries. Move the spike's pure logic (`keys.rs` key mapping, `term.rs` span building and colour resolution) under unit tests. Delete `spikes/native-client/` in the same commit. Add the new binary to CLAUDE.md "Project shape" and `rt.ps1` (a `native` verb that builds and runs it).
+- [ ] **P1.2 Shared daemon-client crate.** Move daemon supervision out of `apps/tauri-app/src-tauri/src/daemon_supervisor.rs` (ensure-running, health probe, protocol check, stale-binary detection, graceful `/shutdown`, orphan reaping, spawn lock) plus the handshake path, config-dir resolution and client identity (`lib.rs` `get_client_identity`) into a new `crates/daemon-client`. The Tauri host calls the crate, so there is still only one implementation. Behaviour-preserving: the existing supervisor tests move with the code.
+- [ ] **P1.3 Connection lifecycle** (parity: "Connection & daemon lifecycle"). Native client: ensure the daemon via `crates/daemon-client`; WS connect with `Hello` carrying `client_id` + hostname; reconnect with backoff (0.5s → 10s); standby-resume watchdog; connecting overlay with "Restart daemon"; footer status pill and troubleshooting flyout (open logs, restart, stop). Open decision: whether the native client shares the Tauri install's `client-id` (same per-client layout) or gets its own.
+- [ ] **P1.4 App shell and sidebar** (parity: "Sidebar / repos / workspaces", the non-drag items). Main window with a resizable, collapsible sidebar: repos view (workspace / repo / SH / DIR containers, Detached bucket), session leaves with status dot, label, runtime tag and attention "!", click to focus. Sidebar state lives in a plain-Rust model with unit tests, and the GPUI view renders it.
+- [ ] **P1.5 Tabs and split panes** (parity: "Tabs & panes / layout", minus drag-and-drop and pop-outs). Tab strip (new, activate, rename, close with confirm, middle-click close), split tree with draggable dividers, split / close pane, focused pane per tab, smart placement, layout persisted through the daemon's per-client tab messages. The split tree is a plain-Rust model with unit tests (port the cases in `apps/tauri-app/src/utils/grid.ts`).
+- [ ] **P1.6 Terminal pane, production grade** (parity: "Terminal", the non-(hard) items plus Shift+Enter and paste). Scrollback-first load with live buffering and 2s/4s retries; resize on layout change; mouse selection with copy (Ctrl+C copies with a selection, else ^C; Ctrl+Shift+C; copy on select); native clipboard paste (arboard), bracketed when asked; Shift+Enter per agent (`\` + CR for claude and shells, `\n` for codex/cursor); cursor bar for agents / block for shells; input dropped when stopped; mouse reporting to the child when it asks; `detach` on close; focus after spawn.
+- [ ] **P1.7 Spawn and session actions** (parity: "Spawn dialog & launch flows" core + "Sessions"). Spawn dialog: target, runtime, open-in tab, interactive mode, trusted launch, worktree new / existing with the daemon-suggested branch name and base branch; + Shell (quick and dialog). Session context menu and pane header: rename, stop (keep / delete worktree through the branch-fate confirm), restart, remove pane; stopped-pane overlay.
+- [ ] **P1.8 Quit flow** (parity: exit dialog items). Intercept window close; quit silently with no live sessions; exit dialog (keep running / stop keep worktrees / stop remove worktrees with per-session branch fate / abandon); wait for `shutdown_ack`.
+
+## Later phases
+
+Each is split into brief-sized items (like Phase 1) when it becomes the current focus, from its parity sections.
+
+- [ ] **Phase 2 — terminal depth:** link detection with wrapped-path stitching and Ctrl-click open, OSC 52 with the copied chip, shell-integration gutter dots and their menu, fonts (bundled + system, bold, size levels app / repo / session / tab), contrast-adjusted theme, appearance editor.
+- [ ] **Phase 3 — source control:** sidebar changes tree, stage / unstage / discard / commit, stashes, history with commit detail, open in forge. Design item first: choose the diff-view approach (the Monaco replacement).
+- [ ] **Phase 4 — flows and settings:** preset launch wizard, worktree manager, delete-worktree and cleanup-failed dialogs, first-connect layout chooser, settings modal, OS notifications and attention, toasts, undo shelf, workspace creator, VS Code workspace prompt, headless view.
+- [ ] **Phase 5 — windows and drag-and-drop:** pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder.
+- [ ] **Phase 6 — remote and cutover:** connection picker, LAN pairing, pinned-TLS tunnel (reuse `src-tauri/src/remote.rs` as a library), autostart. Design item: the UI test driver that replaces WebdriverIO. Cutover: the installer ships the native client; delete `apps/tauri-app`, the TS protocol mirror, the `protocol-mirror` prek hook, the `protocol-sync-checker` agent and the WebdriverIO suite; update CLAUDE.md.

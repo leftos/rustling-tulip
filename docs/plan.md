@@ -60,6 +60,12 @@ WebSocket (see `crates/protocol/src/lib.rs`). Current `PROTOCOL_VERSION`: 15.
 
 ## Open
 
+Priority order for `/nextup`: **Current focus** first, then the sections below it top to bottom.
+
+### Current focus: native client
+Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
+- [ ] **Next up:** Phase 1, starting at P1.1 (crate) → P1.2 (shared daemon-client crate); see [native-client.md](./plans/native-client.md) for the full list
+
 ### Launch into an existing worktree — complete
 - [x] Address a worktree by path instead of by derived branch name, so a
       worktree left behind by a session that is gone (`RootWorktreeStatus::Stale`)

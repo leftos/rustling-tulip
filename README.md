@@ -47,3 +47,11 @@ Daemon listens on a random loopback port; connection details are written to
        "open in forge" links)
 
 See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
+
+## Glossary
+
+- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native` that replaces the Tauri app; see `docs/plans/native-client.md`.
+- **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file; the native client reaches parity when it is all ticked.
+- **Tauri freeze**: the Tauri app takes bug fixes only while the native client catches up; new features go to the native client.
+- **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
+- **P1.1, P1.2, …**: item ids in `docs/plans/native-client.md`, as phase number and item number.
