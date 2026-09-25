@@ -14,7 +14,7 @@ crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry,
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
-apps/native/            binary = rustling-tulip-native: GPUI + alacritty_terminal desktop client replacing the Tauri app (see docs/plans/native-client.md)
+apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client replacing the Tauri app (see docs/plans/native-client.md); tests/ui_*.rs drive RootView::with_transport against a scripted fake daemon
 apps/tauri-app/
   src-tauri/            Rust side: spawns the daemon, exposes Tauri commands (file picker, pop-out window)
   src/                  React 19 + xterm.js frontend (Monaco editor for diffs)
@@ -63,6 +63,9 @@ cargo deny check          # advisories, licenses, source allowlist (see deny.tom
 # Run a single test
 cargo test -p daemon <test_name>
 cargo test -p protocol
+
+# Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
+cargo test -p rustling-tulip-native --test ui_terminal   # also ui_sidebar, ui_tabs
 
 # Frontend (apps/tauri-app)
 cd apps/tauri-app

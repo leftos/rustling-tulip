@@ -77,11 +77,10 @@ impl RootView {
             cx.stop_propagation();
             cx.notify();
         });
+        let name = format!("tab-{}", tab.id);
         div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "tab-{}",
-                tab.id
-            ))))
+            .id(ElementId::Name(SharedString::from(name.clone())))
+            .debug_selector(|| name)
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -209,10 +208,10 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
     } else {
         "Close tab"
     };
+    let name = format!("tab-close-{tab_id}");
     div()
-        .id(ElementId::Name(SharedString::from(format!(
-            "tab-close-{tab_id}"
-        ))))
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
         .px(px(3.0))
         .rounded(px(3.0))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
@@ -232,6 +231,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
 fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
     div()
         .id("new-tab")
+        .debug_selector(|| "new-tab".to_owned())
         .px(px(10.0))
         .h_full()
         .flex()

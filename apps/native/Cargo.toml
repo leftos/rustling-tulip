@@ -33,3 +33,6 @@ tokio-tungstenite = "0.29.0"
 futures = "0.3"
 base64 = "0.22"
 unicode-segmentation = "1.13.2"
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["test-support"] }

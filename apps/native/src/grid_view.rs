@@ -33,6 +33,12 @@ pub(crate) struct PaneSlot {
     _events: Subscription,
 }
 
+impl PaneSlot {
+    pub(crate) fn view(&self) -> &Entity<TerminalPane> {
+        &self.view
+    }
+}
+
 /// One scrollback retry per session and attempt. The panes showing a
 /// session time out together, and every `LoadScrollback` restarts the
 /// daemon's output stream for it, so only the first report goes out.
@@ -158,8 +164,8 @@ impl RootView {
     }
 
     fn new_slot(&self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) -> PaneSlot {
-        let tx = self.tx.clone();
-        let view = cx.new(|cx| TerminalPane::new(tx, cx));
+        let (tx, now) = (self.tx.clone(), self.now.clone());
+        let view = cx.new(|cx| TerminalPane::new(tx, now, cx));
         let handle = view.read(cx).focus_handle();
         let id = pane_id.to_owned();
         let focus_in = cx.on_focus_in(&handle, window, move |this, _, cx| {
@@ -408,9 +414,11 @@ impl RootView {
             &self.drag,
             Some(Drag::Divider { tab_id: t, split_path, .. }) if t == tab_id && split_path == path
         );
-        let id = ElementId::Name(SharedString::from(format!("divider-{tab_id}-{path:?}")));
+        let name = format!("divider-{tab_id}-{path:?}");
+        let id = ElementId::Name(SharedString::from(name.clone()));
         let (tab_id, split_path) = (tab_id.to_owned(), path.to_vec());
         drag_handle(id, direction == SplitDirection::Horizontal, active)
+            .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -437,6 +445,7 @@ impl RootView {
             (Some(_), Some(slot)) if slot.attached => div()
                 .flex_1()
                 .min_h(px(0.0))
+                .debug_selector(|| format!("pane-grid-{pane_id}"))
                 .child(slot.view.clone())
                 .into_any_element(),
             (Some(id), _) => {
@@ -571,10 +580,10 @@ fn header_button(
     glyph: &'static str,
     tip: &'static str,
 ) -> Stateful<Div> {
+    let name = format!("{action}-{pane_id}");
     div()
-        .id(ElementId::Name(SharedString::from(format!(
-            "{action}-{pane_id}"
-        ))))
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
         .px(px(4.0))
         .rounded(px(3.0))
         .cursor_pointer()

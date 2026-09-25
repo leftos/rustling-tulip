@@ -16,6 +16,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, SessionSnapshot};
 
+use crate::Clock;
 use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::scrollback_load::{self, ScrollbackLoad, State as LoadState, Step};
@@ -30,6 +31,8 @@ pub struct TerminalPane {
     term: Terminal,
     focus: FocusHandle,
     tx: UnboundedSender<NetCommand>,
+    /// The time the scrollback load's timeouts and retries count from.
+    now: Clock,
     attachment: Attachment,
     session: Option<SessionContext>,
     /// Wakes the scrollback load at its next timeout or retry.
@@ -109,11 +112,12 @@ pub enum PaneEvent {
 impl EventEmitter<PaneEvent> for TerminalPane {}
 
 impl TerminalPane {
-    pub fn new(tx: UnboundedSender<NetCommand>, cx: &mut Context<Self>) -> Self {
+    pub fn new(tx: UnboundedSender<NetCommand>, now: Clock, cx: &mut Context<Self>) -> Self {
         Self {
             term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
             focus: cx.focus_handle(),
             tx,
+            now,
             attachment: Attachment::default(),
             session: None,
             load_timer: None,
@@ -127,6 +131,40 @@ impl TerminalPane {
 
     pub fn session_id(&self) -> Option<&str> {
         self.attachment.session_id.as_deref()
+    }
+
+    /// The visible screen, one string per row with trailing blanks trimmed.
+    pub fn grid_text(&self) -> Vec<String> {
+        let snapshot = self.term.snapshot();
+        let mut rows = vec![String::new(); self.term.size().rows];
+        for span in &snapshot.text {
+            let Some(row) = rows.get_mut(span.row) else {
+                continue;
+            };
+            let filled = row.chars().count();
+            if filled < span.col {
+                row.extend(std::iter::repeat_n(' ', span.col - filled));
+            }
+            row.push_str(&span.text);
+        }
+        rows.iter().map(|row| row.trim_end().to_owned()).collect()
+    }
+
+    /// The cursor shape the next paint draws.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.term.snapshot().cursor_shape
+    }
+
+    /// The window position of the centre of cell (`col`, `row`), from the
+    /// last layout.
+    pub fn cell_center(&self, col: usize, row: usize) -> Option<Point<Pixels>> {
+        let (origin, cell) = self.layout?;
+        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
+        let (x, y) = (
+            (col as f32 + 0.5) * cell.width,
+            (row as f32 + 0.5) * cell.height,
+        );
+        Some(point(origin.x + px(x), origin.y + px(y)))
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -157,7 +195,7 @@ impl TerminalPane {
         let context = SessionContext::of(session);
         self.fresh_terminal(context.default_cursor_shape());
         self.session = Some(context);
-        self.attachment.attach(session.id.clone(), Instant::now());
+        self.attachment.attach(session.id.clone(), (self.now)());
         self.send_resize();
         self.schedule_load_tick(cx);
         cx.notify();
@@ -186,7 +224,7 @@ impl TerminalPane {
             .as_ref()
             .and_then(ScrollbackLoad::next_deadline);
         self.load_timer = deadline.map(|deadline| {
-            let delay = deadline.saturating_duration_since(Instant::now());
+            let delay = deadline.saturating_duration_since((self.now)());
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 // Fails only when the pane is gone, leaving nothing to load.
@@ -199,7 +237,7 @@ impl TerminalPane {
         let Some(load) = self.attachment.load.as_mut() else {
             return;
         };
-        let steps = load.tick(Instant::now());
+        let steps = load.tick((self.now)());
         if load.state() == LoadState::Failed {
             tracing::warn!(
                 "scrollback for session {:?} failed after {} retries",

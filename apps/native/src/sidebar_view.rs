@@ -77,6 +77,7 @@ impl RootView {
             .flex_none()
             .w(px(width))
             .h_full()
+            .debug_selector(|| "sidebar-panel".to_owned())
             .track_focus(&self.sidebar_focus)
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
@@ -118,6 +119,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
 fn collapsed_strip(cx: &mut Context<RootView>) -> Div {
     let show = div()
         .id("sidebar-show")
+        .debug_selector(|| "sidebar-show".to_owned())
         .flex()
         .justify_center()
         .w_full()
@@ -146,6 +148,7 @@ fn collapsed_strip(cx: &mut Context<RootView>) -> Div {
 /// The drag handle; a press starts a resize the root follows until release.
 fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     drag_handle("sidebar-divider", true, active)
+        .debug_selector(|| "sidebar-divider".to_owned())
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
 
@@ -168,8 +171,10 @@ fn container_rows(
 fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<Div> {
     let key = container.key.clone();
     let chip = if container.collapsed { "▸" } else { "▾" };
+    let name = format!("container-{}", container.key);
     div()
-        .id(SharedString::from(format!("container-{}", container.key)))
+        .id(SharedString::from(name.clone()))
+        .debug_selector(|| name)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -214,8 +219,10 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
 
 fn leaf_row(leaf: &Leaf, selected: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let id = leaf.id.clone();
+    let name = format!("leaf-{}", leaf.id);
     div()
-        .id(SharedString::from(format!("leaf-{}", leaf.id)))
+        .id(SharedString::from(name.clone()))
+        .debug_selector(|| name)
         .flex()
         .items_center()
         .gap(px(6.0))

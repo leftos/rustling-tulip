@@ -30,6 +30,7 @@ pub enum ContainerKind {
 }
 
 impl ContainerKind {
+    #[must_use]
     pub fn tag(self) -> &'static str {
         match self {
             Self::Workspace => "WS",
