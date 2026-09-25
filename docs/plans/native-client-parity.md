@@ -118,15 +118,15 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 ## Terminal
 
 - [ ] **(hard)** Rendering parity with xterm 6 + WebGL (Fit, WebFonts, Clipboard addons; DOM fallback on GPU context loss) — `components/Terminal.tsx`
-- [ ] **(hard)** Scrollback first with live output buffered and drained after; retries at 2s/4s with an in-place status line; truncated / failed banners; 5000-line scrollback — `Terminal.tsx`, `api.ts` `loadScrollback`
+- [ ] **(hard)** Scrollback first with live output buffered and drained after; retries at 2s/4s with an in-place status line; truncated / failed banners; 5000-line scrollback — `Terminal.tsx`, `api.ts` `loadScrollback` (native: all but the 5000-line cap landed in P1.6)
 - [ ] UTF-8 split across chunks; `detach` on unmount — `Terminal.tsx`
 - [ ] Refit + `resize` on container resize, font change, scrollback drawn — `Terminal.tsx`
-- [ ] Input dropped once the session is stopped or errored — `Terminal.tsx`
-- [ ] Cursor: bar for agents, block for shells, no blink; programs can hide it or change its shape — `Terminal.tsx`
-- [ ] **(hard)** Shift+Enter newline: `\` + CR for claude and shells, `\n` for codex/cursor — `Terminal.tsx`
-- [ ] Ctrl/Cmd+C copies with a selection, else sends ^C; Ctrl+Shift+C always copies — `Terminal.tsx`
-- [ ] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text`
-- [ ] Copy on select (setting, on by default) — `Terminal.tsx`
+- [x] Input dropped once the session is stopped or errored — `Terminal.tsx`
+- [x] Cursor: bar for agents, block for shells, no blink; programs can hide it or change its shape — `Terminal.tsx`
+- [x] **(hard)** Shift+Enter newline: `\` + CR for claude and shells, `\n` for codex/cursor — `Terminal.tsx`
+- [x] Ctrl/Cmd+C copies with a selection, else sends ^C; Ctrl+Shift+C always copies — `Terminal.tsx`
+- [ ] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text` (native: GPUI clipboard, bracketed and sanitised, in P1.6; paste logging still missing)
+- [x] Copy on select (setting, on by default) — `Terminal.tsx`
 - [ ] **(hard)** OSC 52: program clipboard writes reach the system clipboard and show the "copied" chip; reads answered empty — `components/clipboardProvider.ts`
 - [ ] **(hard)** Links: URLs and paths (absolute, UNC, relative, `./`, `../`) with `:line:col`; trims trailing punctuation; stitches wrapped rows including TUI box borders (up to 4 joins within ±64 rows); shorter fallbacks if the path doesn't exist — `utils/terminalLinks.ts`
 - [ ] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; disabled on remote with a toast — `Terminal.tsx`, `lib.rs` `open_terminal_path`

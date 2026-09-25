@@ -1,18 +1,32 @@
 //! Terminal state (`alacritty_terminal`) and the per-frame snapshot the view paints.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use alacritty_terminal::Term;
-use alacritty_terminal::event::EventListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
 
-/// Terminal replies (`Event::PtyWrite`, e.g. cursor-position reports) are dropped:
-/// the Tauri app attached to the same session already answers them, and two
-/// answers would reach the child.
-pub struct Listener;
-impl EventListener for Listener {}
+/// Collects terminal replies (`Event::PtyWrite`: cursor-position reports,
+/// device attributes) for the pane to send to the child as input.
+#[derive(Clone, Default)]
+pub struct Listener {
+    replies: Rc<RefCell<Vec<u8>>>,
+}
+
+impl EventListener for Listener {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event {
+            self.replies.borrow_mut().extend_from_slice(text.as_bytes());
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GridSize {
@@ -36,6 +50,7 @@ pub struct Terminal {
     term: Term<Listener>,
     parser: Processor,
     size: GridSize,
+    listener: Listener,
 }
 
 /// A horizontal run of cells sharing one style, painted as one shaped line.
@@ -65,15 +80,26 @@ pub struct Snapshot {
     pub text: Vec<TextSpan>,
     pub bg: Vec<BgSpan>,
     pub cursor: Option<(usize, usize)>,
+    pub cursor_shape: CursorShape,
     pub background: Rgb,
 }
 
 impl Terminal {
-    pub fn new(size: GridSize) -> Self {
+    /// A blank terminal whose cursor is `cursor` until the program sets its own.
+    pub fn new(size: GridSize, cursor: CursorShape) -> Self {
+        let config = Config {
+            default_cursor_style: CursorStyle {
+                shape: cursor,
+                blinking: false,
+            },
+            ..Config::default()
+        };
+        let listener = Listener::default();
         Self {
-            term: Term::new(Config::default(), &size, Listener),
+            term: Term::new(config, &size, listener.clone()),
             parser: Processor::new(),
             size,
+            listener,
         }
     }
 
@@ -81,8 +107,22 @@ impl Terminal {
         self.size
     }
 
+    /// Feeds live output. Replies it provokes wait in [`Self::take_replies`].
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Feeds replayed history. The queries in it were answered when they were
+    /// first made, so the replies they provoke now are discarded.
+    pub fn feed_history(&mut self, bytes: &[u8]) {
+        let queued = self.listener.replies.borrow().len();
+        self.feed(bytes);
+        self.listener.replies.borrow_mut().truncate(queued);
+    }
+
+    /// The replies queued since the last call, to send to the child.
+    pub fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.listener.replies.borrow_mut())
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -106,21 +146,58 @@ impl Terminal {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    pub fn mode(&self) -> TermMode {
+        *self.term.mode()
+    }
+
+    /// Lines scrolled back into history; 0 on the live screen.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    pub fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
+        self.term.selection = Some(Selection::new(ty, point, side));
+    }
+
+    pub fn update_selection(&mut self, point: Point, side: Side) {
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let content = self.term.renderable_content();
         let colors = content.colors;
         let background = resolve(Color::Named(NamedColor::Background), colors);
         let offset = i32::try_from(content.display_offset).unwrap_or(i32::MAX);
+        let palette = Palette { colors, background };
+        let selection = content.selection;
         let mut builder = SpanBuilder::default();
 
         for indexed in content.display_iter {
             if let Ok(row) = usize::try_from(indexed.point.line.0 + offset) {
+                let selected = selection.is_some_and(|range| range.contains(indexed.point));
                 builder.push_cell(
                     row,
                     indexed.point.column.0,
                     indexed.cell,
-                    colors,
-                    background,
+                    &palette,
+                    selected,
                 );
             }
         }
@@ -135,9 +212,42 @@ impl Terminal {
             text: builder.text,
             bg: builder.bg,
             cursor,
+            cursor_shape: content.cursor.shape,
             background,
         }
     }
+}
+
+const SELECTION_FG: Rgb = Rgb {
+    r: 0xf5,
+    g: 0xf6,
+    b: 0xf8,
+};
+
+/// Laid over a selected cell's background at 30%.
+const SELECTION_TINT: Rgb = Rgb {
+    r: 91,
+    g: 155,
+    b: 255,
+};
+
+/// `tint` at 30% over `base`.
+fn blend(base: Rgb, tint: Rgb) -> Rgb {
+    let mix = |b: u8, t: u8| {
+        let v = (u16::from(b) * 7 + u16::from(t) * 3 + 5) / 10;
+        u8::try_from(v).unwrap_or(u8::MAX)
+    };
+    Rgb {
+        r: mix(base.r, tint.r),
+        g: mix(base.g, tint.g),
+        b: mix(base.b, tint.b),
+    }
+}
+
+/// The colours cells resolve against.
+struct Palette<'a> {
+    colors: &'a Colors,
+    background: Rgb,
 }
 
 #[derive(Default)]
@@ -148,7 +258,14 @@ struct SpanBuilder {
 
 impl SpanBuilder {
     /// Adds one grid cell. Spacer cells behind a wide glyph carry nothing to paint.
-    fn push_cell(&mut self, row: usize, col: usize, cell: &Cell, colors: &Colors, background: Rgb) {
+    fn push_cell(
+        &mut self,
+        row: usize,
+        col: usize,
+        cell: &Cell,
+        palette: &Palette,
+        selected: bool,
+    ) {
         if cell
             .flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -160,10 +277,19 @@ impl SpanBuilder {
             std::mem::swap(&mut fg, &mut bg);
         }
         let bold = cell.flags.contains(Flags::BOLD);
-        let fg = resolve(brighten(fg, bold), colors);
-        let bg = resolve(bg, colors);
+        let (fg, bg) = if selected {
+            (
+                SELECTION_FG,
+                blend(resolve(bg, palette.colors), SELECTION_TINT),
+            )
+        } else {
+            (
+                resolve(brighten(fg, bold), palette.colors),
+                resolve(bg, palette.colors),
+            )
+        };
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
-        self.push_bg(row, col, if wide { 2 } else { 1 }, bg, background);
+        self.push_bg(row, col, if wide { 2 } else { 1 }, bg, palette.background);
         let ch = if cell.flags.contains(Flags::HIDDEN) {
             ' '
         } else {
@@ -284,9 +410,11 @@ fn rgb(hex: u32) -> Rgb {
 #[cfg(test)]
 #[expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 mod tests {
+    use alacritty_terminal::index::{Column, Line, Point, Side};
+    use alacritty_terminal::selection::SelectionType;
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::term::color::Colors;
-    use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+    use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
     use super::{GridSize, SpanBuilder, Terminal, TextSpan, brighten, default_named, resolve, rgb};
 
@@ -307,9 +435,61 @@ mod tests {
     }
 
     fn fed(bytes: &[u8]) -> Terminal {
-        let mut term = Terminal::new(GridSize { cols: 10, rows: 2 });
+        let mut term = Terminal::new(GridSize { cols: 10, rows: 2 }, CursorShape::Block);
         term.feed(bytes);
         term
+    }
+
+    #[test]
+    fn selected_cells_are_highlighted() {
+        let mut term = fed(b"abcd");
+        term.start_selection(
+            SelectionType::Simple,
+            Point::new(Line(0), Column(0)),
+            Side::Left,
+        );
+        term.update_selection(Point::new(Line(0), Column(1)), Side::Right);
+        let snap = term.snapshot();
+        let bg: Vec<_> = snap
+            .bg
+            .iter()
+            .map(|b| (b.row, b.col, b.len, b.color))
+            .collect();
+        assert_eq!(bg, [(0, 0, 2, rgb(0x304462))]);
+        let texts: Vec<_> = snap
+            .text
+            .iter()
+            .map(|s| (s.col, s.text.as_str(), s.fg))
+            .collect();
+        assert_eq!(texts[0], (0, "ab", rgb(0xf5f6f8)));
+        assert_eq!(texts[1].2, rgb(0xd4d4d4));
+        assert_eq!(term.selection_text().as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn cursor_position_query_queues_a_reply() {
+        let mut term = fed(b"ab\x1b[6n");
+        assert_eq!(term.take_replies(), b"\x1b[1;3R".to_vec());
+        assert!(term.take_replies().is_empty());
+    }
+
+    #[test]
+    fn replies_to_replayed_history_are_discarded() {
+        let mut term = fed(b"");
+        term.feed_history(b"\x1b[6n");
+        assert!(term.take_replies().is_empty());
+        term.feed(b"\x1b[6n");
+        assert_eq!(term.take_replies(), b"\x1b[1;1R".to_vec());
+    }
+
+    #[test]
+    fn default_cursor_shape_yields_to_the_program() {
+        let term = Terminal::new(GridSize { cols: 10, rows: 2 }, CursorShape::Beam);
+        assert_eq!(term.snapshot().cursor_shape, CursorShape::Beam);
+        assert_eq!(
+            fed(b"\x1b[4 q").snapshot().cursor_shape,
+            CursorShape::Underline
+        );
     }
 
     #[test]

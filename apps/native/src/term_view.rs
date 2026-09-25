@@ -1,20 +1,26 @@
 //! The terminal pane: one daemon session rendered with `alacritty_terminal`,
 //! with its input, resize, scroll and scrollback handling.
 
+use std::time::Instant;
+
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::vte::ansi::CursorShape;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, Bounds, Context, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent, Pixels, Point,
-    Rgba, ScrollWheelEvent, SharedString, TextRun, UnderlineStyle, Window, canvas, div, fill, font,
-    point, prelude::*, px, size,
+    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, FocusHandle, Font, FontStyle,
+    FontWeight, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, Rgba, ScrollWheelEvent, SharedString, Task, TextRun, UnderlineStyle, Window,
+    canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
-use protocol::ClientMessage;
+use protocol::{ClientMessage, SessionSnapshot};
 
-use crate::keys;
+use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
+use crate::scrollback_load::{self, ScrollbackLoad, State as LoadState, Step};
 use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
+use crate::term_input::{self, KeyAction, SessionContext};
 
 const FONT_FAMILY: &str = "Cascadia Mono";
 const FONT_SIZE: f32 = 14.0;
@@ -25,38 +31,39 @@ pub struct TerminalPane {
     focus: FocusHandle,
     tx: UnboundedSender<NetCommand>,
     attachment: Attachment,
-    /// PTY output that arrived before the scrollback reply; fed after it.
-    pending: Vec<Vec<u8>>,
+    session: Option<SessionContext>,
+    /// Wakes the scrollback load at its next timeout or retry.
+    load_timer: Option<Task<()>>,
     scroll_accum: f32,
+    /// The grid's top-left corner in the window and its cell size, from the
+    /// last layout; mouse positions map to cells through it.
+    layout: Option<(Point<Pixels>, CellSize)>,
+    /// The mouse gesture in progress (report or select) and its buttons.
+    tracker: Tracker,
+    /// The last cell a motion report named, so a move inside a cell sends
+    /// nothing.
+    last_motion: Option<(usize, usize)>,
 }
 
-/// The session the pane shows, and whether its scrollback has been fed.
+/// The session the pane shows, and the load of its scrollback. Only the
+/// first scrollback reply after an attach is written: a later one answers an
+/// earlier attach of the same session and would replay its history over the
+/// live screen.
 #[derive(Debug, Default)]
 struct Attachment {
     session_id: Option<String>,
-    scrollback_loaded: bool,
+    load: Option<ScrollbackLoad>,
 }
 
 impl Attachment {
-    fn attach(&mut self, session_id: String) {
+    fn attach(&mut self, session_id: String, now: Instant) {
         self.session_id = Some(session_id);
-        self.scrollback_loaded = false;
+        self.load = Some(ScrollbackLoad::start(now));
     }
 
     fn take(&mut self) -> Option<String> {
-        self.scrollback_loaded = false;
+        self.load = None;
         self.session_id.take()
-    }
-
-    /// Whether to feed a scrollback reply for the attached session: only the
-    /// first one after an attach. A later one answers an earlier attach of
-    /// the same session and would replay its history over the live screen.
-    fn accept_scrollback(&mut self) -> bool {
-        if self.session_id.is_none() || self.scrollback_loaded {
-            return false;
-        }
-        self.scrollback_loaded = true;
-        true
     }
 }
 
@@ -69,12 +76,16 @@ impl TerminalPane {
         let focus = cx.focus_handle();
         focus.focus(window);
         Self {
-            term: Terminal::new(GridSize { cols: 80, rows: 24 }),
+            term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
             focus,
             tx,
             attachment: Attachment::default(),
-            pending: Vec::new(),
+            session: None,
+            load_timer: None,
             scroll_accum: 0.0,
+            layout: None,
+            tracker: Tracker::default(),
+            last_motion: None,
         }
     }
 
@@ -90,14 +101,100 @@ impl TerminalPane {
         self.focus.is_focused(window)
     }
 
-    /// Show `session_id` in a fresh terminal: load its scrollback, then size
+    /// Show `session` in a fresh terminal: load its scrollback, then size
     /// its PTY to this pane.
-    pub fn attach(&mut self, session_id: String) {
-        self.term = Terminal::new(self.term.size());
-        self.pending.clear();
-        self.attachment.attach(session_id.clone());
-        self.send(ClientMessage::LoadScrollback { session_id });
+    pub fn attach(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
+        let context = SessionContext::of(session);
+        self.fresh_terminal(context.default_cursor_shape());
+        self.session = Some(context);
+        self.attachment.attach(session.id.clone(), Instant::now());
+        self.request_scrollback();
         self.send_resize();
+        self.schedule_load_tick(cx);
+    }
+
+    /// Replaces the terminal, dropping any selection or mouse gesture on the
+    /// old one.
+    fn fresh_terminal(&mut self, cursor: CursorShape) {
+        self.term = Terminal::new(self.term.size(), cursor);
+        self.tracker = Tracker::default();
+        self.last_motion = None;
+    }
+
+    fn request_scrollback(&self) {
+        if let Some(session_id) = self.attachment.session_id.clone() {
+            self.send(ClientMessage::LoadScrollback { session_id });
+        }
+    }
+
+    /// Arms a timer for the scrollback load's next timeout or retry, or
+    /// disarms it when the load has none.
+    fn schedule_load_tick(&mut self, cx: &mut Context<Self>) {
+        let deadline = self
+            .attachment
+            .load
+            .as_ref()
+            .and_then(ScrollbackLoad::next_deadline);
+        self.load_timer = deadline.map(|deadline| {
+            let delay = deadline.saturating_duration_since(Instant::now());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                // Fails only when the pane is gone, leaving nothing to load.
+                this.update(cx, TerminalPane::tick_load).ok();
+            })
+        });
+    }
+
+    fn tick_load(&mut self, cx: &mut Context<Self>) {
+        let Some(load) = self.attachment.load.as_mut() else {
+            return;
+        };
+        let steps = load.tick(Instant::now());
+        if load.state() == LoadState::Failed {
+            tracing::warn!(
+                "scrollback for session {:?} failed after {} retries",
+                self.attachment.session_id,
+                scrollback_load::RETRY_DELAYS.len()
+            );
+        }
+        self.run_load_steps(steps);
+        self.schedule_load_tick(cx);
+        cx.notify();
+    }
+
+    fn run_load_steps(&mut self, steps: Vec<Step>) {
+        for step in steps {
+            match step {
+                Step::Status(text) => self.term.feed(text.as_bytes()),
+                Step::Request => {
+                    tracing::warn!(
+                        "scrollback request for session {:?} timed out; retrying",
+                        self.attachment.session_id
+                    );
+                    self.request_scrollback();
+                }
+                Step::History(bytes) => self.term.feed_history(&bytes),
+                Step::Live(bytes) => self.feed_live(&bytes),
+                Step::Resize => self.send_resize(),
+            }
+        }
+    }
+
+    /// Take in a newer snapshot of the attached session (its status).
+    pub fn update_session(&mut self, session: &SessionSnapshot) {
+        if self.session_id() == Some(session.id.as_str()) {
+            self.session = Some(SessionContext::of(session));
+        }
+    }
+
+    /// Take in a full session list: the attached session's entry, if listed.
+    pub fn refresh_sessions(&mut self, sessions: &[SessionSnapshot]) {
+        if let Some(context) = self
+            .session_id()
+            .and_then(|id| SessionContext::find(sessions, id))
+        {
+            self.session = Some(context);
+        }
     }
 
     /// Stop receiving the attached session's output, if one is attached.
@@ -105,7 +202,8 @@ impl TerminalPane {
         if let Some(session_id) = self.attachment.take() {
             self.send(ClientMessage::Detach { session_id });
         }
-        self.pending.clear();
+        self.session = None;
+        self.load_timer = None;
     }
 
     /// Forget the attachment for a new connection, which starts unattached,
@@ -113,38 +211,53 @@ impl TerminalPane {
     pub fn reset_for_reconnect(&mut self) -> Option<String> {
         let previous = self.attachment.take();
         if previous.is_some() {
-            self.term = Terminal::new(self.term.size());
+            self.fresh_terminal(CursorShape::Block);
         }
-        self.pending.clear();
+        self.session = None;
+        self.load_timer = None;
         previous
     }
 
-    pub fn on_scrollback(&mut self, data_b64: &str) -> Result<(), base64::DecodeError> {
-        if !self.attachment.accept_scrollback() {
-            return Ok(());
+    /// A scrollback reply: the history, then the output held back while it
+    /// loaded. Ignored unless it is the first reply since the attach.
+    pub fn on_scrollback(
+        &mut self,
+        data_b64: &str,
+        truncated: bool,
+    ) -> Result<(), base64::DecodeError> {
+        let history = B64.decode(data_b64)?;
+        let steps = self
+            .attachment
+            .load
+            .as_mut()
+            .and_then(|load| load.on_reply(history, truncated));
+        if let Some(steps) = steps {
+            self.load_timer = None;
+            self.run_load_steps(steps);
         }
-        let fed = self.feed_b64(data_b64);
-        for chunk in std::mem::take(&mut self.pending) {
-            self.term.feed(&chunk);
-        }
-        fed
+        Ok(())
     }
 
     pub fn on_pty_output(&mut self, data_b64: &str) -> Result<(), base64::DecodeError> {
-        if self.attachment.scrollback_loaded {
-            self.feed_b64(data_b64)
-        } else {
-            if let Ok(bytes) = B64.decode(data_b64) {
-                self.pending.push(bytes);
-            }
-            Ok(())
+        let bytes = B64.decode(data_b64)?;
+        let live = self
+            .attachment
+            .load
+            .as_mut()
+            .and_then(|load| load.on_output(bytes));
+        if let Some(bytes) = live {
+            self.feed_live(&bytes);
         }
+        Ok(())
     }
 
-    fn feed_b64(&mut self, data_b64: &str) -> Result<(), base64::DecodeError> {
-        let bytes = B64.decode(data_b64)?;
-        self.term.feed(&bytes);
-        Ok(())
+    /// Feeds live output and answers the queries in it.
+    fn feed_live(&mut self, bytes: &[u8]) {
+        self.term.feed(bytes);
+        let replies = self.term.take_replies();
+        if !replies.is_empty() {
+            self.send_to_child(&replies);
+        }
     }
 
     fn send(&self, msg: ClientMessage) {
@@ -153,15 +266,27 @@ impl TerminalPane {
         let _ = self.tx.unbounded_send(NetCommand::Send(Box::new(msg)));
     }
 
+    /// Sends what the user typed or pasted, and scrolls to the live screen.
     fn send_input(&mut self, bytes: &[u8]) {
+        if self.send_to_child(bytes) {
+            self.term.scroll_to_bottom();
+        }
+    }
+
+    /// Sends `bytes` as input unless nothing is attached or the session has
+    /// stopped. Returns whether it sent.
+    fn send_to_child(&self, bytes: &[u8]) -> bool {
         let Some(session_id) = self.attachment.session_id.clone() else {
-            return;
+            return false;
         };
-        self.term.scroll_to_bottom();
+        if !self.session.is_some_and(SessionContext::accepts_input) {
+            return false;
+        }
         self.send(ClientMessage::SendInput {
             session_id,
             data_b64: B64.encode(bytes),
         });
+        true
     }
 
     fn send_resize(&self) {
@@ -187,28 +312,44 @@ impl TerminalPane {
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let ks = &event.keystroke;
-        if ks.modifiers.control && ks.modifiers.shift && ks.key == "v" {
-            self.paste(cx);
-        } else if let Some(bytes) = keys::to_bytes(ks, self.term.app_cursor()) {
-            self.send_input(&bytes);
-        } else {
+        let Some(session) = self.session else {
             return;
+        };
+        let action = term_input::key_action(
+            &event.keystroke,
+            self.term.app_cursor(),
+            self.term.has_selection(),
+            session,
+        );
+        match action {
+            None => return,
+            Some(KeyAction::Send(bytes)) => {
+                self.term.clear_selection();
+                self.send_input(&bytes);
+            }
+            Some(KeyAction::Copy { clear_selection }) => self.copy_selection(clear_selection, cx),
+            Some(KeyAction::Paste) => self.paste(cx),
+            Some(KeyAction::Consume) => {}
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    fn copy_selection(&mut self, clear_selection: bool, cx: &mut Context<Self>) {
+        if let Some(text) = self.term.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        if clear_selection {
+            self.term.clear_selection();
+        }
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        if self.term.bracketed_paste() {
-            self.send_input(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            self.send_input(text.as_bytes());
-        }
+        let bytes = term_input::paste_bytes(&text, self.term.bracketed_paste());
+        self.send_input(&bytes);
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -222,36 +363,222 @@ impl TerminalPane {
                 clippy::cast_possible_truncation,
                 reason = "whole-line count from a wheel delta"
             )]
-            self.term.scroll(lines as i32);
+            self.wheel(lines as i32, event.position, event.modifiers);
             cx.notify();
         }
+    }
+
+    /// Scrolls `lines` (positive is up): as wheel reports when the child
+    /// asked for the mouse, as arrow keys on an alternate screen that asked
+    /// for them, and through the history otherwise.
+    fn wheel(&mut self, lines: i32, position: Point<Pixels>, modifiers: Modifiers) {
+        let mode = self.term.mode();
+        if mouse::reports(mode, modifiers.shift) {
+            let Some(cell) = self.cell_at(position) else {
+                return;
+            };
+            let button = if lines > 0 {
+                mouse::Button::WheelUp
+            } else {
+                mouse::Button::WheelDown
+            };
+            for _ in 0..lines.unsigned_abs() {
+                self.report(button, mouse::ReportKind::Press, modifiers, cell);
+            }
+        } else if mouse::wheel_sends_arrows(mode) {
+            self.send_to_child(&mouse::wheel_arrows(lines, self.term.app_cursor()));
+        } else {
+            self.term.scroll(lines);
+        }
+    }
+
+    fn cell_at(&self, position: Point<Pixels>) -> Option<ViewportCell> {
+        let (origin, cell) = self.layout?;
+        let x = (position.x - origin.x) / px(1.0);
+        let y = (position.y - origin.y) / px(1.0);
+        Some(ViewportCell::at(x, y, cell, self.term.size()))
+    }
+
+    fn report(
+        &self,
+        button: mouse::Button,
+        kind: mouse::ReportKind,
+        modifiers: Modifiers,
+        cell: ViewportCell,
+    ) {
+        let report = mouse::Report {
+            button,
+            kind,
+            mods: mouse::Mods {
+                shift: modifiers.shift,
+                alt: modifiers.alt,
+                ctrl: modifiers.control,
+            },
+            cell,
+        };
+        let encoding = mouse::Encoding::of(self.term.mode());
+        self.send_to_child(&mouse::encode(&report, encoding));
+    }
+
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus.focus(window);
+        let (Some(cell), Some(button)) =
+            (self.cell_at(event.position), report_button(event.button))
+        else {
+            return;
+        };
+        match self
+            .tracker
+            .down(button, self.term.mode(), event.modifiers.shift)
+        {
+            Some(Gesture::Report) => {
+                self.report(button, mouse::ReportKind::Press, event.modifiers, cell);
+            }
+            Some(Gesture::Select) => {
+                let point = cell.to_point(self.term.display_offset());
+                let ty = mouse::selection_type(event.click_count);
+                self.term.start_selection(ty, point, cell.side);
+            }
+            None => return,
+        }
+        cx.notify();
+    }
+
+    /// A move over the pane with no button down: a hover report when the
+    /// child asked for all motion. Moves during a gesture go through
+    /// [`Self::on_gesture_move`].
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+        let mode = self.term.mode();
+        if self.tracker.moving().is_some()
+            || !mouse::reports(mode, event.modifiers.shift)
+            || !mouse::reports_motion(mode, false)
+        {
+            return;
+        }
+        if let Some(cell) = self.cell_at(event.position) {
+            self.report_motion(mouse::Button::None, event.modifiers, cell);
+        }
+    }
+
+    /// A move anywhere in the window during a gesture, clamped to the grid:
+    /// a drag report, or the selection extends.
+    fn on_gesture_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let (Some(gesture), Some(cell)) = (self.tracker.moving(), self.cell_at(event.position))
+        else {
+            return;
+        };
+        match gesture {
+            Gesture::Report => {
+                if mouse::reports_motion(self.term.mode(), true) {
+                    let button = self.tracker.held().unwrap_or(mouse::Button::None);
+                    self.report_motion(button, event.modifiers, cell);
+                }
+            }
+            Gesture::Select => {
+                let point = cell.to_point(self.term.display_offset());
+                self.term.update_selection(point, cell.side);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Reports motion, once per cell entered.
+    fn report_motion(&mut self, button: mouse::Button, modifiers: Modifiers, cell: ViewportCell) {
+        if self.last_motion == Some((cell.row, cell.col)) {
+            return;
+        }
+        self.last_motion = Some((cell.row, cell.col));
+        self.report(button, mouse::ReportKind::Motion, modifiers, cell);
+    }
+
+    /// Ends a reported press, or a selection: a click that selected nothing
+    /// clears it, and a real selection is copied when copy-on-select is on.
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(button) = report_button(event.button) else {
+            return;
+        };
+        match self.tracker.up(button) {
+            Some(Gesture::Report) => {
+                if let Some(cell) = self.cell_at(event.position) {
+                    self.report(button, mouse::ReportKind::Release, event.modifiers, cell);
+                }
+                return;
+            }
+            Some(Gesture::Select) => {}
+            None => return,
+        }
+        if !self.term.has_selection() {
+            self.term.clear_selection();
+        } else if let Some(text) = mouse::copy_on_select(COPY_ON_SELECT, self.term.selection_text())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+        cx.notify();
+    }
+}
+
+fn report_button(button: MouseButton) -> Option<mouse::Button> {
+    match button {
+        MouseButton::Left => Some(mouse::Button::Left),
+        MouseButton::Middle => Some(mouse::Button::Middle),
+        MouseButton::Right => Some(mouse::Button::Right),
+        MouseButton::Navigate(_) => None,
     }
 }
 
 impl Render for TerminalPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
+        let gesture_view = view.clone();
         let background = to_rgba(self.term.snapshot().background);
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window);
                 let snap = view.update(cx, |v, _| {
                     v.ensure_size(grid_size(bounds, &m));
+                    v.layout = Some((bounds.origin, cell_size(&m)));
                     v.term.snapshot()
                 });
                 (m, snap)
             },
-            |bounds, (m, snap), window, cx| paint_grid(bounds, &snap, &m, window, cx),
+            move |bounds, (m, snap), window, cx| {
+                // Window-wide, so a drag keeps going once the pointer leaves the pane.
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        gesture_view.update(cx, |pane, cx| pane.on_gesture_move(event, cx));
+                    }
+                });
+                paint_grid(bounds, &snap, &m, window, cx);
+            },
         )
         .size_full();
-        div()
+        let mut pane = div()
             .size_full()
             .p(px(crate::PADDING))
             .bg(background)
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .child(grid)
+            .on_any_mouse_down(cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move));
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            pane = pane
+                .on_mouse_up(button, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(button, cx.listener(Self::on_mouse_up));
+        }
+        pane.child(grid)
+    }
+}
+
+fn cell_size(m: &Metrics) -> CellSize {
+    CellSize {
+        width: m.cell_width / px(1.0),
+        height: m.line_height / px(1.0),
     }
 }
 
@@ -318,7 +645,12 @@ fn paint_grid(
 ) {
     paint_backgrounds(bounds.origin, &snap.bg, m, window);
     if let Some((row, col)) = snap.cursor {
-        paint_cursor(cell_origin(bounds.origin, m, row, col), m, window);
+        paint_cursor(
+            cell_origin(bounds.origin, m, row, col),
+            snap.cursor_shape,
+            m,
+            window,
+        );
     }
     for span in &snap.text {
         if !span.text.trim().is_empty() {
@@ -341,19 +673,30 @@ fn paint_backgrounds(origin: Point<Pixels>, spans: &[BgSpan], m: &Metrics, windo
     }
 }
 
-fn paint_cursor(at: Point<Pixels>, m: &Metrics, window: &mut Window) {
-    let cursor = Rgba {
-        a: 0.55,
-        ..to_rgba(alacritty_terminal::vte::ansi::Rgb {
-            r: 0xae,
-            g: 0xaf,
-            b: 0xad,
-        })
+/// Paints the cursor in `shape`. The block is translucent so the glyph under
+/// it stays readable; the thin shapes are opaque.
+fn paint_cursor(at: Point<Pixels>, shape: CursorShape, m: &Metrics, window: &mut Window) {
+    const THICKNESS: f32 = 2.0;
+    let color = to_rgba(alacritty_terminal::vte::ansi::Rgb {
+        r: 0xae,
+        g: 0xaf,
+        b: 0xad,
+    });
+    let cell = Bounds::new(at, size(m.cell_width, m.line_height));
+    let quad = match shape {
+        CursorShape::Block => fill(cell, Rgba { a: 0.55, ..color }),
+        CursorShape::Beam => fill(Bounds::new(at, size(px(THICKNESS), m.line_height)), color),
+        CursorShape::Underline => fill(
+            Bounds::new(
+                point(at.x, at.y + m.line_height - px(THICKNESS)),
+                size(m.cell_width, px(THICKNESS)),
+            ),
+            color,
+        ),
+        CursorShape::HollowBlock => outline(cell, color, BorderStyle::Solid),
+        CursorShape::Hidden => return,
     };
-    window.paint_quad(fill(
-        Bounds::new(at, size(m.cell_width, m.line_height)),
-        cursor,
-    ));
+    window.paint_quad(quad);
 }
 
 fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
@@ -409,34 +752,49 @@ fn paint_span(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::Attachment;
+
+    fn attach(attachment: &mut Attachment, id: &str) {
+        attachment.attach(id.to_owned(), Instant::now());
+    }
+
+    /// Whether a scrollback reply arriving now would be written.
+    fn accept_scrollback(attachment: &mut Attachment) -> bool {
+        attachment
+            .load
+            .as_mut()
+            .and_then(|load| load.on_reply(Vec::new(), false))
+            .is_some()
+    }
 
     #[test]
     fn second_scrollback_for_the_same_attach_is_ignored() {
         let mut attachment = Attachment::default();
-        attachment.attach("a".to_owned());
-        assert!(attachment.accept_scrollback());
-        assert!(!attachment.accept_scrollback());
+        attach(&mut attachment, "a");
+        assert!(accept_scrollback(&mut attachment));
+        assert!(!accept_scrollback(&mut attachment));
     }
 
     #[test]
     fn scrollback_after_reattach_is_accepted() {
         let mut attachment = Attachment::default();
-        attachment.attach("a".to_owned());
-        assert!(attachment.accept_scrollback());
+        attach(&mut attachment, "a");
+        assert!(accept_scrollback(&mut attachment));
         attachment.take();
-        attachment.attach("b".to_owned());
+        attach(&mut attachment, "b");
         attachment.take();
-        attachment.attach("a".to_owned());
-        assert!(attachment.accept_scrollback());
+        attach(&mut attachment, "a");
+        assert!(accept_scrollback(&mut attachment));
     }
 
     #[test]
     fn scrollback_without_an_attachment_is_ignored() {
         let mut attachment = Attachment::default();
-        assert!(!attachment.accept_scrollback());
-        attachment.attach("a".to_owned());
+        assert!(!accept_scrollback(&mut attachment));
+        attach(&mut attachment, "a");
         attachment.take();
-        assert!(!attachment.accept_scrollback());
+        assert!(!accept_scrollback(&mut attachment));
     }
 }

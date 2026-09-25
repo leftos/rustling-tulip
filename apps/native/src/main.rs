@@ -11,10 +11,13 @@
 mod connection;
 mod footer;
 mod keys;
+mod mouse;
 mod net;
+mod scrollback_load;
 mod sidebar;
 mod sidebar_view;
 mod term;
+mod term_input;
 mod term_view;
 
 use anyhow::Context as _;
@@ -271,20 +274,27 @@ impl RootView {
             DaemonMessage::Sessions { sessions } => {
                 if self.attached(cx).is_none() {
                     self.pick_session(&sessions, cx);
+                } else {
+                    self.pane
+                        .update(cx, |pane, _| pane.refresh_sessions(&sessions));
                 }
             }
             DaemonMessage::Scrollback {
                 session_id,
                 data_b64,
-                ..
+                truncated,
             } if self.is_ours(&session_id, cx) => {
-                self.feed_pane(cx, |pane| pane.on_scrollback(&data_b64));
+                self.feed_pane(cx, |pane| pane.on_scrollback(&data_b64, truncated));
             }
             DaemonMessage::PtyOutput {
                 session_id,
                 data_b64,
             } if self.is_ours(&session_id, cx) => {
                 self.feed_pane(cx, |pane| pane.on_pty_output(&data_b64));
+            }
+            DaemonMessage::SessionUpdated { session } if self.is_ours(&session.id, cx) => {
+                self.pane
+                    .update(cx, |pane, _| pane.update_session(&session));
             }
             DaemonMessage::SessionRemoved { session_id } if self.is_ours(&session_id, cx) => {
                 "session removed".clone_into(&mut self.status);
@@ -352,9 +362,8 @@ impl RootView {
             .clone()
             .unwrap_or_else(|| session.label.clone());
         self.status = format!("{label} · {}", session.id);
-        let id = session.id.clone();
         self.pane.update(cx, |pane, cx| {
-            pane.attach(id);
+            pane.attach(session, cx);
             cx.notify();
         });
     }
