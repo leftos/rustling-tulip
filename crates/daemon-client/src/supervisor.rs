@@ -25,11 +25,101 @@ const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How [`ensure_running`] treats a healthy daemon that is already running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetirePolicy {
+    /// Retire a daemon whose protocol this client does not support or whose
+    /// executable is not the current cached copy of this build's binary, then
+    /// spawn this build's daemon.
+    RetireStale,
+    /// Reuse any healthy daemon whose protocol this client supports, whatever
+    /// build it came from; retire only a protocol-incompatible one. A reused
+    /// daemon needs no local daemon binary: one is located only to spawn.
+    ReuseCompatible,
+}
+
 enum ExistingDaemon {
     Compatible(DaemonHandshake),
     Incompatible(DaemonHandshake),
     StaleBinary(DaemonHandshake),
     Missing,
+}
+
+/// The shape of [`ExistingDaemon`] without its handshake, for the pure
+/// [`action_for`] decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingKind {
+    Compatible,
+    Incompatible,
+    StaleBinary,
+    Missing,
+}
+
+/// What [`ensure_running`] does about the daemon it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Reuse,
+    RetireThenSpawn,
+    Spawn,
+}
+
+impl ExistingDaemon {
+    fn kind(&self) -> ExistingKind {
+        match self {
+            Self::Compatible(_) => ExistingKind::Compatible,
+            Self::Incompatible(_) => ExistingKind::Incompatible,
+            Self::StaleBinary(_) => ExistingKind::StaleBinary,
+            Self::Missing => ExistingKind::Missing,
+        }
+    }
+
+    fn handshake(&self) -> Option<&DaemonHandshake> {
+        match self {
+            Self::Compatible(h) | Self::Incompatible(h) | Self::StaleBinary(h) => Some(h),
+            Self::Missing => None,
+        }
+    }
+}
+
+fn action_for(existing: ExistingKind, policy: RetirePolicy) -> Action {
+    match (existing, policy) {
+        (ExistingKind::Compatible, _)
+        | (ExistingKind::StaleBinary, RetirePolicy::ReuseCompatible) => Action::Reuse,
+        (ExistingKind::Incompatible, _)
+        | (ExistingKind::StaleBinary, RetirePolicy::RetireStale) => Action::RetireThenSpawn,
+        (ExistingKind::Missing, _) => Action::Spawn,
+    }
+}
+
+/// The handshake of `existing` when `policy` reuses it, logging the reuse
+/// with `message` (or the different-build message for a stale binary).
+fn reused_handshake(
+    existing: &ExistingDaemon,
+    policy: RetirePolicy,
+    message: &str,
+) -> Option<DaemonHandshake> {
+    if action_for(existing.kind(), policy) != Action::Reuse {
+        return None;
+    }
+    let handshake = existing.handshake()?.clone();
+    let (port, protocol_version) = (handshake.port, handshake.protocol_version);
+    if existing.kind() == ExistingKind::StaleBinary {
+        info!(
+            port,
+            protocol_version, "reusing running daemon from a different build"
+        );
+    } else {
+        info!(port, protocol_version, "{message}");
+    }
+    Some(handshake)
+}
+
+fn retire_reason(existing: ExistingKind) -> &'static str {
+    if existing == ExistingKind::Incompatible {
+        "protocol mismatch"
+    } else {
+        "daemon binary changed"
+    }
 }
 
 struct CurrentDaemonBinary {
@@ -53,30 +143,39 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// Return the handshake of a healthy daemon this client can speak to,
 /// spawning or replacing one when needed.
 ///
-/// Reuses a running daemon whose protocol is supported and whose executable is
-/// the current cached copy of the shipped binary. A daemon with an unsupported
-/// protocol or a stale binary is retired (graceful `/shutdown`, then a force
-/// kill) and a fresh one is spawned from the binary cache. Concurrent callers
-/// serialize on a process-wide lock so only one of them spawns.
+/// Under [`RetirePolicy::RetireStale`] a running daemon is reused only when its
+/// protocol is supported and its executable is the current cached copy of the
+/// shipped binary. Under [`RetirePolicy::ReuseCompatible`] any healthy daemon
+/// with a supported protocol is reused, and no local daemon binary is located
+/// unless one has to be spawned. A daemon the policy does not reuse is retired
+/// (graceful `/shutdown`, then a force kill) and a fresh one is spawned from
+/// the binary cache. Concurrent callers serialize on a process-wide lock so
+/// only one of them spawns.
 ///
 /// # Errors
 ///
-/// Fails when the daemon binary cannot be located or cached, a stale daemon
-/// cannot be stopped, the spawn fails, or the new daemon does not report a
-/// healthy handshake within the spawn timeout.
-pub async fn ensure_running() -> anyhow::Result<DaemonHandshake> {
-    let current = resolve_current_daemon_binary()?;
+/// Fails when the daemon binary is needed but cannot be located or cached, a
+/// stale daemon cannot be stopped, the spawn fails, or the new daemon does not
+/// report a healthy handshake within the spawn timeout.
+pub async fn ensure_running(policy: RetirePolicy) -> anyhow::Result<DaemonHandshake> {
+    // RetireStale retires a daemon whose executable is not this build's
+    // cached binary, so it locates and caches the binary up front and a
+    // missing binary is an error. ReuseCompatible compares best-effort: it
+    // checks the running executable against the path the cache would hold,
+    // only to log a reuse across builds, and locates a binary only to spawn.
+    let current = match policy {
+        RetirePolicy::RetireStale => Some(resolve_current_daemon_binary()?),
+        RetirePolicy::ReuseCompatible => None,
+    };
+    let expected = match &current {
+        Some(current) => Some(current.cached.clone()),
+        None => expected_daemon_path(),
+    };
+    let cached = expected.as_deref();
 
-    // Fast path: handshake already present, daemon is healthy, and this app
-    // can speak its protocol. Also verify the daemon executable matches the
-    // installed template so installer upgrades take effect without a protocol
-    // bump.
-    if let ExistingDaemon::Compatible(handshake) = classify_existing_daemon(&current.cached).await {
-        info!(
-            port = handshake.port,
-            protocol_version = handshake.protocol_version,
-            "reusing running daemon"
-        );
+    // Fast path: a healthy daemon the policy reuses.
+    let existing = classify_existing_daemon(cached, policy).await;
+    if let Some(handshake) = reused_handshake(&existing, policy, "reusing running daemon") {
         return Ok(handshake);
     }
 
@@ -85,25 +184,26 @@ pub async fn ensure_running() -> anyhow::Result<DaemonHandshake> {
     // the handshake -- the caller ahead of us may have spawned the daemon
     // already.
     let _guard = spawn_lock().lock().await;
-    match classify_existing_daemon(&current.cached).await {
-        ExistingDaemon::Compatible(handshake) => {
-            info!(
-                port = handshake.port,
-                protocol_version = handshake.protocol_version,
-                "reusing daemon spawned by concurrent caller"
-            );
-            Ok(handshake)
-        }
-        ExistingDaemon::Incompatible(handshake) => {
-            retire_daemon(&handshake, "protocol mismatch").await?;
-            spawn_current_daemon(&current).await
-        }
-        ExistingDaemon::StaleBinary(handshake) => {
-            retire_daemon(&handshake, "daemon binary changed").await?;
-            spawn_current_daemon(&current).await
-        }
-        ExistingDaemon::Missing => spawn_current_daemon(&current).await,
+    let existing = classify_existing_daemon(cached, policy).await;
+    if let Some(handshake) = reused_handshake(
+        &existing,
+        policy,
+        "reusing daemon spawned by concurrent caller",
+    ) {
+        return Ok(handshake);
     }
+    // Resolve before retiring, so a missing binary never leaves the user with
+    // no daemon at all.
+    let current = match current {
+        Some(current) => current,
+        None => resolve_current_daemon_binary()?,
+    };
+    if action_for(existing.kind(), policy) == Action::RetireThenSpawn
+        && let Some(handshake) = existing.handshake()
+    {
+        retire_daemon(handshake, retire_reason(existing.kind())).await?;
+    }
+    spawn_current_daemon(&current).await
 }
 
 fn resolve_current_daemon_binary() -> anyhow::Result<CurrentDaemonBinary> {
@@ -147,19 +247,36 @@ async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> anyhow::Result<D
     wait_for_handshake().await
 }
 
-async fn classify_existing_daemon(current_daemon: &Path) -> ExistingDaemon {
+/// Classify the daemon named by `daemon.json`. With no `current_daemon` to
+/// compare against, a healthy daemon with a supported protocol counts as
+/// compatible whatever executable it runs. A daemon from a different build is
+/// reported at warn only when `policy` retires it; a policy that reuses it
+/// reports the difference at debug.
+async fn classify_existing_daemon(
+    current_daemon: Option<&Path>,
+    policy: RetirePolicy,
+) -> ExistingDaemon {
+    let stale_is_warning = policy == RetirePolicy::RetireStale;
     if let Some(handshake) = load_existing_if_alive().await {
         if daemon_protocol_is_supported(handshake.protocol_version) {
-            if running_daemon_matches_current_binary(handshake.pid, current_daemon) {
+            let Some(current_daemon) = current_daemon else {
+                return ExistingDaemon::Compatible(handshake);
+            };
+            if running_daemon_matches_current_binary(
+                handshake.pid,
+                current_daemon,
+                stale_is_warning,
+            ) {
                 ExistingDaemon::Compatible(handshake)
             } else {
-                warn!(
-                    pid = handshake.pid,
-                    port = handshake.port,
-                    protocol_version = handshake.protocol_version,
-                    current_daemon = %current_daemon.display(),
-                    "running daemon binary is not current"
-                );
+                let (pid, port, protocol_version) =
+                    (handshake.pid, handshake.port, handshake.protocol_version);
+                let current_daemon = current_daemon.display();
+                if stale_is_warning {
+                    warn!(pid, port, protocol_version, %current_daemon, "running daemon binary is not current");
+                } else {
+                    debug!(pid, port, protocol_version, %current_daemon, "running daemon binary is not current");
+                }
                 ExistingDaemon::StaleBinary(handshake)
             }
         } else {
@@ -181,19 +298,27 @@ fn daemon_protocol_is_supported(protocol_version: u32) -> bool {
     protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version)
 }
 
-fn running_daemon_matches_current_binary(pid: u32, expected: &Path) -> bool {
+fn running_daemon_matches_current_binary(
+    pid: u32,
+    expected: &Path,
+    stale_is_warning: bool,
+) -> bool {
     let Some(actual) = process_exe(pid) else {
-        warn!(pid, "could not inspect running daemon executable path");
+        if stale_is_warning {
+            warn!(pid, "could not inspect running daemon executable path");
+        } else {
+            debug!(pid, "could not inspect running daemon executable path");
+        }
         return false;
     };
     let is_current = daemon_exe_matches_expected(&actual, expected);
     if !is_current {
-        warn!(
-            pid,
-            actual = %actual.display(),
-            expected = %expected.display(),
-            "running daemon executable differs from current cached daemon"
-        );
+        let (actual, expected) = (actual.display(), expected.display());
+        if stale_is_warning {
+            warn!(pid, %actual, %expected, "running daemon executable differs from current cached daemon");
+        } else {
+            debug!(pid, %actual, %expected, "running daemon executable differs from current cached daemon");
+        }
     }
     is_current
 }
@@ -471,14 +596,10 @@ pub(crate) fn dev_workspace_root() -> anyhow::Result<PathBuf> {
 /// shipped one is unlocked. The cache is shared with the daemon's
 /// `binary_cache` module (resolved by the same `directories::ProjectDirs`
 /// call) and pruned by the daemon at startup.
-fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
-    let cache_dir = resolve_binaries_dir()?;
-    fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
-
-    let bytes =
-        fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
-    let hash = hash_prefix(&bytes);
+/// The content-addressed cache file name for `template`, whose contents are
+/// `bytes`: `<stem>-<hash prefix>[.<ext>]`.
+fn cached_file_name(template: &Path, bytes: &[u8]) -> String {
+    let hash = hash_prefix(bytes);
     let stem = template
         .file_stem()
         .and_then(|s| s.to_str())
@@ -486,10 +607,38 @@ fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
     let extension = template
         .extension()
         .map(|e| e.to_string_lossy().into_owned());
-    let filename = match extension.as_deref() {
+    match extension.as_deref() {
         Some(ext) if !ext.is_empty() => format!("{stem}-{hash}.{ext}"),
         _ => format!("{stem}-{hash}"),
-    };
+    }
+}
+
+/// Where the cached copy of `template` lives, or would once cached, without
+/// copying anything into the cache.
+fn cached_daemon_path(template: &Path) -> anyhow::Result<PathBuf> {
+    let bytes =
+        fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
+    Ok(resolve_binaries_dir()?.join(cached_file_name(template, &bytes)))
+}
+
+/// Best effort: the cache path this build's daemon runs from, so a running
+/// daemon from a different build can be told apart. `None` when no local
+/// daemon binary is found, which only skips that comparison.
+fn expected_daemon_path() -> Option<PathBuf> {
+    locate_daemon_binary()
+        .and_then(|template| cached_daemon_path(&template))
+        .inspect_err(|err| debug!("not comparing the running daemon's build: {err:#}"))
+        .ok()
+}
+
+fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
+    let cache_dir = resolve_binaries_dir()?;
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("creating cache dir {}", cache_dir.display()))?;
+
+    let bytes =
+        fs::read(template).with_context(|| format!("reading template {}", template.display()))?;
+    let filename = cached_file_name(template, &bytes);
     let cached = cache_dir.join(&filename);
 
     if cached.exists() {
@@ -631,10 +780,62 @@ async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
 )]
 mod tests {
     use super::{
-        daemon_exe_matches_expected, daemon_protocol_is_supported, dev_workspace_root,
-        is_daemon_image, path_is_under, shutdown_url,
+        Action, ExistingKind, RetirePolicy, action_for, daemon_exe_matches_expected,
+        daemon_protocol_is_supported, dev_workspace_root, is_daemon_image, path_is_under,
+        shutdown_url,
     };
     use std::path::Path;
+
+    #[test]
+    fn retire_stale_reuses_compatible() {
+        assert_eq!(
+            action_for(ExistingKind::Compatible, RetirePolicy::RetireStale),
+            Action::Reuse
+        );
+    }
+
+    #[test]
+    fn retire_stale_retires_stale_binary() {
+        assert_eq!(
+            action_for(ExistingKind::StaleBinary, RetirePolicy::RetireStale),
+            Action::RetireThenSpawn
+        );
+    }
+
+    #[test]
+    fn retire_stale_retires_incompatible() {
+        assert_eq!(
+            action_for(ExistingKind::Incompatible, RetirePolicy::RetireStale),
+            Action::RetireThenSpawn
+        );
+    }
+
+    #[test]
+    fn reuse_compatible_reuses_stale_binary() {
+        assert_eq!(
+            action_for(ExistingKind::StaleBinary, RetirePolicy::ReuseCompatible),
+            Action::Reuse
+        );
+    }
+
+    #[test]
+    fn reuse_compatible_retires_incompatible() {
+        assert_eq!(
+            action_for(ExistingKind::Incompatible, RetirePolicy::ReuseCompatible),
+            Action::RetireThenSpawn
+        );
+    }
+
+    #[test]
+    fn missing_spawns_under_both_policies() {
+        for policy in [RetirePolicy::RetireStale, RetirePolicy::ReuseCompatible] {
+            assert_eq!(
+                action_for(ExistingKind::Missing, policy),
+                Action::Spawn,
+                "policy {policy:?}"
+            );
+        }
+    }
 
     #[test]
     fn dev_fallback_root_is_workspace_root() {

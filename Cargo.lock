@@ -6698,7 +6698,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64 0.22.1",
- "directories",
+ "daemon-client",
  "futures",
  "gpui",
  "protocol",

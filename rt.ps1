@@ -31,10 +31,10 @@
                  (`--all-targets --all-features -- -D warnings`).
       fmt        Run `cargo fmt --all`.
       clean      Run `cargo clean`.
-      native     Run the native (GPUI) client via `cargo run -p
-                 rustling-tulip-native`. Debug by default; -Release for the
-                 release profile. Extra arguments go to the client (an
-                 optional session id to attach to).
+      native     Build the daemon and tracer, then run the native (GPUI)
+                 client via `cargo run -p rustling-tulip-native`. Debug by
+                 default; -Release for the release profile. Extra arguments
+                 go to the client (an optional session id to attach to).
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -1027,6 +1027,14 @@ function Invoke-Clean {
 function Invoke-Native {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
     Assert-MsvcLinker
+    # The client spawns the daemon when none is running, from the daemon and
+    # tracer binaries in the same profile's target dir; build them first.
+    $buildArgs = @('build', '--manifest-path', $ManifestPath, '-p', 'daemon', '-p', 'tracer')
+    if ($Release) { $buildArgs += '--release' }
+    Write-Host '==> Building daemon + tracer...' -ForegroundColor Cyan
+    & cargo @buildArgs
+    Test-CargoExitOk 'cargo build -p daemon -p tracer'
+
     $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
     if ($Release) { $cargoArgs += '--release' }
     # Everything after `--` goes to the client, not cargo (the session id).
@@ -1060,7 +1068,8 @@ Commands:
   clippy     `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
   clean      `cargo clean`.
-  native     `cargo run -p rustling-tulip-native` -- the native client.
+  native     `cargo build -p daemon -p tracer`, then `cargo run -p
+             rustling-tulip-native` -- the native client.
              -Release for the release profile; extra args are passed on
              (an optional session id to attach to).
   help       This message.

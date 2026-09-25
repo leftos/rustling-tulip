@@ -14,21 +14,23 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Connection & daemon lifecycle
 
-- [ ] Start or reuse the local daemon: health probe, protocol check, stale-binary detection, cached binary copy, graceful `/shutdown` then force kill, orphan reaping, 30s handshake wait, spawn lock — `src-tauri/src/daemon_supervisor.rs`, `lib.rs` `ensure_daemon_started`
-- [ ] WS client: `Hello` with protocol versions, token, `client_id`, hostname; handles `welcome` / `auth_failed` — `api.ts` `connectDaemon`
-- [ ] Per-install client identity (persisted `client-id` file + hostname) — `lib.rs` `get_client_identity`
-- [ ] Auto-reconnect with backoff (0.5s to 10s), including after a failed handshake; suppressed after the user stops the daemon — `App.tsx`
-- [ ] Standby-resume watchdog: a 30s tick arriving >90s late probes liveness with `list_repos` (3s) and forces a reconnect if the socket is half-open — `App.tsx`
-- [ ] Full-screen "Starting/Connecting to daemon…" overlay with spinner and "Restart daemon", until the first connect — `App.tsx` `ConnectingOverlay`
-- [ ] Footer status pill: state dot, "N sessions", ":port", remote-host chip, reason tooltip — `components/DaemonFooter.tsx`
-- [ ] Footer troubleshooting flyout: state, port, pid, protocol, session count, reason, copy handshake path; Esc / outside click closes — `DaemonFooter.tsx`
-- [ ] Open daemon.log / app.log in the default app; reveal the config dir — `DaemonFooter.tsx`, `lib.rs` `daemon_paths`
-- [ ] Restart daemon (graceful `shutdown` then respawn; forced fresh connect in auth-failed/stopped); "Reconnect" on remote — `App.tsx` `onRestartDaemon`
-- [ ] Stop daemon with two-click confirm (kill pid, remove handshake, no respawn) — `DaemonFooter.tsx`, `lib.rs` `stop_daemon`
+- [x] Start or reuse the local daemon: health probe, protocol check, stale-binary detection, cached binary copy, graceful `/shutdown` then force kill, orphan reaping, 30s handshake wait, spawn lock — `src-tauri/src/daemon_supervisor.rs`, `lib.rs` `ensure_daemon_started`
+- [x] WS client: `Hello` with protocol versions, token, `client_id`, hostname; handles `welcome` / `auth_failed` — `api.ts` `connectDaemon`
+- [x] Per-install client identity (persisted `client-id` file + hostname) — `lib.rs` `get_client_identity`
+- [x] Auto-reconnect with backoff (0.5s to 10s), including after a failed handshake; suppressed after the user stops the daemon — `App.tsx`
+- [x] Standby-resume watchdog: a 30s tick arriving >90s late probes liveness with `list_repos` (3s) and forces a reconnect if the socket is half-open — `App.tsx`
+- [x] Full-screen "Starting/Connecting to daemon…" overlay with spinner and "Restart daemon", until the first connect — `App.tsx` `ConnectingOverlay`
+- [x] Footer status pill: state dot, "N sessions", ":port", reason tooltip — `components/DaemonFooter.tsx`
+- [ ] Footer pill remote-host chip (with the connection picker, Phase 6) — `components/DaemonFooter.tsx`
+- [x] Footer troubleshooting flyout: state, port, pid, protocol, session count, reason, copy handshake path; Esc / outside click closes — `DaemonFooter.tsx`
+- [x] Open daemon.log / app.log in the default app; reveal the config dir (native: daemon.log and native.log) — `DaemonFooter.tsx`, `lib.rs` `daemon_paths`
+- [x] Restart daemon (graceful `shutdown` then respawn; forced fresh connect in auth-failed/stopped) — `App.tsx` `onRestartDaemon`
+- [ ] "Reconnect" in place of Restart on a remote connection (Phase 6) — `App.tsx` `onRestartDaemon`
+- [x] Stop daemon with two-click confirm (kill pid, remove handshake, no respawn) — `DaemonFooter.tsx`, `lib.rs` `stop_daemon`
 - [ ] Main-window close intercepted; quits silently when no sessions are active — `App.tsx` `onCloseRequested`
 - [ ] Exit dialog: keep running (default), stop and keep worktrees, stop and remove worktrees (branch fate per session, "Session n of m"), abandon and quit, orphan note, force quit after 5s stuck — `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
 - [ ] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
-- [ ] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts`
+- [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
 - [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
 - [ ] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage`
 - [ ] Main window size and position persisted — `lib.rs` (window-state plugin)

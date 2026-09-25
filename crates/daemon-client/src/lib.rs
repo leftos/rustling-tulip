@@ -2,7 +2,8 @@
 //!
 //! A client calls [`ensure_running`] to get the handshake of a healthy daemon
 //! it can speak to: it reuses a running `rustling-tulipd`, retires one whose
-//! protocol or binary is out of date, or spawns a fresh one from the
+//! protocol (or, under [`RetirePolicy::RetireStale`], binary) is out of date,
+//! or spawns a fresh one from the
 //! content-addressed binary cache. The crate also resolves the per-user files
 //! every client shares with the daemon (the config dir, `daemon.json`, the
 //! client-identity file) and force-stops the daemon ([`stop`]).
@@ -12,12 +13,12 @@
 
 mod supervisor;
 
-pub use supervisor::{ensure_running, locate_daemon_binary};
+pub use supervisor::{RetirePolicy, ensure_running, locate_daemon_binary};
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the per-user config directory.
 ///
@@ -49,7 +50,13 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 ///
 /// Fails when [`config_dir`] does.
 pub fn handshake_file() -> anyhow::Result<PathBuf> {
-    Ok(config_dir()?.join("daemon.json"))
+    Ok(handshake_file_in(&config_dir()?))
+}
+
+/// Path of the handshake file (`daemon.json`) under `config_dir`.
+#[must_use]
+pub fn handshake_file_in(config_dir: &Path) -> PathBuf {
+    config_dir.join("daemon.json")
 }
 
 /// Read and parse `daemon.json` without checking that the daemon it names is
