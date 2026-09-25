@@ -106,7 +106,9 @@ repos:
       # deserialises wrong at runtime. Cheap enough to check on every push.
       - id: protocol-mirror
         name: protocol Rust/TS mirror in sync
-        entry: python3 scripts/check_protocol_mirror.py
+        # Through uv: on Windows a bare `python3` resolves to the Microsoft
+        # Store installer stub and the hook dies with exit 9009 unchecked.
+        entry: uv run --no-project python scripts/check_protocol_mirror.py
         language: system
         files: ^(crates/protocol/src/lib\.rs|apps/tauri-app/src/(types|api)\.ts|apps/tauri-app/src/App\.tsx)$
         pass_filenames: false
