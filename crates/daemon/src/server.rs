@@ -731,6 +731,7 @@ fn write_handshake(dirs: &Dirs, port: u16, auth_token: &str) -> anyhow::Result<(
         port,
         auth_token: auth_token.to_string(),
         pid,
+        supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
     };
     let bytes = serde_json::to_vec_pretty(&payload).context("serializing handshake")?;
     // Tag the tmp file with our pid so concurrent daemons don't stomp each

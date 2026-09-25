@@ -102,6 +102,7 @@ impl LiveDaemon {
                 port: 0,
                 auth_token: String::new(),
                 pid: 0,
+                supported_versions: Vec::new(),
             },
         };
         live.handshake = live.wait_healthy();

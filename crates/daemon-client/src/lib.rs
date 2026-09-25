@@ -333,6 +333,7 @@ mod tests {
             port: 40123,
             auth_token: "token".to_owned(),
             pid,
+            supported_versions: Vec::new(),
         };
         let json = serde_json::to_vec(&handshake).expect("encode handshake");
         std::fs::write(super::handshake_file_in(dir), json).expect("write daemon.json");

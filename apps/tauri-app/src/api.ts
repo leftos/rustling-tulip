@@ -18,6 +18,7 @@ export interface DaemonHandshake {
   port: number;
   auth_token: string;
   pid: number;
+  supported_versions: number[];
 }
 
 export interface DaemonClient {

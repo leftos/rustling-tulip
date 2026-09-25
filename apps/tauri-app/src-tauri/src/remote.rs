@@ -340,6 +340,7 @@ async fn connect_remote_inner(
         port: local_port,
         auth_token: params.token,
         pid: 0,
+        supported_versions: Vec::new(),
     })
 }
 

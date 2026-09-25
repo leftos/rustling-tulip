@@ -156,6 +156,23 @@ pub struct DaemonHandshake {
     pub port: u16,
     pub auth_token: String,
     pub pid: u32,
+    /// The protocol versions the daemon speaks. Empty in a `daemon.json`
+    /// written by a daemon before protocol 23, meaning only `protocol_version`.
+    #[serde(default)]
+    pub supported_versions: Vec<u32>,
+}
+
+impl DaemonHandshake {
+    /// The protocol versions the daemon speaks: `supported_versions` when the
+    /// daemon wrote it, else the single `protocol_version`.
+    #[must_use]
+    pub fn supported(&self) -> Vec<u32> {
+        if self.supported_versions.is_empty() {
+            vec![self.protocol_version]
+        } else {
+            self.supported_versions.clone()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4757,5 +4774,30 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn handshake_without_supported_versions_falls_back_to_scalar() {
+        let json = r#"{"protocol_version":22,"port":40123,"auth_token":"t","pid":7}"#;
+        let handshake: DaemonHandshake =
+            serde_json::from_str(json).expect("decode a handshake without supported_versions");
+        assert!(handshake.supported_versions.is_empty());
+        assert_eq!(handshake.supported(), vec![22]);
+    }
+
+    #[test]
+    fn handshake_supported_versions_round_trip() {
+        let handshake = DaemonHandshake {
+            protocol_version: 23,
+            port: 40123,
+            auth_token: "t".to_owned(),
+            pid: 7,
+            supported_versions: vec![23, 22],
+        };
+        let json = serde_json::to_string(&handshake).expect("encode handshake");
+        let decoded: DaemonHandshake = serde_json::from_str(&json).expect("decode handshake");
+        assert_eq!(decoded.supported_versions, vec![23, 22]);
+        assert_eq!(decoded.supported(), vec![23, 22]);
+        assert_eq!(decoded.protocol_version, 23);
     }
 }

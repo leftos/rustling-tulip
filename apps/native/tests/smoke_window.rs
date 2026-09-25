@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use protocol::ClientMessage;
-use rustling_tulip_native::SIDEBAR_DEFAULT_WIDTH;
+use rustling_tulip_native::{NATIVE_PROTOCOL_VERSIONS, SIDEBAR_DEFAULT_WIDTH};
 use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};
 use tokio_tungstenite::tungstenite::stream::MaybeTlsStream;
@@ -87,8 +87,8 @@ fn connect(daemon: &LiveDaemon, client_id: &str) -> Socket {
     send(
         &mut ws,
         &ClientMessage::Hello {
-            protocol_version: protocol::PROTOCOL_VERSION,
-            protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+            protocol_version: NATIVE_PROTOCOL_VERSIONS[0],
+            protocol_versions: NATIVE_PROTOCOL_VERSIONS.to_vec(),
             auth_token: handshake.auth_token.clone(),
             client_id: Some(client_id.to_owned()),
             client_name: None,

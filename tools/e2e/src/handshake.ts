@@ -14,6 +14,7 @@ export interface DaemonHandshake {
   port: number;
   auth_token: string;
   pid: number;
+  supported_versions?: number[];
 }
 
 /** Subset of `protocol::PROTOCOL_VERSION` we know how to speak. */

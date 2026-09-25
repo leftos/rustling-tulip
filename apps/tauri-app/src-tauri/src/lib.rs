@@ -62,11 +62,19 @@ fn error_text(err: anyhow::Error) -> String {
     format!("{err:#}")
 }
 
+/// The protocol versions the Tauri app speaks. Must match the pinned
+/// `PROTOCOL_VERSION` / `SUPPORTED_PROTOCOL_VERSIONS` in
+/// `apps/tauri-app/src/types.ts`.
+const TAURI_PROTOCOL_VERSIONS: &[u32] = &[22];
+
 #[tauri::command]
 async fn ensure_daemon_started() -> Result<DaemonHandshake, String> {
-    daemon_client::ensure_running(daemon_client::RetirePolicy::RetireStale)
-        .await
-        .map_err(error_text)
+    daemon_client::ensure_running(
+        daemon_client::RetirePolicy::RetireStale,
+        TAURI_PROTOCOL_VERSIONS,
+    )
+    .await
+    .map_err(error_text)
 }
 
 #[tauri::command]

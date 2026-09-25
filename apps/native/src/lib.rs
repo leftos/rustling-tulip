@@ -51,7 +51,8 @@ use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session}
 pub use crate::connection::Connection;
 pub use crate::footer::LogPaths;
 pub use crate::net::{
-    EnsureFuture, HandshakeInfo, NetCommand, NetDeps, NetEvent, StopFuture, spawn_with as spawn_net,
+    EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
+    StopFuture, spawn_with as spawn_net,
 };
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
 pub use crate::text_input::bind_keys;

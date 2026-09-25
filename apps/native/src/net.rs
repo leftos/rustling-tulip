@@ -25,6 +25,14 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Frame = Option<Result<Message, tungstenite::Error>>;
 /// A pending `ensure_running`, boxed so tests can substitute one.
 pub type EnsureFuture = Pin<Box<dyn Future<Output = Result<DaemonHandshake>>>>;
+/// The protocol versions the native client speaks: only 23, the first whose
+/// daemon echoes `request_id`. An older daemon is retired and replaced.
+pub const NATIVE_PROTOCOL_VERSIONS: &[u32] = &[23];
+
+/// The version `Hello` names as preferred: the highest native version, first
+/// in [`NATIVE_PROTOCOL_VERSIONS`].
+const NATIVE_PROTOCOL_VERSION: u32 = NATIVE_PROTOCOL_VERSIONS[0];
+
 /// A pending force-stop of the daemon.
 pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
@@ -127,7 +135,10 @@ pub fn spawn_with(
 }
 
 fn ensure_daemon() -> EnsureFuture {
-    Box::pin(daemon_client::ensure_running(RetirePolicy::ReuseCompatible))
+    Box::pin(daemon_client::ensure_running(
+        RetirePolicy::ReuseCompatible,
+        NATIVE_PROTOCOL_VERSIONS,
+    ))
 }
 
 /// The network thread's body: build the runtime and run the loop on it until
@@ -292,8 +303,8 @@ impl Net {
 
     fn hello(&self, auth_token: String) -> ClientMessage {
         ClientMessage::Hello {
-            protocol_version: protocol::PROTOCOL_VERSION,
-            protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+            protocol_version: NATIVE_PROTOCOL_VERSION,
+            protocol_versions: NATIVE_PROTOCOL_VERSIONS.to_vec(),
             auth_token,
             client_id: self.deps.identity.as_ref().map(|id| id.client_id.clone()),
             client_name: self
@@ -502,9 +513,13 @@ async fn sleep_until(deadline: Option<Instant>) {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{EnsureFuture, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread};
+    use super::{
+        EnsureFuture, NATIVE_PROTOCOL_VERSIONS, Net, NetCommand, NetDeps, NetEvent,
+        WELCOME_TIMEOUT, run_thread,
+    };
     use crate::connection::State;
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+    use protocol::ClientMessage;
     use protocol::DaemonHandshake;
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
@@ -529,10 +544,11 @@ mod tests {
     fn ensure_silent_server() -> EnsureFuture {
         Box::pin(async {
             Ok(DaemonHandshake {
-                protocol_version: protocol::PROTOCOL_VERSION,
+                protocol_version: 23,
                 port: SILENT_PORT.load(Ordering::SeqCst),
                 auth_token: "test-token".to_owned(),
                 pid: 0,
+                supported_versions: vec![23, 22],
             })
         })
     }
@@ -680,5 +696,35 @@ mod tests {
         net.join()
             .expect("net thread exits when the command channel closes");
         drop(sockets);
+    }
+
+    #[test]
+    fn native_hello_offers_only_23() {
+        assert_eq!(NATIVE_PROTOCOL_VERSIONS, &[23]);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a test runtime");
+        let hello = runtime.block_on(async {
+            let (_commands_tx, commands) = unbounded();
+            let (events, _events_rx) = unbounded();
+            let net = Net::new(
+                commands,
+                events,
+                deps(ensure_silent_server),
+                WELCOME_TIMEOUT,
+            );
+            net.hello("test-token".to_owned())
+        });
+        let ClientMessage::Hello {
+            protocol_version,
+            protocol_versions,
+            ..
+        } = hello
+        else {
+            unreachable!("hello() builds a Hello, got {hello:?}");
+        };
+        assert_eq!(protocol_version, 23);
+        assert_eq!(protocol_versions, vec![23]);
     }
 }

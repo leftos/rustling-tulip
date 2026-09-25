@@ -143,10 +143,12 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// Return the handshake of a healthy daemon this client can speak to,
 /// spawning or replacing one when needed.
 ///
+/// `client_versions` lists the protocol versions the calling client speaks; a
+/// running daemon is protocol-compatible when it speaks at least one of them.
 /// Under [`RetirePolicy::RetireStale`] a running daemon is reused only when its
-/// protocol is supported and its executable is the current cached copy of the
+/// protocol is compatible and its executable is the current cached copy of the
 /// shipped binary. Under [`RetirePolicy::ReuseCompatible`] any healthy daemon
-/// with a supported protocol is reused, and no local daemon binary is located
+/// with a compatible protocol is reused, and no local daemon binary is located
 /// unless one has to be spawned. A daemon the policy does not reuse is retired
 /// (graceful `/shutdown`, then a force kill) and a fresh one is spawned from
 /// the binary cache. Concurrent callers serialize on a process-wide lock so
@@ -157,7 +159,10 @@ fn spawn_lock() -> &'static Mutex<()> {
 /// Fails when the daemon binary is needed but cannot be located or cached, a
 /// stale daemon cannot be stopped, the spawn fails, or the new daemon does not
 /// report a healthy handshake within the spawn timeout.
-pub async fn ensure_running(policy: RetirePolicy) -> anyhow::Result<DaemonHandshake> {
+pub async fn ensure_running(
+    policy: RetirePolicy,
+    client_versions: &[u32],
+) -> anyhow::Result<DaemonHandshake> {
     // RetireStale retires a daemon whose executable is not this build's
     // cached binary, so it locates and caches the binary up front and a
     // missing binary is an error. ReuseCompatible compares best-effort: it
@@ -174,7 +179,7 @@ pub async fn ensure_running(policy: RetirePolicy) -> anyhow::Result<DaemonHandsh
     let cached = expected.as_deref();
 
     // Fast path: a healthy daemon the policy reuses.
-    let existing = classify_existing_daemon(cached, policy).await;
+    let existing = classify_existing_daemon(cached, policy, client_versions).await;
     if let Some(handshake) = reused_handshake(&existing, policy, "reusing running daemon") {
         return Ok(handshake);
     }
@@ -184,7 +189,7 @@ pub async fn ensure_running(policy: RetirePolicy) -> anyhow::Result<DaemonHandsh
     // the handshake -- the caller ahead of us may have spawned the daemon
     // already.
     let _guard = spawn_lock().lock().await;
-    let existing = classify_existing_daemon(cached, policy).await;
+    let existing = classify_existing_daemon(cached, policy, client_versions).await;
     if let Some(handshake) = reused_handshake(
         &existing,
         policy,
@@ -201,7 +206,7 @@ pub async fn ensure_running(policy: RetirePolicy) -> anyhow::Result<DaemonHandsh
     if action_for(existing.kind(), policy) == Action::RetireThenSpawn
         && let Some(handshake) = existing.handshake()
     {
-        retire_daemon(handshake, retire_reason(existing.kind())).await?;
+        retire_daemon(handshake, retire_reason(existing.kind()), client_versions).await?;
     }
     spawn_current_daemon(&current).await
 }
@@ -248,17 +253,18 @@ async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> anyhow::Result<D
 }
 
 /// Classify the daemon named by `daemon.json`. With no `current_daemon` to
-/// compare against, a healthy daemon with a supported protocol counts as
-/// compatible whatever executable it runs. A daemon from a different build is
-/// reported at warn only when `policy` retires it; a policy that reuses it
-/// reports the difference at debug.
+/// compare against, a healthy daemon whose protocol is compatible with
+/// `client_versions` counts as compatible whatever executable it runs. A
+/// daemon from a different build is reported at warn only when `policy`
+/// retires it; a policy that reuses it reports the difference at debug.
 async fn classify_existing_daemon(
     current_daemon: Option<&Path>,
     policy: RetirePolicy,
+    client_versions: &[u32],
 ) -> ExistingDaemon {
     let stale_is_warning = policy == RetirePolicy::RetireStale;
     if let Some(handshake) = load_existing_if_alive().await {
-        if daemon_protocol_is_supported(handshake.protocol_version) {
+        if protocol_kind(&handshake, client_versions) == ExistingKind::Compatible {
             let Some(current_daemon) = current_daemon else {
                 return ExistingDaemon::Compatible(handshake);
             };
@@ -282,7 +288,8 @@ async fn classify_existing_daemon(
         } else {
             warn!(
                 daemon_protocol = handshake.protocol_version,
-                supported = ?protocol::SUPPORTED_PROTOCOL_VERSIONS,
+                daemon_supported = ?handshake.supported(),
+                client_supported = ?client_versions,
                 port = handshake.port,
                 pid = handshake.pid,
                 "running daemon protocol is incompatible with this app"
@@ -294,8 +301,23 @@ async fn classify_existing_daemon(
     }
 }
 
-fn daemon_protocol_is_supported(protocol_version: u32) -> bool {
-    protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version)
+/// Whether the daemon behind `daemon` speaks at least one of `client_versions`.
+fn protocol_compatible(daemon: &DaemonHandshake, client_versions: &[u32]) -> bool {
+    daemon
+        .supported()
+        .iter()
+        .any(|version| client_versions.contains(version))
+}
+
+/// The protocol half of the classification: [`ExistingKind::Compatible`] when
+/// the daemon and the client share a protocol version, else
+/// [`ExistingKind::Incompatible`].
+fn protocol_kind(daemon: &DaemonHandshake, client_versions: &[u32]) -> ExistingKind {
+    if protocol_compatible(daemon, client_versions) {
+        ExistingKind::Compatible
+    } else {
+        ExistingKind::Incompatible
+    }
 }
 
 fn running_daemon_matches_current_binary(
@@ -343,12 +365,17 @@ fn daemon_exe_matches_expected(actual: &Path, expected: &Path) -> bool {
     normalize_process_path(actual) == normalize_process_path(expected)
 }
 
-async fn retire_daemon(handshake: &DaemonHandshake, reason: &str) -> anyhow::Result<()> {
+async fn retire_daemon(
+    handshake: &DaemonHandshake,
+    reason: &str,
+    client_versions: &[u32],
+) -> anyhow::Result<()> {
     info!(
         pid = handshake.pid,
         port = handshake.port,
         protocol_version = handshake.protocol_version,
-        supported = ?protocol::SUPPORTED_PROTOCOL_VERSIONS,
+        daemon_supported = ?handshake.supported(),
+        client_supported = ?client_versions,
         reason,
         "retiring running daemon before spawning current version"
     );
@@ -781,10 +808,21 @@ async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
 mod tests {
     use super::{
         Action, ExistingKind, RetirePolicy, action_for, daemon_exe_matches_expected,
-        daemon_protocol_is_supported, dev_workspace_root, is_daemon_image, path_is_under,
+        dev_workspace_root, is_daemon_image, path_is_under, protocol_compatible, protocol_kind,
         shutdown_url,
     };
+    use protocol::DaemonHandshake;
     use std::path::Path;
+
+    fn handshake(protocol_version: u32, supported_versions: &[u32]) -> DaemonHandshake {
+        DaemonHandshake {
+            protocol_version,
+            port: 40123,
+            auth_token: "token".to_owned(),
+            pid: 7,
+            supported_versions: supported_versions.to_vec(),
+        }
+    }
 
     #[test]
     fn retire_stale_reuses_compatible() {
@@ -851,13 +889,49 @@ mod tests {
     }
 
     #[test]
-    fn current_protocol_is_supported() {
-        assert!(daemon_protocol_is_supported(protocol::PROTOCOL_VERSION));
+    fn current_protocol_is_compatible_with_itself() {
+        let daemon = handshake(
+            protocol::PROTOCOL_VERSION,
+            protocol::SUPPORTED_PROTOCOL_VERSIONS,
+        );
+        assert!(protocol_compatible(
+            &daemon,
+            protocol::SUPPORTED_PROTOCOL_VERSIONS
+        ));
     }
 
     #[test]
-    fn zero_protocol_is_not_supported() {
-        assert!(!daemon_protocol_is_supported(0));
+    fn zero_protocol_is_not_compatible() {
+        assert!(!protocol_compatible(
+            &handshake(0, &[]),
+            protocol::SUPPORTED_PROTOCOL_VERSIONS
+        ));
+    }
+
+    #[test]
+    fn native_client_retires_daemon_that_speaks_only_22() {
+        let daemon = handshake(22, &[]);
+        assert_eq!(
+            action_for(protocol_kind(&daemon, &[23]), RetirePolicy::ReuseCompatible),
+            Action::RetireThenSpawn
+        );
+    }
+
+    #[test]
+    fn tauri_client_reuses_daemon_speaking_23_and_22() {
+        let daemon = handshake(23, &[23, 22]);
+        assert!(protocol_compatible(&daemon, &[22]));
+        assert_eq!(protocol_kind(&daemon, &[22]), ExistingKind::Compatible);
+    }
+
+    #[test]
+    fn native_client_reuses_daemon_speaking_23() {
+        let daemon = handshake(23, &[23, 22]);
+        assert!(protocol_compatible(&daemon, &[23]));
+        assert_eq!(
+            action_for(protocol_kind(&daemon, &[23]), RetirePolicy::ReuseCompatible),
+            Action::Reuse
+        );
     }
 
     #[test]

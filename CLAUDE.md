@@ -79,7 +79,7 @@ pnpm typecheck            # tsc --noEmit
 pnpm build                # tsc -b && vite build
 ```
 
-The Tauri app auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`). The daemon writes `port` + `auth_token` + `pid` to `daemon.json` in the config dir below; clients read that to connect.
+The Tauri app auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`). The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect. Each client passes `ensure_running` the protocol versions it speaks, and a daemon sharing none of them is retired and replaced. The native client speaks only the current version; the frozen Tauri app is pinned to protocol 22 (`apps/tauri-app/src/types.ts` and `TAURI_PROTOCOL_VERSIONS` in `src-tauri/src/lib.rs`), so `supported` must keep 22 until cutover.
 
 ## E2E tests
 
@@ -125,7 +125,7 @@ The `fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI 
 Both sides resolve the config dir via the `directories` crate as `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`. On Windows that expands to `%APPDATA%\leftos\rustling-tulip\config\` (note the `leftos\` + `\config\` segments — `directories` inserts them, so a plain `%APPDATA%\rustling-tulip\` path is wrong). Layout under that root:
 
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings (`worktrees_root_override`, `keep_awake`) that must apply with no window open (see `crates/daemon/src/state.rs`).
-- `daemon.json` — handshake (port + auth_token + pid); written on daemon start, removed on graceful shutdown.
+- `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
 - `logs/app.log` — Tauri side log file, written via the `log_message` invoke command (see `apps/tauri-app/src-tauri/src/lib.rs`). Frontend code calls it through `apps/tauri-app/src/utils/logger.ts`. Rotated on each app boot: the previous launch survives as `app.log.old`.
@@ -145,7 +145,7 @@ Worktrees live under a **separate** root resolved via `ProjectDirs::data_local_d
 
 **On-disk layout under `%APPDATA%\rustling-tulip\`** (see `crates/daemon/src/paths.rs`):
 - `state.json` — repo + workspace registry plus host settings (never sessions)
-- `daemon.json` — handshake (port, token, pid)
+- `daemon.json` — handshake (port, token, pid, supported protocol versions)
 - `sessions/<id>/meta.json` — orphan-recovery sidecar; written at spawn, deleted on graceful stop
 - `sessions/<id>/scrollback.bin` — 2 MB ring (trims to 1.5 MB on overflow), replayed via `LoadScrollback` on attach
 - `sessions/<id>/scrollback.truncated` — flag file iff the ring overflowed

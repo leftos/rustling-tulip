@@ -1,9 +1,9 @@
 // Mirrors the Rust protocol crate. Keep in sync with crates/protocol/src/lib.rs.
 
-import protocolVersion from "../../../protocol-version.json";
-
-export const PROTOCOL_VERSION: number = protocolVersion.version;
-export const SUPPORTED_PROTOCOL_VERSIONS: readonly number[] = protocolVersion.supported;
+// The Tauri app is frozen on protocol 22; the daemon keeps 22 in `supported`.
+// TAURI_PROTOCOL_VERSIONS in src-tauri/src/lib.rs must match these.
+export const PROTOCOL_VERSION: number = 22;
+export const SUPPORTED_PROTOCOL_VERSIONS: readonly number[] = [22] as const;
 
 export type Agent = "claude" | "codex" | "cursor";
 
