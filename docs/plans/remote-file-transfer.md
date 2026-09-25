@@ -10,7 +10,7 @@ Blocked on two native-client phases (see [native-client.md](./native-client.md))
 - Phase 2 (terminal link detection and Ctrl-click open), for the link trigger.
 - Phase 6 (connection picker, pinned-TLS tunnel), because the native client can't connect remotely until then.
 
-The daemon and protocol half doesn't depend on either phase. It lands as the first item when Phase 6 becomes the current focus.
+The daemon and protocol half (FT.1) has landed.
 
 ## Rulings (user, 2026-09-24)
 
@@ -29,7 +29,7 @@ The daemon and protocol half doesn't depend on either phase. It lands as the fir
 
 ### Daemon
 
-- One path-confinement helper used by `FetchFile`. It checks that the root is a registered repo or a worktree under `worktrees_dir()` that belongs to that repo, joins the path to the root, canonicalizes the result, and requires it to `starts_with` the canonical root. Every rejection names the path it rejected and the reason.
+- One path-confinement helper used by `FetchFile`. It checks that the root is a registered repo, or a worktree whose canonical path is under the canonical `worktrees_dir()`. It rejects `..` and absolute paths lexically, then canonicalizes the joined path and requires it to `starts_with` the canonical root. `GetFileSnapshot` and `GetFileDiff` use the same helper. Every rejection names the path it rejected and the reason.
 - Reads run on a blocking task with a bounded channel into the connection's send queue, so a slow remote client applies backpressure instead of making the daemon buffer the whole file. PTY output keeps priority.
 - A directory, a missing file, or an unreadable file ends in `FileFetchError`.
 
@@ -42,7 +42,7 @@ The daemon and protocol half doesn't depend on either phase. It lands as the fir
 
 ## Items
 
-- [ ] **FT.1 Daemon + protocol:** the `FetchFile` / `CancelFetch` messages, the path-confinement helper, and chunked streaming with backpressure. Tests cover: a `..` escape, an absolute path outside the root, a symlink escape (skipped when the OS denies symlink creation), a directory, a missing file, an empty file, a file larger than one chunk that reassembles byte-exact, and cancel mid-stream.
-- [ ] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. Needs Phase 6.
+- [x] **FT.1 Daemon + protocol:** the `FetchFile` / `CancelFetch` messages, the path-confinement helper, and chunked streaming with backpressure. Tests cover: a `..` escape, an absolute path outside the root, a symlink escape (skipped when the OS denies symlink creation), a directory, a missing file, an empty file, a file larger than one chunk that reassembles byte-exact, and cancel mid-stream.
+- [ ] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. `FileFetchStarted.resolved_path` is the daemon's canonical path, so on Windows it starts with `\\?\`; strip that before showing it. Needs Phase 6.
 - [ ] **FT.3 Ctrl-click trigger:** in remote mode, terminal links send `FetchFile` with candidate readings. Needs Phase 2 links and FT.2.
 - [ ] **FT.4 "Fetch file…" popup:** the path input scoped to the focused session's repo or worktree, with progress, cancel, and inline errors. Needs FT.2.

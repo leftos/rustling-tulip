@@ -1992,6 +1992,25 @@ pub enum ClientMessage {
         #[serde(default)]
         worktree_path: Option<String>,
     },
+    /// Download a file from the repo root (or one of its session worktrees).
+    /// `path` is relative to that root; the daemon refuses `..`, absolute
+    /// paths and anything resolving outside the root. The daemon answers
+    /// with [`DaemonMessage::FileFetchStarted`], then
+    /// [`DaemonMessage::FileChunk`]s, then [`DaemonMessage::FileFetchDone`],
+    /// or [`DaemonMessage::FileFetchError`] at any point.
+    FetchFile {
+        /// Client-assigned transfer id, echoed on every response.
+        id: String,
+        repo_id: String,
+        #[serde(default)]
+        worktree_path: Option<String>,
+        path: String,
+    },
+    /// Stop the [`ClientMessage::FetchFile`] transfer with this id. No
+    /// further messages for it are sent. An unknown id is ignored.
+    CancelFetch {
+        id: String,
+    },
     /// Request the persisted scrollback for a session, replayed on attach.
     /// The daemon answers with [`DaemonMessage::Scrollback`].
     LoadScrollback {
@@ -2796,6 +2815,32 @@ pub enum DaemonMessage {
         error: String,
         #[serde(default)]
         worktree_path: Option<String>,
+    },
+    /// First response to [`ClientMessage::FetchFile`]. `resolved_path` is the
+    /// canonical host path of the file, as display text; `size` is its
+    /// length in bytes when the transfer began.
+    FileFetchStarted {
+        id: String,
+        resolved_path: String,
+        size: u64,
+    },
+    /// One piece of a [`ClientMessage::FetchFile`] transfer, base64-encoded.
+    /// `seq` counts from 0; concatenating the chunks in order gives the file.
+    FileChunk {
+        id: String,
+        seq: u64,
+        data_b64: String,
+    },
+    /// The [`ClientMessage::FetchFile`] transfer finished; every chunk has
+    /// been sent.
+    FileFetchDone {
+        id: String,
+    },
+    /// The [`ClientMessage::FetchFile`] transfer failed (refused path,
+    /// directory, unreadable file). No further messages for `id` follow.
+    FileFetchError {
+        id: String,
+        error: String,
     },
     /// Persisted scrollback bytes (raw PTY output for interactive sessions,
     /// raw stream-json lines for headless), base64-encoded. `truncated` is

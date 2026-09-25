@@ -962,6 +962,14 @@ export type ClientMessage =
       against: string | null;
       worktree_path?: string | null;
     }
+  | {
+      type: "fetch_file";
+      id: string;
+      repo_id: string;
+      worktree_path?: string | null;
+      path: string;
+    }
+  | { type: "cancel_fetch"; id: string }
   | { type: "load_scrollback"; session_id: string }
   // `drain` defaults to true server-side. Pass `drain: false` to retain
   // session sidecars so the next daemon start surfaces them as
@@ -1317,6 +1325,15 @@ export type DaemonMessage =
       error: string;
       worktree_path?: string | null;
     }
+  | {
+      type: "file_fetch_started";
+      id: string;
+      resolved_path: string;
+      size: number;
+    }
+  | { type: "file_chunk"; id: string; seq: number; data_b64: string }
+  | { type: "file_fetch_done"; id: string }
+  | { type: "file_fetch_error"; id: string; error: string }
   | {
       type: "scrollback";
       session_id: string;

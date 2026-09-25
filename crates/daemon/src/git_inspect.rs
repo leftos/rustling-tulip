@@ -1,5 +1,6 @@
 //! Read-only git inspection helpers backing the Phase 6 git panel.
 
+use crate::file_fetch;
 use anyhow::{Context as _, anyhow};
 use protocol::{GitCommit, GitCommitDetail, GitFileChange, GitRemoteUrl};
 use std::path::Path;
@@ -228,11 +229,13 @@ pub async fn file_snapshot(
 ) -> anyhow::Result<(String, String)> {
     match against {
         None => {
+            let new = match file_fetch::confine_path(repo, path) {
+                Ok(target) => tokio::fs::read_to_string(target).await.unwrap_or_default(),
+                Err(err) if file_fetch::is_not_found(&err) => String::new(),
+                Err(err) => return Err(err),
+            };
             let old = run_git_quiet(repo, &["show", &format!(":0:{path}")]).await;
             let old = old.unwrap_or_default();
-            let new = tokio::fs::read_to_string(repo.join(path))
-                .await
-                .unwrap_or_default();
             Ok((old, new))
         }
         Some("HEAD") => {
@@ -412,5 +415,15 @@ mod tests {
         let (index, worktree) = parse_porcelain_z("");
         assert!(index.is_empty());
         assert!(worktree.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worktree_snapshot_refuses_escape_but_tolerates_missing_file() {
+        let dir = crate::file_fetch::test_support::TestDir::new("snapshot");
+        assert!(file_snapshot(dir.path(), "../x", None).await.is_err());
+        let (old, new) = file_snapshot(dir.path(), "untracked.txt", None)
+            .await
+            .expect("missing file snapshots as empty");
+        assert!(old.is_empty() && new.is_empty());
     }
 }

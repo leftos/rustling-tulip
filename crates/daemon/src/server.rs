@@ -4,6 +4,7 @@ use crate::agents::CommonSpawnFields;
 use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::branch_names;
 use crate::discovery;
+use crate::file_fetch;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
 use crate::pairing;
@@ -46,6 +47,7 @@ use protocol::{
     SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
 };
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,6 +55,7 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
@@ -786,27 +789,16 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // RAII-tracked so `git_watch` can pause its refreshers when no UI is
     // listening. Dropped on normal return and on panic.
     let _client_guard = ClientCountGuard::new(Arc::clone(&hub.client_count));
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
 
     // Each outgoing message goes through this channel so PTY/event tasks can
     // push to the WS without sharing the sink across tasks.
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<DaemonMessage>();
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<DaemonMessage>();
+    // File transfers get their own small bounded queue: a slow socket stalls
+    // the file read instead of buffering the whole file in memory.
+    let (file_tx, file_rx) = mpsc::channel::<DaemonMessage>(4);
 
-    // Sender pump.
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
-            let json = match serde_json::to_string(&msg) {
-                Ok(s) => s,
-                Err(err) => {
-                    error!(?err, "serializing daemon msg");
-                    continue;
-                }
-            };
-            if sender.send(Message::Text(json.into())).await.is_err() {
-                break;
-            }
-        }
-    });
+    let send_task = tokio::spawn(send_pump(sender, out_rx, file_rx));
 
     // Mandatory handshake.
     let handshake = match handshake(&hub, &mut receiver, &out_tx).await {
@@ -856,6 +848,9 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         String,
         tokio::task::JoinHandle<()>,
     >::new()));
+    // Active `FetchFile` transfers by client-assigned id; cancelled by
+    // `CancelFetch` and on teardown below.
+    let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
 
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
@@ -896,15 +891,15 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // chooser when it has none yet.
     push_initial_state(&hub, &out_tx, &client_id, needs_layout_chooser);
 
-    recv_loop(
-        &hub,
-        &mut receiver,
-        &out_tx,
-        &pty_forwarders,
-        &client_id,
-        client_name.as_deref(),
-    )
-    .await;
+    let ctx = ConnCtx {
+        out_tx: &out_tx,
+        file_tx: &file_tx,
+        pty_forwarders: &pty_forwarders,
+        fetches: &fetches,
+        client_id: &client_id,
+        client_name: client_name.as_deref(),
+    };
+    recv_loop(&hub, &mut receiver, &ctx).await;
 
     info!("client_session: recv_loop returned; tearing down");
     {
@@ -913,6 +908,13 @@ async fn client_session(hub: Hub, socket: WebSocket) {
             handle.abort();
         }
     }
+    {
+        let mut fetches = fetches.lock().await;
+        for (_, token) in fetches.drain() {
+            token.cancel();
+        }
+    }
+    drop(file_tx);
     drop(out_tx);
     event_task.abort();
     tab_event_task.abort();
@@ -1111,6 +1113,108 @@ fn spawn_preset_forwarder(
     })
 }
 
+type PtyForwarders = Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>;
+type FetchRegistry = Arc<AsyncMutex<HashMap<String, CancellationToken>>>;
+
+/// Per-connection handles that [`dispatch`] needs beyond the [`Hub`].
+#[derive(Clone, Copy)]
+struct ConnCtx<'a> {
+    out_tx: &'a mpsc::UnboundedSender<DaemonMessage>,
+    /// Bounded, lower-priority queue for `FetchFile` transfer messages.
+    file_tx: &'a mpsc::Sender<DaemonMessage>,
+    pty_forwarders: &'a PtyForwarders,
+    fetches: &'a FetchRegistry,
+    client_id: &'a str,
+    client_name: Option<&'a str>,
+}
+
+/// Drain a connection's outbound queues into its WebSocket. Control and PTY
+/// traffic on `out_rx` always goes before file-transfer messages on
+/// `file_rx`. Ends when `out_rx` closes or the socket fails; `file_rx`
+/// closing only retires its own arm.
+async fn send_pump(
+    mut sender: futures::stream::SplitSink<WebSocket, Message>,
+    mut out_rx: mpsc::UnboundedReceiver<DaemonMessage>,
+    mut file_rx: mpsc::Receiver<DaemonMessage>,
+) {
+    let mut file_open = true;
+    loop {
+        let msg = tokio::select! {
+            biased;
+            msg = out_rx.recv() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+            msg = file_rx.recv(), if file_open => {
+                let Some(msg) = msg else {
+                    file_open = false;
+                    continue;
+                };
+                msg
+            }
+        };
+        let json = match serde_json::to_string(&msg) {
+            Ok(s) => s,
+            Err(err) => {
+                error!(?err, "serializing daemon msg");
+                continue;
+            }
+        };
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Start streaming a confined file for `FetchFile`, or answer with
+/// `FileFetchError` when the path was refused or `id` is already active.
+async fn start_fetch(ctx: &ConnCtx<'_>, id: String, target: anyhow::Result<PathBuf>) {
+    let path = match target {
+        Ok(path) => path,
+        Err(err) => {
+            let error = format!("{err:#}");
+            let _ = ctx.out_tx.send(DaemonMessage::FileFetchError { id, error });
+            return;
+        }
+    };
+    let token = CancellationToken::new();
+    let duplicate = match ctx.fetches.lock().await.entry(id.clone()) {
+        Entry::Occupied(_) => true,
+        Entry::Vacant(slot) => {
+            slot.insert(token.clone());
+            false
+        }
+    };
+    if duplicate {
+        let _ = ctx.out_tx.send(DaemonMessage::FileFetchError {
+            id,
+            error: "duplicate fetch id".to_string(),
+        });
+        return;
+    }
+    let fetches = Arc::clone(ctx.fetches);
+    let file_tx = ctx.file_tx.clone();
+    tokio::spawn(async move {
+        file_fetch::stream_file(id.clone(), path, file_tx, token.clone()).await;
+        let mut fetches = fetches.lock().await;
+        // A cancelled entry was already removed by whoever cancelled it, and
+        // the id may since belong to a newer fetch.
+        if !token.is_cancelled() {
+            fetches.remove(&id);
+        }
+    });
+}
+
+/// Cancel and forget the `FetchFile` transfer `id`, if it is still active.
+async fn cancel_fetch(fetches: &FetchRegistry, id: &str) {
+    let mut fetches = fetches.lock().await;
+    if let Some(token) = fetches.remove(id) {
+        token.cancel();
+    } else {
+        debug!(%id, "CancelFetch for an unknown or finished fetch id");
+    }
+}
+
 /// Run the WebSocket receive loop until the peer closes or the daemon-wide
 /// shutdown flag flips. Honoring `shutdown_tx` here is what lets axum's
 /// graceful-shutdown future resolve after a [`ClientMessage::Shutdown`] —
@@ -1118,11 +1222,9 @@ fn spawn_preset_forwarder(
 async fn recv_loop(
     hub: &Hub,
     receiver: &mut futures::stream::SplitStream<WebSocket>,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
-    client_id: &str,
-    client_name: Option<&str>,
+    ctx: &ConnCtx<'_>,
 ) {
+    let out_tx = ctx.out_tx;
     let mut shutdown_rx = hub.shutdown_tx.subscribe();
     loop {
         tokio::select! {
@@ -1166,9 +1268,7 @@ async fn recv_loop(
                         continue;
                     }
                 };
-                if let Err(err) =
-                    dispatch(hub, parsed, out_tx, pty_forwarders, client_id, client_name).await
-                {
+                if let Err(err) = dispatch(hub, parsed, ctx).await {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
                     });
@@ -1324,14 +1424,14 @@ fn push_initial_state(
     reason = "dispatch is a flat match over the protocol message set; \
               splitting by category would add indirection without clarity"
 )]
-async fn dispatch(
-    hub: &Hub,
-    msg: ClientMessage,
-    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
-    client_id: &str,
-    client_name: Option<&str>,
-) -> anyhow::Result<()> {
+async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::Result<()> {
+    let ConnCtx {
+        out_tx,
+        pty_forwarders,
+        client_id,
+        client_name,
+        ..
+    } = *ctx;
     match msg {
         ClientMessage::Hello { .. } | ClientMessage::Attach { session_id: _ } => {
             // Hello: already consumed by handshake; ignore subsequent ones.
@@ -1778,6 +1878,7 @@ async fn dispatch(
             against,
             worktree_path,
         } => {
+            file_fetch::check_relative(&path)?;
             let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             let diff = git_inspect::file_diff(&repo, &path, against.as_deref()).await?;
             let _ = out_tx.send(DaemonMessage::FileDiff {
@@ -2014,6 +2115,7 @@ async fn dispatch(
             against,
             worktree_path,
         } => {
+            file_fetch::check_relative(&path)?;
             let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             match git_inspect::file_snapshot(&repo, &path, against.as_deref()).await {
                 Ok((old, new)) => {
@@ -2040,6 +2142,17 @@ async fn dispatch(
                 }
             }
         }
+        ClientMessage::FetchFile {
+            id,
+            repo_id,
+            worktree_path,
+            path,
+        } => {
+            let target = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())
+                .and_then(|root| file_fetch::confine_path(&root, &path));
+            start_fetch(ctx, id, target).await;
+        }
+        ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
         ClientMessage::LoadScrollback { session_id } => {
             load_scrollback_and_attach_forwarder(hub, &session_id, out_tx, pty_forwarders).await;
         }
@@ -2759,7 +2872,11 @@ fn repo_target_or_err(
         return Ok(wt_buf);
     }
     let wt_root = hub.state.worktrees_dir();
-    if wt_buf.starts_with(&wt_root) {
+    let canon_wt =
+        std::fs::canonicalize(&wt_buf).with_context(|| format!("resolving worktree_path {wt}"))?;
+    let canon_root = std::fs::canonicalize(&wt_root)
+        .with_context(|| format!("resolving worktrees root {}", wt_root.display()))?;
+    if canon_wt.starts_with(&canon_root) {
         return Ok(wt_buf);
     }
     Err(anyhow!(

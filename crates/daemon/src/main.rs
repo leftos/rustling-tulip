@@ -5,6 +5,7 @@ mod binary_cache;
 mod branch_fate;
 mod branch_names;
 mod discovery;
+mod file_fetch;
 mod git;
 mod git_inspect;
 mod git_watch;

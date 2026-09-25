@@ -67,8 +67,8 @@ Priority order for `/nextup`: **Current focus** first, then the sections below i
 ### Current focus: native client
 Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
 - [ ] **Next up:** Phase 1, continuing at P1.4 (app shell and sidebar); P1.1–P1.3 are done. See [native-client.md](./plans/native-client.md) for the full list
-- [ ] Remote file transfer: fetch a file from the host to the remote client by Ctrl-clicking it or through a "Fetch file…" popup. Lands with Phase 6, and the Ctrl-click trigger also needs Phase 2. See [remote-file-transfer.md](./plans/remote-file-transfer.md)
-- [ ] Security fix, doesn't wait on the native client: `GetFileSnapshot` / `GetFileDiff` join a client-supplied `path` onto the repo root without confining it (`crates/daemon/src/git_inspect.rs` `file_snapshot`), so `..` or an absolute path reads outside the repo, including from a remote LAN client. Reuse FT.1's path-confinement helper
+- [ ] Remote file transfer: fetch a file from the host to the remote client by Ctrl-clicking it or through a "Fetch file…" popup. The daemon and protocol half (FT.1) has landed. The client side lands with Phase 6, and the Ctrl-click trigger also needs Phase 2. See [remote-file-transfer.md](./plans/remote-file-transfer.md)
+- [x] Security fix: `GetFileSnapshot` / `GetFileDiff` now pass the client-supplied `path` through `file_fetch::confine_path` / `check_relative` before using it. `repo_target_or_err` also canonicalizes `worktree_path` before checking it's under the worktrees root.
 
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
