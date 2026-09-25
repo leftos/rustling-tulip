@@ -67,7 +67,16 @@ pub fn handshake_file_in(config_dir: &Path) -> PathBuf {
 /// Fails when the file cannot be read (`read <path>: …`) or is not a valid
 /// handshake (`parse handshake: …`).
 pub fn read_handshake() -> anyhow::Result<DaemonHandshake> {
-    let path = handshake_file()?;
+    read_handshake_in(&config_dir()?)
+}
+
+/// [`read_handshake`] for the daemon whose config dir is `config_dir`.
+///
+/// # Errors
+///
+/// As [`read_handshake`].
+pub fn read_handshake_in(config_dir: &Path) -> anyhow::Result<DaemonHandshake> {
+    let path = handshake_file_in(config_dir);
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_slice(&bytes).context("parse handshake")
 }
@@ -95,13 +104,22 @@ pub struct ClientIdentity {
 /// Fails when the config dir cannot be resolved or created, or the id file
 /// cannot be written.
 pub fn client_identity(id_file_name: &str) -> anyhow::Result<ClientIdentity> {
-    let dir = config_dir()?;
+    client_identity_in(&config_dir()?, id_file_name)
+}
+
+/// [`client_identity`] with its id file under `dir` instead of the config
+/// dir.
+///
+/// # Errors
+///
+/// Fails when `dir` cannot be created or the id file cannot be written.
+pub fn client_identity_in(dir: &Path, id_file_name: &str) -> anyhow::Result<ClientIdentity> {
     let path = dir.join(id_file_name);
     let client_id = match std::fs::read_to_string(&path) {
         Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
         _ => {
             let id = uuid::Uuid::new_v4().to_string();
-            std::fs::create_dir_all(&dir).context("create config dir")?;
+            std::fs::create_dir_all(dir).context("create config dir")?;
             std::fs::write(&path, &id).with_context(|| format!("write {id_file_name}"))?;
             id
         }
@@ -126,11 +144,20 @@ pub fn client_identity(id_file_name: &str) -> anyhow::Result<ClientIdentity> {
 /// Fails when there is no handshake on disk, it cannot be read or parsed, or
 /// the kill fails.
 pub async fn stop() -> anyhow::Result<()> {
-    let path = handshake_file()?;
+    stop_in(&config_dir()?).await
+}
+
+/// [`stop`] for the daemon whose config dir is `config_dir`.
+///
+/// # Errors
+///
+/// As [`stop`].
+pub async fn stop_in(config_dir: &Path) -> anyhow::Result<()> {
+    let path = handshake_file_in(config_dir);
     if !path.exists() {
         bail!("no daemon handshake on disk — daemon may not be running");
     }
-    let parsed = read_handshake()?;
+    let parsed = read_handshake_in(config_dir)?;
     kill_pid(parsed.pid).await?;
     // Best-effort cleanup; absence will be detected on the next ensure_running
     // regardless. Don't error if the daemon's drop guard beat us to it.
@@ -277,5 +304,125 @@ mod tests {
         );
         let on_disk = std::fs::read_to_string(&id_file).expect("id file exists");
         assert_eq!(on_disk, identity.client_id);
+    }
+
+    /// A directory under `<workspace>/.tmp` that the `*_in` functions are
+    /// pointed at explicitly; the environment is left alone. Drop removes it.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            let path = crate::supervisor::dev_workspace_root()
+                .expect("workspace root resolves")
+                .join(".tmp")
+                .join(format!("daemon-client-{label}-{}", Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_handshake(dir: &std::path::Path, pid: u32) {
+        let handshake = protocol::DaemonHandshake {
+            protocol_version: 7,
+            port: 40123,
+            auth_token: "token".to_owned(),
+            pid,
+        };
+        let json = serde_json::to_vec(&handshake).expect("encode handshake");
+        std::fs::write(super::handshake_file_in(dir), json).expect("write daemon.json");
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build a test runtime")
+            .block_on(future)
+    }
+
+    #[test]
+    fn read_handshake_in_reads_that_dirs_daemon_json() {
+        let scratch = ScratchDir::new("handshake");
+        write_handshake(&scratch.0, 99);
+
+        let handshake = super::read_handshake_in(&scratch.0).expect("handshake parses");
+
+        assert_eq!(handshake.port, 40123);
+        assert_eq!(handshake.pid, 99);
+        assert_eq!(handshake.auth_token, "token");
+    }
+
+    #[test]
+    fn read_handshake_in_names_the_missing_file() {
+        let scratch = ScratchDir::new("no-handshake");
+
+        let err = super::read_handshake_in(&scratch.0).expect_err("no daemon.json");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("daemon.json"), "error was: {message}");
+    }
+
+    #[test]
+    fn client_identity_in_keeps_its_id_in_that_dir() {
+        let scratch = ScratchDir::new("identity-in");
+
+        let first = super::client_identity_in(&scratch.0, ID_FILE).expect("creates the id file");
+        let second = super::client_identity_in(&scratch.0, ID_FILE).expect("reads the id file");
+
+        assert!(
+            is_uuid_v4(&first.client_id),
+            "not a UUID v4: {}",
+            first.client_id
+        );
+        assert_eq!(first.client_id, second.client_id);
+        let on_disk = std::fs::read_to_string(scratch.0.join(ID_FILE)).expect("id file exists");
+        assert_eq!(on_disk, first.client_id);
+    }
+
+    #[test]
+    fn stop_in_without_a_handshake_fails() {
+        let scratch = ScratchDir::new("stop-none");
+
+        let err = block_on(super::stop_in(&scratch.0)).expect_err("nothing to stop");
+
+        assert!(
+            format!("{err:#}").contains("no daemon handshake on disk"),
+            "error was: {err:#}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_in_kills_the_named_pid_and_removes_the_handshake() {
+        let scratch = ScratchDir::new("stop-kill");
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a stand-in daemon");
+        write_handshake(&scratch.0, child.id());
+
+        let stopped = block_on(super::stop_in(&scratch.0));
+        // Reap the child whatever happened, so a failure leaves nothing behind.
+        if stopped.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait().expect("wait for the stand-in");
+
+        stopped.expect("stop_in succeeds");
+        assert!(
+            !status.success(),
+            "the stand-in exited on its own: {status}"
+        );
+        assert!(
+            !super::handshake_file_in(&scratch.0).exists(),
+            "daemon.json survived"
+        );
     }
 }

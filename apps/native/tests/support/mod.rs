@@ -23,6 +23,8 @@ use rustling_tulip_native::{
 };
 use serde_json::{Value, json};
 
+pub mod live;
+
 const PROTOCOL: u32 = 1;
 
 /// A scratch directory under the system temp dir, removed on drop.

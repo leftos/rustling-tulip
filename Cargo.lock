@@ -6788,6 +6788,7 @@ dependencies = [
  "futures",
  "gpui",
  "protocol",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tokio",
@@ -6796,6 +6797,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "uuid",
+ "windows 0.61.3",
 ]
 
 [[package]]

@@ -24,9 +24,38 @@ use crate::connection::{Connection, PROBE_TIMEOUT, RestartAction, State, TICK, W
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Frame = Option<Result<Message, tungstenite::Error>>;
 /// A pending `ensure_running`, boxed so tests can substitute one.
-type EnsureFuture = Pin<Box<dyn Future<Output = Result<DaemonHandshake>>>>;
-/// Starts an `ensure_running`: the daemon step of each connection attempt.
-type EnsureFn = fn() -> EnsureFuture;
+pub type EnsureFuture = Pin<Box<dyn Future<Output = Result<DaemonHandshake>>>>;
+/// A pending force-stop of the daemon.
+pub type StopFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
+
+/// How the network thread reaches its daemon.
+pub struct NetDeps {
+    /// Starts an `ensure_running`: the daemon step of each connection
+    /// attempt.
+    pub ensure: Box<dyn Fn() -> EnsureFuture + Send>,
+    /// The identity sent in `Hello`; `None` connects without one.
+    pub identity: Option<ClientIdentity>,
+    /// Force-stops the daemon, for [`NetCommand::Stop`].
+    pub stop: Box<dyn Fn() -> StopFuture + Send>,
+}
+
+impl NetDeps {
+    /// The daemon under the config dir, reused when compatible, with this
+    /// client's identity.
+    #[must_use]
+    pub fn production() -> Self {
+        let identity = daemon_client::client_identity(CLIENT_ID_FILE)
+            .inspect_err(|err| {
+                warn!("loading the client identity, connecting without one: {err:#}");
+            })
+            .ok();
+        Self {
+            ensure: Box::new(ensure_daemon),
+            identity,
+            stop: Box::new(|| Box::pin(daemon_client::stop())),
+        }
+    }
+}
 
 /// The file under the config dir that holds this client's identity.
 const CLIENT_ID_FILE: &str = "client-id-native";
@@ -76,15 +105,22 @@ pub enum NetEvent {
     Message(Box<DaemonMessage>),
 }
 
-/// Spawns the network thread. It runs until the view drops its command
-/// sender.
+/// Spawns the network thread on the production [`NetDeps`]. It runs until
+/// the view drops its command sender.
 pub fn spawn(commands: UnboundedReceiver<NetCommand>, events: UnboundedSender<NetEvent>) {
-    let identity = daemon_client::client_identity(CLIENT_ID_FILE)
-        .inspect_err(|err| warn!("loading the client identity, connecting without one: {err:#}"))
-        .ok();
+    spawn_with(NetDeps::production(), commands, events);
+}
+
+/// Spawns the network thread on `deps`. It runs until the view drops its
+/// command sender.
+pub fn spawn_with(
+    deps: NetDeps,
+    commands: UnboundedReceiver<NetCommand>,
+    events: UnboundedSender<NetEvent>,
+) {
     let spawned = std::thread::Builder::new()
         .name("net".to_owned())
-        .spawn(move || run_thread(commands, events, identity, ensure_daemon, WELCOME_TIMEOUT));
+        .spawn(move || run_thread(commands, events, deps, WELCOME_TIMEOUT));
     if let Err(err) = spawned {
         error!("spawning the network thread: {err}");
     }
@@ -99,8 +135,7 @@ fn ensure_daemon() -> EnsureFuture {
 fn run_thread(
     commands: UnboundedReceiver<NetCommand>,
     events: UnboundedSender<NetEvent>,
-    identity: Option<ClientIdentity>,
-    ensure: EnsureFn,
+    deps: NetDeps,
     welcome_timeout: Duration,
 ) {
     match tokio::runtime::Builder::new_current_thread()
@@ -109,7 +144,7 @@ fn run_thread(
     {
         // `Net::new` builds a tokio interval, so it runs inside the runtime.
         Ok(rt) => rt.block_on(async move {
-            Net::new(commands, events, identity, ensure, welcome_timeout)
+            Net::new(commands, events, deps, welcome_timeout)
                 .run()
                 .await;
         }),
@@ -146,8 +181,7 @@ struct Net {
     commands: UnboundedReceiver<NetCommand>,
     events: UnboundedSender<NetEvent>,
     conn: Connection,
-    identity: Option<ClientIdentity>,
-    ensure: EnsureFn,
+    deps: NetDeps,
     /// How long after `Hello` the daemon has to answer.
     welcome_timeout: Duration,
     ticker: Interval,
@@ -160,8 +194,7 @@ impl Net {
     fn new(
         commands: UnboundedReceiver<NetCommand>,
         events: UnboundedSender<NetEvent>,
-        identity: Option<ClientIdentity>,
-        ensure: EnsureFn,
+        deps: NetDeps,
         welcome_timeout: Duration,
     ) -> Self {
         let mut ticker = tokio::time::interval_at(Instant::now() + TICK, TICK);
@@ -170,8 +203,7 @@ impl Net {
             commands,
             events,
             conn: Connection::new(),
-            identity,
-            ensure,
+            deps,
             welcome_timeout,
             ticker,
             watchdog: Watchdog::new(SystemTime::now()),
@@ -211,7 +243,7 @@ impl Net {
     /// command that arrives while the daemon or the socket is still coming up
     /// is handled at once and may cancel the attempt.
     async fn attempt(&mut self) -> Next {
-        let ensured = match self.or_command((self.ensure)()).await {
+        let ensured = match self.or_command((self.deps.ensure)()).await {
             Ok(ensured) => ensured,
             Err(next) => return next,
         };
@@ -263,8 +295,12 @@ impl Net {
             protocol_version: protocol::PROTOCOL_VERSION,
             protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
             auth_token,
-            client_id: self.identity.as_ref().map(|id| id.client_id.clone()),
-            client_name: self.identity.as_ref().and_then(|id| id.client_name.clone()),
+            client_id: self.deps.identity.as_ref().map(|id| id.client_id.clone()),
+            client_name: self
+                .deps
+                .identity
+                .as_ref()
+                .and_then(|id| id.client_name.clone()),
         }
     }
 
@@ -397,7 +433,7 @@ impl Net {
         info!("stopping the daemon");
         self.conn.stop();
         self.emit_state();
-        if let Err(err) = Box::pin(daemon_client::stop()).await {
+        if let Err(err) = (self.deps.stop)().await {
             warn!("stopping the daemon: {err:#}");
         }
     }
@@ -466,7 +502,7 @@ async fn sleep_until(deadline: Option<Instant>) {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{EnsureFuture, NetCommand, NetEvent, WELCOME_TIMEOUT, run_thread};
+    use super::{EnsureFuture, NetCommand, NetDeps, NetEvent, WELCOME_TIMEOUT, run_thread};
     use crate::connection::State;
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use protocol::DaemonHandshake;
@@ -474,6 +510,15 @@ mod tests {
     use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     use tokio_tungstenite::tungstenite;
+
+    /// Deps that ensure with `ensure`, send no identity and never stop.
+    fn deps(ensure: fn() -> EnsureFuture) -> NetDeps {
+        NetDeps {
+            ensure: Box::new(ensure),
+            identity: None,
+            stop: Box::new(|| Box::pin(async { Ok(()) })),
+        }
+    }
 
     /// The port of the silent test server `ensure_silent_server` hands out.
     static SILENT_PORT: AtomicU16 = AtomicU16::new(0);
@@ -568,8 +613,7 @@ mod tests {
         run_thread(
             commands,
             events,
-            None,
-            ensure_never_after_close,
+            deps(ensure_never_after_close),
             WELCOME_TIMEOUT,
         );
 
@@ -588,8 +632,7 @@ mod tests {
             run_thread(
                 commands,
                 events,
-                None,
-                ensure_counting_restarts,
+                deps(ensure_counting_restarts),
                 WELCOME_TIMEOUT,
             );
         });
@@ -619,8 +662,7 @@ mod tests {
             run_thread(
                 commands,
                 events,
-                None,
-                ensure_silent_server,
+                deps(ensure_silent_server),
                 Duration::from_millis(200),
             );
         });

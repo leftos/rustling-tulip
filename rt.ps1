@@ -35,6 +35,17 @@
                  client via `cargo run -p rustling-tulip-native`. Debug by
                  default; -Release for the release profile. Extra arguments
                  go to the client (an optional session id to focus, or to place in the active tab).
+      native-e2e Build the daemon and tracer, then run the native client's
+                 end-to-end specs (`--test e2e_live -- --ignored`) against
+                 a real daemon isolated under `.tmp\native-e2e\`. The
+                 fake-claude spec needs `node` on PATH. -Release for the
+                 release profile.
+      native-smoke
+                 Build the daemon and tracer, then run the native client's
+                 OS smoke specs (`--test smoke_window -- --ignored`): the
+                 real client binary in a cloaked window that never
+                 takes focus; checks it connects and that posted keys
+                 reach the shell. -Release for the release profile.
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -88,7 +99,7 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'installer', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'help')]
+    [ValidateSet('', 'build', 'launch', 'installer', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
@@ -1024,16 +1035,20 @@ function Invoke-Clean {
     Test-CargoExitOk 'cargo clean'
 }
 
-function Invoke-Native {
+function Build-DaemonAndTracer {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
     Assert-MsvcLinker
-    # The client spawns the daemon when none is running, from the daemon and
-    # tracer binaries in the same profile's target dir; build them first.
     $buildArgs = @('build', '--manifest-path', $ManifestPath, '-p', 'daemon', '-p', 'tracer')
     if ($Release) { $buildArgs += '--release' }
     Write-Host '==> Building daemon + tracer...' -ForegroundColor Cyan
     & cargo @buildArgs
     Test-CargoExitOk 'cargo build -p daemon -p tracer'
+}
+
+function Invoke-Native {
+    # The client spawns the daemon when none is running, from the daemon and
+    # tracer binaries in the same profile's target dir; build them first.
+    Build-DaemonAndTracer
 
     $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
     if ($Release) { $cargoArgs += '--release' }
@@ -1044,6 +1059,24 @@ function Invoke-Native {
     & cargo @cargoArgs
     Test-CargoExitOk 'cargo run -p rustling-tulip-native'
 }
+
+# Runs one of the native client's ignored spec files. The specs start their
+# own daemon from the binaries beside the test binary, so the daemon and
+# tracer are built first in the same profile. One thread: each spec owns a
+# daemon and, for the smoke specs, a client window.
+function Invoke-NativeSpecFile([string]$TestFile) {
+    Build-DaemonAndTracer
+    $testArgs = @('test', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native', '--test', $TestFile)
+    if ($Release) { $testArgs += '--release' }
+    $testArgs += @('--', '--ignored', '--test-threads=1')
+    Write-Host "==> Running native specs: $TestFile..." -ForegroundColor Cyan
+    & cargo @testArgs
+    Test-CargoExitOk "cargo test -p rustling-tulip-native --test $TestFile"
+}
+
+function Invoke-NativeE2e { Invoke-NativeSpecFile 'e2e_live' }
+
+function Invoke-NativeSmoke { Invoke-NativeSpecFile 'smoke_window' }
 
 function Show-Help {
     $help = @'
@@ -1072,10 +1105,17 @@ Commands:
              rustling-tulip-native` -- the native client.
              -Release for the release profile; extra args are passed on
              (an optional session id to focus, or to place in the active tab).
+  native-e2e Build daemon + tracer, then run the native client's
+             end-to-end specs against an isolated daemon (needs `node`).
+  native-smoke
+             Build daemon + tracer, then run the native client's OS smoke
+             specs in a cloaked window that never takes focus; checks it
+             connects and that posted keys reach the shell.
   help       This message.
 
 Flags:
-  -Release           Use the release profile (build/launch/restart/native).
+  -Release           Use the release profile (build/launch/restart/native,
+                     native-e2e, native-smoke).
   -NoBuild           Skip the cargo build step (launch/restart).
   -ForceStopDaemon   Stop the daemon up-front (launch/restart) even when
                      cargo says no rebuild is needed.
@@ -1120,6 +1160,8 @@ switch ($effective) {
     'fmt'       { Invoke-Fmt }
     'clean'     { Invoke-Clean }
     'native'    { Invoke-Native }
+    'native-e2e'   { Invoke-NativeE2e }
+    'native-smoke' { Invoke-NativeSmoke }
     'help'      { Show-Help }
     default     { throw "Unknown command: $effective" }
 }
