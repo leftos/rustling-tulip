@@ -67,6 +67,209 @@ fn space_with_windows_key_shape_reaches_the_pty(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn typed_text_reaches_the_pty_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.keys("a shift-b space c");
+    assert_eq!(h.sent_input("s1"), b"aB c");
+}
+
+#[gpui::test]
+fn composition_sends_only_committed_text(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.compose("p1", "に");
+    h.compose("p1", "にほ");
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "nothing sent while composing"
+    );
+    assert_eq!(h.marked_text("p1").as_deref(), Some("にほ"));
+
+    h.commit("p1", "日本");
+    assert_eq!(h.sent_input("s1"), "日本".as_bytes());
+    assert_eq!(h.marked_text("p1"), None, "the commit ends the composition");
+}
+
+/// A key press with no modifiers, as the platform delivers it.
+fn press(h: &mut Harness<'_>, key: &str, key_char: Option<&str>) {
+    h.key_down(gpui::Keystroke {
+        modifiers: Modifiers::none(),
+        key: key.into(),
+        key_char: key_char.map(Into::into),
+    });
+}
+
+/// The ´ dead key in `p1`: its key press, then the mark Windows makes of it.
+fn dead_acute(h: &mut Harness<'_>) {
+    press(h, "´", Some("´"));
+    h.compose("p1", "´");
+}
+
+#[gpui::test]
+fn dead_key_then_letter_sends_composed_char(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    assert!(
+        h.sent_input("s1").is_empty(),
+        "the dead key alone sends nothing"
+    );
+    assert_eq!(h.preedit("p1").as_deref(), Some("´"));
+
+    h.commit("p1", "é");
+    assert_eq!(h.sent_input("s1"), "é".as_bytes());
+    assert_eq!(h.preedit("p1"), None);
+}
+
+#[gpui::test]
+fn dead_key_mark_is_not_reported_as_composition(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    assert_eq!(h.marked_text("p1"), None, "keys must still reach the pane");
+    assert_eq!(h.preedit("p1").as_deref(), Some("´"), "still drawn");
+}
+
+#[gpui::test]
+fn ime_mark_is_still_reported_as_composition(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    press(&mut h, "n", Some("n"));
+    h.compose("p1", "に");
+    assert_eq!(h.marked_text("p1").as_deref(), Some("に"));
+    assert_eq!(h.preedit("p1").as_deref(), Some("に"));
+}
+
+#[gpui::test]
+fn dead_key_then_enter_sends_accent_then_cr(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    press(&mut h, "enter", None);
+    assert_eq!(h.sent_input("s1"), "´\r".as_bytes());
+    assert_eq!(h.preedit("p1"), None);
+}
+
+#[gpui::test]
+fn dead_key_then_backspace_cancels_the_accent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    press(&mut h, "backspace", None);
+    assert!(h.sent_input("s1").is_empty(), "nothing is erased");
+    assert_eq!(h.preedit("p1"), None);
+}
+
+#[gpui::test]
+fn dead_key_then_escape_sends_only_escape(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    dead_acute(&mut h);
+    press(&mut h, "escape", None);
+    assert_eq!(h.sent_input("s1"), b"\x1b");
+    assert_eq!(h.preedit("p1"), None);
+}
+
+#[gpui::test]
+fn dead_key_then_space_sends_only_the_accent(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    for modifiers in [Modifiers::none(), Modifiers::shift()] {
+        dead_acute(&mut h);
+        h.key_down(gpui::Keystroke {
+            modifiers,
+            key: "space".into(),
+            key_char: None,
+        });
+        assert_eq!(h.sent_input("s1"), "´".as_bytes(), "{modifiers:?}");
+        assert_eq!(h.preedit("p1"), None);
+    }
+}
+
+#[gpui::test]
+fn marked_text_dropped_on_blur(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_s1(cx, &dir);
+    h.answer_scrollback("s1", b"");
+    // A test window starts inactive, and gpui reports no focus change in one.
+    h.cx.update(|window, _| window.activate_window());
+    let p1 = h.cell_center("p1", 0, 0);
+    h.click(p1, Modifiers::none());
+    h.compose("p1", "´");
+    assert_eq!(h.marked_text("p1").as_deref(), Some("´"));
+
+    let p2 = h.cell_center("p2", 0, 0);
+    h.click(p2, Modifiers::none());
+    assert_eq!(h.marked_text("p1"), None, "blur drops the composition");
+    assert!(h.sent_input("s1").is_empty());
+}
+
+#[gpui::test]
+fn committed_text_dropped_when_stopped(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.compose("p1", "´");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").status("stopped").build(),
+        request_id: None,
+    });
+    assert_eq!(h.marked_text("p1"), None, "a stop drops the composition");
+
+    h.commit("p1", "x");
+    assert!(h.sent_input("s1").is_empty());
+}
+
+#[gpui::test]
+fn ime_bounds_follow_cursor_cell(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"abc\r\nx");
+    let anchor = h.ime_bounds("p1").expect("an IME anchor");
+    let on = h.cell_center("p1", 1, 1);
+    let (left, right) = (h.cell_center("p1", 0, 1), h.cell_center("p1", 2, 1));
+    let above = h.cell_center("p1", 1, 0);
+    assert!(anchor.contains(&on), "the cursor cell, got {anchor:?}");
+    for off in [left, right, above] {
+        assert!(!anchor.contains(&off), "one cell only, got {anchor:?}");
+    }
+}
+
+#[gpui::test]
+fn ime_bounds_follow_hidden_cursor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"abc\r\nxy\x1b[?25l");
+    let anchor = h.ime_bounds("p1").expect("an IME anchor");
+    let on = h.cell_center("p1", 2, 1);
+    let top_left = h.cell_center("p1", 0, 0);
+    assert!(
+        anchor.contains(&on),
+        "the hidden cursor's cell, got {anchor:?}"
+    );
+    assert!(
+        !anchor.contains(&top_left),
+        "not the fallback, got {anchor:?}"
+    );
+}
+
+#[gpui::test]
+fn ctrl_alt_symbol_types_the_symbol(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.key_down(gpui::Keystroke {
+        modifiers: Modifiers {
+            control: true,
+            alt: true,
+            ..Modifiers::default()
+        },
+        key: "q".into(),
+        key_char: Some("@".into()),
+    });
+    assert_eq!(h.sent_input("s1"), b"@");
+}
+
+#[gpui::test]
 fn drag_selects_copies_on_release_and_ctrl_c_copies_instead_of_interrupting(
     cx: &mut TestAppContext,
 ) {

@@ -11,8 +11,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    Bounds, Entity, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-    Pixels, Point, TestAppContext, VisualTestContext, point, px,
+    App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext, Window, point,
+    px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
@@ -537,6 +538,61 @@ impl<'a> Harness<'a> {
             is_held: false,
         });
         self.cx.run_until_parked();
+    }
+
+    /// Runs `drive` against pane `pane`'s text input the way the platform
+    /// does, then lets the view settle.
+    fn input<R>(
+        &mut self,
+        pane: &str,
+        drive: impl FnOnce(&mut dyn InputHandler, &mut Window, &mut App) -> R,
+    ) -> R {
+        let root = self.root.clone();
+        let result = self.cx.update(|window, cx| {
+            let mut handler = root
+                .read(cx)
+                .pane_input_handler(pane)
+                .expect("the pane has a terminal");
+            drive(&mut handler, window, cx)
+        });
+        self.cx.run_until_parked();
+        result
+    }
+
+    /// An IME composition update in `pane`: `text` is the whole preedit.
+    pub fn compose(&mut self, pane: &str, text: &str) {
+        self.input(pane, |handler, window, cx| {
+            handler.replace_and_mark_text_in_range(None, text, None, window, cx);
+        });
+    }
+
+    /// Text committed in `pane`: an IME result, or a character the
+    /// platform typed.
+    pub fn commit(&mut self, pane: &str, text: &str) {
+        self.input(pane, |handler, window, cx| {
+            handler.replace_text_in_range(None, text, window, cx);
+        });
+    }
+
+    /// The composition `pane` holds, read back through its marked range.
+    pub fn marked_text(&mut self, pane: &str) -> Option<String> {
+        self.input(pane, |handler, window, cx| {
+            let range = handler.marked_text_range(window, cx)?;
+            handler.text_for_range(range, &mut None, window, cx)
+        })
+    }
+
+    /// The marked text `pane` draws at its cursor, a dead key's included.
+    pub fn preedit(&mut self, pane: &str) -> Option<String> {
+        self.root(|root, cx| root.pane_preedit(pane, cx))
+    }
+
+    /// Where `pane` anchors the IME window: the bounds of its selection.
+    pub fn ime_bounds(&mut self, pane: &str) -> Option<Bounds<Pixels>> {
+        self.input(pane, |handler, window, cx| {
+            let selection = handler.selected_text_range(false, window, cx)?;
+            handler.bounds_for_range(selection.range, window, cx)
+        })
     }
 
     pub fn clipboard(&mut self) -> Option<String> {

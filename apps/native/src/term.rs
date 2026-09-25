@@ -80,8 +80,13 @@ pub struct Snapshot {
     pub text: Vec<TextSpan>,
     pub bg: Vec<BgSpan>,
     pub cursor: Option<(usize, usize)>,
+    /// Where the cursor is (row, column), whether the program shows it or
+    /// hides it.
+    pub cursor_point: Option<(usize, usize)>,
     pub cursor_shape: CursorShape,
     pub background: Rgb,
+    /// The default text colour, after the program's palette changes.
+    pub foreground: Rgb,
 }
 
 impl Terminal {
@@ -203,17 +208,19 @@ impl Terminal {
         }
 
         let cursor_visible = content.mode.contains(TermMode::SHOW_CURSOR);
-        let cursor = usize::try_from(content.cursor.point.line.0 + offset)
+        let cursor_point = usize::try_from(content.cursor.point.line.0 + offset)
             .ok()
-            .filter(|_| cursor_visible)
             .map(|row| (row, content.cursor.point.column.0));
+        let cursor = cursor_point.filter(|_| cursor_visible);
 
         Snapshot {
             text: builder.text,
             bg: builder.bg,
             cursor,
+            cursor_point,
             cursor_shape: content.cursor.shape,
             background,
+            foreground: resolve(Color::Named(NamedColor::Foreground), colors),
         }
     }
 }

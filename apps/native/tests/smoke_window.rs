@@ -61,6 +61,11 @@ const KEYS_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long one typed command gets to show up before it is typed again.
 const ECHO_WAIT: Duration = Duration::from_secs(5);
+/// The pause after each posted key. A letter reaches the pane as the
+/// `WM_CHAR` that translating its key-down posts, which queues behind every
+/// key already posted; the pause lets it arrive before the next key, as it
+/// does from a real keyboard, whose input is read after posted messages.
+const KEY_GAP: Duration = Duration::from_millis(25);
 
 /// The client binary, killed with everything under it on drop.
 struct Client(Child);
@@ -412,6 +417,7 @@ fn press(hwnd: HWND, vk: VIRTUAL_KEY) {
         wparam,
         isize::try_from(up).expect("key lparam"),
     );
+    std::thread::sleep(KEY_GAP);
 }
 
 /// Types lowercase letters, digits, spaces, dots and hyphens, then Enter.

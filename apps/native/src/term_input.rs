@@ -97,6 +97,33 @@ pub fn key_action(
     keys::to_bytes(ks, app_cursor).map(KeyAction::Send)
 }
 
+/// What a key the terminal handles itself does to a pending dead key's
+/// accent.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeadKeyFate {
+    /// The accent is withdrawn and the key does nothing else.
+    Cancel,
+    /// The accent is dropped and the key acts as usual.
+    Drop,
+    /// The accent is sent, then the key acts as usual.
+    SendFirst,
+    /// The accent is sent in place of the key.
+    SendInstead,
+}
+
+/// Backspace cancels a pending accent, Escape drops it, Space (Shift
+/// allowed) types it alone as Windows does, and every other key the terminal
+/// handles sends it ahead of its own input.
+pub fn dead_key_fate(ks: &Keystroke) -> DeadKeyFate {
+    let m = ks.modifiers;
+    match ks.key.as_str() {
+        "backspace" => DeadKeyFate::Cancel,
+        "escape" => DeadKeyFate::Drop,
+        "space" if !m.control && !m.alt => DeadKeyFate::SendInstead,
+        _ => DeadKeyFate::SendFirst,
+    }
+}
+
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
@@ -173,8 +200,72 @@ mod tests {
         }
     }
 
+    fn alt(control: bool) -> Modifiers {
+        Modifiers {
+            control,
+            alt: true,
+            ..Default::default()
+        }
+    }
+
+    fn typed(name: &str, text: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            key: name.to_owned(),
+            key_char: Some(text.to_owned()),
+            modifiers,
+        }
+    }
+
     fn action(ks: &Keystroke, has_selection: bool) -> Option<KeyAction> {
         key_action(ks, false, has_selection, claude())
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "compared with key_action's result"
+    )]
+    fn sends(text: &str) -> Option<KeyAction> {
+        Some(KeyAction::Send(text.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn plain_text_key_is_left_to_the_input_handler() {
+        let cases = [
+            typed("a", "a", Modifiers::default()),
+            typed("a", "A", shift()),
+            typed("´", "´", Modifiers::default()),
+        ];
+        for ks in cases {
+            assert_eq!(action(&ks, false), None, "{ks:?}");
+        }
+        assert_eq!(
+            action(&typed("space", " ", Modifiers::default()), false),
+            sends(" ")
+        );
+        assert_eq!(action(&typed("enter", "\r", shift()), false), sends("\\\r"));
+    }
+
+    #[test]
+    fn ctrl_alt_symbol_is_sent_as_text() {
+        for (name, text) in [("q", "@"), ("e", "€"), ("7", "{")] {
+            assert_eq!(
+                action(&typed(name, text, alt(true)), false),
+                sends(text),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_alt_letter_keeps_escape_prefix() {
+        assert_eq!(action(&typed("a", "a", alt(true)), false), sends("\x1ba"));
+        assert_eq!(action(&typed("1", "1", alt(true)), false), sends("\x1b1"));
+    }
+
+    #[test]
+    fn alt_letter_still_sends_escape_prefix() {
+        assert_eq!(action(&typed("x", "x", alt(false)), false), sends("\x1bx"));
+        assert_eq!(action(&typed("x", "X", alt(false)), false), sends("\x1bX"));
     }
 
     #[test]

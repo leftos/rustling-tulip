@@ -32,9 +32,10 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, ClipboardItem,
-    Context, CursorStyle, Div, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Task,
-    Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
+    Context, CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
+    InputHandler, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
+    pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
 use std::collections::HashMap;
@@ -446,6 +447,22 @@ impl RootView {
     pub fn pane_grid_text(&self, pane_id: &str, cx: &App) -> Option<Vec<String>> {
         let slot = self.panes.get(pane_id)?;
         Some(slot.view().read(cx).grid_text())
+    }
+
+    /// Pane `pane_id`'s text input, which the platform drives with typed
+    /// characters and the IME's composition.
+    #[must_use]
+    pub fn pane_input_handler(&self, pane_id: &str) -> Option<impl InputHandler + use<>> {
+        let view = self.panes.get(pane_id)?.view().clone();
+        Some(ElementInputHandler::new(Bounds::default(), view))
+    }
+
+    /// The marked text pane `pane_id` draws at its cursor: an IME
+    /// composition or a pending dead key.
+    #[must_use]
+    pub fn pane_preedit(&self, pane_id: &str, cx: &App) -> Option<String> {
+        let slot = self.panes.get(pane_id)?;
+        slot.view().read(cx).preedit().map(str::to_owned)
     }
 
     /// The cursor shape pane `pane_id` renders.

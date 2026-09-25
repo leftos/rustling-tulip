@@ -28,7 +28,11 @@ const FIXED_KEYS: &[(&str, &[u8])] = &[
     ("f12", b"\x1b[24~"),
 ];
 
-/// Returns the bytes to send for `ks`, or `None` when the key produces no input.
+/// Returns the bytes to send for `ks`, or `None` when the key itself sends
+/// nothing. A text key with neither Ctrl nor Alt is `None`: its text arrives
+/// through the window's text input, which composes dead keys and IME text.
+/// Ctrl+Alt with a character other than an ASCII letter or digit is `AltGr`
+/// on a layout that types a symbol there, and sends that symbol.
 /// `app_cursor` is the terminal's DECCKM mode: arrows send `ESC O x` instead of `ESC [ x`.
 pub fn to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let m = ks.modifiers;
@@ -44,7 +48,13 @@ pub fn to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         return if m.alt { None } else { Some(b" ".to_vec()) };
     }
     let text = ks.key_char.as_deref()?;
-    Some(prefix_alt(m.alt, text.as_bytes().to_vec()))
+    if !m.alt {
+        return None;
+    }
+    if m.control && !matches!(text.as_bytes(), [b] if b.is_ascii_alphanumeric()) {
+        return Some(text.as_bytes().to_vec());
+    }
+    Some(prefix_alt(true, text.as_bytes().to_vec()))
 }
 
 fn prefix_alt(alt: bool, mut bytes: Vec<u8>) -> Vec<u8> {
@@ -289,9 +299,10 @@ mod tests {
     }
 
     #[test]
-    fn plain_char_passes_through() {
-        assert_eq!(bytes(&typed("a", "a")), Some(b"a".to_vec()));
-        assert_eq!(bytes(&typed("e", "é")), Some("é".as_bytes().to_vec()));
+    fn plain_char_is_left_to_text_input() {
+        assert_eq!(bytes(&typed("a", "a")), None);
+        assert_eq!(bytes(&typed("e", "é")), None);
+        assert_eq!(bytes(&with(typed("a", "A"), shift())), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The terminal pane: one daemon session rendered with `alacritty_terminal`,
 //! with its input, resize, scroll and scrollback handling.
 
+use std::ops::Range;
 use std::time::Instant;
 
 use alacritty_terminal::term::cell::Flags;
@@ -9,10 +10,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, EventEmitter, FocusHandle,
-    Font, FontStyle, FontWeight, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString, Task,
-    TextRun, UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent,
+    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    Rgba, ScrollWheelEvent, SharedString, Subscription, Task, TextRun, UTF16Selection,
+    UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionSnapshot};
 
@@ -21,7 +23,8 @@ use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCel
 use crate::net::NetCommand;
 use crate::scrollback_load::{self, ScrollbackLoad, State as LoadState, Step};
 use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
-use crate::term_input::{self, KeyAction, SessionContext};
+use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
+use crate::text_input::{offset_from_utf16, offset_to_utf16};
 
 const FONT_FAMILY: &str = "Cascadia Mono";
 const FONT_SIZE: f32 = 14.0;
@@ -53,6 +56,17 @@ pub struct TerminalPane {
     /// Whether this pane answers its session's terminal queries: one pane
     /// per session does, so the child gets each answer once.
     answers_queries: bool,
+    /// The IME composition in progress (or a pending dead key), drawn at
+    /// the cursor and never sent: only the text it commits is.
+    marked: Option<String>,
+    /// Whether `marked` is a dead key's accent rather than an IME
+    /// composition: keys still reach [`Self::on_key`] while it is pending.
+    dead_key: bool,
+    /// The character of the last key-down left to the text input, which a
+    /// dead key's mark repeats.
+    last_key_char: Option<String>,
+    /// Drops the composition when the pane loses focus.
+    blur: Option<Subscription>,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -132,6 +146,10 @@ impl TerminalPane {
             last_motion: None,
             size_gate: SizeGate::default(),
             answers_queries: false,
+            marked: None,
+            dead_key: false,
+            last_key_char: None,
+            blur: None,
         }
     }
 
@@ -154,6 +172,11 @@ impl TerminalPane {
             row.push_str(&span.text);
         }
         rows.iter().map(|row| row.trim_end().to_owned()).collect()
+    }
+
+    /// The marked text drawn at the cursor, if any.
+    pub fn preedit(&self) -> Option<&str> {
+        self.marked.as_deref()
     }
 
     /// The cursor shape the next paint draws.
@@ -300,6 +323,7 @@ impl TerminalPane {
     pub fn update_session(&mut self, session: &SessionSnapshot) {
         if self.session_id() == Some(session.id.as_str()) {
             self.session = Some(SessionContext::of(session));
+            self.drop_marked_unless_accepting();
         }
     }
 
@@ -310,6 +334,7 @@ impl TerminalPane {
             .and_then(|id| SessionContext::find(sessions, id))
         {
             self.session = Some(context);
+            self.drop_marked_unless_accepting();
         }
     }
 
@@ -319,6 +344,7 @@ impl TerminalPane {
         self.attachment.take();
         self.fresh_terminal(CursorShape::Block);
         self.session = None;
+        self.marked = None;
         self.load_timer = None;
     }
 
@@ -328,7 +354,27 @@ impl TerminalPane {
             self.fresh_terminal(CursorShape::Block);
         }
         self.session = None;
+        self.marked = None;
         self.load_timer = None;
+    }
+
+    /// Whether the attached session takes input; a composition is only
+    /// held while it does.
+    fn accepts_input(&self) -> bool {
+        self.session.is_some_and(SessionContext::accepts_input)
+    }
+
+    fn drop_marked_unless_accepting(&mut self) {
+        if !self.accepts_input() {
+            self.marked = None;
+        }
+    }
+
+    /// Drops the composition in progress without sending it.
+    fn drop_marked(&mut self, cx: &mut Context<Self>) {
+        if self.marked.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// A scrollback reply: the history, then the output held back while it
@@ -455,24 +501,56 @@ impl TerminalPane {
         let Some(session) = self.session else {
             return;
         };
+        let ks = &event.keystroke;
         let action = term_input::key_action(
-            &event.keystroke,
+            ks,
             self.term.app_cursor(),
             self.term.has_selection(),
             session,
         );
-        match action {
-            None => return,
-            Some(KeyAction::Send(bytes)) => {
-                self.term.clear_selection();
-                self.send_input(&bytes);
+        let Some(action) = action else {
+            self.last_key_char = ks.key_char.clone().filter(|text| text.chars().count() == 1);
+            return;
+        };
+        self.last_key_char = None;
+        if self.end_dead_key(ks) {
+            match action {
+                KeyAction::Send(bytes) => {
+                    self.term.clear_selection();
+                    self.send_input(&bytes);
+                }
+                KeyAction::Copy { clear_selection } => self.copy_selection(clear_selection, cx),
+                KeyAction::Paste => self.paste(cx),
+                KeyAction::Consume => {}
             }
-            Some(KeyAction::Copy { clear_selection }) => self.copy_selection(clear_selection, cx),
-            Some(KeyAction::Paste) => self.paste(cx),
-            Some(KeyAction::Consume) => {}
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Ends a pending dead key when the terminal handles `ks` itself: the
+    /// accent is cancelled by Backspace, dropped for Escape and sent ahead
+    /// of any other key. Returns whether `ks` still does its own action.
+    fn end_dead_key(&mut self, ks: &Keystroke) -> bool {
+        if !self.dead_key {
+            return true;
+        }
+        let Some(accent) = self.marked.take() else {
+            return true;
+        };
+        flush_dead_key();
+        match term_input::dead_key_fate(ks) {
+            DeadKeyFate::Cancel => false,
+            DeadKeyFate::Drop => true,
+            DeadKeyFate::SendFirst => {
+                self.send_input(accent.as_bytes());
+                true
+            }
+            DeadKeyFate::SendInstead => {
+                self.send_input(accent.as_bytes());
+                false
+            }
+        }
     }
 
     fn copy_selection(&mut self, clear_selection: bool, cx: &mut Context<Self>) {
@@ -662,6 +740,152 @@ impl TerminalPane {
     }
 }
 
+/// The byte range of the UTF-16 range `range` in `text`, clamped to it.
+fn utf8_range(text: &str, range: &Range<usize>) -> Range<usize> {
+    let end = offset_from_utf16(text, range.end);
+    offset_from_utf16(text, range.start).min(end)..end
+}
+
+fn utf16_len(text: &str) -> usize {
+    offset_to_utf16(text, text.len())
+}
+
+/// The cell the IME anchors to and the composition is drawn from: the
+/// cursor's, shown or hidden, or the grid's top-left cell without one.
+fn anchor_cell(snap: &Snapshot) -> (usize, usize) {
+    snap.cursor_point.unwrap_or_default()
+}
+
+/// Clears the dead key Windows still holds after the pane resolved its
+/// accent, so the next letter is not composed with it: translating a Space
+/// consumes a pending dead key. The key state is all up, so a held modifier
+/// cannot change the translation. A negative length means a dead key is
+/// still pending, so the translation runs once more.
+#[cfg(windows)]
+fn flush_dead_key() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyboardLayout, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicodeEx, VK_SPACE,
+    };
+    let state = [0u8; 256];
+    let space = u32::from(VK_SPACE.0);
+    // SAFETY: plain lookups for this thread's layout and a key's scan code.
+    let (layout, scan) = unsafe { (GetKeyboardLayout(0), MapVirtualKeyW(space, MAPVK_VK_TO_VSC)) };
+    let mut out = [0u16; 8];
+    for _ in 0..2 {
+        // SAFETY: translates into a local buffer; flags 0 let the call
+        // consume the pending dead key, and its output is discarded.
+        let len = unsafe { ToUnicodeEx(space, scan, &state, &mut out, 0, Some(layout)) };
+        if len >= 0 {
+            break;
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn flush_dead_key() {}
+
+/// Text from the platform: typed characters and the IME. Only committed
+/// text is sent; the composition before it is held and drawn at the cursor.
+impl EntityInputHandler for TerminalPane {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        let marked = self.marked.as_deref()?;
+        let range = utf8_range(marked, &range_utf16);
+        adjusted_range
+            .replace(offset_to_utf16(marked, range.start)..offset_to_utf16(marked, range.end));
+        marked.get(range).map(str::to_owned)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let end = self.marked.as_deref().map_or(0, utf16_len);
+        Some(UTF16Selection {
+            range: end..end,
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        self.marked
+            .as_deref()
+            .filter(|_| !self.dead_key)
+            .map(|marked| 0..utf16_len(marked))
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.drop_marked(cx);
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.marked = None;
+        self.last_key_char = None;
+        if !text.is_empty() {
+            self.term.clear_selection();
+            self.send_input(text.as_bytes());
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let last_key_char = self.last_key_char.take();
+        let composing = self.marked.is_some();
+        let mut marked = self.marked.take().unwrap_or_default();
+        let range = range_utf16.map_or(0..marked.len(), |range| utf8_range(&marked, &range));
+        marked.replace_range(range, new_text);
+        self.dead_key = !composing && last_key_char.as_deref() == Some(marked.as_str());
+        self.marked = (!marked.is_empty() && self.accepts_input()).then_some(marked);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let (origin, cell) = self.layout?;
+        let (row, col) = anchor_cell(&self.term.snapshot());
+        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
+        let at = point(
+            origin.x + px(col as f32 * cell.width),
+            origin.y + px(row as f32 * cell.height),
+        );
+        Some(Bounds::new(at, size(px(cell.width), px(cell.height))))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _: Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+}
+
 fn report_button(button: MouseButton) -> Option<mouse::Button> {
     match button {
         MouseButton::Left => Some(mouse::Button::Left),
@@ -672,21 +896,28 @@ fn report_button(button: MouseButton) -> Option<mouse::Button> {
 }
 
 impl Render for TerminalPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.blur.is_none() {
+            let blur = cx.on_blur(&self.focus, window, |pane, _, cx| pane.drop_marked(cx));
+            self.blur = Some(blur);
+        }
         let view = cx.entity();
         let gesture_view = view.clone();
+        let input_view = view.clone();
+        let focus = self.focus.clone();
         let background = to_rgba(self.term.snapshot().background);
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window);
-                let snap = view.update(cx, |v, _| {
+                let (snap, marked) = view.update(cx, |v, _| {
                     v.ensure_size(grid_size(bounds, &m));
                     v.layout = Some((bounds.origin, cell_size(&m)));
-                    v.term.snapshot()
+                    (v.term.snapshot(), v.marked.clone())
                 });
-                (m, snap)
+                (m, snap, marked)
             },
-            move |bounds, (m, snap), window, cx| {
+            move |bounds, (m, snap, marked), window, cx| {
+                window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
                 // Window-wide, so a drag keeps going once the pointer leaves the pane.
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                     if phase == DispatchPhase::Bubble {
@@ -694,6 +925,9 @@ impl Render for TerminalPane {
                     }
                 });
                 paint_grid(bounds, &snap, &m, window, cx);
+                if let Some(text) = marked {
+                    paint_preedit(bounds.origin, &snap, &text, &m, window, cx);
+                }
             },
         )
         .size_full();
@@ -867,6 +1101,48 @@ fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
                 wavy: false,
             }),
         strikethrough: None,
+    }
+}
+
+/// Paints the composition from the anchor cell rightwards: underlined, in the
+/// terminal's font and foreground, over its background so the cells beneath
+/// do not show through.
+fn paint_preedit(
+    origin: Point<Pixels>,
+    snap: &Snapshot,
+    text: &str,
+    m: &Metrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let color = to_rgba(snap.foreground);
+    let run = TextRun {
+        len: text.len(),
+        font: m.font.clone(),
+        color: color.into(),
+        background_color: None,
+        underline: Some(UnderlineStyle {
+            color: Some(color.into()),
+            thickness: px(1.0),
+            wavy: false,
+        }),
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_owned()),
+        px(FONT_SIZE),
+        &[run],
+        None,
+    );
+    let (row, col) = anchor_cell(snap);
+    let at = cell_origin(origin, m, row, col);
+    let width = line.width.max(m.cell_width);
+    window.paint_quad(fill(
+        Bounds::new(at, size(width, m.line_height)),
+        to_rgba(snap.background),
+    ));
+    if let Err(err) = line.paint(at, m.line_height, window, cx) {
+        tracing::error!("painting the IME composition: {err:#}");
     }
 }
 
