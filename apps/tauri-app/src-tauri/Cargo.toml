@@ -24,13 +24,12 @@ tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 protocol = { workspace = true }
-uuid = { workspace = true }
+daemon-client = { workspace = true }
 anyhow = "1"
 chrono = "0.4"
 directories = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = [
     "fs",
     "process",
@@ -41,7 +40,6 @@ tokio = { version = "1", features = [
     "io-util",
 ] }
 sha2 = "0.10"
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # Pinned-TLS loopback tunnel to a remote daemon (LAN access). Same `ring`
 # backend as the daemon + reqwest, so no `aws-lc-sys` (NASM/CMake) in the tree.
 rustls = { version = "0.23", default-features = false, features = [

@@ -12,7 +12,7 @@
 ;
 ;     1. The daemon and tracer are spawned from a content-addressed binary
 ;        cache (see crates/daemon/src/binary_cache.rs and
-;        apps/tauri-app/src-tauri/src/daemon_supervisor.rs::cache_daemon_binary).
+;        crates/daemon-client/src/supervisor.rs::cache_daemon_binary).
 ;        The shipped templates never get exec'd directly, so they're never
 ;        locked even when sessions are running. Reinstall replaces the
 ;        templates in place.

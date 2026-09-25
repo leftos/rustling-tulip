@@ -1,3 +1,5 @@
+use daemon_client::{ClientIdentity, config_dir};
+use protocol::DaemonHandshake;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -9,18 +11,9 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod autostart;
-mod daemon_supervisor;
 mod remote;
 
 const APP_BACKGROUND_COLOR: Color = Color(8, 9, 11, 255);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonHandshake {
-    pub protocol_version: u32,
-    pub port: u16,
-    pub auth_token: String,
-    pub pid: u32,
-}
 
 /// Parse a boolean-ish env var. Set + non-empty + not literally "0" counts as
 /// true; everything else is false. Used for opt-in harness toggles where the
@@ -59,31 +52,19 @@ where
         .background_color(APP_BACKGROUND_COLOR)
 }
 
-/// Resolve the per-user config directory. Mirrors
-/// `daemon::paths::Dirs::ensure`'s resolution: honors
-/// `RUSTLING_TULIP_CONFIG_DIR` if set (used by the e2e harness to isolate
-/// test runs to a tmpdir), otherwise falls back to
-/// `ProjectDirs::from("dev", "leftos", "rustling-tulip").config_dir()`.
-fn config_dir() -> Result<PathBuf, String> {
-    if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
-        && !value.is_empty()
-    {
-        return Ok(PathBuf::from(value));
-    }
-    let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")
-        .ok_or_else(|| "could not resolve config directory".to_string())?;
-    Ok(pd.config_dir().to_path_buf())
-}
-
-/// Returns the path that the daemon writes its handshake to. Mirrors
-/// `daemon::paths::Dirs::ensure().handshake_file`.
-pub fn handshake_file() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("daemon.json"))
+/// Render a `daemon_client` error as the string the frontend sees, with its
+/// full context chain.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "used as a map_err adapter, which hands the error over by value"
+)]
+fn error_text(err: anyhow::Error) -> String {
+    format!("{err:#}")
 }
 
 #[tauri::command]
-async fn ensure_daemon_started(app: tauri::AppHandle) -> Result<DaemonHandshake, String> {
-    daemon_supervisor::ensure_running(&app).await
+async fn ensure_daemon_started() -> Result<DaemonHandshake, String> {
+    daemon_client::ensure_running().await.map_err(error_text)
 }
 
 #[tauri::command]
@@ -133,7 +114,7 @@ async fn pick_file(
 /// path to `app.log` under it. Errors surface as `Result<_, String>` so they
 /// flow back through Tauri's invoke pipeline.
 fn app_log_path() -> Result<PathBuf, String> {
-    let log_dir = config_dir()?.join("logs");
+    let log_dir = config_dir().map_err(error_text)?.join("logs");
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     Ok(log_dir.join("app.log"))
 }
@@ -215,102 +196,32 @@ pub struct DaemonPaths {
     pub handshake_file: String,
 }
 
-/// Stable per-install client identity for per-client tab layouts. `client_id`
-/// is generated once and persisted in the config dir so a window and its
-/// pop-outs (same install) share one layout; `client_name` is the machine
-/// hostname, shown when another client offers to clone this layout.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientIdentity {
-    pub client_id: String,
-    pub client_name: Option<String>,
-}
-
+/// Stable per-install client identity for per-client tab layouts; see
+/// [`daemon_client::client_identity`].
 #[tauri::command]
 fn get_client_identity() -> Result<ClientIdentity, String> {
-    let dir = config_dir()?;
-    let path = dir.join("client-id");
-    let client_id = match std::fs::read_to_string(&path) {
-        Ok(existing) if !existing.trim().is_empty() => existing.trim().to_string(),
-        _ => {
-            let id = uuid::Uuid::new_v4().to_string();
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create config dir: {e}"))?;
-            std::fs::write(&path, &id).map_err(|e| format!("write client-id: {e}"))?;
-            id
-        }
-    };
-    Ok(ClientIdentity {
-        client_id,
-        client_name: sysinfo::System::host_name(),
-    })
+    daemon_client::client_identity("client-id").map_err(error_text)
 }
 
 #[tauri::command]
 fn daemon_paths() -> Result<DaemonPaths, String> {
-    let cfg = config_dir()?;
+    let cfg = config_dir().map_err(error_text)?;
+    let handshake = daemon_client::handshake_file().map_err(error_text)?;
     let logs = cfg.join("logs");
     Ok(DaemonPaths {
         config_dir: cfg.to_string_lossy().into_owned(),
         daemon_log: logs.join("daemon.log").to_string_lossy().into_owned(),
         app_log: logs.join("app.log").to_string_lossy().into_owned(),
-        handshake_file: cfg.join("daemon.json").to_string_lossy().into_owned(),
+        handshake_file: handshake.to_string_lossy().into_owned(),
     })
 }
 
-/// Force-stop the running daemon by reading its pid from `daemon.json` and
-/// killing the process. Used by the footer's "Stop daemon" action. We kill
-/// by pid rather than send a `Shutdown` WS message because the WS may
-/// already be closed (e.g. when the footer surfaced "connecting…" and the
-/// user gave up waiting), and pid-kill works in both states. The daemon's
-/// drop guard would normally remove `daemon.json` on graceful exit; we
-/// remove it here too so a subsequent `ensure_daemon_started` doesn't
-/// mistake a stale handshake for a live daemon.
+/// Force-stop the running daemon. Used by the footer's "Stop daemon" action,
+/// which may fire while the WS is already closed (e.g. the footer surfaced
+/// "connecting…" and the user gave up waiting); see [`daemon_client::stop`].
 #[tauri::command]
 async fn stop_daemon() -> Result<(), String> {
-    let path = handshake_file()?;
-    if !path.exists() {
-        return Err("no daemon handshake on disk — daemon may not be running".to_string());
-    }
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
-    let parsed: DaemonHandshake =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse handshake: {e}"))?;
-    kill_pid(parsed.pid).await?;
-    // Best-effort cleanup; absence will be detected on next ensure_running
-    // regardless. Don't error if the daemon's drop guard beat us to it.
-    let _ = tokio::fs::remove_file(&path).await;
-    Ok(())
-}
-
-#[cfg(windows)]
-pub(crate) async fn kill_pid(pid: u32) -> Result<(), String> {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let status = tokio::process::Command::new("taskkill")
-        .arg("/PID")
-        .arg(pid.to_string())
-        .arg("/F")
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .await
-        .map_err(|e| format!("taskkill: {e}"))?;
-    if !status.success() {
-        return Err(format!("taskkill exited with {status}"));
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn kill_pid(pid: u32) -> Result<(), String> {
-    let status = tokio::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status()
-        .await
-        .map_err(|e| format!("kill: {e}"))?;
-    if !status.success() {
-        return Err(format!("kill exited with {status}"));
-    }
-    Ok(())
+    daemon_client::stop().await.map_err(error_text)
 }
 
 /// Reveal a directory in the OS file manager (Explorer on Windows, Finder on
@@ -910,8 +821,9 @@ async fn open_tab_window(app: tauri::AppHandle, tab_id: String) -> Result<(), St
     reason = "Tauri builder errors are programmer errors; the canonical pattern is .expect()"
 )]
 pub fn run() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,rustling_tulip_app_lib=debug"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,rustling_tulip_app_lib=debug,daemon_client=debug")
+    });
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)

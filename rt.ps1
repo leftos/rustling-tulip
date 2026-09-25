@@ -887,7 +887,7 @@ function Invoke-Installer {
     try {
         # Step 1: build the release daemon + tracer. Tauri bundles them
         # as `externalBin` siblings next to the main app exe so
-        # daemon_supervisor's `current_exe().parent()` discovery works in
+        # daemon_client's `current_exe().parent()` discovery works in
         # the installed layout.
         Write-Host "==> Building $modeLabel daemon + tracer..." -ForegroundColor Cyan
         & cargo build --release --manifest-path $ManifestPath -p daemon -p tracer

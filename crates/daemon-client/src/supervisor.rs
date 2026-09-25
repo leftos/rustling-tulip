@@ -1,8 +1,9 @@
 //! Locate and (if needed) spawn the rustling-tulipd binary, then return its
-//! handshake to the frontend.
+//! handshake to the caller.
 
-use crate::{DaemonHandshake, handshake_file};
+use crate::handshake_file;
 use anyhow::{Context as _, anyhow};
+use protocol::DaemonHandshake;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,7 +50,21 @@ fn spawn_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, String> {
+/// Return the handshake of a healthy daemon this client can speak to,
+/// spawning or replacing one when needed.
+///
+/// Reuses a running daemon whose protocol is supported and whose executable is
+/// the current cached copy of the shipped binary. A daemon with an unsupported
+/// protocol or a stale binary is retired (graceful `/shutdown`, then a force
+/// kill) and a fresh one is spawned from the binary cache. Concurrent callers
+/// serialize on a process-wide lock so only one of them spawns.
+///
+/// # Errors
+///
+/// Fails when the daemon binary cannot be located or cached, a stale daemon
+/// cannot be stopped, the spawn fails, or the new daemon does not report a
+/// healthy handshake within the spawn timeout.
+pub async fn ensure_running() -> anyhow::Result<DaemonHandshake> {
     let current = resolve_current_daemon_binary()?;
 
     // Fast path: handshake already present, daemon is healthy, and this app
@@ -91,18 +106,18 @@ pub async fn ensure_running(_app: &tauri::AppHandle) -> Result<DaemonHandshake, 
     }
 }
 
-fn resolve_current_daemon_binary() -> Result<CurrentDaemonBinary, String> {
+fn resolve_current_daemon_binary() -> anyhow::Result<CurrentDaemonBinary> {
     let template = locate_daemon_binary()?;
-    let cached = cache_daemon_binary(&template).map_err(|e| e.to_string())?;
+    let cached = cache_daemon_binary(&template)?;
     Ok(CurrentDaemonBinary { template, cached })
 }
 
-async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> Result<DaemonHandshake, String> {
+async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> anyhow::Result<DaemonHandshake> {
     let cache_dir = current
         .cached
         .parent()
         .map(Path::to_path_buf)
-        .ok_or_else(|| "cached daemon binary has no parent dir".to_string())?;
+        .ok_or_else(|| anyhow!("cached daemon binary has no parent dir"))?;
 
     // Reap any leftover daemon processes before spawning. We're in the slow
     // path because no healthy daemon was found, so any `rustling-tulipd.exe`
@@ -126,7 +141,7 @@ async fn spawn_current_daemon(current: &CurrentDaemonBinary) -> Result<DaemonHan
         .template
         .parent()
         .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| "template has no parent dir".to_string())?;
+        .ok_or_else(|| anyhow!("template has no parent dir"))?;
     spawn_daemon(&current.cached, &template_dir)?;
 
     wait_for_handshake().await
@@ -203,7 +218,7 @@ fn daemon_exe_matches_expected(actual: &Path, expected: &Path) -> bool {
     normalize_process_path(actual) == normalize_process_path(expected)
 }
 
-async fn retire_daemon(handshake: &DaemonHandshake, reason: &str) -> Result<(), String> {
+async fn retire_daemon(handshake: &DaemonHandshake, reason: &str) -> anyhow::Result<()> {
     info!(
         pid = handshake.pid,
         port = handshake.port,
@@ -313,7 +328,7 @@ async fn reap_orphan_daemons(cache_dir: &Path) {
     info!(count = pids.len(), pids = ?pids, "reaping stale daemon processes");
     for pid in pids {
         if let Err(err) = crate::kill_pid(pid).await {
-            warn!(pid, %err, "failed to reap stale daemon");
+            warn!(pid, err = %format!("{err:#}"), "failed to reap stale daemon");
         }
     }
 }
@@ -391,7 +406,16 @@ async fn probe_health(port: u16) -> bool {
     matches!(client.get(&url).send().await, Ok(resp) if resp.status().is_success())
 }
 
-pub(crate) fn locate_daemon_binary() -> Result<PathBuf, String> {
+/// Locate the shipped `rustling-tulipd` binary (the template the cache copies
+/// from).
+///
+/// Looks next to the current executable first (production install), then in
+/// the workspace's `target/debug` and `target/release` (dev).
+///
+/// # Errors
+///
+/// Fails, naming every path it tried, when none of them holds the binary.
+pub fn locate_daemon_binary() -> anyhow::Result<PathBuf> {
     let exe_name = if cfg!(windows) {
         "rustling-tulipd.exe"
     } else {
@@ -408,14 +432,8 @@ pub(crate) fn locate_daemon_binary() -> Result<PathBuf, String> {
         }
     }
 
-    // 2. Workspace target dir (dev). Tauri sets CARGO_MANIFEST_DIR at compile
-    //    time via build.rs; we rebuild the workspace-relative path from there.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = PathBuf::from(manifest_dir)
-        .ancestors()
-        .nth(3)
-        .map(PathBuf::from)
-        .ok_or_else(|| "could not resolve workspace root from CARGO_MANIFEST_DIR".to_string())?;
+    // 2. Workspace target dir (dev).
+    let workspace_root = dev_workspace_root()?;
     let dev_candidate = workspace_root.join("target").join("debug").join(exe_name);
     if dev_candidate.is_file() {
         return Ok(dev_candidate);
@@ -425,7 +443,7 @@ pub(crate) fn locate_daemon_binary() -> Result<PathBuf, String> {
         return Ok(release_candidate);
     }
 
-    Err(format!(
+    Err(anyhow!(
         "rustling-tulipd binary not found. Looked in:\n  \
          - <exe_dir>/{exe_name}\n  \
          - {}\n  \
@@ -434,6 +452,16 @@ pub(crate) fn locate_daemon_binary() -> Result<PathBuf, String> {
         dev_candidate.display(),
         release_candidate.display(),
     ))
+}
+
+/// Workspace root this crate was compiled in, rebuilt from the compile-time
+/// `CARGO_MANIFEST_DIR` (`<root>/crates/daemon-client`).
+pub(crate) fn dev_workspace_root() -> anyhow::Result<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("could not resolve workspace root from CARGO_MANIFEST_DIR"))
 }
 
 /// Copy the daemon template into the content-addressed cache and return the
@@ -490,6 +518,8 @@ fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
     Ok(cached)
 }
 
+/// Resolve the cached-binary root. Mirrors `resolve_binaries_dir` in
+/// `crates/daemon/src/paths.rs` so the daemon and its clients share one cache.
 fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
     if let Ok(value) = std::env::var("RUSTLING_TULIP_BINARIES_DIR")
         && !value.is_empty()
@@ -515,7 +545,7 @@ fn hash_prefix(bytes: &[u8]) -> String {
 }
 
 #[cfg(windows)]
-fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
@@ -530,11 +560,11 @@ fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result
             // We intentionally don't await the child — the daemon outlives us.
             drop(child);
         })
-        .map_err(|e| format!("failed to spawn daemon: {e}"))
+        .context("failed to spawn daemon")
 }
 
 #[cfg(not(windows))]
-fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> anyhow::Result<()> {
     let mut cmd = Command::new(bin);
     cmd.env("RUSTLING_TULIP_BIN_TEMPLATES", template_dir);
     cmd.stdin(Stdio::null())
@@ -544,7 +574,7 @@ fn spawn_daemon(bin: &std::path::Path, template_dir: &std::path::Path) -> Result
         .map(|child| {
             drop(child);
         })
-        .map_err(|e| format!("failed to spawn daemon: {e}"))
+        .context("failed to spawn daemon")
 }
 
 async fn try_load_handshake(path: &std::path::Path) -> Option<DaemonHandshake> {
@@ -555,7 +585,7 @@ async fn try_load_handshake(path: &std::path::Path) -> Option<DaemonHandshake> {
     serde_json::from_slice::<DaemonHandshake>(&bytes).ok()
 }
 
-async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
+async fn wait_for_handshake() -> anyhow::Result<DaemonHandshake> {
     let path = handshake_file()?;
     let started = tokio::time::Instant::now();
     let deadline = started + SPAWN_WAIT_TIMEOUT;
@@ -591,16 +621,33 @@ async fn wait_for_handshake() -> Result<DaemonHandshake, String> {
         timeout_secs = SPAWN_WAIT_TIMEOUT.as_secs(),
         "daemon never reported handshake"
     );
-    Err("daemon failed to start within the timeout".to_string())
+    Err(anyhow!("daemon failed to start within the timeout"))
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use super::{
-        daemon_exe_matches_expected, daemon_protocol_is_supported, is_daemon_image, path_is_under,
-        shutdown_url,
+        daemon_exe_matches_expected, daemon_protocol_is_supported, dev_workspace_root,
+        is_daemon_image, path_is_under, shutdown_url,
     };
     use std::path::Path;
+
+    #[test]
+    fn dev_fallback_root_is_workspace_root() {
+        let root = dev_workspace_root().expect("workspace root resolves");
+        let manifest = root.join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| format!("<unreadable {}: {e}>", manifest.display()));
+        assert!(
+            text.lines().any(|line| line.trim() == "[workspace]"),
+            "{} has no [workspace] table: {text}",
+            manifest.display()
+        );
+    }
 
     #[test]
     fn current_protocol_is_supported() {

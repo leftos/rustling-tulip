@@ -21,10 +21,11 @@
 //! This module also persists paired hosts in `remote-profiles.json` so the
 //! laptop can reconnect without re-pasting the connection code.
 
-use crate::{DaemonHandshake, config_dir};
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
+use daemon_client::config_dir;
 use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
+use protocol::DaemonHandshake;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -342,12 +343,12 @@ async fn connect_remote_inner(
     })
 }
 
-fn profiles_path() -> Result<PathBuf, String> {
+fn profiles_path() -> anyhow::Result<PathBuf> {
     Ok(config_dir()?.join("remote-profiles.json"))
 }
 
 fn load_store() -> anyhow::Result<RemoteProfileStore> {
-    let path = profiles_path().map_err(|e| anyhow!(e))?;
+    let path = profiles_path()?;
     if !path.exists() {
         return Ok(RemoteProfileStore::default());
     }
@@ -356,7 +357,7 @@ fn load_store() -> anyhow::Result<RemoteProfileStore> {
 }
 
 fn save_store(store: &RemoteProfileStore) -> anyhow::Result<()> {
-    let path = profiles_path().map_err(|e| anyhow!(e))?;
+    let path = profiles_path()?;
     let bytes = serde_json::to_vec_pretty(store).context("serializing remote-profiles.json")?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;

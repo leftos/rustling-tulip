@@ -146,7 +146,7 @@ pub async fn get_autostart() -> Result<bool, String> {
 pub async fn set_autostart(enabled: bool) -> Result<(), String> {
     #[cfg(any(windows, target_os = "macos"))]
     {
-        let path = crate::daemon_supervisor::locate_daemon_binary()?;
+        let path = daemon_client::locate_daemon_binary().map_err(|e| format!("{e:#}"))?;
         imp::set(enabled, &path.to_string_lossy())
     }
     #[cfg(not(any(windows, target_os = "macos")))]

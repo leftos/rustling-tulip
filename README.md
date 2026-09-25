@@ -8,6 +8,7 @@ Multi-repo Claude Code wrapper. Tauri desktop app + long-lived Rust daemon that 
 crates/
   protocol/     - shared message types (daemon <-> client)
   daemon/       - long-lived background daemon (WS server, PTY pool, registry)
+  daemon-client/ - client-side daemon supervision shared by the clients
 apps/
   tauri-app/    - desktop client (Rust src-tauri + React + xterm.js)
 docs/

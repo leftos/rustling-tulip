@@ -205,7 +205,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 Today these live in Tauri commands and plugins; natively they become plain Rust calls in the client process.
 
-- Daemon supervision, handshake, paths, client identity, stop: `ensure_daemon_started`, `daemon_paths`, `get_client_identity`, `stop_daemon` (reusable nearly as-is from `src-tauri/src/`).
+- Daemon supervision, handshake, paths, client identity, stop: `ensure_daemon_started`, `daemon_paths`, `get_client_identity`, `stop_daemon` (the logic lives in `crates/daemon-client`; the Tauri commands are thin wrappers).
 - Native pickers: `pick_directory`, `pick_file`, dialog plugin (e.g. `rfd`).
 - Windows: `open_session_window`, `open_pane_window`, `open_tab_window`, window-state persistence, close interception, `setTitle`.
 - OS handoff: `reveal_in_explorer`, `open_url` (http(s) only), `open_terminal_path`, `open_folders_in_vscode`, opener / shell plugins.

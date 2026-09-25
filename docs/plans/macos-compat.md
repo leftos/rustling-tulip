@@ -121,7 +121,7 @@ tracer over the socket.
 - [x] macOS arm implemented in `autostart.rs`: write/remove
       `~/Library/LaunchAgents/dev.leftos.rustling-tulip.daemon.plist` (hand-emitted
       XML — no `plist` dep), `ProgramArguments` from
-      `daemon_supervisor::locate_daemon_binary`, `RunAtLoad`. **File-only** (no
+      `daemon_client::locate_daemon_binary`, `RunAtLoad`. **File-only** (no
       `launchctl load` on toggle: that would start a second daemon while the
       app's supervisor runs one; the file gives next-login parity with the
       Windows `Run` key). *Verify on macOS that launchd loads it at login;
@@ -166,9 +166,8 @@ Confirmed dual-arm or platform-neutral during the sweep:
 - **PTY**: `portable-pty` (`crates/tracer/src/supervisor.rs`) — cross-platform.
 - **Tracer spawn**: `tracer_client.rs` has both `#[cfg(windows)]` (CREATE_NO_WINDOW)
   and `#[cfg(not(windows))]` arms; exe-name (`rt-tracer[.exe]`) is gated.
-- **Daemon process mgmt (Tauri side)**: `kill_pid` (`lib.rs:255–284`),
-  `spawn_daemon` (`daemon_supervisor.rs:510–541`), path normalization
-  (`daemon_supervisor.rs:355–369`), binary discovery (`394–437`) — all dual-arm.
+- **Daemon process mgmt (client side)**: `kill_pid`, `spawn_daemon`, path
+  normalization and binary discovery in `crates/daemon-client` — all dual-arm.
 - **Reveal/open**: `reveal_in_explorer` (`lib.rs:297–320`, 3-platform: explorer/
   `open`/`xdg-open`), `open_url` (`378–402`), `spawn_vscode` (`462–519`, `code` on
   PATH for Unix).

@@ -918,6 +918,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "daemon-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "protocol",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3988,16 +4005,15 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "chrono",
+ "daemon-client",
  "directories",
  "mdns-sd",
  "protocol",
  "rcgen",
- "reqwest 0.12.28",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
- "sysinfo",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4009,7 +4025,6 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
- "uuid",
  "winreg 0.55.0",
 ]
 

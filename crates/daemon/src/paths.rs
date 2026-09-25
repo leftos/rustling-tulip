@@ -248,8 +248,8 @@ fn resolve_worktrees_dir() -> anyhow::Result<PathBuf> {
 /// Resolve the cached-binary root, honoring `RUSTLING_TULIP_BINARIES_DIR` when
 /// set (used by e2e isolation). Falls back to
 /// `<data_local>/leftos/rustling-tulip/data/binaries/` — same root as
-/// worktrees, machine-local and known-writable. The Tauri-side daemon
-/// supervisor resolves the same path independently so both processes share
+/// worktrees, machine-local and known-writable. `crates/daemon-client`
+/// resolves the same path independently so the daemon and its clients share
 /// one cache.
 pub fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
     if let Ok(value) = std::env::var("RUSTLING_TULIP_BINARIES_DIR")

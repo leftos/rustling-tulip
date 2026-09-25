@@ -5,6 +5,7 @@ members = [
     "crates/tracer-protocol",
     "crates/tracer",
     "crates/daemon",
+    "crates/daemon-client",
     "apps/tauri-app/src-tauri",
 ]
 
@@ -33,6 +34,7 @@ mdns-sd = "0.20"
 
 protocol = { path = "crates/protocol" }
 tracer-protocol = { path = "crates/tracer-protocol" }
+daemon-client = { path = "crates/daemon-client" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
