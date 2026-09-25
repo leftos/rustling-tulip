@@ -5,6 +5,7 @@
 //! The binary opens [`open_main_window`]; the UI specs build a [`RootView`]
 //! over their own transport with [`RootView::with_transport`].
 
+mod branch_fate;
 mod connection;
 mod footer;
 mod grid_view;
@@ -41,8 +42,8 @@ use std::time::{Duration, Instant};
 use crate::connection::{DotKind, Footer};
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
-use crate::session_actions::{ActionConfirm, Duplicates};
-use crate::session_menu::SessionMenu;
+use crate::session_actions::{Duplicates, HeaderStopConfirm};
+use crate::session_menu::{DeleteDialog, SessionMenu};
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
 use crate::tab_bar::Rename;
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
@@ -275,10 +276,14 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
-    /// A header Stop or a worktree delete waiting for its second click.
-    confirm: ActionConfirm,
+    /// A header Stop waiting for its second click.
+    confirm: HeaderStopConfirm,
     /// Restarts and resumes waiting for their duplicate.
     duplicates: Duplicates,
+    /// The delete-worktree confirm, while open.
+    delete_dialog: Option<DeleteDialog>,
+    /// The confirm's keyboard focus, so Esc, Enter and Tab reach it.
+    dialog_focus: FocusHandle,
 }
 
 impl RootView {
@@ -361,8 +366,10 @@ impl RootView {
             paths,
             menu: None,
             menu_focus: cx.focus_handle(),
-            confirm: ActionConfirm::default(),
+            confirm: HeaderStopConfirm::default(),
             duplicates: Duplicates::default(),
+            delete_dialog: None,
+            dialog_focus: cx.focus_handle(),
         }
     }
 
@@ -524,10 +531,14 @@ impl RootView {
     }
 
     /// After any change to the tab model: terminals follow the layout, the
-    /// requested pane takes the keyboard and the active tab is saved.
+    /// requested pane takes the keyboard (unless the delete-worktree
+    /// confirm holds it; closing the confirm focuses the tab's pane) and
+    /// the active tab is saved.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_panes(window, cx);
-        if let Some(pane_id) = self.tabs.take_focus_request() {
+        if let Some(pane_id) = self.tabs.take_focus_request()
+            && self.delete_dialog.is_none()
+        {
             self.focus_pane_view(&pane_id, window, cx);
         }
         if self.sidebar.set_active_tab(self.tabs.active_id()) {
@@ -671,7 +682,7 @@ impl RootView {
 
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.apply(&msg);
-        self.drop_stale_menu(window, cx);
+        self.drop_stale_session_ui(window, cx);
         if self.tabs.apply(&msg) {
             self.confirm.disarm();
             self.after_tabs_change(window, cx);
@@ -729,14 +740,22 @@ impl RootView {
                 self.attach_waiting_panes(cx);
                 self.place_duplicate(request_id.as_deref(), &session.id, window, cx);
             }
+            DaemonMessage::DiscardPreview {
+                session_id,
+                members,
+            } => self.on_discard_preview(&session_id, &members, cx),
             _ => {}
         }
     }
 
-    /// Keys the root takes before the panes see them. Esc drops an armed
-    /// tab close (and still reaches the pane). Ctrl+B toggles the sidebar
-    /// only when no terminal and no tab rename has the keyboard; in a
-    /// terminal it is the PTY's 0x02.
+    /// Keys the root takes before the panes see them. The delete-worktree
+    /// confirm, while open, holds the focus and takes every key that
+    /// reaches this listener; gpui runs keymap actions before capture
+    /// listeners, so that holds only while no key-bound context (a text
+    /// input) has the focus. Esc drops an armed tab close
+    /// (and still reaches the pane). Ctrl+B toggles the sidebar only when
+    /// no terminal and no tab rename has the keyboard; in a terminal it is
+    /// the PTY's 0x02.
     fn on_key_capture(
         &mut self,
         event: &KeyDownEvent,
@@ -744,6 +763,11 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
+        if self.delete_dialog.is_some() {
+            self.on_delete_dialog_key(ks, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
             if self.confirm.disarm() || tab_close {
@@ -820,6 +844,7 @@ impl Render for RootView {
             .child(self.footer_bar(&footer, cx))
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
+            .children(self.delete_dialog_layer(cx))
             .children(overlay)
     }
 }

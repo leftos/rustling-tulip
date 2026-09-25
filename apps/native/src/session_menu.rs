@@ -2,12 +2,13 @@
 //! overlay: rendering and forwarding to [`crate::session_actions`].
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, MouseButton,
-    MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window, anchored,
-    deferred, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, Keystroke,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Task, Window,
+    anchored, deferred, div, prelude::*, px,
 };
-use protocol::{SessionSnapshot, TabEntry};
+use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
+use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::session_actions::{
     MenuEntry, MenuMode, SessionAction, Step, exit_code_label, exited_message,
     header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
@@ -17,10 +18,19 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
 
 const MENU_WIDTH: f32 = 240.0;
-/// A worktree-deleting button after its first click.
-const ARMED_LABEL: &str = "Confirm delete worktree";
 /// The stopped-pane overlay: translucent, so the terminal shows through.
 const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
+/// The dim layer behind the delete-worktree confirm.
+const BACKDROP_TINT: u32 = 0x0000_0099;
+const DIALOG_WIDTH: f32 = 440.0;
+
+/// The open delete-worktree confirm.
+pub(crate) struct DeleteDialog {
+    confirm: DeleteWorktreeConfirm,
+    /// Wakes the dialog at the preview's deadline; replacing or dropping
+    /// it cancels the wake-up.
+    timer: Option<Task<()>>,
+}
 
 /// The open context menu.
 pub(crate) struct SessionMenu {
@@ -49,10 +59,7 @@ impl RootView {
     /// A pane showing the session whose header Stop waits for its confirm.
     #[must_use]
     pub fn armed_stop_pane(&self) -> Option<&str> {
-        let (session_id, action) = self.confirm.armed()?;
-        if action != SessionAction::StopKeepWorktree {
-            return None;
-        }
+        let session_id = self.confirm.armed()?;
         self.tabs
             .tabs()
             .iter()
@@ -124,14 +131,21 @@ impl RootView {
         }
     }
 
-    /// Closes the menu of a session the daemon no longer lists.
-    pub(crate) fn drop_stale_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Closes the menu and the delete-worktree confirm of a session the
+    /// daemon no longer lists.
+    pub(crate) fn drop_stale_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .menu
             .as_ref()
             .is_some_and(|menu| self.sidebar.session(&menu.session_id).is_none())
         {
             self.close_session_menu(window, cx);
+        }
+        if self
+            .delete_dialog_session()
+            .is_some_and(|id| self.sidebar.session(id).is_none())
+        {
+            self.close_delete_dialog(window, cx);
         }
     }
 
@@ -146,9 +160,9 @@ impl RootView {
         cx.notify();
     }
 
-    /// Carries out `action` on `session_id`. A worktree delete acts on its
-    /// second click only; any other action disarms it. A restart already on
-    /// the way does nothing.
+    /// Carries out `action` on `session_id`, disarming the header Stop. A
+    /// worktree delete opens the delete-worktree confirm in the menu's
+    /// place. A restart already on the way does nothing.
     fn choose_action(
         &mut self,
         session_id: &str,
@@ -160,14 +174,12 @@ impl RootView {
             return;
         };
         cx.notify();
-        if action.deletes_worktree() {
-            if !self.confirm.click(session_id, action) {
-                return;
-            }
-        } else {
-            self.confirm.disarm();
-        }
+        self.confirm.disarm();
         match plan(action, &session, self.is_shown(session_id)) {
+            Step::ConfirmWorktreeDelete => {
+                self.close_session_menu(window, cx);
+                self.open_delete_dialog(session_id, window, cx);
+            }
             Step::Send(messages) => {
                 for msg in messages {
                     self.send(msg);
@@ -259,10 +271,11 @@ impl RootView {
         }
     }
 
-    /// Closes the menu and drops every armed confirm, as when the
-    /// connection goes.
+    /// Closes the menu and the delete-worktree confirm and drops every
+    /// armed confirm, as when the connection goes.
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
+        self.close_delete_dialog(window, cx);
     }
 
     /// The open menu over a layer that keeps a click outside it from
@@ -346,16 +359,13 @@ impl RootView {
             .collect()
     }
 
-    /// An action's text: armed, on the way, or as it stands.
+    /// An action's text: on the way, or as it stands.
     fn action_label(
         &self,
         session: &SessionSnapshot,
         action: SessionAction,
         in_pane: bool,
     ) -> &'static str {
-        if self.confirm.is_armed(&session.id, action) {
-            return ARMED_LABEL;
-        }
         if self.duplicates.is_pending(&session.id)
             && let Some(pending) = action.pending_label()
         {
@@ -369,12 +379,12 @@ impl RootView {
             MenuEntry::Action(action) => self
                 .action_button(session_id, action, &row.selector, row.label, cx)
                 .into_any_element(),
-            MenuEntry::StopChoice => menu_item(&row.selector, row.label, true, false)
+            MenuEntry::StopChoice => menu_item(&row.selector, row.label, true)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.set_menu_mode(MenuMode::StopChoice, window, cx);
                 }))
                 .into_any_element(),
-            MenuEntry::Cancel => menu_item(&row.selector, row.label, false, false)
+            MenuEntry::Cancel => menu_item(&row.selector, row.label, false)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.set_menu_mode(MenuMode::Actions, window, cx);
                 }))
@@ -393,8 +403,7 @@ impl RootView {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let armed = self.confirm.is_armed(session_id, action);
-        let button = menu_item(selector, label, is_danger(action), armed);
+        let button = menu_item(selector, label, is_danger(action));
         if action.pending_label().is_some() && self.duplicates.is_pending(session_id) {
             return button.opacity(0.6).cursor_default();
         }
@@ -433,11 +442,11 @@ impl RootView {
         }
         let id = session.id.clone();
         let stop = SessionAction::StopKeepWorktree;
-        if !self.confirm.is_armed(&id, stop) {
+        if !self.confirm.is_armed(&id) {
             let button = header_text_button(&format!("pane-stop-{pane_id}"), "Stop", MUTED);
             return vec![
                 on_press(button, cx, move |this, _, _| {
-                    this.confirm.click(&id, stop);
+                    this.confirm.click(&id);
                 })
                 .into_any_element(),
             ];
@@ -450,7 +459,7 @@ impl RootView {
         let cancel = header_text_button(&format!("pane-stop-cancel-{pane_id}"), "Cancel", TEXT);
         vec![
             on_press(confirm, cx, move |this, window, cx| {
-                if this.confirm.click(&id, stop) {
+                if this.confirm.click(&id) {
                     this.choose_action(&id, stop, window, cx);
                 }
             })
@@ -516,6 +525,298 @@ impl RootView {
     }
 }
 
+impl RootView {
+    /// The session whose delete-worktree confirm is open.
+    #[must_use]
+    pub fn delete_dialog_session(&self) -> Option<&str> {
+        self.delete_dialog
+            .as_ref()
+            .map(|dialog| dialog.confirm.session_id())
+    }
+
+    /// The confirm's footer buttons as shown: selector and label.
+    #[must_use]
+    pub fn delete_dialog_buttons(&self) -> Vec<(String, String)> {
+        let Some(dialog) = &self.delete_dialog else {
+            return Vec::new();
+        };
+        dialog
+            .confirm
+            .buttons()
+            .into_iter()
+            .map(|button| (button.selector().to_owned(), dialog.confirm.label(button)))
+            .collect()
+    }
+
+    /// The confirm's text: the intro, the status note, then one
+    /// "repo branch fate" line per member.
+    #[must_use]
+    pub fn delete_dialog_text(&self) -> Vec<String> {
+        let Some(dialog) = &self.delete_dialog else {
+            return Vec::new();
+        };
+        let confirm = &dialog.confirm;
+        let label = self.session_label(confirm.session_id());
+        let mut lines = vec![format!("Removing the worktree for {label}.")];
+        lines.extend(confirm.status_note().map(str::to_owned));
+        lines.extend(
+            confirm
+                .member_rows()
+                .into_iter()
+                .map(|row| format!("{} {} {}", row.repo, row.branch, row.fate)),
+        );
+        lines
+    }
+
+    /// The selector of the confirm's focused button.
+    #[must_use]
+    pub fn delete_dialog_focus(&self) -> Option<String> {
+        self.delete_dialog
+            .as_ref()
+            .map(|dialog| dialog.confirm.focused().selector().to_owned())
+    }
+
+    /// Opens the confirm for `session_id`: asks the daemon for its branch
+    /// fates, arms the fallback at the preview's deadline and takes the
+    /// keyboard.
+    pub(crate) fn open_delete_dialog(
+        &mut self,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let confirm = DeleteWorktreeConfirm::new(session_id, (self.now)());
+        self.send(confirm.request());
+        self.delete_dialog = Some(DeleteDialog {
+            confirm,
+            timer: None,
+        });
+        self.schedule_delete_dialog_tick(cx);
+        self.dialog_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Arms a timer for the rest of the wait for the preview, or disarms it
+    /// once the wait is over.
+    fn schedule_delete_dialog_tick(&mut self, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let Some(dialog) = &mut self.delete_dialog else {
+            return;
+        };
+        dialog.timer = dialog.confirm.deadline().map(|deadline| {
+            let delay = deadline.saturating_duration_since(now);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                // Fails only when the view is gone, and the dialog with it.
+                this.update(cx, Self::tick_delete_dialog).ok();
+            })
+        });
+    }
+
+    /// The timer fired: fall back when the deadline has passed, else wait
+    /// out the rest, as the clock may lag the timer.
+    fn tick_delete_dialog(&mut self, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let Some(dialog) = &mut self.delete_dialog else {
+            return;
+        };
+        if dialog.confirm.tick(now) {
+            cx.notify();
+        }
+        self.schedule_delete_dialog_tick(cx);
+    }
+
+    /// The daemon's branch fates for the open confirm's session.
+    pub(crate) fn on_discard_preview(
+        &mut self,
+        session_id: &str,
+        members: &[MemberBranchFate],
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(dialog) = &mut self.delete_dialog
+            && dialog.confirm.on_preview(session_id, members)
+        {
+            cx.notify();
+        }
+    }
+
+    /// Closes the confirm and hands the keyboard back to the active pane.
+    pub(crate) fn close_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_dialog.take().is_some() {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The user's answer. A delete sends the confirm's messages for the
+    /// session as it stands now; Cancel sends nothing.
+    fn answer_delete_dialog(
+        &mut self,
+        button: DialogButton,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = self.delete_dialog.take() else {
+            return;
+        };
+        let session = self.sidebar.session(dialog.confirm.session_id()).cloned();
+        if let (Some(branch), Some(session)) = (button.branch(), session) {
+            for msg in confirm_messages(&session, branch) {
+                self.send(msg);
+            }
+        }
+        self.focus_active_pane(window, cx);
+        cx.notify();
+    }
+
+    /// A key while the confirm is open: Esc cancels, Enter and Space press
+    /// the focused button, Tab and Shift+Tab move the focus.
+    pub(crate) fn on_delete_dialog_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match keystroke.key.as_str() {
+            "escape" => self.close_delete_dialog(window, cx),
+            "enter" | "space" => {
+                if let Some(button) = self.delete_dialog.as_ref().map(|d| d.confirm.focused()) {
+                    self.answer_delete_dialog(button, window, cx);
+                }
+            }
+            "tab" => {
+                if let Some(dialog) = &mut self.delete_dialog {
+                    dialog.confirm.move_focus(!keystroke.modifiers.shift);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The confirm over a backdrop that takes every click beneath it; a
+    /// click on the backdrop itself does nothing.
+    pub(crate) fn delete_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let confirm = &self.delete_dialog.as_ref()?.confirm;
+        let close = dialog_button("delete-worktree-dialog-close", "✕".to_owned(), false, false)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_delete_dialog(window, cx);
+            }));
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Delete worktree?"),
+            )
+            .child(close);
+        let buttons: Vec<AnyElement> = confirm
+            .buttons()
+            .into_iter()
+            .map(|button| {
+                let focused = confirm.focused() == button;
+                dialog_button(
+                    button.selector(),
+                    confirm.label(button),
+                    button.is_danger(),
+                    focused,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.answer_delete_dialog(button, window, cx);
+                }))
+                .into_any_element()
+            })
+            .collect();
+        let panel = div()
+            .id("delete-worktree-panel")
+            .track_focus(&self.dialog_focus)
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .w(px(DIALOG_WIDTH))
+            .p(px(14.0))
+            .bg(gpui::rgb(PANEL_BG))
+            .border_1()
+            .border_color(gpui::rgb(BORDER))
+            .rounded(px(6.0))
+            .text_size(px(UI_TEXT_SIZE))
+            .text_color(gpui::rgb(TEXT))
+            .child(header)
+            .child(self.delete_dialog_body(confirm))
+            .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
+        Some(
+            div()
+                .id("delete-worktree-dialog")
+                .debug_selector(|| "delete-worktree-dialog".to_owned())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::rgba(BACKDROP_TINT))
+                .occlude()
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    /// Whose worktree goes, the wait or its failure, and each member's
+    /// branch with its fate.
+    fn delete_dialog_body(&self, confirm: &DeleteWorktreeConfirm) -> Div {
+        let intro = div()
+            .flex()
+            .flex_wrap()
+            .child("Removing the worktree for ")
+            .child(
+                div()
+                    .font_weight(FontWeight::BOLD)
+                    .child(self.session_label(confirm.session_id())),
+            )
+            .child(".");
+        let note = confirm
+            .status_note()
+            .map(|note| div().text_color(gpui::rgb(MUTED)).child(note));
+        let members = confirm.member_rows().into_iter().map(|row| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.0))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(row.repo))
+                .child(div().text_color(gpui::rgb(MUTED)).child(row.branch))
+                .child(row.fate)
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(intro)
+            .children(note)
+            .children(members)
+    }
+}
+
+/// A button of the delete-worktree confirm; the focused one is outlined.
+fn dialog_button(selector: &str, label: String, danger: bool, focused: bool) -> Stateful<Div> {
+    let name = selector.to_owned();
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .px(px(10.0))
+        .py(px(4.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
+        .cursor_pointer()
+        .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
+        .when(danger, |button| button.bg(gpui::rgb(DANGER_BG)))
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .child(label)
+}
+
 /// Runs `act` on a left press and keeps the press from the root.
 fn on_press(
     button: Stateful<Div>,
@@ -544,7 +845,7 @@ fn is_danger(action: SessionAction) -> bool {
 }
 
 /// A clickable row of the menu or the overlay.
-fn menu_item(selector: &str, label: &'static str, danger: bool, armed: bool) -> Stateful<Div> {
+fn menu_item(selector: &str, label: &'static str, danger: bool) -> Stateful<Div> {
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -555,7 +856,6 @@ fn menu_item(selector: &str, label: &'static str, danger: bool, armed: bool) -> 
         .cursor_pointer()
         .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(armed, |item| item.bg(gpui::rgb(DANGER_BG)))
         .child(label)
 }
 

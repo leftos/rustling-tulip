@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use protocol::{BranchCleanup, CleanupAction, ClientMessage, SessionSnapshot, SessionStatus};
+use protocol::{ClientMessage, SessionSnapshot, SessionStatus};
 
 use crate::tabs::PaneBinding;
 
@@ -67,13 +67,16 @@ pub(crate) enum Step {
     /// Duplicate the session under a fresh request id, then place the
     /// duplicate and discard the original ([`Duplicates`]).
     Duplicate,
+    /// Open the delete-worktree confirm, whose answer sends the messages
+    /// ([`crate::branch_fate`]).
+    ConfirmWorktreeDelete,
 }
 
-/// The one action waiting for its confirming second click, keyed by the
-/// session it acts on, so it never carries over to another session.
+/// The pane header's Stop waiting for its confirming second click, keyed by
+/// the session it stops, so it never carries over to another session.
 #[derive(Debug, Default)]
-pub(crate) struct ActionConfirm {
-    armed: Option<(String, SessionAction)>,
+pub(crate) struct HeaderStopConfirm {
+    armed: Option<String>,
 }
 
 /// The sessions being restarted or resumed, by the request id of their
@@ -217,17 +220,17 @@ pub(crate) fn rename_message(session_id: &str, text: &str) -> ClientMessage {
 /// What `action` does to `session`; `shown` says whether a pane shows it.
 /// A stop that leaves no pane behind also parks the session when it has a
 /// worktree to keep, else discards it, as `SessionContextMenu.tsx`'s
-/// `sendStop` does. Deleting a worktree discards with one cleanup per
-/// member repo.
+/// `sendStop` does. Deleting a worktree goes through the delete-worktree
+/// confirm.
 pub(crate) fn plan(action: SessionAction, session: &SessionSnapshot, shown: bool) -> Step {
     let id = session.id.clone();
     let stop = || ClientMessage::StopSession {
         session_id: id.clone(),
         cleanup: Vec::new(),
     };
-    let discard = |cleanup| ClientMessage::DiscardSession {
+    let discard = || ClientMessage::DiscardSession {
         session_id: id.clone(),
-        cleanup,
+        cleanup: Vec::new(),
     };
     let park = || ClientMessage::ParkSession {
         session_id: id.clone(),
@@ -235,18 +238,14 @@ pub(crate) fn plan(action: SessionAction, session: &SessionSnapshot, shown: bool
     let messages = match action {
         SessionAction::Rename => return Step::EditName,
         SessionAction::Restart | SessionAction::Resume => return Step::Duplicate,
+        SessionAction::StopDeleteWorktree
+        | SessionAction::RemovePaneDeleteWorktree
+        | SessionAction::RemoveFromSidebarDeleteWorktree => return Step::ConfirmWorktreeDelete,
         SessionAction::StopKeepWorktree if shown => vec![stop()],
         SessionAction::StopKeepWorktree if session.has_per_session_worktree => vec![stop(), park()],
-        SessionAction::StopKeepWorktree => vec![stop(), discard(Vec::new())],
-        SessionAction::StopDeleteWorktree => vec![stop(), discard(delete_worktrees(session))],
+        SessionAction::StopKeepWorktree => vec![stop(), discard()],
         SessionAction::Park => vec![park()],
-        SessionAction::RemovePane | SessionAction::RemoveFromSidebar => {
-            vec![discard(Vec::new())]
-        }
-        SessionAction::RemovePaneDeleteWorktree
-        | SessionAction::RemoveFromSidebarDeleteWorktree => {
-            vec![discard(delete_worktrees(session))]
-        }
+        SessionAction::RemovePane | SessionAction::RemoveFromSidebar => vec![discard()],
         SessionAction::ResumeAbandoned => vec![ClientMessage::ResumeAbandoned {
             session_id: id.clone(),
         }],
@@ -255,18 +254,6 @@ pub(crate) fn plan(action: SessionAction, session: &SessionSnapshot, shown: bool
         }],
     };
     Step::Send(messages)
-}
-
-fn delete_worktrees(session: &SessionSnapshot) -> Vec<CleanupAction> {
-    session
-        .members
-        .iter()
-        .map(|member| CleanupAction {
-            repo_id: member.repo_id.clone(),
-            remove_worktree: true,
-            branch: BranchCleanup::Auto,
-        })
-        .collect()
 }
 
 impl SessionAction {
@@ -319,7 +306,8 @@ impl SessionAction {
         }
     }
 
-    /// Whether the action deletes a worktree, and so asks twice.
+    /// Whether the action deletes a worktree, and so goes through the
+    /// delete-worktree confirm.
     pub(crate) fn deletes_worktree(self) -> bool {
         matches!(
             self,
@@ -334,29 +322,25 @@ impl SessionAction {
     }
 }
 
-impl ActionConfirm {
-    /// A click on `action` for `session_id`: true when exactly that was
+impl HeaderStopConfirm {
+    /// A Stop click for `session_id`: true when exactly that session was
     /// armed (and disarms it), else arms it and returns false.
-    pub(crate) fn click(&mut self, session_id: &str, action: SessionAction) -> bool {
-        if self.is_armed(session_id, action) {
+    pub(crate) fn click(&mut self, session_id: &str) -> bool {
+        if self.is_armed(session_id) {
             self.armed = None;
             true
         } else {
-            self.armed = Some((session_id.to_owned(), action));
+            self.armed = Some(session_id.to_owned());
             false
         }
     }
 
-    pub(crate) fn is_armed(&self, session_id: &str, action: SessionAction) -> bool {
-        self.armed
-            .as_ref()
-            .is_some_and(|(id, armed)| id == session_id && *armed == action)
+    pub(crate) fn is_armed(&self, session_id: &str) -> bool {
+        self.armed.as_deref() == Some(session_id)
     }
 
-    pub(crate) fn armed(&self) -> Option<(&str, SessionAction)> {
-        self.armed
-            .as_ref()
-            .map(|(id, action)| (id.as_str(), *action))
+    pub(crate) fn armed(&self) -> Option<&str> {
+        self.armed.as_deref()
     }
 
     /// Returns whether anything was armed.
@@ -455,12 +439,12 @@ impl Duplicates {
 )]
 mod tests {
     use super::{
-        ActionConfirm, ActionState, Duplicates, MenuEntry, MenuMode, SessionAction, Step,
+        ActionState, Duplicates, HeaderStopConfirm, MenuEntry, MenuMode, SessionAction, Step,
         action_state, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
         menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
     };
     use crate::tabs::PaneBinding;
-    use protocol::{BranchCleanup, CleanupAction, ClientMessage, SessionSnapshot};
+    use protocol::{CleanupAction, ClientMessage, SessionSnapshot};
     use serde_json::json;
 
     use SessionAction as A;
@@ -506,17 +490,6 @@ mod tests {
             Step::Send(messages) => messages,
             other => panic!("expected messages, got {other:?}"),
         }
-    }
-
-    fn delete_all() -> Vec<CleanupAction> {
-        ["r1", "r2"]
-            .into_iter()
-            .map(|repo_id| CleanupAction {
-                repo_id: repo_id.to_owned(),
-                remove_worktree: true,
-                branch: BranchCleanup::Auto,
-            })
-            .collect()
     }
 
     fn is_discard(msg: &ClientMessage, cleanup: &[CleanupAction]) -> bool {
@@ -729,23 +702,23 @@ mod tests {
     }
 
     #[test]
-    fn actions_worktree_deletes_send_one_cleanup_per_member() {
+    fn actions_worktree_deletes_go_through_the_confirm() {
         let running = with_worktree(session("idle"));
-        let stop = sent(plan(A::StopDeleteWorktree, &running, true));
-        assert!(
-            matches!(stop.as_slice(), [s, d] if is_stop(s) && is_discard(d, &delete_all())),
-            "{stop:?}"
-        );
+        assert!(matches!(
+            plan(A::StopDeleteWorktree, &running, true),
+            Step::ConfirmWorktreeDelete
+        ));
         let stopped = with_worktree(session("stopped"));
         for action in [
             A::RemovePaneDeleteWorktree,
             A::RemoveFromSidebarDeleteWorktree,
         ] {
-            let msgs = sent(plan(action, &stopped, true));
-            assert!(
-                matches!(msgs.as_slice(), [d] if is_discard(d, &delete_all())),
-                "{msgs:?}"
-            );
+            for shown in [true, false] {
+                assert!(
+                    matches!(plan(action, &stopped, shown), Step::ConfirmWorktreeDelete),
+                    "{action:?} never deletes in one click"
+                );
+            }
         }
         for action in [A::RemovePane, A::RemoveFromSidebar] {
             let msgs = sent(plan(action, &stopped, false));
@@ -789,28 +762,22 @@ mod tests {
     }
 
     #[test]
-    fn actions_confirm_is_keyed_by_session_and_action() {
-        let mut confirm = ActionConfirm::default();
-        assert!(!confirm.click("s1", A::RemovePaneDeleteWorktree));
-        assert!(confirm.is_armed("s1", A::RemovePaneDeleteWorktree));
+    fn actions_header_stop_confirm_is_keyed_by_session() {
+        let mut confirm = HeaderStopConfirm::default();
+        assert!(!confirm.click("s1"), "the first click only arms");
+        assert!(confirm.is_armed("s1"));
+        assert_eq!(confirm.armed(), Some("s1"));
         assert!(
-            !confirm.click("s2", A::RemovePaneDeleteWorktree),
-            "another session arms its own"
+            !confirm.click("s2"),
+            "another session arms its own, never stops on s1's arm"
         );
-        assert!(!confirm.is_armed("s1", A::RemovePaneDeleteWorktree));
-        assert!(
-            !confirm.click("s2", A::StopDeleteWorktree),
-            "another action too"
-        );
-        assert!(confirm.click("s2", A::StopDeleteWorktree));
+        assert!(!confirm.is_armed("s1"));
+        assert!(confirm.click("s2"));
         assert_eq!(confirm.armed(), None, "acting disarms");
         assert!(!confirm.disarm());
-        confirm.click("s1", A::StopKeepWorktree);
+        confirm.click("s1");
         assert!(confirm.disarm());
-        assert!(
-            !confirm.click("s1", A::StopKeepWorktree),
-            "a disarm needs two clicks again"
-        );
+        assert!(!confirm.click("s1"), "a disarm needs two clicks again");
     }
 
     fn binding(tab: &str, pane: &str, session: Option<&str>) -> PaneBinding {

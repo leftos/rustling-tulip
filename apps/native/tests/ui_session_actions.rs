@@ -12,7 +12,7 @@
 mod support;
 
 use gpui::{Modifiers, TestAppContext, px};
-use protocol::{BranchCleanup, CleanupAction, ClientMessage, DaemonMessage, SessionSnapshot};
+use protocol::{CleanupAction, ClientMessage, DaemonMessage, SessionSnapshot};
 use support::{Fixture, Harness, TestDir, pane, session, tab};
 
 /// Whether the element tagged `selector` has been painted on screen. gpui
@@ -254,24 +254,28 @@ fn overlay_remove_keep_worktree_parks(cx: &mut TestAppContext) {
     );
 }
 
+fn dialog_of(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.delete_dialog_session().map(str::to_owned))
+}
+
+/// Whether `sent` is the delete-worktree confirm's preview request for
+/// `id` and nothing else: no discard goes out on the click.
+fn only_preview(sent: &[ClientMessage], id: &str) -> bool {
+    matches!(sent, [ClientMessage::PreviewDiscard { session_id }] if session_id == id)
+}
+
 #[gpui::test]
-fn remove_and_delete_worktree_requires_confirm_and_sends_cleanup(cx: &mut TestAppContext) {
+fn remove_and_delete_worktree_opens_the_confirm(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").worktree("r1").exited(1).build());
 
     h.click_on("exited-remove-pane-delete-p1");
-    assert!(h.sent().is_empty(), "the first click only asks");
-    h.click_on("exited-remove-pane-delete-p1");
-    let cleanup = [CleanupAction {
-        repo_id: "r1".to_owned(),
-        remove_worktree: true,
-        branch: BranchCleanup::Auto,
-    }];
     let sent = h.sent();
     assert!(
-        matches!(sent.as_slice(), [discard] if is_discard(discard, "s1", &cleanup)),
-        "sent {sent:?}"
+        only_preview(&sent, "s1"),
+        "the click only asks: sent {sent:?}"
     );
+    assert_eq!(dialog_of(&mut h).as_deref(), Some("s1"));
 }
 
 #[gpui::test]
@@ -366,31 +370,6 @@ fn rows(h: &mut Harness<'_>) -> Vec<String> {
 fn pending(h: &mut Harness<'_>, id: &str) -> bool {
     let id = id.to_owned();
     h.root(move |root, _| root.restart_pending(&id))
-}
-
-#[gpui::test]
-fn overlay_delete_confirm_does_not_survive_restart(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = single(cx, &dir, session("s1").worktree("r1").exited(1).build());
-
-    h.click_on("exited-remove-pane-delete-p1");
-    h.click_on("exited-restart-p1");
-    let id = duplicate_request(&h.sent(), "s1");
-    h.send(updated(
-        session("s2").worktree("r1").exited(1).build(),
-        Some(&id),
-    ));
-    h.send(DaemonMessage::TabUpdated {
-        tab: tab("t1", &pane("p1", Some("s2"))),
-    });
-    h.sent();
-
-    h.click_on("exited-remove-pane-delete-p1");
-    let sent = h.sent();
-    assert!(
-        sent.is_empty(),
-        "s2's worktree delete asks first; nothing armed for s1 carries over: sent {sent:?}"
-    );
 }
 
 #[gpui::test]
@@ -591,29 +570,6 @@ fn unplaced_stopped_session_menu_says_session(cx: &mut TestAppContext) {
             "Remove session, keep worktree",
             "Remove session and delete worktree"
         ]
-    );
-}
-
-#[gpui::test]
-fn menu_delete_worktree_is_two_step(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = single(cx, &dir, session("s1").worktree("r1").build());
-
-    h.right_click_on("leaf-s1");
-    h.click_on("menu-stop");
-    h.click_on("menu-stop-delete");
-    assert!(h.sent().is_empty(), "the first click only asks");
-    assert_eq!(menu_of(&mut h).as_deref(), Some("s1"));
-    h.click_on("menu-stop-delete");
-    let cleanup = [CleanupAction {
-        repo_id: "r1".to_owned(),
-        remove_worktree: true,
-        branch: BranchCleanup::Auto,
-    }];
-    let sent = h.sent();
-    assert!(
-        matches!(sent.as_slice(), [stop, discard] if is_stop(stop, "s1") && is_discard(discard, "s1", &cleanup)),
-        "sent {sent:?}"
     );
 }
 

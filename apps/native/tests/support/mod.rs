@@ -442,6 +442,14 @@ impl<'a> Harness<'a> {
                 .or_else(|| selector.strip_prefix("pane-stop-cancel-"))
             {
                 root.armed_stop_pane() == Some(id)
+            } else if selector == "delete-worktree-dialog"
+                || selector == "delete-worktree-dialog-close"
+            {
+                root.delete_dialog_session().is_some()
+            } else if selector.starts_with("delete-worktree-") {
+                root.delete_dialog_buttons()
+                    .iter()
+                    .any(|(button, _)| *button == selector)
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
             } else if selector == "sidebar-panel" || selector == "sidebar-divider" {
