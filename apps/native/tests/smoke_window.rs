@@ -33,7 +33,7 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_OEM_MINUS, VK_OEM_PERIOD, VK_RETURN,
+    MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_OEM_MINUS, VK_OEM_PERIOD, VK_RETURN, VK_SPACE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
@@ -414,14 +414,15 @@ fn press(hwnd: HWND, vk: VIRTUAL_KEY) {
     );
 }
 
-/// Types lowercase letters, digits, dots and hyphens, then Enter.
+/// Types lowercase letters, digits, spaces, dots and hyphens, then Enter.
 fn type_line(hwnd: HWND, text: &str) {
     for c in text.chars() {
         assert!(
-            c == '.' || c == '-' || c.is_ascii_alphanumeric(),
-            "type_line types letters, digits, dots and hyphens only, not {c:?}"
+            c == ' ' || c == '.' || c == '-' || c.is_ascii_alphanumeric(),
+            "type_line types letters, digits, spaces, dots and hyphens only, not {c:?}"
         );
         let vk = match c {
+            ' ' => VK_SPACE,
             '.' => VK_OEM_PERIOD,
             '-' => VK_OEM_MINUS,
             c => {
@@ -454,10 +455,7 @@ fn smoke_posted_keys_reach_the_shell() {
     // its session are dropped.
     loop {
         click_at(hwnd, pane_center(hwnd));
-        // `echo.` prints the rest of the line in cmd. A posted Space is lost:
-        // gpui gives it no `key_char`, the pane passes it on, and the
-        // `WM_CHAR` it becomes finds no input handler on the pane.
-        type_line(hwnd, &format!("echo.{MARKER}"));
+        type_line(hwnd, &format!("echo {MARKER}"));
         if wait_for_line(&mut shell, &smoke.session, MARKER, ECHO_WAIT) {
             break;
         }

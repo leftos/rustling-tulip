@@ -38,6 +38,11 @@ pub fn to_bytes(ks: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     if m.control && !m.alt {
         return control_byte(ks.key.as_str()).map(|b| vec![b]);
     }
+    if ks.key == "space" {
+        // Alt+Space belongs to the window's system menu, so it stays
+        // unconsumed whichever `key_char` shape the platform sends.
+        return if m.alt { None } else { Some(b" ".to_vec()) };
+    }
     let text = ks.key_char.as_deref()?;
     Some(prefix_alt(m.alt, text.as_bytes().to_vec()))
 }
@@ -249,6 +254,29 @@ mod tests {
     fn ctrl_with_unmapped_key_yields_nothing() {
         assert_eq!(bytes(&with(typed("1", "1"), ctrl())), None);
         assert_eq!(bytes(&with(key("f13"), ctrl())), None);
+    }
+
+    #[test]
+    fn space_without_key_char_sends_space() {
+        assert_eq!(bytes(&key("space")), Some(b" ".to_vec()));
+        assert_eq!(bytes(&with(key("space"), shift())), Some(b" ".to_vec()));
+    }
+
+    #[test]
+    fn ctrl_space_still_sends_nul() {
+        assert_eq!(bytes(&with(key("space"), ctrl())), Some(vec![0x00]));
+    }
+
+    #[test]
+    fn alt_space_is_left_to_the_system_menu() {
+        let ctrl_alt = Modifiers {
+            control: true,
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(bytes(&with(key("space"), alt())), None);
+        assert_eq!(bytes(&with(typed("space", " "), alt())), None);
+        assert_eq!(bytes(&with(key("space"), ctrl_alt)), None);
     }
 
     #[test]

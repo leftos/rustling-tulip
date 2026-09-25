@@ -11,8 +11,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    Bounds, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point,
-    TestAppContext, VisualTestContext, point, px,
+    Bounds, Entity, KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+    Pixels, Point, TestAppContext, VisualTestContext, point, px,
 };
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
@@ -518,6 +518,16 @@ impl<'a> Harness<'a> {
 
     pub fn keys(&mut self, keystrokes: &str) {
         self.cx.simulate_keystrokes(keystrokes);
+    }
+
+    /// Dispatches one key press the way the platform delivers it, without the
+    /// character `simulate_keystrokes` synthesizes from it.
+    pub fn key_down(&mut self, keystroke: Keystroke) {
+        self.cx.simulate_event(KeyDownEvent {
+            keystroke,
+            is_held: false,
+        });
+        self.cx.run_until_parked();
     }
 
     pub fn clipboard(&mut self) -> Option<String> {

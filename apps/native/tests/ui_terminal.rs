@@ -55,6 +55,18 @@ fn shift_enter_sends_line_continuation_per_agent(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn space_with_windows_key_shape_reaches_the_pty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.key_down(gpui::Keystroke {
+        modifiers: Modifiers::none(),
+        key: "space".into(),
+        key_char: None,
+    });
+    assert_eq!(h.sent_input("s1"), b" ", "a Windows Space has no key_char");
+}
+
+#[gpui::test]
 fn drag_selects_copies_on_release_and_ctrl_c_copies_instead_of_interrupting(
     cx: &mut TestAppContext,
 ) {
