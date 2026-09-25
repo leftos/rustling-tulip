@@ -12,23 +12,21 @@ mod connection;
 mod footer;
 mod keys;
 mod net;
+mod sidebar;
+mod sidebar_view;
 mod term;
+mod term_view;
 
-use alacritty_terminal::term::cell::Flags;
 use anyhow::Context as _;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Application, Bounds, ClickEvent,
-    ClipboardItem, Context, Div, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent,
-    MouseDownEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString, Stateful, TextRun,
-    UnderlineStyle, Window, WindowBounds, WindowOptions, canvas, div, fill, font, point,
-    prelude::*, pulsating_between, px, size,
+    ClipboardItem, Context, Div, ElementId, Entity, FocusHandle, FontWeight, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, Window,
+    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
-use protocol::{ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
-use std::collections::HashSet;
+use protocol::{DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -40,12 +38,12 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use crate::connection::{Connection, DotKind, Footer};
 use crate::footer::{LogPaths, StopConfirm, flyout_rows, log_paths};
 use crate::net::{HandshakeInfo, NetCommand, NetEvent};
-use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
+use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
+use crate::term_view::TerminalPane;
 
-const FONT_FAMILY: &str = "Cascadia Mono";
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 18.0;
 const PADDING: f32 = 6.0;
+/// Width of the drag handle between the sidebar and the terminal.
+const DIVIDER_WIDTH: f32 = 4.0;
 /// This client's log file, under `<config dir>/logs/`.
 const LOG_FILE: &str = "native.log";
 
@@ -62,23 +60,26 @@ const MUTED: u32 = 0x009a_9a9a;
 const DANGER: u32 = 0x00ef_5c5c;
 const DANGER_BG: u32 = 0x003a_1c1f;
 
-struct TerminalView {
-    term: Terminal,
-    focus: FocusHandle,
+struct RootView {
+    pane: Entity<TerminalPane>,
     tx: UnboundedSender<NetCommand>,
     /// The connection state machine as the network thread last reported it.
     conn: Connection,
     handshake: Option<HandshakeInfo>,
-    /// Every session the daemon knows, for the session count.
-    session_ids: HashSet<String>,
+    /// Repos, workspaces and every session the daemon knows, plus the
+    /// sidebar layout.
+    sidebar: SidebarModel,
+    /// Where the sidebar layout is saved; `None` when the config dir could
+    /// not be resolved.
+    ui_dir: Option<PathBuf>,
+    /// The divider is being dragged.
+    dragging: bool,
+    /// Focus for the sidebar, which takes it on a click so Ctrl+B there
+    /// toggles the sidebar instead of reaching the terminal.
+    sidebar_focus: FocusHandle,
     wanted_session: Option<String>,
-    session_id: Option<String>,
-    /// PTY output that arrived before the scrollback reply; fed after it.
-    pending: Vec<Vec<u8>>,
-    scrollback_loaded: bool,
     /// The attached session, or why none is.
     status: String,
-    scroll_accum: f32,
     /// Whether the daemon troubleshooting flyout is open.
     flyout_open: bool,
     /// The flyout's two-click stop.
@@ -89,7 +90,7 @@ struct TerminalView {
     paths: Result<LogPaths, String>,
 }
 
-impl TerminalView {
+impl RootView {
     fn new(wanted_session: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (out_tx, out_rx) = unbounded();
         let (in_tx, mut in_rx) = unbounded();
@@ -102,32 +103,114 @@ impl TerminalView {
             }
         })
         .detach();
-        let focus = cx.focus_handle();
-        focus.focus(window);
+        let pane_tx = out_tx.clone();
+        let pane = cx.new(|cx| TerminalPane::new(pane_tx, window, cx));
+        let config_dir = daemon_client::config_dir();
+        let ui_dir = match &config_dir {
+            Ok(dir) => Some(dir.clone()),
+            Err(err) => {
+                tracing::warn!("sidebar layout will not be saved: {err:#}");
+                None
+            }
+        };
+        let ui = ui_dir
+            .as_deref()
+            .map_or_else(UiState::default, load_ui_state);
         Self {
-            term: Terminal::new(GridSize { cols: 80, rows: 24 }),
-            focus,
+            pane,
             tx: out_tx,
             conn: Connection::new(),
             handshake: None,
-            session_ids: HashSet::new(),
+            sidebar: SidebarModel::new(ui),
+            ui_dir,
+            dragging: false,
+            sidebar_focus: cx.focus_handle(),
             wanted_session,
-            session_id: None,
-            pending: Vec::new(),
-            scrollback_loaded: false,
             status: String::new(),
-            scroll_accum: 0.0,
             flyout_open: false,
             stop: StopConfirm::default(),
             copied: false,
-            paths: daemon_client::config_dir()
+            paths: config_dir
                 .map(|dir| log_paths(&dir))
                 .map_err(|err| format!("config folder unavailable: {err:#}")),
         }
     }
 
-    fn send(&self, msg: ClientMessage) {
-        self.command(NetCommand::Send(Box::new(msg)));
+    fn save_ui(&self) {
+        let Some(dir) = &self.ui_dir else {
+            return;
+        };
+        if let Err(err) = save_ui_state(dir, self.sidebar.ui_state()) {
+            tracing::warn!("saving the sidebar layout: {err:#}");
+        }
+    }
+
+    /// Hide or show the sidebar; hiding it hands the keyboard back to the
+    /// terminal, since the sidebar may have held it.
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.toggle_sidebar();
+        self.dragging = false;
+        self.save_ui();
+        if self.sidebar.is_collapsed() {
+            self.pane.read(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    fn toggle_container(&mut self, key: &str) {
+        self.sidebar.toggle_container(key);
+        self.save_ui();
+    }
+
+    /// A leaf click: re-attach the terminal to that session unless it is
+    /// already attached or has no terminal, and acknowledge its attention
+    /// either way.
+    fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.clear_attention(id);
+        if !self.is_ours(id, cx)
+            && let Some(session) = self.sidebar.session(id).filter(|s| can_attach(s)).cloned()
+        {
+            self.pane.update(cx, |pane, _| pane.detach());
+            self.attach_to(&session, cx);
+        }
+        self.pane.read(cx).focus(window);
+        cx.notify();
+    }
+
+    fn start_drag(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.dragging = true;
+        cx.stop_propagation();
+    }
+
+    fn on_drag_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dragging {
+            return;
+        }
+        if event.pressed_button == Some(MouseButton::Left) {
+            let window_width = window.viewport_size().width / px(1.0);
+            self.sidebar
+                .set_width(event.position.x / px(1.0), window_width);
+        } else {
+            self.finish_drag();
+        }
+        cx.notify();
+    }
+
+    fn on_drag_end(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.finish_drag();
+            cx.notify();
+        }
+    }
+
+    fn finish_drag(&mut self) {
+        self.dragging = false;
+        self.save_ui();
     }
 
     fn command(&self, command: NetCommand) {
@@ -171,7 +254,7 @@ impl TerminalView {
         match event {
             NetEvent::State(conn) => self.conn = conn,
             NetEvent::Handshake(info) => self.handshake = Some(info),
-            NetEvent::Message(msg) => self.on_message(*msg),
+            NetEvent::Message(msg) => self.on_message(*msg, cx),
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.
@@ -181,71 +264,68 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_message(&mut self, msg: DaemonMessage) {
+    fn on_message(&mut self, msg: DaemonMessage, cx: &mut Context<Self>) {
+        self.sidebar.apply(&msg);
         match msg {
-            DaemonMessage::Welcome { .. } => self.reset_attachment(),
+            DaemonMessage::Welcome { .. } => self.reset_attachment(cx),
             DaemonMessage::Sessions { sessions } => {
-                self.session_ids = sessions.iter().map(|s| s.id.clone()).collect();
-                if self.session_id.is_none() {
-                    self.pick_session(&sessions);
+                if self.attached(cx).is_none() {
+                    self.pick_session(&sessions, cx);
                 }
-            }
-            DaemonMessage::SessionUpdated { session } => {
-                self.session_ids.insert(session.id);
             }
             DaemonMessage::Scrollback {
                 session_id,
                 data_b64,
                 ..
-            } if self.is_ours(&session_id) => self.on_scrollback(&data_b64),
+            } if self.is_ours(&session_id, cx) => {
+                self.feed_pane(cx, |pane| pane.on_scrollback(&data_b64));
+            }
             DaemonMessage::PtyOutput {
                 session_id,
                 data_b64,
-            } if self.is_ours(&session_id) => self.on_pty_output(&data_b64),
-            DaemonMessage::SessionRemoved { session_id } => {
-                self.session_ids.remove(&session_id);
-                if self.is_ours(&session_id) {
-                    "session removed".clone_into(&mut self.status);
-                }
+            } if self.is_ours(&session_id, cx) => {
+                self.feed_pane(cx, |pane| pane.on_pty_output(&data_b64));
+            }
+            DaemonMessage::SessionRemoved { session_id } if self.is_ours(&session_id, cx) => {
+                "session removed".clone_into(&mut self.status);
             }
             _ => {}
+        }
+    }
+
+    fn feed_pane(
+        &mut self,
+        cx: &mut Context<Self>,
+        feed: impl FnOnce(&mut TerminalPane) -> Result<(), base64::DecodeError>,
+    ) {
+        let fed = self.pane.update(cx, |pane, cx| {
+            cx.notify();
+            feed(pane)
+        });
+        if let Err(err) = fed {
+            self.status = format!("bad base64 from daemon: {err}");
         }
     }
 
     /// A new connection starts unattached: the daemon pushes `Sessions` after
     /// `Welcome`, and the view picks again, preferring the session it had and
     /// replaying its scrollback into a fresh terminal.
-    fn reset_attachment(&mut self) {
-        if let Some(id) = self.session_id.take() {
+    fn reset_attachment(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.pane.update(cx, |pane, _| pane.reset_for_reconnect()) {
             self.wanted_session = Some(id);
-            self.term = Terminal::new(self.term.size());
         }
-        self.pending.clear();
-        self.scrollback_loaded = false;
         self.status.clear();
     }
 
-    fn on_scrollback(&mut self, data_b64: &str) {
-        self.feed_b64(data_b64);
-        self.scrollback_loaded = true;
-        for chunk in std::mem::take(&mut self.pending) {
-            self.term.feed(&chunk);
-        }
+    fn attached(&self, cx: &App) -> Option<String> {
+        self.pane.read(cx).session_id().map(str::to_owned)
     }
 
-    fn on_pty_output(&mut self, data_b64: &str) {
-        if self.scrollback_loaded {
-            self.feed_b64(data_b64);
-        } else if let Ok(bytes) = B64.decode(data_b64) {
-            self.pending.push(bytes);
-        }
+    fn is_ours(&self, id: &str, cx: &App) -> bool {
+        self.pane.read(cx).session_id() == Some(id)
     }
 
-    fn is_ours(&self, id: &str) -> bool {
-        self.session_id.as_deref() == Some(id)
-    }
-
-    fn pick_session(&mut self, sessions: &[SessionSnapshot]) {
+    fn pick_session(&mut self, sessions: &[SessionSnapshot], cx: &mut Context<Self>) {
         let live = |s: &&SessionSnapshot| {
             matches!(s.mode, SessionMode::Interactive | SessionMode::PlainShell)
                 && !matches!(s.status, SessionStatus::Stopped | SessionStatus::Error)
@@ -263,271 +343,48 @@ impl TerminalView {
             };
             return;
         };
+        self.attach_to(session, cx);
+    }
+
+    fn attach_to(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
         let label = session
             .user_label
             .clone()
             .unwrap_or_else(|| session.label.clone());
         self.status = format!("{label} · {}", session.id);
-        self.session_id = Some(session.id.clone());
-        self.send(ClientMessage::LoadScrollback {
-            session_id: session.id.clone(),
-        });
-        self.send_resize();
-    }
-
-    fn feed_b64(&mut self, data_b64: &str) {
-        match B64.decode(data_b64) {
-            Ok(bytes) => self.term.feed(&bytes),
-            Err(err) => self.status = format!("bad base64 from daemon: {err}"),
-        }
-    }
-
-    fn send_input(&mut self, bytes: &[u8]) {
-        let Some(session_id) = self.session_id.clone() else {
-            return;
-        };
-        self.term.scroll_to_bottom();
-        self.send(ClientMessage::SendInput {
-            session_id,
-            data_b64: B64.encode(bytes),
+        let id = session.id.clone();
+        self.pane.update(cx, |pane, cx| {
+            pane.attach(id);
+            cx.notify();
         });
     }
 
-    fn send_resize(&self) {
-        let Some(session_id) = self.session_id.clone() else {
-            return;
-        };
-        let GridSize { cols, rows } = self.term.size();
-        let (Ok(cols), Ok(rows)) = (u16::try_from(cols), u16::try_from(rows)) else {
-            return;
-        };
-        self.send(ClientMessage::Resize {
-            session_id,
-            cols,
-            rows,
-        });
-    }
-
-    fn ensure_size(&mut self, size: GridSize) {
-        if size != self.term.size() {
-            self.term.resize(size);
-            self.send_resize();
-        }
-    }
-
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Keys the root takes before the terminal sees them. Ctrl+B toggles the
+    /// sidebar only when the terminal is not focused; there it is the PTY's
+    /// 0x02.
+    fn on_key_capture(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
+        let ctrl_only = ks.modifiers.control && !ks.modifiers.shift && !ks.modifiers.alt;
         if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
-        } else if ks.modifiers.control && ks.modifiers.shift && ks.key == "v" {
-            self.paste(cx);
-        } else if let Some(bytes) = keys::to_bytes(ks, self.term.app_cursor()) {
-            self.send_input(&bytes);
+        } else if ctrl_only && ks.key == "b" && !self.pane.read(cx).is_focused(window) {
+            self.toggle_sidebar(window, cx);
         } else {
             return;
         }
         cx.stop_propagation();
         cx.notify();
     }
-
-    fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
-            return;
-        };
-        let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        if self.term.bracketed_paste() {
-            self.send_input(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            self.send_input(text.as_bytes());
-        }
-    }
-
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let line_height = px(LINE_HEIGHT);
-        self.scroll_accum += event.delta.pixel_delta(line_height).y / line_height;
-        let lines = self.scroll_accum.trunc();
-        if lines != 0.0 {
-            self.scroll_accum -= lines;
-            // Saturating cast: a single wheel event never scrolls i32::MAX lines.
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "whole-line count from a wheel delta"
-            )]
-            self.term.scroll(lines as i32);
-            cx.notify();
-        }
-    }
 }
 
-struct Metrics {
-    cell_width: Pixels,
-    line_height: Pixels,
-    font: Font,
-}
-
-fn metrics(window: &Window) -> Metrics {
-    let font = font(FONT_FAMILY);
-    let text = window.text_system();
-    let font_id = text.resolve_font(&font);
-    let cell_width = text
-        .advance(font_id, px(FONT_SIZE), 'm')
-        .map_or(px(FONT_SIZE * 0.6), |s| s.width);
-    Metrics {
-        cell_width,
-        line_height: px(LINE_HEIGHT),
-        font,
-    }
-}
-
-fn grid_size(bounds: Bounds<Pixels>, m: &Metrics) -> GridSize {
-    let fit = |avail: Pixels, unit: Pixels| {
-        let n = (avail / unit).floor();
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "clamped, small count"
-        )]
-        let n = n.max(1.0) as usize;
-        n
-    };
-    GridSize {
-        cols: fit(bounds.size.width, m.cell_width),
-        rows: fit(bounds.size.height, m.line_height),
-    }
-}
-
-fn to_rgba(c: alacritty_terminal::vte::ansi::Rgb) -> Rgba {
-    Rgba {
-        r: f32::from(c.r) / 255.0,
-        g: f32::from(c.g) / 255.0,
-        b: f32::from(c.b) / 255.0,
-        a: 1.0,
-    }
-}
-
-fn cell_origin(origin: Point<Pixels>, m: &Metrics, row: usize, col: usize) -> Point<Pixels> {
-    #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
-    point(
-        origin.x + m.cell_width * col as f32,
-        origin.y + m.line_height * row as f32,
-    )
-}
-
-fn paint_grid(
-    bounds: Bounds<Pixels>,
-    snap: &Snapshot,
-    m: &Metrics,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    paint_backgrounds(bounds.origin, &snap.bg, m, window);
-    if let Some((row, col)) = snap.cursor {
-        paint_cursor(cell_origin(bounds.origin, m, row, col), m, window);
-    }
-    for span in &snap.text {
-        if !span.text.trim().is_empty() {
-            paint_span(bounds.origin, span, m, window, cx);
-        }
-    }
-}
-
-fn paint_backgrounds(origin: Point<Pixels>, spans: &[BgSpan], m: &Metrics, window: &mut Window) {
-    for bg in spans {
-        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
-        let width = m.cell_width * bg.len as f32;
-        window.paint_quad(fill(
-            Bounds::new(
-                cell_origin(origin, m, bg.row, bg.col),
-                size(width, m.line_height),
-            ),
-            to_rgba(bg.color),
-        ));
-    }
-}
-
-fn paint_cursor(at: Point<Pixels>, m: &Metrics, window: &mut Window) {
-    let cursor = Rgba {
-        a: 0.55,
-        ..to_rgba(alacritty_terminal::vte::ansi::Rgb {
-            r: 0xae,
-            g: 0xaf,
-            b: 0xad,
-        })
-    };
-    window.paint_quad(fill(
-        Bounds::new(at, size(m.cell_width, m.line_height)),
-        cursor,
-    ));
-}
-
-fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
-    let color = to_rgba(span.fg);
-    TextRun {
-        len: span.text.len(),
-        font: Font {
-            weight: if span.flags.contains(Flags::BOLD) {
-                FontWeight::BOLD
-            } else {
-                FontWeight::NORMAL
-            },
-            style: if span.flags.contains(Flags::ITALIC) {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            },
-            ..m.font.clone()
-        },
-        color: color.into(),
-        background_color: None,
-        underline: span
-            .flags
-            .contains(Flags::UNDERLINE)
-            .then(|| UnderlineStyle {
-                color: Some(color.into()),
-                thickness: px(1.0),
-                wavy: false,
-            }),
-        strikethrough: None,
-    }
-}
-
-fn paint_span(
-    origin: Point<Pixels>,
-    span: &TextSpan,
-    m: &Metrics,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let force_width = (!span.flags.contains(Flags::WIDE_CHAR)).then_some(m.cell_width);
-    let line = window.text_system().shape_line(
-        SharedString::from(span.text.clone()),
-        px(FONT_SIZE),
-        &[text_run(span, m)],
-        force_width,
-    );
-    let at = cell_origin(origin, m, span.row, span.col);
-    if let Err(err) = line.paint(at, m.line_height, window, cx) {
-        tracing::error!("painting row {}: {err:#}", span.row);
-    }
-}
-
-impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity();
-        let background = to_rgba(self.term.snapshot().background);
-        let grid = canvas(
-            move |bounds, window, cx| {
-                let m = metrics(window);
-                let snap = view.update(cx, |v, _| {
-                    v.ensure_size(grid_size(bounds, &m));
-                    v.term.snapshot()
-                });
-                (m, snap)
-            },
-            |bounds, (m, snap), window, cx| paint_grid(bounds, &snap, &m, window, cx),
-        )
-        .size_full();
-        let footer = self.conn.footer(self.session_ids.len());
+impl Render for RootView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self
             .flyout_open
             .then(|| [flyout_backdrop(cx).into_any_element(), self.flyout(cx)]);
@@ -541,18 +398,17 @@ impl Render for TerminalView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(background)
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::on_key))
-            .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .child(div().flex_1().p(px(PADDING)).child(grid))
+            .capture_key_down(cx.listener(Self::on_key_capture))
+            .on_mouse_move(cx.listener(Self::on_drag_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
+            .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
             .children(flyout.into_iter().flatten())
             .children(overlay)
     }
 }
 
-impl TerminalView {
+impl RootView {
     /// The bottom bar: the daemon pill, then the attached session's status.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
         let text = match footer.port {
@@ -592,7 +448,11 @@ impl TerminalView {
 
     /// The troubleshooting flyout above the pill: details, files, control.
     fn flyout(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows = flyout_rows(&self.conn, self.handshake.as_ref(), self.session_ids.len());
+        let rows = flyout_rows(
+            &self.conn,
+            self.handshake.as_ref(),
+            self.sidebar.sessions().len(),
+        );
         let details = div()
             .flex()
             .flex_col()
@@ -715,7 +575,7 @@ impl TerminalView {
 
 /// A transparent full-window layer under the flyout; a click on it (the pill
 /// included) closes the flyout.
-fn flyout_backdrop(cx: &mut Context<TerminalView>) -> Stateful<Div> {
+fn flyout_backdrop(cx: &mut Context<RootView>) -> Stateful<Div> {
     div()
         .id("flyout-backdrop")
         .absolute()
@@ -734,7 +594,7 @@ fn flyout_backdrop(cx: &mut Context<TerminalView>) -> Stateful<Div> {
 fn connecting_overlay(
     text: &'static str,
     dot: DotKind,
-    cx: &mut Context<TerminalView>,
+    cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let restart = div()
         .id("overlay-restart")
@@ -777,7 +637,7 @@ fn connecting_overlay(
 }
 
 /// The status dot: pulsing while pending, dimmed when stopped.
-fn status_dot(dot: DotKind, id: &'static str) -> AnyElement {
+fn status_dot(dot: DotKind, id: impl Into<ElementId>) -> AnyElement {
     let base = div()
         .flex_none()
         .size(px(8.0))
@@ -961,7 +821,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            move |window, cx| cx.new(|cx| TerminalView::new(wanted_session, window, cx)),
+            move |window, cx| cx.new(|cx| RootView::new(wanted_session, window, cx)),
         );
         if let Err(err) = opened {
             tracing::error!("opening window: {err:#}");

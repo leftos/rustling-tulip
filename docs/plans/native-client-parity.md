@@ -38,11 +38,11 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 ## Sidebar / repos / workspaces
 
 - [ ] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
-- [ ] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
+- [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [ ] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx`
 - [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx`
-- [ ] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers`
-- [ ] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
+- [ ] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner is still missing)
+- [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [ ] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers`
 - [ ] Container row: collapse chip (Enter/Space), count, "!" roll-up, kind tag, last-launch summary, ▶ launch-last; double-click launches last in the current tab — `Sidebar.tsx` `ContainerNode`
 - [ ] Remove repo/workspace: inline two-click; with live sessions a dialog (Cancel / Remove anyway / Stop and remove) — `Sidebar.tsx`, `RepoRemoveDialog.tsx`

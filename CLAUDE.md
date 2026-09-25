@@ -124,6 +124,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `logs/app.log` — Tauri side log file, written via the `log_message` invoke command (see `apps/tauri-app/src-tauri/src/lib.rs`). Frontend code calls it through `apps/tauri-app/src/utils/logger.ts`. Rotated on each app boot: the previous launch survives as `app.log.old`.
 - `logs/native.log` — native client (`apps/native`) tracing output, also mirrored to stderr. Rotated on each launch to `native.log.old`.
 - `client-id` / `client-id-native` — per-install client identity (a bare UUID) that the Tauri app and the native client send in `Hello`; tab layouts are keyed by it, so the two clients keep separate layouts.
+- `native-ui.json` — native client UI state that stays on this machine: sidebar width, the sidebar's collapsed flag and the collapsed containers (`apps/native/src/sidebar.rs`).
 
 When debugging spawn/connect/shutdown issues, both `daemon.log` and `app.log` together tell the full story — neither alone is enough.
 
