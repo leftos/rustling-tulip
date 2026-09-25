@@ -1,5 +1,5 @@
 # Plan: Multi-Repo Claude Code Wrapper ("rustling-tulip")
-<!-- plan-doc-hygiene: 2026-09-24 314d519 -->
+<!-- plan-doc-hygiene: 2026-09-25 5a84a44 -->
 
 A Tauri desktop app that orchestrates many parallel Claude Code sessions across repos,
 including coordinated multi-repo "workspace" sessions where a single `claude` instance
@@ -80,18 +80,9 @@ or only from the primary `cwd`? Not yet verified empirically. Relevant to worksp
 sessions where member repos may have their own `CLAUDE.md` / hooks.
 
 ### macOS compatibility — greenlit 2026-05-30
-- [ ] **Next up:** produce the detailed macOS implementation plan from the phased
-      map in `docs/plans/macos-compat.md`, then start at Phase M0. First settle
-      the two open scoping decisions with the user (IPC transport: `#[cfg]` alias
-      vs `interprocess`; distribution: dev-only vs signed `.dmg`) — both are in
-      that doc's "Decisions to make during planning".
-
-Substantially portable already: PTY via `portable-pty`, config/data dirs via
-`directories`, most OS calls already dual-armed (`#[cfg(not(windows))]`). One
-architectural blocker — the tracer↔daemon IPC is Windows named pipes with no Unix
-path (needs Unix domain sockets) — plus a `job_object` module compile-gate,
-autostart (LaunchAgent), and a macOS bundle target. Full catalog + phasing in
-`docs/plans/macos-compat.md`.
+M0–M3 are code-complete (2026-05-30, `667739d`): tracer IPC over `interprocess` local sockets on both platforms, `killpg` process-tree cleanup, LaunchAgent autostart. Both scoping decisions are settled (`interprocess`; local dev builds only). Full catalog and phasing in [macos-compat.md](./plans/macos-compat.md).
+- [ ] **Blocked on a Mac:** verify M0–M3 on real macOS hardware: `cargo build` and `cargo clippy` there, tracer reattach across a daemon restart, `killpg` cleanup of the child tree, and the LaunchAgent plist written and removed by the autostart toggle
+- [ ] M4 packaging, signing and notarization: deferred while distribution is local dev builds only
 
 ### Tooling cleanups (singles)
 Pre-existing warnings and traps noticed during the 2026-09-24 native-client session.
