@@ -12,6 +12,8 @@ mod keys;
 mod mouse;
 mod net;
 mod scrollback_load;
+mod session_actions;
+mod session_menu;
 mod sidebar;
 mod sidebar_view;
 mod tab_bar;
@@ -39,6 +41,8 @@ use std::time::{Duration, Instant};
 use crate::connection::{DotKind, Footer};
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
+use crate::session_actions::{ActionConfirm, Duplicates};
+use crate::session_menu::SessionMenu;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
 use crate::tab_bar::Rename;
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
@@ -163,6 +167,14 @@ pub struct RootView {
     copied: bool,
     /// The flyout's files, or why the config dir could not be resolved.
     paths: Result<LogPaths, String>,
+    /// The session context menu, while open.
+    menu: Option<SessionMenu>,
+    /// The open menu's keyboard focus, so Esc reaches it.
+    menu_focus: FocusHandle,
+    /// A header Stop or a worktree delete waiting for its second click.
+    confirm: ActionConfirm,
+    /// Restarts and resumes waiting for their duplicate.
+    duplicates: Duplicates,
 }
 
 impl RootView {
@@ -243,6 +255,10 @@ impl RootView {
             stop: StopConfirm::default(),
             copied: false,
             paths,
+            menu: None,
+            menu_focus: cx.focus_handle(),
+            confirm: ActionConfirm::default(),
+            duplicates: Duplicates::default(),
         }
     }
 
@@ -544,13 +560,16 @@ impl RootView {
         // reappear (possibly armed) when the overlay goes.
         if self.conn.overlay().is_some() {
             self.close_flyout();
+            self.reset_session_ui(window, cx);
         }
         cx.notify();
     }
 
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.apply(&msg);
+        self.drop_stale_menu(window, cx);
         if self.tabs.apply(&msg) {
+            self.confirm.disarm();
             self.after_tabs_change(window, cx);
             return;
         }
@@ -558,6 +577,12 @@ impl RootView {
             DaemonMessage::Welcome { .. } => {
                 self.reset_panes(cx);
                 self.status.clear();
+                self.duplicates.clear();
+                self.reset_session_ui(window, cx);
+            }
+            DaemonMessage::Error { request_id, .. }
+            | DaemonMessage::ActionFailed { request_id, .. } => {
+                self.fail_duplicate(request_id.as_deref());
             }
             DaemonMessage::LayoutInitRequired {
                 active_session_count,
@@ -590,11 +615,15 @@ impl RootView {
                 session_id,
                 data_b64,
             } => self.feed_panes(&session_id, cx, |pane| pane.on_pty_output(&data_b64)),
-            DaemonMessage::SessionUpdated { session } => {
+            DaemonMessage::SessionUpdated {
+                session,
+                request_id,
+            } => {
                 for view in self.pane_views(Some(&session.id)) {
                     view.update(cx, |pane, _| pane.update_session(&session));
                 }
                 self.attach_waiting_panes(cx);
+                self.place_duplicate(request_id.as_deref(), &session.id, window, cx);
             }
             _ => {}
         }
@@ -611,11 +640,16 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
-        if ks.key == "escape" && self.tabs.close_confirm.disarm() {
-            cx.notify();
+        if ks.key == "escape" {
+            let tab_close = self.tabs.close_confirm.disarm();
+            if self.confirm.disarm() || tab_close {
+                cx.notify();
+            }
         }
         let ctrl_only = ks.modifiers.control && !ks.modifiers.shift && !ks.modifiers.alt;
-        if self.flyout_open && ks.key == "escape" {
+        if self.menu.is_some() && ks.key == "escape" {
+            self.close_session_menu(window, cx);
+        } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
         } else if ctrl_only
             && ks.key == "b"
@@ -630,10 +664,11 @@ impl RootView {
         cx.notify();
     }
 
-    /// A press anywhere that did not stop at a tab's close button drops its
-    /// armed close.
+    /// A press anywhere that did not stop at a tab's close button or a
+    /// session action's confirm drops what they armed.
     fn on_any_mouse_down(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.close_confirm.disarm() {
+        let tab_close = self.tabs.close_confirm.disarm();
+        if self.confirm.disarm() || tab_close {
             cx.notify();
         }
     }
@@ -679,6 +714,7 @@ impl Render for RootView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
+            .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             .children(overlay)
     }

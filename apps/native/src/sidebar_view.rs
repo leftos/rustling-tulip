@@ -2,8 +2,8 @@
 //! button, container rows and session leaves, and the drag divider.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, SharedString, Stateful, Window,
-    div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, div, prelude::*, px,
 };
 use protocol::SessionStatus;
 
@@ -219,6 +219,7 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
 
 fn leaf_row(leaf: &Leaf, selected: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let id = leaf.id.clone();
+    let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
     div()
         .id(SharedString::from(name.clone()))
@@ -250,6 +251,13 @@ fn leaf_row(leaf: &Leaf, selected: bool, cx: &mut Context<RootView>) -> Stateful
             )
         })
         .when(leaf.attention, |row| row.child(attention_mark()))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.open_session_menu(&menu_id, event.position, window, cx);
+                cx.stop_propagation();
+            }),
+        )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.select_session(&id, window, cx);
         }))

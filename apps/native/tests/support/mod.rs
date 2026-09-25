@@ -128,6 +128,34 @@ impl SessionBuilder {
         )
     }
 
+    /// A member of `repo_id` on a worktree of its own.
+    pub fn worktree(self, repo_id: &str) -> Self {
+        self.set(
+            "members",
+            json!([{ "repo_id": repo_id, "repo_name": repo_id, "branch": "wt/x", "worktree_path": "C:/wt/x" }]),
+        )
+        .set("has_per_session_worktree", json!(true))
+        .set("worktree_paths", json!(["C:/wt/x"]))
+    }
+
+    /// Stopped with its child's exit code.
+    pub fn exited(self, code: i32) -> Self {
+        self.set("status", json!("stopped"))
+            .set("exit_code", json!(code))
+    }
+
+    /// Left behind by a daemon restart that could not reattach it.
+    pub fn abandoned(self) -> Self {
+        self.set("status", json!("stopped"))
+            .set("is_abandoned", json!(true))
+    }
+
+    /// Parked: stopped and kept in the sidebar to resume.
+    pub fn inactive(self) -> Self {
+        self.set("status", json!("stopped"))
+            .set("is_inactive", json!(true))
+    }
+
     pub fn in_workspace(self, workspace_id: &str) -> Self {
         self.set("kind", json!("workspace"))
             .set("workspace_id", json!(workspace_id))
@@ -273,6 +301,12 @@ impl<'a> Harness<'a> {
         });
     }
 
+    /// Reports a connection that has not reached the daemon, which shows the
+    /// connecting overlay.
+    pub fn lose_connection(&mut self) {
+        self.event(NetEvent::State(Connection::new()));
+    }
+
     fn event(&mut self, event: NetEvent) {
         self.events
             .unbounded_send(event)
@@ -397,6 +431,15 @@ impl<'a> Harness<'a> {
                         .any(|c| !c.collapsed && c.leaves.iter().any(|leaf| leaf.id == id))
             } else if let Some(id) = selector.strip_prefix("pane-grid-") {
                 pane(id)
+            } else if selector == "session-menu" {
+                root.session_menu().is_some()
+            } else if selector.starts_with("menu-") {
+                root.menu_rows().contains(&selector)
+            } else if let Some(id) = selector
+                .strip_prefix("pane-stop-confirm-")
+                .or_else(|| selector.strip_prefix("pane-stop-cancel-"))
+            {
+                root.armed_stop_pane() == Some(id)
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
             } else if selector == "sidebar-panel" || selector == "sidebar-divider" {
@@ -424,6 +467,16 @@ impl<'a> Harness<'a> {
     pub fn click_on(&mut self, selector: &str) {
         let at = self.center(selector);
         self.click(at, Modifiers::none());
+    }
+
+    /// A right-button press and release on the element tagged `selector`.
+    pub fn right_click_on(&mut self, selector: &str) {
+        let at = self.center(selector);
+        self.cx
+            .simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        self.cx
+            .simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        self.cx.run_until_parked();
     }
 
     pub fn double_click(&mut self, at: Point<Pixels>) {

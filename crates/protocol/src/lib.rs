@@ -583,6 +583,11 @@ pub struct SpawnRequest {
     /// Ignored entirely for headless and plain-shell sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
+    /// Chosen by the client so it can tell its own spawn's reply apart: the
+    /// daemon echoes it on the [`DaemonMessage::SessionUpdated`] it sends
+    /// back to the requester. Broadcasts never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 impl SpawnRequest {
@@ -741,6 +746,7 @@ impl SpawnConfig {
             model: self.model.clone(),
             extra_env: self.extra_env.clone(),
             prompt_injector: None,
+            request_id: None,
         }
     }
 
@@ -1720,6 +1726,10 @@ pub enum ClientMessage {
     /// the source's branch. See [`SpawnConfig::to_duplicate_request`].
     DuplicateSession {
         session_id: String,
+        /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+        /// the duplicate, as for [`SpawnRequest::request_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
     /// dialog can pre-fill all fields with the source's values. Replied
@@ -2664,6 +2674,10 @@ pub enum DaemonMessage {
     },
     SessionUpdated {
         session: SessionSnapshot,
+        /// The `request_id` of the spawn or duplicate this reply answers;
+        /// only on the reply sent to the requester, never on a broadcast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     SessionRemoved {
         session_id: String,
@@ -2973,6 +2987,10 @@ pub enum DaemonMessage {
     },
     Error {
         message: String,
+        /// The `request_id` of the spawn or duplicate that failed, on the
+        /// reply to its requester.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// A user-requested action was refused or failed in a way that warrants a
     /// blocking modal rather than a transient toast — e.g. a worktree spawn
@@ -2985,6 +3003,10 @@ pub enum DaemonMessage {
         detail: String,
         #[serde(default)]
         hint: Option<String>,
+        /// The `request_id` of the spawn or duplicate that failed, on the
+        /// reply to its requester.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 }
 
@@ -3727,6 +3749,7 @@ mod tests {
                 ],
                 verify_mode_marker: None,
             }),
+            request_id: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3754,6 +3777,7 @@ mod tests {
             model: Some("gpt-5.1-codex".to_string()),
             extra_env: vec![],
             prompt_injector: None,
+            request_id: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3786,6 +3810,7 @@ mod tests {
             model: Some("sonnet-4".to_string()),
             extra_env: vec![],
             prompt_injector: None,
+            request_id: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -3812,6 +3837,7 @@ mod tests {
             model: None,
             extra_env: vec![],
             prompt_injector: None,
+            request_id: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4566,5 +4592,170 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let decoded: MemberBranchFate = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn spawn_request_id_round_trips_and_is_absent_when_unset() {
+        let mut req = SpawnRequest {
+            label: None,
+            target: SpawnTarget::Workspace {
+                workspace_id: "ws1".to_string(),
+                branch_name: "feat/x".to_string(),
+                base_branch: None,
+                use_worktree: true,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktrees: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            initial_prompt: None,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
+            model: None,
+            extra_env: vec![],
+            prompt_injector: None,
+            request_id: Some("req-1".to_string()),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-1""#), "{json}");
+        let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, decoded);
+
+        req.request_id = None;
+        let old_shape = serde_json::to_string(&req).expect("serialize");
+        assert!(!old_shape.contains("request_id"), "{old_shape}");
+        let decoded: SpawnRequest = serde_json::from_str(&old_shape).expect("deserialize");
+        assert_eq!(decoded.request_id, None);
+    }
+
+    #[test]
+    fn duplicate_session_request_id_is_optional_and_round_trips() {
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"duplicate_session","session_id":"s1"}"#)
+                .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::DuplicateSession { session_id, request_id: None } if session_id == "s1"
+            ),
+            "{old:?}"
+        );
+        let msg = ClientMessage::DuplicateSession {
+            session_id: "s1".to_string(),
+            request_id: Some("req-2".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-2""#), "{json}");
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::DuplicateSession { session_id, request_id: Some(id) }
+                    if session_id == "s1" && id == "req-2"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn failure_replies_carry_an_optional_request_id() {
+        let old: DaemonMessage =
+            serde_json::from_str(r#"{"type":"error","message":"boom"}"#).expect("old error");
+        assert!(
+            matches!(&old, DaemonMessage::Error { message, request_id: None } if message == "boom"),
+            "{old:?}"
+        );
+        let json = serde_json::to_string(&old).expect("serialize");
+        assert!(!json.contains("request_id"), "{json}");
+        let old: DaemonMessage = serde_json::from_str(
+            r#"{"type":"action_failed","title":"t","detail":"d","hint":null}"#,
+        )
+        .expect("old action_failed");
+        assert!(
+            matches!(
+                &old,
+                DaemonMessage::ActionFailed {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+
+        for msg in [
+            DaemonMessage::Error {
+                message: "boom".to_string(),
+                request_id: Some("req-4".to_string()),
+            },
+            DaemonMessage::ActionFailed {
+                title: "t".to_string(),
+                detail: "d".to_string(),
+                hint: None,
+                request_id: Some("req-4".to_string()),
+            },
+        ] {
+            let json = serde_json::to_string(&msg).expect("serialize");
+            assert!(json.contains(r#""request_id":"req-4""#), "{json}");
+            let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(
+                    &decoded,
+                    DaemonMessage::Error { request_id: Some(id), .. }
+                        | DaemonMessage::ActionFailed { request_id: Some(id), .. } if id == "req-4"
+                ),
+                "{decoded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_updated_request_id_is_optional_and_round_trips() {
+        let session = serde_json::json!({
+            "id": "s1",
+            "label": "s1",
+            "kind": "single",
+            "members": [],
+            "status": "idle",
+            "mode": "interactive",
+            "started_at": "2026-01-01T00:00:00Z",
+            "exit_code": null,
+            "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
+            "recent_actions": [],
+            "agent": "claude",
+        });
+        let old = serde_json::json!({ "type": "session_updated", "session": session });
+        let decoded: DaemonMessage = serde_json::from_value(old).expect("broadcast shape decodes");
+        assert!(
+            matches!(
+                decoded,
+                DaemonMessage::SessionUpdated {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{decoded:?}"
+        );
+        let json = serde_json::to_string(&decoded).expect("serialize");
+        assert!(!json.contains("request_id"), "{json}");
+
+        let reply = serde_json::json!({
+            "type": "session_updated",
+            "session": session,
+            "request_id": "req-3",
+        });
+        let decoded: DaemonMessage = serde_json::from_value(reply).expect("reply decodes");
+        let json = serde_json::to_string(&decoded).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-3""#), "{json}");
+        match decoded {
+            DaemonMessage::SessionUpdated {
+                session,
+                request_id,
+            } => {
+                assert_eq!(session.id, "s1");
+                assert_eq!(request_id.as_deref(), Some("req-3"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }

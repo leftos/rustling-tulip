@@ -26,6 +26,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+uuid = { workspace = true }
 
 gpui = "0.2.2"
 alacritty_terminal = "0.26.0"

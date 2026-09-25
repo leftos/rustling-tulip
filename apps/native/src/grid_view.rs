@@ -462,6 +462,14 @@ impl RootView {
             }
             (None, None) => muted_note("Empty pane").into_any_element(),
         };
+        let body = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(body)
+            .children(self.exited_overlay(pane_id, session_id, cx));
         div()
             .flex()
             .flex_col()
@@ -473,8 +481,9 @@ impl RootView {
             .into_any_element()
     }
 
-    /// The session's name, split right and down (Shift: left and up), and
-    /// close.
+    /// The session's name, its Stop or exit code, split right and down
+    /// (Shift: left and up), and close. A right-click opens the session's
+    /// menu.
     fn pane_header(
         &self,
         tab_id: &str,
@@ -485,7 +494,19 @@ impl RootView {
         let label = session_id.map_or_else(|| "Empty pane".to_owned(), |id| self.session_label(id));
         let ids = (tab_id.to_owned(), pane_id.to_owned());
         let (right, down, close) = (ids.clone(), ids.clone(), ids);
+        let menu_session = session_id.map(str::to_owned);
+        let name = format!("pane-header-{pane_id}");
         div()
+            .debug_selector(|| name)
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    if let Some(id) = &menu_session {
+                        this.open_session_menu(id, event.position, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             .flex()
             .flex_none()
             .items_center()
@@ -503,6 +524,7 @@ impl RootView {
                     .whitespace_nowrap()
                     .child(label),
             )
+            .children(self.header_stop(pane_id, session_id, cx))
             .child(
                 header_button(pane_id, "split-right", "│", "Split right (Shift: left)").on_click(
                     cx.listener(move |this, event: &ClickEvent, _, _| {

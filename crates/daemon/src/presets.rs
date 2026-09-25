@@ -1515,6 +1515,7 @@ async fn spawn_one(
         model: plan.preset.model.clone(),
         extra_env: Vec::new(),
         prompt_injector: Some(injector),
+        request_id: None,
     };
     let snapshot = spawn_session(hub, req).await.map_err(|e| {
         LaunchFailure::new(format!("spawn failed at #{index}: {e}"))

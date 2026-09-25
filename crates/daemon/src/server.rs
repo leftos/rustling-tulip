@@ -860,7 +860,10 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         loop {
             match events_rx.recv().await {
                 Ok(SessionEvent::Updated(snap)) => {
-                    let _ = out_for_events.send(DaemonMessage::SessionUpdated { session: *snap });
+                    let _ = out_for_events.send(DaemonMessage::SessionUpdated {
+                        session: *snap,
+                        request_id: None,
+                    });
                 }
                 Ok(SessionEvent::Removed(id)) => {
                     let _ = out_for_events.send(DaemonMessage::SessionRemoved { session_id: id });
@@ -1254,6 +1257,7 @@ async fn recv_loop(
                     Err(err) => {
                         let _ = out_tx.send(DaemonMessage::Error {
                             message: format!("malformed message: {err}"),
+                            request_id: None,
                         });
                         continue;
                     }
@@ -1271,6 +1275,7 @@ async fn recv_loop(
                 if let Err(err) = dispatch(hub, parsed, ctx).await {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: err.to_string(),
+                        request_id: None,
                     });
                 }
             }
@@ -1598,42 +1603,23 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
             } else {
+                let request_id = req.request_id.clone();
                 match spawn_session(hub, req).await {
                     Ok(snap) => {
-                        let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+                        let _ = out_tx.send(DaemonMessage::SessionUpdated {
+                            session: snap,
+                            request_id,
+                        });
                     }
-                    Err(err) => send_spawn_failure(out_tx, &err),
+                    Err(err) => send_spawn_failure(out_tx, &err, request_id.as_deref()),
                 }
             }
         }
-        ClientMessage::DuplicateSession { session_id } => {
-            let stored = hub
-                .sessions
-                .get(&session_id)
-                .map(|rec| crate::sync::lock(&rec).spawn_config.clone())
-                .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-            let Some(stored) = stored else {
-                return Err(anyhow!(
-                    "session {session_id} has no stored spawn config; cannot duplicate"
-                ));
-            };
-            // A worktree duplicate runs on its own branch: the source still
-            // holds its checkout, and a name the daemon picks can't attach a
-            // leftover the user was never shown.
-            let fresh = match stored.target.suggest_target() {
-                Some(target) if target_uses_worktree(&stored.target) => Some(
-                    branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?,
-                ),
-                _ => None,
-            };
-            info!(source = %session_id, ?fresh, "duplicate_session: spawning");
-            let req = stored.to_duplicate_request(fresh);
-            match spawn_session(hub, req).await {
-                Ok(snap) => {
-                    let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
-                }
-                Err(err) => send_spawn_failure(out_tx, &err),
-            }
+        ClientMessage::DuplicateSession {
+            session_id,
+            request_id,
+        } => {
+            duplicate_session(hub, &session_id, request_id, out_tx).await;
         }
         ClientMessage::GetSpawnConfig { session_id } => {
             let config = hub
@@ -2022,12 +2008,14 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     warn!(?err, repo_id, "stash_list failed");
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("stash list failed: {err:#}"),
+                        request_id: None,
                     });
                 }
             },
             Err(err) => {
                 let _ = out_tx.send(DaemonMessage::Error {
                     message: format!("{err:#}"),
+                    request_id: None,
                 });
             }
         },
@@ -2557,6 +2545,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 None => {
                     let _ = out_tx.send(DaemonMessage::Error {
                         message: format!("unknown preset launch job: {job_id}"),
+                        request_id: None,
                     });
                 }
             }
@@ -3071,6 +3060,7 @@ pub(crate) async fn spawn_session(
         model,
         extra_env,
         prompt_injector,
+        request_id: _,
     } = req;
     let agent = agent_options.agent();
     info!(
@@ -4038,6 +4028,7 @@ fn blocked_discard_message(
             "Close the other session(s) first, then remove the worktree — or discard this session while keeping the worktree."
                 .to_string(),
         ),
+        request_id: None,
     })
 }
 
@@ -4104,17 +4095,77 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> spawn_plan
 /// Send a spawn failure to the requesting client as a blocking `ActionFailed`
 /// modal. Uses the structured `SpawnFailure` fields when present; otherwise
 /// surfaces the full anyhow chain under a generic title.
-fn send_spawn_failure(out_tx: &mpsc::UnboundedSender<DaemonMessage>, err: &anyhow::Error) {
+/// Spawns a copy of `session_id` from its stored config. The reply to the
+/// requester, success or failure, carries `request_id`.
+async fn duplicate_session(
+    hub: &Hub,
+    session_id: &str,
+    request_id: Option<String>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let req = match duplicate_request(hub, session_id).await {
+        Ok(req) => req,
+        Err(err) => {
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: err.to_string(),
+                request_id,
+            });
+            return;
+        }
+    };
+    match spawn_session(hub, req).await {
+        Ok(snap) => {
+            let _ = out_tx.send(DaemonMessage::SessionUpdated {
+                session: snap,
+                request_id,
+            });
+        }
+        Err(err) => send_spawn_failure(out_tx, &err, request_id.as_deref()),
+    }
+}
+
+/// The request that duplicates `session_id`. A worktree duplicate runs on
+/// its own branch: the source still holds its checkout, and a name the
+/// daemon picks can't attach a leftover the user was never shown.
+async fn duplicate_request(hub: &Hub, session_id: &str) -> anyhow::Result<SpawnRequest> {
+    let stored = hub
+        .sessions
+        .get(session_id)
+        .map(|rec| crate::sync::lock(&rec).spawn_config.clone())
+        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+    let Some(stored) = stored else {
+        return Err(anyhow!(
+            "session {session_id} has no stored spawn config; cannot duplicate"
+        ));
+    };
+    let fresh = match stored.target.suggest_target() {
+        Some(target) if target_uses_worktree(&stored.target) => {
+            Some(branch_names::suggest(&hub.state, &hub.state.worktrees_dir(), &target).await?)
+        }
+        _ => None,
+    };
+    info!(source = %session_id, ?fresh, "duplicate_session: spawning");
+    Ok(stored.to_duplicate_request(fresh))
+}
+
+/// Tells the requester its spawn failed, echoing the request's id.
+fn send_spawn_failure(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    err: &anyhow::Error,
+    request_id: Option<&str>,
+) {
     let msg = err.downcast_ref::<spawn_plan::SpawnFailure>().map_or_else(
         || DaemonMessage::ActionFailed {
             title: "Couldn't start session".to_string(),
             detail: format!("{err:#}"),
             hint: None,
+            request_id: request_id.map(str::to_owned),
         },
         |sf| DaemonMessage::ActionFailed {
             title: sf.title.clone(),
             detail: sf.detail.clone(),
             hint: sf.hint.clone(),
+            request_id: request_id.map(str::to_owned),
         },
     );
     let _ = out_tx.send(msg);
@@ -4750,7 +4801,10 @@ async fn resume_abandoned(
     // so the user can try again.
     discard_abandoned(hub, session_id, out_tx);
 
-    let _ = out_tx.send(DaemonMessage::SessionUpdated { session: snap });
+    let _ = out_tx.send(DaemonMessage::SessionUpdated {
+        session: snap,
+        request_id: None,
+    });
     Ok(())
 }
 
@@ -4777,6 +4831,7 @@ async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMe
             warn!(session_id = %id, ?err, "bulk resume: per-session failure");
             let _ = out_tx.send(DaemonMessage::Error {
                 message: format!("resume {id}: {err}"),
+                request_id: None,
             });
         }
     }

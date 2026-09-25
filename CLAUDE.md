@@ -164,6 +164,7 @@ Sessions are deliberately **not** in `state.json` — they're rebuilt from sidec
 - The `Hello` message must be the first thing a client sends after WS upgrade. New clients send both `protocol_version` (scalar back-compat) and `protocol_versions: Vec<u32>`. The daemon picks the highest mutually supported version from its `SUPPORTED_PROTOCOL_VERSIONS` const and echoes it in `Welcome.protocol_version`. An empty intersection or token mismatch closes the connection.
 - Unknown message types (forward-compat path) hit `InboundClientMessage::Unknown` in the daemon (`crates/protocol/src/lib.rs`) and a default arm in `App.tsx::handleMessage`. Both log + drop without crashing the connection.
 - `SessionSnapshot` is the canonical session shape — daemon emits `Sessions` (list), `SessionUpdated` (single), `SessionRemoved` (id only). Don't add ad-hoc session-shaped messages elsewhere.
+- A client that needs to know which reply answers its request sets the optional `request_id` on `SpawnSession` / `DuplicateSession`. The daemon echoes it only on the reply it sends to that requester (`SessionUpdated`, or `Error` / `ActionFailed` on failure). Broadcasts never carry it.
 
 ## Style and lints
 

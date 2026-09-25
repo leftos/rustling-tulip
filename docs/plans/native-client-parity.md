@@ -60,8 +60,8 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 ## Sessions
 
 - [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx`
-- [ ] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
-- [ ] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
+- [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
+- [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
 - [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx`
 - [ ] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
 - [ ] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx`

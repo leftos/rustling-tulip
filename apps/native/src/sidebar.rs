@@ -155,7 +155,7 @@ impl SidebarModel {
     fn apply_session_message(&mut self, msg: &DaemonMessage) {
         match msg {
             DaemonMessage::Sessions { sessions } => sessions.clone_into(&mut self.sessions),
-            DaemonMessage::SessionUpdated { session } => self.update_session(session),
+            DaemonMessage::SessionUpdated { session, .. } => self.update_session(session),
             DaemonMessage::SessionRemoved { session_id } => {
                 self.sessions.retain(|s| &s.id != session_id);
                 self.attention.remove(session_id);
@@ -1135,7 +1135,10 @@ mod tests {
             flag(&mut model, "a");
             let mut updated = in_repo("a", "r1");
             updated.status = status;
-            model.apply(&DaemonMessage::SessionUpdated { session: updated });
+            model.apply(&DaemonMessage::SessionUpdated {
+                session: updated,
+                request_id: None,
+            });
             assert_eq!(attention_of(&model, "a"), !cleared, "status {status:?}");
         }
     }
@@ -1162,6 +1165,7 @@ mod tests {
         let mut model = model_with(vec![in_repo("a", "r1")]);
         model.apply(&DaemonMessage::SessionUpdated {
             session: in_repo("b", "r1"),
+            request_id: None,
         });
         assert_eq!(model.sessions().len(), 2);
         model.apply(&DaemonMessage::SessionRemoved {

@@ -68,6 +68,7 @@ fn shell_moves_under_repo_when_its_cwd_enters_it(cx: &mut TestAppContext) {
 
     h.send(DaemonMessage::SessionUpdated {
         session: session("sh").shell("D:/src/r2/sub").build(),
+        request_id: None,
     });
 
     let home = home_of(&mut h, "sh").expect("the shell is listed");
@@ -98,6 +99,7 @@ fn attention_marks_leaf_and_container_and_clears_on_click_or_working(cx: &mut Te
     assert_eq!(attention(&mut h), (true, true));
     h.send(DaemonMessage::SessionUpdated {
         session: session("s1").in_repo("r1").status("working").build(),
+        request_id: None,
     });
     assert_eq!(attention(&mut h), (false, false), "working clears it");
 }

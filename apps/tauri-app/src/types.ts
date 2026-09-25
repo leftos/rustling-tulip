@@ -244,6 +244,8 @@ export interface SpawnRequest {
   model: string | null;
   extra_env: Array<[string, string]>;
   prompt_injector: PromptInjector | null;
+  // Echoed on the requester's `session_updated` reply; broadcasts omit it.
+  request_id?: string;
 }
 
 // Subset of SpawnRequest persisted on each session record + orphan sidecar
@@ -821,7 +823,7 @@ export type ClientMessage =
   | { type: "remove_workspace"; workspace_id: string }
   | { type: "list_sessions" }
   | ({ type: "spawn_session" } & SpawnRequest)
-  | { type: "duplicate_session"; session_id: string }
+  | { type: "duplicate_session"; session_id: string; request_id?: string }
   | { type: "get_spawn_config"; session_id: string }
   | { type: "rename_session"; session_id: string; label: string | null }
   | {
@@ -1207,7 +1209,7 @@ export type DaemonMessage =
   // `target` echoes the request.
   | { type: "branch_name_suggestion"; target: SuggestTarget; name: string }
   | { type: "sessions"; sessions: SessionSnapshot[] }
-  | { type: "session_updated"; session: SessionSnapshot }
+  | { type: "session_updated"; session: SessionSnapshot; request_id?: string }
   | { type: "session_removed"; session_id: string }
   // An in-place spawn would switch a dirty tree to a different branch; the
   // daemon declined and asks how to proceed. The client resends the same spawn
@@ -1402,5 +1404,7 @@ export type DaemonMessage =
       title: string;
       detail: string;
       hint: string | null;
+      // The failed spawn's request_id, on the reply to its requester.
+      request_id?: string;
     }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; request_id?: string };

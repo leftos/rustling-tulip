@@ -153,6 +153,7 @@ fn stopped_session_drops_keys_and_pastes(cx: &mut TestAppContext) {
 
     h.send(DaemonMessage::SessionUpdated {
         session: session("s1").status("stopped").build(),
+        request_id: None,
     });
     h.keys("a enter");
     h.set_clipboard("x");
