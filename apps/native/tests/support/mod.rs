@@ -460,6 +460,12 @@ impl<'a> Harness<'a> {
                 root.action_failed().is_some()
             } else if selector.starts_with("checkout-") {
                 root.checkout_prompt().is_some()
+            } else if selector.starts_with("spawn-share-") {
+                root.spawn_share_confirm_open()
+            } else if selector.starts_with("spawn-") {
+                root.spawn_dialog_open()
+            } else if selector == "sidebar-add-session" {
+                !root.sidebar_collapsed()
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
             } else if selector == "sidebar-panel" || selector == "sidebar-divider" {

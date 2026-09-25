@@ -1,7 +1,8 @@
 //! A single-line text input, trimmed from gpui's `examples/input.rs`: typing
 //! and IME, backspace and delete, the arrows, Home and End, Shift selection,
 //! select-all, copy, cut and paste. Enter emits [`TextInputEvent::Submit`]
-//! and Esc [`TextInputEvent::Cancel`].
+//! and Esc [`TextInputEvent::Cancel`]; every edit the user makes emits
+//! [`TextChanged`], and [`TextInput::set_text`] replaces the text without it.
 
 use std::ops::Range;
 
@@ -68,6 +69,10 @@ pub enum TextInputEvent {
     Cancel,
 }
 
+/// The user edited the text: typing, IME, deletion, cut or paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextChanged;
+
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
@@ -81,6 +86,8 @@ pub struct TextInput {
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
+
+impl EventEmitter<TextChanged> for TextInput {}
 
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -111,6 +118,30 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Replaces the text, the cursor at its end, without [`TextChanged`]:
+    /// the owner is setting it, not the user.
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        let end = self.content.len();
+        self.selected_range = end..end;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Replaces the text shown while the input is empty.
+    pub fn set_placeholder(
+        &mut self,
+        placeholder: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = placeholder.into();
+        if placeholder != self.placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -384,6 +415,7 @@ impl EntityInputHandler for TextInput {
         let end = range.start + new_text.len();
         self.selected_range = end..end;
         self.marked_range = None;
+        cx.emit(TextChanged);
         cx.notify();
     }
 
@@ -409,6 +441,7 @@ impl EntityInputHandler for TextInput {
             .map_or(end..end, |selected| {
                 range.start + selected.start..range.start + selected.end
             });
+        cx.emit(TextChanged);
         cx.notify();
     }
 
@@ -645,9 +678,44 @@ impl Element for TextElement {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{EntityInputHandler as _, TestAppContext};
+
     use super::{
-        next_boundary, offset_from_utf16, offset_to_utf16, previous_boundary, single_line,
+        TextChanged, TextInput, next_boundary, offset_from_utf16, offset_to_utf16,
+        previous_boundary, single_line,
     };
+
+    #[gpui::test]
+    fn text_input_set_text_is_silent_and_edits_emit_changed(cx: &mut TestAppContext) {
+        let (input, cx) = cx.add_window_view(|_, cx| TextInput::new("seed", "", cx));
+        let changes = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&changes);
+        cx.update(|_, cx| {
+            cx.subscribe(&input, move |_, _: &TextChanged, _| {
+                counter.set(counter.get() + 1);
+            })
+            .detach();
+        });
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("wt/brave-fox", cx)));
+        cx.run_until_parked();
+        assert_eq!(changes.get(), 0, "set_text is the owner's, not the user's");
+        let text = cx.update(|_, cx| input.read(cx).text().to_owned());
+        assert_eq!(text, "wt/brave-fox");
+
+        cx.update(|window, cx| {
+            input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, "!", window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(changes.get(), 1, "typing is an edit");
+        let text = cx.update(|_, cx| input.read(cx).text().to_owned());
+        assert_eq!(text, "wt/brave-fox!", "set_text left the cursor at the end");
+    }
 
     /// "a", a thumbs-up with a skin tone (two chars, one grapheme), then an
     /// "e" with a combining acute (two chars, one grapheme), then "b".

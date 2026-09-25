@@ -32,7 +32,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
 - [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
 - [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
-- [ ] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage`
+- [ ] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries)
 - [ ] Main window size and position persisted — `lib.rs` (window-state plugin)
 
 ## Sidebar / repos / workspaces
@@ -40,7 +40,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
 - [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [ ] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx`
-- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx`
+- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c)
 - [ ] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner is still missing)
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [ ] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers`
@@ -70,25 +70,25 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Sessions without a worktree that exit on their own are discarded automatically — `App.tsx`
 - [x] Delete-worktree confirm (the only path to deleting one): per-branch fate from the daemon, delete all / keep vs delete (commits lost) / worktree only, 10s fallback, safe option focused — `DeleteWorktreeDialog.tsx`, `utils/branchFate.ts`
 - [ ] Worktree cleanup failed: path, reason, locking processes (name, pid, cmdline) as checkboxes, open folder, "Kill N & retry" / Retry / Ignore — `WorktreeCleanupFailedDialog.tsx`
-- [ ] Blocking "action failed" modal (title, detail, hint) — `ActionFailedModal.tsx`
+- [x] Blocking "action failed" modal (title, detail, hint) — `ActionFailedModal.tsx`
 
 ## Spawn dialog & launch flows
 
-- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx`
-- [ ] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx`
-- [ ] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
-- [ ] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`
+- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c)
+- [ ] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c; no "no repos" state, since native has no Add repo yet)
+- [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
+- [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`
 - [ ] Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
-- [ ] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
+- [x] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
 - [ ] Advanced: model, Claude approval mode, Codex sandbox, Cursor plan mode + sandbox, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
-- [ ] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`
+- [x] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`
 - [ ] Branch combobox: lists all branches, filters as you type, marks current, "Create branch" row, arrow/Enter, Esc closes the list only — `BranchCombobox.tsx`
-- [ ] Suggested branch name, "Random", "picking a name…", cached between opens — `SpawnDialog.tsx` `useBranchField`, `utils/branchSuggestion.ts`
-- [ ] Base branch defaults to `origin/<default>`; notes a failed background fetch; debounced preview for N commits behind and existing worktree/branch (reuse or recreate) — `SpawnDialog.tsx`
-- [ ] Workspace form: one branch for all members, create worktrees, new / existing group ("N bound, M to be created"), base, preview table — `SpawnDialog.tsx` `WorkspaceForm`
-- [ ] Double-submit guard; Esc closes, backdrop click doesn't — `SpawnDialog.tsx`
-- [ ] Dirty in-place checkout prompts Carry changes / Stash & switch, then resends — `CheckoutConfirmModal.tsx`
-- [ ] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`
+- [x] Suggested branch name, "Random", "picking a name…", cached between opens — `SpawnDialog.tsx` `useBranchField`, `utils/branchSuggestion.ts`
+- [ ] Base branch defaults to `origin/<default>`; notes a failed background fetch; debounced preview for N commits behind and existing worktree/branch (reuse or recreate) — `SpawnDialog.tsx` (native: the default and the fetch note landed in P1.7c; the preview is Phase 4)
+- [ ] Workspace form: one branch for all members, create worktrees, new / existing group ("N bound, M to be created"), base, preview table — `SpawnDialog.tsx` `WorkspaceForm` (native: all but the preview table landed in P1.7c)
+- [x] Double-submit guard; Esc closes, backdrop click doesn't — `SpawnDialog.tsx`
+- [x] Dirty in-place checkout prompts Carry changes / Stash & switch, then resends — `CheckoutConfirmModal.tsx`
+- [x] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`
 - [ ] Launch last again: replays the config; worktree launches wait for a fresh branch name (toast on timeout); trusted configs open the full dialog with a warning — `App.tsx` `onLaunchLast`
 - [ ] Standalone shell: quick default dir, or a dialog with Browse and "Use as quick shell default" — `StandaloneShellDialog.tsx`
 - [ ] Preset wizard: source (file / folder / inline / GitHub issue ranges) → variables (toggle / file / folder / text, required fields) → preview (grouped by tab, max panes per tab, script commands) → launching (progress, counts, Cancel, Select launched, Stop all) — `PresetLaunchDialog.tsx`, `utils/parsePrompts.ts`, `utils/parseIssueSpec.ts`
@@ -172,7 +172,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx`
 - [ ] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx`
 - [ ] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
-- [ ] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx`
+- [ ] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: error and info toasts with 8s auto-dismiss and × landed in P1.7c; no sticky or same-key update)
 - [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx`
 - [ ] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
 - [ ] Preset-launched sessions highlighted in the sidebar — `App.tsx`

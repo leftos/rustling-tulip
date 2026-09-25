@@ -186,6 +186,16 @@ impl SidebarModel {
         &self.sessions
     }
 
+    /// The registered repos, in the daemon's order.
+    pub fn repos(&self) -> &[RepoEntry] {
+        &self.repos
+    }
+
+    /// The registered workspaces, in the daemon's order.
+    pub fn workspaces(&self) -> &[WorkspaceEntry] {
+        &self.workspaces
+    }
+
     pub fn session(&self, id: &str) -> Option<&SessionSnapshot> {
         self.sessions.iter().find(|s| s.id == id)
     }
@@ -700,6 +710,24 @@ mod tests {
 
     fn repo(id: &str, path: &str) -> RepoEntry {
         serde_json::from_value(json!({ "id": id, "name": id, "path": path })).expect("repo fixture")
+    }
+
+    #[test]
+    fn sidebar_keeps_repos_and_workspaces_in_daemon_order() {
+        let mut model = SidebarModel::default();
+        assert!(model.repos().is_empty() && model.workspaces().is_empty());
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("zeta", "C:/z"), repo("alpha", "C:/a")],
+        });
+        model.apply(&DaemonMessage::Workspaces {
+            workspaces: vec![workspace("w2", &["zeta"]), workspace("w1", &["alpha"])],
+        });
+        let repos: Vec<&str> = model.repos().iter().map(|r| r.id.as_str()).collect();
+        let workspaces: Vec<&str> = model.workspaces().iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(repos, ["zeta", "alpha"], "not sorted by name");
+        assert_eq!(workspaces, ["w2", "w1"]);
+        model.apply(&DaemonMessage::Repos { repos: Vec::new() });
+        assert!(model.repos().is_empty(), "a new snapshot replaces the old");
     }
 
     fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {

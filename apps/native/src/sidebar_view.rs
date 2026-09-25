@@ -82,13 +82,38 @@ impl RootView {
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(header(cx))
+            .child(header(!self.sidebar.repos().is_empty(), cx))
             .child(body)
     }
 }
 
-/// "Sessions" and the button that hides the sidebar.
-fn header(cx: &mut Context<RootView>) -> Div {
+/// "+ Session", which opens the spawn dialog; disabled with no repo.
+fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let tip = if has_repos {
+        "Spawn a new session"
+    } else {
+        "Register a repo to spawn repo-tied sessions."
+    };
+    div()
+        .id("sidebar-add-session")
+        .debug_selector(|| "sidebar-add-session".to_owned())
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .child("+ Session")
+        .tooltip(tooltip(tip))
+        .when(has_repos, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.open_spawn_dialog(window, cx);
+                }))
+        })
+        .when(!has_repos, |button| button.opacity(0.5))
+}
+
+/// "Sessions", "+ Session" and the button that hides the sidebar.
+fn header(has_repos: bool, cx: &mut Context<RootView>) -> Div {
     let hide = div()
         .id("sidebar-hide")
         .px(px(6.0))
@@ -111,7 +136,14 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(MUTED))
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Sessions"))
-        .child(hide)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(add_session(has_repos, cx))
+                .child(hide),
+        )
 }
 
 /// The slim strip a hidden sidebar leaves at the left edge, with the button

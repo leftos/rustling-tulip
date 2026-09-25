@@ -19,6 +19,8 @@ mod session_actions;
 mod session_menu;
 mod sidebar;
 mod sidebar_view;
+mod spawn_form;
+mod spawn_view;
 mod spawns;
 mod tab_bar;
 mod tabs;
@@ -33,9 +35,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, ClipboardItem,
     Context, CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
-    InputHandler, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
-    pulsating_between, px, size,
+    InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions,
+    div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
 use std::collections::HashMap;
@@ -50,6 +52,8 @@ use crate::notices::Notices;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
 use crate::session_menu::{DeleteDialog, SessionMenu};
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
+use crate::spawn_form::BranchCache;
+use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
 use crate::tab_bar::Rename;
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
@@ -303,6 +307,12 @@ pub struct RootView {
     notice_focus: FocusHandle,
     /// Spawns waiting for the daemon's reply.
     spawns: PendingSpawns,
+    /// The spawn dialog, while open.
+    spawn_dialog: Option<SpawnDialog>,
+    /// The spawn dialog's keyboard focus when no text field of it holds it.
+    spawn_focus: FocusHandle,
+    /// Branch names the daemon suggested, per repo or workspace.
+    branch_cache: BranchCache,
 }
 
 impl RootView {
@@ -393,6 +403,9 @@ impl RootView {
             toast_timer: None,
             notice_focus: cx.focus_handle(),
             spawns: PendingSpawns::default(),
+            spawn_dialog: None,
+            spawn_focus: cx.focus_handle(),
+            branch_cache: BranchCache::default(),
         }
     }
 
@@ -570,12 +583,15 @@ impl RootView {
     }
 
     /// After any change to the tab model: terminals follow the layout, the
-    /// requested pane takes the keyboard (unless the delete-worktree
-    /// confirm or a modal notice holds it; closing it focuses the tab's
-    /// pane) and the active tab is saved.
+    /// requested pane takes the keyboard (unless the spawn dialog, the
+    /// delete-worktree confirm or a modal notice holds it; closing it
+    /// focuses the tab's pane), the spawn dialog's Open in follows the tabs
+    /// and the active tab is saved.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_panes(window, cx);
+        self.refresh_spawn_tabs();
         if let Some(pane_id) = self.tabs.take_focus_request()
+            && self.spawn_dialog.is_none()
             && self.delete_dialog.is_none()
             && !self.notices.has_modal()
         {
@@ -715,6 +731,7 @@ impl RootView {
         // reappear (possibly armed) when the overlay goes.
         if self.conn.overlay().is_some() {
             self.close_flyout();
+            self.close_spawn_dialog(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
         }
@@ -724,6 +741,7 @@ impl RootView {
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.apply(&msg);
         self.drop_stale_session_ui(window, cx);
+        self.on_spawn_dialog_message(&msg, window, cx);
         if self.tabs.apply(&msg) {
             self.confirm.disarm();
             self.after_tabs_change(window, cx);
@@ -734,6 +752,7 @@ impl RootView {
                 self.reset_panes(cx);
                 self.status.clear();
                 self.duplicates.clear();
+                self.close_spawn_dialog(window, cx);
                 self.reset_session_ui(window, cx);
                 self.reset_notices(window, cx);
             }
@@ -810,13 +829,12 @@ impl RootView {
     }
 
     /// Keys the root takes before the panes see them. A modal notice, else
-    /// the delete-worktree confirm, while open, holds the focus and takes
-    /// every key that reaches this listener; gpui runs keymap actions before capture
-    /// listeners, so that holds only while no key-bound context (a text
-    /// input) has the focus. Esc drops an armed tab close
-    /// (and still reaches the pane). Ctrl+B toggles the sidebar only when
-    /// no terminal and no tab rename has the keyboard; in a terminal it is
-    /// the PTY's 0x02.
+    /// the delete-worktree confirm, else the spawn dialog, while open, holds
+    /// the focus and takes every key that reaches this listener (the spawn
+    /// dialog lets typing through to its text fields); gpui runs keymap
+    /// actions before capture listeners, so that holds only while no
+    /// key-bound context (a text input) has the focus. Esc drops an armed
+    /// tab close (and still reaches the pane).
     fn on_key_capture(
         &mut self,
         event: &KeyDownEvent,
@@ -833,28 +851,57 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.spawn_dialog.is_some() {
+            if self.on_spawn_dialog_key(ks, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
             if self.confirm.disarm() || tab_close {
                 cx.notify();
             }
         }
+        if self.on_shortcut(ks, window, cx) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// The root's own keys; returns whether `ks` was one. Esc closes the
+    /// session menu or the flyout. Ctrl+B toggles the sidebar and Ctrl+N
+    /// opens the spawn dialog only when no terminal and no tab rename has
+    /// the keyboard; in a terminal they are the PTY's 0x02 and 0x0e.
+    /// Ctrl+Shift+N opens the spawn dialog from anywhere.
+    fn on_shortcut(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let ctrl_only = ks.modifiers.control && !ks.modifiers.shift && !ks.modifiers.alt;
         if self.menu.is_some() && ks.key == "escape" {
             self.close_session_menu(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
-        } else if ctrl_only
-            && ks.key == "b"
-            && self.renaming.is_none()
-            && !self.terminal_focused(window, cx)
-        {
+        } else if ctrl_only && ks.key == "b" && self.outside_terminal(window, cx) {
             self.toggle_sidebar(window, cx);
+        } else if self.is_spawn_shortcut(ks, window, cx) {
+            self.open_spawn_dialog(window, cx);
         } else {
-            return;
+            return false;
         }
-        cx.stop_propagation();
-        cx.notify();
+        true
+    }
+
+    /// Neither a terminal nor a tab rename has the keyboard.
+    fn outside_terminal(&self, window: &Window, cx: &Context<Self>) -> bool {
+        self.renaming.is_none() && !self.terminal_focused(window, cx)
+    }
+
+    /// Ctrl+Shift+N anywhere, or Ctrl+N outside the terminals.
+    fn is_spawn_shortcut(&self, ks: &Keystroke, window: &Window, cx: &Context<Self>) -> bool {
+        let mods = &ks.modifiers;
+        if !mods.control || mods.alt || mods.platform || !ks.key.eq_ignore_ascii_case("n") {
+            return false;
+        }
+        mods.shift || self.outside_terminal(window, cx)
     }
 
     /// A press anywhere that did not stop at a tab's close button or a
@@ -909,6 +956,7 @@ impl Render for RootView {
             .child(self.footer_bar(&footer, cx))
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
+            .children(self.spawn_dialog_layers(cx))
             .children(self.delete_dialog_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
