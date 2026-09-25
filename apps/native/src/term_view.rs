@@ -9,10 +9,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, FocusHandle, Font, FontStyle,
-    FontWeight, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Point, Rgba, ScrollWheelEvent, SharedString, Task, TextRun, UnderlineStyle, Window,
-    canvas, div, fill, font, outline, point, prelude::*, px, size,
+    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, EventEmitter, FocusHandle,
+    Font, FontStyle, FontWeight, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString, Task,
+    TextRun, UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionSnapshot};
 
@@ -43,6 +43,8 @@ pub struct TerminalPane {
     /// The last cell a motion report named, so a move inside a cell sends
     /// nothing.
     last_motion: Option<(usize, usize)>,
+    /// Whether this pane may size the session's PTY yet.
+    size_gate: SizeGate,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -67,17 +69,50 @@ impl Attachment {
     }
 }
 
+/// Whether the pane may size its session's PTY: only once a layout pass has
+/// measured its real size, and only while it drives the session's size.
+#[derive(Debug, Default, Clone, Copy)]
+struct SizeGate {
+    measured: bool,
+    driving: bool,
+}
+
+impl SizeGate {
+    /// A layout pass measured the grid; returns whether to send the size.
+    /// The first measure always does, since nothing was sent before it.
+    fn measure(&mut self, changed: bool) -> bool {
+        let first = !self.measured;
+        self.measured = true;
+        self.driving && (first || changed)
+    }
+
+    /// Returns whether to send the size now: when the pane takes over with
+    /// a measured size.
+    fn set_driving(&mut self, driving: bool) -> bool {
+        let takes_over = driving && !self.driving;
+        self.driving = driving;
+        takes_over && self.measured
+    }
+
+    fn allows(self) -> bool {
+        self.measured && self.driving
+    }
+}
+
+/// What a pane asks of the root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneEvent {
+    /// The scrollback request timed out and retry `attempt` is due.
+    ScrollbackRetry { session_id: String, attempt: usize },
+}
+
+impl EventEmitter<PaneEvent> for TerminalPane {}
+
 impl TerminalPane {
-    pub fn new(
-        tx: UnboundedSender<NetCommand>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let focus = cx.focus_handle();
-        focus.focus(window);
+    pub fn new(tx: UnboundedSender<NetCommand>, cx: &mut Context<Self>) -> Self {
         Self {
             term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
-            focus,
+            focus: cx.focus_handle(),
             tx,
             attachment: Attachment::default(),
             session: None,
@@ -86,11 +121,16 @@ impl TerminalPane {
             layout: None,
             tracker: Tracker::default(),
             last_motion: None,
+            size_gate: SizeGate::default(),
         }
     }
 
     pub fn session_id(&self) -> Option<&str> {
         self.attachment.session_id.as_deref()
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
     }
 
     pub fn focus(&self, window: &mut Window) {
@@ -101,16 +141,26 @@ impl TerminalPane {
         self.focus.is_focused(window)
     }
 
-    /// Show `session` in a fresh terminal: load its scrollback, then size
-    /// its PTY to this pane.
+    /// Whether this pane drives its session's PTY size: the focused pane
+    /// showing it, else the first on screen. Taking over sends the size.
+    pub fn set_drives_size(&mut self, drives: bool) {
+        if self.size_gate.set_driving(drives) {
+            self.send_resize();
+        }
+    }
+
+    /// Show `session` in a fresh terminal waiting for its scrollback, then
+    /// size its PTY to this pane. The caller asks for the scrollback once
+    /// for every pane showing the session, through
+    /// [`Self::request_scrollback`].
     pub fn attach(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
         let context = SessionContext::of(session);
         self.fresh_terminal(context.default_cursor_shape());
         self.session = Some(context);
         self.attachment.attach(session.id.clone(), Instant::now());
-        self.request_scrollback();
         self.send_resize();
         self.schedule_load_tick(cx);
+        cx.notify();
     }
 
     /// Replaces the terminal, dropping any selection or mouse gesture on the
@@ -121,7 +171,7 @@ impl TerminalPane {
         self.last_motion = None;
     }
 
-    fn request_scrollback(&self) {
+    pub fn request_scrollback(&self) {
         if let Some(session_id) = self.attachment.session_id.clone() {
             self.send(ClientMessage::LoadScrollback { session_id });
         }
@@ -157,26 +207,38 @@ impl TerminalPane {
                 scrollback_load::RETRY_DELAYS.len()
             );
         }
-        self.run_load_steps(steps);
+        if self.run_load_steps(steps) {
+            self.emit_retry(cx);
+        }
         self.schedule_load_tick(cx);
         cx.notify();
     }
 
-    fn run_load_steps(&mut self, steps: Vec<Step>) {
+    /// Runs the load's steps; returns whether a retry is due. The root
+    /// sends it, once for every pane showing the session.
+    fn run_load_steps(&mut self, steps: Vec<Step>) -> bool {
+        let mut retry = false;
         for step in steps {
             match step {
                 Step::Status(text) => self.term.feed(text.as_bytes()),
-                Step::Request => {
-                    tracing::warn!(
-                        "scrollback request for session {:?} timed out; retrying",
-                        self.attachment.session_id
-                    );
-                    self.request_scrollback();
-                }
+                Step::Request => retry = true,
                 Step::History(bytes) => self.term.feed_history(&bytes),
                 Step::Live(bytes) => self.feed_live(&bytes),
                 Step::Resize => self.send_resize(),
             }
+        }
+        retry
+    }
+
+    fn emit_retry(&self, cx: &mut Context<Self>) {
+        let attempt = self.attachment.load.as_ref().map(ScrollbackLoad::state);
+        if let (Some(session_id), Some(LoadState::Loading(attempt))) =
+            (self.attachment.session_id.clone(), attempt)
+        {
+            cx.emit(PaneEvent::ScrollbackRetry {
+                session_id,
+                attempt,
+            });
         }
     }
 
@@ -197,25 +259,22 @@ impl TerminalPane {
         }
     }
 
-    /// Stop receiving the attached session's output, if one is attached.
-    pub fn detach(&mut self) {
-        if let Some(session_id) = self.attachment.take() {
-            self.send(ClientMessage::Detach { session_id });
-        }
+    /// Forget the attached session. The caller sends `Detach` once no pane
+    /// shows it.
+    pub fn release(&mut self) {
+        self.attachment.take();
+        self.fresh_terminal(CursorShape::Block);
         self.session = None;
         self.load_timer = None;
     }
 
-    /// Forget the attachment for a new connection, which starts unattached,
-    /// and return the session that was attached.
-    pub fn reset_for_reconnect(&mut self) -> Option<String> {
-        let previous = self.attachment.take();
-        if previous.is_some() {
+    /// Forget the attachment for a new connection, which starts unattached.
+    pub fn reset_for_reconnect(&mut self) {
+        if self.attachment.take().is_some() {
             self.fresh_terminal(CursorShape::Block);
         }
         self.session = None;
         self.load_timer = None;
-        previous
     }
 
     /// A scrollback reply: the history, then the output held back while it
@@ -290,6 +349,9 @@ impl TerminalPane {
     }
 
     fn send_resize(&self) {
+        if !self.size_gate.allows() {
+            return;
+        }
         let Some(session_id) = self.attachment.session_id.clone() else {
             return;
         };
@@ -305,8 +367,11 @@ impl TerminalPane {
     }
 
     fn ensure_size(&mut self, size: GridSize) {
-        if size != self.term.size() {
+        let changed = size != self.term.size();
+        if changed {
             self.term.resize(size);
+        }
+        if self.size_gate.measure(changed) {
             self.send_resize();
         }
     }
@@ -754,7 +819,7 @@ fn paint_span(
 mod tests {
     use std::time::Instant;
 
-    use super::Attachment;
+    use super::{Attachment, SizeGate};
 
     fn attach(attachment: &mut Attachment, id: &str) {
         attachment.attach(id.to_owned(), Instant::now());
@@ -767,6 +832,34 @@ mod tests {
             .as_mut()
             .and_then(|load| load.on_reply(Vec::new(), false))
             .is_some()
+    }
+
+    #[test]
+    fn size_gate_waits_for_the_first_measure() {
+        let mut gate = SizeGate::default();
+        assert!(!gate.set_driving(true), "nothing measured yet");
+        assert!(!gate.allows());
+        assert!(
+            gate.measure(false),
+            "the first measure sends even at the old size"
+        );
+        assert!(gate.allows());
+        assert!(!gate.measure(false));
+        assert!(gate.measure(true));
+    }
+
+    #[test]
+    fn size_gate_only_the_driver_sends() {
+        let mut gate = SizeGate::default();
+        assert!(!gate.measure(true), "not driving");
+        assert!(!gate.allows());
+        assert!(
+            gate.set_driving(true),
+            "taking over sends the measured size"
+        );
+        assert!(!gate.set_driving(true));
+        assert!(!gate.set_driving(false));
+        assert!(!gate.measure(true));
     }
 
     #[test]

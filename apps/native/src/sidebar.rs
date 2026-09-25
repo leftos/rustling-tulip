@@ -94,6 +94,9 @@ pub struct UiState {
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
     pub collapsed_containers: BTreeSet<String>,
+    /// The tab shown when the client last ran, restored when the daemon
+    /// sends the tab list.
+    pub active_tab_id: Option<String>,
 }
 
 impl Default for UiState {
@@ -102,6 +105,7 @@ impl Default for UiState {
             sidebar_width: DEFAULT_WIDTH,
             sidebar_collapsed: false,
             collapsed_containers: BTreeSet::new(),
+            active_tab_id: None,
         }
     }
 }
@@ -227,6 +231,15 @@ impl SidebarModel {
 
     pub fn ui_state(&self) -> &UiState {
         &self.ui
+    }
+
+    /// Records the active tab; returns whether it changed.
+    pub fn set_active_tab(&mut self, tab_id: Option<&str>) -> bool {
+        if self.ui.active_tab_id.as_deref() == tab_id {
+            return false;
+        }
+        self.ui.active_tab_id = tab_id.map(str::to_owned);
+        true
     }
 }
 
@@ -1242,6 +1255,7 @@ mod tests {
             sidebar_width: 333.0,
             sidebar_collapsed: true,
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
+            active_tab_id: Some("t1".to_owned()),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

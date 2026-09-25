@@ -96,23 +96,23 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Tabs & panes / layout
 
-- [ ] Tab strip: pills with Δ for diff tabs, busy/total badge, name; + New tab — `TabBar.tsx`
-- [ ] Click activates; Ctrl/Cmd-click toggles selection; Shift-click selects a range — `TabBar.tsx`
-- [ ] Close with × (two-click when the tab has sessions or ≥2 panes; Esc / outside click resets); middle-click closes — `TabBar.tsx`
-- [ ] Double-click to rename inline — `TabBar.tsx`
+- [ ] Tab strip: pills with Δ for diff tabs, busy/total badge, name; + New tab — `TabBar.tsx` (native: all but the busy/total badge landed in P1.5)
+- [ ] Click activates; Ctrl/Cmd-click toggles selection; Shift-click selects a range — `TabBar.tsx` (native: click-to-activate landed in P1.5)
+- [x] Close with × (two-click when the tab has sessions or ≥2 panes; Esc / outside click resets); middle-click closes — `TabBar.tsx`
+- [x] Double-click to rename inline — `TabBar.tsx`
 - [ ] Drag to reorder; a pane dragged over a pill activates that tab; dropping on a pill places the pane automatically — `TabBar.tsx`
 - [ ] Tab menu: Rename, Pop out, Rearrange ▸ grid (auto / N×M) / side by side / stacked, Move panes to new tab… (≥3 panes), font +/−/reset, Close, Close others, Merge selected (horizontal / vertical) — `TabBar.tsx`
 - [ ] Move panes dialog: pick panes, layout, grid shape, name — `MovePanesDialog.tsx`
 - [ ] Undo shelf for closed tab / closed pane / move / swap (8s, at most 3) — `UndoShelf.tsx`
-- [ ] Split tree with draggable dividers (5–95%), ratio saved on release — `GridRenderer.tsx` `SplitRenderer`
-- [ ] Focused pane remembered per tab; a new split gets focus — `utils/grid.ts`
-- [ ] Split right/down (Shift = left/up), move to new tab, close pane from the header; empty panes get floating buttons — `SessionPane.tsx`, `GridRenderer.tsx`
+- [x] Split tree with draggable dividers (5–95%), ratio saved on release — `GridRenderer.tsx` `SplitRenderer`
+- [x] Focused pane remembered per tab; a new split gets focus — `utils/grid.ts`
+- [ ] Split right/down (Shift = left/up), move to new tab, close pane from the header; empty panes get floating buttons — `SessionPane.tsx`, `GridRenderer.tsx` (native: split and close landed in P1.5; move to new tab and the empty-pane buttons are open)
 - [ ] **(hard)** Pane drag and drop from the header or ⠿ handle: edge overlay for splits, centre swap, outer band splits at the top level, across tabs — `GridRenderer.tsx` `computeEdge`
 - [ ] Closing a pane with a session: close pane only / discard session keep worktree / delete worktree — `PaneCloseDialog.tsx`
 - [ ] Empty pane placeholder and its context menu (Move to ▸, Close) — `EmptyPane.tsx`, `GridRenderer.tsx` `PaneContextMenu`
-- [ ] Smart placement: next to the same repo → an empty pane → split the largest pane along its longer side — `App.tsx` `paneTargetForSession`
+- [x] Smart placement: next to the same repo → an empty pane → split the largest pane along its longer side — `App.tsx` `paneTargetForSession`
 - [ ] "Import remote sessions" modal when the remote session count changes — `ImportArrangementModal.tsx`
-- [ ] Active tab remembered across reloads — `App.tsx`
+- [x] Active tab remembered across reloads — `App.tsx`
 - [ ] Window title "(M/N) Tab — rustling-tulip", debounced 350ms — `utils/windowTitle.ts`
 
 ## Terminal

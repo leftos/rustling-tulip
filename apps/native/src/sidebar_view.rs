@@ -2,15 +2,15 @@
 //! button, container rows and session leaves, and the drag divider.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, CursorStyle, Div, FontWeight, MouseButton, SharedString,
-    Stateful, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 use protocol::SessionStatus;
 
 use crate::connection::DotKind;
 use crate::sidebar::{Container, Leaf};
 use crate::{
-    BORDER, DIVIDER_WIDTH, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color,
+    BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color, drag_handle,
     status_dot, tooltip,
 };
 
@@ -30,20 +30,24 @@ impl RootView {
             row.child(collapsed_strip(cx))
         } else {
             let width = self.sidebar.width(window.viewport_size().width / px(1.0));
+            let active = matches!(self.drag, Some(Drag::Sidebar));
             row.child(self.sidebar_panel(width, cx))
-                .child(divider(self.dragging, cx))
+                .child(divider(active, cx))
         };
         row.child(
             div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
-                .child(self.pane.clone()),
+                .child(self.tab_bar(cx))
+                .child(self.grid_area(cx)),
         )
     }
 
     fn sidebar_panel(&self, width: f32, cx: &mut Context<Self>) -> Div {
-        let attached = self.pane.read(cx).session_id().map(str::to_owned);
+        let attached = self.focused_session();
         let containers = self.sidebar.containers();
         let body = div()
             .id("sidebar-body")
@@ -141,15 +145,7 @@ fn collapsed_strip(cx: &mut Context<RootView>) -> Div {
 
 /// The drag handle; a press starts a resize the root follows until release.
 fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
-    div()
-        .id("sidebar-divider")
-        .flex_none()
-        .w(px(DIVIDER_WIDTH))
-        .h_full()
-        .bg(gpui::rgb(BORDER))
-        .cursor(CursorStyle::ResizeLeftRight)
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(active, |handle| handle.bg(gpui::rgb(HOVER_BG)))
+    drag_handle("sidebar-divider", true, active)
         .on_mouse_down(MouseButton::Left, cx.listener(RootView::start_drag))
 }
 

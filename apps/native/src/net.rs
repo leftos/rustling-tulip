@@ -334,16 +334,6 @@ impl Net {
                 self.conn.on_auth_failed(reason.clone());
                 self.emit_state();
             }
-            DaemonMessage::LayoutInitRequired {
-                has_legacy,
-                active_session_count,
-                clonable,
-            } => info!(
-                has_legacy,
-                active_session_count,
-                clonable = clonable.len(),
-                "daemon asked for a first-connect layout choice; not answering"
-            ),
             _ => {}
         }
         self.emit(NetEvent::Message(msg));

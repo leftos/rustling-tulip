@@ -34,7 +34,7 @@
       native     Build the daemon and tracer, then run the native (GPUI)
                  client via `cargo run -p rustling-tulip-native`. Debug by
                  default; -Release for the release profile. Extra arguments
-                 go to the client (an optional session id to attach to).
+                 go to the client (an optional session id to focus, or to place in the active tab).
       help       Print the subcommand summary.
 
 .PARAMETER Command
@@ -1071,7 +1071,7 @@ Commands:
   native     `cargo build -p daemon -p tracer`, then `cargo run -p
              rustling-tulip-native` -- the native client.
              -Release for the release profile; extra args are passed on
-             (an optional session id to attach to).
+             (an optional session id to focus, or to place in the active tab).
   help       This message.
 
 Flags:
