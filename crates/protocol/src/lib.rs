@@ -2042,6 +2042,13 @@ pub enum ClientMessage {
     /// The daemon answers with [`DaemonMessage::Scrollback`].
     LoadScrollback {
         session_id: String,
+        /// Chosen by the client so it can tell the reply to this request apart
+        /// from replies to its earlier ones: the daemon echoes it on the
+        /// [`DaemonMessage::Scrollback`] it sends back to the requester only.
+        /// An echoed id also guarantees that reply is queued before any
+        /// `PtyOutput` from the forwarder this request starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Stop every active session and exit the daemon process. The client is
     /// expected to wait for the WebSocket to close as the shutdown signal —
@@ -2881,6 +2888,20 @@ pub enum DaemonMessage {
         session_id: String,
         data_b64: String,
         truncated: bool,
+        /// The `request_id` of the [`ClientMessage::LoadScrollback`] this
+        /// reply answers; only the requester receives it. When set, this
+        /// reply is queued before any `PtyOutput` from the forwarder that
+        /// request starts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        /// True only when this reply came from a live snapshot, the
+        /// connection's previous forwarder for the session has fully
+        /// stopped, and a new forwarder starts after this reply: output the
+        /// client held back before it is then already in the history. Known
+        /// limit: under heavy output the lifecycle task's drain can lag, and
+        /// the snapshot then misses chunks the old forwarder delivered.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        forwarder_restarted: bool,
     },
     /// Initial tab snapshot sent on connect.
     Tabs {
@@ -4670,6 +4691,116 @@ mod tests {
                 &decoded,
                 ClientMessage::DuplicateSession { session_id, request_id: Some(id) }
                     if session_id == "s1" && id == "req-2"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn load_scrollback_request_id_is_optional_and_round_trips() {
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"load_scrollback","session_id":"s1"}"#)
+                .expect("a message without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::LoadScrollback { session_id, request_id: None } if session_id == "s1"
+            ),
+            "{old:?}"
+        );
+        let unset = serde_json::to_string(&old).expect("serialize");
+        assert!(!unset.contains("request_id"), "{unset}");
+        let msg = ClientMessage::LoadScrollback {
+            session_id: "s1".to_string(),
+            request_id: Some("req-5".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-5""#), "{json}");
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::LoadScrollback { session_id, request_id: Some(id) }
+                    if session_id == "s1" && id == "req-5"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn scrollback_request_id_is_optional_and_round_trips() {
+        let old: DaemonMessage = serde_json::from_str(
+            r#"{"type":"scrollback","session_id":"s1","data_b64":"","truncated":false}"#,
+        )
+        .expect("a reply without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                DaemonMessage::Scrollback {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+        let unset = serde_json::to_string(&old).expect("serialize");
+        assert!(!unset.contains("request_id"), "{unset}");
+        let msg = DaemonMessage::Scrollback {
+            session_id: "s1".to_string(),
+            data_b64: "aGk=".to_string(),
+            truncated: true,
+            request_id: Some("req-6".to_string()),
+            forwarder_restarted: false,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-6""#), "{json}");
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                DaemonMessage::Scrollback { session_id, data_b64, truncated: true, request_id: Some(id), .. }
+                    if session_id == "s1" && data_b64 == "aGk=" && id == "req-6"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn scrollback_forwarder_restarted_is_omitted_when_false_and_round_trips() {
+        let missing: DaemonMessage = serde_json::from_str(
+            r#"{"type":"scrollback","session_id":"s1","data_b64":"","truncated":false,"request_id":"r"}"#,
+        )
+        .expect("a reply without forwarder_restarted decodes");
+        assert!(
+            matches!(
+                &missing,
+                DaemonMessage::Scrollback {
+                    forwarder_restarted: false,
+                    ..
+                }
+            ),
+            "{missing:?}"
+        );
+        let unset = serde_json::to_string(&missing).expect("serialize");
+        assert!(!unset.contains("forwarder_restarted"), "{unset}");
+
+        let msg = DaemonMessage::Scrollback {
+            session_id: "s1".to_string(),
+            data_b64: String::new(),
+            truncated: false,
+            request_id: Some("r".to_string()),
+            forwarder_restarted: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""forwarder_restarted":true"#), "{json}");
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                DaemonMessage::Scrollback {
+                    forwarder_restarted: true,
+                    ..
+                }
             ),
             "{decoded:?}"
         );

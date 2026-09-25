@@ -150,6 +150,7 @@ fn scrollback(ws: &mut Socket, session: &str) -> Vec<u8> {
         ws,
         &ClientMessage::LoadScrollback {
             session_id: session.to_owned(),
+            request_id: None,
         },
     );
     loop {

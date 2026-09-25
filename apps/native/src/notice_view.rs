@@ -25,7 +25,7 @@ impl RootView {
     /// Asks the daemon for a new session and places it by `open_in` when
     /// its reply arrives. A "Spawning session…" toast shows meanwhile.
     pub fn spawn(&mut self, request: SpawnRequest, open_in: OpenIn, cx: &mut Context<Self>) {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = crate::new_request_id();
         let msg = self.spawns.start(request, request_id, open_in);
         self.send(msg);
         self.push_spawning_toast(cx);

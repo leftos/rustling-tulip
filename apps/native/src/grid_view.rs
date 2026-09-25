@@ -15,7 +15,7 @@ use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term_view::{PaneEvent, TerminalPane};
 use crate::{
     BAR_BG, BORDER, DIVIDER_WIDTH, Drag, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE,
-    drag_handle, tooltip,
+    drag_handle, new_request_id, tooltip,
 };
 
 const PANE_HEADER_HEIGHT: f32 = 20.0;
@@ -39,32 +39,55 @@ impl PaneSlot {
     }
 }
 
-/// One scrollback retry per session and attempt. The panes showing a
-/// session time out together, and every `LoadScrollback` restarts the
-/// daemon's output stream for it, so only the first report goes out.
+/// One scrollback retry per session and attempt, and a fresh request id for
+/// every `LoadScrollback`. The panes showing a session time out together,
+/// and every `LoadScrollback` restarts the daemon's output stream for it, so
+/// only the first report goes out.
 #[derive(Debug, Default)]
 pub(crate) struct RetryGate {
-    /// The last attempt sent, by session.
-    sent: HashMap<String, usize>,
+    rounds: HashMap<String, Round>,
+}
+
+/// A session's latest `LoadScrollback`.
+#[derive(Debug)]
+struct Round {
+    /// The id it went out under.
+    request_id: String,
+    /// Its retry attempt; 0 for the attach's first request.
+    attempt: usize,
 }
 
 impl RetryGate {
-    /// Whether a pane's retry `attempt` for the session is the one to send.
-    pub(crate) fn claim(&mut self, session_id: &str, attempt: usize) -> bool {
-        if self
-            .sent
-            .get(session_id)
-            .is_some_and(|&last| last >= attempt)
-        {
-            return false;
-        }
-        self.sent.insert(session_id.to_owned(), attempt);
-        true
+    /// A fresh attach of the session: counts its retries from the start and
+    /// returns the id for its first request.
+    pub(crate) fn start(&mut self, session_id: &str) -> String {
+        let request_id = new_request_id();
+        self.rounds.insert(
+            session_id.to_owned(),
+            Round {
+                request_id: request_id.clone(),
+                attempt: 0,
+            },
+        );
+        request_id
     }
 
-    /// A fresh attach of the session counts its retries from the start.
-    pub(crate) fn reset(&mut self, session_id: &str) {
-        self.sent.remove(session_id);
+    /// The id to send a pane's retry `attempt` for the session under, when
+    /// it is the one to send: the pane waited on the session's latest
+    /// request, and no pane has reported this attempt yet.
+    pub(crate) fn claim(
+        &mut self,
+        session_id: &str,
+        request_id: Option<&str>,
+        attempt: usize,
+    ) -> Option<String> {
+        let round = self.rounds.get_mut(session_id)?;
+        if request_id != Some(round.request_id.as_str()) || round.attempt >= attempt {
+            return None;
+        }
+        round.request_id = new_request_id();
+        round.attempt = attempt;
+        Some(round.request_id.clone())
     }
 }
 
@@ -191,8 +214,8 @@ impl RootView {
             this.pane_focused(&id, cx);
             cx.notify();
         });
-        let events = cx.subscribe(&view, |this, _, event: &PaneEvent, _| {
-            this.on_pane_event(event);
+        let events = cx.subscribe(&view, |this, _, event: &PaneEvent, cx| {
+            this.on_pane_event(event, cx);
         });
         PaneSlot {
             view,
@@ -223,8 +246,8 @@ impl RootView {
         else {
             return;
         };
-        self.retries.reset(session_id);
-        let mut first = None;
+        let request_id = self.retries.start(session_id);
+        let mut attached = false;
         for slot in self
             .panes
             .values_mut()
@@ -232,11 +255,23 @@ impl RootView {
         {
             slot.view.update(cx, |pane, cx| pane.attach(&session, cx));
             slot.attached = true;
-            first.get_or_insert_with(|| slot.view.clone());
+            attached = true;
         }
-        if let Some(view) = first {
-            view.read(cx).request_scrollback();
+        if attached {
+            self.request_scrollback(session_id, request_id, cx);
         }
+    }
+
+    /// Sends `LoadScrollback` for the session under `request_id`, and tells
+    /// every pane showing it that only this request's reply counts.
+    fn request_scrollback(&mut self, session_id: &str, request_id: String, cx: &mut Context<Self>) {
+        for view in self.pane_views(Some(session_id)) {
+            view.update(cx, |pane, _| pane.expect_scrollback(&request_id));
+        }
+        self.send(ClientMessage::LoadScrollback {
+            session_id: session_id.to_owned(),
+            request_id: Some(request_id),
+        });
     }
 
     /// Tells every pane whether it drives its session's PTY size and whether
@@ -263,18 +298,20 @@ impl RootView {
 
     /// A pane's scrollback retry: sent once per session and attempt, and the
     /// reply reaches every pane showing the session.
-    fn on_pane_event(&mut self, event: &PaneEvent) {
+    fn on_pane_event(&mut self, event: &PaneEvent, cx: &mut Context<Self>) {
         let PaneEvent::ScrollbackRetry {
             session_id,
             attempt,
+            request_id,
         } = event;
-        if self.retries.claim(session_id, *attempt) {
+        if let Some(request_id) = self
+            .retries
+            .claim(session_id, request_id.as_deref(), *attempt)
+        {
             tracing::warn!(
                 "scrollback request for session {session_id} timed out; retry {attempt}"
             );
-            self.send(ClientMessage::LoadScrollback {
-                session_id: session_id.clone(),
-            });
+            self.request_scrollback(session_id, request_id, cx);
         }
     }
 
@@ -689,13 +726,49 @@ mod tests {
     #[test]
     fn grid_retry_goes_out_once_per_session_and_attempt() {
         let mut gate = RetryGate::default();
-        assert!(gate.claim("s1", 2));
-        assert!(!gate.claim("s1", 2), "a second pane of the same session");
-        assert!(gate.claim("s2", 2));
-        assert!(gate.claim("s1", 3));
-        assert!(!gate.claim("s1", 2), "a late report of an earlier round");
-        gate.reset("s1");
-        assert!(gate.claim("s1", 2), "a fresh attach counts again");
+        let first = gate.start("s1");
+        let retry = gate
+            .claim("s1", Some(&first), 2)
+            .expect("the first report of a round");
+        assert_ne!(retry, first, "every request gets its own id");
+        assert_eq!(
+            gate.claim("s1", Some(&first), 2),
+            None,
+            "a second pane of the same session, still waiting on the first id"
+        );
+        assert_eq!(
+            gate.claim("s1", Some(&retry), 2),
+            None,
+            "a second pane of the same session, already told the retry's id"
+        );
+        let other = gate.start("s2");
+        assert!(gate.claim("s2", Some(&other), 2).is_some());
+        let next = gate.claim("s1", Some(&retry), 3).expect("the next round");
+        assert_ne!(next, retry);
+        assert_eq!(
+            gate.claim("s1", Some(&next), 2),
+            None,
+            "a late report of an earlier round"
+        );
+        let again = gate.start("s1");
+        assert_ne!(again, first);
+        assert!(
+            gate.claim("s1", Some(&again), 2).is_some(),
+            "a fresh attach counts again"
+        );
+    }
+
+    #[test]
+    fn a_retry_from_before_a_reattach_is_ignored() {
+        let mut gate = RetryGate::default();
+        let before = gate.start("s1");
+        let current = gate.start("s1");
+        assert_eq!(gate.claim("s1", Some(&before), 2), None);
+        assert_eq!(gate.claim("s1", None, 2), None, "a pane that knows no id");
+        assert!(
+            gate.claim("s1", Some(&current), 2).is_some(),
+            "the ignored retry left the expected id alone"
+        );
     }
 
     #[test]

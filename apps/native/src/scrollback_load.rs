@@ -49,6 +49,17 @@ pub enum Step {
     Resize,
 }
 
+/// What became of a scrollback reply.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReplyVerdict {
+    /// It answers the load; the steps write it.
+    Accepted(Vec<Step>),
+    /// It answers an earlier request than the latest one, and is dropped.
+    Stale,
+    /// No load is in progress, so it is dropped.
+    NotLoading,
+}
+
 #[derive(Debug)]
 enum Phase {
     Awaiting { attempt: usize, deadline: Instant },
@@ -62,6 +73,8 @@ pub struct ScrollbackLoad {
     phase: Phase,
     /// Live output held back until the history is written.
     buffer: Vec<Vec<u8>>,
+    /// The id of the latest `LoadScrollback` sent; only its reply is written.
+    request_id: Option<String>,
 }
 
 impl ScrollbackLoad {
@@ -73,7 +86,19 @@ impl ScrollbackLoad {
                 deadline: now + REQUEST_TIMEOUT,
             },
             buffer: Vec::new(),
+            request_id: None,
         }
+    }
+
+    /// A `LoadScrollback` went out under `request_id`: replies to earlier
+    /// requests are dropped from now on.
+    pub fn expect_reply_to(&mut self, request_id: String) {
+        self.request_id = Some(request_id);
+    }
+
+    /// The id of the latest `LoadScrollback` sent, once known.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
     }
 
     pub fn state(&self) -> State {
@@ -106,11 +131,31 @@ impl ScrollbackLoad {
         }
     }
 
-    /// A scrollback reply. The first one while loading is written, whichever
-    /// request it answers; any later one returns `None`.
-    pub fn on_reply(&mut self, history: Vec<u8>, truncated: bool) -> Option<Vec<Step>> {
+    /// A scrollback reply, written if it is the first one while loading and
+    /// answers the latest request. A reply without an id comes from a daemon
+    /// that echoes none, and is never stale. `history` is only called, to
+    /// decode the reply, once it is accepted; its error leaves the load as
+    /// it was.
+    ///
+    /// When the daemon says `forwarder_restarted`, the output held back so
+    /// far came from the stream it stopped and is already in the history: it
+    /// is dropped. Otherwise it follows the history.
+    pub fn on_reply<E>(
+        &mut self,
+        request_id: Option<&str>,
+        forwarder_restarted: bool,
+        truncated: bool,
+        history: impl FnOnce() -> Result<Vec<u8>, E>,
+    ) -> Result<ReplyVerdict, E> {
         if !matches!(self.state(), State::Loading(_)) {
-            return None;
+            return Ok(ReplyVerdict::NotLoading);
+        }
+        if request_id.is_some_and(|id| self.request_id.as_deref() != Some(id)) {
+            return Ok(ReplyVerdict::Stale);
+        }
+        let history = history()?;
+        if forwarder_restarted {
+            self.buffer.clear();
         }
         self.phase = Phase::Loaded;
         let mut steps = vec![Step::Status(CLEAR_LINE.to_owned())];
@@ -120,7 +165,7 @@ impl ScrollbackLoad {
             }
             steps.push(Step::History(history));
         }
-        Some(self.finish(steps))
+        Ok(ReplyVerdict::Accepted(self.finish(steps)))
     }
 
     /// Advances the timeout and retry schedule to `now`.
@@ -173,15 +218,29 @@ impl ScrollbackLoad {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::time::Instant;
 
     use super::{
-        CLEAR_LINE, FAILED_BANNER, REQUEST_TIMEOUT, RETRY_DELAYS, ScrollbackLoad, State, Step,
-        TRUNCATED_BANNER, retry_line,
+        CLEAR_LINE, FAILED_BANNER, REQUEST_TIMEOUT, RETRY_DELAYS, ReplyVerdict, ScrollbackLoad,
+        State, Step, TRUNCATED_BANNER, retry_line,
     };
 
     fn clear() -> Step {
         Step::Status(CLEAR_LINE.to_owned())
+    }
+
+    /// Hands the load an untruncated reply.
+    fn reply(
+        load: &mut ScrollbackLoad,
+        history: &[u8],
+        request_id: Option<&str>,
+        forwarder_restarted: bool,
+    ) -> ReplyVerdict {
+        load.on_reply(request_id, forwarder_restarted, false, || {
+            Ok::<_, Infallible>(history.to_vec())
+        })
+        .unwrap_or_else(|never| match never {})
     }
 
     #[test]
@@ -190,8 +249,8 @@ mod tests {
         assert_eq!(load.on_output(b"a".to_vec()), None);
         assert_eq!(load.on_output(b"b".to_vec()), None);
         assert_eq!(
-            load.on_reply(b"history".to_vec(), false),
-            Some(vec![
+            reply(&mut load, b"history", None, false),
+            ReplyVerdict::Accepted(vec![
                 clear(),
                 Step::History(b"history".to_vec()),
                 Step::Live(b"a".to_vec()),
@@ -220,8 +279,8 @@ mod tests {
         assert_eq!(load.state(), State::Loading(2));
         assert_eq!(load.next_deadline(), Some(retry_at + REQUEST_TIMEOUT));
         assert_eq!(
-            load.on_reply(b"h".to_vec(), false),
-            Some(vec![clear(), Step::History(b"h".to_vec()), Step::Resize])
+            reply(&mut load, b"h", None, false),
+            ReplyVerdict::Accepted(vec![clear(), Step::History(b"h".to_vec()), Step::Resize])
         );
     }
 
@@ -253,20 +312,108 @@ mod tests {
                 Step::Resize,
             ]
         );
-        assert_eq!(load.on_reply(b"late".to_vec(), false), None);
+        assert_eq!(
+            reply(&mut load, b"late", None, false),
+            ReplyVerdict::NotLoading
+        );
         assert_eq!(load.on_output(b"x".to_vec()), Some(b"x".to_vec()));
     }
 
     #[test]
-    fn a_late_reply_after_a_retry_is_accepted_once() {
+    fn a_late_reply_to_an_earlier_request_is_dropped() {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
+        load.expect_reply_to("first".to_owned());
+        load.tick(t0 + REQUEST_TIMEOUT);
+        let retry_at = t0 + REQUEST_TIMEOUT + RETRY_DELAYS[0];
+        assert_eq!(load.tick(retry_at), vec![Step::Request]);
+        load.expect_reply_to("second".to_owned());
+
+        assert_eq!(
+            reply(&mut load, b"stale", Some("first"), true),
+            ReplyVerdict::Stale
+        );
+        assert_eq!(load.state(), State::Loading(2));
+        assert_eq!(load.next_deadline(), Some(retry_at + REQUEST_TIMEOUT));
+
+        assert_eq!(
+            reply(&mut load, b"fresh", Some("second"), true),
+            ReplyVerdict::Accepted(vec![
+                clear(),
+                Step::History(b"fresh".to_vec()),
+                Step::Resize
+            ])
+        );
+        assert_eq!(load.state(), State::Loaded);
+        assert_eq!(
+            reply(&mut load, b"fresh", Some("second"), true),
+            ReplyVerdict::NotLoading
+        );
+    }
+
+    #[test]
+    fn a_reply_before_any_request_id_is_known_is_dropped() {
+        let mut load = ScrollbackLoad::start(Instant::now());
+        assert_eq!(
+            reply(&mut load, b"h", Some("other"), true),
+            ReplyVerdict::Stale
+        );
+        assert_eq!(load.state(), State::Loading(1));
+    }
+
+    #[test]
+    fn a_matching_reply_discards_the_output_held_back() {
+        let mut load = ScrollbackLoad::start(Instant::now());
+        load.expect_reply_to("r1".to_owned());
+        assert_eq!(load.on_output(b"X".to_vec()), None);
+        assert_eq!(
+            reply(&mut load, b"H", Some("r1"), true),
+            ReplyVerdict::Accepted(vec![clear(), Step::History(b"H".to_vec()), Step::Resize])
+        );
+        assert_eq!(load.on_output(b"live".to_vec()), Some(b"live".to_vec()));
+    }
+
+    #[test]
+    fn matching_reply_without_restart_keeps_the_buffer() {
+        let mut load = ScrollbackLoad::start(Instant::now());
+        load.expect_reply_to("r1".to_owned());
+        assert_eq!(load.on_output(b"X".to_vec()), None);
+        assert_eq!(
+            reply(&mut load, b"H", Some("r1"), false),
+            ReplyVerdict::Accepted(vec![
+                clear(),
+                Step::History(b"H".to_vec()),
+                Step::Live(b"X".to_vec()),
+                Step::Resize,
+            ])
+        );
+        assert_eq!(load.state(), State::Loaded);
+    }
+
+    #[test]
+    fn an_id_less_reply_after_a_retry_is_accepted_once_with_the_output_held_back() {
+        let t0 = Instant::now();
+        let mut load = ScrollbackLoad::start(t0);
+        load.expect_reply_to("first".to_owned());
         load.tick(t0 + REQUEST_TIMEOUT);
         let retried = load.tick(t0 + REQUEST_TIMEOUT + RETRY_DELAYS[0]);
         assert_eq!(retried, vec![Step::Request]);
-        assert!(load.on_reply(b"h".to_vec(), false).is_some());
+        load.expect_reply_to("second".to_owned());
+        assert_eq!(load.on_output(b"X".to_vec()), None);
+        assert_eq!(
+            reply(&mut load, b"h", None, false),
+            ReplyVerdict::Accepted(vec![
+                clear(),
+                Step::History(b"h".to_vec()),
+                Step::Live(b"X".to_vec()),
+                Step::Resize,
+            ])
+        );
         assert_eq!(load.state(), State::Loaded);
-        assert_eq!(load.on_reply(b"h".to_vec(), false), None);
+        assert_eq!(
+            reply(&mut load, b"h", None, false),
+            ReplyVerdict::NotLoading
+        );
     }
 
     #[test]
@@ -274,16 +421,22 @@ mod tests {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
         load.tick(t0 + REQUEST_TIMEOUT);
-        assert!(load.on_reply(Vec::new(), false).is_some());
+        assert!(matches!(
+            reply(&mut load, b"", None, false),
+            ReplyVerdict::Accepted(_)
+        ));
         assert_eq!(load.state(), State::Loaded);
     }
 
     #[test]
     fn truncated_history_gets_the_banner() {
         let mut load = ScrollbackLoad::start(Instant::now());
+        let verdict = load
+            .on_reply(None, false, true, || Ok::<_, Infallible>(b"h".to_vec()))
+            .unwrap_or_else(|never| match never {});
         assert_eq!(
-            load.on_reply(b"h".to_vec(), true),
-            Some(vec![
+            verdict,
+            ReplyVerdict::Accepted(vec![
                 clear(),
                 Step::Status(TRUNCATED_BANNER.to_owned()),
                 Step::History(b"h".to_vec()),
@@ -295,7 +448,7 @@ mod tests {
     #[test]
     fn output_after_loaded_is_fed_directly() {
         let mut load = ScrollbackLoad::start(Instant::now());
-        load.on_reply(Vec::new(), false);
+        reply(&mut load, b"", None, false);
         assert_eq!(load.on_output(b"x".to_vec()), Some(b"x".to_vec()));
     }
 }

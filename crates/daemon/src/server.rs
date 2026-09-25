@@ -17,8 +17,8 @@ use crate::registry::{
     set_workspace_worktree_default, upsert_workspace,
 };
 use crate::session::{
-    SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle, build_replay_snapshot, new_id,
-    push_recent_action,
+    ScrollbackSnapshot, SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle,
+    build_replay_snapshot, new_id, push_recent_action,
 };
 use crate::state::AppState;
 use crate::tabs;
@@ -2142,8 +2142,18 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             start_fetch(ctx, id, target).await;
         }
         ClientMessage::CancelFetch { id } => cancel_fetch(ctx.fetches, &id).await,
-        ClientMessage::LoadScrollback { session_id } => {
-            load_scrollback_and_attach_forwarder(hub, &session_id, out_tx, pty_forwarders).await;
+        ClientMessage::LoadScrollback {
+            session_id,
+            request_id,
+        } => {
+            load_scrollback_and_attach_forwarder(
+                hub,
+                &session_id,
+                request_id,
+                out_tx,
+                pty_forwarders,
+            )
+            .await;
         }
         ClientMessage::Shutdown { drain } => {
             info!(drain, "dispatch: ClientMessage::Shutdown received");
@@ -3297,8 +3307,9 @@ const SCROLLBACK_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 async fn load_scrollback_and_attach_forwarder(
     hub: &Hub,
     session_id: &str,
+    request_id: Option<String>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
-    pty_forwarders: &Arc<AsyncMutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    pty_forwarders: &PtyForwarders,
 ) {
     let snap_tx = hub
         .sessions
@@ -3332,45 +3343,8 @@ async fn load_scrollback_and_attach_forwarder(
         None
     };
 
-    let (data, truncated) = if let Some(snap) = snapshot {
-        // Replace any existing forwarder for this session (e.g. a previous
-        // Terminal mount in the same WS session that didn't get a clean
-        // Detach). Abort first, then spawn the fresh one.
-        let mut forwarders = pty_forwarders.lock().await;
-        if let Some(old) = forwarders.remove(session_id) {
-            old.abort();
-        }
-        let mut live = snap.live;
-        let out = out_tx.clone();
-        let sid = session_id.to_string();
-        let handle = tokio::spawn(async move {
-            loop {
-                match live.recv().await {
-                    Ok(bytes) => {
-                        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                        if out
-                            .send(DaemonMessage::PtyOutput {
-                                session_id: sid.clone(),
-                                data_b64,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(
-                            session_id = %sid,
-                            lagged = n,
-                            "per-client pty forwarder lagged"
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        forwarders.insert(session_id.to_string(), handle);
-        (snap.data, snap.truncated)
+    if let Some(snap) = snapshot {
+        reply_then_forward(snap, session_id, request_id, out_tx, pty_forwarders).await;
     } else {
         // No live PTY (orphan/abandoned/headless), or the lifecycle task failed
         // to answer in time. Read the file directly, but still re-assert the
@@ -3378,15 +3352,92 @@ async fn load_scrollback_and_attach_forwarder(
         // snapshot-timeout path the session *is* live, and handing it an
         // unprefixed replay re-opens the stale-paste-flag bug.
         let bp_enabled = crate::termstate::load(&hub.dirs, session_id);
-        build_replay_snapshot(Some(&hub.dirs), session_id, bp_enabled)
-    };
+        let (data, truncated) = build_replay_snapshot(Some(&hub.dirs), session_id, bp_enabled);
+        let _ = out_tx.send(scrollback_reply(
+            session_id, &data, truncated, request_id, false,
+        ));
+    }
+}
 
-    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-    let _ = out_tx.send(DaemonMessage::Scrollback {
-        session_id: session_id.to_string(),
-        data_b64,
-        truncated,
+/// Queues the snapshot's `Scrollback` reply, then starts the per-client
+/// forwarder for its live receiver. The receiver was subscribed when the
+/// snapshot was taken, so output produced meanwhile waits in it; and since
+/// `out_tx` is a FIFO, the reply reaches the client before any `PtyOutput`
+/// from the new forwarder.
+async fn reply_then_forward(
+    snap: ScrollbackSnapshot,
+    session_id: &str,
+    request_id: Option<String>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    pty_forwarders: &PtyForwarders,
+) {
+    // Replace any existing forwarder for this session (e.g. a previous
+    // Terminal mount in the same WS session that didn't get a clean
+    // Detach). Stop it before the reply, spawn the fresh one after.
+    let mut forwarders = pty_forwarders.lock().await;
+    if let Some(old) = forwarders.remove(session_id) {
+        old.abort();
+        // `abort` does not wait, and on the multi-threaded runtime the old
+        // forwarder may be mid-send on another worker; awaiting it (it
+        // yields `Err(Cancelled)` once stopped) keeps its `PtyOutput` from
+        // landing after the reply. It holds only its live receiver and an
+        // `out_tx` clone, never this map's lock, so waiting here is safe.
+        let _ = old.await;
+    }
+    let _ = out_tx.send(scrollback_reply(
+        session_id,
+        &snap.data,
+        snap.truncated,
+        request_id,
+        true,
+    ));
+    let mut live = snap.live;
+    let out = out_tx.clone();
+    let sid = session_id.to_string();
+    let handle = tokio::spawn(async move {
+        loop {
+            match live.recv().await {
+                Ok(bytes) => {
+                    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    if out
+                        .send(DaemonMessage::PtyOutput {
+                            session_id: sid.clone(),
+                            data_b64,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        session_id = %sid,
+                        lagged = n,
+                        "per-client pty forwarder lagged"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
     });
+    forwarders.insert(session_id.to_string(), handle);
+}
+
+/// One `Scrollback` reply, echoing the request's id.
+fn scrollback_reply(
+    session_id: &str,
+    data: &[u8],
+    truncated: bool,
+    request_id: Option<String>,
+    forwarder_restarted: bool,
+) -> DaemonMessage {
+    DaemonMessage::Scrollback {
+        session_id: session_id.to_string(),
+        data_b64: base64::engine::general_purpose::STANDARD.encode(data),
+        truncated,
+        request_id,
+        forwarder_restarted,
+    }
 }
 
 /// Per-spawn configuration bundled together to keep spawn-fn signatures narrow.
@@ -6017,6 +6068,51 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
 )]
 mod tests {
     use super::*;
+
+    /// Output the PTY produced after the snapshot waits in its live receiver;
+    /// the reply must still reach the client first. Multi-threaded, so a
+    /// forwarder spawned before the reply is queued gets the chance to win.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scrollback_reply_precedes_live_output_and_echoes_the_request_id() {
+        let (live_tx, live) = broadcast::channel(8);
+        live_tx.send(b"after".to_vec()).unwrap();
+        let snap = ScrollbackSnapshot {
+            data: b"history".to_vec(),
+            truncated: true,
+            live,
+        };
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let old = tokio::spawn(std::future::pending::<()>());
+        forwarders.lock().await.insert("s1".to_string(), old);
+
+        reply_then_forward(snap, "s1", Some("req-1".to_string()), &out_tx, &forwarders).await;
+
+        let first = out_rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                &first,
+                DaemonMessage::Scrollback {
+                    session_id,
+                    truncated: true,
+                    request_id: Some(id),
+                    forwarder_restarted: true,
+                    ..
+                } if session_id == "s1" && id == "req-1"
+            ),
+            "{first:?}"
+        );
+        let second = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("the new forwarder sends the queued output")
+            .unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode(b"after");
+        assert!(
+            matches!(&second, DaemonMessage::PtyOutput { data_b64, .. } if *data_b64 == expected),
+            "{second:?}"
+        );
+        assert!(forwarders.lock().await.contains_key("s1"));
+    }
 
     #[test]
     fn negotiate_picks_highest_match_from_range() {

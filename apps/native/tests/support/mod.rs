@@ -1,7 +1,7 @@
 //! A fake daemon for the native client's UI specs: the root view on a test
 //! window, fed daemon messages, read back through the commands it sends.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -233,6 +233,16 @@ pub struct Harness<'a> {
     commands: UnboundedReceiver<NetCommand>,
     clock: TestClock,
     answered: HashSet<String>,
+    outbox: Outbox,
+}
+
+/// What the client sent, drained from its channel: the messages
+/// [`Harness::sent`] has not returned yet, and the ids of its
+/// `LoadScrollback` requests by session, in the order sent.
+#[derive(Default)]
+pub struct Outbox {
+    unread: Vec<ClientMessage>,
+    scrollback_ids: HashMap<String, Vec<String>>,
 }
 
 impl<'a> Harness<'a> {
@@ -259,6 +269,7 @@ impl<'a> Harness<'a> {
             commands,
             clock,
             answered: HashSet::new(),
+            outbox: Outbox::default(),
         };
         harness.connect();
         harness
@@ -324,14 +335,40 @@ impl<'a> Harness<'a> {
 
     /// Every message the client sent since the last call.
     pub fn sent(&mut self) -> Vec<ClientMessage> {
+        self.drain();
+        std::mem::take(&mut self.outbox.unread)
+    }
+
+    /// Moves what the client sent into the outbox, noting the id of every
+    /// `LoadScrollback` on the way.
+    fn drain(&mut self) {
         self.cx.run_until_parked();
-        let mut out = Vec::new();
         while let Ok(command) = self.commands.try_recv() {
             if let NetCommand::Send(msg) = command {
-                out.push(*msg);
+                if let ClientMessage::LoadScrollback {
+                    session_id,
+                    request_id: Some(id),
+                } = msg.as_ref()
+                {
+                    self.outbox
+                        .scrollback_ids
+                        .entry(session_id.clone())
+                        .or_default()
+                        .push(id.clone());
+                }
+                self.outbox.unread.push(*msg);
             }
         }
-        out
+    }
+
+    /// The ids of `session`'s scrollback requests so far, oldest first.
+    pub fn scrollback_requests(&mut self, session: &str) -> Vec<String> {
+        self.drain();
+        self.outbox
+            .scrollback_ids
+            .get(session)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The input bytes sent to `session` since the last drain.
@@ -349,13 +386,39 @@ impl<'a> Harness<'a> {
             .collect()
     }
 
-    /// Answers `session`'s scrollback request with `history`.
+    /// Answers `session`'s latest scrollback request with `history`, echoing
+    /// its id as the daemon does from a live snapshot, which restarts the
+    /// session's forwarder.
     pub fn answer_scrollback(&mut self, session: &str, history: &[u8]) {
+        let latest = self.scrollback_requests(session).pop();
+        self.answer_scrollback_to(session, latest.as_deref(), true, history);
+    }
+
+    /// Answers `session`'s latest scrollback request with `history`, echoing
+    /// its id as the daemon does when it reads the history from disk: no
+    /// forwarder restart, so output held back meanwhile follows the history.
+    pub fn answer_scrollback_from_file(&mut self, session: &str, history: &[u8]) {
+        let latest = self.scrollback_requests(session).pop();
+        self.answer_scrollback_to(session, latest.as_deref(), false, history);
+    }
+
+    /// Answers `session`'s scrollback with `history` under `request_id`:
+    /// an earlier request's id, or none as a daemon that echoes none.
+    /// `forwarder_restarted` is what the daemon says of its forwarder.
+    pub fn answer_scrollback_to(
+        &mut self,
+        session: &str,
+        request_id: Option<&str>,
+        forwarder_restarted: bool,
+        history: &[u8],
+    ) {
         self.answered.insert(session.to_owned());
         self.send(DaemonMessage::Scrollback {
             session_id: session.to_owned(),
             data_b64: B64.encode(history),
             truncated: false,
+            request_id: request_id.map(str::to_owned),
+            forwarder_restarted,
         });
     }
 

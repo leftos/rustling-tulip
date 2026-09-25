@@ -972,7 +972,7 @@ export type ClientMessage =
       path: string;
     }
   | { type: "cancel_fetch"; id: string }
-  | { type: "load_scrollback"; session_id: string }
+  | { type: "load_scrollback"; session_id: string; request_id?: string }
   // `drain` defaults to true server-side. Pass `drain: false` to retain
   // session sidecars so the next daemon start surfaces them as
   // Abandoned (B.3). Pre-Phase-C the children still die — sidecar
@@ -1341,6 +1341,8 @@ export type DaemonMessage =
       session_id: string;
       data_b64: string;
       truncated: boolean;
+      request_id?: string;
+      forwarder_restarted?: boolean;
     }
   | { type: "tabs"; tabs: TabEntry[] }
   | {

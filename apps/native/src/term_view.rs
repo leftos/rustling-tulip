@@ -21,7 +21,7 @@ use protocol::{ClientMessage, SessionSnapshot};
 use crate::Clock;
 use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
-use crate::scrollback_load::{self, ScrollbackLoad, State as LoadState, Step};
+use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
@@ -124,8 +124,13 @@ impl SizeGate {
 /// What a pane asks of the root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
-    /// The scrollback request timed out and retry `attempt` is due.
-    ScrollbackRetry { session_id: String, attempt: usize },
+    /// The scrollback request `request_id` timed out and retry `attempt` is
+    /// due.
+    ScrollbackRetry {
+        session_id: String,
+        attempt: usize,
+        request_id: Option<String>,
+    },
 }
 
 impl EventEmitter<PaneEvent> for TerminalPane {}
@@ -224,8 +229,8 @@ impl TerminalPane {
 
     /// Show `session` in a fresh terminal waiting for its scrollback, then
     /// size its PTY to this pane. The caller asks for the scrollback once
-    /// for every pane showing the session, through
-    /// [`Self::request_scrollback`].
+    /// for every pane showing the session, and names the request through
+    /// [`Self::expect_scrollback`].
     pub fn attach(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
         let context = SessionContext::of(session);
         self.fresh_terminal(context.default_cursor_shape());
@@ -244,9 +249,11 @@ impl TerminalPane {
         self.last_motion = None;
     }
 
-    pub fn request_scrollback(&self) {
-        if let Some(session_id) = self.attachment.session_id.clone() {
-            self.send(ClientMessage::LoadScrollback { session_id });
+    /// A `LoadScrollback` for the attached session went out under
+    /// `request_id`: only its reply is written.
+    pub fn expect_scrollback(&mut self, request_id: &str) {
+        if let Some(load) = self.attachment.load.as_mut() {
+            load.expect_reply_to(request_id.to_owned());
         }
     }
 
@@ -308,13 +315,17 @@ impl TerminalPane {
     }
 
     fn emit_retry(&self, cx: &mut Context<Self>) {
-        let attempt = self.attachment.load.as_ref().map(ScrollbackLoad::state);
-        if let (Some(session_id), Some(LoadState::Loading(attempt))) =
-            (self.attachment.session_id.clone(), attempt)
-        {
+        let (Some(session_id), Some(load)) = (
+            self.attachment.session_id.clone(),
+            self.attachment.load.as_ref(),
+        ) else {
+            return;
+        };
+        if let LoadState::Loading(attempt) = load.state() {
             cx.emit(PaneEvent::ScrollbackRetry {
                 session_id,
                 attempt,
+                request_id: load.request_id().map(str::to_owned),
             });
         }
     }
@@ -377,22 +388,33 @@ impl TerminalPane {
         }
     }
 
-    /// A scrollback reply: the history, then the output held back while it
-    /// loaded. Ignored unless it is the first reply since the attach.
+    /// A scrollback reply: the history, then any output held back while it
+    /// loaded unless the daemon restarted the forwarder for it. Ignored,
+    /// and not decoded, unless it is the first reply since the attach and
+    /// answers the latest request.
     pub fn on_scrollback(
         &mut self,
         data_b64: &str,
         truncated: bool,
+        request_id: Option<&str>,
+        forwarder_restarted: bool,
     ) -> Result<(), base64::DecodeError> {
-        let history = B64.decode(data_b64)?;
-        let steps = self
-            .attachment
-            .load
-            .as_mut()
-            .and_then(|load| load.on_reply(history, truncated));
-        if let Some(steps) = steps {
-            self.load_timer = None;
-            self.run_load_steps(steps);
+        let Some(load) = self.attachment.load.as_mut() else {
+            return Ok(());
+        };
+        let verdict = load.on_reply(request_id, forwarder_restarted, truncated, || {
+            B64.decode(data_b64)
+        })?;
+        match verdict {
+            ReplyVerdict::Accepted(steps) => {
+                self.load_timer = None;
+                self.run_load_steps(steps);
+            }
+            ReplyVerdict::Stale => tracing::debug!(
+                "dropping a scrollback reply for session {:?} to an earlier request {request_id:?}",
+                self.attachment.session_id
+            ),
+            ReplyVerdict::NotLoading => {}
         }
         Ok(())
     }
@@ -1168,9 +1190,10 @@ fn paint_span(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
     use std::time::Instant;
 
-    use super::{Attachment, SizeGate};
+    use super::{Attachment, ReplyVerdict, SizeGate};
 
     fn attach(attachment: &mut Attachment, id: &str) {
         attachment.attach(id.to_owned(), Instant::now());
@@ -1178,11 +1201,10 @@ mod tests {
 
     /// Whether a scrollback reply arriving now would be written.
     fn accept_scrollback(attachment: &mut Attachment) -> bool {
-        attachment
-            .load
-            .as_mut()
-            .and_then(|load| load.on_reply(Vec::new(), false))
-            .is_some()
+        attachment.load.as_mut().is_some_and(|load| {
+            let verdict = load.on_reply(None, false, false, || Ok::<_, Infallible>(Vec::new()));
+            matches!(verdict, Ok(ReplyVerdict::Accepted(_)))
+        })
     }
 
     #[test]

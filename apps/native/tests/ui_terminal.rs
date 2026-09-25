@@ -431,7 +431,9 @@ fn trailing_query_followed_by_buffered_live_output_is_not_answered_twice(cx: &mu
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     h.pty_raw("s1", b"PS C:\\> ");
-    h.answer_scrollback("s1", b"hello\r\n\x1b[6n");
+    // Only a reply that restarted no forwarder leaves held-back live output
+    // that is not in the history.
+    h.answer_scrollback_from_file("s1", b"hello\r\n\x1b[6n");
     let reply = h.sent_input("s1");
     assert!(
         reply.is_empty(),
@@ -444,7 +446,7 @@ fn trailing_query_repeated_in_buffered_live_is_answered_once(cx: &mut TestAppCon
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     h.pty_raw("s1", b"\x1b[6n");
-    h.answer_scrollback("s1", b"hello\r\n\x1b[6n");
+    h.answer_scrollback_from_file("s1", b"hello\r\n\x1b[6n");
     let reply = h.sent_input("s1");
     assert_eq!(
         cursor_replies(&reply),
@@ -513,7 +515,7 @@ fn scrollback_timeout_retries_and_then_drains_buffered_output(cx: &mut TestAppCo
     let requests = |sent: &[ClientMessage]| {
         sent.iter()
             .filter(
-                |m| matches!(m, ClientMessage::LoadScrollback { session_id } if session_id == "s1"),
+                |m| matches!(m, ClientMessage::LoadScrollback { session_id, .. } if session_id == "s1"),
             )
             .count()
     };
@@ -531,10 +533,50 @@ fn scrollback_timeout_retries_and_then_drains_buffered_output(cx: &mut TestAppCo
 
     h.pty_raw("s1", b"live");
     assert!(!h.grid_text("p1").join("\n").contains("live"), "held back");
-    h.answer_scrollback("s1", b"hist\r\n");
+    // A reply read from disk restarts no forwarder, so the output held back
+    // follows the history.
+    h.answer_scrollback_from_file("s1", b"hist\r\n");
     let screen = h.grid_text("p1").join("\n");
     assert!(
         screen.contains("hist") && screen.contains("live"),
+        "got {screen:?}"
+    );
+}
+
+#[gpui::test]
+fn reattach_a_b_a_uses_the_reply_to_the_latest_request(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("a").build(), session("b").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("a")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    for shown in ["b", "a"] {
+        h.send(DaemonMessage::TabUpdated {
+            tab: tab("t1", &pane("p1", Some(shown))),
+        });
+    }
+    let requests = h.scrollback_requests("a");
+    assert_eq!(requests.len(), 2, "two requests for a, got {requests:?}");
+    let (first, second) = (&requests[0], &requests[1]);
+    assert_ne!(first, second, "every request gets its own id");
+
+    h.pty_raw("a", b"OLD");
+    h.answer_scrollback_to("a", Some(first), true, b"STALE\r\n");
+    assert!(
+        !h.grid_text("p1").join("\n").contains("STALE"),
+        "the reply to the first request is dropped"
+    );
+    h.answer_scrollback_to("a", Some(second), true, b"FRESH\r\n");
+    h.pty_raw("a", b"NEW");
+    let screen = h.grid_text("p1").join("\n");
+    assert!(
+        screen.contains("FRESH") && screen.contains("NEW"),
+        "got {screen:?}"
+    );
+    assert!(
+        !screen.contains("STALE") && !screen.contains("OLD"),
         "got {screen:?}"
     );
 }

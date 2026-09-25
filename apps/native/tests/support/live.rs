@@ -22,7 +22,7 @@ use rustling_tulip_native::{
 };
 use serde_json::{Value, json};
 
-use super::{Harness, TestClock};
+use super::{Harness, Outbox, TestClock};
 
 /// How long the daemon has to write `daemon.json` and answer `/health`.
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -555,6 +555,7 @@ impl<'a> Harness<'a> {
             commands: unbounded().1,
             clock,
             answered: HashSet::new(),
+            outbox: Outbox::default(),
         };
         (harness, LiveClient { tx, states })
     }

@@ -802,8 +802,15 @@ impl RootView {
                 session_id,
                 data_b64,
                 truncated,
+                request_id,
+                forwarder_restarted,
             } => self.feed_panes(&session_id, cx, |pane| {
-                pane.on_scrollback(&data_b64, truncated)
+                pane.on_scrollback(
+                    &data_b64,
+                    truncated,
+                    request_id.as_deref(),
+                    forwarder_restarted,
+                )
             }),
             DaemonMessage::PtyOutput {
                 session_id,
@@ -962,6 +969,11 @@ impl Render for RootView {
             .children(self.toast_layer(cx))
             .children(overlay)
     }
+}
+
+/// A fresh id for a request whose reply the client matches to it.
+pub(crate) fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// A handle a press starts dragging: a vertical line between side-by-side

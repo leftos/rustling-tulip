@@ -188,7 +188,7 @@ impl RootView {
             }
             Step::EditName => self.start_session_rename(&session, window, cx),
             Step::Duplicate => {
-                let request_id = uuid::Uuid::new_v4().to_string();
+                let request_id = crate::new_request_id();
                 if let Some(request) = self.duplicates.request(session_id, request_id) {
                     self.send(request);
                     self.close_session_menu(window, cx);
