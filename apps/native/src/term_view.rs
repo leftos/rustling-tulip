@@ -26,6 +26,8 @@ use crate::term_input::{self, KeyAction, SessionContext};
 const FONT_FAMILY: &str = "Cascadia Mono";
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 18.0;
+/// `DSR 6`: the program asks where the cursor is and waits for the reply.
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 
 pub struct TerminalPane {
     term: Terminal,
@@ -48,6 +50,9 @@ pub struct TerminalPane {
     last_motion: Option<(usize, usize)>,
     /// Whether this pane may size the session's PTY yet.
     size_gate: SizeGate,
+    /// Whether this pane answers its session's terminal queries: one pane
+    /// per session does, so the child gets each answer once.
+    answers_queries: bool,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -126,6 +131,7 @@ impl TerminalPane {
             tracker: Tracker::default(),
             last_motion: None,
             size_gate: SizeGate::default(),
+            answers_queries: false,
         }
     }
 
@@ -185,6 +191,12 @@ impl TerminalPane {
         if self.size_gate.set_driving(drives) {
             self.send_resize();
         }
+    }
+
+    /// Whether this pane answers its session's terminal queries, from
+    /// history and live output alike. The others drop their answers.
+    pub fn set_answers_queries(&mut self, answers: bool) {
+        self.answers_queries = answers;
     }
 
     /// Show `session` in a fresh terminal waiting for its scrollback, then
@@ -256,11 +268,15 @@ impl TerminalPane {
     /// sends it, once for every pane showing the session.
     fn run_load_steps(&mut self, steps: Vec<Step>) -> bool {
         let mut retry = false;
+        // The load's live output always comes after its history.
+        let output_follows = steps
+            .iter()
+            .any(|step| matches!(step, Step::Live(bytes) if !bytes.is_empty()));
         for step in steps {
             match step {
                 Step::Status(text) => self.term.feed(text.as_bytes()),
                 Step::Request => retry = true,
-                Step::History(bytes) => self.term.feed_history(&bytes),
+                Step::History(bytes) => self.feed_history(&bytes, output_follows),
                 Step::Live(bytes) => self.feed_live(&bytes),
                 Step::Resize => self.send_resize(),
             }
@@ -348,11 +364,32 @@ impl TerminalPane {
         Ok(())
     }
 
-    /// Feeds live output and answers the queries in it.
+    /// Feeds replayed history. A cursor-position query at its very end is
+    /// still waiting for its answer (`ConPTY` sends one at startup and writes
+    /// nothing until it is answered), so it is answered as live output is,
+    /// unless `output_follows`: output after it means another client has
+    /// answered it already. Every earlier query was answered when it was
+    /// first made.
+    ///
+    /// Known limit: the query is answered a second time when another client
+    /// already answered it and the child has printed nothing since, or when
+    /// the program got its answer and now waits in silence.
+    fn feed_history(&mut self, bytes: &[u8], output_follows: bool) {
+        match bytes.strip_suffix(CURSOR_POSITION_QUERY) {
+            Some(answered) if !output_follows => {
+                self.term.feed_history(answered);
+                self.feed_live(CURSOR_POSITION_QUERY);
+            }
+            _ => self.term.feed_history(bytes),
+        }
+    }
+
+    /// Feeds live output and answers the queries in it when this pane
+    /// answers for its session.
     fn feed_live(&mut self, bytes: &[u8]) {
         self.term.feed(bytes);
         let replies = self.term.take_replies();
-        if !replies.is_empty() {
+        if self.answers_queries && !replies.is_empty() {
             self.send_to_child(&replies);
         }
     }

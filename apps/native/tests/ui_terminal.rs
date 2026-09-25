@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{Modifiers, Point, TestAppContext, point, px, size};
-use protocol::{ClientMessage, DaemonMessage, SessionSnapshot};
-use support::{Fixture, Harness, TestDir, session};
+use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
+use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
 /// everything sent so far drained.
@@ -165,7 +165,7 @@ fn stopped_session_drops_keys_and_pastes(cx: &mut TestAppContext) {
 fn cursor_position_query_is_answered_live_but_not_from_history(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
-    h.answer_scrollback("s1", b"old\x1b[6n");
+    h.answer_scrollback("s1", b"old\x1b[6nnew");
     assert!(h.sent_input("s1").is_empty(), "history is not answered");
 
     h.pty("s1", b"\x1b[6n");
@@ -173,6 +173,120 @@ fn cursor_position_query_is_answered_live_but_not_from_history(cx: &mut TestAppC
     assert!(
         reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
         "cursor position reply, got {reply:?}"
+    );
+}
+
+/// The input sent to `s1` after its scrollback is answered with `history`.
+fn input_after_history(cx: &mut TestAppContext, history: &[u8]) -> Vec<u8> {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", history);
+    h.sent_input("s1")
+}
+
+#[gpui::test]
+fn conpty_startup_query_still_pending_in_history_is_answered(cx: &mut TestAppContext) {
+    let reply = input_after_history(cx, b"\x1b[6n");
+    assert!(
+        reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
+        "the pending query is answered, got {reply:?}"
+    );
+}
+
+#[gpui::test]
+fn trailing_query_after_other_history_is_answered(cx: &mut TestAppContext) {
+    let reply = input_after_history(cx, b"hello\r\n\x1b[6n");
+    assert!(
+        reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
+        "the pending query is answered, got {reply:?}"
+    );
+}
+
+#[gpui::test]
+fn query_followed_by_output_in_history_is_not_answered(cx: &mut TestAppContext) {
+    let reply = input_after_history(cx, b"\x1b[6nPS C:\\> ");
+    assert!(
+        reply.is_empty(),
+        "an answered query is not answered again, got {reply:?}"
+    );
+}
+
+#[gpui::test]
+fn trailing_query_followed_by_buffered_live_output_is_not_answered_twice(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.pty_raw("s1", b"PS C:\\> ");
+    h.answer_scrollback("s1", b"hello\r\n\x1b[6n");
+    let reply = h.sent_input("s1");
+    assert!(
+        reply.is_empty(),
+        "output after the query means another client answered it, got {reply:?}"
+    );
+}
+
+#[gpui::test]
+fn trailing_query_repeated_in_buffered_live_is_answered_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.pty_raw("s1", b"\x1b[6n");
+    h.answer_scrollback("s1", b"hello\r\n\x1b[6n");
+    let reply = h.sent_input("s1");
+    assert_eq!(
+        cursor_replies(&reply),
+        1,
+        "one query pending, one answer, got {reply:?}"
+    );
+}
+
+/// How many cursor-position replies (`ESC [ row ; col R`) `input` holds.
+fn cursor_replies(input: &[u8]) -> usize {
+    input
+        .split(|&byte| byte == 0x1b)
+        .filter(|reply| reply.starts_with(b"[") && reply.ends_with(b"R"))
+        .count()
+}
+
+/// `s1` in both panes of one tab, `p1` and `p2`.
+fn two_panes_on_s1<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s1")),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    Harness::with(cx, dir, &fixture)
+}
+
+#[gpui::test]
+fn two_panes_on_one_session_answer_a_live_query_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_s1(cx, &dir);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+
+    h.pty("s1", b"\x1b[6n");
+    let reply = h.sent_input("s1");
+    assert_eq!(
+        cursor_replies(&reply),
+        1,
+        "one pane answers for the session, got {reply:?}"
+    );
+}
+
+#[gpui::test]
+fn two_panes_on_one_session_answer_a_pending_history_query_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_s1(cx, &dir);
+    h.answer_scrollback("s1", b"hello\r\n\x1b[6n");
+    let reply = h.sent_input("s1");
+    assert_eq!(
+        cursor_replies(&reply),
+        1,
+        "one pane answers for the session, got {reply:?}"
     );
 }
 

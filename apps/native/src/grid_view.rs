@@ -99,6 +99,25 @@ pub(crate) fn divider_ratio(
     Some(tabs::ratio_at(&divider, at.0, at.1))
 }
 
+/// The pane that answers each session's terminal queries, by session: its
+/// size driver, whose grid matches the PTY, else the first pane in layout
+/// order that shows it. Every pane showing a session sees its queries, and
+/// each answer reaches the child as input, so only one pane answers.
+fn query_answerers(
+    bindings: &[PaneBinding],
+    drivers: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut answerers = drivers.clone();
+    for binding in bindings {
+        if let Some(session_id) = &binding.session_id {
+            answerers
+                .entry(session_id.clone())
+                .or_insert_with(|| binding.pane_id.clone());
+        }
+    }
+    answerers
+}
+
 impl RootView {
     /// Brings the terminals in line with the tab model: one per pane,
     /// attached to the pane's session and sizing the PTY only in the active
@@ -121,7 +140,7 @@ impl RootView {
         for session_id in to_sync {
             self.sync_session(&session_id, cx);
         }
-        self.update_size_drivers(cx);
+        self.update_pane_roles(cx);
     }
 
     fn drop_removed_panes(&mut self, bindings: &[PaneBinding], cx: &mut Context<Self>) {
@@ -188,7 +207,7 @@ impl RootView {
     fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
         if let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) {
             self.tabs.set_focused(&tab_id, pane_id);
-            self.update_size_drivers(cx);
+            self.update_pane_roles(cx);
         }
     }
 
@@ -220,17 +239,25 @@ impl RootView {
         }
     }
 
-    /// Tells every pane whether it drives its session's PTY size.
-    fn update_size_drivers(&self, cx: &mut Context<Self>) {
+    /// Tells every pane whether it drives its session's PTY size and whether
+    /// it answers the session's terminal queries.
+    fn update_pane_roles(&self, cx: &mut Context<Self>) {
         let active = self.tabs.active_id();
         let focused = active.and_then(|tab_id| self.tabs.focused_pane(tab_id));
-        let drivers = tabs::size_drivers(&self.tabs.bindings(), active, focused.as_deref());
+        let bindings = self.tabs.bindings();
+        let drivers = tabs::size_drivers(&bindings, active, focused.as_deref());
+        let answerers = query_answerers(&bindings, &drivers);
         for (pane_id, slot) in &self.panes {
-            let drives = slot
-                .session
-                .as_ref()
-                .is_some_and(|session| drivers.get(session) == Some(pane_id));
-            slot.view.update(cx, |pane, _| pane.set_drives_size(drives));
+            let holds = |roles: &HashMap<String, String>| {
+                slot.session
+                    .as_ref()
+                    .is_some_and(|session| roles.get(session) == Some(pane_id))
+            };
+            let (drives, answers) = (holds(&drivers), holds(&answerers));
+            slot.view.update(cx, |pane, _| {
+                pane.set_drives_size(drives);
+                pane.set_answers_queries(answers);
+            });
         }
     }
 
