@@ -1,8 +1,9 @@
-//! Spike: a native (GPUI) client that attaches to one session of a running
-//! rustling-tulip daemon and renders it with `alacritty_terminal`.
+//! Native (GPUI) rustling-tulip client: attaches to one session of a running
+//! daemon and renders it with `alacritty_terminal`.
 //!
-//! Usage: `rt-native-spike [session-id]`. Without an id it attaches to the first
-//! live interactive or plain-shell session the daemon lists.
+//! Usage: `rustling-tulip-native [session-id]`. Without an id it attaches to the
+//! first live interactive or plain-shell session the daemon lists. Logs go to
+//! stderr, filtered by `RUST_LOG` (default `info`).
 
 mod keys;
 mod net;
@@ -15,13 +16,14 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{
     App, Application, Bounds, Context, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent,
-    Pixels, Rgba, ScrollWheelEvent, SharedString, TextRun, UnderlineStyle, Window, WindowBounds,
-    WindowOptions, canvas, div, fill, font, point, prelude::*, px, size,
+    Pixels, Point, Rgba, ScrollWheelEvent, SharedString, TextRun, UnderlineStyle, Window,
+    WindowBounds, WindowOptions, canvas, div, fill, font, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, SessionMode, SessionSnapshot, SessionStatus};
+use tracing_subscriber::EnvFilter;
 
 use crate::net::NetEvent;
-use crate::term::{GridSize, Snapshot, Terminal};
+use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
 
 const FONT_FAMILY: &str = "Cascadia Mono";
 const FONT_SIZE: f32 = 14.0;
@@ -98,27 +100,31 @@ impl TerminalView {
                 session_id,
                 data_b64,
                 ..
-            } if self.is_ours(&session_id) => {
-                self.feed_b64(&data_b64);
-                self.scrollback_loaded = true;
-                for chunk in std::mem::take(&mut self.pending) {
-                    self.term.feed(&chunk);
-                }
-            }
+            } if self.is_ours(&session_id) => self.on_scrollback(&data_b64),
             DaemonMessage::PtyOutput {
                 session_id,
                 data_b64,
-            } if self.is_ours(&session_id) => {
-                if self.scrollback_loaded {
-                    self.feed_b64(&data_b64);
-                } else if let Ok(bytes) = B64.decode(data_b64) {
-                    self.pending.push(bytes);
-                }
-            }
+            } if self.is_ours(&session_id) => self.on_pty_output(&data_b64),
             DaemonMessage::SessionRemoved { session_id } if self.is_ours(&session_id) => {
                 "session removed".clone_into(&mut self.status);
             }
             _ => {}
+        }
+    }
+
+    fn on_scrollback(&mut self, data_b64: &str) {
+        self.feed_b64(data_b64);
+        self.scrollback_loaded = true;
+        for chunk in std::mem::take(&mut self.pending) {
+            self.term.feed(&chunk);
+        }
+    }
+
+    fn on_pty_output(&mut self, data_b64: &str) {
+        if self.scrollback_loaded {
+            self.feed_b64(data_b64);
+        } else if let Ok(bytes) = B64.decode(data_b64) {
+            self.pending.push(bytes);
         }
     }
 
@@ -284,6 +290,14 @@ fn to_rgba(c: alacritty_terminal::vte::ansi::Rgb) -> Rgba {
     }
 }
 
+fn cell_origin(origin: Point<Pixels>, m: &Metrics, row: usize, col: usize) -> Point<Pixels> {
+    #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
+    point(
+        origin.x + m.cell_width * col as f32,
+        origin.y + m.line_height * row as f32,
+    )
+}
+
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,
@@ -291,78 +305,94 @@ fn paint_grid(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let origin = bounds.origin;
-    let at = |row: usize, col: usize| {
-        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
-        point(
-            origin.x + m.cell_width * col as f32,
-            origin.y + m.line_height * row as f32,
-        )
-    };
-    for bg in &snap.bg {
+    paint_backgrounds(bounds.origin, &snap.bg, m, window);
+    if let Some((row, col)) = snap.cursor {
+        paint_cursor(cell_origin(bounds.origin, m, row, col), m, window);
+    }
+    for span in &snap.text {
+        if !span.text.trim().is_empty() {
+            paint_span(bounds.origin, span, m, window, cx);
+        }
+    }
+}
+
+fn paint_backgrounds(origin: Point<Pixels>, spans: &[BgSpan], m: &Metrics, window: &mut Window) {
+    for bg in spans {
         #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
         let width = m.cell_width * bg.len as f32;
         window.paint_quad(fill(
-            Bounds::new(at(bg.row, bg.col), size(width, m.line_height)),
+            Bounds::new(
+                cell_origin(origin, m, bg.row, bg.col),
+                size(width, m.line_height),
+            ),
             to_rgba(bg.color),
         ));
     }
-    if let Some((row, col)) = snap.cursor {
-        let cursor = Rgba {
-            a: 0.55,
-            ..to_rgba(alacritty_terminal::vte::ansi::Rgb {
-                r: 0xae,
-                g: 0xaf,
-                b: 0xad,
-            })
-        };
-        window.paint_quad(fill(
-            Bounds::new(at(row, col), size(m.cell_width, m.line_height)),
-            cursor,
-        ));
-    }
-    for span in &snap.text {
-        if span.text.trim().is_empty() {
-            continue;
-        }
-        let color = to_rgba(span.fg);
-        let run = TextRun {
-            len: span.text.len(),
-            font: Font {
-                weight: if span.flags.contains(Flags::BOLD) {
-                    FontWeight::BOLD
-                } else {
-                    FontWeight::NORMAL
-                },
-                style: if span.flags.contains(Flags::ITALIC) {
-                    FontStyle::Italic
-                } else {
-                    FontStyle::Normal
-                },
-                ..m.font.clone()
+}
+
+fn paint_cursor(at: Point<Pixels>, m: &Metrics, window: &mut Window) {
+    let cursor = Rgba {
+        a: 0.55,
+        ..to_rgba(alacritty_terminal::vte::ansi::Rgb {
+            r: 0xae,
+            g: 0xaf,
+            b: 0xad,
+        })
+    };
+    window.paint_quad(fill(
+        Bounds::new(at, size(m.cell_width, m.line_height)),
+        cursor,
+    ));
+}
+
+fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
+    let color = to_rgba(span.fg);
+    TextRun {
+        len: span.text.len(),
+        font: Font {
+            weight: if span.flags.contains(Flags::BOLD) {
+                FontWeight::BOLD
+            } else {
+                FontWeight::NORMAL
             },
-            color: color.into(),
-            background_color: None,
-            underline: span
-                .flags
-                .contains(Flags::UNDERLINE)
-                .then(|| UnderlineStyle {
-                    color: Some(color.into()),
-                    thickness: px(1.0),
-                    wavy: false,
-                }),
-            strikethrough: None,
-        };
-        let force_width = (!span.flags.contains(Flags::WIDE_CHAR)).then_some(m.cell_width);
-        let line = window.text_system().shape_line(
-            SharedString::from(span.text.clone()),
-            px(FONT_SIZE),
-            &[run],
-            force_width,
-        );
-        if let Err(err) = line.paint(at(span.row, span.col), m.line_height, window, cx) {
-            eprintln!("rt-native-spike: painting row {}: {err:#}", span.row);
-        }
+            style: if span.flags.contains(Flags::ITALIC) {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            },
+            ..m.font.clone()
+        },
+        color: color.into(),
+        background_color: None,
+        underline: span
+            .flags
+            .contains(Flags::UNDERLINE)
+            .then(|| UnderlineStyle {
+                color: Some(color.into()),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+        strikethrough: None,
+    }
+}
+
+fn paint_span(
+    origin: Point<Pixels>,
+    span: &TextSpan,
+    m: &Metrics,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let force_width = (!span.flags.contains(Flags::WIDE_CHAR)).then_some(m.cell_width);
+    let line = window.text_system().shape_line(
+        SharedString::from(span.text.clone()),
+        px(FONT_SIZE),
+        &[text_run(span, m)],
+        force_width,
+    );
+    let at = cell_origin(origin, m, span.row, span.col);
+    if let Err(err) = line.paint(at, m.line_height, window, cx) {
+        tracing::error!("painting row {}: {err:#}", span.row);
     }
 }
 
@@ -404,7 +434,16 @@ impl Render for TerminalView {
     }
 }
 
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 fn main() {
+    init_tracing();
     let wanted_session = std::env::args().nth(1);
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1000.0), px(640.0)), cx);
@@ -416,7 +455,7 @@ fn main() {
             move |window, cx| cx.new(|cx| TerminalView::new(wanted_session, window, cx)),
         );
         if let Err(err) = opened {
-            eprintln!("rt-native-spike: opening window: {err:#}");
+            tracing::error!("opening window: {err:#}");
             cx.quit();
             return;
         }

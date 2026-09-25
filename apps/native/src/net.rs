@@ -68,7 +68,7 @@ async fn run(
         protocol_versions: protocol::SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
         auth_token: handshake.auth_token,
         client_id: None,
-        client_name: Some("rt-native-spike".to_owned()),
+        client_name: Some("rustling-tulip-native".to_owned()),
     };
     ws.send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
@@ -85,7 +85,7 @@ async fn run(
                         }
                     }
                     Ok(InboundDaemonMessage::Unknown { .. }) => {}
-                    Err(err) => eprintln!("rt-native-spike: undecodable daemon message: {err}"),
+                    Err(err) => tracing::error!("undecodable daemon message: {err}"),
                 }
             }
             msg = outbound.next() => {

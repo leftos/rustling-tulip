@@ -31,13 +31,17 @@
                  (`--all-targets --all-features -- -D warnings`).
       fmt        Run `cargo fmt --all`.
       clean      Run `cargo clean`.
+      native     Run the native (GPUI) client via `cargo run -p
+                 rustling-tulip-native`. Debug by default; -Release for the
+                 release profile. Extra arguments go to the client (an
+                 optional session id to attach to).
       help       Print the subcommand summary.
 
 .PARAMETER Command
     The subcommand to run (positional). When omitted, defaults to `launch`.
 
 .PARAMETER Release
-    Applies to `build`, `launch`, and `restart`. Selects the release
+    Applies to `build`, `launch`, `restart`, and `native`. Selects the release
     profile instead of debug.
 
 .PARAMETER NoBuild
@@ -84,7 +88,7 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'installer', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'help')]
+    [ValidateSet('', 'build', 'launch', 'installer', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
@@ -93,7 +97,7 @@ param(
     [switch]$Fast,
 
     # Extra arguments forwarded to the underlying tool (e.g. `cargo test --
-    # mytest`). Only meaningful for `launch`, `test`, `clippy`, `fmt`.
+    # mytest`). Only meaningful for `launch`, `test`, `clippy`, `fmt`, `native`.
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -1020,6 +1024,19 @@ function Invoke-Clean {
     Test-CargoExitOk 'cargo clean'
 }
 
+function Invoke-Native {
+    Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
+    Assert-MsvcLinker
+    $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
+    if ($Release) { $cargoArgs += '--release' }
+    # Everything after `--` goes to the client, not cargo (the session id).
+    if ($Rest) { $cargoArgs += @('--') + $Rest }
+    $modeLabel = if ($Release) { 'release' } else { 'debug' }
+    Write-Host "==> Running native client ($modeLabel)..." -ForegroundColor Cyan
+    & cargo @cargoArgs
+    Test-CargoExitOk 'cargo run -p rustling-tulip-native'
+}
+
 function Show-Help {
     $help = @'
 rt.ps1 -- rustling-tulip dev helper
@@ -1043,10 +1060,13 @@ Commands:
   clippy     `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
   clean      `cargo clean`.
+  native     `cargo run -p rustling-tulip-native` -- the native client.
+             -Release for the release profile; extra args are passed on
+             (an optional session id to attach to).
   help       This message.
 
 Flags:
-  -Release           Use the release profile (build/launch/restart).
+  -Release           Use the release profile (build/launch/restart/native).
   -NoBuild           Skip the cargo build step (launch/restart).
   -ForceStopDaemon   Stop the daemon up-front (launch/restart) even when
                      cargo says no rebuild is needed.
@@ -1090,6 +1110,7 @@ switch ($effective) {
     'clippy'    { Invoke-Clippy }
     'fmt'       { Invoke-Fmt }
     'clean'     { Invoke-Clean }
+    'native'    { Invoke-Native }
     'help'      { Show-Help }
     default     { throw "Unknown command: $effective" }
 }

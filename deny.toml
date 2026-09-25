@@ -34,6 +34,10 @@ allow = [
     # the Boost Software License — permissive, OSI-approved, no attribution
     # requirement (strictly more permissive than the MIT/BSD entries above).
     "BSL-1.0",
+    # libfuzzer-sys (via gpui → image → ravif → rav1e, the native client's image
+    # stack) bundles LLVM's libFuzzer under the University of Illinois/NCSA
+    # licence — permissive, OSI-approved, BSD-3-style attribution only.
+    "NCSA",
 ]
 confidence-threshold = 0.8
 

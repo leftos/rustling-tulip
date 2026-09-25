@@ -10,6 +10,7 @@ crates/
   daemon/       - long-lived background daemon (WS server, PTY pool, registry)
   daemon-client/ - client-side daemon supervision shared by the clients
 apps/
+  native/       - native desktop client (GPUI + alacritty_terminal), replacing tauri-app
   tauri-app/    - desktop client (Rust src-tauri + React + xterm.js)
 docs/
   plans/        - design docs and milestone plans

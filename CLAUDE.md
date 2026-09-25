@@ -14,6 +14,7 @@ crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry,
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
+apps/native/            binary = rustling-tulip-native: GPUI + alacritty_terminal desktop client replacing the Tauri app (see docs/plans/native-client.md)
 apps/tauri-app/
   src-tauri/            Rust side: spawns the daemon, exposes Tauri commands (file picker, pop-out window)
   src/                  React 19 + xterm.js frontend (Monaco editor for diffs)
@@ -35,6 +36,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 restart          # stop running daemon + relaunch
 .\rt.ps1 installer        # produce NSIS bundle
 .\rt.ps1 installer -Fast  # same, minus LTO + LZMA (dev iteration, not shippable)
+.\rt.ps1 native           # build + run the native client (optional session id to attach to)
 .\rt.ps1 help             # usage summary
 ```
 
