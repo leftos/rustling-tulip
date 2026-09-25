@@ -1,4 +1,5 @@
 # Plan: Multi-Repo Claude Code Wrapper ("rustling-tulip")
+<!-- plan-doc-hygiene: 2026-09-24 314d519 -->
 
 A Tauri desktop app that orchestrates many parallel Claude Code sessions across repos,
 including coordinated multi-repo "workspace" sessions where a single `claude` instance
@@ -39,7 +40,7 @@ Daemon is a standalone Rust binary; Tauri app is a client. No Anthropic API call
 
 ### Post-Phase-6
 - **Upgrade-survivable sessions** — `rt-tracer.exe` PTY supervisor survives daemon restarts; orphan reattach replays ring buffer. See `docs/plans/completed/upgrade-survivable-sessions.md`.
-- **E2E harness** — wdio + tauri-driver + fake-claude + side-channel WS; config-dir isolated to `.tmp/e2e/`; 11 spec files. Multi-window helper (`src/popout.ts`) enables pop-out window specs via WebDriver `getWindowHandles()` + `switchToWindow`. See `docs/plans/e2e-test-coverage-strategy.md`.
+- **E2E harness** — wdio + tauri-driver + fake-claude + side-channel WS; config-dir isolated to `.tmp/e2e/`; 11 spec files. Multi-window helper (`src/popout.ts`) enables pop-out window specs via WebDriver `getWindowHandles()` + `switchToWindow`. See `docs/plans/completed/e2e-test-coverage-strategy.md`.
 - **Codex support** — per-session `Agent` enum (Claude / Codex); `build_codex_args` in `server.rs`; headless stays claude-only; workspace prelude injected for cross-repo path clarity. See `docs/plans/completed/add-support-for-codex.md`.
 - **Source Control sidebar** — VSCode-style activity-bar sidebar; path-folded ChangesTree; Monaco diff tabs; stage/unstage/commit/discard/stash; paginated history. See `docs/plans/completed/source-control-sidebar.md`.
 - **UX audit** — 52 iteration passes; all code-evidence findings resolved. Detached bucket gets a "Stop all" inline action (iter 51); pop-out window findings closed as won't-fix (iter 52). See `docs/ux-audit.md` for full history.
@@ -52,9 +53,12 @@ Daemon is a standalone Rust binary; Tauri app is a client. No Anthropic API call
 - **Discard branch fate** — "delete worktree" reaps the session branch when its commits already landed on the base or its remote by ancestry *or* patch equivalence (`git cherry`), so cherry-picked and rebased work counts as merged; every delete-worktree gesture (pane close, context menu, stopped-pane overlay, quit) goes through one confirm modal that names each member's branch fate and offers keep/delete when work is unlanded. Spawn dialog base-branch pickers moved from `<datalist>` to `BranchCombobox`. See `docs/plans/completed/discard-branch-fate.md`.
 - **Daemon-picked worktree names** — random `wt/<adjective>-<noun>` names come from the daemon (`SuggestBranchName`), which rejects any name in a member repo's local or remote refs or with a worktree dir already on disk. Launch-last and preset launches spawn with `WorktreeReusePolicy::RefuseLeftover`, so a branch-only leftover is refused with a modal naming its tip and staleness instead of being attached silently. `pnpm run doctor` in `tools/e2e` checks the msedgedriver major against the installed WebView2. See `docs/plans/completed/worktree-branch-leftovers.md`.
 - **Duplicate on a fresh branch** — duplicating a worktree session spawns the clone on a daemon-picked `wt/` name under `RefuseLeftover` instead of replaying the source's branch (which either collided with the running source's worktree or could attach a leftover). A pinned source's pin is dropped too, so the clone always gets its own worktree under the daemon root. In-place duplicates still replay the branch. See `docs/plans/completed/duplicate-fresh-branch.md` and `docs/plans/completed/duplicate-drop-pin.md`.
-- **Remote LAN access** — opt-in `0.0.0.0` TLS listener (self-signed cert + fingerprint pinning/TOFU), off by default; a pinned-TLS loopback tunnel in the Tauri app bridges the webview WS to the remote daemon. Per-client tab/pane layouts (sessions stay global to the daemon); host auto-start on login (HKCU `Run`); mDNS discovery + short-code pairing. See `docs/plans/remote-lan-access.md`.
+- **Remote LAN access** — opt-in `0.0.0.0` TLS listener (self-signed cert + fingerprint pinning/TOFU), off by default; a pinned-TLS loopback tunnel in the Tauri app bridges the webview WS to the remote daemon. Per-client tab/pane layouts (sessions stay global to the daemon); host auto-start on login (HKCU `Run`); mDNS discovery + short-code pairing. See `docs/plans/completed/remote-lan-access.md`.
 - **Terminal path opening** — ctrl-click on a path hands it to the OS default handler (`ShellExecuteExW` via the opener plugin on Windows) instead of always shelling out to VS Code; a `:line[:col]` ref still goes to VS Code with `-g`, since no OS handler can honor one, and an unassociated type gets the OS's own "open with" picker. The link provider now reads a window of buffer rows instead of one, so a path broken across rows is stitched back together: soft wraps merge on the buffer's `isWrapped` flag, hard wraps merge only when the row above is flush against its wrap column and the break falls mid-path-token, and the merged reading is sent ahead of the un-stitched fragment so the backend opens whichever exists. See `docs/plans/completed/terminal-path-open.md`.
 - **Keep the host awake** — the daemon holds an OS idle-sleep inhibitor (`SetThreadExecutionState` on a dedicated thread on Windows, `caffeinate -i` on macOS) while any session has a live child, using the same liveness predicate as idle-exit. Display sleep is untouched. Persisted `keep_awake` host setting in `state.json` (default on), toggled from Settings → General; `KeepAwakeStatus` reports whether the hold is engaged. See `docs/plans/completed/keep-awake.md`.
+- **Launch into an existing worktree** — worktrees are addressed by path instead of derived branch name, so a worktree left behind by a gone session (`RootWorktreeStatus::Stale`) can be launched into from the Manage Worktrees modal and the spawn dialog. See `docs/plans/completed/launch-into-existing-worktree.md`.
+- **Bug hunt** — full-codebase audit, 2026-07-29 against `c4c2676`: 12 findings, all fixed with regression tests (headless Stop hang, `BracketedPasteTracker` carry, nested build-dir filter, preset `%VAR%` expansion). See `docs/plans/completed/bug-hunt.md`.
+- **Main UX improvements** — the 2026-05-13 UX review's lifecycle, identity, colour, spawn-safety and source-control passes. Its three open plain-shell cwd re-homing items moved to the native client's parity checklist ("Plain-shell sessions regroup under the container matching their live cwd"). See `docs/plans/completed/main-ux-improvements.md`.
 
 ## Open
 
@@ -63,22 +67,6 @@ Priority order for `/nextup`: **Current focus** first, then the sections below i
 ### Current focus: native client
 Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
 - [ ] **Next up:** Phase 1, starting at P1.1 (crate) → P1.2 (shared daemon-client crate); see [native-client.md](./plans/native-client.md) for the full list
-
-### Launch into an existing worktree — complete
-- [x] Address a worktree by path instead of by derived branch name, so a
-      worktree left behind by a session that is gone (`RootWorktreeStatus::Stale`)
-      can be launched into from the Manage Worktrees modal and the spawn dialog.
-      Design, decisions, and checklist in
-      [launch-into-existing-worktree.md](./plans/launch-into-existing-worktree.md).
-
-### Bug hunt — complete
-Full-codebase audit, 2026-07-29 against `c4c2676`. **12 findings, all fixed**,
-one commit each with regression tests. Notable: the headless Stop path hung and
-never killed the child; `BracketedPasteTracker` silently defeated the `c4c2676`
-paste fix on fragmented output; the git watcher's build-dir filter missed every
-nested `node_modules` / `dist` / `target`; preset `%VAR%` expansion ate literal
-text between percent signs. See [bug-hunt.md](./plans/bug-hunt.md) for the
-findings, the coverage map, and what was deliberately left unswept.
 
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
