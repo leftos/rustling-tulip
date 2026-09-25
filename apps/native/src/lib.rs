@@ -12,11 +12,14 @@ mod grid_view;
 mod keys;
 mod mouse;
 mod net;
+mod notice_view;
+mod notices;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
 mod sidebar;
 mod sidebar_view;
+mod spawns;
 mod tab_bar;
 mod tabs;
 mod term;
@@ -30,8 +33,8 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, ClipboardItem,
     Context, CursorStyle, Div, ElementId, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window,
-    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Task,
+    Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
 use std::collections::HashMap;
@@ -42,9 +45,11 @@ use std::time::{Duration, Instant};
 use crate::connection::{DotKind, Footer};
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
+use crate::notices::Notices;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
 use crate::session_menu::{DeleteDialog, SessionMenu};
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
+use crate::spawns::PendingSpawns;
 use crate::tab_bar::Rename;
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
 
@@ -54,7 +59,11 @@ pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
     StopFuture, spawn_with as spawn_net,
 };
+pub use crate::notices::{
+    ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind,
+};
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
+pub use crate::spawns::OpenIn;
 pub use crate::text_input::bind_keys;
 
 const PADDING: f32 = 6.0;
@@ -285,6 +294,14 @@ pub struct RootView {
     delete_dialog: Option<DeleteDialog>,
     /// The confirm's keyboard focus, so Esc, Enter and Tab reach it.
     dialog_focus: FocusHandle,
+    /// The toasts, the action-failed notice and the checkout prompt.
+    notices: Notices,
+    /// Wakes the view when the next toast's time is up.
+    toast_timer: Option<Task<()>>,
+    /// The modal notices' keyboard focus.
+    notice_focus: FocusHandle,
+    /// Spawns waiting for the daemon's reply.
+    spawns: PendingSpawns,
 }
 
 impl RootView {
@@ -371,6 +388,10 @@ impl RootView {
             duplicates: Duplicates::default(),
             delete_dialog: None,
             dialog_focus: cx.focus_handle(),
+            notices: Notices::default(),
+            toast_timer: None,
+            notice_focus: cx.focus_handle(),
+            spawns: PendingSpawns::default(),
         }
     }
 
@@ -533,12 +554,13 @@ impl RootView {
 
     /// After any change to the tab model: terminals follow the layout, the
     /// requested pane takes the keyboard (unless the delete-worktree
-    /// confirm holds it; closing the confirm focuses the tab's pane) and
-    /// the active tab is saved.
+    /// confirm or a modal notice holds it; closing it focuses the tab's
+    /// pane) and the active tab is saved.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_panes(window, cx);
         if let Some(pane_id) = self.tabs.take_focus_request()
             && self.delete_dialog.is_none()
+            && !self.notices.has_modal()
         {
             self.focus_pane_view(&pane_id, window, cx);
         }
@@ -677,6 +699,7 @@ impl RootView {
         if self.conn.overlay().is_some() {
             self.close_flyout();
             self.reset_session_ui(window, cx);
+            self.reset_notices(window, cx);
         }
         cx.notify();
     }
@@ -695,11 +718,30 @@ impl RootView {
                 self.status.clear();
                 self.duplicates.clear();
                 self.reset_session_ui(window, cx);
+                self.reset_notices(window, cx);
             }
-            DaemonMessage::Error { request_id, .. }
-            | DaemonMessage::ActionFailed { request_id, .. } => {
-                self.fail_duplicate(request_id.as_deref());
+            DaemonMessage::Error {
+                message,
+                request_id,
+            } => self.on_daemon_error(message, request_id.as_deref(), cx),
+            DaemonMessage::ActionFailed {
+                title,
+                detail,
+                hint,
+                request_id,
+            } => {
+                let notice = ActionFailedNotice {
+                    title,
+                    detail,
+                    hint,
+                };
+                self.on_action_failed(notice, request_id.as_deref(), window, cx);
             }
+            DaemonMessage::CheckoutConfirmRequired {
+                repo_id,
+                branch,
+                dirty_count,
+            } => self.on_checkout_confirm(repo_id, branch, dirty_count, window, cx),
             DaemonMessage::LayoutInitRequired {
                 active_session_count,
                 ..
@@ -740,6 +782,7 @@ impl RootView {
                 }
                 self.attach_waiting_panes(cx);
                 self.place_duplicate(request_id.as_deref(), &session.id, window, cx);
+                self.place_spawn(request_id.as_deref(), &session, window, cx);
             }
             DaemonMessage::DiscardPreview {
                 session_id,
@@ -749,9 +792,9 @@ impl RootView {
         }
     }
 
-    /// Keys the root takes before the panes see them. The delete-worktree
-    /// confirm, while open, holds the focus and takes every key that
-    /// reaches this listener; gpui runs keymap actions before capture
+    /// Keys the root takes before the panes see them. A modal notice, else
+    /// the delete-worktree confirm, while open, holds the focus and takes
+    /// every key that reaches this listener; gpui runs keymap actions before capture
     /// listeners, so that holds only while no key-bound context (a text
     /// input) has the focus. Esc drops an armed tab close
     /// (and still reaches the pane). Ctrl+B toggles the sidebar only when
@@ -764,6 +807,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
+        if self.on_notice_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.delete_dialog.is_some() {
             self.on_delete_dialog_key(ks, window, cx);
             cx.stop_propagation();
@@ -846,6 +893,8 @@ impl Render for RootView {
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             .children(self.delete_dialog_layer(cx))
+            .children(self.notice_layers(cx))
+            .children(self.toast_layer(cx))
             .children(overlay)
     }
 }

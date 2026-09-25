@@ -728,7 +728,20 @@ impl TabsModel {
     /// [`pane_target_for_session`], or a new tab when there is no active
     /// grid tab.
     pub fn place(&self, session: &SessionSnapshot, sessions: &[SessionSnapshot]) -> Placement {
-        let Some(tab) = self.active_tab() else {
+        self.active.as_deref().map_or(Placement::NewTab, |tab_id| {
+            self.place_in(tab_id, session, sessions)
+        })
+    }
+
+    /// Where `session` goes in `tab_id` by [`pane_target_for_session`], or
+    /// a new tab when `tab_id` is gone or holds no grid.
+    pub fn place_in(
+        &self,
+        tab_id: &str,
+        session: &SessionSnapshot,
+        sessions: &[SessionSnapshot],
+    ) -> Placement {
+        let Some(tab) = self.tab(tab_id) else {
             return Placement::NewTab;
         };
         tab.grid()
@@ -775,7 +788,7 @@ impl TabsModel {
     clippy::expect_used,
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sidebar::UiState;
     use protocol::SessionMember;
@@ -784,7 +797,7 @@ mod tests {
     const H: SplitDirection = SplitDirection::Horizontal;
     const V: SplitDirection = SplitDirection::Vertical;
 
-    fn pane(id: &str, session: Option<&str>) -> GridNode {
+    pub(crate) fn pane(id: &str, session: Option<&str>) -> GridNode {
         GridNode::Pane {
             pane_id: id.to_owned(),
             session_id: session.map(str::to_owned),
@@ -800,7 +813,7 @@ mod tests {
         }
     }
 
-    fn tab(id: &str, grid: &GridNode) -> TabEntry {
+    pub(crate) fn tab(id: &str, grid: &GridNode) -> TabEntry {
         serde_json::from_value(json!({
             "id": id,
             "name": id,
@@ -820,7 +833,11 @@ mod tests {
         .expect("diff tab fixture")
     }
 
-    fn session(id: &str, repo: Option<&str>, workspace: Option<&str>) -> SessionSnapshot {
+    pub(crate) fn session(
+        id: &str,
+        repo: Option<&str>,
+        workspace: Option<&str>,
+    ) -> SessionSnapshot {
         let mut s: SessionSnapshot = serde_json::from_value(json!({
             "id": id,
             "label": id,
@@ -849,7 +866,7 @@ mod tests {
     }
 
     /// `ClientMessage` has no `PartialEq`; its wire form stands in.
-    fn wire(msg: &ClientMessage) -> serde_json::Value {
+    pub(crate) fn wire(msg: &ClientMessage) -> serde_json::Value {
         serde_json::to_value(msg).expect("serialize a client message")
     }
 
@@ -859,11 +876,11 @@ mod tests {
         }
     }
 
-    fn updated(tab: &TabEntry) -> DaemonMessage {
+    pub(crate) fn updated(tab: &TabEntry) -> DaemonMessage {
         DaemonMessage::TabUpdated { tab: tab.clone() }
     }
 
-    fn model_with(tabs: &[TabEntry]) -> TabsModel {
+    pub(crate) fn model_with(tabs: &[TabEntry]) -> TabsModel {
         let mut model = TabsModel::new(None);
         assert!(model.apply(&tabs_msg(tabs)));
         model
@@ -1183,6 +1200,38 @@ mod tests {
 
         let diff = model_with(&[diff_tab("d")]);
         assert_eq!(diff.place(&new, &[]), Placement::NewTab);
+    }
+
+    #[test]
+    fn tabs_placement_in_a_named_tab_ignores_the_active_one() {
+        let new = session("new", Some("q"), None);
+        let model = model_with(&[
+            tab("t1", &pane("a", None)),
+            tab("t2", &pane("b", Some("s1"))),
+        ]);
+        assert_eq!(model.active_id(), Some("t1"));
+        assert_eq!(
+            model.place_in("t2", &new, &[session("s1", Some("r"), None)]),
+            Placement::Pane {
+                tab_id: "t2".to_owned(),
+                target: split_target("b", H),
+            }
+        );
+        assert_eq!(
+            model.place_in("t1", &new, &[]),
+            Placement::Pane {
+                tab_id: "t1".to_owned(),
+                target: replace("a"),
+            }
+        );
+    }
+
+    #[test]
+    fn tabs_placement_in_a_missing_or_diff_tab_is_a_new_tab() {
+        let new = session("new", Some("q"), None);
+        let model = model_with(&[tab("t1", &pane("a", None)), diff_tab("d")]);
+        assert_eq!(model.place_in("gone", &new, &[]), Placement::NewTab);
+        assert_eq!(model.place_in("d", &new, &[]), Placement::NewTab);
     }
 
     #[test]

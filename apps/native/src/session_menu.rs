@@ -21,7 +21,7 @@ const MENU_WIDTH: f32 = 240.0;
 /// The stopped-pane overlay: translucent, so the terminal shows through.
 const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
 /// The dim layer behind the delete-worktree confirm.
-const BACKDROP_TINT: u32 = 0x0000_0099;
+pub(crate) const BACKDROP_TINT: u32 = 0x0000_0099;
 const DIALOG_WIDTH: f32 = 440.0;
 
 /// The open delete-worktree confirm.
@@ -800,7 +800,12 @@ impl RootView {
 }
 
 /// A button of the delete-worktree confirm; the focused one is outlined.
-fn dialog_button(selector: &str, label: String, danger: bool, focused: bool) -> Stateful<Div> {
+pub(crate) fn dialog_button(
+    selector: &str,
+    label: String,
+    danger: bool,
+    focused: bool,
+) -> Stateful<Div> {
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))

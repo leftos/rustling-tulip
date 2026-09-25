@@ -455,6 +455,7 @@ fn failed_restart_clears_pending_and_allows_retry(cx: &mut TestAppContext) {
         request_id: Some(id),
     });
     assert!(!pending(&mut h, "s1"), "the failure answers the restart");
+    h.click_on("action-failed-dismiss");
 
     h.click_on("exited-restart-p1");
     let id = duplicate_request(&h.sent(), "s1");

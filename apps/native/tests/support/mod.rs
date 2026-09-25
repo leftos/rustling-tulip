@@ -450,6 +450,15 @@ impl<'a> Harness<'a> {
                 root.delete_dialog_buttons()
                     .iter()
                     .any(|(button, _)| *button == selector)
+            } else if let Some(id) = selector
+                .strip_prefix("toast-close-")
+                .or_else(|| selector.strip_prefix("toast-"))
+            {
+                root.toasts().iter().any(|toast| toast.id.to_string() == id)
+            } else if selector.starts_with("action-failed-") {
+                root.action_failed().is_some()
+            } else if selector.starts_with("checkout-") {
+                root.checkout_prompt().is_some()
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
             } else if selector == "sidebar-panel" || selector == "sidebar-divider" {
