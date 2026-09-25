@@ -37,6 +37,8 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 installer        # produce NSIS bundle
 .\rt.ps1 installer -Fast  # same, minus LTO + LZMA (dev iteration, not shippable)
 .\rt.ps1 native           # build daemon + tracer, then run the native client (optional session id to attach to)
+.\rt.ps1 native-e2e       # native client specs against a real daemon isolated under .tmp/ (fake-claude needs node)
+.\rt.ps1 native-smoke     # launch the native client exe in a cloaked, never-focused window; check it connects and takes keys
 .\rt.ps1 help             # usage summary
 ```
 
@@ -65,7 +67,8 @@ cargo test -p daemon <test_name>
 cargo test -p protocol
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
-cargo test -p rustling-tulip-native --test ui_terminal   # also ui_sidebar, ui_tabs
+cargo test -p rustling-tulip-native --test ui_terminal   # also ui_sidebar, ui_tabs, ui_session_actions
+# e2e_live.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 
 # Frontend (apps/tauri-app)
 cd apps/tauri-app
@@ -115,6 +118,7 @@ The `fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the real CLI 
 | `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
 | `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
 | `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |
+| `RUSTLING_TULIP_OFFSCREEN_WINDOW` | Native client: open the window cloaked and never activate it (the smoke tier sets it); the Tauri app uses it for its e2e window | unset |
 
 ## Where things live on disk
 

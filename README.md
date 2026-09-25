@@ -54,4 +54,5 @@ See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file; the native client reaches parity when it is all ticked.
 - **Tauri freeze**: the Tauri app takes bug fixes only while the native client catches up; new features go to the native client.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
+- **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **P1.1, P1.2, …**: item ids in `docs/plans/native-client.md`, as phase number and item number.
