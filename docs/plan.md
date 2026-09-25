@@ -66,7 +66,7 @@ Priority order for `/nextup`: **Current focus** first, then the sections below i
 
 ### Current focus: native client
 Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
-- [ ] **Next up:** Phase 1, starting at P1.1 (crate) → P1.2 (shared daemon-client crate); see [native-client.md](./plans/native-client.md) for the full list
+- [ ] **Next up:** Phase 1, continuing at P1.4 (app shell and sidebar); P1.1–P1.3 are done. See [native-client.md](./plans/native-client.md) for the full list
 
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
@@ -90,6 +90,13 @@ architectural blocker — the tracer↔daemon IPC is Windows named pipes with no
 path (needs Unix domain sockets) — plus a `job_object` module compile-gate,
 autostart (LaunchAgent), and a macOS bundle target. Full catalog + phasing in
 `docs/plans/macos-compat.md`.
+
+### Tooling cleanups (singles)
+Pre-existing warnings and traps noticed during the 2026-09-24 native-client session.
+- [ ] Drop the unused `Unicode-DFS-2016` entry from `deny.toml` `[licenses] allow`; `cargo deny check` reports it as never encountered
+- [ ] Clear cargo's future-incompatibility warning for `proc-macro-error2` v2.0.1: find which dependency pulls it in (`cargo tree -i proc-macro-error2`) and update it if a newer release drops it
+- [ ] Fix the 8 Information-level PSScriptAnalyzer findings in `rt.ps1` (PSAvoidUsingPositionalParameters on `Join-Path`)
+- [ ] Add a trap to the `rustling-tulip-nextup` profile: a fresh worktree can't run workspace clippy (or pass the prek clippy hook) until the Tauri sidecars are copied into `apps/tauri-app/src-tauri/binaries/`, an empty `apps/tauri-app/dist/` exists, and the Windows SDK `rc.exe` dir is on PATH
 
 ## Out of scope
 
