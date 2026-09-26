@@ -188,5 +188,4 @@ Don't go looking for these — they're explicitly out of scope until the corresp
 
 - **Auto-update** for the desktop app (`tauri-plugin-updater`) — deferred until a signed release pipeline exists.
 - **Code signing / notarization** of the installer and the binaries inside it — no signing cert, so the NSIS bundle `.\rt.ps1 installer` produces is unsigned and trips SmartScreen. This is the only remaining blocker for a release pipeline; bundling itself works (see "Common commands").
-- **Stage/unstage from the git panel** — the panel is read-only; `StageFiles` is in the protocol but not wired up.
 - **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync**, **mobile app** — explicit non-goals.
