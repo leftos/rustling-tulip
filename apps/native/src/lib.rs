@@ -17,6 +17,8 @@ pub mod diff_view;
 pub mod fonts;
 mod footer;
 mod grid_view;
+mod history;
+mod history_view;
 mod keys;
 mod links;
 mod mouse;
@@ -97,6 +99,10 @@ use crate::term_view::ScrollbackReply;
 pub use crate::assets::Assets;
 pub use crate::connection::Connection;
 pub use crate::footer::LogPaths;
+pub use crate::history::{
+    CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
+    MoreRow,
+};
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
     StopFuture, spawn_with as spawn_net,
@@ -211,6 +217,11 @@ enum Drag {
         split_path: Vec<u8>,
         ratio: Option<f32>,
     },
+    /// The source-control split between the changes and the History.
+    ScSplit,
+    /// The split between a section's commit list and its detail pane, by
+    /// section key id.
+    HistoryList(String),
 }
 
 /// The window's content: sidebar, tabs and panes, footer and overlays.
@@ -338,6 +349,11 @@ pub struct RootView {
     sc: ScModel,
     /// Whether the source-control repo picker's menu is open.
     sc_picker_open: bool,
+    /// The source-control History: commits, details and remotes.
+    history: history::HistoryModel,
+    /// Where the source-control body and History blocks were last laid
+    /// out; the split drags map the pointer through it.
+    sc_layout: history::ScLayout,
 }
 
 impl RootView {
@@ -479,6 +495,8 @@ impl RootView {
             run_focus: cx.focus_handle(),
             sc: ScModel::default(),
             sc_picker_open: false,
+            history: history::HistoryModel::default(),
+            sc_layout: history::ScLayout::default(),
         }
     }
 
@@ -760,6 +778,8 @@ impl RootView {
         self.save_ui();
         if self.sidebar.is_collapsed() {
             self.focus_active_pane(window, cx);
+        } else {
+            self.seed_history();
         }
         cx.notify();
     }
@@ -899,6 +919,11 @@ impl RootView {
                     *ratio = Some(next);
                 }
             }
+            Some(Drag::ScSplit) => self.drag_sc_split(at.1),
+            Some(Drag::HistoryList(key_id)) => {
+                let key_id = key_id.clone();
+                self.drag_history_list(&key_id, at.1);
+            }
             None => {}
         }
         cx.notify();
@@ -915,7 +940,7 @@ impl RootView {
     /// to the daemon.
     fn finish_drag(&mut self) {
         match self.drag.take() {
-            Some(Drag::Sidebar) => self.save_ui(),
+            Some(Drag::Sidebar | Drag::ScSplit | Drag::HistoryList(_)) => self.save_ui(),
             Some(Drag::Divider {
                 tab_id,
                 split_path,
@@ -1022,6 +1047,9 @@ impl RootView {
         self.sidebar.apply(&msg);
         if self.sc.apply(&msg) {
             cx.notify();
+        }
+        if self.apply_history(&msg, cx) {
+            return;
         }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);

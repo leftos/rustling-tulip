@@ -147,11 +147,11 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
 - [ ] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx`
 - [ ] Stashes: collapsible, stash with optional message, pop / apply / drop, live updates — `StashesSection.tsx`
-- [ ] History: 50 at a time with "load more", hover card (sha, author, date); selecting a commit shows header, body and file list — `SourceControlSidebar.tsx` `HistoryView`, `DiffView`
-- [ ] Open in forge (GitHub / GitLab / Bitbucket) — `api.ts` `getRemoteUrl`
+- [x] History: 50 at a time with "load more", hover card (sha, author, date); selecting a commit shows header, body and file list — `SourceControlSidebar.tsx` `HistoryView`, `DiffView`
+- [x] Open in forge (GitHub / GitLab / Bitbucket) — `api.ts` `getRemoteUrl`
 - [ ] Click a file to open or focus its diff tab — `api.ts` `openDiffTab`
 - [ ] **(hard)** Side-by-side read-only diff: path, "worktree vs index" / "vs HEAD", whitespace toggle (saved), change count, first / previous / next / last (wraps), loading and error states — `components/DiffPane.tsx` (Monaco `createDiffEditor`; language from the daemon; no language services)
-- [ ] Resizable changes / history split — `ResizableSplit.tsx`
+- [x] Resizable changes / history split — `ResizableSplit.tsx`
 
 ## Worktrees
 

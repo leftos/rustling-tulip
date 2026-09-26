@@ -154,6 +154,8 @@ impl RootView {
         self.save_ui();
         if self.sidebar.is_collapsed() {
             self.focus_active_pane(window, cx);
+        } else {
+            self.seed_history();
         }
         cx.notify();
     }

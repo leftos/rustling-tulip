@@ -17,11 +17,11 @@ use crate::session_menu::{backdrop, dialog_button};
 use crate::{MUTED, RootView};
 
 /// The title of every toast about a link that did not open.
-const COULD_NOT_OPEN: &str = "Couldn't open";
+pub(crate) const COULD_NOT_OPEN: &str = "Couldn't open";
 
 /// What happens once an open went through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Then {
+pub(crate) enum Then {
     Nothing,
     /// The link asked for VS Code, which is not installed, so its file went
     /// to its default app instead: say so.
@@ -194,7 +194,7 @@ impl RootView {
 
     /// Hands `job` to the opener on a background thread and reports how it
     /// went.
-    fn dispatch_open(
+    pub(crate) fn dispatch_open(
         &mut self,
         job: OpenJob,
         then: Then,

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
-use crate::source_control::ScUiState;
+use crate::source_control::{Part, ScKey, ScUiState};
 
 /// The sidebar layout file, in the client's config dir.
 pub const UI_FILE: &str = "native-ui.json";
@@ -315,10 +315,30 @@ impl SidebarModel {
         true
     }
 
+    /// Records whether a part of a source-control section is collapsed;
+    /// returns whether the stored value changed.
+    pub fn set_sc_collapsed(&mut self, key: &ScKey, part: Part, collapsed: bool) -> bool {
+        self.ui.source_control.set_collapsed(key, part, collapsed)
+    }
+
     /// Drops the source-control pin and collapse entries of repos not in
     /// `repos`; returns whether any went.
     pub fn prune_source_control(&mut self, repos: &[RepoEntry]) -> bool {
         self.ui.source_control.prune(repos)
+    }
+
+    /// Sets the source-control changes area's height, already clamped.
+    pub fn set_sc_changes_height(&mut self, height: f32) {
+        self.ui.source_control.changes_height = Some(height);
+    }
+
+    /// Sets a section's commit-list height, already clamped, by section key
+    /// id.
+    pub fn set_sc_history_list_height(&mut self, key_id: &str, height: f32) {
+        self.ui
+            .source_control
+            .history_list_height
+            .insert(key_id.to_owned(), height);
     }
 
     /// The sidebar width to lay out in a window this wide.

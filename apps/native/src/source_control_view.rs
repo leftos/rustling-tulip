@@ -278,10 +278,11 @@ impl RootView {
                 request_id: None,
             });
         }
+        self.seed_history();
     }
 
-    /// Asks again for every current section's status; the stored ones stay
-    /// on screen until the answers replace them.
+    /// Asks again for every current section's status and history; the
+    /// stored ones stay on screen until the answers replace them.
     fn refresh_source_control(&mut self) {
         for section in self.sc_sections() {
             self.sc.mark_requested(section.key.clone());
@@ -291,6 +292,7 @@ impl RootView {
                 request_id: None,
             });
         }
+        self.refresh_history();
     }
 
     /// Opens the picker's menu, closing any other menu, unless a dialog or
@@ -358,22 +360,22 @@ impl RootView {
     /// The panel, `width` wide.
     pub(crate) fn source_control_view(&self, width: f32, cx: &mut Context<Self>) -> Div {
         let panel = self.source_control_panel();
-        let body = div()
-            .id("sc-body")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h(px(0.0))
-            .overflow_y_scroll();
         let body = match panel.empty_hint {
-            Some(hint) => body.child(
-                div()
-                    .px(px(ROW_PADDING))
-                    .py(px(6.0))
-                    .text_color(gpui::rgb(MUTED))
-                    .child(hint),
-            ),
-            None => body.children(panel.sections.iter().map(section_view)),
+            Some(hint) => div()
+                .id("sc-body")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .px(px(ROW_PADDING))
+                        .py(px(6.0))
+                        .text_color(gpui::rgb(MUTED))
+                        .child(hint),
+                ),
+            None => self.sc_split_body(panel.sections.iter().map(section_view).collect(), cx),
         };
         div()
             .flex()

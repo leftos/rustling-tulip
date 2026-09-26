@@ -423,19 +423,28 @@ pub fn build_tree(changes: &[GitFileChange]) -> Folder {
 }
 
 /// The source-control state `native-ui.json` keeps.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScUiState {
     /// The repo the panel is pinned to; `None` follows the active pane.
     pub pinned_repo: Option<String>,
     /// The collapsed parts, keyed `<section key id>|<part>`.
     pub collapsed: BTreeMap<String, bool>,
+    /// The changes area's height above the History, in pixels; `None` is
+    /// the default.
+    #[serde(default)]
+    pub changes_height: Option<f32>,
+    /// Each section's commit-list height above its detail pane, in pixels,
+    /// by section key id.
+    #[serde(default)]
+    pub history_list_height: BTreeMap<String, f32>,
 }
 
 impl ScUiState {
     /// Whether a part of a section is collapsed. A stored value wins; the
     /// defaults are Changes collapsed only when loaded and empty, Stashes
-    /// collapsed, History expanded.
+    /// collapsed, and History as [`Self::is_history_collapsed`] answers with
+    /// no session focused.
     #[must_use]
     pub fn is_collapsed(&self, key: &ScKey, part: Part, loaded_count: Option<usize>) -> bool {
         if let Some(stored) = self.collapsed.get(&part_key(key, part)) {
@@ -444,23 +453,38 @@ impl ScUiState {
         match part {
             Part::Changes => loaded_count == Some(0),
             Part::Stashes => true,
-            Part::History => false,
+            Part::History => self.is_history_collapsed(key, false),
         }
     }
 
-    /// Record whether a part of a section is collapsed.
-    pub fn set_collapsed(&mut self, key: &ScKey, part: Part, collapsed: bool) {
-        self.collapsed.insert(part_key(key, part), collapsed);
+    /// Whether a section's History is collapsed. A stored value wins;
+    /// otherwise it is collapsed for a focused session's members
+    /// (`session_focused`) and expanded for a repo browsed with no session
+    /// focused.
+    #[must_use]
+    pub fn is_history_collapsed(&self, key: &ScKey, session_focused: bool) -> bool {
+        self.collapsed
+            .get(&part_key(key, Part::History))
+            .copied()
+            .unwrap_or(session_focused)
     }
 
-    /// Drop the collapse entries and the pin of repos no longer registered;
-    /// `true` when any went.
+    /// Record whether a part of a section is collapsed; `true` when the
+    /// stored value changed.
+    pub fn set_collapsed(&mut self, key: &ScKey, part: Part, collapsed: bool) -> bool {
+        self.collapsed.insert(part_key(key, part), collapsed) != Some(collapsed)
+    }
+
+    /// Drop the collapse entries, the list heights and the pin of repos no
+    /// longer registered; `true` when any went.
     pub fn prune(&mut self, repos: &[RepoEntry]) -> bool {
         let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
-        let before = self.collapsed.len();
-        self.collapsed
-            .retain(|entry, _| entry.split("::").next().is_some_and(|id| ids.contains(id)));
-        let mut changed = self.collapsed.len() != before;
+        let registered = |entry: &str| entry.split("::").next().is_some_and(|id| ids.contains(id));
+        let before = self.collapsed.len() + self.history_list_height.len();
+        self.collapsed.retain(|entry, _| registered(entry));
+        self.history_list_height
+            .retain(|entry, _| registered(entry));
+        let mut changed = self.collapsed.len() + self.history_list_height.len() != before;
         if self
             .pinned_repo
             .as_deref()

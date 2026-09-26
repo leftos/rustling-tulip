@@ -125,7 +125,13 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
   - [ ] **P3.4 Changes tree and stage / unstage / discard.** Staged / Changes buckets, per-file hover buttons, Stage all / Unstage all / Discard all, the right-click menu, the discard confirm listing the paths, the pending state, and `GitWriteError` as a banner plus a toast. Needs P3.3. Also: a `RepoStatus` that fails is answered with a keyless `Error`, so its key stays requested and its section stays on `loading…` until Refresh or a reconnect; settle that here.
   - [ ] **P3.5 Commit box.** A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4.
   - [ ] **P3.6 Stashes.** A collapsible section with a count, stash with an optional message, pop / apply / drop, and live updates from the `Stashes` broadcast. Needs P3.3.
-  - [ ] **P3.7 History, commit detail, open in forge.** 50 commits at a time with "load more", a tooltip (sha, author, date), a commit detail pane with clickable files, the resizable changes / history split, and the forge link. Needs P3.3.
+  - [x] **P3.7 History, commit detail, open in forge.** As built:
+    - `history.rs` holds the model: paging by offset with sha dedupe, request-id routing for the three reads, retiring stale reads, a detail cache per sha, the remote per repo, `branch_url`, and the split clamps.
+    - `history_view.rs` holds the view: one History block per section under a saved changes / history split, the detail pane under the list behind its own saved divider, and the forge button with its three disabled tooltips.
+    - Reads go out when the panel is shown, never from layout.
+    - Commit-detail files send `OpenDiffTab` against the sha.
+
+    Original text: 50 commits at a time with "load more", a tooltip (sha, author, date), a commit detail pane with clickable files, the resizable changes / history split, and the forge link. Needs P3.3.
   - [ ] **P3.8 Diff tab.** File clicks send `OpenDiffTab` with the worktree path. Diff tabs render the P3.1 view with the path, "worktree vs index" / "vs HEAD" / "@ sha", a whitespace toggle (saved), a change count, first / previous / next / last (wrapping), and loading and error states. Needs P3.1 and P3.4.
   - [x] **P3.9 Daemon diff hardening.** As built (312260c): a side is refused when binary (a NUL in the first 8000 bytes, or not UTF-8) or over 2 MiB, with the reason in `FileSnapshot.unavailable`; a committed blob's size is checked before it is read. Original text: `file_snapshot` detects binary files and caps size, using additive fields on `FileSnapshot`, so the diff tab can show "Binary file" or "File too large" instead of garbage. Independent.
   - [ ] **P3.10 Syntax highlighting in the diff.** syntect with `default-fancy` (no C), by the daemon's `language`; a separate item because of its binary-size cost. Needs P3.8.
