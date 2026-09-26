@@ -179,6 +179,7 @@ impl RootView {
         };
         self.renaming = None;
         self.close_flyout();
+        self.close_tab_menu(window, cx);
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);

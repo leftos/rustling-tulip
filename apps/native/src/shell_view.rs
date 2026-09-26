@@ -113,6 +113,7 @@ impl RootView {
         let subscriptions = Self::watch_shell_field(&folder_input, window, cx);
         self.renaming = None;
         self.close_flyout();
+        self.close_tab_menu(window, cx);
         self.shell_dialog = Some(ShellDialog {
             form,
             folder_input,

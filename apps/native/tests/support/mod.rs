@@ -693,6 +693,10 @@ impl<'a> Harness<'a> {
                 root.exit_dialog_buttons()
                     .iter()
                     .any(|(button, _, _)| *button == selector)
+            } else if selector == "tab-menu" {
+                root.tab_menu().is_some()
+            } else if selector.starts_with("tab-menu-") {
+                root.tab_menu_rows().contains(&selector)
             } else if let Some(id) = selector.strip_prefix("tab-close-") {
                 root.tab_ids().iter().any(|t| t == id)
             } else if let Some(id) = selector.strip_prefix("tab-") {

@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use crate::fonts::FontSettings;
+use crate::fonts::{self, FontSettings};
 
 /// The sidebar layout file, in the client's config dir.
 pub const UI_FILE: &str = "native-ui.json";
@@ -106,6 +106,10 @@ pub struct UiState {
     /// The font every new terminal pane starts from.
     #[serde(default)]
     pub terminal_font: FontSettings,
+    /// Terminal font sizes overridden per tab, by tab id; a tab's size wins
+    /// over its session's, its container's and the app's.
+    #[serde(default)]
+    pub tab_font_sizes: BTreeMap<String, f32>,
 }
 
 impl Default for UiState {
@@ -117,6 +121,7 @@ impl Default for UiState {
             active_tab_id: None,
             quick_shell_dir: None,
             terminal_font: FontSettings::default(),
+            tab_font_sizes: BTreeMap::new(),
         }
     }
 }
@@ -265,6 +270,48 @@ impl SidebarModel {
 
     pub fn set_terminal_font(&mut self, font: FontSettings) {
         self.ui.terminal_font = font;
+    }
+
+    /// The size stored for `tab_id`, if the tab has an override.
+    pub fn tab_font_size(&self, tab_id: &str) -> Option<f32> {
+        self.ui.tab_font_sizes.get(tab_id).copied()
+    }
+
+    /// Records `size` as `tab_id`'s override.
+    pub fn set_tab_font_size(&mut self, tab_id: &str, size: f32) {
+        self.ui
+            .tab_font_sizes
+            .insert(tab_id.to_owned(), fonts::clamp_size(size));
+    }
+
+    /// Drops `tab_id`'s override; returns whether there was one.
+    pub fn clear_tab_font_size(&mut self, tab_id: &str) -> bool {
+        self.ui.tab_font_sizes.remove(tab_id).is_some()
+    }
+
+    /// Drops the overrides of the tabs that are not in `live`; returns
+    /// whether any went.
+    pub fn prune_tab_font_sizes(&mut self, live: &HashSet<&str>) -> bool {
+        let before = self.ui.tab_font_sizes.len();
+        self.ui
+            .tab_font_sizes
+            .retain(|tab_id, _| live.contains(tab_id.as_str()));
+        self.ui.tab_font_sizes.len() != before
+    }
+
+    /// The size a pane of `session_id` in a tab overridden to `tab_size`
+    /// draws at: the tab's override, else the session's size, else its
+    /// container's, else the app's.
+    pub fn resolved_font_size(&self, tab_size: Option<f32>, session_id: Option<&str>) -> f32 {
+        let session = session_id.and_then(|id| self.session(id));
+        let container =
+            session.and_then(|s| fonts::container_size(s, &self.repos, &self.workspaces));
+        fonts::resolve_size(
+            tab_size,
+            session.and_then(|s| s.appearance.terminal_font_size),
+            container,
+            self.ui.terminal_font.size,
+        )
     }
 
     /// Records the active tab; returns whether it changed.
@@ -1406,6 +1453,7 @@ mod tests {
                 size: 15.0,
                 bold: true,
             },
+            tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -1430,5 +1478,24 @@ mod tests {
 
         assert!(model.set_quick_shell_dir(None));
         assert_eq!(model.quick_shell_dir(), None);
+    }
+
+    #[test]
+    fn tab_font_sizes_clamp_clear_and_prune() {
+        let mut model = SidebarModel::default();
+        assert_eq!(model.tab_font_size("t1"), None);
+        model.set_tab_font_size("t1", 20.4);
+        model.set_tab_font_size("t2", 100.0);
+        assert_eq!(model.tab_font_size("t1"), Some(20.0), "stored rounded");
+        assert_eq!(model.tab_font_size("t2"), Some(32.0), "stored clamped");
+
+        let live: std::collections::HashSet<&str> = ["t2"].into_iter().collect();
+        assert!(model.prune_tab_font_sizes(&live), "t1's override went");
+        assert_eq!(model.tab_font_size("t1"), None);
+        assert!(!model.prune_tab_font_sizes(&live), "nothing left to prune");
+
+        assert!(model.clear_tab_font_size("t2"));
+        assert_eq!(model.tab_font_size("t2"), None);
+        assert!(!model.clear_tab_font_size("t2"), "already clear");
     }
 }

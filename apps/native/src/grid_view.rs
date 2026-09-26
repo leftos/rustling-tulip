@@ -13,6 +13,7 @@ use protocol::{
     ClientMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
+use crate::fonts;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::can_attach;
@@ -52,6 +53,11 @@ pub(crate) struct PaneSlot {
 impl PaneSlot {
     pub(crate) fn view(&self) -> &Entity<TerminalPane> {
         &self.view
+    }
+
+    /// The session the pane shows.
+    pub(crate) fn session(&self) -> Option<&str> {
+        self.session.as_deref()
     }
 }
 
@@ -310,6 +316,38 @@ impl RootView {
                 pane.set_drives_size(drives);
                 pane.set_answers_queries(answers);
             });
+        }
+    }
+
+    /// Gives every pane the size it resolves to — its tab's override, else
+    /// its session's size, else its container's, else the app's — with the
+    /// app's family and weight.
+    pub(crate) fn apply_pane_fonts(&mut self, cx: &mut Context<Self>) {
+        self.apply_fonts_where(|_| true, cx);
+    }
+
+    /// Gives the panes showing `session_id` the size they resolve to, as a
+    /// snapshot that moved that session's appearance must.
+    pub(crate) fn apply_session_pane_fonts(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.apply_fonts_where(|slot| slot.session.as_deref() == Some(session_id), cx);
+    }
+
+    /// Gives every pane `keep` takes the size it resolves to.
+    fn apply_fonts_where(&mut self, keep: impl Fn(&PaneSlot) -> bool, cx: &mut Context<Self>) {
+        for slot in self.panes.values().filter(|slot| keep(slot)) {
+            let settings = self.pane_font_settings(&slot.tab_id, slot.session.as_deref());
+            slot.view
+                .update(cx, |pane, cx| pane.set_font(settings.clone(), cx));
+        }
+    }
+
+    /// The font a pane of `tab_id` showing `session` draws with.
+    fn pane_font_settings(&self, tab_id: &str, session: Option<&str>) -> fonts::FontSettings {
+        fonts::FontSettings {
+            size: self
+                .sidebar
+                .resolved_font_size(self.sidebar.tab_font_size(tab_id), session),
+            ..self.sidebar.ui_state().terminal_font.clone()
         }
     }
 

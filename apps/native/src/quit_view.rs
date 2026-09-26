@@ -144,6 +144,7 @@ impl RootView {
         }
         tracing::info!(active, "window close: asking what to do with the sessions");
         self.close_session_menu(window, cx);
+        self.close_tab_menu(window, cx);
         // The menu's delete confirm and the spawn and Shell… dialogs have
         // sent nothing yet, so they can go.
         self.close_delete_dialog(window, cx);
@@ -159,8 +160,10 @@ impl RootView {
         false
     }
 
-    /// Quits the app, once.
+    /// Quits the app, once, after writing the layout change a font step
+    /// left pending.
     fn request_quit(&mut self, cx: &mut Context<Self>) {
+        self.flush_font_save();
         self.quitter.request(cx);
     }
 

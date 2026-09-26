@@ -134,7 +134,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Gutter-dot menu: exit and duration, copy command / output / both, re-run (types the command without Enter) — `ShellCommandMenu.tsx`
 - [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
 - [ ] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code) and applies a font model live; choosing a family, the bold toggle and the system list come with the P2.10 editor)
-- [ ] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
+- [x] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
 - [ ] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts`
 
 The frontend has no search addon, bell handling or title parsing; `terminal_title`, `current_cwd` and `program_name` come from the daemon in each session snapshot.

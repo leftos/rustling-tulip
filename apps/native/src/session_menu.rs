@@ -2,9 +2,9 @@
 //! overlay: rendering and forwarding to [`crate::session_actions`].
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Task, Window,
-    anchored, deferred, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
+    Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
@@ -20,7 +20,7 @@ use crate::{
     BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip,
 };
 
-const MENU_WIDTH: f32 = 240.0;
+pub(crate) const MENU_WIDTH: f32 = 240.0;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
 /// The stopped-pane overlay: translucent, so the terminal shows through.
 const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
@@ -45,6 +45,31 @@ pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyEleme
         .occlude()
         .child(panel)
         .into_any_element()
+}
+
+/// The frame a context menu sits in, tagged `id` and holding `focus`; a
+/// press outside it runs `on_out`.
+pub(crate) fn menu_frame(
+    id: &'static str,
+    focus: &FocusHandle,
+    on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .track_focus(focus)
+        .flex()
+        .flex_col()
+        .w(px(MENU_WIDTH))
+        .p(px(4.0))
+        .bg(gpui::rgb(PANEL_BG))
+        .border_1()
+        .border_color(gpui::rgb(BORDER))
+        .rounded(px(6.0))
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+        .occlude()
+        .on_mouse_down_out(on_out)
 }
 
 /// Who opened the delete-worktree confirm, and so what its answer does.
@@ -317,10 +342,11 @@ impl RootView {
         }
     }
 
-    /// Closes the menu and the delete-worktree confirm and drops every
+    /// Closes the menus and the delete-worktree confirm and drops every
     /// armed confirm, as when the connection goes.
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
+        self.close_tab_menu(window, cx);
         self.close_delete_dialog(window, cx);
     }
 
@@ -351,29 +377,18 @@ impl RootView {
         };
         let choosing_stop =
             menu.rename.is_none() && self.rows().iter().any(|row| row.entry == MenuEntry::Cancel);
-        div()
-            .id("session-menu")
-            .debug_selector(|| "session-menu".to_owned())
-            .track_focus(&self.menu_focus)
-            .flex()
-            .flex_col()
-            .w(px(MENU_WIDTH))
-            .p(px(4.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
+        menu_frame(
+            "session-menu",
+            &self.menu_focus,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
                 this.close_session_menu(window, cx);
                 cx.stop_propagation();
-            }))
-            .when(choosing_stop, |panel| {
-                panel.child(muted_row("Stop session?"))
-            })
-            .children(rows)
+            }),
+        )
+        .when(choosing_stop, |panel| {
+            panel.child(muted_row("Stop session?"))
+        })
+        .children(rows)
     }
 
     /// The open menu's rows for its session's current state.
@@ -1024,7 +1039,7 @@ fn is_danger(action: SessionAction) -> bool {
 }
 
 /// A clickable row of the menu or the overlay.
-fn menu_item(selector: &str, label: &'static str, danger: bool) -> Stateful<Div> {
+pub(crate) fn menu_item(selector: &str, label: &'static str, danger: bool) -> Stateful<Div> {
     let name = selector.to_owned();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -1053,7 +1068,9 @@ fn header_text_button(selector: &str, label: &'static str, color: u32) -> Statef
         .child(label)
 }
 
-fn muted_row(text: &'static str) -> Div {
+/// A non-clickable line of the menu or the overlay, in the muted color.
+pub(crate) fn muted_row(text: impl Into<SharedString>) -> Div {
+    let text: SharedString = text.into();
     div()
         .px(px(8.0))
         .py(px(3.0))

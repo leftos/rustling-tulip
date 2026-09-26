@@ -51,7 +51,7 @@ use gpui::{
     div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,7 +72,7 @@ use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_s
 use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
-use crate::tab_bar::Rename;
+use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
 use crate::term_view::ScrollbackReply;
 
@@ -95,6 +95,8 @@ const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
 /// between split panes.
 const DIVIDER_WIDTH: f32 = 4.0;
+/// How long tab font steps wait before the layout is written out.
+const FONT_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// This client's log file, under `<config dir>/logs/`.
 pub const LOG_FILE: &str = "native.log";
 
@@ -322,6 +324,17 @@ pub struct RootView {
     menu: Option<SessionMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
+    /// The tab context menu, while open.
+    tab_menu: Option<TabMenu>,
+    /// The open tab menu's keyboard focus, so Esc reaches it.
+    tab_menu_focus: FocusHandle,
+    /// The session sizes the client sent but the daemon has not echoed, so
+    /// a held key steps from where its last press left off.
+    pending_session_font: HashMap<String, u16>,
+    /// When the pending tab-font save is due, if one is.
+    font_save_deadline: Option<Instant>,
+    /// Wakes the view when the tab-font save is due.
+    font_save_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
     /// Restarts and resumes waiting for their duplicate.
@@ -467,6 +480,11 @@ impl RootView {
             paths,
             menu: None,
             menu_focus: cx.focus_handle(),
+            tab_menu: None,
+            tab_menu_focus: cx.focus_handle(),
+            pending_session_font: HashMap::new(),
+            font_save_deadline: None,
+            font_save_timer: None,
             confirm: HeaderStopConfirm::default(),
             duplicates: Duplicates::default(),
             delete_dialog: None,
@@ -568,16 +586,38 @@ impl RootView {
     }
 
     /// Makes `settings` the app's terminal font: saved as the default every
-    /// new pane starts from and applied to every open pane.
+    /// new pane starts from, and the size every pane falls back to. Each
+    /// open pane re-applies the size it resolves to, with this family and
+    /// weight.
     pub fn set_app_font(&mut self, settings: fonts::FontSettings, cx: &mut Context<Self>) {
-        let settings = settings.normalized();
-        self.sidebar.set_terminal_font(settings.clone());
+        self.sidebar.set_terminal_font(settings.normalized());
+        self.after_font_change(cx);
+    }
+
+    /// The session the pane `pane_id` shows.
+    #[must_use]
+    pub fn pane_session(&self, pane_id: &str) -> Option<String> {
+        Some(self.panes.get(pane_id)?.session()?.to_owned())
+    }
+
+    /// Saves the layout, re-applies every pane's resolved font and redraws.
+    fn after_font_change(&mut self, cx: &mut Context<Self>) {
         self.save_ui();
-        for slot in self.panes.values() {
-            slot.view()
-                .update(cx, |pane, cx| pane.set_font(settings.clone(), cx));
-        }
+        self.apply_pane_fonts(cx);
         cx.notify();
+    }
+
+    /// Drops the font overrides of tabs the daemon no longer lists, once it
+    /// has listed any: before the first full list nothing is known to be
+    /// gone, so an update for one tab prunes nothing.
+    fn prune_tab_font_sizes(&mut self) {
+        if !self.tabs.is_loaded() {
+            return;
+        }
+        let live: HashSet<&str> = self.tabs.tabs().iter().map(|tab| tab.id.as_str()).collect();
+        if self.sidebar.prune_tab_font_sizes(&live) {
+            self.save_ui();
+        }
     }
 
     /// The cursor shape pane `pane_id` renders.
@@ -636,6 +676,49 @@ impl RootView {
         };
         if let Err(err) = save_ui_state(dir, self.sidebar.ui_state()) {
             tracing::warn!("saving the sidebar layout: {err:#}");
+        }
+    }
+
+    /// Writes the layout at most once per [`FONT_SAVE_DEBOUNCE`] while tab
+    /// font steps keep coming, so a held key does not rewrite the file for
+    /// every step; the save that fires writes the sizes as they then stand.
+    fn schedule_font_save(&mut self, cx: &mut Context<Self>) {
+        if self.font_save_deadline.is_some() {
+            return;
+        }
+        let deadline = (self.now)() + FONT_SAVE_DEBOUNCE;
+        self.font_save_deadline = Some(deadline);
+        self.arm_font_save(deadline, cx);
+    }
+
+    /// Arms the timer for the rest of the wait for the pending save.
+    fn arm_font_save(&mut self, deadline: Instant, cx: &mut Context<Self>) {
+        let delay = deadline.saturating_duration_since((self.now)());
+        self.font_save_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            // Fails only when the view is gone, and the save with it.
+            this.update(cx, Self::tick_font_save).ok();
+        }));
+    }
+
+    /// The save timer fired: write once the debounce has passed by the
+    /// clock, which may lag the timer, else wait out the rest.
+    fn tick_font_save(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.font_save_deadline else {
+            return;
+        };
+        if deadline > (self.now)() {
+            self.arm_font_save(deadline, cx);
+        } else {
+            self.flush_font_save();
+        }
+    }
+
+    /// Writes a pending save now, as the quit path must before the app goes.
+    fn flush_font_save(&mut self) {
+        if self.font_save_deadline.take().is_some() {
+            self.font_save_timer = None;
+            self.save_ui();
         }
     }
 
@@ -717,6 +800,8 @@ impl RootView {
     /// and the active tab is saved.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reconcile_panes(window, cx);
+        self.prune_tab_font_sizes();
+        self.apply_pane_fonts(cx);
         self.refresh_spawn_tabs();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && self.spawn_dialog.is_none()
@@ -737,6 +822,7 @@ impl RootView {
         {
             self.renaming = None;
         }
+        self.drop_stale_tab_menu();
         self.try_wanted_session(window, cx);
         cx.notify();
     }
@@ -886,6 +972,12 @@ impl RootView {
     }
 
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
+        // The sidebar takes the message before the panes do, so whether a
+        // snapshot moved a session's appearance is read from the old one.
+        let moved = match &msg {
+            DaemonMessage::SessionUpdated { session, .. } => Some(self.appearance_moved(session)),
+            _ => None,
+        };
         self.sidebar.apply(&msg);
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
@@ -897,6 +989,7 @@ impl RootView {
         match msg {
             DaemonMessage::Welcome { .. } => {
                 self.reset_panes(cx);
+                self.pending_session_font.clear();
                 self.status.clear();
                 self.duplicates.clear();
                 self.close_spawn_dialog(window, cx);
@@ -940,14 +1033,7 @@ impl RootView {
                 );
                 self.request_layout_seed();
             }
-            DaemonMessage::Sessions { sessions } => {
-                self.sessions_loaded = true;
-                for view in self.pane_views(None) {
-                    view.update(cx, |pane, _| pane.refresh_sessions(&sessions));
-                }
-                self.attach_waiting_panes(cx);
-                self.try_wanted_session(window, cx);
-            }
+            DaemonMessage::Sessions { sessions } => self.on_sessions(&sessions, window, cx),
             DaemonMessage::Scrollback {
                 session_id,
                 data_b64,
@@ -971,21 +1057,74 @@ impl RootView {
             DaemonMessage::SessionUpdated {
                 session,
                 request_id,
-            } => {
-                for view in self.pane_views(Some(&session.id)) {
-                    view.update(cx, |pane, _| pane.update_session(&session));
-                }
-                self.attach_waiting_panes(cx);
-                self.place_duplicate(request_id.as_deref(), &session.id, window, cx);
-                self.place_spawn(request_id.as_deref(), &session, window, cx);
-            }
+            } => self.on_session_updated(
+                &session,
+                moved.unwrap_or(false),
+                request_id.as_deref(),
+                window,
+                cx,
+            ),
             DaemonMessage::DiscardPreview {
                 session_id,
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
+            // A repo's or workspace's size is a level above the session's.
+            DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. } => {
+                self.apply_pane_fonts(cx);
+            }
             _ => {}
         }
+    }
+
+    /// Whether `session`'s snapshot moves its appearance, read against the
+    /// copy the sidebar still holds.
+    fn appearance_moved(&self, session: &SessionSnapshot) -> bool {
+        self.sidebar
+            .session(&session.id)
+            .map(|before| before.appearance.clone())
+            != Some(session.appearance.clone())
+    }
+
+    /// A session's snapshot: every pane showing it refreshes, the size it
+    /// resolves to moves with its appearance, and a spawn or a duplicate
+    /// answers with it.
+    fn on_session_updated(
+        &mut self,
+        session: &SessionSnapshot,
+        moved: bool,
+        request_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for view in self.pane_views(Some(&session.id)) {
+            view.update(cx, |pane, _| pane.update_session(session));
+        }
+        self.pending_session_font.remove(&session.id);
+        self.attach_waiting_panes(cx);
+        if moved {
+            self.apply_session_pane_fonts(&session.id, cx);
+        }
+        self.place_duplicate(request_id, &session.id, window, cx);
+        self.place_spawn(request_id, session, window, cx);
+    }
+
+    /// The daemon's whole session list: every pane refreshes from it, the
+    /// panes whose session it names attach, each pane re-applies the size it
+    /// resolves to, and the session named on the command line is focused.
+    fn on_sessions(
+        &mut self,
+        sessions: &[SessionSnapshot],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sessions_loaded = true;
+        for view in self.pane_views(None) {
+            view.update(cx, |pane, _| pane.refresh_sessions(sessions));
+        }
+        self.attach_waiting_panes(cx);
+        self.apply_pane_fonts(cx);
+        self.try_wanted_session(window, cx);
     }
 
     /// Ask the daemon to seed this client's layout with every running session.
@@ -1051,17 +1190,21 @@ impl RootView {
         }
     }
 
-    /// The root's own keys; returns whether `ks` was one. Esc closes the
-    /// session menu or the flyout. Ctrl+B toggles the sidebar and Ctrl+N
+    /// The root's own keys; returns whether `ks` was one. Esc closes a
+    /// context menu or the flyout. Ctrl+B toggles the sidebar and Ctrl+N
     /// opens the spawn dialog only when no terminal and no tab rename has
     /// the keyboard; in a terminal they are the PTY's 0x02 and 0x0e.
     /// Ctrl+Shift+N opens the spawn dialog from anywhere.
     fn on_shortcut(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let ctrl_only = ks.modifiers.control && !ks.modifiers.shift && !ks.modifiers.alt;
-        if self.menu.is_some() && ks.key == "escape" {
+        if self.tab_menu.is_some() && ks.key == "escape" {
+            self.close_tab_menu(window, cx);
+        } else if self.menu.is_some() && ks.key == "escape" {
             self.close_session_menu(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
+        } else if let Some(key) = font_key(ks) {
+            self.on_font_key(key, cx);
         } else if ctrl_only && ks.key == "b" && self.outside_terminal(window, cx) {
             self.toggle_sidebar(window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
@@ -1070,6 +1213,95 @@ impl RootView {
             return false;
         }
         true
+    }
+
+    /// A font-size shortcut: Ctrl+`=`/`+`/`-` steps the focused session's
+    /// size, with Shift the active tab's override, and Ctrl+0 clears both.
+    /// The pane follows the session's change when the daemon echoes it.
+    fn on_font_key(&mut self, key: FontKey, cx: &mut Context<Self>) {
+        match key {
+            FontKey::Session(step) => self.step_session_font(step, cx),
+            FontKey::Tab(step) => {
+                if let Some(tab_id) = self.tabs.active_id().map(str::to_owned) {
+                    self.bump_tab_font(&tab_id, step, cx);
+                }
+            }
+            FontKey::Clear => self.clear_font_overrides(cx),
+        }
+    }
+
+    /// Sends the focused pane's session the next size, keeping its other
+    /// appearance fields. The step starts from the size the session
+    /// resolves to without its tab's override — a tab's size is the tab
+    /// level's to change — and from the size a press already sent while the
+    /// daemon has not echoed it, so a held key does not lose steps. At a
+    /// clamp limit nothing goes out.
+    fn step_session_font(&mut self, step: f32, cx: &mut Context<Self>) {
+        let Some(pane_id) = self.focused_pane() else {
+            return;
+        };
+        let Some(session_id) = self.pane_session(&pane_id) else {
+            return;
+        };
+        let Some(session) = self.sidebar.session(&session_id).cloned() else {
+            return;
+        };
+        let current = self.pending_session_font.get(&session_id).map_or_else(
+            || self.sidebar.resolved_font_size(None, Some(&session_id)),
+            |size| fonts::clamp_size(f32::from(*size)),
+        );
+        let Some(next) = fonts::stepped(current, step) else {
+            return;
+        };
+        let size = font_size_to_u16(next);
+        let mut appearance = session.appearance.clone();
+        appearance.terminal_font_size = Some(size);
+        self.pending_session_font.insert(session_id.clone(), size);
+        self.send(ClientMessage::SetSessionAppearance {
+            session_id,
+            appearance,
+        });
+        cx.notify();
+    }
+
+    /// Clears the focused session's size and the active tab's override, so
+    /// both fall back to the container's and the app's. A level that is
+    /// already clear sends and saves nothing.
+    fn clear_font_overrides(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        let target = self
+            .focused_pane()
+            .and_then(|pane_id| self.pane_session(&pane_id));
+        if let Some(session_id) = target {
+            let clearable = self.sidebar.session(&session_id).map(|session| {
+                (
+                    session.appearance.clone(),
+                    session.appearance.terminal_font_size.is_some(),
+                )
+            });
+            if let Some((mut appearance, has_size)) = clearable
+                && (has_size || self.pending_session_font.contains_key(&session_id))
+            {
+                appearance.terminal_font_size = None;
+                self.pending_session_font.remove(&session_id);
+                self.send(ClientMessage::SetSessionAppearance {
+                    session_id,
+                    appearance,
+                });
+                changed = true;
+            }
+        }
+        let tab_id = self.tabs.active_id().map(str::to_owned);
+        if let Some(tab_id) = tab_id
+            && self.sidebar.clear_tab_font_size(&tab_id)
+        {
+            changed = true;
+        }
+        if changed {
+            self.apply_pane_fonts(cx);
+            self.schedule_font_save(cx);
+            cx.notify();
+        }
     }
 
     /// Neither a terminal nor a tab rename has the keyboard.
@@ -1114,6 +1346,49 @@ impl RootView {
     }
 }
 
+/// What a font-size keystroke asks for.
+#[derive(Debug, Clone, Copy)]
+enum FontKey {
+    /// Step the focused session's size by this much.
+    Session(f32),
+    /// Step the active tab's override by this much.
+    Tab(f32),
+    /// Clear the focused session's size and the active tab's override.
+    Clear,
+}
+
+/// The font-size shortcut `ks` is, if any: Ctrl with `=` (or the `+` Shift
+/// types on a US layout) and `-` (or the `_` it shifts to), and Ctrl+0.
+/// Shift makes a step act on the tab's override; Ctrl+Shift+0 is nothing.
+fn font_key(ks: &Keystroke) -> Option<FontKey> {
+    let m = ks.modifiers;
+    if !m.control || m.alt || m.platform {
+        return None;
+    }
+    let step = match ks.key.as_str() {
+        "=" | "+" => 1.0,
+        "-" | "_" => -1.0,
+        "0" if !m.shift => return Some(FontKey::Clear),
+        _ => return None,
+    };
+    Some(if m.shift {
+        FontKey::Tab(step)
+    } else {
+        FontKey::Session(step)
+    })
+}
+
+/// `size`, already clamped to the range, as the wire's whole pixel count.
+fn font_size_to_u16(size: f32) -> u16 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the resolver clamps the size to 8..=32"
+    )]
+    let size = size as u16;
+    size
+}
+
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let footer = self.conn.footer(self.sidebar.sessions().len());
@@ -1145,6 +1420,7 @@ impl Render for RootView {
             .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
             .children(self.session_menu_layer(cx).into_iter().flatten())
+            .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other
