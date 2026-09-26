@@ -3,14 +3,15 @@
 //! for a new tab.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, MouseButton,
-    MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window, anchored,
-    deferred, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
+    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window,
+    anchored, deferred, div, prelude::*, px,
 };
-use protocol::{ClientMessage, TabContent, TabEntry};
+use protocol::{ClientMessage, RearrangeLayout, TabContent, TabEntry};
 
 use crate::fonts;
 use crate::session_menu::{menu_frame, menu_item, muted_row};
+use crate::tabs::collect_panes;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
     BAR_BG, BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip,
@@ -18,6 +19,42 @@ use crate::{
 
 const TAB_BAR_HEIGHT: f32 = 26.0;
 const RENAME_WIDTH: f32 = 140.0;
+
+/// A tab shortcut, before the check whether it has anything to do.
+#[derive(Debug, PartialEq, Eq)]
+enum TabKey {
+    /// Ctrl+Tab, or Ctrl+Shift+Tab going `back`.
+    Cycle { back: bool },
+    /// Ctrl+1–9: the tab at this index.
+    Nth(usize),
+    /// Ctrl+T, or Ctrl+Shift+T that acts `anywhere`, the terminals included.
+    New { anywhere: bool },
+    /// Ctrl+Shift+G.
+    Grid,
+}
+
+/// Which tab shortcut `ks` is, if any; Alt or the platform key rules all
+/// of them out.
+fn tab_key(ks: &Keystroke) -> Option<TabKey> {
+    let mods = &ks.modifiers;
+    if !mods.control || mods.alt || mods.platform {
+        return None;
+    }
+    let key = ks.key.to_ascii_lowercase();
+    match key.as_str() {
+        "tab" => Some(TabKey::Cycle { back: mods.shift }),
+        "t" => Some(TabKey::New {
+            anywhere: mods.shift,
+        }),
+        "g" if mods.shift => Some(TabKey::Grid),
+        _ if !mods.shift => key
+            .parse::<usize>()
+            .ok()
+            .filter(|digit| (1..=9).contains(digit))
+            .map(|digit| TabKey::Nth(digit - 1)),
+        _ => None,
+    }
+}
 
 /// The open tab context menu: the tab's font size.
 pub(crate) struct TabMenu {
@@ -133,7 +170,7 @@ impl RootView {
     /// of tab font changes saves at most once per debounce.
     fn after_tab_font_change(&mut self, cx: &mut Context<Self>) {
         self.apply_pane_fonts(cx);
-        self.schedule_font_save(cx);
+        self.schedule_ui_save(cx);
         cx.notify();
     }
 
@@ -316,6 +353,102 @@ impl RootView {
             self.tabs.activate(tab_id);
             self.after_tabs_change(window, cx);
         }
+    }
+
+    /// The tab shortcuts; returns whether `ks` was one with something to
+    /// do. Ctrl+(Shift+)Tab cycles the tabs, Ctrl+1–9 shows the Nth and
+    /// Ctrl+Shift+G rearranges the active grid, from the terminals too;
+    /// Ctrl+T opens a tab outside the terminals and Ctrl+Shift+T anywhere.
+    /// None fires while a menu or a popup is open.
+    pub(crate) fn on_tab_shortcut(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.menu_open() {
+            return false;
+        }
+        match tab_key(ks) {
+            Some(TabKey::Cycle { back }) => self.cycle_tab(back, window, cx),
+            Some(TabKey::Nth(index)) => self.show_nth_tab(index, window, cx),
+            Some(TabKey::New { anywhere }) => {
+                if !anywhere && !self.outside_terminal(window, cx) {
+                    return false;
+                }
+                self.new_tab();
+                true
+            }
+            Some(TabKey::Grid) => self.rearrange_active_grid(),
+            None => false,
+        }
+    }
+
+    /// Shows the tab after the active one, or before it when `back`,
+    /// wrapping; with fewer than two tabs there is nothing to do.
+    fn cycle_tab(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let tabs = self.tabs.tabs();
+        let count = tabs.len();
+        if count < 2 {
+            return false;
+        }
+        let current = self
+            .tabs
+            .active_id()
+            .and_then(|id| tabs.iter().position(|tab| tab.id == id));
+        let next = match (current, back) {
+            (Some(at), false) => (at + 1) % count,
+            (Some(at), true) => (at + count - 1) % count,
+            (None, _) => 0,
+        };
+        let tab_id = tabs[next].id.clone();
+        self.show_tab(&tab_id, window, cx);
+        true
+    }
+
+    /// Shows the tab at `index` in strip order, when there is one.
+    fn show_nth_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(tab_id) = self.tabs.tabs().get(index).map(|tab| tab.id.clone()) else {
+            return false;
+        };
+        self.show_tab(&tab_id, window, cx);
+        true
+    }
+
+    /// A context menu or a popup Esc closes is open.
+    fn menu_open(&self) -> bool {
+        self.tab_menu.is_some()
+            || self.menu.is_some()
+            || self.container_menu.is_some()
+            || self.shell_menu.is_some()
+            || self.sc_picker_open
+            || self.changes.file_menu.is_some()
+            || self.flyout_open
+    }
+
+    /// Shows `tab_id` as a click on its pill does.
+    fn show_tab(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.activate(tab_id);
+        self.after_tabs_change(window, cx);
+    }
+
+    /// Asks the daemon to lay the active tab out as a grid, when it is a
+    /// grid of two panes or more.
+    fn rearrange_active_grid(&self) -> bool {
+        let Some(tab) = self.tabs.active_tab() else {
+            return false;
+        };
+        let Some(grid) = tab.grid() else {
+            return false;
+        };
+        if collect_panes(grid).len() < 2 {
+            return false;
+        }
+        self.send(ClientMessage::RearrangeTab {
+            tab_id: tab.id.clone(),
+            layout: RearrangeLayout::Grid { cols: 0 },
+        });
+        true
     }
 
     fn new_tab(&mut self) {

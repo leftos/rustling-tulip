@@ -14,6 +14,7 @@ use std::path::Path;
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::{Part, ScKey, ScUiState};
+use crate::window_state::WindowState;
 
 /// The sidebar layout file, in the client's config dir.
 pub const UI_FILE: &str = "native-ui.json";
@@ -140,6 +141,9 @@ pub struct UiState {
     /// Whether the diff tabs colour code by the file's language.
     #[serde(default = "highlight_by_default")]
     pub diff_highlight: bool,
+    /// The main window's place when it last moved; `None` until it has.
+    #[serde(default)]
+    pub window: Option<WindowState>,
 }
 
 /// A layout saved before the diff tabs' whitespace toggle existed shows
@@ -170,6 +174,7 @@ impl Default for UiState {
             recent_colors: Vec::new(),
             diff_include_whitespace: true,
             diff_highlight: true,
+            window: None,
         }
     }
 }
@@ -386,6 +391,15 @@ impl SidebarModel {
     /// Whether the diff tabs colour code by the file's language.
     pub fn set_diff_highlight(&mut self, highlight: bool) {
         self.ui.diff_highlight = highlight;
+    }
+
+    /// Records the main window's place; returns whether it changed.
+    pub fn set_window_state(&mut self, state: WindowState) -> bool {
+        if self.ui.window.as_ref() == Some(&state) {
+            return false;
+        }
+        self.ui.window = Some(state);
+        true
     }
 
     /// The size stored for `tab_id`, if the tab has an override.
@@ -1655,6 +1669,7 @@ mod tests {
             recent_colors: vec!["#abcdef".to_owned()],
             diff_include_whitespace: false,
             diff_highlight: false,
+            window: None,
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

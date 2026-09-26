@@ -166,10 +166,10 @@ impl RootView {
         false
     }
 
-    /// Quits the app, once, after writing the layout change a font step
-    /// left pending.
+    /// Quits the app, once, after writing the layout change a font step or
+    /// a window move left pending.
     fn request_quit(&mut self, cx: &mut Context<Self>) {
-        self.flush_font_save();
+        self.flush_ui_save();
         self.quitter.request(cx);
     }
 

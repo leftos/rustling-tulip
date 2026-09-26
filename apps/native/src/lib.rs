@@ -60,16 +60,17 @@ mod term_input;
 mod term_view;
 mod text_input;
 mod theme;
+mod window_state;
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
-    CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight, InputHandler,
-    KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions,
-    div, prelude::*, pulsating_between, px, size,
+    CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
+    InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window,
+    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, InitLayoutKind, RepoEntry, SessionSnapshot,
@@ -105,6 +106,7 @@ use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
+use crate::window_state::{RestoreRect, WindowState};
 
 pub use crate::assets::Assets;
 pub use crate::changes_view::{
@@ -145,8 +147,9 @@ const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
 /// between split panes.
 const DIVIDER_WIDTH: f32 = 4.0;
-/// How long tab font steps wait before the layout is written out.
-const FONT_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// How long tab font steps and window moves wait before the layout is
+/// written out.
+const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The toast a session appearance change the daemon refused raises.
 const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
 /// This client's log file, under `<config dir>/logs/`.
@@ -182,11 +185,17 @@ pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
     bind_keys(cx);
     fonts::register_bundled(cx);
     let offscreen = offscreen::requested();
-    let (width, height) = WINDOW_SIZE;
-    let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
+    // The cloaked window opens as it always has, whatever was saved.
+    let saved = if offscreen {
+        None
+    } else {
+        saved_window_state()
+    };
+    let (display_id, window_bounds) = window_placement(saved.as_ref(), cx);
     let opened = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(window_bounds),
+            display_id,
             // gpui activates any window it shows, so a cloaked window is
             // opened hidden and shown by `show_cloaked`.
             focus: !offscreen,
@@ -208,6 +217,40 @@ pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
     if !offscreen {
         cx.activate(true);
     }
+}
+
+/// The main window's place saved in `native-ui.json`, if the config dir
+/// resolves and the file holds one.
+fn saved_window_state() -> Option<WindowState> {
+    match daemon_client::config_dir() {
+        Ok(dir) => load_ui_state(&dir).window,
+        Err(err) => {
+            tracing::warn!("the window opens at its default place: {err:#}");
+            None
+        }
+    }
+}
+
+/// The monitor and bounds the main window opens with, from `saved`.
+fn window_placement(saved: Option<&WindowState>, cx: &App) -> (Option<DisplayId>, WindowBounds) {
+    let displays: Vec<(DisplayId, String)> = cx
+        .displays()
+        .iter()
+        .filter_map(|display| Some((display.id(), display.uuid().ok()?.to_string())))
+        .collect();
+    let (width, height) = WINDOW_SIZE;
+    let default_size = size(px(width.into()), px(height.into()));
+    let restore = window_state::restore_options(saved, &displays, default_size);
+    let bounds = match restore.rect {
+        RestoreRect::Centered(size) => Bounds::centered(None, size, cx),
+        RestoreRect::At(bounds) => bounds,
+    };
+    let bounds = if restore.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    };
+    (restore.display, bounds)
 }
 
 /// The main window's size in logical pixels.
@@ -321,10 +364,10 @@ pub struct RootView {
     /// last press left off and one change does not undo another still on
     /// its way.
     pending_appearance: appearance::InFlightAppearance,
-    /// When the pending tab-font save is due, if one is.
-    font_save_deadline: Option<Instant>,
-    /// Wakes the view when the tab-font save is due.
-    font_save_timer: Option<Task<()>>,
+    /// When the pending layout save is due, if one is.
+    ui_save_deadline: Option<Instant>,
+    /// Wakes the view when the layout save is due.
+    ui_save_timer: Option<Task<()>>,
     /// A header Stop waiting for its second click.
     confirm: HeaderStopConfirm,
     /// Restarts and resumes waiting for their duplicate.
@@ -426,7 +469,15 @@ impl RootView {
             quit: Box::new(|cx: &mut App| cx.quit()),
             open: Arc::new(SystemOpener),
         };
-        Self::with_transport(deps, window, cx)
+        let root = Self::with_transport(deps, window, cx);
+        // The cloaked window neither restores nor saves its place.
+        if !offscreen::requested() {
+            cx.observe_window_bounds(window, |root, window, cx| {
+                root.remember_window_place(window, cx);
+            })
+            .detach();
+        }
+        root
     }
 
     /// Follows the window's activation and bounds. Ctrl stays down in the
@@ -445,6 +496,25 @@ impl RootView {
             root.close_shell_menu(window, cx);
         })
         .detach();
+    }
+
+    /// Records where the window now is and schedules a save, unless it is
+    /// minimized, has no area, or has not moved.
+    fn remember_window_place(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.ui_dir.is_none() || window_state::is_minimized(window) {
+            return;
+        }
+        let display_uuid = window
+            .display(cx)
+            .and_then(|display| display.uuid().ok())
+            .map(|uuid| uuid.to_string());
+        let Some(state) = window_state::to_window_state(window.window_bounds(), display_uuid)
+        else {
+            return;
+        };
+        if self.sidebar.set_window_state(state) {
+            self.schedule_ui_save(cx);
+        }
     }
 
     /// A view over `deps`: it sends through `deps.tx` and handles every
@@ -504,8 +574,8 @@ impl RootView {
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
             pending_appearance: appearance::InFlightAppearance::default(),
-            font_save_deadline: None,
-            font_save_timer: None,
+            ui_save_deadline: None,
+            ui_save_timer: None,
             confirm: HeaderStopConfirm::default(),
             duplicates: Duplicates::default(),
             delete_dialog: None,
@@ -784,45 +854,46 @@ impl RootView {
         }
     }
 
-    /// Writes the layout at most once per [`FONT_SAVE_DEBOUNCE`] while tab
-    /// font steps keep coming, so a held key does not rewrite the file for
-    /// every step; the save that fires writes the sizes as they then stand.
-    fn schedule_font_save(&mut self, cx: &mut Context<Self>) {
-        if self.font_save_deadline.is_some() {
+    /// Writes the layout at most once per [`UI_SAVE_DEBOUNCE`] while tab
+    /// font steps or window moves keep coming, so a held key or a drag does
+    /// not rewrite the file for every step; the save that fires writes the
+    /// layout as it then stands.
+    fn schedule_ui_save(&mut self, cx: &mut Context<Self>) {
+        if self.ui_save_deadline.is_some() {
             return;
         }
-        let deadline = (self.now)() + FONT_SAVE_DEBOUNCE;
-        self.font_save_deadline = Some(deadline);
-        self.arm_font_save(deadline, cx);
+        let deadline = (self.now)() + UI_SAVE_DEBOUNCE;
+        self.ui_save_deadline = Some(deadline);
+        self.arm_ui_save(deadline, cx);
     }
 
     /// Arms the timer for the rest of the wait for the pending save.
-    fn arm_font_save(&mut self, deadline: Instant, cx: &mut Context<Self>) {
+    fn arm_ui_save(&mut self, deadline: Instant, cx: &mut Context<Self>) {
         let delay = deadline.saturating_duration_since((self.now)());
-        self.font_save_timer = Some(cx.spawn(async move |this, cx| {
+        self.ui_save_timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
             // Fails only when the view is gone, and the save with it.
-            this.update(cx, Self::tick_font_save).ok();
+            this.update(cx, Self::tick_ui_save).ok();
         }));
     }
 
     /// The save timer fired: write once the debounce has passed by the
     /// clock, which may lag the timer, else wait out the rest.
-    fn tick_font_save(&mut self, cx: &mut Context<Self>) {
-        let Some(deadline) = self.font_save_deadline else {
+    fn tick_ui_save(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.ui_save_deadline else {
             return;
         };
         if deadline > (self.now)() {
-            self.arm_font_save(deadline, cx);
+            self.arm_ui_save(deadline, cx);
         } else {
-            self.flush_font_save();
+            self.flush_ui_save();
         }
     }
 
     /// Writes a pending save now, as the quit path must before the app goes.
-    fn flush_font_save(&mut self) {
-        if self.font_save_deadline.take().is_some() {
-            self.font_save_timer = None;
+    fn flush_ui_save(&mut self) {
+        if self.ui_save_deadline.take().is_some() {
+            self.ui_save_timer = None;
             self.save_ui();
         }
     }
@@ -1447,7 +1518,7 @@ impl RootView {
         } else if self.is_spawn_shortcut(ks, window, cx) {
             self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
         } else {
-            return false;
+            return self.on_tab_shortcut(ks, window, cx);
         }
         true
     }
@@ -1566,7 +1637,7 @@ impl RootView {
         }
         if changed {
             self.apply_pane_fonts(cx);
-            self.schedule_font_save(cx);
+            self.schedule_ui_save(cx);
             cx.notify();
         }
     }

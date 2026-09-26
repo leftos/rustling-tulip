@@ -33,7 +33,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
 - [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
 - [x] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries; unknown types are logged since P4.1)
-- [ ] Main window size and position persisted — `lib.rs` (window-state plugin)
+- [x] Main window size and position persisted — `lib.rs` (window-state plugin)
 
 ## Sidebar / repos / workspaces
 
@@ -197,7 +197,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Misc & shortcuts
 
-- [ ] App shortcuts, ignored in inputs, the terminal, modals and pop-outs: Ctrl+B sidebar, Ctrl+T new tab, Ctrl+N spawn, Ctrl+, settings, Ctrl+(Shift+)Tab cycle tabs, Ctrl+1–9 jump to tab, Ctrl+Shift+G auto-grid, Ctrl+= / − / 0 session font, Ctrl+Shift+= / − tab font — `utils/a11y.ts`, `App.tsx`
+- [x] App shortcuts, ignored in inputs, the terminal, modals and pop-outs: Ctrl+B sidebar, Ctrl+T new tab, Ctrl+N spawn, Ctrl+, settings, Ctrl+(Shift+)Tab cycle tabs, Ctrl+1–9 jump to tab, Ctrl+Shift+G auto-grid, Ctrl+= / − / 0 session font, Ctrl+Shift+= / − tab font — `utils/a11y.ts`, `App.tsx` (native, P4.14: the tab keys and Ctrl+Shift+G also act from the terminal, and Ctrl+Shift+N / Ctrl+Shift+T open from anywhere; user, 2026-09-26)
 - [ ] Other keys: Ctrl+Enter commits; Enter/Esc in rename fields; Esc closes menus and modals; arrows in the branch combobox — various
 - [x] Default right-click menu suppressed everywhere, Monaco included — `main.tsx` (native: GPUI has no default context menu)
 - [ ] Menus stay inside the viewport; modals focus the safe option and return focus on close — `utils/a11y.ts`
