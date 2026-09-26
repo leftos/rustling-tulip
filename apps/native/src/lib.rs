@@ -10,10 +10,12 @@ pub mod appearance;
 mod appearance_view;
 mod assets;
 mod branch_fate;
+mod changes_view;
 mod connection;
 mod copied;
 pub mod diff_model;
 pub mod diff_view;
+mod discard_confirm;
 pub mod fonts;
 mod footer;
 mod grid_view;
@@ -31,6 +33,7 @@ mod open_view;
 mod quit;
 mod quit_view;
 mod run_confirm;
+mod sc_writes;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
@@ -74,6 +77,7 @@ use std::time::{Duration, Instant};
 
 use crate::appearance::AppearanceChange;
 use crate::appearance_view::AppearanceEditor;
+use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
@@ -97,6 +101,9 @@ use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 
 pub use crate::assets::Assets;
+pub use crate::changes_view::{
+    DiscardConfirmView, ScAction, ScBucketRow, ScButton, ScFileRow, ScFolderRow, ScTreeRow,
+};
 pub use crate::connection::Connection;
 pub use crate::footer::LogPaths;
 pub use crate::history::{
@@ -116,6 +123,7 @@ pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf,
 };
+pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::text_input::bind_keys;
@@ -354,6 +362,9 @@ pub struct RootView {
     /// Where the source-control body and History blocks were last laid
     /// out; the split drags map the pointer through it.
     sc_layout: history::ScLayout,
+    /// The source-control writes out, the banners failed ones left, the
+    /// file menu and the discard confirm.
+    changes: ChangesUi,
 }
 
 impl RootView {
@@ -497,6 +508,7 @@ impl RootView {
             sc_picker_open: false,
             history: history::HistoryModel::default(),
             sc_layout: history::ScLayout::default(),
+            changes: ChangesUi::new(cx.focus_handle()),
         }
     }
 
@@ -773,6 +785,7 @@ impl RootView {
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_shell_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.sidebar.toggle_sidebar();
         self.drag = None;
         self.save_ui();
@@ -874,9 +887,12 @@ impl RootView {
             self.renaming = None;
         }
         self.drop_stale_tab_menu();
-        self.drop_stale_sc_picker();
+        let dropped_picker = self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
-        self.seed_source_control();
+        let dropped_changes = self.seed_source_control();
+        if dropped_picker || dropped_changes {
+            self.after_notice_closed(window, cx);
+        }
         cx.notify();
     }
 
@@ -1013,9 +1029,10 @@ impl RootView {
             NetEvent::Message(msg) => {
                 let reseed = moves_source_control_inputs(&msg);
                 self.on_message(*msg, window, cx);
-                self.drop_stale_sc_picker();
-                if reseed {
-                    self.seed_source_control();
+                let dropped_picker = self.drop_stale_sc_picker();
+                let dropped_changes = reseed && self.seed_source_control();
+                if dropped_picker || dropped_changes {
+                    self.after_notice_closed(window, cx);
                 }
             }
             NetEvent::ShutdownSent => self.on_shutdown_sent(),
@@ -1028,6 +1045,7 @@ impl RootView {
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
             self.close_appearance_editor(window, cx);
+            self.close_discard_confirm(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
         }
@@ -1045,8 +1063,8 @@ impl RootView {
             _ => None,
         };
         self.sidebar.apply(&msg);
-        if self.sc.apply(&msg) {
-            cx.notify();
+        if self.on_sc_message(&msg, cx) {
+            return;
         }
         if self.apply_history(&msg, cx) {
             return;
@@ -1152,6 +1170,7 @@ impl RootView {
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
         self.close_appearance_editor(window, cx);
+        self.close_discard_confirm(window, cx);
         self.reset_session_ui(window, cx);
         self.reset_notices(window, cx);
     }
@@ -1242,6 +1261,10 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.on_discard_confirm_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.delete_dialog.is_some() {
             self.on_delete_dialog_key(ks, window, cx);
             cx.stop_propagation();
@@ -1294,6 +1317,8 @@ impl RootView {
             self.close_shell_menu(window, cx);
         } else if self.sc_picker_open && ks.key == "escape" {
             self.close_sc_picker(window, cx);
+        } else if self.changes.file_menu.is_some() && ks.key == "escape" {
+            self.close_sc_file_menu(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
         } else if let Some(key) = font_key(ks) {
@@ -1564,6 +1589,7 @@ impl Render for RootView {
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(self.sc_picker_layer())
+            .children(self.sc_file_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other
@@ -1574,6 +1600,7 @@ impl Render for RootView {
             .children(self.appearance_editor_layer(cx))
             .children(self.settings_layer(cx))
             .children(delete_under)
+            .children(self.discard_confirm_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
             .children(self.run_confirm_layer(cx))

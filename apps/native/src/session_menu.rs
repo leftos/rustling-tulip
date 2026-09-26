@@ -357,6 +357,7 @@ impl RootView {
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.container_menu = Some(ContainerMenu { level, at });
         self.menu_focus.focus(window);
         cx.notify();
@@ -571,6 +572,7 @@ impl RootView {
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.close_delete_dialog(window, cx);
     }
 
@@ -1391,7 +1393,7 @@ fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Statef
 }
 
 /// A thin line between groups of menu rows.
-fn menu_separator() -> Div {
+pub(crate) fn menu_separator() -> Div {
     div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(BORDER))
 }
 

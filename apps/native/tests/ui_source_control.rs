@@ -12,7 +12,7 @@ mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage};
-use rustling_tulip_native::{Activity, ScContext, ScPanel, ScSectionRow};
+use rustling_tulip_native::{Activity, ScContext, ScPanel};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, repo, session};
 
@@ -304,7 +304,7 @@ fn the_badge_counts_a_worktree_and_the_main_tree_separately(cx: &mut TestAppCont
         Some("1"),
         "the focused worktree's count, untouched by the main tree's status"
     );
-    assert_eq!(panel(&mut h).sections[0].body, "1 changed");
+    assert_eq!(panel(&mut h).sections[0].count, Some(1));
 
     h.send(DaemonMessage::SessionRemoved {
         session_id: "s1".to_owned(),
@@ -316,7 +316,7 @@ fn the_badge_counts_a_worktree_and_the_main_tree_separately(cx: &mut TestAppCont
     );
     let sections = panel(&mut h).sections;
     assert_eq!(sections[0].id, "r1::");
-    assert_eq!(sections[0].body, "3 changed");
+    assert_eq!(sections[0].count, Some(3));
 }
 
 #[gpui::test]
@@ -324,14 +324,15 @@ fn sections_show_loading_then_clean_then_count(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &two_repos());
     h.click_on("activity-source-control");
-    let row = |id: &str, count: Option<usize>, body: &str| ScSectionRow {
-        id: id.to_owned(),
-        title: "r1".to_owned(),
-        count,
-        body: body.to_owned(),
+    let row = |h: &mut Harness<'_>| {
+        let sections = panel(h).sections;
+        assert_eq!(sections.len(), 1, "one section");
+        let row = sections.into_iter().next().expect("the section");
+        assert_eq!((row.id.as_str(), row.title.as_str()), ("r1::", "r1"));
+        (row.count, row.collapsed, row.body, row.buckets.len())
     };
 
-    assert_eq!(panel(&mut h).sections, [row("r1::", None, "loading…")]);
+    assert_eq!(row(&mut h), (None, false, Some("loading…".to_owned()), 0));
     assert!(h.in_model("sc-section-r1::"));
     assert!(h.in_model("sc-section-body-r1::"));
     assert!(h.bounds("sc-section-body-r1::").size.height > px(0.0));
@@ -342,15 +343,21 @@ fn sections_show_loading_then_clean_then_count(cx: &mut TestAppContext) {
 
     h.send(status("r1", None, &[], &[]));
     assert_eq!(
-        panel(&mut h).sections,
-        [row("r1::", None, "working tree clean")]
+        row(&mut h),
+        (None, true, None, 0),
+        "a clean tree folds by default"
+    );
+    h.click_on("sc-section-r1::");
+    assert_eq!(
+        row(&mut h),
+        (None, false, Some("working tree clean".to_owned()), 0)
     );
 
     h.send(status("r1", None, &["a.rs"], &["a.rs", "b.rs"]));
     assert_eq!(
-        panel(&mut h).sections,
-        [row("r1::", Some(2), "2 changed")],
-        "distinct paths, shown beside the name"
+        row(&mut h),
+        (Some(2), false, None, 2),
+        "distinct paths, shown beside the name, and both buckets below"
     );
     assert_eq!(
         panel(&mut h).context,
@@ -465,6 +472,7 @@ fn a_picker_whose_button_goes_away_closes(cx: &mut TestAppContext) {
     fixture.sessions.push(session("s2").build());
     fixture.repos = vec![repo("r1", "D:/src/r1"), repo("r2", "D:/src/r2")];
     let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
     h.click_on("activity-source-control");
     h.click_on("sc-picker");
     assert!(h.in_model("sc-picker-menu"));
@@ -480,6 +488,8 @@ fn a_picker_whose_button_goes_away_closes(cx: &mut TestAppContext) {
         "the button went, so the menu and its blocking layer go too"
     );
     assert!(!h.in_model("sc-picker-menu"));
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard again");
 
     h.click_on("activity-sessions");
     assert_eq!(
@@ -572,13 +582,14 @@ fn refresh_resends_status_without_clearing(cx: &mut TestAppContext) {
         "every section asks again, and only the sections"
     );
     assert_eq!(
-        panel(&mut h).sections[0].body,
-        "2 changed",
+        panel(&mut h).sections[0].count,
+        Some(2),
         "the stored status stays until the answer"
     );
+    assert_eq!(panel(&mut h).sections[0].buckets[0].count, 2);
 
     h.send(status("r1", None, &[], &["a.rs"]));
-    assert_eq!(panel(&mut h).sections[0].body, "1 changed");
+    assert_eq!(panel(&mut h).sections[0].count, Some(1));
 }
 
 #[gpui::test]
@@ -621,7 +632,7 @@ fn welcome_reseeds(cx: &mut TestAppContext) {
         [main_tree("r1"), main_tree("r2")],
         "a new connection asks for everything again"
     );
-    assert_eq!(panel(&mut h).sections[0].body, "loading…");
+    assert_eq!(panel(&mut h).sections[0].body.as_deref(), Some("loading…"));
 
     h.load(&fixture);
     assert!(

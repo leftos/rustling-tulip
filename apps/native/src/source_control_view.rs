@@ -10,10 +10,12 @@ use gpui::{
 use protocol::{ClientMessage, SessionMember};
 
 use crate::assets::REFRESH_ICON;
+use crate::changes_view::{ScBucketRow, ScChanges, caret, changes_body};
+use crate::history::section_title;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
-use crate::source_control::{ScKey, Section, sections};
+use crate::source_control::{Part, ScKey, Section, sections};
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 /// The panel's title.
@@ -41,14 +43,22 @@ pub struct ScContext {
 /// One section as the panel draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScSectionRow {
+    pub key: ScKey,
     /// The section's key id, which its selectors end in.
     pub id: String,
     /// The repo name, then ` · <branch>` when a branch is known.
     pub title: String,
     /// The distinct changed paths, when loaded and not zero.
     pub count: Option<usize>,
-    /// `loading…`, `working tree clean` or `N changed`.
-    pub body: String,
+    /// Whether its Changes part is folded, which hides the body below.
+    pub collapsed: bool,
+    /// `<operation>: <error>` of the last git write that failed.
+    pub banner: Option<String>,
+    /// `loading…`, `couldn't load status: <reason>` or `working tree
+    /// clean`, shown instead of buckets.
+    pub body: Option<String>,
+    /// The non-empty buckets, Staged first.
+    pub buckets: Vec<ScBucketRow>,
 }
 
 /// Everything the source-control panel draws, as text.
@@ -76,7 +86,7 @@ pub struct ScPickerRow {
 
 impl RootView {
     /// The members of the focused pane's session, when it has any.
-    fn sc_focused_members(&self) -> Option<&[SessionMember]> {
+    pub(crate) fn sc_focused_members(&self) -> Option<&[SessionMember]> {
         let id = self.focused_session()?;
         self.sidebar
             .session(&id)
@@ -152,11 +162,14 @@ impl RootView {
     }
 
     /// Closes the picker once its button no longer shows, so its menu and
-    /// the blocking layer under it never outlive the button.
-    pub(crate) fn drop_stale_sc_picker(&mut self) {
-        if self.sc_picker_open && !self.sc_picker_offered() {
+    /// the blocking layer under it never outlive the button; returns
+    /// whether it closed, so the caller hands the keyboard back.
+    pub(crate) fn drop_stale_sc_picker(&mut self) -> bool {
+        let stale = self.sc_picker_open && !self.sc_picker_offered();
+        if stale {
             self.sc_picker_open = false;
         }
+        stale
     }
 
     /// The picker's rows: Auto, then every repo, the current choice checked.
@@ -239,60 +252,71 @@ impl RootView {
     }
 
     fn sc_row(&self, section: &Section) -> ScSectionRow {
-        let title = match &section.branch {
-            Some(branch) => format!("{} · {branch}", section.repo_name),
-            None => section.repo_name.clone(),
-        };
+        let title = section_title(section);
         let loaded = self.sc.is_loaded(&section.key);
         let count = self.sc.badge_total(std::slice::from_ref(&section.key));
-        let body = if !loaded {
-            "loading…".to_owned()
-        } else if count == 0 {
-            "working tree clean".to_owned()
+        let collapsed = self.sidebar.source_control().is_collapsed(
+            &section.key,
+            Part::Changes,
+            loaded.then_some(count),
+        );
+        let changes = if collapsed {
+            ScChanges::default()
         } else {
-            format!("{count} changed")
+            self.sc_changes(&section.key)
         };
         ScSectionRow {
+            key: section.key.clone(),
             id: section.key.id(),
             title,
             count: (loaded && count > 0).then_some(count),
-            body,
+            collapsed,
+            banner: changes.banner,
+            body: changes.body,
+            buckets: changes.buckets,
         }
     }
 
     /// Asks for the status of every tree the panel or the badge reads that
     /// has none and no request out: the current sections, and every
-    /// registered repo's main tree.
-    pub(crate) fn seed_source_control(&mut self) {
+    /// registered repo's main tree. The file menu and the discard confirm
+    /// of a tree that left the sections go; returns whether one did, so
+    /// the caller hands the keyboard back.
+    pub(crate) fn seed_source_control(&mut self) -> bool {
         let mut wanted: Vec<ScKey> = self
             .sc_sections()
             .into_iter()
             .map(|section| section.key)
             .collect();
+        let dropped = self.drop_stale_sc_changes(&wanted);
         wanted.extend(self.sc_main_keys());
         for key in self.sc.wanted_missing(&wanted) {
-            self.sc.mark_requested(key.clone());
-            self.send(ClientMessage::RepoStatus {
-                repo_id: key.repo_id,
-                worktree_path: key.worktree,
-                request_id: None,
-            });
+            self.request_sc_status(key);
         }
         self.seed_history();
+        dropped
     }
 
-    /// Asks again for every current section's status and history; the
-    /// stored ones stay on screen until the answers replace them.
+    /// Asks again for every current section's status, a failed one
+    /// included, and its history, and forgets the section's pending write;
+    /// the stored ones stay on screen until the answers replace them.
     fn refresh_source_control(&mut self) {
         for section in self.sc_sections() {
-            self.sc.mark_requested(section.key.clone());
-            self.send(ClientMessage::RepoStatus {
-                repo_id: section.key.repo_id,
-                worktree_path: section.key.worktree,
-                request_id: None,
-            });
+            self.changes.writes.clear_pending(&section.key);
+            self.request_sc_status(section.key);
         }
         self.refresh_history();
+    }
+
+    /// Sends a status request for `key` under a fresh request id, so a
+    /// failure comes back to its section.
+    fn request_sc_status(&mut self, key: ScKey) {
+        let request_id = self.sc.request(key.clone());
+        self.send(ClientMessage::RepoStatus {
+            repo_id: key.repo_id,
+            worktree_path: key.worktree,
+            request_id: Some(request_id),
+        });
     }
 
     /// Opens the picker's menu, closing any other menu, unless a dialog or
@@ -304,6 +328,7 @@ impl RootView {
             || self.appearance_editor.is_some()
             || self.delete_dialog.is_some()
             || self.run_confirm.is_some()
+            || self.changes.discard.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
         if blocked {
@@ -313,6 +338,7 @@ impl RootView {
         self.close_container_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.sc_picker_open = true;
         self.menu_focus.focus(window);
         cx.notify();
@@ -338,7 +364,9 @@ impl RootView {
         self.close_sc_picker(window, cx);
         if self.sidebar.set_pinned_repo(repo_id) {
             self.save_ui();
-            self.seed_source_control();
+            if self.seed_source_control() {
+                self.after_notice_closed(window, cx);
+            }
         }
         cx.notify();
     }
@@ -375,7 +403,14 @@ impl RootView {
                         .text_color(gpui::rgb(MUTED))
                         .child(hint),
                 ),
-            None => self.sc_split_body(panel.sections.iter().map(section_view).collect(), cx),
+            None => self.sc_split_body(
+                panel
+                    .sections
+                    .iter()
+                    .map(|row| section_view(row, cx))
+                    .collect(),
+                cx,
+            ),
         };
         div()
             .flex()
@@ -524,10 +559,12 @@ fn context_line(context: ScContext) -> Stateful<Div> {
         .when_some(context.tooltip, |line, tip| line.tooltip(tooltip(tip)))
 }
 
-/// A section's header row and its body.
-fn section_view(row: &ScSectionRow) -> AnyElement {
+/// A section's header row, which folds its Changes part, and its body
+/// unless folded.
+fn section_view(row: &ScSectionRow, cx: &mut Context<RootView>) -> AnyElement {
     let name = format!("sc-section-{}", row.id);
     let body_name = format!("sc-section-body-{}", row.id);
+    let key = row.key.clone();
     let header = div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
@@ -536,6 +573,12 @@ fn section_view(row: &ScSectionRow) -> AnyElement {
         .gap(px(6.0))
         .h(px(22.0))
         .px(px(ROW_PADDING))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.toggle_sc_changes(&key, cx);
+        }))
+        .child(caret(row.collapsed))
         .child(
             div()
                 .flex_1()
@@ -552,18 +595,19 @@ fn section_view(row: &ScSectionRow) -> AnyElement {
                     .child(count.to_string()),
             )
         });
-    let body = div()
-        .id(SharedString::from(body_name.clone()))
-        .debug_selector(|| body_name)
-        .pl(px(ROW_PADDING * 2.0))
-        .pr(px(ROW_PADDING))
-        .pb(px(6.0))
-        .text_color(gpui::rgb(MUTED))
-        .child(row.body.clone());
+    let body = (!row.collapsed).then(|| {
+        div()
+            .id(SharedString::from(body_name.clone()))
+            .debug_selector(|| body_name)
+            .flex()
+            .flex_col()
+            .pb(px(6.0))
+            .children(changes_body(row, cx))
+    });
     div()
         .flex()
         .flex_col()
         .child(header)
-        .child(body)
+        .children(body)
         .into_any_element()
 }

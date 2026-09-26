@@ -142,10 +142,10 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 ## Source control & diff
 
 - [x] Two modes: per-member sections for the focused session, or a single repo (follows the active pane or a saved dropdown choice) — `source-control/SourceControlSidebar.tsx`
-- [ ] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx` (native: Refresh landed in P3.3; section collapse comes with P3.4)
-- [ ] Staged / Changes folder trees with M/A/D/R/U status; per-file hover buttons (unstage; discard, stage); Unstage all / Discard all / Stage all — `ChangesTree.tsx`, `utils/changesTree.ts`
+- [x] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx`
+- [x] Staged / Changes folder trees with M/A/D/R/U status; per-file hover buttons (unstage; discard, stage); Unstage all / Discard all / Stage all — `ChangesTree.tsx`, `utils/changesTree.ts`
 - [ ] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
-- [ ] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx`
+- [ ] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx` (native: stage / unstage and the discard confirm landed in P3.4; the open items come with the diff tab)
 - [ ] Stashes: collapsible, stash with optional message, pop / apply / drop, live updates — `StashesSection.tsx`
 - [x] History: 50 at a time with "load more", hover card (sha, author, date); selecting a commit shows header, body and file list — `SourceControlSidebar.tsx` `HistoryView`, `DiffView`
 - [x] Open in forge (GitHub / GitLab / Bitbucket) — `api.ts` `getRemoteUrl`
@@ -173,7 +173,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx`
 - [ ] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
 - [ ] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: error and info toasts with 8s auto-dismiss and × landed in P1.7c; no sticky or same-key update)
-- [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx`
+- [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
 - [ ] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
 - [ ] Preset-launched sessions highlighted in the sidebar — `App.tsx`
 

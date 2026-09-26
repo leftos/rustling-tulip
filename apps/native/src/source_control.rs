@@ -5,10 +5,6 @@
 //!
 //! Plain Rust, so every rule is unit-tested; the panel view renders it and
 //! requests the statuses [`ScModel::wanted_missing`] names.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the source-control panel")
-)]
 
 use protocol::{DaemonMessage, GitFileChange, GitStash, RepoEntry, SessionMember};
 use serde::{Deserialize, Serialize};
@@ -139,6 +135,10 @@ pub enum Bucket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Part {
     Changes,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the panel draws no stash part, so none is built")
+    )]
     Stashes,
     History,
 }
@@ -154,27 +154,45 @@ impl Part {
     }
 }
 
+/// The prefix the daemon puts before a failed status read's message, which
+/// the section's own wording replaces.
+const STATUS_FAILED_PREFIX: &str = "status failed: ";
+
+/// The prefix of every status request id this model hands out.
+const STATUS_REQUEST_PREFIX: &str = "sc-status-";
+
 /// The status and stash stores, the statuses asked for and not yet
-/// answered, and the in-memory folder collapse.
+/// answered, the ones whose request failed, and the in-memory folder
+/// collapse.
 #[derive(Debug, Default)]
 pub struct ScModel {
     status: HashMap<ScKey, Status>,
     stashes: HashMap<ScKey, Vec<GitStash>>,
     requested: HashSet<ScKey>,
+    /// The status requests handed out, by request id.
+    request_ids: HashMap<String, ScKey>,
+    /// The number the last request id carried.
+    last_request: u64,
+    /// The keys whose last status request failed, with the daemon's reason.
+    failed: HashMap<ScKey, String>,
     collapsed_folders: HashSet<(String, Bucket, String)>,
 }
 
 impl ScModel {
     /// Fold a daemon message into the stores; `true` when one of them changed.
-    /// A new connection also forgets every request, and a status clears its
-    /// key's; neither counts as a change, since the view does not show them.
+    /// A new connection also forgets every request and failure, and a status
+    /// clears its key's request and failure; a request alone does not count
+    /// as a change, since the view does not show it.
     pub fn apply(&mut self, msg: &DaemonMessage) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
-                let changed = !self.status.is_empty() || !self.stashes.is_empty();
+                let changed =
+                    !self.status.is_empty() || !self.stashes.is_empty() || !self.failed.is_empty();
                 self.status.clear();
                 self.stashes.clear();
                 self.requested.clear();
+                self.request_ids.clear();
+                self.failed.clear();
                 changed
             }
             DaemonMessage::RepoStatus {
@@ -192,9 +210,11 @@ impl ScModel {
                     changes: worktree_changes.clone(),
                 };
                 self.requested.remove(&key);
+                self.request_ids.retain(|_, requested| *requested != key);
+                let recovered = self.failed.remove(&key).is_some();
                 let changed = self.status.get(&key) != Some(&status);
                 self.status.insert(key, status);
-                changed
+                changed || recovered
             }
             DaemonMessage::Stashes {
                 repo_id,
@@ -219,30 +239,79 @@ impl ScModel {
     /// Drop every key whose repo is not in `repos`; `true` when any went.
     fn retain_repos(&mut self, repos: &[RepoEntry]) -> bool {
         let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
-        let before = self.status.len() + self.stashes.len();
+        let before = self.status.len() + self.stashes.len() + self.failed.len();
         self.status
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
         self.stashes
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
         self.requested
             .retain(|key| ids.contains(key.repo_id.as_str()));
-        before != self.status.len() + self.stashes.len()
+        self.request_ids
+            .retain(|_, key| ids.contains(key.repo_id.as_str()));
+        self.failed
+            .retain(|key, _| ids.contains(key.repo_id.as_str()));
+        before != self.status.len() + self.stashes.len() + self.failed.len()
     }
 
-    /// Record that a status for `key` was asked for, so it is not asked for
-    /// again until it arrives or the connection is replaced.
-    pub fn mark_requested(&mut self, key: ScKey) {
-        self.requested.insert(key);
+    /// Record that a status for `key` is being asked for, so it is not asked
+    /// for again until it arrives, fails or the connection is replaced, and
+    /// hand out the request id to send with it: `sc-status-<n>`, `n`
+    /// counting up from 1. The key's earlier id, if any, is forgotten, so
+    /// only its latest request can mark it failed.
+    pub fn request(&mut self, key: ScKey) -> String {
+        self.last_request += 1;
+        let id = format!("{STATUS_REQUEST_PREFIX}{}", self.last_request);
+        self.request_ids.retain(|_, requested| *requested != key);
+        self.requested.insert(key.clone());
+        self.request_ids.insert(id.clone(), key);
+        id
     }
 
-    /// The keys of `wanted` with no status yet and no request out, in order
-    /// and each once, for the view to request.
+    /// A daemon `Error` answering `request_id`: when the id is this model's
+    /// outstanding request for a key, the key is marked failed with
+    /// `message` (less the daemon's `status failed: ` prefix) and is no
+    /// longer asked for. Any other `sc-status-` id is a superseded or
+    /// already answered request of this model's, and is dropped. Returns
+    /// whether the id was this model's.
+    pub fn fail_request(&mut self, request_id: &str, message: &str) -> bool {
+        let Some(key) = self.request_ids.remove(request_id) else {
+            let ours = request_id.starts_with(STATUS_REQUEST_PREFIX);
+            if ours {
+                tracing::debug!(
+                    request_id,
+                    message,
+                    "dropping an error for a stale status request"
+                );
+            }
+            return ours;
+        };
+        self.requested.remove(&key);
+        let reason = message
+            .strip_prefix(STATUS_FAILED_PREFIX)
+            .unwrap_or(message);
+        self.failed.insert(key, reason.to_owned());
+        true
+    }
+
+    /// Why the last status request for `key` failed, until a status arrives.
+    #[must_use]
+    pub fn failure(&self, key: &ScKey) -> Option<&str> {
+        self.failed.get(key).map(String::as_str)
+    }
+
+    /// The keys of `wanted` with no status yet, no request out and no failed
+    /// request, in order and each once, for the view to request. A failed
+    /// key waits for Refresh.
     #[must_use]
     pub fn wanted_missing(&self, wanted: &[ScKey]) -> Vec<ScKey> {
         let mut seen = HashSet::new();
         wanted
             .iter()
-            .filter(|key| !self.status.contains_key(key) && !self.requested.contains(key))
+            .filter(|key| {
+                !self.status.contains_key(key)
+                    && !self.requested.contains(key)
+                    && !self.failed.contains_key(key)
+            })
             .filter(|key| seen.insert(*key))
             .cloned()
             .collect()
@@ -256,6 +325,10 @@ impl ScModel {
 
     /// The stashes of a key, when a list has arrived.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the panel draws no stash part to read it")
+    )]
     pub fn stashes(&self, key: &ScKey) -> Option<&[GitStash]> {
         self.stashes.get(key).map(Vec::as_slice)
     }
@@ -771,7 +844,7 @@ mod tests {
         );
 
         model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
-        model.mark_requested(main_tree("r2"));
+        model.request(main_tree("r2"));
         assert_eq!(
             model.wanted_missing(&wanted),
             [worktree("r1", "D:\\r1-wt")],
@@ -783,8 +856,8 @@ mod tests {
     fn a_status_or_a_welcome_clears_requests() {
         let mut model = ScModel::default();
         let wanted = vec![main_tree("r1"), worktree("r1", "D:\\r1-wt")];
-        model.mark_requested(main_tree("r1"));
-        model.mark_requested(worktree("r1", "D:\\r1-wt"));
+        model.request(main_tree("r1"));
+        model.request(worktree("r1", "D:\\r1-wt"));
         assert!(model.wanted_missing(&wanted).is_empty());
 
         model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
@@ -798,7 +871,7 @@ mod tests {
             "the welcome dropped the status and every request"
         );
 
-        model.mark_requested(main_tree("r1"));
+        model.request(main_tree("r1"));
         model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
         model.apply(&DaemonMessage::Repos {
             repos: vec![repo("r1", "D:\\r1")],
@@ -808,6 +881,145 @@ mod tests {
             !model.requested.contains(&main_tree("r1")),
             "its status arrived, so the request is answered"
         );
+    }
+
+    #[test]
+    fn a_failed_status_request_marks_its_key_until_a_status_arrives() {
+        let mut model = ScModel::default();
+        let main = main_tree("r1");
+        let worktree_key = worktree("r1", "D:\\r1-wt");
+        let first = model.request(main.clone());
+        let second = model.request(worktree_key.clone());
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("sc-status-1", "sc-status-2")
+        );
+
+        assert!(
+            !model.fail_request("spawn-7", "spawn failed"),
+            "an id it never handed out is not its"
+        );
+        assert!(model.fail_request(&first, "status failed: not a git repository"));
+        assert_eq!(model.failure(&main), Some("not a git repository"));
+        assert_eq!(model.failure(&worktree_key), None);
+        assert!(
+            model.fail_request(&first, "status failed: again"),
+            "an answered id is still this model's, so no toast shows it"
+        );
+        assert_eq!(
+            model.failure(&main),
+            Some("not a git repository"),
+            "an answered id records no second failure"
+        );
+        assert!(
+            model.wanted_missing(std::slice::from_ref(&main)).is_empty(),
+            "a failed key is not asked for again by itself"
+        );
+
+        assert_eq!(
+            model.request(main.clone()),
+            "sc-status-3",
+            "a retry takes a new id"
+        );
+        assert!(
+            model.failure(&main).is_some(),
+            "the failure stays until the answer"
+        );
+        assert!(model.apply(&status_message("r1", None, Vec::new(), Vec::new())));
+        assert_eq!(model.failure(&main), None, "a status clears it");
+        assert!(model.is_loaded(&main));
+    }
+
+    #[test]
+    fn a_welcome_forgets_request_ids_and_failures() {
+        let mut model = ScModel::default();
+        let main = main_tree("r1");
+        let failed = model.request(main.clone());
+        model.fail_request(&failed, "status failed: boom");
+        let out = model.request(worktree("r1", "D:\\r1-wt"));
+        assert!(
+            model.apply(&DaemonMessage::Welcome {
+                protocol_version: 22,
+                supported_versions: vec![22],
+            }),
+            "dropping a failure is a change"
+        );
+        assert_eq!(model.failure(&main), None);
+        assert!(
+            model.fail_request(&out, "status failed: late"),
+            "an old connection's id is still this model's, so no toast shows it"
+        );
+        assert_eq!(
+            model.failure(&worktree("r1", "D:\\r1-wt")),
+            None,
+            "the old connection's id records no failure"
+        );
+        assert_eq!(
+            model.wanted_missing(std::slice::from_ref(&main)),
+            [main],
+            "asked for again on the new connection"
+        );
+    }
+
+    #[test]
+    fn request_ids_hold_one_entry_per_key_until_its_status_arrives() {
+        let mut model = ScModel::default();
+        let main = main_tree("r1");
+        let superseded = model.request(main.clone());
+        let current = model.request(main.clone());
+        model.request(worktree("r1", "D:\\r1-wt"));
+        assert_eq!(model.request_ids.len(), 2, "one id per key");
+        assert!(
+            model.fail_request(&superseded, "status failed: stale"),
+            "a superseded id is still this model's"
+        );
+        assert_eq!(
+            model.failure(&main),
+            None,
+            "a superseded id records no failure"
+        );
+
+        model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
+        assert_eq!(
+            model.request_ids.len(),
+            1,
+            "the status dropped its key's id"
+        );
+        assert!(
+            model.fail_request(&current, "status failed: late"),
+            "an answered id is still this model's"
+        );
+        assert_eq!(model.failure(&main), None, "and records no failure");
+    }
+
+    #[test]
+    fn a_status_clears_a_failure_even_with_the_same_contents() {
+        let mut model = ScModel::default();
+        let main = main_tree("r1");
+        model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
+        let id = model.request(main.clone());
+        model.fail_request(&id, "status failed: boom");
+        assert!(
+            model.apply(&status_message("r1", None, Vec::new(), Vec::new())),
+            "an identical status still clears the failure, which is a change"
+        );
+        assert_eq!(model.failure(&main), None);
+    }
+
+    #[test]
+    fn set_collapsed_reports_whether_the_stored_value_moved() {
+        let mut state = ScUiState::default();
+        let key = main_tree("r1");
+        assert!(
+            state.set_collapsed(&key, Part::Changes, false),
+            "a first value is stored"
+        );
+        assert!(
+            !state.set_collapsed(&key, Part::Changes, false),
+            "the same value again"
+        );
+        assert!(state.set_collapsed(&key, Part::Changes, true));
+        assert!(state.is_collapsed(&key, Part::Changes, Some(3)));
     }
 
     #[test]

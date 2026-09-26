@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, IntoElement, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, canvas, div, prelude::*, px,
 };
-use protocol::{ClientMessage, DaemonMessage, SessionMember};
+use protocol::{ClientMessage, DaemonMessage};
 
 use crate::history::{
     Applied, CommitRow, DetailPane, ForgeButton, HistoryBlock, HistoryBody, MIN_CHANGES_SIDE,
@@ -30,19 +30,10 @@ const BUTTON_HEIGHT: f32 = 18.0;
 const AUTHOR_WIDTH: f32 = 90.0;
 
 impl RootView {
-    /// The focused pane's session members, when it has any.
-    fn history_members(&self) -> Option<&[SessionMember]> {
-        let id = self.focused_session()?;
-        self.sidebar
-            .session(&id)
-            .map(|session| session.members.as_slice())
-            .filter(|members| !members.is_empty())
-    }
-
     /// The panel's sections, and whether they are a focused session's
     /// members.
     fn history_sections(&self) -> (Vec<Section>, bool) {
-        let members = self.history_members();
+        let members = self.sc_focused_members();
         let shown = sections(
             self.sidebar.repos(),
             members,

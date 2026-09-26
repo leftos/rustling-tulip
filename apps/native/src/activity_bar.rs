@@ -149,6 +149,7 @@ impl RootView {
     fn click_activity(&mut self, item: Activity, window: &mut Window, cx: &mut Context<Self>) {
         self.close_shell_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.sidebar.click_activity(item);
         self.drag = None;
         self.save_ui();

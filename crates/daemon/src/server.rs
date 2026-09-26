@@ -2876,7 +2876,9 @@ async fn reply_git_read<F>(
 /// `RepoStatus` to all connected clients (including this one) and emits the
 /// optional follow-up message (e.g. `CommitOk`). On failure, sends
 /// `GitWriteError { operation }` to the caller only — peer clients learn
-/// nothing happened because the broadcast is never sent.
+/// nothing happened because the broadcast is never sent. A write that
+/// succeeds but whose status refresh fails also answers the caller with
+/// `GitWriteError`, so its pending state clears.
 async fn handle_git_write<F>(
     hub: &Hub,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
@@ -2902,6 +2904,7 @@ async fn handle_git_write<F>(
                     }
                     Err(err) => {
                         warn!(?err, repo_id, "git_write: post-write status refresh failed");
+                        send_refresh_failed(out_tx, repo_id, worktree_path, operation, &err);
                     }
                 },
                 Err(err) => {
@@ -2922,6 +2925,23 @@ async fn handle_git_write<F>(
             });
         }
     }
+}
+
+/// Tells the writer that its write landed but the status read after it
+/// failed, so a client waiting on that status for `operation` stops waiting.
+fn send_refresh_failed(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    repo_id: &str,
+    worktree_path: Option<&str>,
+    operation: &str,
+    err: &anyhow::Error,
+) {
+    let _ = out_tx.send(DaemonMessage::GitWriteError {
+        repo_id: repo_id.to_string(),
+        operation: operation.to_string(),
+        error: format!("status refresh failed: {err:#}"),
+        worktree_path: worktree_path.map(str::to_owned),
+    });
 }
 
 /// Like [`handle_git_write`] but for stash mutations: in addition to the
@@ -2955,6 +2975,7 @@ async fn handle_stash_write<F>(
                             ?err,
                             repo_id, "stash_write: post-write status refresh failed"
                         );
+                        send_refresh_failed(out_tx, repo_id, worktree_path, operation, &err);
                     }
                 }
                 match git_write::stash_list(&repo).await {
@@ -6389,6 +6410,75 @@ mod tests {
                     if id == "q2" && message.starts_with("remote url failed:")
             ),
             "{msg:?}"
+        );
+    }
+
+    /// A hub with `r1` registered over a folder whose `.git` points at a
+    /// git dir that does not exist, so every status read of it fails.
+    fn hub_with_broken_repo(tag: &str) -> (Hub, ScratchDir) {
+        let (hub, scratch) = test_hub(tag);
+        let folder = scratch.path().join("broken");
+        std::fs::create_dir_all(&folder).expect("create repo dir");
+        std::fs::write(folder.join(".git"), "gitdir: missing-git-dir\n").expect("write .git file");
+        hub.state
+            .mutate(|s| {
+                s.repos.push(protocol::RepoEntry {
+                    id: "r1".to_string(),
+                    name: "r1".to_string(),
+                    path: folder.to_string_lossy().into_owned(),
+                    default_branch: None,
+                    default_use_worktree: true,
+                    appearance: AppearanceOverrides::default(),
+                    last_agent: None,
+                    last_spawn_config: None,
+                });
+            })
+            .expect("register repo");
+        (hub, scratch)
+    }
+
+    /// Every message waiting on `out_rx`.
+    fn drain(out_rx: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> Vec<DaemonMessage> {
+        let mut messages = Vec::new();
+        while let Ok(msg) = out_rx.try_recv() {
+            messages.push(msg);
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn a_git_write_whose_status_refresh_fails_answers_with_a_write_error() {
+        let (hub, _scratch) = hub_with_broken_repo("write-refresh");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        handle_git_write(&hub, &out_tx, "r1", None, "stage", async { Ok(None) }).await;
+        let messages = drain(&mut out_rx);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
+                    if repo_id == "r1"
+                        && operation == "stage"
+                        && error.starts_with("status refresh failed: ")
+            ),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stash_write_whose_status_refresh_fails_answers_with_a_write_error() {
+        let (hub, _scratch) = hub_with_broken_repo("stash-refresh");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        handle_stash_write(&hub, &out_tx, "r1", None, "stash_push", async { Ok(()) }).await;
+        let messages = drain(&mut out_rx);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
+                    if repo_id == "r1"
+                        && operation == "stash_push"
+                        && error.starts_with("status refresh failed: ")
+            ),
+            "{messages:?}"
         );
     }
 

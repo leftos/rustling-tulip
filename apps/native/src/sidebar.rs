@@ -1512,6 +1512,28 @@ mod tests {
     }
 
     #[test]
+    fn set_sc_collapsed_returns_whether_the_value_changed() {
+        use crate::source_control::{Part, ScKey};
+        let mut model = SidebarModel::new(UiState::default());
+        let key = ScKey {
+            repo_id: "r1".to_owned(),
+            worktree: None,
+        };
+        assert!(model.set_sc_collapsed(&key, Part::Changes, true));
+        assert!(
+            !model.set_sc_collapsed(&key, Part::Changes, true),
+            "the same value again changes nothing"
+        );
+        assert!(model.set_sc_collapsed(&key, Part::Changes, false));
+        assert!(
+            !model
+                .source_control()
+                .is_collapsed(&key, Part::Changes, Some(0)),
+            "the stored value beats the collapsed-when-empty default"
+        );
+    }
+
+    #[test]
     fn width_is_clamped() {
         assert!((clamp_width(100.0, 1000.0) - MIN_WIDTH).abs() < f32::EPSILON);
         assert!((clamp_width(950.0, 1000.0) - 800.0).abs() < f32::EPSILON);

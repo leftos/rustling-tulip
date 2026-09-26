@@ -345,6 +345,7 @@ impl RootView {
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
         self.renaming = None;
         self.close_flyout();
         let accent_hex = cx.new(|cx| TextInput::new("", HEX_PLACEHOLDER, cx));

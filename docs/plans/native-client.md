@@ -122,8 +122,16 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - Section bodies: `loading…` / `working tree clean` / `N changed` until P3.4.
     - Settings gear: on the rail, pinned to its bottom (P2.10b put it in the sessions header first).
     Original text: A rail with Sessions / Source control and the change badge (99+); clicking the active item collapses the sidebar; the choice is persisted. A header with refresh and a repo picker ("Auto · follow active pane" or a pinned repo), the empty state, and status seeding. Needs P3.2.
-  - [ ] **P3.4 Changes tree and stage / unstage / discard.** Staged / Changes buckets, per-file hover buttons, Stage all / Unstage all / Discard all, the right-click menu, the discard confirm listing the paths, the pending state, and `GitWriteError` as a banner plus a toast. Needs P3.3. Also: a `RepoStatus` that fails is answered with a keyless `Error`, so its key stays requested and its section stays on `loading…` until Refresh or a reconnect; settle that here.
-  - [ ] **P3.5 Commit box.** A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4.
+  - [x] **P3.4 Changes tree and stage / unstage / discard.** As built:
+    - `changes_view.rs`, `sc_writes.rs` (pending per tree, banners, the paths a row sends) and `discard_confirm.rs`.
+    - Section carets persist.
+    - Every discard goes through the confirm, as in Tauri.
+    - A failed status shows `couldn't load status: …` in its section, with no toast; the request ids hold one entry per key.
+    - The daemon answers a write whose status refresh fails with `GitWriteError`, so pending always clears.
+    - Open items in the file menu come with P3.8.
+
+    Original text: Staged / Changes buckets, per-file hover buttons, Stage all / Unstage all / Discard all, the right-click menu, the discard confirm listing the paths, the pending state, and `GitWriteError` as a banner plus a toast. Needs P3.3. Also: a `RepoStatus` that fails is answered with a keyless `Error`, so its key stays requested and its section stays on `loading…` until Refresh or a reconnect; settle that here.
+  - [ ] **P3.5 Commit box.** A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4. Note: a commit that succeeds but whose status refresh fails gets `GitWriteError { operation: "commit", error: "status refresh failed: …" }` and then `CommitOk`. Treat the commit as done: clear the box, and show only the refresh banner.
   - [ ] **P3.6 Stashes.** A collapsible section with a count, stash with an optional message, pop / apply / drop, and live updates from the `Stashes` broadcast. Needs P3.3.
   - [x] **P3.7 History, commit detail, open in forge.** As built:
     - `history.rs` holds the model: paging by offset with sha dedupe, request-id routing for the three reads, retiring stale reads, a detail cache per sha, the remote per repo, `branch_url`, and the split clamps.
