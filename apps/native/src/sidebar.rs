@@ -11,6 +11,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use crate::fonts::FontSettings;
+
 /// The sidebar layout file, in the client's config dir.
 pub const UI_FILE: &str = "native-ui.json";
 pub const MIN_WIDTH: f32 = 200.0;
@@ -101,6 +103,9 @@ pub struct UiState {
     /// The folder "+ Shell" opens in, when the user picked one.
     #[serde(default)]
     pub quick_shell_dir: Option<String>,
+    /// The font every new terminal pane starts from.
+    #[serde(default)]
+    pub terminal_font: FontSettings,
 }
 
 impl Default for UiState {
@@ -111,6 +116,7 @@ impl Default for UiState {
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
             quick_shell_dir: None,
+            terminal_font: FontSettings::default(),
         }
     }
 }
@@ -255,6 +261,10 @@ impl SidebarModel {
 
     pub fn ui_state(&self) -> &UiState {
         &self.ui
+    }
+
+    pub fn set_terminal_font(&mut self, font: FontSettings) {
+        self.ui.terminal_font = font;
     }
 
     /// Records the active tab; returns whether it changed.
@@ -1322,6 +1332,11 @@ mod tests {
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),
+            terminal_font: FontSettings {
+                family: Some("JetBrains Mono".to_owned()),
+                size: 15.0,
+                bold: true,
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

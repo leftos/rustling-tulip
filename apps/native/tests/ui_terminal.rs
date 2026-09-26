@@ -14,6 +14,7 @@ use std::time::Duration;
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{Modifiers, Point, TestAppContext, point, px, size};
 use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
+use rustling_tulip_native::fonts::FontSettings;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 /// `s` alone in pane `p1`, its scrollback answered, the pane focused and
@@ -692,4 +693,75 @@ fn a_sync_update_holds_output_back_until_its_timeout(cx: &mut TestAppContext) {
 
     h.pty("s1", b"\x1b[?2026hhello\x1b[?2026l");
     assert_eq!(h.grid_text("p1")[0], "heldhello", "an end releases it too");
+}
+
+/// The column counts of the `Resize`s in `sent` for session `id`, in order.
+fn resize_cols(sent: &[ClientMessage], id: &str) -> Vec<u16> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::Resize {
+                session_id, cols, ..
+            } if session_id == id => Some(*cols),
+            _ => None,
+        })
+        .collect()
+}
+
+fn set_app_font(h: &mut Harness<'_>, font: FontSettings) {
+    let root = h.root.clone();
+    h.cx.update(|_, cx| root.update(cx, |root, cx| root.set_app_font(font, cx)));
+    h.cx.run_until_parked();
+}
+
+#[gpui::test]
+fn cell_width_follows_the_app_font_size(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    let before = *resize_cols(&h.sent(), "s1")
+        .last()
+        .expect("the pane sized its PTY");
+
+    set_app_font(
+        &mut h,
+        FontSettings {
+            size: 20.0,
+            ..FontSettings::default()
+        },
+    );
+
+    let after = *resize_cols(&h.sent(), "s1")
+        .last()
+        .expect("the font change resizes the PTY");
+    assert!(
+        after < before,
+        "a larger font fits fewer columns: {before} -> {after}"
+    );
+}
+
+#[gpui::test]
+fn bold_setting_is_applied(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    let bold = |h: &mut Harness<'_>| h.root(|root, cx| root.pane_font("p1", cx).map(|f| f.bold));
+    assert_eq!(bold(&mut h), Some(false), "normal weight by default");
+
+    set_app_font(
+        &mut h,
+        FontSettings {
+            bold: true,
+            ..FontSettings::default()
+        },
+    );
+
+    assert_eq!(bold(&mut h), Some(true), "the open pane draws bold");
+    let saved: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("native-ui.json")).expect("native-ui.json"),
+    )
+    .expect("native-ui.json is JSON");
+    assert_eq!(
+        saved["terminal_font"]["bold"],
+        serde_json::Value::Bool(true),
+        "the app default is saved"
+    );
 }

@@ -41,11 +41,11 @@ repos:
       # lives in the config dir, not the repo, but the cost of being wrong here
       # is a leaked key in git history.
       - id: detect-private-key
-      # Cargo.lock and pnpm-lock.yaml are legitimately large; nothing else
-      # should be.
+      # Cargo.lock, pnpm-lock.yaml and the native client's bundled fonts are
+      # legitimately large; nothing else should be.
       - id: check-added-large-files
         args: [--maxkb=512]
-        exclude: '^(Cargo\.lock|.*/pnpm-lock\.yaml)$'
+        exclude: '^(Cargo\.lock|.*/pnpm-lock\.yaml|apps/native/assets/fonts/.*\.ttf)$'
 
   - repo: local
     hooks:

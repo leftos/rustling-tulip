@@ -8,6 +8,7 @@
 mod branch_fate;
 mod connection;
 mod copied;
+pub mod fonts;
 mod footer;
 mod grid_view;
 mod keys;
@@ -116,6 +117,7 @@ pub struct RootDeps {
 /// `wanted_session` once it arrives.
 pub fn open_main_window(wanted_session: Option<String>, cx: &mut App) {
     bind_keys(cx);
+    fonts::register_bundled(cx);
     let offscreen = std::env::var_os(OFFSCREEN_ENV).is_some_and(|value| !value.is_empty());
     let (width, height) = WINDOW_SIZE;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
@@ -528,6 +530,26 @@ impl RootView {
     pub fn pane_preedit(&self, pane_id: &str, cx: &App) -> Option<String> {
         let slot = self.panes.get(pane_id)?;
         slot.view().read(cx).preedit().map(str::to_owned)
+    }
+
+    /// The font settings pane `pane_id` renders with.
+    #[must_use]
+    pub fn pane_font(&self, pane_id: &str, cx: &App) -> Option<fonts::FontSettings> {
+        let slot = self.panes.get(pane_id)?;
+        Some(slot.view().read(cx).font().clone())
+    }
+
+    /// Makes `settings` the app's terminal font: saved as the default every
+    /// new pane starts from and applied to every open pane.
+    pub fn set_app_font(&mut self, settings: fonts::FontSettings, cx: &mut Context<Self>) {
+        let settings = settings.normalized();
+        self.sidebar.set_terminal_font(settings.clone());
+        self.save_ui();
+        for slot in self.panes.values() {
+            slot.view()
+                .update(cx, |pane, cx| pane.set_font(settings.clone(), cx));
+        }
+        cx.notify();
     }
 
     /// The cursor shape pane `pane_id` renders.

@@ -20,6 +20,7 @@ use gpui::{
 use protocol::{ClientMessage, SessionSnapshot};
 
 use crate::Clock;
+use crate::fonts::{self, FontSettings};
 use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
@@ -27,9 +28,6 @@ use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
 
-const FONT_FAMILY: &str = "Cascadia Mono";
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 18.0;
 /// `DSR 6`: the program asks where the cursor is and waits for the reply.
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 
@@ -73,6 +71,10 @@ pub struct TerminalPane {
     last_key_char: Option<String>,
     /// Drops the composition when the pane loses focus.
     blur: Option<Subscription>,
+    /// The font the pane draws with.
+    font: FontSettings,
+    /// `font`'s family resolved against the installed fonts, once measured.
+    family: Option<SharedString>,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -161,7 +163,12 @@ pub enum PaneEvent {
 impl EventEmitter<PaneEvent> for TerminalPane {}
 
 impl TerminalPane {
-    pub fn new(tx: UnboundedSender<NetCommand>, now: Clock, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        tx: UnboundedSender<NetCommand>,
+        now: Clock,
+        font: FontSettings,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
             focus: cx.focus_handle(),
@@ -182,11 +189,45 @@ impl TerminalPane {
             dead_key: false,
             last_key_char: None,
             blur: None,
+            font: font.normalized(),
+            family: None,
         }
     }
 
     pub fn session_id(&self) -> Option<&str> {
         self.attachment.session_id.as_deref()
+    }
+
+    /// The font the pane draws with.
+    pub fn font(&self) -> &FontSettings {
+        &self.font
+    }
+
+    /// Draws with `settings` from the next frame, which re-measures the grid
+    /// and resizes the PTY to fit.
+    pub fn set_font(&mut self, settings: FontSettings, cx: &mut Context<Self>) {
+        let settings = settings.normalized();
+        if settings == self.font {
+            return;
+        }
+        self.font = settings;
+        self.family = None;
+        cx.notify();
+    }
+
+    /// The family the pane's font resolves to, resolved once per font.
+    fn resolved_family(&mut self, window: &Window) -> SharedString {
+        if let Some(family) = &self.family {
+            return family.clone();
+        }
+        let available = fonts::available_families(window.text_system());
+        let requested = self.font.family.as_deref().unwrap_or(fonts::DEFAULT_FAMILY);
+        let family = fonts::resolve_family(Some(requested), &available);
+        if !family.eq_ignore_ascii_case(requested) {
+            tracing::warn!("terminal font {requested:?} is not installed; using {family:?}");
+        }
+        self.family = Some(family.clone());
+        family
     }
 
     /// The visible screen, one string per row with trailing blanks trimmed.
@@ -718,7 +759,9 @@ impl TerminalPane {
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let line_height = px(LINE_HEIGHT);
+        let line_height = self
+            .layout
+            .map_or(px(self.font.size * 1.2), |(_, cell)| px(cell.height));
         self.scroll_accum += event.delta.pixel_delta(line_height).y / line_height;
         let lines = self.scroll_accum.trunc();
         if lines != 0.0 {
@@ -1070,6 +1113,8 @@ impl Render for TerminalPane {
             let blur = cx.on_blur(&self.focus, window, |pane, _, cx| pane.drop_marked(cx));
             self.blur = Some(blur);
         }
+        let family = self.resolved_family(window);
+        let font_settings = self.font.clone();
         let view = cx.entity();
         let gesture_view = view.clone();
         let input_view = view.clone();
@@ -1077,7 +1122,7 @@ impl Render for TerminalPane {
         let background = to_rgba(self.term.snapshot().background);
         let grid = canvas(
             move |bounds, window, cx| {
-                let m = metrics(window);
+                let m = metrics(window, family, &font_settings);
                 let (snap, marked) = view.update(cx, |v, _| {
                     v.ensure_size(grid_size(bounds, &m));
                     v.layout = Some((bounds.origin, cell_size(&m)));
@@ -1128,19 +1173,33 @@ fn cell_size(m: &Metrics) -> CellSize {
 struct Metrics {
     cell_width: Pixels,
     line_height: Pixels,
+    font_size: Pixels,
+    /// The font normal text draws in: the settings' family, at the bold
+    /// weight when the settings ask for it.
     font: Font,
 }
 
-fn metrics(window: &Window) -> Metrics {
-    let font = font(FONT_FAMILY);
+fn metrics(window: &Window, family: SharedString, settings: &FontSettings) -> Metrics {
+    let font = Font {
+        weight: if settings.bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        ..font(family)
+    };
     let text = window.text_system();
     let font_id = text.resolve_font(&font);
+    let font_size = px(settings.size);
     let cell_width = text
-        .advance(font_id, px(FONT_SIZE), 'm')
-        .map_or(px(FONT_SIZE * 0.6), |s| s.width);
+        .advance(font_id, font_size, 'm')
+        .map_or(px(settings.size * 0.6), |s| s.width);
+    let ascent = text.ascent(font_id, font_size) / px(1.0);
+    let descent = text.descent(font_id, font_size) / px(1.0);
     Metrics {
         cell_width,
-        line_height: px(LINE_HEIGHT),
+        line_height: px(fonts::line_height(ascent, descent, settings.size)),
+        font_size,
         font,
     }
 }
@@ -1253,7 +1312,7 @@ fn text_run(span: &TextSpan, m: &Metrics) -> TextRun {
             weight: if span.flags.contains(Flags::BOLD) {
                 FontWeight::BOLD
             } else {
-                FontWeight::NORMAL
+                m.font.weight
             },
             style: if span.flags.contains(Flags::ITALIC) {
                 FontStyle::Italic
@@ -1302,7 +1361,7 @@ fn paint_preedit(
     };
     let line = window.text_system().shape_line(
         SharedString::from(text.to_owned()),
-        px(FONT_SIZE),
+        m.font_size,
         &[run],
         None,
     );
@@ -1328,7 +1387,7 @@ fn paint_span(
     let force_width = (!span.flags.contains(Flags::WIDE_CHAR)).then_some(m.cell_width);
     let line = window.text_system().shape_line(
         SharedString::from(span.text.clone()),
-        px(FONT_SIZE),
+        m.font_size,
         &[text_run(span, m)],
         force_width,
     );
