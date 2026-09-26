@@ -37,7 +37,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Sidebar / repos / workspaces
 
-- [ ] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
+- [x] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
 - [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [ ] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx`
 - [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a toolbar row under the header that wraps)
@@ -141,8 +141,8 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Source control & diff
 
-- [ ] Two modes: per-member sections for the focused session, or a single repo (follows the active pane or a saved dropdown choice) — `source-control/SourceControlSidebar.tsx`
-- [ ] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx`
+- [x] Two modes: per-member sections for the focused session, or a single repo (follows the active pane or a saved dropdown choice) — `source-control/SourceControlSidebar.tsx`
+- [ ] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx` (native: Refresh landed in P3.3; section collapse comes with P3.4)
 - [ ] Staged / Changes folder trees with M/A/D/R/U status; per-file hover buttons (unstage; discard, stage); Unstage all / Discard all / Stage all — `ChangesTree.tsx`, `utils/changesTree.ts`
 - [ ] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
 - [ ] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx`

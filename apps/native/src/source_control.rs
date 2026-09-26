@@ -4,7 +4,7 @@
 //! keeps.
 //!
 //! Plain Rust, so every rule is unit-tested; the panel view renders it and
-//! requests the statuses [`ScModel::missing`] names.
+//! requests the statuses [`ScModel::wanted_missing`] names.
 #![cfg_attr(
     not(test),
     expect(dead_code, reason = "consumed by the source-control panel")
@@ -154,22 +154,27 @@ impl Part {
     }
 }
 
-/// The status and stash stores plus the in-memory folder collapse.
+/// The status and stash stores, the statuses asked for and not yet
+/// answered, and the in-memory folder collapse.
 #[derive(Debug, Default)]
 pub struct ScModel {
     status: HashMap<ScKey, Status>,
     stashes: HashMap<ScKey, Vec<GitStash>>,
+    requested: HashSet<ScKey>,
     collapsed_folders: HashSet<(String, Bucket, String)>,
 }
 
 impl ScModel {
     /// Fold a daemon message into the stores; `true` when one of them changed.
+    /// A new connection also forgets every request, and a status clears its
+    /// key's; neither counts as a change, since the view does not show them.
     pub fn apply(&mut self, msg: &DaemonMessage) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
                 let changed = !self.status.is_empty() || !self.stashes.is_empty();
                 self.status.clear();
                 self.stashes.clear();
+                self.requested.clear();
                 changed
             }
             DaemonMessage::RepoStatus {
@@ -186,6 +191,7 @@ impl ScModel {
                     staged: index_changes.clone(),
                     changes: worktree_changes.clone(),
                 };
+                self.requested.remove(&key);
                 let changed = self.status.get(&key) != Some(&status);
                 self.status.insert(key, status);
                 changed
@@ -218,7 +224,28 @@ impl ScModel {
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
         self.stashes
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
+        self.requested
+            .retain(|key| ids.contains(key.repo_id.as_str()));
         before != self.status.len() + self.stashes.len()
+    }
+
+    /// Record that a status for `key` was asked for, so it is not asked for
+    /// again until it arrives or the connection is replaced.
+    pub fn mark_requested(&mut self, key: ScKey) {
+        self.requested.insert(key);
+    }
+
+    /// The keys of `wanted` with no status yet and no request out, in order
+    /// and each once, for the view to request.
+    #[must_use]
+    pub fn wanted_missing(&self, wanted: &[ScKey]) -> Vec<ScKey> {
+        let mut seen = HashSet::new();
+        wanted
+            .iter()
+            .filter(|key| !self.status.contains_key(key) && !self.requested.contains(key))
+            .filter(|key| seen.insert(*key))
+            .cloned()
+            .collect()
     }
 
     /// The status of a key, when one has arrived.
@@ -237,17 +264,6 @@ impl ScModel {
     #[must_use]
     pub fn is_loaded(&self, key: &ScKey) -> bool {
         self.status.contains_key(key)
-    }
-
-    /// The section keys with no status yet, in section order, for the view to
-    /// request.
-    #[must_use]
-    pub fn missing(&self, sections: &[Section]) -> Vec<ScKey> {
-        sections
-            .iter()
-            .filter(|section| !self.status.contains_key(&section.key))
-            .map(|section| section.key.clone())
-            .collect()
     }
 
     /// The badge total over `keys`: the distinct file paths across both
@@ -437,18 +453,23 @@ impl ScUiState {
         self.collapsed.insert(part_key(key, part), collapsed);
     }
 
-    /// Drop the collapse entries and the pin of repos no longer registered.
-    pub fn prune(&mut self, repos: &[RepoEntry]) {
+    /// Drop the collapse entries and the pin of repos no longer registered;
+    /// `true` when any went.
+    pub fn prune(&mut self, repos: &[RepoEntry]) -> bool {
         let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
+        let before = self.collapsed.len();
         self.collapsed
             .retain(|entry, _| entry.split("::").next().is_some_and(|id| ids.contains(id)));
+        let mut changed = self.collapsed.len() != before;
         if self
             .pinned_repo
             .as_deref()
             .is_some_and(|pinned| !ids.contains(pinned))
         {
             self.pinned_repo = None;
+            changed = true;
         }
+        changed
     }
 }
 
@@ -707,25 +728,62 @@ mod tests {
     }
 
     #[test]
-    fn missing_lists_the_sections_with_no_status_yet() {
-        let repos = vec![repo("r1", "D:\\r1"), repo("r2", "D:\\r2")];
-        let members = vec![member("r1", "D:\\r1"), member("r2", "D:\\r2-wt")];
-        let sections = sections(&repos, Some(&members), None);
+    fn wanted_missing_skips_loaded_and_requested_keys() {
         let mut model = ScModel::default();
-        assert_eq!(model.missing(&sections).len(), 2);
+        let wanted = vec![
+            main_tree("r1"),
+            main_tree("r2"),
+            worktree("r1", "D:\\r1-wt"),
+            main_tree("r1"),
+        ];
+        assert_eq!(
+            model.wanted_missing(&wanted),
+            [
+                main_tree("r1"),
+                main_tree("r2"),
+                worktree("r1", "D:\\r1-wt")
+            ],
+            "in order, each key once"
+        );
 
         model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
-        let missing = model.missing(&sections);
-        assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].id(), "r2::D:\\r2-wt");
+        model.mark_requested(main_tree("r2"));
+        assert_eq!(
+            model.wanted_missing(&wanted),
+            [worktree("r1", "D:\\r1-wt")],
+            "r1's main tree is loaded and r2's is asked for"
+        );
+    }
 
-        model.apply(&status_message(
-            "r2",
-            Some("D:\\r2-wt"),
-            Vec::new(),
-            Vec::new(),
-        ));
-        assert!(model.missing(&sections).is_empty());
+    #[test]
+    fn a_status_or_a_welcome_clears_requests() {
+        let mut model = ScModel::default();
+        let wanted = vec![main_tree("r1"), worktree("r1", "D:\\r1-wt")];
+        model.mark_requested(main_tree("r1"));
+        model.mark_requested(worktree("r1", "D:\\r1-wt"));
+        assert!(model.wanted_missing(&wanted).is_empty());
+
+        model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
+        model.apply(&DaemonMessage::Welcome {
+            protocol_version: 22,
+            supported_versions: vec![22],
+        });
+        assert_eq!(
+            model.wanted_missing(&wanted),
+            wanted,
+            "the welcome dropped the status and every request"
+        );
+
+        model.mark_requested(main_tree("r1"));
+        model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
+        model.apply(&DaemonMessage::Repos {
+            repos: vec![repo("r1", "D:\\r1")],
+        });
+        model.apply(&stashes_message("r1", None, 0));
+        assert!(
+            !model.requested.contains(&main_tree("r1")),
+            "its status arrived, so the request is answered"
+        );
     }
 
     #[test]
@@ -857,7 +915,7 @@ mod tests {
             "a stored false beats the collapsed default"
         );
 
-        state.prune(&[repo("r1", "D:\\r1")]);
+        assert!(state.prune(&[repo("r1", "D:\\r1")]), "r2's entries went");
         assert!(
             state.is_collapsed(&r1, Part::Changes, Some(4)),
             "a registered repo stays"
@@ -869,8 +927,21 @@ mod tests {
             pinned_repo: Some("r2".to_owned()),
             ..ScUiState::default()
         };
-        kept.prune(&[repo("r1", "D:\\r1"), repo("r2", "D:\\r2")]);
+        assert!(
+            !kept.prune(&[repo("r1", "D:\\r1"), repo("r2", "D:\\r2")]),
+            "nothing to drop"
+        );
         assert_eq!(kept.pinned_repo.as_deref(), Some("r2"));
+
+        let mut pin_only = ScUiState {
+            pinned_repo: Some("r2".to_owned()),
+            ..ScUiState::default()
+        };
+        assert!(
+            pin_only.prune(&[repo("r1", "D:\\r1")]),
+            "the pin alone counts"
+        );
+        assert_eq!(pin_only.pinned_repo, None);
     }
 
     #[test]

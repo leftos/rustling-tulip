@@ -356,6 +356,7 @@ impl RootView {
         self.close_session_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
+        self.close_sc_picker(window, cx);
         self.container_menu = Some(ContainerMenu { level, at });
         self.menu_focus.focus(window);
         cx.notify();
@@ -569,6 +570,7 @@ impl RootView {
         self.close_container_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
+        self.close_sc_picker(window, cx);
         self.close_delete_dialog(window, cx);
     }
 
@@ -1349,8 +1351,13 @@ fn is_danger(action: SessionAction) -> bool {
 }
 
 /// A clickable row of the menu or the overlay.
-pub(crate) fn menu_item(selector: &str, label: &'static str, danger: bool) -> Stateful<Div> {
+pub(crate) fn menu_item(
+    selector: &str,
+    label: impl Into<SharedString>,
+    danger: bool,
+) -> Stateful<Div> {
     let name = selector.to_owned();
+    let label: SharedString = label.into();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)

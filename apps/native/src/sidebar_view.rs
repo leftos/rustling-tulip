@@ -1,5 +1,6 @@
-//! Renders the sidebar model beside the terminal: a header with the hide
-//! button, container rows and session leaves, and the drag divider.
+//! Renders the activity rail, the panel it picks and the drag divider beside
+//! the terminal; the sessions panel is a header, the spawn toolbar, and
+//! container rows with their session leaves.
 
 use std::collections::HashMap;
 
@@ -13,7 +14,7 @@ use crate::appearance;
 use crate::appearance_view::Level;
 use crate::connection::DotKind;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
-use crate::sidebar::{Container, ContainerKind, Leaf};
+use crate::sidebar::{Activity, Container, ContainerKind, Leaf};
 use crate::spawn_view::SpawnEntry;
 use crate::{
     BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color, drag_handle,
@@ -25,21 +26,28 @@ const ROW_PADDING: f32 = 8.0;
 const LEAF_INDENT: f32 = 22.0;
 const SELECTED_BG: u32 = 0x0037_3a44;
 const TAG_TEXT_SIZE: f32 = 10.0;
-const COLLAPSED_STRIP_WIDTH: f32 = 16.0;
 const ACCENT_STRIPE_WIDTH: f32 = 3.0;
 
 impl RootView {
-    /// The sidebar, the divider and the terminal pane side by side; a hidden
-    /// sidebar leaves only a slim strip to show it again.
+    /// The rail, the panel it picks with its divider, and the terminal pane
+    /// side by side; a folded panel leaves the rail alone.
     pub(crate) fn main_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let row = div().flex().flex_row().flex_1().min_h(px(0.0));
+        let row = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(self.activity_rail(cx));
         let row = if self.sidebar.is_collapsed() {
-            row.child(collapsed_strip(cx))
+            row
         } else {
             let width = self.sidebar.width(window.viewport_size().width / px(1.0));
             let active = matches!(self.drag, Some(Drag::Sidebar));
-            row.child(self.sidebar_panel(width, cx))
-                .child(divider(active, cx))
+            let panel = match self.sidebar.activity() {
+                Activity::Sessions => self.sidebar_panel(width, cx),
+                Activity::SourceControl => self.source_control_view(width, cx),
+            };
+            row.child(panel).child(divider(active, cx))
         };
         row.child(
             div()
@@ -90,7 +98,7 @@ impl RootView {
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(header(cx))
+            .child(header())
             .child(toolbar(
                 self.has_repos(),
                 self.sidebar.quick_shell_dir(),
@@ -156,43 +164,18 @@ fn add_shell_dialog(cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
-/// "Sessions", the Settings gear and the button that hides the sidebar.
-fn header(cx: &mut Context<RootView>) -> Div {
-    let settings = div()
-        .id("settings-open")
-        .debug_selector(|| "settings-open".to_owned())
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-        .child("⚙")
-        .tooltip(tooltip("Settings (Ctrl+,)"))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.open_settings(window, cx);
-        }));
-    let hide = div()
-        .id("sidebar-hide")
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-        .child("«")
-        .tooltip(tooltip("Hide sidebar (Ctrl+B outside the terminal)"))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.toggle_sidebar(window, cx);
-        }));
+/// The panel's title.
+fn header() -> Div {
     div()
         .flex()
         .flex_none()
         .items_center()
-        .justify_between()
         .h(px(ROW_HEIGHT + 4.0))
         .px(px(ROW_PADDING))
         .border_b_1()
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(MUTED))
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Sessions"))
-        .child(div().flex().items_center().child(settings).child(hide))
 }
 
 /// The spawns, under the header; the row wraps when the sidebar is too
@@ -211,37 +194,6 @@ fn toolbar(has_repos: bool, quick_shell_dir: Option<&str>, cx: &mut Context<Root
         .child(add_session(has_repos, cx))
         .child(add_shell(quick_shell_dir, cx))
         .child(add_shell_dialog(cx))
-}
-
-/// The slim strip a hidden sidebar leaves at the left edge, with the button
-/// that shows it again.
-fn collapsed_strip(cx: &mut Context<RootView>) -> Div {
-    let show = div()
-        .id("sidebar-show")
-        .debug_selector(|| "sidebar-show".to_owned())
-        .flex()
-        .justify_center()
-        .w_full()
-        .py(px(4.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-        .child("»")
-        .tooltip(tooltip("Show sidebar"))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.toggle_sidebar(window, cx);
-        }));
-    div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .w(px(COLLAPSED_STRIP_WIDTH))
-        .h_full()
-        .bg(gpui::rgb(PANEL_BG))
-        .border_r_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(MUTED))
-        .child(show)
 }
 
 /// The drag handle; a press starts a resize the root follows until release.

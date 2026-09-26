@@ -478,6 +478,9 @@ fn closing_the_window_closes_the_appearance_editor_settings_and_container_menu(
     h.send(DaemonMessage::Repos {
         repos: vec![repo("r1", "C:/repos/r1")],
     });
+    // The registry asks for the repo's source-control status; that is not
+    // what this spec watches.
+    h.sent();
     let editor_open = |h: &mut Harness<'_>| h.root(|root, _| root.appearance_editor_title());
 
     h.right_click_on("leaf-s1");

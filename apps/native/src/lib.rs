@@ -5,8 +5,10 @@
 //! The binary opens [`open_main_window`]; the UI specs build a [`RootView`]
 //! over their own transport with [`RootView::with_transport`].
 
+mod activity_bar;
 pub mod appearance;
 mod appearance_view;
+mod assets;
 mod branch_fate;
 mod connection;
 mod copied;
@@ -36,6 +38,7 @@ mod shell_view;
 mod sidebar;
 mod sidebar_view;
 mod source_control;
+mod source_control_view;
 mod spawn_form;
 mod spawn_view;
 mod spawns;
@@ -58,7 +61,8 @@ use gpui::{
     div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
-    AppearanceOverrides, ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry,
+    AppearanceOverrides, ClientMessage, DaemonMessage, InitLayoutKind, RepoEntry, SessionSnapshot,
+    TabEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -80,6 +84,7 @@ use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
+use crate::source_control::ScModel;
 use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
@@ -88,6 +93,7 @@ use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session}
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 
+pub use crate::assets::Assets;
 pub use crate::connection::Connection;
 pub use crate::footer::LogPaths;
 pub use crate::net::{
@@ -100,7 +106,10 @@ pub use crate::notices::{
 pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
-pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
+pub use crate::sidebar::{
+    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf,
+};
+pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::text_input::bind_keys;
 
@@ -410,6 +419,10 @@ pub struct RootView {
     run_confirm: Option<RunConfirm>,
     /// The run confirm's keyboard focus.
     run_focus: FocusHandle,
+    /// The source-control statuses and the requests out for them.
+    sc: ScModel,
+    /// Whether the source-control repo picker's menu is open.
+    sc_picker_open: bool,
 }
 
 impl RootView {
@@ -549,6 +562,8 @@ impl RootView {
             opener: open,
             run_confirm: None,
             run_focus: cx.focus_handle(),
+            sc: ScModel::default(),
+            sc_picker_open: false,
         }
     }
 
@@ -675,6 +690,21 @@ impl RootView {
         if self.sidebar.prune_tab_font_sizes(&live) {
             self.save_ui();
         }
+    }
+
+    /// Drops the source-control pin and collapse state of repos a registry
+    /// snapshot no longer lists, saving when any went.
+    fn prune_source_control(&mut self, repos: &[RepoEntry]) {
+        if self.sidebar.prune_source_control(repos) {
+            self.save_ui();
+        }
+    }
+
+    /// A repo or workspace snapshot: a container's appearance is a level
+    /// above the session's, so the panes' fonts follow it.
+    fn on_containers_changed(&mut self, cx: &mut Context<Self>) {
+        self.settle_container_sends();
+        self.apply_pane_fonts(cx);
     }
 
     /// The cursor shape pane `pane_id` renders.
@@ -809,6 +839,7 @@ impl RootView {
     /// active tab's focused pane, since the sidebar may have held it.
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_shell_menu(window, cx);
+        self.close_sc_picker(window, cx);
         self.sidebar.toggle_sidebar();
         self.drag = None;
         self.save_ui();
@@ -908,7 +939,9 @@ impl RootView {
             self.renaming = None;
         }
         self.drop_stale_tab_menu();
+        self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
+        self.seed_source_control();
         cx.notify();
     }
 
@@ -1037,7 +1070,14 @@ impl RootView {
         match event {
             NetEvent::State(conn) => self.conn = conn,
             NetEvent::Handshake(info) => self.handshake = Some(info),
-            NetEvent::Message(msg) => self.on_message(*msg, window, cx),
+            NetEvent::Message(msg) => {
+                let reseed = moves_source_control_inputs(&msg);
+                self.on_message(*msg, window, cx);
+                self.drop_stale_sc_picker();
+                if reseed {
+                    self.seed_source_control();
+                }
+            }
             NetEvent::ShutdownSent => self.on_shutdown_sent(),
             NetEvent::ShutdownFailed => self.on_shutdown_failed(window, cx),
         }
@@ -1065,6 +1105,9 @@ impl RootView {
             _ => None,
         };
         self.sidebar.apply(&msg);
+        if self.sc.apply(&msg) {
+            cx.notify();
+        }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
         if self.tabs.apply(&msg) {
@@ -1146,12 +1189,11 @@ impl RootView {
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
-            // A repo's or workspace's appearance is a level above the
-            // session's.
-            DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. } => {
-                self.settle_container_sends();
-                self.apply_pane_fonts(cx);
+            DaemonMessage::Repos { repos } => {
+                self.prune_source_control(&repos);
+                self.on_containers_changed(cx);
             }
+            DaemonMessage::Workspaces { .. } => self.on_containers_changed(cx),
             _ => {}
         }
     }
@@ -1307,6 +1349,8 @@ impl RootView {
             self.close_container_menu(window, cx);
         } else if self.shell_menu.is_some() && ks.key == "escape" {
             self.close_shell_menu(window, cx);
+        } else if self.sc_picker_open && ks.key == "escape" {
+            self.close_sc_picker(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
         } else if let Some(key) = font_key(ks) {
@@ -1496,6 +1540,20 @@ enum FontKey {
     Clear,
 }
 
+/// Whether `msg` can change what the source-control panel or the rail's badge
+/// reads: the connection, the repo registry or a session. Tab changes seed on
+/// their own path.
+fn moves_source_control_inputs(msg: &DaemonMessage) -> bool {
+    matches!(
+        msg,
+        DaemonMessage::Welcome { .. }
+            | DaemonMessage::Repos { .. }
+            | DaemonMessage::Sessions { .. }
+            | DaemonMessage::SessionUpdated { .. }
+            | DaemonMessage::SessionRemoved { .. }
+    )
+}
+
 /// The font-size shortcut `ks` is, if any: Ctrl with `=` (or the `+` Shift
 /// types on a US layout) and `-` (or the `_` it shifts to), and Ctrl+0.
 /// Shift makes a step act on the tab's override; Ctrl+Shift+0 is nothing.
@@ -1562,6 +1620,7 @@ impl Render for RootView {
             .children(self.shell_menu_layer(cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
+            .children(self.sc_picker_layer())
             .children(flyout.into_iter().flatten())
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other

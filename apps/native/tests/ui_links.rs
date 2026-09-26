@@ -452,7 +452,7 @@ fn a_ui_save_keeps_hand_added_unc_hosts(cx: &mut TestAppContext) {
     );
 
     hand_edit_unc_hosts(&dir, Some(&["nas", "files"]));
-    h.click_on("sidebar-show");
+    h.click_on("activity-sessions");
     let saved = ui_file(&dir);
     assert_eq!(saved["sidebar_collapsed"], json!(false), "{saved}");
     assert_eq!(saved["unc_hosts"], json!(["nas", "files"]), "{saved}");

@@ -103,6 +103,7 @@ impl RootView {
             || self.menu.is_some()
             || self.container_menu.is_some()
             || self.shell_menu.is_some()
+            || self.sc_picker_open
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
         if blocked {

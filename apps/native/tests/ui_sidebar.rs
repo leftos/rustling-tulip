@@ -126,7 +126,7 @@ fn ctrl_b_is_input_in_the_terminal_and_toggles_the_sidebar_elsewhere(cx: &mut Te
     assert!(h.root(|root, _| root.sidebar_collapsed()), "hidden");
     assert!(h.sent_input("s1").is_empty());
 
-    h.click_on("sidebar-show");
+    h.click_on("activity-sessions");
     assert!(!h.root(|root, _| root.sidebar_collapsed()), "shown again");
 }
 
@@ -177,7 +177,7 @@ fn sidebar_divider_clamps_persists_and_restores(cx: &mut TestAppContext) {
         h.root(|root, _| root.active_tab_id().map(str::to_owned)),
         Some("t2".to_owned())
     );
-    h.click_on("sidebar-show");
+    h.click_on("activity-sessions");
     assert_eq!(h.bounds("sidebar-panel").size.width, px(400.0));
 }
 

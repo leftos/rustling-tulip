@@ -257,6 +257,8 @@ impl RootView {
         if let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) {
             self.tabs.set_focused(&tab_id, pane_id);
             self.update_pane_roles(cx);
+            self.drop_stale_sc_picker();
+            self.seed_source_control();
         }
     }
 

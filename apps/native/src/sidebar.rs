@@ -92,12 +92,24 @@ pub enum CwdHome {
     Dir(String),
 }
 
+/// Which panel the activity rail shows beside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Activity {
+    #[default]
+    Sessions,
+    SourceControl,
+}
+
 /// The persisted sidebar layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiState {
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// The panel the rail last showed.
+    #[serde(default)]
+    pub activity: Activity,
     pub collapsed_containers: BTreeSet<String>,
     /// The tab shown when the client last ran, restored when the daemon
     /// sends the tab list.
@@ -129,6 +141,7 @@ impl Default for UiState {
         Self {
             sidebar_width: DEFAULT_WIDTH,
             sidebar_collapsed: false,
+            activity: Activity::Sessions,
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
             quick_shell_dir: None,
@@ -268,6 +281,44 @@ impl SidebarModel {
 
     pub fn is_collapsed(&self) -> bool {
         self.ui.sidebar_collapsed
+    }
+
+    /// The panel the rail shows.
+    pub fn activity(&self) -> Activity {
+        self.ui.activity
+    }
+
+    /// A rail click on `item`: the active item folds or unfolds the panel;
+    /// the other one takes its place, unfolding a folded panel.
+    pub fn click_activity(&mut self, item: Activity) {
+        if self.ui.activity == item {
+            self.ui.sidebar_collapsed = !self.ui.sidebar_collapsed;
+        } else {
+            self.ui.activity = item;
+            self.ui.sidebar_collapsed = false;
+        }
+    }
+
+    /// The source-control panel's persisted state.
+    pub fn source_control(&self) -> &ScUiState {
+        &self.ui.source_control
+    }
+
+    /// Pins the source-control panel to `repo_id`, or back to following the
+    /// active pane; returns whether the pin moved.
+    pub fn set_pinned_repo(&mut self, repo_id: Option<String>) -> bool {
+        let pinned = &mut self.ui.source_control.pinned_repo;
+        if *pinned == repo_id {
+            return false;
+        }
+        *pinned = repo_id;
+        true
+    }
+
+    /// Drops the source-control pin and collapse entries of repos not in
+    /// `repos`; returns whether any went.
+    pub fn prune_source_control(&mut self, repos: &[RepoEntry]) -> bool {
+        self.ui.source_control.prune(repos)
     }
 
     /// The sidebar width to lay out in a window this wide.
@@ -1510,6 +1561,7 @@ mod tests {
         let state = UiState {
             sidebar_width: 333.0,
             sidebar_collapsed: true,
+            activity: Activity::SourceControl,
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),

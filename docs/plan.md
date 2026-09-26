@@ -66,7 +66,7 @@ Priority order for `/nextup`: **Current focus** first, then the sections below i
 
 ### Current focus: native client
 Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
-- [ ] **Next up:** Phase 3 (source control): P3.3 (the activity bar and panel shell) is next, then P3.4, P3.6 and P3.7 in parallel; P3.1, P3.2 and P3.9 are done. Phases 1 and 2 are complete. See [native-client.md](./plans/native-client.md) for the items and their decided designs.
+- [ ] **Next up:** Phase 3 (source control): P3.4, P3.6 and P3.7 are next and can run in parallel; P3.1, P3.2, P3.3 and P3.9 are done. Phases 1 and 2 are complete. See [native-client.md](./plans/native-client.md) for the items and their decided designs.
 - [ ] Remote file transfer: fetch a file from the host to the remote client by Ctrl-clicking it or through a "Fetch file…" popup. The daemon and protocol half (FT.1) has landed. The client side lands with Phase 6, and the Ctrl-click trigger also needs Phase 2. See [remote-file-transfer.md](./plans/remote-file-transfer.md)
 - [x] Security fix: `GetFileSnapshot` / `GetFileDiff` now pass the client-supplied `path` through `file_fetch::confine_path` / `check_relative` before using it. `repo_target_or_err` also canonicalizes `worktree_path` before checking it's under the worktrees root.
 

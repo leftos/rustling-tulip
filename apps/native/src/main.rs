@@ -10,7 +10,7 @@
 
 use anyhow::Context as _;
 use gpui::{App, Application};
-use rustling_tulip_native::LOG_FILE;
+use rustling_tulip_native::{Assets, LOG_FILE};
 use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
@@ -90,9 +90,11 @@ fn main() {
     init_tracing();
     install_panic_hook();
     let wanted_session = std::env::args().nth(1);
-    Application::new().run(move |cx: &mut App| {
-        rustling_tulip_native::open_main_window(wanted_session, cx);
-    });
+    Application::new()
+        .with_assets(Assets)
+        .run(move |cx: &mut App| {
+            rustling_tulip_native::open_main_window(wanted_session, cx);
+        });
 }
 
 #[cfg(test)]

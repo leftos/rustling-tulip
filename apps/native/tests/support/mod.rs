@@ -22,14 +22,62 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, OpenFailure, Opener, QuitFn,
-    RootDeps, RootView, bind_keys, spawn_net,
+    Activity, Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, OpenFailure, Opener,
+    QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
 pub mod live;
 
 const PROTOCOL: u32 = 1;
+
+/// Whether the rail's side of the window shows what `selector` tags: the
+/// panels, the divider, the badge and the source-control panel's parts.
+/// Selectors it does not know count as present.
+fn side_part_shown(root: &RootView, selector: &str) -> bool {
+    let open = !root.sidebar_collapsed();
+    match selector {
+        "sidebar-panel" => open && root.activity() == Activity::Sessions,
+        "sidebar-divider" => open,
+        "activity-badge" => root.activity_badge().is_some(),
+        "sc-picker-menu" => sc_picker_shown(root),
+        _ if selector.starts_with("sc-picker-") => {
+            sc_picker_shown(root)
+                && root
+                    .sc_picker_rows()
+                    .iter()
+                    .any(|row| row.selector == selector)
+        }
+        _ if selector.starts_with("sc-") => {
+            open && root.activity() == Activity::SourceControl
+                && sc_part_shown(&root.source_control_panel(), selector)
+        }
+        _ => true,
+    }
+}
+
+/// Whether the picker's menu draws: open, and its button offered, since the
+/// menu hangs under the button.
+fn sc_picker_shown(root: &RootView) -> bool {
+    root.sc_picker_open() && root.source_control_panel().picker.is_some()
+}
+
+/// Whether the shown source-control panel draws what `selector` tags.
+fn sc_part_shown(panel: &ScPanel, selector: &str) -> bool {
+    let section = |id: &str| panel.sections.iter().any(|row| row.id == id);
+    if let Some(id) = selector.strip_prefix("sc-section-body-") {
+        section(id)
+    } else if let Some(id) = selector.strip_prefix("sc-section-") {
+        section(id)
+    } else {
+        match selector {
+            "sc-refresh" => panel.refresh,
+            "sc-picker" => panel.picker.is_some(),
+            "sc-context" => panel.context.is_some(),
+            _ => true,
+        }
+    }
+}
 
 /// A scratch directory under the system temp dir, removed on drop.
 pub struct TestDir(PathBuf);
@@ -132,6 +180,18 @@ impl SessionBuilder {
             "members",
             json!([{ "repo_id": repo_id, "repo_name": repo_id, "branch": "main", "worktree_path": "" }]),
         )
+    }
+
+    /// Members as `(repo id, branch, worktree path)`, each repo named by
+    /// its id.
+    pub fn members(self, members: &[(&str, &str, &str)]) -> Self {
+        let members: Vec<Value> = members
+            .iter()
+            .map(|(repo_id, branch, path)| {
+                json!({ "repo_id": repo_id, "repo_name": repo_id, "branch": branch, "worktree_path": path })
+            })
+            .collect();
+        self.set("members", Value::Array(members))
     }
 
     /// A member of `repo_id` on a worktree of its own.
@@ -687,6 +747,7 @@ impl<'a> Harness<'a> {
         let selector = selector.to_owned();
         self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
+            let sessions_shown = !root.sidebar_collapsed() && root.activity() == Activity::Sessions;
             if selector == "exit-confirm-dialog" {
                 root.exit_dialog_open()
             } else if selector.starts_with("exit-") {
@@ -702,7 +763,7 @@ impl<'a> Harness<'a> {
             } else if let Some(id) = selector.strip_prefix("tab-") {
                 root.tab_ids().iter().any(|t| t == id)
             } else if let Some(id) = selector.strip_prefix("leaf-") {
-                !root.sidebar_collapsed()
+                sessions_shown
                     && root
                         .sidebar_containers()
                         .iter()
@@ -759,7 +820,7 @@ impl<'a> Harness<'a> {
                 || selector == "sidebar-add-shell"
                 || selector == "sidebar-shell-dialog"
             {
-                !root.sidebar_collapsed()
+                sessions_shown
             } else if let Some(id) = selector
                 .strip_prefix("empty-pane-new-session-")
                 .or_else(|| selector.strip_prefix("empty-pane-shell-"))
@@ -771,12 +832,8 @@ impl<'a> Harness<'a> {
                 root.no_tab_choices_shown()
             } else if selector == "empty-repo-hint" {
                 root.no_tab_choices_shown() && !root.has_repos()
-            } else if selector == "sidebar-show" {
-                root.sidebar_collapsed()
-            } else if selector == "sidebar-panel" || selector == "sidebar-divider" {
-                !root.sidebar_collapsed()
             } else {
-                true
+                side_part_shown(root, &selector)
             }
         })
     }
