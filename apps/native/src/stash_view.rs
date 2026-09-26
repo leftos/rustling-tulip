@@ -5,7 +5,8 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    FontWeight, Keystroke, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, SharedString, Stateful, Subscription,
+    Window, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, GitStash};
 use std::collections::{HashMap, HashSet};
@@ -364,8 +365,10 @@ impl RootView {
             .map(|entry| entry.input.read(cx).text().to_owned())
     }
 
-    /// The Stashes header: folds or unfolds the part, and saves.
-    fn toggle_sc_stashes(&mut self, key: &ScKey, cx: &mut Context<Self>) {
+    /// The Stashes header: folds or unfolds the part, and saves. Folding it
+    /// while its push input has the keyboard hands the keyboard to the
+    /// active pane.
+    fn toggle_sc_stashes(&mut self, key: &ScKey, window: &mut Window, cx: &mut Context<Self>) {
         let collapsed = self
             .sidebar
             .source_control()
@@ -375,6 +378,9 @@ impl RootView {
             .set_sc_collapsed(key, Part::Stashes, !collapsed)
         {
             self.save_ui();
+        }
+        if !collapsed && self.stash_input_focused(key, window, cx) {
+            self.focus_active_pane(window, cx);
         }
         cx.notify();
     }
@@ -634,8 +640,18 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
                     .child(count.to_string()),
             )
         })
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.toggle_sc_stashes(&key, cx);
+        .on_mouse_down(MouseButton::Left, {
+            let key = key.clone();
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                // The panel would take the keyboard on this press; the push
+                // input keeps it, so the fold can hand it on.
+                if this.stash_input_focused(&key, window, cx) {
+                    window.prevent_default();
+                }
+            })
+        })
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.toggle_sc_stashes(&key, window, cx);
         }))
 }
 

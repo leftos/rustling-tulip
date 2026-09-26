@@ -971,7 +971,8 @@ impl RootView {
 
     /// Gives every section of `sections` that has none a commit input.
     /// Ctrl+Enter commits, Esc hands the keyboard to the active pane, and
-    /// every edit is mirrored into the section's draft.
+    /// every edit is mirrored into the section's draft: an edit that hides
+    /// the box hands the keyboard on.
     pub(crate) fn make_commit_inputs(
         &mut self,
         sections: &[ScKey],
@@ -1000,9 +1001,12 @@ impl RootView {
             let edits = cx.subscribe_in(
                 &input,
                 window,
-                move |this, input, _: &TextChanged, _, cx| {
+                move |this, input, _: &TextChanged, window, cx| {
                     let text = input.read(cx).text().to_owned();
                     if this.changes.writes.set_draft(&key, text) {
+                        if this.hidden_commit_input_focused(window, cx) {
+                            this.focus_active_pane(window, cx);
+                        }
                         cx.notify();
                     }
                 },

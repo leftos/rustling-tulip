@@ -373,6 +373,28 @@ fn folding_the_section_hands_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
     assert_eq!(h.sent_input("s1"), b"x", "the pane has the keyboard");
 }
 
+#[gpui::test]
+fn emptying_the_draft_with_nothing_staged_hands_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &worktree_session());
+    h.click_on("activity-source-control");
+    h.send(status_from(Some(WORKTREE), &["a.rs"], &["b.rs"]));
+    h.click_on(&format!("sc-commit-input-r1::{WORKTREE}"));
+    type_text(&mut h, "ab");
+    h.send(status_from(Some(WORKTREE), &[], &["b.rs"]));
+    assert_eq!(
+        button(&mut h),
+        Some(("Commit", false)),
+        "the draft keeps the box up"
+    );
+    h.sent_input("s1");
+
+    h.keys("backspace backspace");
+    assert_eq!(button(&mut h), None, "the box hid");
+    h.keys("x");
+    assert_eq!(h.sent_input("s1"), b"x", "the pane has the keyboard");
+}
+
 /// The Stashes part's push row as `(label, enabled)`.
 fn stash_push(h: &mut Harness<'_>) -> Option<(&'static str, bool)> {
     section(h)
