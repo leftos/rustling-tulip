@@ -1118,15 +1118,6 @@ export type ClientMessage =
       variable_values: Array<[string, string]>;
     };
 
-// Why a `file_snapshot` carries no text: the daemon refused to ship a side
-// it judged binary or larger than its 2 MiB cap. `old` and `new` are both
-// empty when this is present. Mirrors `protocol::SnapshotUnavailable`.
-export type SnapshotUnavailable =
-  | { kind: "binary" }
-  | { kind: "too_large"; bytes: number; limit: number }
-  // A reason from a newer daemon; the client renders its generic message.
-  | { kind: "unknown" };
-
 export type DaemonMessage =
   | {
       type: "welcome";
@@ -1327,9 +1318,6 @@ export type DaemonMessage =
       old: string;
       new: string;
       language: string;
-      // Absent for an ordinary text diff; when present, `old` and `new` are
-      // empty and the pane shows the reason instead of a diff.
-      unavailable?: SnapshotUnavailable;
       worktree_path?: string | null;
     }
   | {

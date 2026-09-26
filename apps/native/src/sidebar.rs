@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::fonts::{self, FontSettings};
+use crate::source_control::ScUiState;
 
 /// The sidebar layout file, in the client's config dir.
 pub const UI_FILE: &str = "native-ui.json";
@@ -110,6 +111,9 @@ pub struct UiState {
     /// over its session's, its container's and the app's.
     #[serde(default)]
     pub tab_font_sizes: BTreeMap<String, f32>,
+    /// The source-control panel's pinned repo and collapsed sections.
+    #[serde(default)]
+    pub source_control: ScUiState,
 }
 
 impl Default for UiState {
@@ -122,6 +126,7 @@ impl Default for UiState {
             quick_shell_dir: None,
             terminal_font: FontSettings::default(),
             tab_font_sizes: BTreeMap::new(),
+            source_control: ScUiState::default(),
         }
     }
 }
@@ -1454,6 +1459,10 @@ mod tests {
                 bold: true,
             },
             tab_font_sizes: [("t1".to_owned(), 20.0)].into(),
+            source_control: ScUiState {
+                pinned_repo: Some("r1".to_owned()),
+                ..ScUiState::default()
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

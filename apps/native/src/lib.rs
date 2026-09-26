@@ -30,6 +30,7 @@ mod shell_marks;
 mod shell_view;
 mod sidebar;
 mod sidebar_view;
+mod source_control;
 mod spawn_form;
 mod spawn_view;
 mod spawns;
