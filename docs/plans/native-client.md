@@ -131,7 +131,15 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - Open items in the file menu come with P3.8.
 
     Original text: Staged / Changes buckets, per-file hover buttons, Stage all / Unstage all / Discard all, the right-click menu, the discard confirm listing the paths, the pending state, and `GitWriteError` as a banner plus a toast. Needs P3.3. Also: a `RepoStatus` that fails is answered with a keyless `Error`, so its key stays requested and its section stays on `loading…` until Refresh or a reconnect; settle that here.
-  - [ ] **P3.5 Commit box.** A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4. Note: a commit that succeeds but whose status refresh fails gets `GitWriteError { operation: "commit", error: "status refresh failed: …" }` and then `CommitOk`. Treat the commit as done: clear the box, and show only the refresh banner.
+  - [x] **P3.5a Multi-line `TextInput`.** As built: `TextInput::multi_line` with `with_rows(min, max)` (default 2 to 6), wrapped to the width, scrolling past the maximum. Enter inserts a newline and Ctrl+Enter submits. Up / Down keep the goal column, and Home / End work per visual row. Paste and `set_text` normalise CRLF. `set_read_only` works in both modes. Single-line inputs are unchanged, apart from drawing a stray line break as a space.
+  - [ ] **P3.5b Commit box** (split from P3.5 on 2026-09-26; decided by the orchestrator):
+    - It shows as in Tauri: when something is staged, a draft exists, or a commit is out.
+    - The draft survives folding, activity switches and reconnects, and is dropped when its section leaves.
+    - The input is 2 to 6 rows, read-only while committing. Esc gives the keyboard back.
+    - A commit's `GitWriteError` gets the banner plus a toast, like every write.
+    - When a commit fails, the daemon's error includes git's stdout if stderr is empty, and no longer echoes the args.
+
+    Original P3.5 text: A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4. Note: a commit that succeeds but whose status refresh fails gets `GitWriteError { operation: "commit", error: "status refresh failed: …" }` and then `CommitOk`. Treat the commit as done: clear the box, and show only the refresh banner.
   - [ ] **P3.6 Stashes.** A collapsible section with a count, stash with an optional message, pop / apply / drop, and live updates from the `Stashes` broadcast. Needs P3.3.
   - [x] **P3.7 History, commit detail, open in forge.** As built:
     - `history.rs` holds the model: paging by offset with sha dedupe, request-id routing for the three reads, retiring stale reads, a detail cache per sha, the remote per repo, `branch_url`, and the split clamps.
