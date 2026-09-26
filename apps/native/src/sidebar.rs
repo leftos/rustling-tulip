@@ -137,11 +137,20 @@ pub struct UiState {
     /// Whether the diff tabs show whitespace-only changes.
     #[serde(default = "include_whitespace_by_default")]
     pub diff_include_whitespace: bool,
+    /// Whether the diff tabs colour code by the file's language.
+    #[serde(default = "highlight_by_default")]
+    pub diff_highlight: bool,
 }
 
 /// A layout saved before the diff tabs' whitespace toggle existed shows
 /// whitespace changes.
 fn include_whitespace_by_default() -> bool {
+    true
+}
+
+/// A layout saved before the diff tabs' highlight toggle existed colours
+/// the diffs.
+fn highlight_by_default() -> bool {
     true
 }
 
@@ -160,6 +169,7 @@ impl Default for UiState {
             app_appearance: AppColors::default(),
             recent_colors: Vec::new(),
             diff_include_whitespace: true,
+            diff_highlight: true,
         }
     }
 }
@@ -371,6 +381,11 @@ impl SidebarModel {
     /// Whether the diff tabs show whitespace-only changes.
     pub fn set_diff_include_whitespace(&mut self, include: bool) {
         self.ui.diff_include_whitespace = include;
+    }
+
+    /// Whether the diff tabs colour code by the file's language.
+    pub fn set_diff_highlight(&mut self, highlight: bool) {
+        self.ui.diff_highlight = highlight;
     }
 
     /// The size stored for `tab_id`, if the tab has an override.
@@ -1639,6 +1654,7 @@ mod tests {
             },
             recent_colors: vec!["#abcdef".to_owned()],
             diff_include_whitespace: false,
+            diff_highlight: false,
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

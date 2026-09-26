@@ -1,7 +1,8 @@
 //! Diff tab specs: opening a diff from the History and the changes tree,
 //! activating the tab the daemon names in either arrival order, the header,
-//! the change buttons and F7, the whitespace toggle, the texts standing in
-//! for a diff, the live refresh and a refused open.
+//! the change buttons and F7, the whitespace toggle, syntax highlighting and
+//! its toggle, the texts standing in for a diff, the live refresh and a
+//! refused open.
 
 #![expect(
     clippy::expect_used,
@@ -12,12 +13,14 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
-use gpui::{Entity, TestAppContext};
+use std::ops::Range;
+
+use gpui::{Entity, Hsla, TestAppContext};
 use protocol::{
     ClientMessage, DaemonMessage, GitCommit, GitCommitDetail, GitFileChange, SnapshotUnavailable,
     TabEntry,
 };
-use rustling_tulip_native::diff_view::DiffView;
+use rustling_tulip_native::diff_view::{DiffView, Half};
 use rustling_tulip_native::{
     BINARY_TEXT, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT, ToastKind,
 };
@@ -484,6 +487,7 @@ fn a_snapshot_fills_the_header_and_the_count(cx: &mut TestAppContext) {
             mode: "@ 0a00001".to_owned(),
             mode_tip: Some(SHA.to_owned()),
             include_whitespace: true,
+            highlight: true,
             count: "…".to_owned(),
             nav_enabled: false,
         }
@@ -609,6 +613,134 @@ fn the_whitespace_toggle_is_saved_and_rebuilds_every_diff(cx: &mut TestAppContex
     h.click_on("diff-whitespace");
     assert_eq!(header(&mut h, "d1").count, "1 change");
     assert_eq!(saved_ui(&dir)["diff_include_whitespace"], json!(true));
+}
+
+// --- Syntax highlighting -------------------------------------------------
+
+const RUST_OLD: &str = "fn main() {\n    let s = \"hi\";\n}\n";
+const RUST_NEW: &str = "fn main() {\n    let s = \"hey\"; // x\n}\n";
+
+/// The syntax colours of row `row`'s `half` in tab `tab`'s diff.
+fn colors(h: &mut Harness<'_>, tab: &str, row: usize, half: Half) -> Vec<(Range<usize>, Hsla)> {
+    let view = diff_view(h, tab);
+    h.cx.update(|_, cx| view.read(cx).syntax_colors(row, half))
+}
+
+fn highlight_runs(h: &mut Harness<'_>, tab: &str) -> u64 {
+    h.root(|root, cx| root.diff_tab_highlight_runs(tab, cx))
+        .expect("the diff tab has a view")
+}
+
+/// The colour of the span covering `token` in `line`, among `spans`.
+fn color_of(spans: &[(Range<usize>, Hsla)], line: &str, token: &str) -> Option<Hsla> {
+    let at = line.find(token)?;
+    spans
+        .iter()
+        .find(|(range, _)| range.start <= at && at + token.len() <= range.end)
+        .map(|(_, color)| *color)
+}
+
+#[gpui::test]
+fn a_rust_diff_is_coloured_once_highlighting_lands(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let id = show(&mut h, &diff_tab("d1", "src/main.rs", None));
+    answer(&mut h, &id, RUST_OLD, RUST_NEW);
+    assert!(header(&mut h, "d1").highlight, "on by default");
+    assert_eq!(highlight_runs(&mut h, "d1"), 2, "one run a side");
+
+    let first = colors(&mut h, "d1", 0, Half::Old);
+    let keyword = color_of(&first, "fn main() {", "fn").expect("fn is coloured");
+    let function = color_of(&first, "fn main() {", "main").expect("main is coloured");
+    assert_ne!(keyword, function, "a keyword and a function differ");
+    assert_eq!(first, colors(&mut h, "d1", 0, Half::New), "an equal row");
+
+    let changed = "    let s = \"hey\"; // x";
+    let new = colors(&mut h, "d1", 1, Half::New);
+    let string = color_of(&new, changed, "\"hey\"").expect("the string is coloured");
+    let comment = color_of(&new, changed, "// x").expect("the comment is coloured");
+    assert_ne!(string, comment);
+    let old = colors(&mut h, "d1", 1, Half::Old);
+    assert_eq!(
+        color_of(&old, "    let s = \"hi\";", "\"hi\""),
+        Some(string),
+        "the old side too"
+    );
+    assert!(
+        colors(&mut h, "d1", 2, Half::New).is_empty(),
+        "a lone brace"
+    );
+}
+
+#[gpui::test]
+fn the_highlight_toggle_hides_the_colours_and_is_saved(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let id = show(&mut h, &diff_tab("d1", "src/main.rs", None));
+    answer(&mut h, &id, RUST_OLD, RUST_NEW);
+    assert!(!colors(&mut h, "d1", 0, Half::Old).is_empty());
+
+    h.click_on("diff-highlight");
+    assert!(!header(&mut h, "d1").highlight);
+    assert!(colors(&mut h, "d1", 0, Half::Old).is_empty());
+    assert!(colors(&mut h, "d1", 1, Half::New).is_empty());
+    assert_eq!(saved_ui(&dir)["diff_highlight"], json!(false));
+    assert!(
+        snapshot_requests(&mut h).is_empty(),
+        "nothing fetched again"
+    );
+
+    h.click_on("diff-highlight");
+    assert!(header(&mut h, "d1").highlight);
+    assert!(!colors(&mut h, "d1", 0, Half::Old).is_empty());
+    assert_eq!(highlight_runs(&mut h, "d1"), 2, "the landed colours again");
+    assert_eq!(saved_ui(&dir)["diff_highlight"], json!(true));
+}
+
+#[gpui::test]
+fn a_plaintext_diff_has_no_colours(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let id = show(&mut h, &diff_tab("d1", "notes.txt", None));
+    h.send(DaemonMessage::FileSnapshot {
+        id,
+        repo_id: "r1".to_owned(),
+        path: "notes.txt".to_owned(),
+        against: None,
+        old: RUST_OLD.to_owned(),
+        new: RUST_NEW.to_owned(),
+        language: "plaintext".to_owned(),
+        unavailable: None,
+        worktree_path: Some(TREE.to_owned()),
+    });
+    assert_eq!(body(&mut h, "d1"), DiffTabBody::Diff);
+    for row in 0..3 {
+        assert!(colors(&mut h, "d1", row, Half::Old).is_empty(), "{row}");
+        assert!(colors(&mut h, "d1", row, Half::New).is_empty(), "{row}");
+    }
+    assert_eq!(highlight_runs(&mut h, "d1"), 0, "no run for plaintext");
+}
+
+#[gpui::test]
+fn the_whitespace_toggle_reuses_the_highlighting(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let id = show(&mut h, &diff_tab("d1", "src/main.rs", None));
+    answer(&mut h, &id, RUST_OLD, RUST_NEW);
+    assert_eq!(highlight_runs(&mut h, "d1"), 2);
+    let before = colors(&mut h, "d1", 1, Half::New);
+    assert!(!before.is_empty());
+
+    h.click_on("diff-whitespace");
+    assert!(!header(&mut h, "d1").include_whitespace);
+    assert_eq!(highlight_runs(&mut h, "d1"), 2, "no run for the same texts");
+    assert_eq!(colors(&mut h, "d1", 1, Half::New), before);
+
+    h.send(status(&[], &["src/main.rs"], Some(TREE)));
+    let again = one_snapshot_id(&mut h);
+    answer(&mut h, &again, RUST_OLD, "fn main() {}\n");
+    assert_eq!(highlight_runs(&mut h, "d1"), 3, "new text on one side only");
+    assert!(!colors(&mut h, "d1", 0, Half::New).is_empty());
 }
 
 #[gpui::test]

@@ -1,6 +1,7 @@
 //! Times the side-by-side diff view in a real window, then quits: the model
 //! build over a synthetic 5,000-line pair (about a tenth of the lines
-//! changed, a few of them 2,000 characters long), the time from opening the
+//! changed, a few of them 2,000 characters long), loading the grammars and
+//! highlighting the new side as Rust, the time from opening the
 //! window to its first drawn rows, and the worst of 200 scroll steps driven
 //! through the list's scroll handle. It talks to no daemon.
 //!
@@ -9,6 +10,7 @@
 //!
 //! `cargo run --release -p rustling-tulip-native --example diff_bench`
 
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -19,6 +21,7 @@ use rustling_tulip_native::diff_model::{DiffModel, DiffOptions};
 use rustling_tulip_native::diff_view::DiffView;
 use rustling_tulip_native::fonts::{self, FontSettings};
 use rustling_tulip_native::offscreen::{requested, show_cloaked};
+use rustling_tulip_native::syntax;
 
 /// The window's size in logical pixels, the client's own.
 const WINDOW_SIZE: (u16, u16) = (1000, 640);
@@ -43,8 +46,34 @@ fn main() {
             ?build,
             "model built"
         );
+        time_highlighting(&new);
         open(model, cx);
     });
+}
+
+/// Times loading the grammars, then highlighting `text` as Rust with no
+/// deadline, so a run past the client's limit still reports its time.
+fn time_highlighting(text: &str) {
+    let started = Instant::now();
+    let grammar = syntax::syntax_for("rust");
+    let load = started.elapsed();
+    let Some(grammar) = grammar else {
+        tracing::error!("no Rust grammar");
+        return;
+    };
+    let started = Instant::now();
+    let far = started + Duration::from_secs(3600);
+    let never = AtomicBool::new(false);
+    let lines =
+        syntax::highlight(text, grammar, syntax::syntax_set(), far, &never).map_or(0, |l| l.len());
+    let highlight = started.elapsed();
+    tracing::info!(
+        lines,
+        ?load,
+        ?highlight,
+        within_limit = highlight < syntax::TIME_LIMIT,
+        "highlighted the new side"
+    );
 }
 
 /// A Rust-like 5,000-line text and a copy with every tenth line edited; the

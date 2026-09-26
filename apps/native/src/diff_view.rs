@@ -2,22 +2,26 @@
 //! row's old and new halves, so both sides scroll together. Each half has a
 //! line-number gutter and its line in the terminal font; long lines are not
 //! wrapped but scroll sideways together, and only the part of a line the
-//! text column shows is laid out.
+//! text column shows is laid out. Tokens take their syntax class's colour
+//! once the tab hands the view each side's classes.
 
 #![expect(clippy::unreadable_literal, reason = "colours read as #rrggbbaa")]
 
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use alacritty_terminal::vte::ansi::Rgb;
 use gpui::{
     Context, DispatchPhase, Div, FocusHandle, HighlightStyle, Hsla, KeyDownEvent, ScrollStrategy,
-    ScrollWheelEvent, SharedString, StyledText, UniformListScrollHandle, Window, canvas, div, font,
-    prelude::*, px, rgba, uniform_list,
+    ScrollWheelEvent, SharedString, StyledText, UniformListScrollHandle, Window, canvas,
+    combine_highlights, div, font, prelude::*, px, rgba, uniform_list,
 };
 
-use crate::diff_model::{DiffModel, Row, RowKind};
+use crate::diff_model::{DiffModel, Row, RowKind, Side};
 use crate::fonts::{self, FontSettings};
+use crate::syntax::{self, Highlighted, TokenClass};
 use crate::theme;
 
 /// A deleted line's half, and the old half of a modified row.
@@ -60,7 +64,7 @@ struct Metrics {
 
 /// Which side of a row a half draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Half {
+pub enum Half {
     Old,
     New,
 }
@@ -118,12 +122,20 @@ pub struct DiffView {
     gutter_digits: usize,
     /// The characters of the longest line on either side.
     longest_line: usize,
+    /// Each side's syntax classes by line, when they have landed.
+    old_syntax: Option<Arc<Highlighted>>,
+    new_syntax: Option<Arc<Highlighted>>,
+    /// Each token class's colour, in [`TokenClass::ALL`] order.
+    class_colors: [Hsla; 6],
 }
 
 impl DiffView {
     /// A view of `model` in `font`, the app's terminal font.
     pub fn new(model: DiffModel, font: FontSettings, cx: &mut Context<Self>) -> Self {
         let (gutter_digits, longest_line) = measure(&model);
+        let background = theme::DEFAULT_BACKGROUND;
+        let palette = theme::build_theme(background).ansi;
+        let class_colors = syntax::class_colors(&palette, background).map(hsla);
         Self {
             model,
             font: font.normalized(),
@@ -137,7 +149,56 @@ impl DiffView {
             column_width: Rc::new(Cell::new(0.0)),
             gutter_digits,
             longest_line,
+            old_syntax: None,
+            new_syntax: None,
+            class_colors,
         }
+    }
+
+    /// Colours the sides' lines by the syntax classes `old` and `new` give
+    /// them, line 1 first; `None` leaves a side uncoloured. The scroll and
+    /// the current hunk stay.
+    pub fn set_syntax(
+        &mut self,
+        old: Option<Arc<Highlighted>>,
+        new: Option<Arc<Highlighted>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.old_syntax = old;
+        self.new_syntax = new;
+        cx.notify();
+    }
+
+    /// The syntax colours of row `row`'s `half`: byte ranges into its whole
+    /// line and the colour each is drawn in. None for a filler half or an
+    /// uncoloured side.
+    #[must_use]
+    pub fn syntax_colors(&self, row: usize, half: Half) -> Vec<(Range<usize>, Hsla)> {
+        let Some(side) = self
+            .model
+            .rows()
+            .get(row)
+            .and_then(|row| side_of(row, half))
+        else {
+            return Vec::new();
+        };
+        self.line_syntax(side, half)
+            .iter()
+            .map(|(range, class)| (range.clone(), self.class_colors[class.index()]))
+            .collect()
+    }
+
+    /// The syntax classes of `side`'s line on `half`.
+    fn line_syntax(&self, side: &Side, half: Half) -> &[(Range<usize>, TokenClass)] {
+        let lines = match half {
+            Half::Old => self.old_syntax.as_deref(),
+            Half::New => self.new_syntax.as_deref(),
+        };
+        usize::try_from(side.line_no)
+            .ok()
+            .and_then(|line_no| line_no.checked_sub(1))
+            .and_then(|index| lines?.get(index))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Shows `model` in place of the current one. The row at the top stays
@@ -463,15 +524,11 @@ impl DiffView {
         metrics: &Metrics,
     ) -> (Div, Option<SharedString>) {
         let cell = div().flex_1().min_w(px(0.0)).h_full().flex().flex_row();
-        let side = match half {
-            Half::Old => row.left.as_ref(),
-            Half::New => row.right.as_ref(),
-        };
-        let Some(side) = side else {
+        let Some(side) = side_of(row, half) else {
             return (cell.bg(rgba(FILLER_BG)), None);
         };
         let changed = row.kind != RowKind::Equal;
-        let (text, tint, word_tint) = match half {
+        let (line_text, tint, word_tint) = match half {
             Half::Old => (self.model.old_text(side), DELETE_BG, DELETE_WORD_BG),
             Half::New => (self.model.new_text(side), INSERT_BG, INSERT_WORD_BG),
         };
@@ -479,15 +536,30 @@ impl DiffView {
             Half::Old => spans.left.as_slice(),
             Half::New => spans.right.as_slice(),
         });
-        let (text, words) =
-            visible_slice(text, words.unwrap_or_default(), columns.start, columns.len);
+        let shown = visible_range(line_text, columns.start, columns.len);
         let word_style = HighlightStyle {
             background_color: Some(Hsla::from(rgba(word_tint))),
             ..HighlightStyle::default()
         };
-        let text = SharedString::from(text.to_owned());
-        let line = StyledText::new(text.clone())
-            .with_highlights(words.into_iter().map(|range| (range, word_style)));
+        let words = words
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|span| clip(line_text, &shown, span))
+            .map(|range| (range, word_style));
+        let classes = self
+            .line_syntax(side, half)
+            .iter()
+            .filter_map(|(span, class)| {
+                let style = HighlightStyle {
+                    color: Some(self.class_colors[class.index()]),
+                    ..HighlightStyle::default()
+                };
+                Some((clip(line_text, &shown, span)?, style))
+            })
+            .collect::<Vec<_>>();
+        let text = SharedString::from(line_text.get(shown.clone()).unwrap_or_default().to_owned());
+        let line =
+            StyledText::new(text.clone()).with_highlights(combine_highlights(classes, words));
         let cell = cell
             .when(changed, |cell| cell.bg(rgba(tint)))
             .child(
@@ -542,16 +614,17 @@ fn measure(model: &DiffModel) -> (usize, usize) {
     (largest.max(1).to_string().len(), longest)
 }
 
-/// The `len` characters of `text` from character `start`, with `spans` (byte
-/// ranges into `text`) clipped to them and rebased onto the slice. Spans
-/// wholly outside the slice are dropped, and every range stays on character
-/// boundaries.
-fn visible_slice<'a>(
-    text: &'a str,
-    spans: &[Range<usize>],
-    start: usize,
-    len: usize,
-) -> (&'a str, Vec<Range<usize>>) {
+/// The side of `row` that `half` draws; `None` for a filler.
+fn side_of(row: &Row, half: Half) -> Option<&Side> {
+    match half {
+        Half::Old => row.left.as_ref(),
+        Half::New => row.right.as_ref(),
+    }
+}
+
+/// The bytes of `text` that its `len` characters from character `start`
+/// cover, on character boundaries.
+fn visible_range(text: &str, start: usize, len: usize) -> Range<usize> {
     let from = text
         .char_indices()
         .nth(start)
@@ -562,36 +635,44 @@ fn visible_slice<'a>(
             .char_indices()
             .nth(len)
             .map_or(rest.len(), |(at, _)| at);
-    let shown = text.get(from..to).unwrap_or_default();
-    let clipped = spans
-        .iter()
-        .filter_map(|span| {
-            let mut span_start = span.start.max(from);
-            let mut span_end = span.end.min(to);
-            if span_start >= span_end {
-                return None;
-            }
-            while !text.is_char_boundary(span_start) {
-                span_start -= 1;
-            }
-            while !text.is_char_boundary(span_end) {
-                span_end += 1;
-            }
-            Some(span_start - from..span_end - from)
-        })
-        .collect();
-    (shown, clipped)
+    from..to
+}
+
+/// `span`, a byte range into `text`, clipped to `shown` and rebased onto
+/// it; `None` when it lies wholly outside. The result stays on character
+/// boundaries, widened to them when `span` is not.
+fn clip(text: &str, shown: &Range<usize>, span: &Range<usize>) -> Option<Range<usize>> {
+    let mut span_start = span.start.max(shown.start);
+    let mut span_end = span.end.min(shown.end);
+    if span_start >= span_end {
+        return None;
+    }
+    while !text.is_char_boundary(span_start) {
+        span_start -= 1;
+    }
+    while !text.is_char_boundary(span_end) {
+        span_end += 1;
+    }
+    Some(span_start - shown.start..span_end - shown.start)
+}
+
+/// `color` as a gpui colour.
+fn gpui_rgba(color: Rgb) -> gpui::Rgba {
+    gpui::Rgba {
+        r: f32::from(color.r) / 255.0,
+        g: f32::from(color.g) / 255.0,
+        b: f32::from(color.b) / 255.0,
+        a: 1.0,
+    }
+}
+
+fn hsla(color: Rgb) -> Hsla {
+    Hsla::from(gpui_rgba(color))
 }
 
 /// The theme's background as a gpui colour.
 fn background() -> gpui::Rgba {
-    let bg = theme::DEFAULT_BACKGROUND;
-    gpui::Rgba {
-        r: f32::from(bg.r) / 255.0,
-        g: f32::from(bg.g) / 255.0,
-        b: f32::from(bg.b) / 255.0,
-        a: 1.0,
-    }
+    gpui_rgba(theme::DEFAULT_BACKGROUND)
 }
 
 impl Render for DiffView {
@@ -664,8 +745,12 @@ mod tests {
         start: usize,
         len: usize,
     ) -> (String, Vec<Range<usize>>) {
-        let (text, spans) = visible_slice(text, spans, start, len);
-        (text.to_owned(), spans)
+        let shown = visible_range(text, start, len);
+        let spans = spans
+            .iter()
+            .filter_map(|span| clip(text, &shown, span))
+            .collect();
+        (text[shown].to_owned(), spans)
     }
 
     /// A list of just `range`.

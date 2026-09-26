@@ -94,7 +94,7 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - Right-clicking a repo or workspace opens a minimal container menu with `Appearance…`, and the session menu gains `Appearance…` before `Accent ▸`.
     - Session sends go through the in-flight `request_id` path; repo and workspace sends overlay the container's stored overrides; the app level writes `native-ui.json`.
     Original text: At app, repo/workspace and session level: accent colour, shell background (presets, 12 recent, custom), font family, size and bold, each showing its resolved value and where it comes from. The session accent drives the sidebar stripe, pane frame and focus colour.
-- [ ] **Phase 3 — source control:** split into P3.1–P3.10 below (2026-09-25). Parity: "Source control & diff", plus the activity-bar line in "Sidebar / repos / workspaces". The daemon already handles every git message (`server.rs` ~1840–2133). Rulings (orchestrator, 2026-09-25):
+- [x] **Phase 3 — source control:** split into P3.1–P3.10 below (2026-09-25); all done 2026-09-26. Parity: "Source control & diff", plus the activity-bar line in "Sidebar / repos / workspaces". The daemon already handles every git message (`server.rs` ~1840–2133). Rulings (orchestrator, 2026-09-25):
   - Status, badge counts and diffs are keyed by (repo, worktree path), fixing two Tauri bugs: its diff tab never sends `worktree_path`, and its badge lets worktree and main-tree counts overwrite each other.
   - Commit-detail files are clickable and open an `@ sha` diff tab.
   - Open in forge is disabled, with a tooltip, when `origin` isn't a recognised forge.
@@ -179,7 +179,16 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - Folding the Stashes part (`toggle_sc_stashes`) while its push input has the keyboard.
 
     Hand the keyboard to the active pane in both cases, as P3.5b does for the other paths, and give each a UI spec.
-  - [ ] **P3.10 Syntax highlighting in the diff.** syntect with `default-fancy` (no C), by the daemon's `language`; a separate item because of its binary-size cost. Needs P3.8.
+  - [x] **P3.10 Syntax highlighting in the diff.** As built:
+    - The new `syntax.rs` uses syntect 5.3 plus two-face 0.5, both with fancy-regex, so there is no C dependency.
+    - Tokens are classified into six classes by scope. Each class takes its colour from the terminal's ANSI palette, lifted to 4.5:1 contrast (user, 2026-09-26).
+    - Highlighting runs on the background executor after the uncoloured diff shows. It is cached per text, and it is cancelled when turned off or replaced.
+    - It stops silently past 20,000 lines, a line over 10,000 bytes, or 2 s.
+    - A saved `highlight` toggle sits in the diff header (`diff_highlight`).
+    - PowerShell is not coloured, because two-face drops that grammar without onig.
+    - Measured (release): +1,288,192 bytes on the exe (+5.6%); 570 ms for 5k lines of Rust.
+
+    Original text: syntect with `default-fancy` (no C), by the daemon's `language`; a separate item because of its binary-size cost. Needs P3.8.
 - [ ] **Phase 4 — flows and settings:** preset launch wizard, worktree manager, cleanup-failed dialog, first-connect layout chooser, settings modal, OS notifications and attention, toasts beyond P1.7c's error and spawn toasts, the spawn dialog's headless mode, Advanced section, spawn preview, collision radios and branch combobox, undo shelf, workspace creator, VS Code workspace prompt, headless view.
 - [ ] **Phase 5 — windows and drag-and-drop:** pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder.
 - [ ] **Phase 6 — remote and cutover:** connection picker, LAN pairing, pinned-TLS tunnel (reuse `src-tauri/src/remote.rs` as a library), autostart, remote file transfer (fetch a host file by Ctrl-click or a "Fetch file…" popup and open it locally; see [remote-file-transfer.md](./remote-file-transfer.md)). Design item: the UI test driver that replaces WebdriverIO. Cutover: the installer ships the native client; delete `apps/tauri-app`, the TS protocol mirror, the `protocol-mirror` prek hook, the `protocol-sync-checker` agent and the WebdriverIO suite; update CLAUDE.md.

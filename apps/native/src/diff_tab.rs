@@ -32,6 +32,10 @@ pub const UNKNOWN_UNAVAILABLE_TEXT: &str = "Cannot display this file";
 pub const WHITESPACE_LABEL: &str = "include whitespace";
 /// The whitespace toggle's tooltip.
 pub const WHITESPACE_TIP: &str = "When unchecked, whitespace-only changes are hidden from the diff";
+/// The syntax highlighting toggle's label.
+pub const HIGHLIGHT_LABEL: &str = "highlight";
+/// The syntax highlighting toggle's tooltip.
+pub const HIGHLIGHT_TIP: &str = "Colour code by its language";
 /// What the body says before the reason a snapshot read failed.
 const ERROR_PREFIX: &str = "Could not load diff: ";
 const MIB: u64 = 1024 * 1024;
@@ -198,7 +202,9 @@ pub struct DiffTabHeader {
     /// The full sha, for a commit's diff.
     pub mode_tip: Option<String>,
     pub include_whitespace: bool,
-    /// `…`, `no changes`, `1 change` or `N changes`; empty when the body
+    /// Whether the diff is coloured by its language.
+    pub highlight: bool,
+    /// `…`,`no changes`, `1 change` or `N changes`; empty when the body
     /// is an error or a file that is not shown.
     pub count: String,
     /// Whether the change buttons take clicks.
@@ -235,9 +241,16 @@ impl DiffTabState {
     }
 
     /// The snapshot's language hint, once one landed.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by syntax highlighting"))]
     pub(crate) fn language(&self) -> Option<&str> {
         self.language.as_deref()
+    }
+
+    /// The (old, new) texts of the last snapshot, while the tab holds them.
+    pub(crate) fn texts(&self) -> Option<(Arc<str>, Arc<str>)> {
+        match &self.content {
+            Content::Texts { old, new } => Some((old.clone(), new.clone())),
+            Content::Loading | Content::Failed(_) | Content::Unavailable(_) => None,
+        }
     }
 
     /// Whether `id` is the fetch out.
@@ -365,7 +378,7 @@ impl DiffTabState {
         }
     }
 
-    pub(crate) fn header(&self, include_whitespace: bool) -> DiffTabHeader {
+    pub(crate) fn header(&self, include_whitespace: bool, highlight: bool) -> DiffTabHeader {
         let (mode, mode_tip) = mode_label(self.target.against.as_deref());
         let count = match self.content {
             Content::Failed(_) | Content::Unavailable(_) => String::new(),
@@ -378,6 +391,7 @@ impl DiffTabState {
             mode,
             mode_tip,
             include_whitespace,
+            highlight,
             count,
             nav_enabled: self.built.is_some_and(|built| built.changes > 0),
         }
@@ -648,18 +662,18 @@ mod tests {
         state.on_snapshot("s", texts("a\n", "a\r\n"));
         let (_, _, generation) = state.build_input().expect("texts to build");
         assert_eq!(text(&state.body()).0, LOADING_TEXT, "not built yet");
-        assert_eq!(state.header(true).count, "…");
+        assert_eq!(state.header(true, true).count, "…");
         assert!(state.accept_build(generation, built(0, true, false)));
         assert_eq!(text(&state.body()), (EMPTY_TEXT, Some(LINE_ENDINGS_NOTE)));
-        assert_eq!(state.header(true).count, "no changes");
-        assert!(!state.header(true).nav_enabled);
+        assert_eq!(state.header(true, true).count, "no changes");
+        assert!(!state.header(true, true).nav_enabled);
         assert!(state.accept_build(generation, built(0, false, true)));
         assert_eq!(text(&state.body()), (EMPTY_TEXT, Some(FINAL_NEWLINE_NOTE)));
         assert!(state.accept_build(generation, built(0, false, false)));
         assert_eq!(text(&state.body()), (EMPTY_TEXT, None));
         assert!(state.accept_build(generation, built(2, false, false)));
         assert_eq!(state.body(), DiffTabBody::Diff);
-        assert!(state.header(true).nav_enabled);
+        assert!(state.header(true, true).nav_enabled);
     }
 
     #[test]
@@ -715,7 +729,7 @@ mod tests {
         state.start_fetch("s2".to_owned());
         state.on_snapshot_error("s2", "no such path".to_owned());
         assert_eq!(text(&state.body()).0, "Could not load diff: no such path");
-        assert_eq!(state.header(true).count, "");
+        assert_eq!(state.header(true, true).count, "");
         assert!(!state.accept_build(generation, built(1, false, false)));
 
         state.start_fetch("s3".to_owned());
@@ -745,5 +759,12 @@ mod tests {
             serde_json::from_str(r#"{"diff_include_whitespace": false}"#).expect("layout");
         assert!(!saved.diff_include_whitespace);
         assert!(UiState::default().diff_include_whitespace);
+    }
+
+    #[test]
+    fn an_empty_layout_includes_whitespace_and_highlights() {
+        let empty: UiState = serde_json::from_str("{}").expect("an empty layout");
+        assert!(empty.diff_include_whitespace);
+        assert!(empty.diff_highlight);
     }
 }

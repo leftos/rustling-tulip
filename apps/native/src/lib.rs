@@ -52,6 +52,7 @@ mod spawn_view;
 mod spawns;
 mod stash_view;
 mod stashes;
+pub mod syntax;
 mod tab_bar;
 mod tabs;
 mod term;
