@@ -32,7 +32,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
 - [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
 - [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
-- [ ] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries)
+- [x] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries; unknown types are logged since P4.1)
 - [ ] Main window size and position persisted — `lib.rs` (window-state plugin)
 
 ## Sidebar / repos / workspaces
@@ -172,7 +172,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx`
 - [ ] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx`
 - [ ] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
-- [ ] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: error and info toasts with 8s auto-dismiss and × landed in P1.7c; no sticky or same-key update)
+- [x] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: P1.7c, and warning, sticky and same-key update in P4.1)
 - [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
 - [x] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
 - [ ] Preset-launched sessions highlighted in the sidebar — `App.tsx`

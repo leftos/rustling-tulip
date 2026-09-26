@@ -375,7 +375,9 @@ impl Net {
         *probe_deadline = None;
         match InboundDaemonMessage::from_json_str(text.as_str()) {
             Ok(InboundDaemonMessage::Known(msg)) => self.on_daemon_message(msg),
-            Ok(InboundDaemonMessage::Unknown { .. }) => {}
+            Ok(InboundDaemonMessage::Unknown { type_tag, .. }) => {
+                warn!("unknown or undecodable daemon message type: {type_tag}");
+            }
             Err(err) => error!("undecodable daemon message: {err}"),
         }
         Step::Continue

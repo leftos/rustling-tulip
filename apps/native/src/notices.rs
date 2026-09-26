@@ -9,7 +9,9 @@ use protocol::CheckoutStrategy;
 
 /// How long a toast stays before it goes by itself.
 pub const TOAST_LIFETIME: Duration = Duration::from_secs(8);
-/// The most toasts on screen; a newer one pushes the oldest out.
+/// The most toasts on screen at once; a toast arriving while this many are
+/// shown pushes out the timed one that has waited longest, and stickies alone
+/// may exceed it.
 pub const MAX_TOASTS: usize = 3;
 /// The checkout prompt's heading.
 pub const CHECKOUT_TITLE: &str = "Switch branch in place?";
@@ -18,6 +20,7 @@ pub const CHECKOUT_TITLE: &str = "Switch branch in place?";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
+    Warning,
     Error,
 }
 
@@ -29,7 +32,25 @@ pub struct Toast {
     pub kind: ToastKind,
     pub title: String,
     pub detail: Option<String>,
+    /// A later push of this key updates this toast in place.
+    pub key: Option<String>,
+    /// A sticky toast never goes by itself; only the × closes it.
+    pub sticky: bool,
     expires_at: Instant,
+}
+
+/// A toast to show: what it reports, and what it does when a toast of the
+/// same key is already on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastSpec {
+    pub kind: ToastKind,
+    pub title: String,
+    pub detail: Option<String>,
+    /// Updates the toast of this key in place when one is shown; None appends
+    /// a new toast.
+    pub key: Option<String>,
+    /// Never goes by itself.
+    pub sticky: bool,
 }
 
 /// A refused or failed action that blocks until the user dismisses it.
@@ -189,7 +210,8 @@ pub struct Notices {
 
 impl Notices {
     /// Shows a toast until [`TOAST_LIFETIME`] after `now`, pushing out the
-    /// oldest when [`MAX_TOASTS`] are shown; returns its id.
+    /// timed toast that has waited longest when [`MAX_TOASTS`] are shown;
+    /// returns its id.
     pub fn push(
         &mut self,
         kind: ToastKind,
@@ -197,19 +219,80 @@ impl Notices {
         detail: Option<String>,
         now: Instant,
     ) -> u64 {
+        self.push_spec(
+            ToastSpec {
+                kind,
+                title: title.into(),
+                detail,
+                key: None,
+                sticky: false,
+            },
+            now,
+        )
+    }
+
+    /// Shows `spec`. A key matching a toast on screen updates that toast in
+    /// place — same id, same place, its kind, title, detail and stickiness
+    /// replaced — and restarts its lifetime unless it is now sticky; any
+    /// other push appends a toast, and one arriving while [`MAX_TOASTS`] are
+    /// already shown evicts the timed toast among them that has waited
+    /// longest, an update counting as a wait's end. A toast is never its own
+    /// victim, so stickies alone may exceed the cap. Returns the toast's id.
+    pub fn push_spec(&mut self, spec: ToastSpec, now: Instant) -> u64 {
+        let ToastSpec {
+            kind,
+            title,
+            detail,
+            key,
+            sticky,
+        } = spec;
+        if let Some(at) = key.as_deref().and_then(|key| self.keyed_at(key)) {
+            let toast = &mut self.toasts[at];
+            toast.kind = kind;
+            toast.title = title;
+            toast.detail = detail;
+            toast.sticky = sticky;
+            toast.expires_at = now + TOAST_LIFETIME;
+            return toast.id;
+        }
         if self.toasts.len() >= MAX_TOASTS {
-            let excess = self.toasts.len() + 1 - MAX_TOASTS;
-            self.toasts.drain(..excess);
+            self.evict_oldest_timed();
         }
         self.next_id += 1;
+        let id = self.next_id;
         self.toasts.push(Toast {
-            id: self.next_id,
+            id,
             kind,
-            title: title.into(),
+            title,
             detail,
+            key,
+            sticky,
             expires_at: now + TOAST_LIFETIME,
         });
-        self.next_id
+        id
+    }
+
+    /// Where the toast of `key` shows, if one does.
+    fn keyed_at(&self, key: &str) -> Option<usize> {
+        self.toasts
+            .iter()
+            .position(|toast| toast.key.as_deref() == Some(key))
+    }
+
+    /// Drops the timed toast that has waited longest — its last push, or its
+    /// last update, is what the deadline measures. Stickies are left, so a
+    /// new toast shows over a screenful of stickies rather than evicting one.
+    fn evict_oldest_timed(&mut self) {
+        let oldest = self
+            .toasts
+            .iter()
+            .enumerate()
+            .filter(|(_, toast)| !toast.sticky)
+            .min_by_key(|(_, toast)| toast.expires_at)
+            .map(|(at, _)| at);
+        if let Some(at) = oldest {
+            self.toasts.remove(at);
+        }
     }
 
     /// Oldest first.
@@ -225,17 +308,23 @@ impl Notices {
         self.toasts.len() != before
     }
 
-    /// Drops the toasts whose time is up at `now`; returns whether any went.
+    /// Drops the timed toasts whose time is up at `now`; returns whether any
+    /// went. A sticky toast has no time to be up.
     pub fn expire(&mut self, now: Instant) -> bool {
         let before = self.toasts.len();
-        self.toasts.retain(|toast| toast.expires_at > now);
+        self.toasts
+            .retain(|toast| toast.sticky || toast.expires_at > now);
         self.toasts.len() != before
     }
 
-    /// When the next toast goes.
+    /// When the next toast goes; None while every toast shown is sticky.
     #[must_use]
     pub fn next_expiry(&self) -> Option<Instant> {
-        self.toasts.iter().map(|toast| toast.expires_at).min()
+        self.toasts
+            .iter()
+            .filter(|toast| !toast.sticky)
+            .map(|toast| toast.expires_at)
+            .min()
     }
 
     /// Shows the notice in place of the one shown.
@@ -397,6 +486,33 @@ mod tests {
         notices.toasts().iter().map(|t| t.title.as_str()).collect()
     }
 
+    /// A toast spec of `kind` and `title`, with no detail, key or stickiness.
+    fn spec(kind: ToastKind, title: &str) -> ToastSpec {
+        ToastSpec {
+            kind,
+            title: title.to_owned(),
+            detail: None,
+            key: None,
+            sticky: false,
+        }
+    }
+
+    /// A keyed toast spec, to be updated in place by a later push of the key.
+    fn keyed(title: &str) -> ToastSpec {
+        ToastSpec {
+            key: Some("k".to_owned()),
+            ..spec(ToastKind::Info, title)
+        }
+    }
+
+    /// A sticky toast spec of `title`.
+    fn sticky(title: &str) -> ToastSpec {
+        ToastSpec {
+            sticky: true,
+            ..spec(ToastKind::Info, title)
+        }
+    }
+
     #[test]
     fn toasts_expire_after_eight_seconds() {
         let start = Instant::now();
@@ -447,6 +563,174 @@ mod tests {
         assert!(notices.dismiss(first));
         assert_eq!(titles(&notices), ["two"]);
         assert!(!notices.dismiss(first), "a toast goes once");
+    }
+
+    #[test]
+    fn sticky_toast_never_expires() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        notices.push_spec(sticky("running"), start);
+
+        assert_eq!(notices.next_expiry(), None, "a sticky toast sets no timer");
+        assert!(!notices.expire(start + Duration::from_secs(60)));
+        assert_eq!(titles(&notices), ["running"], "it outlasts any lifetime");
+        assert!(notices.dismiss(1), "× still closes it");
+        assert!(notices.toasts().is_empty());
+    }
+
+    #[test]
+    fn keyed_push_updates_in_place() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        let first = notices.push_spec(
+            ToastSpec {
+                detail: Some("one".to_owned()),
+                sticky: true,
+                ..keyed("A")
+            },
+            start,
+        );
+        notices.push_spec(spec(ToastKind::Info, "B"), start + Duration::from_secs(1));
+        assert_eq!(titles(&notices), ["A", "B"]);
+
+        let again = notices.push_spec(
+            ToastSpec {
+                kind: ToastKind::Warning,
+                title: "A again".to_owned(),
+                detail: Some("two".to_owned()),
+                ..keyed("A again")
+            },
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(again, first, "a keyed push keeps the toast's id");
+        assert_eq!(titles(&notices), ["A again", "B"], "and its place");
+        assert_eq!(notices.toasts().len(), 2, "and appends nothing");
+        let updated = notices.toasts().first().expect("the updated toast");
+        assert_eq!(updated.kind, ToastKind::Warning);
+        assert_eq!(updated.detail.as_deref(), Some("two"));
+        assert_eq!(updated.key.as_deref(), Some("k"));
+        assert!(!updated.sticky, "the update replaces the stickiness");
+    }
+
+    #[test]
+    fn keyed_update_restarts_lifetime() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        notices.push_spec(keyed("job"), start);
+        assert_eq!(notices.next_expiry(), Some(start + TOAST_LIFETIME));
+
+        let update = start + Duration::from_secs(6);
+        notices.push_spec(keyed("job still"), update);
+        assert_eq!(notices.next_expiry(), Some(update + TOAST_LIFETIME));
+
+        assert!(
+            !notices.expire(start + Duration::from_secs(13)),
+            "the update restarted its time"
+        );
+        assert_eq!(titles(&notices), ["job still"]);
+        assert!(notices.expire(start + Duration::from_millis(14_100)));
+        assert!(notices.toasts().is_empty());
+    }
+
+    #[test]
+    fn keyed_push_after_expiry_appends() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        let first = notices.push_spec(keyed("one"), start);
+        assert!(notices.expire(start + TOAST_LIFETIME));
+
+        let second = notices.push_spec(keyed("two"), start + TOAST_LIFETIME);
+        assert_ne!(
+            second, first,
+            "the keyed toast is gone, so this is a new one"
+        );
+        assert_eq!(titles(&notices), ["two"]);
+    }
+
+    #[test]
+    fn cap_evicts_oldest_non_sticky() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        notices.push_spec(sticky("pinned"), start);
+        for (i, title) in ["one", "two", "three"].into_iter().enumerate() {
+            let at = start + Duration::from_secs(u64::try_from(i).expect("small") + 1);
+            notices.push_spec(spec(ToastKind::Info, title), at);
+        }
+
+        assert_eq!(
+            titles(&notices),
+            ["pinned", "two", "three"],
+            "the sticky one stays and the oldest timed one goes"
+        );
+    }
+
+    #[test]
+    fn cap_counts_a_keyed_update_as_recent() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        let first = notices.push_spec(keyed("one"), start);
+        notices.push_spec(spec(ToastKind::Info, "two"), start + Duration::from_secs(1));
+        notices.push_spec(
+            spec(ToastKind::Info, "three"),
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(
+            notices.push_spec(keyed("one again"), start + Duration::from_secs(3)),
+            first,
+            "the update is not a new toast"
+        );
+
+        notices.push_spec(
+            spec(ToastKind::Info, "four"),
+            start + Duration::from_secs(4),
+        );
+        assert_eq!(
+            titles(&notices),
+            ["one again", "three", "four"],
+            "the update made one the freshest, so two went"
+        );
+    }
+
+    #[test]
+    fn all_sticky_exceeds_cap() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        for (i, title) in ["a", "b", "c", "d"].into_iter().enumerate() {
+            let at = start + Duration::from_secs(u64::try_from(i).expect("small"));
+            notices.push_spec(sticky(title), at);
+        }
+
+        assert_eq!(
+            titles(&notices),
+            ["a", "b", "c", "d"],
+            "stickies may exceed the cap"
+        );
+        assert_eq!(notices.next_expiry(), None);
+    }
+
+    #[test]
+    fn timed_toast_over_three_stickies_is_shown() {
+        let start = Instant::now();
+        let mut notices = Notices::default();
+        for (i, title) in ["a", "b", "c"].into_iter().enumerate() {
+            let at = start + Duration::from_secs(u64::try_from(i).expect("small"));
+            notices.push_spec(sticky(title), at);
+        }
+        notices.push_spec(
+            spec(ToastKind::Info, "timed"),
+            start + Duration::from_secs(3),
+        );
+
+        assert_eq!(
+            titles(&notices),
+            ["a", "b", "c", "timed"],
+            "a new toast is never its own eviction victim"
+        );
+        assert_eq!(
+            notices.next_expiry(),
+            Some(start + Duration::from_secs(3) + TOAST_LIFETIME),
+            "the timed toast is the one with a time"
+        );
     }
 
     #[test]

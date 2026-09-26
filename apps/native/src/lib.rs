@@ -125,7 +125,7 @@ pub use crate::net::{
     StopFuture, spawn_with as spawn_net,
 };
 pub use crate::notices::{
-    ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind,
+    ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind, ToastSpec,
 };
 pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
@@ -228,6 +228,8 @@ const TEXT: u32 = 0x00cc_cccc;
 const MUTED: u32 = 0x009a_9a9a;
 const DANGER: u32 = 0x00ef_5c5c;
 const DANGER_BG: u32 = 0x003a_1c1f;
+/// Amber, for something the user should look at that is not a failure.
+const WARNING: u32 = 0x00e8_a531;
 
 /// What a press on a drag handle is resizing.
 enum Drag {
@@ -2004,7 +2006,7 @@ fn status_dot(dot: DotKind, id: impl Into<ElementId>) -> AnyElement {
 fn dot_color(dot: DotKind) -> u32 {
     match dot {
         DotKind::Ok => 0x003f_b96a,
-        DotKind::Pending => 0x00e8_a531,
+        DotKind::Pending => WARNING,
         DotKind::Idle | DotKind::Stopped => 0x0083_8a96,
         DotKind::Err => 0x00ef_5c5c,
     }

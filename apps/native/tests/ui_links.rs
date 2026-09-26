@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::SessionSnapshot;
+use rustling_tulip_native::ToastKind;
 use serde_json::{Value, json};
 use support::{Fixture, Harness, Opened, TestDir, session};
 
@@ -355,6 +356,11 @@ fn toasts(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
     })
 }
 
+/// Every toast's kind, oldest first.
+fn toast_kinds(h: &mut Harness<'_>) -> Vec<ToastKind> {
+    h.root(|root, _| root.toasts().iter().map(|toast| toast.kind).collect())
+}
+
 #[gpui::test]
 fn a_second_exec_link_while_the_confirm_is_open_is_dropped(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -430,7 +436,12 @@ fn an_edit_to_unc_hosts_applies_on_the_next_click(cx: &mut TestAppContext) {
     hand_edit_unc_hosts(&dir, None);
     h.click(on, ctrl());
     assert_eq!(h.opened(), [opened], "unlisted again, so it does not");
-    assert_eq!(toasts(&mut h), [refused.clone(), refused]);
+    assert_eq!(
+        toasts(&mut h),
+        std::slice::from_ref(&refused),
+        "the second refusal of the same host updates the toast that is up"
+    );
+    assert_eq!(toast_kinds(&mut h), [ToastKind::Warning]);
 }
 
 #[gpui::test]

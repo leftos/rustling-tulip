@@ -19,7 +19,7 @@ use protocol::{
     AgentOptions, CheckoutStrategy, ClientMessage, DaemonMessage, SessionMode, SessionSnapshot,
     SpawnRequest, SpawnTarget, SplitDirection, WorktreeReusePolicy,
 };
-use rustling_tulip_native::{OpenIn, TOAST_LIFETIME};
+use rustling_tulip_native::{OpenIn, TOAST_LIFETIME, ToastKind, ToastSpec};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 const SPAWNING: (&str, Option<&str>) = (
@@ -437,6 +437,57 @@ fn error_shows_daemon_error_toast_that_expires(cx: &mut TestAppContext) {
         [Some("a"), Some("b"), Some("c")].map(|d| d.map(str::to_owned)),
         "at most three: the oldest goes"
     );
+}
+
+#[gpui::test]
+fn sticky_toast_outlives_eight_seconds_and_closes_on_x(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+    let id = h.root_update(|root, _window, cx| {
+        root.push_toast_spec(
+            ToastSpec {
+                kind: ToastKind::Warning,
+                title: "Still working".to_owned(),
+                detail: None,
+                key: Some("job".to_owned()),
+                sticky: true,
+            },
+            cx,
+        )
+    });
+
+    assert!(painted(&mut h, &format!("toast-{id}")));
+    h.advance(Duration::from_secs(9));
+    assert_eq!(
+        toasts(&mut h),
+        [("Still working".to_owned(), None)],
+        "a sticky toast has no lifetime to run out"
+    );
+    h.click_on(&format!("toast-close-{id}"));
+    assert!(toasts(&mut h).is_empty(), "× still closes it");
+}
+
+#[gpui::test]
+fn keyed_toast_updates_in_place_in_the_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+    let patch = |title: &str| ToastSpec {
+        kind: ToastKind::Info,
+        title: title.to_owned(),
+        detail: None,
+        key: Some("job".to_owned()),
+        sticky: false,
+    };
+    let first = h.root_update(|root, _window, cx| root.push_toast_spec(patch("Copying"), cx));
+    let again = h.root_update(|root, _window, cx| root.push_toast_spec(patch("Copied"), cx));
+
+    assert_eq!(again, first, "the same key keeps the toast's id");
+    assert_eq!(
+        toasts(&mut h),
+        [("Copied".to_owned(), None)],
+        "one element, showing the second push"
+    );
+    assert!(h.in_model(&format!("toast-{first}")));
 }
 
 #[gpui::test]

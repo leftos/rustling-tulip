@@ -10,7 +10,7 @@ use gpui::{AnyElement, ClickEvent, Context, FontWeight, Keystroke, Window, div, 
 
 use crate::links::{LinkKind, TerminalLink, TerminalLinkCandidate};
 use crate::notice_view::modal_panel;
-use crate::notices::ToastKind;
+use crate::notices::{ToastKind, ToastSpec};
 use crate::open::{self, JobOutcome, OpenAction, OpenFailure, OpenJob, Resolution};
 use crate::run_confirm::{RunButton, RunConfirm};
 use crate::session_menu::{backdrop, dialog_button};
@@ -132,10 +132,16 @@ impl RootView {
                 tracing::warn!(
                     "terminal link {first} is on network host {host}, which is neither mapped nor listed"
                 );
-                self.push_toast(
-                    ToastKind::Error,
-                    &format!("Not opening a network path on {host}"),
-                    Some("Add it to unc_hosts in native-ui.json to allow it.".to_owned()),
+                self.push_toast_spec(
+                    ToastSpec {
+                        kind: ToastKind::Warning,
+                        title: format!("Not opening a network path on {host}"),
+                        detail: Some(
+                            "Add it to unc_hosts in native-ui.json to allow it.".to_owned(),
+                        ),
+                        key: Some(format!("unc-refused:{}", host.to_lowercase())),
+                        sticky: false,
+                    },
                     cx,
                 );
             }
@@ -235,10 +241,14 @@ impl RootView {
             (Ok(JobOutcome::Opened), OpenJob::DefaultApp { path, .. })
                 if then == Then::SayVsCodeMissing =>
             {
-                self.push_toast(
-                    ToastKind::Info,
-                    "VS Code not found",
-                    Some(format!("Opened {} in its default app.", file_name(&path))),
+                self.push_toast_spec(
+                    ToastSpec {
+                        kind: ToastKind::Warning,
+                        title: "VS Code not found".to_owned(),
+                        detail: Some(format!("Opened {} in its default app.", file_name(&path))),
+                        key: None,
+                        sticky: false,
+                    },
                     cx,
                 );
             }

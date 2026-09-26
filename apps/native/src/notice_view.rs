@@ -9,11 +9,13 @@ use gpui::{
 use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
 use crate::notices::{
-    ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind,
+    ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
 };
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
-use crate::{BORDER, DANGER, FOOTER_HEIGHT, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
+use crate::{
+    BORDER, DANGER, FOOTER_HEIGHT, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
+};
 
 const TOAST_WIDTH: f32 = 320.0;
 const MODAL_WIDTH: f32 = 440.0;
@@ -103,6 +105,15 @@ impl RootView {
         self.notices.push(kind, title, detail, (self.now)());
         self.schedule_toast_expiry(cx);
         cx.notify();
+    }
+
+    /// Shows `spec`, updating the toast its key matches in place; returns the
+    /// toast's id.
+    pub fn push_toast_spec(&mut self, spec: ToastSpec, cx: &mut Context<Self>) -> u64 {
+        let id = self.notices.push_spec(spec, (self.now)());
+        self.schedule_toast_expiry(cx);
+        cx.notify();
+        id
     }
 
     fn dismiss_toast(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -518,6 +529,7 @@ fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
         }));
     let accent = match toast.kind {
         ToastKind::Error => DANGER,
+        ToastKind::Warning => WARNING,
         ToastKind::Info => BORDER,
     };
     let detail = toast

@@ -17,12 +17,11 @@ use crate::spawn_form::{
 };
 use crate::spawns::PaneAim;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
 
 const DIALOG_WIDTH: f32 = 520.0;
 const BODY_MAX_HEIGHT: f32 = 440.0;
 const SELECTED_BG: u32 = 0x0037_3a44;
-const WARNING: u32 = 0x00e8_a531;
 const DIALOG_TITLE: &str = "Spawn session";
 const SHARE_TITLE: &str = "Share this worktree?";
 const SHARE_BODY: &str = "A session is already running in the worktree you picked. Both agents will see each other's uncommitted edits, and concurrent writes to the same file will overwrite one another.";
