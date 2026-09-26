@@ -2643,6 +2643,27 @@ pub struct RetryWorktreeTarget {
     pub repo_path: String,
 }
 
+/// Why a [`DaemonMessage::FileSnapshot`] carries no text. Set when the
+/// daemon refuses to ship a side it judged non-text or over its size cap;
+/// `old` and `new` are both empty in that case, so the client renders a
+/// placeholder instead of a diff of garbage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotUnavailable {
+    /// A side is not text: a NUL byte in its first 8000 bytes, or bytes
+    /// that are not valid UTF-8. Covers a PNG or an executable, and a file
+    /// the worktree holds in a non-UTF-8 code page.
+    Binary,
+    /// A side is larger than the daemon's snapshot cap. `bytes` is the
+    /// larger of the two sides' sizes and `limit` the cap that rejected it.
+    TooLarge { bytes: u64, limit: u64 },
+    /// Forward-compat fallback: a reason the current build doesn't know.
+    /// The client renders its generic "cannot display this file" text.
+    /// Daemon never constructs this directly.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
@@ -2930,7 +2951,9 @@ pub enum DaemonMessage {
     /// the file contents Monaco's `DiffEditor` needs to render. `language`
     /// is an extension-derived hint (e.g. `"typescript"`, `"rust"`); the
     /// client uses it to set Monaco's model language for syntax
-    /// highlighting.
+    /// highlighting. `unavailable` is set when the daemon refused a side
+    /// as binary or oversized, in which case `old` and `new` are both
+    /// empty; absent for an ordinary text diff.
     FileSnapshot {
         id: String,
         repo_id: String,
@@ -2939,6 +2962,8 @@ pub enum DaemonMessage {
         old: String,
         new: String,
         language: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unavailable: Option<SnapshotUnavailable>,
         #[serde(default)]
         worktree_path: Option<String>,
     },
@@ -5209,5 +5234,94 @@ mod tests {
         assert_eq!(decoded.supported_versions, vec![23, 22]);
         assert_eq!(decoded.supported(), vec![23, 22]);
         assert_eq!(decoded.protocol_version, 23);
+    }
+
+    #[test]
+    fn file_snapshot_unavailable_is_optional_and_absorbs_unknown_kinds() {
+        let plain: DaemonMessage = serde_json::from_str(
+            r#"{"type":"file_snapshot","id":"g1","repo_id":"r1","path":"a.txt","against":null,"old":"a\n","new":"b\n","language":"plaintext"}"#,
+        )
+        .expect("a snapshot without unavailable decodes");
+        assert!(
+            matches!(
+                &plain,
+                DaemonMessage::FileSnapshot { old, new, unavailable: None, .. }
+                    if old == "a\n" && new == "b\n"
+            ),
+            "{plain:?}"
+        );
+        let json = serde_json::to_string(&plain).expect("serialize");
+        assert!(!json.contains("unavailable"), "{json}");
+
+        for reason in [
+            SnapshotUnavailable::Binary,
+            SnapshotUnavailable::TooLarge {
+                bytes: 3 * 1024 * 1024,
+                limit: 2 * 1024 * 1024,
+            },
+        ] {
+            let message = DaemonMessage::FileSnapshot {
+                id: "g1".to_string(),
+                repo_id: "r1".to_string(),
+                path: "a.bin".to_string(),
+                against: Some("HEAD".to_string()),
+                old: String::new(),
+                new: String::new(),
+                language: "plaintext".to_string(),
+                unavailable: Some(reason.clone()),
+                worktree_path: None,
+            };
+            let json = serde_json::to_string(&message).expect("serialize");
+            let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(
+                    &decoded,
+                    DaemonMessage::FileSnapshot { unavailable: Some(got), .. } if got == &reason
+                ),
+                "{decoded:?}"
+            );
+        }
+
+        // The wire shape the TS mirror and the clients read.
+        let oversized: DaemonMessage = serde_json::from_str(
+            r#"{"type":"file_snapshot","id":"g1","repo_id":"r1","path":"a.bin","against":null,"old":"","new":"","language":"plaintext","unavailable":{"kind":"too_large","bytes":3145728,"limit":2097152}}"#,
+        )
+        .expect("decode a too_large reason");
+        assert!(
+            matches!(
+                &oversized,
+                DaemonMessage::FileSnapshot {
+                    unavailable: Some(SnapshotUnavailable::TooLarge {
+                        bytes: 3_145_728,
+                        limit: 2_097_152,
+                    }),
+                    ..
+                }
+            ),
+            "{oversized:?}"
+        );
+
+        // A reason from a newer daemon must not break the containing message,
+        // whether or not it carries fields this build has never heard of.
+        for reason in [
+            r#"{"kind":"moon_phase"}"#,
+            r#"{"kind":"lfs","oid":"x","n":3}"#,
+        ] {
+            let json = format!(
+                r#"{{"type":"file_snapshot","id":"g1","repo_id":"r1","path":"a.bin","against":null,"old":"","new":"","language":"plaintext","unavailable":{reason}}}"#
+            );
+            let unknown: DaemonMessage =
+                serde_json::from_str(&json).expect("decode an unknown reason");
+            assert!(
+                matches!(
+                    &unknown,
+                    DaemonMessage::FileSnapshot {
+                        unavailable: Some(SnapshotUnavailable::Unknown),
+                        ..
+                    }
+                ),
+                "{unknown:?}"
+            );
+        }
     }
 }
