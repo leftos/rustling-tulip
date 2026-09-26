@@ -6,20 +6,24 @@
 //! forwards the clicks.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FocusHandle, FontWeight, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window, anchored, deferred,
-    div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
+    Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, GitFileChange};
+use std::collections::HashMap;
 
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::sc_writes::{ScWrites, WriteOp, bucket_paths, row_paths};
+use crate::sc_writes::{
+    ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
+};
 use crate::session_menu::{backdrop, dialog_button, menu_frame, menu_item, menu_separator};
 use crate::source_control::{Bucket, Folder, Part, ScKey, ScModel, Status, build_tree};
 use crate::source_control_view::ScSectionRow;
-use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, RootView, TEXT, tooltip};
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, tooltip};
 
 /// A section body before its status arrives.
 pub const LOADING_TEXT: &str = "loading…";
@@ -30,6 +34,13 @@ const FAILED_PREFIX: &str = "couldn't load status: ";
 /// The discard confirm's warning.
 pub const DISCARD_BODY: &str = "Discarded edits cannot be recovered. Untracked files are removed; modified and deleted files are restored from the index.";
 const DISMISS_TIP: &str = "Dismiss error";
+/// The commit input's placeholder.
+pub const COMMIT_PLACEHOLDER: &str = "Commit message (Ctrl+Enter to commit)";
+/// The commit button's label, and its label while a commit is out.
+pub const COMMIT_LABEL: &str = "Commit";
+pub const COMMITTING_LABEL: &str = "Committing…";
+const COMMIT_MIN_ROWS: usize = 2;
+const COMMIT_MAX_ROWS: usize = 6;
 const ROW_PADDING: f32 = 8.0;
 const ROW_HEIGHT: f32 = 20.0;
 const INDENT_STEP: f32 = 12.0;
@@ -159,9 +170,26 @@ pub struct DiscardConfirmView {
     pub focused: &'static str,
 }
 
+/// A section's commit box: its input and the button under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScCommit {
+    pub input_selector: String,
+    pub selector: String,
+    /// `Commit`, or `Committing…` while a commit is out.
+    pub label: &'static str,
+    /// Something is staged, the draft is not blank and no write is out.
+    pub enabled: bool,
+    /// A commit is out, so the input is read-only.
+    pub committing: bool,
+    /// The app accent, `0xRRGGBB`, the enabled button is drawn in.
+    pub accent: u32,
+}
+
 /// An expanded section's body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ScChanges {
+    /// The commit box, above the banner, when it shows.
+    pub commit: Option<ScCommit>,
     pub banner: Option<String>,
     /// `loading…`, the failure or `working tree clean`, instead of buckets.
     pub body: Option<String>,
@@ -178,6 +206,9 @@ pub(crate) struct ChangesUi {
     pub(crate) discard: Option<DiscardConfirm>,
     /// The discard confirm's keyboard focus.
     pub(crate) discard_focus: FocusHandle,
+    /// Each section's commit input, by tree; the draft it holds is
+    /// mirrored in `writes`.
+    commit_inputs: HashMap<ScKey, CommitInput>,
 }
 
 impl ChangesUi {
@@ -187,8 +218,15 @@ impl ChangesUi {
             file_menu: None,
             discard: None,
             discard_focus,
+            commit_inputs: HashMap::new(),
         }
     }
+}
+
+/// A section's commit input and what listens to it.
+struct CommitInput {
+    input: Entity<TextInput>,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// The open right-click menu of a file row.
@@ -349,10 +387,24 @@ impl RootView {
     /// Folds a daemon message into the source-control stores. An `Error`
     /// answering one of their status requests marks its section failed and
     /// raises no toast; it returns `true`, since nothing else is owed. A
-    /// `GitWriteError` also raises a toast.
-    pub(crate) fn on_sc_message(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) -> bool {
+    /// `GitWriteError` also raises a toast. A commit box the message hides
+    /// while its input has the keyboard hands the keyboard to the active
+    /// pane.
+    pub(crate) fn on_sc_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let status_moved = self.sc.apply(msg);
-        if self.changes.writes.apply(msg) || status_moved {
+        let writes_moved = self.changes.writes.apply(msg);
+        if writes_moved {
+            self.sync_commit_inputs(cx);
+        }
+        if writes_moved || status_moved {
+            if self.hidden_commit_input_focused(window, cx) {
+                self.focus_active_pane(window, cx);
+            }
             cx.notify();
         }
         match msg {
@@ -390,6 +442,7 @@ impl RootView {
             }
         };
         ScChanges {
+            commit: self.sc_commit(key),
             banner,
             body,
             buckets,
@@ -430,7 +483,15 @@ impl RootView {
     }
 
     /// A section header click: folds or unfolds its Changes part, and saves.
-    pub(crate) fn toggle_sc_changes(&mut self, key: &ScKey, cx: &mut Context<Self>) {
+    /// Folding hides the commit input, and the push input unless the tree
+    /// is clean; the one of them holding the keyboard hands it to the
+    /// active pane.
+    pub(crate) fn toggle_sc_changes(
+        &mut self,
+        key: &ScKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let loaded = self
             .sc
             .status(key)
@@ -444,6 +505,12 @@ impl RootView {
             .set_sc_collapsed(key, Part::Changes, !collapsed)
         {
             self.save_ui();
+        }
+        let clean = loaded == Some(0);
+        let hidden_focused = self.commit_input_focused(key, window, cx)
+            || (!clean && self.stash_input_focused(key, window, cx));
+        if !collapsed && hidden_focused {
+            self.focus_active_pane(window, cx);
         }
         cx.notify();
     }
@@ -827,12 +894,248 @@ fn action_button(
         }))
 }
 
-/// An expanded section's body elements: the banner, the text line and the
-/// buckets with their trees.
-pub(crate) fn changes_body(row: &ScSectionRow, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+impl RootView {
+    /// The commit box of the section `key`, when it shows.
+    fn sc_commit(&self, key: &ScKey) -> Option<ScCommit> {
+        let writes = &self.changes.writes;
+        let staged = self.sc_has_staged(key);
+        let draft = writes.draft(key);
+        let pending = writes.pending(key);
+        if !commit_box_shown(staged, draft, pending) {
+            return None;
+        }
+        let id = key.id();
+        let committing = pending == Some(WriteOp::Commit);
+        Some(ScCommit {
+            input_selector: format!("sc-commit-input-{id}"),
+            selector: format!("sc-commit-{id}"),
+            label: if committing {
+                COMMITTING_LABEL
+            } else {
+                COMMIT_LABEL
+            },
+            enabled: commit_enabled(staged, draft, pending),
+            committing,
+            accent: self.sidebar.appearance(None).accent.value,
+        })
+    }
+
+    /// Whether the tree `key` has something staged.
+    fn sc_has_staged(&self, key: &ScKey) -> bool {
+        self.sc
+            .status(key)
+            .is_some_and(|status| !status.staged.is_empty())
+    }
+
+    /// Whether the tree `key` has a commit out.
+    pub(crate) fn sc_committing(&self, key: &ScKey) -> bool {
+        self.changes.writes.pending(key) == Some(WriteOp::Commit)
+    }
+
+    /// Whether the commit input of the section `key` has the keyboard.
+    pub(crate) fn commit_input_focused(&self, key: &ScKey, window: &Window, cx: &App) -> bool {
+        self.changes
+            .commit_inputs
+            .get(key)
+            .is_some_and(|entry| entry.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Whether a commit input whose box no longer shows has the keyboard.
+    fn hidden_commit_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.changes
+            .commit_inputs
+            .keys()
+            .any(|key| self.sc_commit(key).is_none() && self.commit_input_focused(key, window, cx))
+    }
+
+    /// Drops the commit inputs and drafts of trees that are no longer
+    /// `sections`; returns whether the input holding the keyboard went, so
+    /// the caller hands the keyboard back.
+    pub(crate) fn drop_stale_commit_ui(
+        &mut self,
+        sections: &[ScKey],
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let focused_gone = self
+            .changes
+            .commit_inputs
+            .keys()
+            .any(|key| !sections.contains(key) && self.commit_input_focused(key, window, cx));
+        self.changes
+            .commit_inputs
+            .retain(|key, _| sections.contains(key));
+        self.changes.writes.retain_drafts(sections);
+        focused_gone
+    }
+
+    /// Gives every section of `sections` that has none a commit input.
+    /// Ctrl+Enter commits, Esc hands the keyboard to the active pane, and
+    /// every edit is mirrored into the section's draft.
+    pub(crate) fn make_commit_inputs(
+        &mut self,
+        sections: &[ScKey],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for section in sections {
+            if self.changes.commit_inputs.contains_key(section) {
+                continue;
+            }
+            let draft = self.changes.writes.draft(section).to_owned();
+            let input = cx.new(|cx| {
+                TextInput::multi_line(draft, COMMIT_PLACEHOLDER, cx)
+                    .with_rows(COMMIT_MIN_ROWS, COMMIT_MAX_ROWS)
+            });
+            let key = section.clone();
+            let keys = cx.subscribe_in(
+                &input,
+                window,
+                move |this, _, event: &TextInputEvent, window, cx| match event {
+                    TextInputEvent::Submit => this.commit_changes(&key, cx),
+                    TextInputEvent::Cancel => this.focus_active_pane(window, cx),
+                },
+            );
+            let key = section.clone();
+            let edits = cx.subscribe_in(
+                &input,
+                window,
+                move |this, input, _: &TextChanged, _, cx| {
+                    let text = input.read(cx).text().to_owned();
+                    if this.changes.writes.set_draft(&key, text) {
+                        cx.notify();
+                    }
+                },
+            );
+            self.changes.commit_inputs.insert(
+                section.clone(),
+                CommitInput {
+                    input,
+                    _subscriptions: vec![keys, edits],
+                },
+            );
+        }
+    }
+
+    /// The commit input of the section `key`, once made.
+    pub(crate) fn commit_input(&self, key: &ScKey) -> Option<Entity<TextInput>> {
+        self.changes
+            .commit_inputs
+            .get(key)
+            .map(|entry| entry.input.clone())
+    }
+
+    /// The text in the commit input of the section `key`.
+    #[must_use]
+    pub fn sc_commit_input(&self, key: &ScKey, cx: &App) -> Option<String> {
+        self.changes
+            .commit_inputs
+            .get(key)
+            .map(|entry| entry.input.read(cx).text().to_owned())
+    }
+
+    /// Brings every commit input in line with the store: its text with the
+    /// draft, and read-only exactly while its tree has a commit out.
+    pub(crate) fn sync_commit_inputs(&self, cx: &mut Context<Self>) {
+        for (key, entry) in &self.changes.commit_inputs {
+            let draft = self.changes.writes.draft(key);
+            let read_only = self.sc_committing(key);
+            entry.input.update(cx, |input, cx| {
+                if input.text() != draft {
+                    input.set_text(draft.to_owned(), cx);
+                }
+                input.set_read_only(read_only, cx);
+            });
+        }
+    }
+
+    /// Ctrl+Enter in the commit input or its button: sends the trimmed
+    /// draft for the tree `key` and marks it committing, when something is
+    /// staged, the draft is not blank and no write is out.
+    fn commit_changes(&mut self, key: &ScKey, cx: &mut Context<Self>) {
+        let draft = self.changes.writes.draft(key);
+        let pending = self.changes.writes.pending(key);
+        if !commit_enabled(self.sc_has_staged(key), draft, pending) {
+            return;
+        }
+        let message = draft.trim().to_owned();
+        self.send(ClientMessage::CommitRepo {
+            repo_id: key.repo_id.clone(),
+            message,
+            worktree_path: key.worktree.clone(),
+        });
+        self.changes.writes.start(key.clone(), WriteOp::Commit);
+        self.sync_commit_inputs(cx);
+        cx.notify();
+    }
+}
+
+/// The commit box: the input, then the accent Commit button right-aligned
+/// under it. A disabled button is greyed and takes no click; the input is
+/// dimmed while a commit is out.
+fn commit_box(
+    key: &ScKey,
+    commit: &ScCommit,
+    input: Option<Entity<TextInput>>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let input_name = commit.input_selector.clone();
+    let field = div()
+        .debug_selector(|| input_name)
+        .px(px(6.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(BORDER))
+        .when(commit.committing, |field| field.opacity(0.5))
+        .children(input);
+    let name = commit.selector.clone();
+    let button = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex_none()
+        .px(px(10.0))
+        .py(px(1.0))
+        .rounded(px(3.0))
+        .child(commit.label);
+    let button = if commit.enabled {
+        let key = key.clone();
+        button
+            .bg(gpui::rgb(commit.accent))
+            .text_color(gpui::rgb(PANEL_BG))
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.85))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                this.commit_changes(&key, cx);
+            }))
+    } else {
+        button.bg(gpui::rgb(BORDER)).text_color(gpui::rgb(MUTED))
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .px(px(ROW_PADDING))
+        .pt(px(2.0))
+        .pb(px(6.0))
+        .child(field)
+        .child(div().flex().justify_end().child(button))
+}
+
+/// An expanded section's body elements: the commit box, the banner, the
+/// text line and the buckets with their trees.
+pub(crate) fn changes_body(
+    row: &ScSectionRow,
+    commit_input: Option<Entity<TextInput>>,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
     let key = &row.key;
     let id = &row.id;
     let mut out = Vec::new();
+    if let Some(commit) = &row.commit {
+        out.push(commit_box(key, commit, commit_input, cx).into_any_element());
+    }
     if let Some(text) = &row.banner {
         out.push(banner_view(key, id, text.clone(), cx).into_any_element());
     }

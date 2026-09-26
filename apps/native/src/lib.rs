@@ -1128,7 +1128,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         self.on_diff_message(msg, window, cx)
-            || self.on_sc_message(msg, cx)
+            || self.on_sc_message(msg, window, cx)
             || self.on_stash_message(msg, window, cx)
             || self.apply_history(msg, cx)
     }

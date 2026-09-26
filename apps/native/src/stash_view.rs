@@ -4,8 +4,8 @@
 //! renders it and forwards the clicks.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, FontWeight,
-    Keystroke, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
+    FontWeight, Keystroke, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, GitStash};
 use std::collections::{HashMap, HashSet};
@@ -218,7 +218,7 @@ impl RootView {
             } else {
                 STASH_LABEL
             },
-            enabled,
+            enabled: enabled && !self.sc_committing(key),
         });
         if let Some(reason) = model.failure(repo) {
             part.body = Some(format!("{FAILED_PREFIX}{reason}"));
@@ -286,9 +286,19 @@ impl RootView {
     }
 
     /// Drops the push inputs and the drop confirm of trees that are no
-    /// longer `sections`; returns whether the confirm went, so the caller
-    /// hands the keyboard back.
-    pub(crate) fn drop_stale_stash_ui(&mut self, sections: &[ScKey]) -> bool {
+    /// longer `sections`; returns whether the confirm or the input holding
+    /// the keyboard went, so the caller hands the keyboard back.
+    pub(crate) fn drop_stale_stash_ui(
+        &mut self,
+        sections: &[ScKey],
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let focused_gone = self
+            .stash
+            .inputs
+            .keys()
+            .any(|key| !sections.contains(key) && self.stash_input_focused(key, window, cx));
         self.stash.inputs.retain(|key, _| sections.contains(key));
         let stale = self
             .stash
@@ -298,7 +308,15 @@ impl RootView {
         if stale {
             self.stash.drop = None;
         }
-        stale
+        stale || focused_gone
+    }
+
+    /// Whether the push input of the section `key` has the keyboard.
+    pub(crate) fn stash_input_focused(&self, key: &ScKey, window: &Window, cx: &App) -> bool {
+        self.stash
+            .inputs
+            .get(key)
+            .is_some_and(|entry| entry.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Gives every section of `sections` that has none a push input.
@@ -363,9 +381,9 @@ impl RootView {
 
     /// Enter in the push input or its button: sends the trimmed message for
     /// the tree `key`, marks the repo pending and clears the input. A repo
-    /// with a stash write out takes nothing.
+    /// with a stash write out, or a tree with a commit out, takes nothing.
     fn push_stash(&mut self, key: &ScKey, cx: &mut Context<Self>) {
-        if self.stash.model.pending(&key.repo_id).is_some() {
+        if self.stash.model.pending(&key.repo_id).is_some() || self.sc_committing(key) {
             return;
         }
         let Some(input) = self.stash_input(key) else {

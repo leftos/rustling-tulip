@@ -144,7 +144,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Two modes: per-member sections for the focused session, or a single repo (follows the active pane or a saved dropdown choice) — `source-control/SourceControlSidebar.tsx`
 - [x] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx`
 - [x] Staged / Changes folder trees with M/A/D/R/U status; per-file hover buttons (unstage; discard, stage); Unstage all / Discard all / Stage all — `ChangesTree.tsx`, `utils/changesTree.ts`
-- [ ] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
+- [x] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
 - [x] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx`
 - [x] Stashes: collapsible, stash with optional message, pop / apply / drop, live updates — `StashesSection.tsx`
 - [x] History: 50 at a time with "load more", hover card (sha, author, date); selecting a commit shows header, body and file list — `SourceControlSidebar.tsx` `HistoryView`, `DiffView`

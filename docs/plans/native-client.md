@@ -132,7 +132,14 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
 
     Original text: Staged / Changes buckets, per-file hover buttons, Stage all / Unstage all / Discard all, the right-click menu, the discard confirm listing the paths, the pending state, and `GitWriteError` as a banner plus a toast. Needs P3.3. Also: a `RepoStatus` that fails is answered with a keyless `Error`, so its key stays requested and its section stays on `loading…` until Refresh or a reconnect; settle that here.
   - [x] **P3.5a Multi-line `TextInput`.** As built: `TextInput::multi_line` with `with_rows(min, max)` (default 2 to 6), wrapped to the width, scrolling past the maximum. Enter inserts a newline and Ctrl+Enter submits. Up / Down keep the goal column, and Home / End work per visual row. Paste and `set_text` normalise CRLF. `set_read_only` works in both modes. Single-line inputs are unchanged, apart from drawing a stray line break as a space.
-  - [ ] **P3.5b Commit box** (split from P3.5 on 2026-09-26; decided by the orchestrator):
+  - [x] **P3.5b Commit box.** As built:
+    - The draft lives in `ScWrites`.
+    - A pending commit survives a `RepoStatus`; it is cleared by `CommitOk`, by a commit's own `GitWriteError`, by Refresh or by `Welcome`.
+    - While a commit is out, stash push is disabled.
+    - The keyboard returns to the pane when the box hides, when its section folds, or when the section leaves.
+    - The daemon's git-write errors read `git <subcommand> failed: <stderr, else stdout, else exit status>`.
+
+    Decided (split from P3.5 on 2026-09-26; decided by the orchestrator):
     - It shows as in Tauri: when something is staged, a draft exists, or a commit is out.
     - The draft survives folding, activity switches and reconnects, and is dropped when its section leaves.
     - The input is 2 to 6 rows, read-only while committing. Esc gives the keyboard back.
@@ -167,6 +174,11 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     Original text: File clicks send `OpenDiffTab` with the worktree path. Diff tabs render the P3.1 view with the path, "worktree vs index" / "vs HEAD" / "@ sha", a whitespace toggle (saved), a change count, first / previous / next / last (wrapping), and loading and error states. Needs P3.1 and P3.4.
   - [x] **P3.9 Daemon diff hardening.** `16fd93b` dropped it by accident: it was committed from an older base and undid `312260c` byte for byte. Restored 2026-09-26. As built (312260c): a side is refused when binary (a NUL in the first 8000 bytes, or not UTF-8) or over 2 MiB, with the reason in `FileSnapshot.unavailable`; a committed blob's size is checked before it is read. Original text: `file_snapshot` detects binary files and caps size, using additive fields on `FileSnapshot`, so the diff tab can show "Binary file" or "File too large" instead of garbage. Independent.
   - [x] **P3.8b Keep the session's sections while a diff tab is active.** As built: `RootView.last_focused_session` is remembered on every pane focus and tab change, used by `sc_session` when the active tab isn't a terminal grid, and forgotten when the session goes. Original text: Activating a diff tab leaves no session pane focused, so `sections()` falls back to the repos' main trees. The session's worktree sections disappear, and any file menu, discard confirm or drop confirm on them closes. Orchestrator ruling (2026-09-26): while a non-terminal tab is active, the panel keeps the last focused session's sections. Also add `run_confirm` to `keyboard_free` (`lib.rs`), so a pending diff activation can't take the keyboard from it.
+  - [ ] **P3.5c Two more stranded-keyboard paths.** Both leave keys going nowhere:
+    - Backspacing the commit draft to empty with nothing staged hides the box while its input still has the keyboard.
+    - Folding the Stashes part (`toggle_sc_stashes`) while its push input has the keyboard.
+
+    Hand the keyboard to the active pane in both cases, as P3.5b does for the other paths, and give each a UI spec.
   - [ ] **P3.10 Syntax highlighting in the diff.** syntect with `default-fancy` (no C), by the daemon's `language`; a separate item because of its binary-size cost. Needs P3.8.
 - [ ] **Phase 4 — flows and settings:** preset launch wizard, worktree manager, cleanup-failed dialog, first-connect layout chooser, settings modal, OS notifications and attention, toasts beyond P1.7c's error and spawn toasts, the spawn dialog's headless mode, Advanced section, spawn preview, collision radios and branch combobox, undo shelf, workspace creator, VS Code workspace prompt, headless view.
 - [ ] **Phase 5 — windows and drag-and-drop:** pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder.

@@ -28,10 +28,32 @@ async fn run_git(repo: &Path, args: &[&str]) -> anyhow::Result<String> {
         .await
         .with_context(|| format!("spawning git {args:?}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("git {args:?} failed: {stderr}"));
+        let subcommand = args.first().copied().unwrap_or_default();
+        return Err(anyhow!(
+            "git {subcommand} failed: {}",
+            failure_text(&output)
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// What a failed git run said: its trimmed stderr, else its trimmed stdout
+/// (a commit with nothing staged, or hook output, lands there), else its
+/// exit status. The args are never echoed, so a commit message stays out
+/// of the error.
+fn failure_text(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        return stderr.trim().to_owned();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        return stdout.trim().to_owned();
+    }
+    output.status.code().map_or_else(
+        || output.status.to_string(),
+        |code| format!("exit status {code}"),
+    )
 }
 
 /// `git add -- <path>...`. Caller is responsible for filtering empty inputs.
@@ -223,5 +245,37 @@ mod tests {
     fn parse_stash_line_rejects_short() {
         assert!(parse_stash_line("only-one-field").is_none());
         assert!(parse_stash_line("two\u{1f}fields").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_names_the_subcommand_and_shows_what_git_printed() {
+        let root =
+            std::env::temp_dir().join(format!("rt-git-write-{}-empty-commit", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create repo dir");
+        for args in [
+            &["init"][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "Test"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            run_git(&root, args).await.expect("set up the scratch repo");
+        }
+
+        let err = commit(&root, "a secret subject line")
+            .await
+            .expect_err("nothing is staged");
+        let text = format!("{err:#}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(text.starts_with("git commit failed: "), "{text}");
+        assert!(
+            text.contains("nothing to commit"),
+            "git prints this on stdout: {text}"
+        );
+        assert!(
+            !text.contains("a secret subject line"),
+            "the args are not echoed: {text}"
+        );
     }
 }

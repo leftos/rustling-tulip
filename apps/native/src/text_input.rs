@@ -168,13 +168,6 @@ impl TextInput {
 
     /// A multi-line input holding `content`, all of it selected, two to six
     /// rows tall until [`Self::with_rows`] says otherwise.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no view has a multi-line input yet; the tests build one"
-        )
-    )]
     pub fn multi_line(
         content: impl Into<SharedString>,
         placeholder: impl Into<SharedString>,
@@ -215,13 +208,6 @@ impl TextInput {
     /// `min_rows` to `max_rows` and scrolls past that. `min_rows` is at least
     /// one and `max_rows` at least `min_rows`. A single-line input stays one
     /// row whatever this says.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no view has a multi-line input yet; the tests build one"
-        )
-    )]
     #[must_use]
     pub fn with_rows(mut self, min_rows: usize, max_rows: usize) -> Self {
         if self.mode.is_multi_line() {
@@ -237,13 +223,6 @@ impl TextInput {
     /// Makes the input read-only, or editable again. A read-only input
     /// ignores typing, IME, paste, cut and deletion; the caret still moves,
     /// and selecting and copying still work.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no view has a read-only input yet; the tests make one"
-        )
-    )]
     /// Going read-only mid-composition drops the half-composed text, a
     /// [`TextChanged`] like the composing was.
     pub fn set_read_only(&mut self, read_only: bool, cx: &mut Context<Self>) {

@@ -1,6 +1,7 @@
 //! The source-control writes in flight and the errors they leave: which
-//! trees have a stage, unstage or discard out, the banner a failed git
-//! write leaves on its section, and the paths a changes-tree row sends.
+//! trees have a stage, unstage, discard or commit out, the banner a failed
+//! git write leaves on its section, each tree's commit message draft, and
+//! the paths a changes-tree row sends.
 //!
 //! Plain Rust, so every rule is unit-tested; the changes view renders it.
 
@@ -9,12 +10,16 @@ use std::collections::{HashMap, HashSet};
 
 use crate::source_control::ScKey;
 
+/// The `operation` a `GitWriteError` for a commit names.
+const COMMIT_OPERATION: &str = "commit";
+
 /// A git write the changes view sends for one tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOp {
     Stage,
     Unstage,
     Discard,
+    Commit,
 }
 
 /// The writes out per tree and the banners failed writes left.
@@ -22,29 +27,49 @@ pub enum WriteOp {
 pub struct ScWrites {
     pending: HashMap<ScKey, WriteOp>,
     banners: HashMap<ScKey, String>,
+    /// Trees whose banner a `GitWriteError` set after their last commit was
+    /// sent; `CommitOk` keeps such a banner.
+    banner_after_commit: HashSet<ScKey>,
+    /// The commit message typed per tree.
+    drafts: HashMap<ScKey, String>,
+}
+
+/// Whether Commit may send: something is staged, the trimmed draft is not
+/// empty, and the tree has no write of any kind out.
+#[must_use]
+pub fn commit_enabled(staged: bool, draft: &str, pending: Option<WriteOp>) -> bool {
+    staged && !draft.trim().is_empty() && pending.is_none()
+}
+
+/// Whether a section shows its commit box: something is staged, the draft
+/// is not blank, or a commit is out.
+#[must_use]
+pub fn commit_box_shown(staged: bool, draft: &str, pending: Option<WriteOp>) -> bool {
+    staged || !draft.trim().is_empty() || pending == Some(WriteOp::Commit)
 }
 
 impl ScWrites {
     /// Fold a daemon message in; `true` when what the view shows changed. A
-    /// status for a tree ends its pending write; a `GitWriteError` ends it
-    /// too and sets the tree's banner to `<operation>: <error>`, replacing
-    /// any; a new connection forgets both.
+    /// status for a tree ends its pending write, unless that is a commit; a
+    /// `GitWriteError` ends it too, a commit only when the error is the
+    /// commit's own, and sets the tree's banner to `<operation>: <error>`,
+    /// replacing any. `CommitOk` ends the commit, empties the draft and
+    /// drops a banner set before the commit was sent. A new connection
+    /// forgets the writes and the banners, not the drafts.
     pub fn apply(&mut self, msg: &DaemonMessage) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
                 let changed = !self.pending.is_empty() || !self.banners.is_empty();
                 self.pending.clear();
                 self.banners.clear();
+                self.banner_after_commit.clear();
                 changed
             }
             DaemonMessage::RepoStatus {
                 repo_id,
                 worktree_path,
                 ..
-            } => self
-                .pending
-                .remove(&tree_key(repo_id, worktree_path.as_ref()))
-                .is_some(),
+            } => self.end_unless_commit(&tree_key(repo_id, worktree_path.as_ref())),
             DaemonMessage::GitWriteError {
                 repo_id,
                 operation,
@@ -52,16 +77,45 @@ impl ScWrites {
                 worktree_path,
             } => {
                 let key = tree_key(repo_id, worktree_path.as_ref());
-                self.pending.remove(&key);
-                self.banners.insert(key, format!("{operation}: {error}"));
+                if operation == COMMIT_OPERATION {
+                    self.pending.remove(&key);
+                } else {
+                    self.end_unless_commit(&key);
+                }
+                self.banners
+                    .insert(key.clone(), format!("{operation}: {error}"));
+                self.banner_after_commit.insert(key);
                 true
             }
+            DaemonMessage::CommitOk {
+                repo_id,
+                worktree_path,
+                ..
+            } => self.commit_landed(&tree_key(repo_id, worktree_path.as_ref())),
             _ => false,
         }
     }
 
+    /// `CommitOk` for `key`; returns whether anything changed.
+    fn commit_landed(&mut self, key: &ScKey) -> bool {
+        let ended = self.pending.get(key) == Some(&WriteOp::Commit);
+        if ended {
+            self.pending.remove(key);
+        }
+        let banner_gone =
+            !self.banner_after_commit.remove(key) && self.banners.remove(key).is_some();
+        let draft_gone = self
+            .drafts
+            .remove(key)
+            .is_some_and(|draft| !draft.is_empty());
+        ended || banner_gone || draft_gone
+    }
+
     /// Record that `op` was sent for `key`.
     pub fn start(&mut self, key: ScKey, op: WriteOp) {
+        if op == WriteOp::Commit {
+            self.banner_after_commit.remove(&key);
+        }
         self.pending.insert(key, op);
     }
 
@@ -71,10 +125,41 @@ impl ScWrites {
         self.pending.get(key).copied()
     }
 
-    /// Forget the write out for `key`, as Refresh does; returns whether
-    /// there was one.
+    /// Forget the write out for `key`, a commit included, as Refresh does;
+    /// returns whether one went.
     pub fn clear_pending(&mut self, key: &ScKey) -> bool {
         self.pending.remove(key).is_some()
+    }
+
+    /// Ends the write out for `key` unless it is a commit, which only its
+    /// own answer, Refresh or a new connection ends; returns whether one
+    /// went.
+    fn end_unless_commit(&mut self, key: &ScKey) -> bool {
+        match self.pending.get(key) {
+            None | Some(WriteOp::Commit) => false,
+            Some(_) => self.pending.remove(key).is_some(),
+        }
+    }
+
+    /// The commit message typed for `key`, empty when none.
+    #[must_use]
+    pub fn draft(&self, key: &ScKey) -> &str {
+        self.drafts.get(key).map_or("", String::as_str)
+    }
+
+    /// Records the commit message typed for `key`; returns whether it
+    /// changed.
+    pub fn set_draft(&mut self, key: &ScKey, text: String) -> bool {
+        if self.draft(key) == text {
+            return false;
+        }
+        self.drafts.insert(key.clone(), text);
+        true
+    }
+
+    /// Drops the drafts of trees that are no longer sections.
+    pub fn retain_drafts(&mut self, sections: &[ScKey]) {
+        self.drafts.retain(|key, _| sections.contains(key));
     }
 
     /// The banner a failed write left on `key`'s section.
@@ -93,6 +178,8 @@ impl ScWrites {
     pub fn retain_banners(&mut self, sections: &[ScKey]) -> bool {
         let before = self.banners.len();
         self.banners.retain(|key, _| sections.contains(key));
+        self.banner_after_commit
+            .retain(|key| sections.contains(key));
         before != self.banners.len()
     }
 }
@@ -266,6 +353,133 @@ mod tests {
             "its key stopped being a section"
         );
         assert!(writes.banner(&wt).is_some());
+    }
+
+    fn commit_ok(repo_id: &str, worktree: Option<&str>) -> DaemonMessage {
+        DaemonMessage::CommitOk {
+            repo_id: repo_id.to_owned(),
+            sha: "0123456789abcdef".to_owned(),
+            short_sha: "0123456".to_owned(),
+            worktree_path: worktree.map(str::to_owned),
+        }
+    }
+
+    /// `key` with `draft` typed and a commit of it out.
+    fn committing(draft: &str) -> (ScWrites, ScKey) {
+        let mut writes = ScWrites::default();
+        let main = key("r1", None);
+        writes.set_draft(&main, draft.to_owned());
+        writes.start(main.clone(), WriteOp::Commit);
+        (writes, main)
+    }
+
+    #[test]
+    fn a_commit_out_survives_a_status_and_refresh_clears_it() {
+        let (mut writes, main) = committing("fix: it");
+        assert!(
+            !writes.apply(&status("r1", None)),
+            "the status a commit broadcasts does not end it"
+        );
+        assert_eq!(writes.pending(&main), Some(WriteOp::Commit));
+        assert!(writes.clear_pending(&main), "Refresh does");
+        assert_eq!(writes.pending(&main), None);
+    }
+
+    #[test]
+    fn a_stash_error_leaves_a_commit_out() {
+        let (mut writes, main) = committing("fix: it");
+        assert!(writes.apply(&write_error("r1", None, "stash_push", "locked")));
+        assert_eq!(writes.pending(&main), Some(WriteOp::Commit));
+        assert_eq!(writes.banner(&main), Some("stash_push: locked"));
+
+        writes.apply(&write_error("r1", None, "commit", "hook failed"));
+        assert_eq!(
+            writes.pending(&main),
+            None,
+            "the commit's own error ends it"
+        );
+    }
+
+    #[test]
+    fn commit_ok_clears_the_commit_its_draft_and_an_older_banner() {
+        let mut writes = ScWrites::default();
+        let main = key("r1", None);
+        writes.apply(&write_error("r1", None, "stage", "index.lock exists"));
+        writes.set_draft(&main, "fix: it".to_owned());
+        writes.start(main.clone(), WriteOp::Commit);
+
+        assert!(
+            !writes.apply(&commit_ok("r1", Some("D:\\r1-wt"))),
+            "another tree"
+        );
+        assert!(writes.apply(&commit_ok("r1", None)));
+        assert_eq!(writes.pending(&main), None);
+        assert_eq!(writes.draft(&main), "");
+        assert_eq!(
+            writes.banner(&main),
+            None,
+            "a banner from before the commit goes"
+        );
+    }
+
+    #[test]
+    fn an_error_then_ok_keeps_the_refresh_banner() {
+        let (mut writes, main) = committing("fix: it");
+        writes.apply(&write_error(
+            "r1",
+            None,
+            "commit",
+            "status refresh failed: boom",
+        ));
+        assert_eq!(writes.pending(&main), None);
+        assert!(writes.apply(&commit_ok("r1", None)));
+        assert_eq!(writes.draft(&main), "", "the commit landed");
+        assert_eq!(
+            writes.banner(&main),
+            Some("commit: status refresh failed: boom"),
+            "the banner set after the commit was sent stays"
+        );
+    }
+
+    #[test]
+    fn a_commit_error_keeps_the_draft() {
+        let (mut writes, main) = committing("fix: it");
+        assert!(writes.apply(&write_error("r1", None, "commit", "hook failed")));
+        assert_eq!(writes.pending(&main), None);
+        assert_eq!(writes.draft(&main), "fix: it");
+        assert_eq!(writes.banner(&main), Some("commit: hook failed"));
+    }
+
+    #[test]
+    fn a_welcome_clears_the_commit_but_not_the_draft() {
+        let (mut writes, main) = committing("fix: it");
+        assert!(writes.apply(&welcome()));
+        assert_eq!(writes.pending(&main), None);
+        assert_eq!(writes.draft(&main), "fix: it");
+    }
+
+    #[test]
+    fn commit_needs_staged_changes_a_message_and_no_write_out() {
+        assert!(commit_enabled(true, "fix: it", None));
+        assert!(!commit_enabled(false, "fix: it", None), "nothing staged");
+        assert!(!commit_enabled(true, "", None), "no message");
+        assert!(!commit_enabled(true, " \n\t", None), "a blank message");
+        for op in [
+            WriteOp::Stage,
+            WriteOp::Unstage,
+            WriteOp::Discard,
+            WriteOp::Commit,
+        ] {
+            assert!(!commit_enabled(true, "fix: it", Some(op)), "{op:?} is out");
+        }
+
+        assert!(commit_box_shown(true, "", None), "something staged");
+        assert!(commit_box_shown(false, "wip", None), "a draft");
+        assert!(
+            commit_box_shown(false, "", Some(WriteOp::Commit)),
+            "a commit out"
+        );
+        assert!(!commit_box_shown(false, "  ", Some(WriteOp::Stage)));
     }
 
     #[test]

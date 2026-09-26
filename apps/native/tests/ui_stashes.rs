@@ -365,6 +365,42 @@ fn enter_in_the_input_sends_a_trimmed_push_and_clears_it(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+fn folding_the_section_hands_the_stash_input_s_keyboard_to_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let worktree = "C:/wt/r1";
+    let s1 = session("s1").members(&[("r1", "feat", worktree)]).build();
+    let mut fixture = Fixture::single(s1);
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("activity-source-control");
+    h.send(
+        serde_json::from_value(json!({
+            "type": "repo_status",
+            "repo_id": "r1",
+            "index_changes": [],
+            "worktree_changes": [{ "path": "b.rs", "status": "M", "from_path": null }],
+            "worktree_path": worktree,
+        }))
+        .expect("status fixture"),
+    );
+    h.send(stashes_from(Some(worktree), &[]));
+    h.click_on(&format!("sc-stashes-r1::{worktree}"));
+    h.click_on(&format!("sc-stash-input-r1::{worktree}"));
+    type_text(&mut h, "wip");
+    h.sent_input("s1");
+
+    h.click_on(&format!("sc-section-r1::{worktree}"));
+    assert!(
+        h.root(|root, _| root.source_control_panel()).sections[0]
+            .stashes
+            .is_none(),
+        "a folded dirty section hides its Stashes part"
+    );
+    h.keys("x");
+    assert_eq!(h.sent_input("s1"), b"x", "the pane has the keyboard");
+}
+
+#[gpui::test]
 fn pop_and_apply_send(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let (mut h, _) = open_expanded(cx, &dir);

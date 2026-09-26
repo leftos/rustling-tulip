@@ -4,13 +4,13 @@
 //! asks the daemon for the statuses the panel and the rail's badge read.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, MouseDownEvent, SharedString,
-    Stateful, Window, anchored, deferred, div, point, prelude::*, px, svg,
+    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent,
+    SharedString, Stateful, Window, anchored, deferred, div, point, prelude::*, px, svg,
 };
 use protocol::{ClientMessage, SessionMember};
 
 use crate::assets::REFRESH_ICON;
-use crate::changes_view::{ScBucketRow, ScChanges, caret, changes_body};
+use crate::changes_view::{ScBucketRow, ScChanges, ScCommit, caret, changes_body};
 use crate::history::section_title;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
@@ -54,6 +54,8 @@ pub struct ScSectionRow {
     pub count: Option<usize>,
     /// Whether its Changes part is folded, which hides the body below.
     pub collapsed: bool,
+    /// The commit box, first in the unfolded body, when it shows.
+    pub commit: Option<ScCommit>,
     /// `<operation>: <error>` of the last git write that failed.
     pub banner: Option<String>,
     /// `loading…`, `couldn't load status: <reason>` or `working tree
@@ -292,6 +294,7 @@ impl RootView {
             title,
             count: (loaded && count > 0).then_some(count),
             collapsed,
+            commit: changes.commit,
             banner: changes.banner,
             body: changes.body,
             buckets: changes.buckets,
@@ -302,9 +305,10 @@ impl RootView {
     /// Asks for the status of every tree the panel or the badge reads that
     /// has none and no request out: the current sections, and every
     /// registered repo's main tree; and the stash list of every section's
-    /// repo that has none. The file menu, the discard confirm and the drop
-    /// confirm of a tree that left the sections go; returns whether one
-    /// did, so the caller hands the keyboard back.
+    /// repo that has none. The file menu, the discard confirm, the drop
+    /// confirm and the commit and push inputs of a tree that left the
+    /// sections go; returns whether a menu, a confirm or the input holding
+    /// the keyboard did, so the caller hands the keyboard back.
     pub(crate) fn seed_source_control(
         &mut self,
         window: &mut Window,
@@ -316,9 +320,11 @@ impl RootView {
             .map(|section| section.key)
             .collect();
         let dropped_changes = self.drop_stale_sc_changes(&wanted);
-        let dropped_stash = self.drop_stale_stash_ui(&wanted);
+        let dropped_stash = self.drop_stale_stash_ui(&wanted, window, cx);
         self.make_stash_inputs(&wanted, window, cx);
-        let dropped = dropped_changes || dropped_stash;
+        let dropped_commit = self.drop_stale_commit_ui(&wanted, window, cx);
+        self.make_commit_inputs(&wanted, window, cx);
+        let dropped = dropped_changes || dropped_stash || dropped_commit;
         self.seed_stashes(&wanted);
         wanted.extend(self.sc_main_keys());
         for key in self.sc.wanted_missing(&wanted) {
@@ -330,9 +336,10 @@ impl RootView {
 
     /// Asks again for every current section's status, a failed one
     /// included, its repo's stash list and its history, and forgets the
-    /// section's pending write and its repo's pending stash write; the
-    /// stored ones stay on screen until the answers replace them.
-    fn refresh_source_control(&mut self) {
+    /// section's pending write, a commit included, and its repo's pending
+    /// stash write; the stored ones stay on screen until the answers
+    /// replace them.
+    fn refresh_source_control(&mut self, cx: &mut Context<Self>) {
         let keys: Vec<ScKey> = self
             .sc_sections()
             .into_iter()
@@ -342,6 +349,7 @@ impl RootView {
             self.changes.writes.clear_pending(key);
             self.request_sc_status(key.clone());
         }
+        self.sync_commit_inputs(cx);
         self.refresh_stashes(&keys);
         self.refresh_history();
     }
@@ -446,7 +454,13 @@ impl RootView {
                 panel
                     .sections
                     .iter()
-                    .map(|row| section_view(row, self.stash_input(&row.key), cx))
+                    .map(|row| {
+                        let inputs = SectionInputs {
+                            commit: self.commit_input(&row.key),
+                            stash: self.stash_input(&row.key),
+                        };
+                        section_view(row, inputs, cx)
+                    })
                     .collect(),
                 cx,
             ),
@@ -578,7 +592,7 @@ fn refresh_button(cx: &mut Context<RootView>) -> Stateful<Div> {
         )
         .tooltip(tooltip(REFRESH_TIP))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.refresh_source_control();
+            this.refresh_source_control(cx);
             cx.notify();
         }))
 }
@@ -598,11 +612,17 @@ fn context_line(context: ScContext) -> Stateful<Div> {
         .when_some(context.tooltip, |line, tip| line.tooltip(tooltip(tip)))
 }
 
+/// The inputs a section's body holds, once made.
+struct SectionInputs {
+    commit: Option<Entity<TextInput>>,
+    stash: Option<Entity<TextInput>>,
+}
+
 /// A section's header row, which folds its Changes part, and its body:
 /// the changes unless folded, then the Stashes part when it shows.
 fn section_view(
     row: &ScSectionRow,
-    stash_input: Option<Entity<TextInput>>,
+    inputs: SectionInputs,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let name = format!("sc-section-{}", row.id);
@@ -618,8 +638,20 @@ fn section_view(
         .px(px(ROW_PADDING))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.toggle_sc_changes(&key, cx);
+        .on_mouse_down(MouseButton::Left, {
+            let key = key.clone();
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                // The panel would take the keyboard on this press; the
+                // section's input keeps it, so the fold can hand it on.
+                if this.commit_input_focused(&key, window, cx)
+                    || this.stash_input_focused(&key, window, cx)
+                {
+                    window.prevent_default();
+                }
+            })
+        })
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.toggle_sc_changes(&key, window, cx);
         }))
         .child(caret(row.collapsed))
         .child(
@@ -645,8 +677,8 @@ fn section_view(
             .flex()
             .flex_col()
             .pb(px(6.0))
-            .children(changes_body(row, cx))
-            .children(stashes_part(row, stash_input, cx))
+            .children(changes_body(row, inputs.commit, cx))
+            .children(stashes_part(row, inputs.stash, cx))
     });
     div()
         .flex()
