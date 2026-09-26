@@ -2172,11 +2172,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 shutdown_all(hub).await;
                 info!("dispatch: shutdown_all returned; flipping watch");
             } else {
-                // Don't drain — leave sidecars on disk so the next daemon
-                // start surfaces these sessions in the Abandoned bucket.
-                // Pre-Phase-C the children die anyway (their ConPTY master
-                // goes away with the daemon); B.3's contribution is the
-                // sidecar-preservation half of the round-trip.
+                // Don't drain: leave the sidecars on disk. Tracer-backed
+                // sessions keep running without the daemon and are reattached
+                // by the next daemon start; any that can't be reattached are
+                // listed as abandoned so the user can resume or dismiss them.
                 info!("dispatch: shutdown without drain; sidecars retained for resume");
             }
             // Hand the client an explicit ack BEFORE we flip the shutdown
@@ -2892,8 +2891,9 @@ async fn reply_git_read<F>(
 /// optional follow-up message (e.g. `CommitOk`). On failure, sends
 /// `GitWriteError { operation }` to the caller only — peer clients learn
 /// nothing happened because the broadcast is never sent. A write that
-/// succeeds but whose status refresh fails also answers the caller with
-/// `GitWriteError`, so its pending state clears.
+/// succeeds but whose status refresh fails — or whose repo-path lookup
+/// fails because the repo was unregistered mid-write — also answers the
+/// caller with `GitWriteError`, so its pending state clears.
 async fn handle_git_write<F>(
     hub: &Hub,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
@@ -2919,11 +2919,26 @@ async fn handle_git_write<F>(
                     }
                     Err(err) => {
                         warn!(?err, repo_id, "git_write: post-write status refresh failed");
-                        send_refresh_failed(out_tx, repo_id, worktree_path, operation, &err);
+                        send_post_write_error(
+                            out_tx,
+                            repo_id,
+                            worktree_path,
+                            operation,
+                            "status refresh failed",
+                            &err,
+                        );
                     }
                 },
                 Err(err) => {
                     warn!(?err, repo_id, "git_write: repo path lookup failed");
+                    send_post_write_error(
+                        out_tx,
+                        repo_id,
+                        worktree_path,
+                        operation,
+                        "repo lookup failed",
+                        &err,
+                    );
                 }
             }
             if let Some(msg) = follow_up {
@@ -2942,19 +2957,22 @@ async fn handle_git_write<F>(
     }
 }
 
-/// Tells the writer that its write landed but the status read after it
-/// failed, so a client waiting on that status for `operation` stops waiting.
-fn send_refresh_failed(
+/// Tells the writer that its write landed but the step after it failed — the
+/// status read, or the repo-path lookup when the repo was unregistered
+/// mid-write — so a client waiting on that write for `operation` stops
+/// waiting. `prefix` names which of them failed.
+fn send_post_write_error(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     repo_id: &str,
     worktree_path: Option<&str>,
     operation: &str,
+    prefix: &str,
     err: &anyhow::Error,
 ) {
     let _ = out_tx.send(DaemonMessage::GitWriteError {
         repo_id: repo_id.to_string(),
         operation: operation.to_string(),
-        error: format!("status refresh failed: {err:#}"),
+        error: format!("{prefix}: {err:#}"),
         worktree_path: worktree_path.map(str::to_owned),
     });
 }
@@ -2990,7 +3008,14 @@ async fn handle_stash_write<F>(
                             ?err,
                             repo_id, "stash_write: post-write status refresh failed"
                         );
-                        send_refresh_failed(out_tx, repo_id, worktree_path, operation, &err);
+                        send_post_write_error(
+                            out_tx,
+                            repo_id,
+                            worktree_path,
+                            operation,
+                            "status refresh failed",
+                            &err,
+                        );
                     }
                 }
                 match git_write::stash_list(&repo).await {
@@ -3008,6 +3033,14 @@ async fn handle_stash_write<F>(
             }
             Err(err) => {
                 warn!(?err, repo_id, "stash_write: repo path lookup failed");
+                send_post_write_error(
+                    out_tx,
+                    repo_id,
+                    worktree_path,
+                    operation,
+                    "repo lookup failed",
+                    &err,
+                );
             }
         },
         Err(err) => {
@@ -6540,6 +6573,42 @@ mod tests {
                     if repo_id == "r1"
                         && operation == "stash_push"
                         && error.starts_with("status refresh failed: ")
+            ),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_git_write_whose_repo_is_gone_answers_with_a_write_error() {
+        let (hub, _scratch) = test_hub("write-repo-gone");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        handle_git_write(&hub, &out_tx, "gone", None, "stage", async { Ok(None) }).await;
+        let messages = drain(&mut out_rx);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
+                    if repo_id == "gone"
+                        && operation == "stage"
+                        && error.starts_with("repo lookup failed: ")
+            ),
+            "{messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stash_write_whose_repo_is_gone_answers_with_a_write_error() {
+        let (hub, _scratch) = test_hub("stash-repo-gone");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        handle_stash_write(&hub, &out_tx, "gone", None, "stash_push", async { Ok(()) }).await;
+        let messages = drain(&mut out_rx);
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [DaemonMessage::GitWriteError { repo_id, operation, error, worktree_path: None }]
+                    if repo_id == "gone"
+                        && operation == "stash_push"
+                        && error.starts_with("repo lookup failed: ")
             ),
             "{messages:?}"
         );
