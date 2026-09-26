@@ -15,8 +15,8 @@ mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    ClientMessage, DaemonMessage, RootWorktreeStatus, SpawnRequest, SpawnTarget, SuggestTarget,
-    WorktreeInfo,
+    AgentOptions, ClientMessage, DaemonMessage, PermissionMode, RootWorktreeStatus, SessionMode,
+    SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -366,7 +366,7 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     let mut seen = vec![focus(&mut h).expect("a focus")];
-    for _ in 0..3 {
+    for _ in 0..7 {
         h.keys("tab");
         seen.push(focus(&mut h).expect("a focus"));
     }
@@ -376,9 +376,13 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
             "spawn-branch",
             "spawn-branch-random",
             "spawn-base-branch",
+            "spawn-runmode-interactive",
+            "spawn-runmode-headless",
+            "spawn-skip-perms",
+            "spawn-advanced",
             "spawn-cancel"
         ],
-        "Spawn is skipped while it cannot go"
+        "Spawn is skipped while it cannot go, and collapsed Advanced keeps its controls out"
     );
     assert_eq!(branch(&mut h).as_deref(), Some(""), "Tab typed nothing");
     h.keys("tab");
@@ -398,6 +402,116 @@ fn tab_cycles_controls(cx: &mut TestAppContext) {
         "Space chooses the focused option"
     );
     assert!(is_open(&mut h));
+}
+
+fn prompt(h: &mut Harness<'_>) -> Option<String> {
+    h.root(RootView::spawn_dialog_prompt)
+}
+
+/// Opens the dialog with a branch name, picks Headless and moves the
+/// keyboard to the prompt.
+fn open_headless(h: &mut Harness<'_>) {
+    open(h);
+    suggest(h, "r1", "wt/brave-fox");
+    h.click_on("spawn-runmode-headless");
+    h.keys("tab");
+    assert_eq!(focus(h).as_deref(), Some("spawn-headless-prompt"));
+}
+
+#[gpui::test]
+fn headless_spawn_sends_the_prompt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_headless(&mut h);
+    h.keys("space f i x space");
+    assert_eq!(prompt(&mut h).as_deref(), Some(" fix "));
+    h.keys("ctrl-enter");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.mode, SessionMode::Headless);
+    assert_eq!(request.initial_prompt.as_deref(), Some("fix"), "trimmed");
+    assert!(!is_open(&mut h));
+}
+
+#[gpui::test]
+fn headless_is_disabled_for_cursor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    h.click_on("spawn-runmode-headless");
+    assert!(selected(&mut h).contains(&"spawn-runmode-headless".to_owned()));
+    h.click_on("spawn-agent-cursor");
+    let chosen = selected(&mut h);
+    assert!(
+        chosen.contains(&"spawn-runmode-interactive".to_owned()),
+        "cursor snaps back to interactive: {chosen:?}"
+    );
+    h.click_on("spawn-runmode-headless");
+    assert!(
+        !selected(&mut h).contains(&"spawn-runmode-headless".to_owned()),
+        "a click on the disabled choice does nothing"
+    );
+}
+
+#[gpui::test]
+fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    h.click_on("spawn-advanced");
+    h.click_on("spawn-model-sonnet");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_model).as_deref(),
+        Some("sonnet")
+    );
+    h.click_on("spawn-approval-accept-edits");
+    h.click_on("spawn-env-add");
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-env-key-0"));
+    h.keys("F O O tab b a r");
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.model.as_deref(), Some("sonnet"));
+    assert_eq!(
+        request.agent_options,
+        AgentOptions::Claude {
+            permission_mode: Some(PermissionMode::AcceptEdits)
+        }
+    );
+    assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
+}
+
+#[gpui::test]
+fn invalid_env_key_blocks_spawn(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    h.click_on("spawn-advanced");
+    h.click_on("spawn-env-add");
+    h.keys("1");
+    h.click_on("spawn-submit");
+    assert!(spawns(&h.sent()).is_empty(), "an invalid key blocks Spawn");
+    assert!(is_open(&mut h));
+
+    h.click_on("spawn-env-key-0");
+    h.keys("backspace a");
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.extra_env, [("a".to_owned(), String::new())]);
+}
+
+#[gpui::test]
+fn enter_in_the_prompt_inserts_a_newline_not_a_submit(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_headless(&mut h);
+    h.keys("a enter b");
+    assert!(spawns(&h.sent()).is_empty());
+    assert!(is_open(&mut h));
+    assert_eq!(prompt(&mut h).as_deref(), Some("a\nb"));
+    h.keys("ctrl-enter");
+    let request = the_spawn(&h.sent());
+    assert_eq!(request.initial_prompt.as_deref(), Some("a\nb"));
 }
 
 #[gpui::test]

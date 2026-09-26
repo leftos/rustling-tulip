@@ -78,9 +78,9 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c; no "no repos" state, since native has no Add repo yet)
 - [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`
-- [ ] Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
+- [x] Mode Interactive / Headless (prompt textarea; no headless for cursor) — `SpawnDialog.tsx`
 - [x] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
-- [ ] Advanced: model, Claude approval mode, Codex sandbox, Cursor plan mode + sandbox, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
+- [x] Advanced: model, Claude approval mode, Codex sandbox, Cursor plan mode + sandbox, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
 - [x] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`
 - [ ] Branch combobox: lists all branches, filters as you type, marks current, "Create branch" row, arrow/Enter, Esc closes the list only — `BranchCombobox.tsx`
 - [x] Suggested branch name, "Random", "picking a name…", cached between opens — `SpawnDialog.tsx` `useBranchField`, `utils/branchSuggestion.ts`

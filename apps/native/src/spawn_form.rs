@@ -1,16 +1,18 @@
-//! The spawn dialog's form: target, runtime, Open in, trusted launch,
-//! worktree new or existing, branch and base branch, the "Share this
-//! worktree?" confirm and the keyboard focus ring. `spawn_view` renders it
-//! and forwards input; the daemon requests it needs come back as messages.
+//! The spawn dialog's form: target, runtime, Open in, worktree new or
+//! existing, branch and base branch, run mode and headless prompt, trusted
+//! launch, the Advanced section (model, the agent's approval or sandbox
+//! options, extra environment variables), the "Share this worktree?"
+//! confirm and the keyboard focus ring. `spawn_view` renders it and forwards
+//! input; the daemon requests it needs come back as messages.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Agent, AgentOptions, ClientMessage, DaemonMessage, PinnedMemberWorktree, RepoEntry,
-    RootWorktreeEntry, RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest,
-    SpawnTarget, SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
-    WorktreeReusePolicy,
+    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage, PermissionMode,
+    PinnedMemberWorktree, RepoEntry, RootWorktreeEntry, RootWorktreeStatus, SessionMode,
+    SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, TabEntry,
+    WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget, WorktreeReusePolicy,
 };
 
 use crate::spawns::OpenIn;
@@ -106,6 +108,124 @@ impl Runtime {
     }
 }
 
+/// How an agent session runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunMode {
+    Interactive,
+    Headless,
+}
+
+impl RunMode {
+    pub(crate) const ALL: [Self; 2] = [Self::Interactive, Self::Headless];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Interactive => "Interactive",
+            Self::Headless => "Headless (one-shot prompt, no terminal)",
+        }
+    }
+
+    fn selector_part(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Headless => "headless",
+        }
+    }
+}
+
+/// The model aliases offered as chips while the runtime is claude.
+pub(crate) const MODEL_ALIASES: [&str; 3] = ["opus", "sonnet", "haiku"];
+
+/// Claude's approval modes, the CLI default first.
+pub(crate) const APPROVAL_CHOICES: [Option<PermissionMode>; 5] = [
+    None,
+    Some(PermissionMode::Default),
+    Some(PermissionMode::AcceptEdits),
+    Some(PermissionMode::BypassPermissions),
+    Some(PermissionMode::Plan),
+];
+
+/// Codex's sandbox modes, the CLI default first.
+pub(crate) const CODEX_SANDBOX_CHOICES: [Option<CodexSandbox>; 4] = [
+    None,
+    Some(CodexSandbox::ReadOnly),
+    Some(CodexSandbox::WorkspaceWrite),
+    Some(CodexSandbox::DangerFullAccess),
+];
+
+/// Cursor's sandbox modes, the CLI default first.
+pub(crate) const CURSOR_SANDBOX_CHOICES: [Option<CursorSandbox>; 3] = [
+    None,
+    Some(CursorSandbox::Enabled),
+    Some(CursorSandbox::Disabled),
+];
+
+pub(crate) fn approval_label(mode: Option<PermissionMode>) -> &'static str {
+    match mode {
+        None => "CLI default",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::AcceptEdits) => "accept edits",
+        Some(PermissionMode::BypassPermissions) => "bypass permissions",
+        Some(PermissionMode::Plan) => "plan",
+    }
+}
+
+fn approval_part(mode: Option<PermissionMode>) -> &'static str {
+    match mode {
+        None => "cli-default",
+        Some(PermissionMode::Default) => "default",
+        Some(PermissionMode::AcceptEdits) => "accept-edits",
+        Some(PermissionMode::BypassPermissions) => "bypass-permissions",
+        Some(PermissionMode::Plan) => "plan",
+    }
+}
+
+pub(crate) fn codex_sandbox_label(sandbox: Option<CodexSandbox>) -> &'static str {
+    sandbox.map_or("CLI default (read-only)", CodexSandbox::as_cli_arg)
+}
+
+pub(crate) fn cursor_sandbox_label(sandbox: Option<CursorSandbox>) -> &'static str {
+    match sandbox {
+        None => "CLI default",
+        Some(CursorSandbox::Enabled) => "enabled",
+        Some(CursorSandbox::Disabled) => "disabled",
+    }
+}
+
+/// One extra environment variable, as typed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EnvRow {
+    pub key: String,
+    pub value: String,
+}
+
+/// Why an environment variable row blocks Spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvProblem {
+    /// The key is not a variable name, or a value has no key.
+    InvalidKey,
+    /// An earlier row has the same key.
+    Duplicate,
+}
+
+impl EnvProblem {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::InvalidKey => "Key must match [A-Za-z_][A-Za-z0-9_]*",
+            Self::Duplicate => "Duplicate key",
+        }
+    }
+}
+
+/// Whether `key` matches `[A-Za-z_][A-Za-z0-9_]*`.
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Where the session opens, as the dialog offers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpenChoice {
@@ -166,6 +286,19 @@ pub(crate) enum Control {
     Branch,
     Random,
     Base,
+    RunMode(RunMode),
+    Prompt,
+    AdvancedToggle,
+    Model,
+    ModelChip(&'static str),
+    Approval(Option<PermissionMode>),
+    CodexSandbox(Option<CodexSandbox>),
+    CursorPlan,
+    CursorSandbox(Option<CursorSandbox>),
+    EnvKey(usize),
+    EnvValue(usize),
+    EnvRemove(usize),
+    EnvAdd,
     Cancel,
     Submit,
 }
@@ -190,6 +323,34 @@ impl Control {
             Self::Base => "spawn-base-branch".to_owned(),
             Self::Cancel => "spawn-cancel".to_owned(),
             Self::Submit => "spawn-submit".to_owned(),
+            other => other.advanced_selector(),
+        }
+    }
+
+    /// The selectors of the run-mode and Advanced controls; `selector`
+    /// answers for every other control.
+    fn advanced_selector(&self) -> String {
+        match self {
+            Self::RunMode(mode) => format!("spawn-runmode-{}", mode.selector_part()),
+            Self::Prompt => "spawn-headless-prompt".to_owned(),
+            Self::AdvancedToggle => "spawn-advanced".to_owned(),
+            Self::Model => "spawn-model".to_owned(),
+            Self::ModelChip(alias) => format!("spawn-model-{alias}"),
+            Self::Approval(mode) => format!("spawn-approval-{}", approval_part(*mode)),
+            Self::CodexSandbox(sandbox) => format!(
+                "spawn-codex-sandbox-{}",
+                sandbox.map_or("cli-default", CodexSandbox::as_cli_arg)
+            ),
+            Self::CursorPlan => "spawn-cursor-plan-mode".to_owned(),
+            Self::CursorSandbox(sandbox) => format!(
+                "spawn-cursor-sandbox-{}",
+                sandbox.map_or("cli-default", |s| cursor_sandbox_label(Some(s)))
+            ),
+            Self::EnvKey(index) => format!("spawn-env-key-{index}"),
+            Self::EnvValue(index) => format!("spawn-env-value-{index}"),
+            Self::EnvRemove(index) => format!("spawn-env-remove-{index}"),
+            Self::EnvAdd => "spawn-env-add".to_owned(),
+            _ => String::new(),
         }
     }
 }
@@ -335,12 +496,27 @@ impl ExistingOption {
     }
 }
 
-/// The runtime and whether the user has chosen it.
+/// The runtime, the run mode, and whether the user has chosen them.
 #[derive(Debug, Clone, Copy)]
 struct RuntimeChoice {
     agent: Agent,
     plain_shell: bool,
+    /// Headless rather than interactive; never set for cursor.
+    headless: bool,
     touched: Touched,
+}
+
+/// The Advanced section: whether it is open, and every value in it, kept
+/// across runtime switches.
+#[derive(Debug, Default)]
+struct Advanced {
+    open: bool,
+    model: String,
+    permission_mode: Option<PermissionMode>,
+    codex_sandbox: Option<CodexSandbox>,
+    cursor_plan: bool,
+    cursor_sandbox: Option<CursorSandbox>,
+    env: Vec<EnvRow>,
 }
 
 /// Which runtime defaults the user has overridden.
@@ -400,6 +576,9 @@ pub(crate) struct SpawnForm {
     base: BaseField,
     refs: Refs,
     existing: Existing,
+    /// The headless prompt, as typed.
+    prompt: String,
+    advanced: Advanced,
     focus: Control,
     share: Option<ShareButton>,
     submitted: bool,
@@ -435,6 +614,7 @@ impl SpawnForm {
             runtime: RuntimeChoice {
                 agent: Agent::Claude,
                 plain_shell: false,
+                headless: false,
                 touched: Touched::default(),
             },
             tabs: inputs.tabs,
@@ -446,6 +626,8 @@ impl SpawnForm {
             base: BaseField::default(),
             refs: Refs::default(),
             existing: Existing::default(),
+            prompt: String::new(),
+            advanced: Advanced::default(),
             focus: Control::Branch,
             share: None,
             submitted: false,
@@ -559,6 +741,16 @@ impl SpawnForm {
         }
         if !touched.run_mode {
             self.runtime.plain_shell = plain_shell;
+            self.runtime.headless = false;
+        }
+        self.snap_headless();
+    }
+
+    /// Cursor has no headless mode: it runs interactive, and the snap is
+    /// not a choice the user made.
+    fn snap_headless(&mut self) {
+        if self.runtime.agent == Agent::Cursor {
+            self.runtime.headless = false;
         }
     }
 
@@ -828,15 +1020,138 @@ impl SpawnForm {
                 self.runtime.touched.agent = true;
                 if self.runtime.plain_shell {
                     self.runtime.plain_shell = false;
+                    self.runtime.headless = false;
                     self.runtime.touched.run_mode = true;
                 }
+                self.snap_headless();
             }
             Runtime::PlainShell => {
                 self.runtime.plain_shell = true;
+                self.runtime.headless = false;
                 self.runtime.touched.run_mode = true;
                 self.trusted = false;
             }
         }
+    }
+
+    /// Interactive or headless; a plain shell counts as interactive.
+    pub(crate) fn run_mode(&self) -> RunMode {
+        if self.runtime.headless && !self.runtime.plain_shell {
+            RunMode::Headless
+        } else {
+            RunMode::Interactive
+        }
+    }
+
+    /// Whether the run mode shows (not for a plain shell).
+    pub(crate) fn run_mode_shown(&self) -> bool {
+        !self.runtime.plain_shell
+    }
+
+    /// Whether headless can be chosen (not for cursor).
+    pub(crate) fn headless_enabled(&self) -> bool {
+        self.runtime.agent != Agent::Cursor
+    }
+
+    fn set_run_mode(&mut self, mode: RunMode) {
+        let headless = mode == RunMode::Headless;
+        if !self.run_mode_shown() || (headless && !self.headless_enabled()) {
+            return;
+        }
+        self.runtime.headless = headless;
+        self.runtime.touched.run_mode = true;
+    }
+
+    pub(crate) fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    pub(crate) fn prompt_placeholder(&self) -> String {
+        format!("What should {} do?", self.runtime.agent.as_label())
+    }
+
+    /// The user typed in the prompt field.
+    pub(crate) fn edit_prompt(&mut self, text: &str) {
+        text.clone_into(&mut self.prompt);
+    }
+
+    pub(crate) fn advanced_open(&self) -> bool {
+        self.advanced.open
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.advanced.model
+    }
+
+    /// The user typed in the model field.
+    pub(crate) fn edit_model(&mut self, text: &str) {
+        text.clone_into(&mut self.advanced.model);
+    }
+
+    /// Whether the model field shows (not for a plain shell).
+    pub(crate) fn model_shown(&self) -> bool {
+        !self.runtime.plain_shell
+    }
+
+    /// Whether the alias chips show (claude only).
+    pub(crate) fn model_chips_shown(&self) -> bool {
+        self.model_shown() && self.runtime.agent == Agent::Claude
+    }
+
+    pub(crate) fn permission_mode(&self) -> Option<PermissionMode> {
+        self.advanced.permission_mode
+    }
+
+    pub(crate) fn codex_sandbox(&self) -> Option<CodexSandbox> {
+        self.advanced.codex_sandbox
+    }
+
+    pub(crate) fn cursor_plan(&self) -> bool {
+        self.advanced.cursor_plan
+    }
+
+    pub(crate) fn cursor_sandbox(&self) -> Option<CursorSandbox> {
+        self.advanced.cursor_sandbox
+    }
+
+    pub(crate) fn env_rows(&self) -> &[EnvRow] {
+        &self.advanced.env
+    }
+
+    /// The user typed in row `index`'s key field.
+    pub(crate) fn edit_env_key(&mut self, index: usize, text: &str) {
+        if let Some(row) = self.advanced.env.get_mut(index) {
+            text.clone_into(&mut row.key);
+        }
+    }
+
+    /// The user typed in row `index`'s value field.
+    pub(crate) fn edit_env_value(&mut self, index: usize, text: &str) {
+        if let Some(row) = self.advanced.env.get_mut(index) {
+            text.clone_into(&mut row.value);
+        }
+    }
+
+    /// What is wrong with row `index`: a key that is not a variable name, a
+    /// value without a key, or a key an earlier row has. A row with neither
+    /// key nor value is fine; it is dropped.
+    pub(crate) fn env_problem(&self, index: usize) -> Option<EnvProblem> {
+        let row = self.advanced.env.get(index)?;
+        let key = row.key.trim();
+        if key.is_empty() {
+            return (!row.value.is_empty()).then_some(EnvProblem::InvalidKey);
+        }
+        if !valid_env_key(key) {
+            return Some(EnvProblem::InvalidKey);
+        }
+        let mut earlier = self.advanced.env.iter().take(index);
+        earlier
+            .any(|other| other.key.trim() == key)
+            .then_some(EnvProblem::Duplicate)
+    }
+
+    fn env_valid(&self) -> bool {
+        (0..self.advanced.env.len()).all(|index| self.env_problem(index).is_none())
     }
 
     pub(crate) fn tabs(&self) -> &TabChoices {
@@ -1015,13 +1330,16 @@ impl SpawnForm {
         self.refs.fetch_failed
     }
 
-    /// Whether Spawn can go: a branch name, or a picked worktree.
+    /// Whether Spawn can go: a branch name or a picked worktree, a prompt
+    /// when headless, and no env row with a problem.
     pub(crate) fn can_submit(&self) -> bool {
-        if self.pinning() {
+        let located = if self.pinning() {
             self.selected_option().is_some()
         } else {
             !self.branch.value.trim().is_empty()
-        }
+        };
+        let prompted = self.run_mode() == RunMode::Interactive || !self.prompt.trim().is_empty();
+        located && prompted && self.env_valid()
     }
 
     /// The focusable controls, in the order they are drawn.
@@ -1039,15 +1357,78 @@ impl SpawnForm {
                 .iter()
                 .map(|t| Control::OpenIn(OpenChoice::Tab(t.id.clone()))),
         );
-        if self.trusted_shown() {
-            ring.push(Control::Trusted);
-        }
         ring.extend(self.worktree_controls());
+        ring.extend(self.run_controls());
+        ring.extend(self.advanced_controls());
         ring.push(Control::Cancel);
         if self.can_submit() {
             ring.push(Control::Submit);
         }
         ring
+    }
+
+    /// Run mode (headless only when it can be chosen), the prompt and
+    /// trusted launch.
+    fn run_controls(&self) -> Vec<Control> {
+        let mut ring = Vec::new();
+        if self.run_mode_shown() {
+            ring.push(Control::RunMode(RunMode::Interactive));
+            if self.headless_enabled() {
+                ring.push(Control::RunMode(RunMode::Headless));
+            }
+        }
+        if self.run_mode() == RunMode::Headless {
+            ring.push(Control::Prompt);
+        }
+        if self.trusted_shown() {
+            ring.push(Control::Trusted);
+        }
+        ring
+    }
+
+    /// The Advanced toggle, and while open its controls.
+    fn advanced_controls(&self) -> Vec<Control> {
+        let mut ring = vec![Control::AdvancedToggle];
+        if !self.advanced.open {
+            return ring;
+        }
+        if self.model_shown() {
+            ring.push(Control::Model);
+        }
+        if self.model_chips_shown() {
+            ring.extend(MODEL_ALIASES.map(Control::ModelChip));
+        }
+        ring.extend(self.agent_option_controls());
+        for index in 0..self.advanced.env.len() {
+            ring.extend([
+                Control::EnvKey(index),
+                Control::EnvValue(index),
+                Control::EnvRemove(index),
+            ]);
+        }
+        ring.push(Control::EnvAdd);
+        ring
+    }
+
+    /// The agent's own options; those trusted launch overrides are
+    /// disabled, and so out of the ring, while it is on.
+    fn agent_option_controls(&self) -> Vec<Control> {
+        if self.runtime.plain_shell {
+            return Vec::new();
+        }
+        let locked = self.trusted();
+        match self.runtime.agent {
+            Agent::Claude if !locked => APPROVAL_CHOICES.map(Control::Approval).to_vec(),
+            Agent::Codex if !locked => CODEX_SANDBOX_CHOICES.map(Control::CodexSandbox).to_vec(),
+            Agent::Cursor => {
+                let mut ring = vec![Control::CursorPlan];
+                if !locked {
+                    ring.extend(CURSOR_SANDBOX_CHOICES.map(Control::CursorSandbox));
+                }
+                ring
+            }
+            Agent::Claude | Agent::Codex => Vec::new(),
+        }
     }
 
     /// The worktree and branch controls: a repo's checkbox leads, a
@@ -1143,9 +1524,53 @@ impl SpawnForm {
                 Vec::new()
             }
             Control::Random => self.random(cache, now),
-            Control::Branch | Control::Base | Control::Target(_) => Vec::new(),
+            Control::Branch
+            | Control::Base
+            | Control::Target(_)
+            | Control::Prompt
+            | Control::Model
+            | Control::EnvKey(_)
+            | Control::EnvValue(_) => Vec::new(),
+            Control::RunMode(_)
+            | Control::AdvancedToggle
+            | Control::ModelChip(_)
+            | Control::Approval(_)
+            | Control::CodexSandbox(_)
+            | Control::CursorPlan
+            | Control::CursorSandbox(_)
+            | Control::EnvRemove(_)
+            | Control::EnvAdd => {
+                self.press_option(control);
+                Vec::new()
+            }
         };
         Outcome::Stay(messages)
+    }
+
+    /// A press on a run-mode or Advanced control. The options trusted
+    /// launch overrides do not change while it is on.
+    fn press_option(&mut self, control: &Control) {
+        let locked = self.trusted();
+        match control {
+            Control::RunMode(mode) => self.set_run_mode(*mode),
+            Control::AdvancedToggle => self.advanced.open = !self.advanced.open,
+            Control::ModelChip(alias) => (*alias).clone_into(&mut self.advanced.model),
+            Control::Approval(mode) if !locked => self.advanced.permission_mode = *mode,
+            Control::CodexSandbox(sandbox) if !locked => self.advanced.codex_sandbox = *sandbox,
+            Control::CursorSandbox(sandbox) if !locked => self.advanced.cursor_sandbox = *sandbox,
+            Control::CursorPlan => self.advanced.cursor_plan = !self.advanced.cursor_plan,
+            Control::EnvAdd => {
+                self.advanced.env.push(EnvRow::default());
+                self.focus = Control::EnvKey(self.advanced.env.len() - 1);
+            }
+            Control::EnvRemove(index) => {
+                if *index < self.advanced.env.len() {
+                    self.advanced.env.remove(*index);
+                }
+                self.focus = Control::EnvAdd;
+            }
+            _ => {}
+        }
     }
 
     /// Random: forget the cached name and ask for another; the field keeps
@@ -1210,24 +1635,66 @@ impl SpawnForm {
     /// The spawn the form describes, where it opens, and the worktree
     /// default to save when the checkbox differs from it.
     pub(crate) fn build_request(&self) -> (SpawnRequest, OpenIn, Option<ClientMessage>) {
-        let plain = self.runtime.plain_shell;
+        let mode = self.session_mode();
         let request = SpawnRequest {
             label: None,
             target: self.spawn_target(),
-            mode: if plain {
-                SessionMode::PlainShell
-            } else {
-                SessionMode::Interactive
-            },
-            initial_prompt: None,
+            mode,
+            initial_prompt: (mode == SessionMode::Headless).then(|| self.prompt.trim().to_owned()),
             dangerously_skip_permissions: self.trusted(),
-            agent_options: agent_options(self.runtime.agent),
-            model: None,
-            extra_env: Vec::new(),
+            agent_options: self.agent_options(),
+            model: self.wire_model(),
+            extra_env: self.extra_env(),
             prompt_injector: None,
             request_id: None,
         };
         (request, self.placement(), self.worktree_default_change())
+    }
+
+    fn session_mode(&self) -> SessionMode {
+        match (self.runtime.plain_shell, self.run_mode()) {
+            (true, _) => SessionMode::PlainShell,
+            (false, RunMode::Interactive) => SessionMode::Interactive,
+            (false, RunMode::Headless) => SessionMode::Headless,
+        }
+    }
+
+    /// The agent's options. A plain shell or a trusted launch sends no
+    /// approval mode or sandbox; cursor's plan mode goes whenever an agent
+    /// runs.
+    fn agent_options(&self) -> AgentOptions {
+        let plain = self.runtime.plain_shell;
+        let suppress = plain || self.trusted();
+        let advanced = &self.advanced;
+        match self.runtime.agent {
+            Agent::Claude => AgentOptions::Claude {
+                permission_mode: advanced.permission_mode.filter(|_| !suppress),
+            },
+            Agent::Codex => AgentOptions::Codex {
+                sandbox: advanced.codex_sandbox.filter(|_| !suppress),
+            },
+            Agent::Cursor => AgentOptions::Cursor {
+                plan_mode: advanced.cursor_plan && !plain,
+                sandbox: advanced.cursor_sandbox.filter(|_| !suppress),
+            },
+        }
+    }
+
+    /// The trimmed model, or `None` for the CLI default and a plain shell.
+    fn wire_model(&self) -> Option<String> {
+        let model = self.advanced.model.trim();
+        (!self.runtime.plain_shell && !model.is_empty()).then(|| model.to_owned())
+    }
+
+    /// The env rows with a key, in order: the key trimmed, the value as
+    /// typed.
+    fn extra_env(&self) -> Vec<(String, String)> {
+        self.advanced
+            .env
+            .iter()
+            .filter(|row| !row.key.trim().is_empty())
+            .map(|row| (row.key.trim().to_owned(), row.value.clone()))
+            .collect()
     }
 
     fn spawn_target(&self) -> SpawnTarget {
@@ -1332,20 +1799,6 @@ fn capitalised(word: &str) -> String {
 
 fn is_plain_shell(config: Option<&SpawnConfig>) -> bool {
     config.is_some_and(|c| c.mode == SessionMode::PlainShell)
-}
-
-/// The agent's options with nothing chosen beyond the agent itself.
-fn agent_options(agent: Agent) -> AgentOptions {
-    match agent {
-        Agent::Claude => AgentOptions::Claude {
-            permission_mode: None,
-        },
-        Agent::Codex => AgentOptions::Codex { sandbox: None },
-        Agent::Cursor => AgentOptions::Cursor {
-            plan_mode: false,
-            sandbox: None,
-        },
-    }
 }
 
 /// Where a spawn asked for the current tab opens: the tab on screen when it
@@ -2139,13 +2592,16 @@ mod tests {
                 Control::Runtime(Runtime::PlainShell),
                 Control::OpenIn(OpenChoice::CurrentTab),
                 Control::OpenIn(OpenChoice::NewTab),
-                Control::Trusted,
                 Control::UseWorktree,
                 Control::Mode(WorktreeMode::New),
                 Control::Mode(WorktreeMode::Existing),
                 Control::Branch,
                 Control::Random,
                 Control::Base,
+                Control::RunMode(RunMode::Interactive),
+                Control::RunMode(RunMode::Headless),
+                Control::Trusted,
+                Control::AdvancedToggle,
                 Control::Cancel,
             ]
         );
@@ -2156,6 +2612,413 @@ mod tests {
         assert_eq!(form.focused(), Control::Close, "wraps forward");
         form.move_focus(false);
         assert_eq!(form.focused(), Control::Cancel, "and back");
+    }
+
+    /// Claude on repo `r1` with a branch name, so Spawn can go.
+    fn ready_form() -> SpawnForm {
+        let mut form = open_repo(repo("r1"));
+        form.branch.value = "b".to_owned();
+        form
+    }
+
+    fn request_of(form: &SpawnForm) -> SpawnRequest {
+        form.build_request().0
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn headless_sends_mode_and_trimmed_prompt() {
+        let mut form = ready_form();
+        assert_eq!(form.run_mode(), RunMode::Interactive);
+        assert!(!form.controls().contains(&Control::Prompt));
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        assert_eq!(form.run_mode(), RunMode::Headless);
+        assert!(form.controls().contains(&Control::Prompt));
+        assert_eq!(form.prompt_placeholder(), "What should claude do?");
+        form.edit_prompt("  fix the bug\n");
+        let request = submission(press(&mut form, &Control::Submit)).request;
+        assert_eq!(request.mode, SessionMode::Headless);
+        assert_eq!(request.initial_prompt.as_deref(), Some("fix the bug"));
+
+        let mut interactive = ready_form();
+        interactive.edit_prompt("kept, not sent");
+        let request = request_of(&interactive);
+        assert_eq!(request.mode, SessionMode::Interactive);
+        assert_eq!(request.initial_prompt, None, "only headless sends it");
+    }
+
+    #[test]
+    fn headless_requires_a_prompt() {
+        let mut form = ready_form();
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        assert!(!form.can_submit());
+        assert!(!form.controls().contains(&Control::Submit));
+        form.edit_prompt("  \n ");
+        assert!(!form.can_submit(), "blank after trimming");
+        assert!(matches!(
+            form.submit(&mut BranchCache::default()),
+            Outcome::Stay(_)
+        ));
+        form.edit_prompt("go");
+        assert!(form.can_submit());
+        press(&mut form, &Control::RunMode(RunMode::Interactive));
+        form.edit_prompt("");
+        assert!(form.can_submit(), "interactive needs no prompt");
+    }
+
+    #[test]
+    fn cursor_snaps_headless_back_without_touching() {
+        let mut shell = repo("r2");
+        shell.last_spawn_config = Some(config("claude", "plain_shell"));
+        let mut form = Setup::repos(vec![repo("r1"), shell])
+            .open(&mut BranchCache::default())
+            .0;
+        form.runtime.headless = true;
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        assert_eq!(form.run_mode(), RunMode::Interactive);
+        assert!(!form.runtime.touched.run_mode, "the snap is not a choice");
+        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        assert_eq!(
+            form.runtime(),
+            Runtime::PlainShell,
+            "the run mode still follows the target"
+        );
+
+        let mut form = ready_form();
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        assert_eq!(form.run_mode(), RunMode::Interactive);
+        assert!(!form.headless_enabled());
+        assert!(
+            !form
+                .controls()
+                .contains(&Control::RunMode(RunMode::Headless)),
+            "disabled, so out of the ring"
+        );
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        assert_eq!(form.run_mode(), RunMode::Interactive, "a press is inert");
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert!(form.headless_enabled());
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        assert_eq!(request_of(&form).mode, SessionMode::Headless);
+    }
+
+    #[test]
+    fn plain_shell_clears_to_interactive_and_sends_no_agent_extras() {
+        let mut form = ready_form();
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        form.edit_prompt("do it");
+        form.edit_model("opus");
+        press(&mut form, &Control::AdvancedToggle);
+        press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_key(0, "FOO");
+        form.edit_env_value(0, "1");
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        let ring = form.controls();
+        assert!(
+            !ring.iter().any(|c| matches!(
+                c,
+                Control::RunMode(_)
+                    | Control::Prompt
+                    | Control::Model
+                    | Control::ModelChip(_)
+                    | Control::Approval(_)
+            )),
+            "no agent controls for a plain shell: {ring:?}"
+        );
+        assert!(ring.contains(&Control::EnvKey(0)), "env vars stay");
+        let request = request_of(&form);
+        assert_eq!(request.mode, SessionMode::PlainShell);
+        assert_eq!(request.initial_prompt, None);
+        assert_eq!(request.model, None);
+        assert_eq!(
+            request.agent_options,
+            AgentOptions::Claude {
+                permission_mode: None
+            }
+        );
+        assert_eq!(request.extra_env, env(&[("FOO", "1")]));
+
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert_eq!(
+            form.run_mode(),
+            RunMode::Interactive,
+            "an agent after a plain shell runs interactive"
+        );
+    }
+
+    #[test]
+    fn trusted_suppresses_permission_mode_and_sandboxes_but_keeps_cursor_plan() {
+        let mut form = ready_form();
+        press(&mut form, &Control::AdvancedToggle);
+        press(
+            &mut form,
+            &Control::Approval(Some(PermissionMode::AcceptEdits)),
+        );
+        let accept = AgentOptions::Claude {
+            permission_mode: Some(PermissionMode::AcceptEdits),
+        };
+        assert_eq!(request_of(&form).agent_options, accept);
+        press(&mut form, &Control::Trusted);
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Claude {
+                permission_mode: None
+            }
+        );
+        assert!(!form.controls().contains(&Control::Approval(None)));
+        assert_eq!(
+            form.permission_mode(),
+            Some(PermissionMode::AcceptEdits),
+            "kept for later"
+        );
+        press(&mut form, &Control::Trusted);
+        assert_eq!(request_of(&form).agent_options, accept);
+
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(
+            &mut form,
+            &Control::CodexSandbox(Some(CodexSandbox::WorkspaceWrite)),
+        );
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::WorkspaceWrite)
+            }
+        );
+        press(&mut form, &Control::Trusted);
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Codex { sandbox: None }
+        );
+        press(&mut form, &Control::Trusted);
+
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        press(
+            &mut form,
+            &Control::CursorSandbox(Some(CursorSandbox::Disabled)),
+        );
+        press(&mut form, &Control::CursorPlan);
+        press(&mut form, &Control::Trusted);
+        assert!(form.controls().contains(&Control::CursorPlan));
+        assert!(!form.controls().contains(&Control::CursorSandbox(None)));
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Cursor {
+                plan_mode: true,
+                sandbox: None
+            }
+        );
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Cursor {
+                plan_mode: false,
+                sandbox: None
+            },
+            "a plain shell drops plan mode"
+        );
+    }
+
+    #[test]
+    fn model_trimmed_and_empty_is_none() {
+        let mut form = ready_form();
+        assert_eq!(request_of(&form).model, None);
+        form.edit_model("  claude-opus-4  ");
+        assert_eq!(request_of(&form).model.as_deref(), Some("claude-opus-4"));
+        form.edit_model("   ");
+        assert_eq!(request_of(&form).model, None);
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        form.edit_model("gpt-5");
+        assert_eq!(
+            request_of(&form).model.as_deref(),
+            Some("gpt-5"),
+            "every agent takes a model"
+        );
+    }
+
+    #[test]
+    fn alias_chip_sets_model() {
+        let mut form = ready_form();
+        press(&mut form, &Control::AdvancedToggle);
+        let ring = form.controls();
+        for alias in MODEL_ALIASES {
+            assert!(ring.contains(&Control::ModelChip(alias)), "{alias} chip");
+        }
+        form.edit_model("something");
+        press(&mut form, &Control::ModelChip("haiku"));
+        assert_eq!(form.model(), "haiku");
+        assert_eq!(request_of(&form).model.as_deref(), Some("haiku"));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert!(
+            !form
+                .controls()
+                .iter()
+                .any(|c| matches!(c, Control::ModelChip(_))),
+            "claude aliases only for claude"
+        );
+        assert!(form.controls().contains(&Control::Model));
+        assert_eq!(form.model(), "haiku");
+    }
+
+    #[test]
+    fn env_rows_validate_key_and_duplicates() {
+        let mut form = ready_form();
+        press(&mut form, &Control::AdvancedToggle);
+        for _ in 0..4 {
+            press(&mut form, &Control::EnvAdd);
+        }
+        form.edit_env_key(0, " FOO ");
+        form.edit_env_value(0, " a ");
+        form.edit_env_key(1, "1BAD");
+        form.edit_env_key(2, "FOO");
+        form.edit_env_value(2, "b");
+        form.edit_env_key(3, "FOO");
+        assert_eq!(form.env_problem(0), None, "the first occurrence is fine");
+        assert_eq!(form.env_problem(1), Some(EnvProblem::InvalidKey));
+        assert_eq!(form.env_problem(2), Some(EnvProblem::Duplicate));
+        assert_eq!(form.env_problem(3), Some(EnvProblem::Duplicate));
+        assert_eq!(
+            EnvProblem::InvalidKey.message(),
+            "Key must match [A-Za-z_][A-Za-z0-9_]*"
+        );
+        assert_eq!(EnvProblem::Duplicate.message(), "Duplicate key");
+        assert!(!form.can_submit());
+
+        form.edit_env_key(1, "_OK1");
+        form.edit_env_key(2, "BAR");
+        form.edit_env_key(3, "baz");
+        assert!(form.can_submit());
+        assert_eq!(
+            request_of(&form).extra_env,
+            env(&[("FOO", " a "), ("_OK1", ""), ("BAR", "b"), ("baz", "")]),
+            "keys trimmed, values as typed, in row order"
+        );
+        press(&mut form, &Control::EnvRemove(1));
+        assert_eq!(
+            request_of(&form).extra_env,
+            env(&[("FOO", " a "), ("BAR", "b"), ("baz", "")])
+        );
+        assert_eq!(form.focused(), Control::EnvAdd);
+    }
+
+    #[test]
+    fn env_value_without_key_is_invalid_and_empty_row_dropped() {
+        let mut form = ready_form();
+        press(&mut form, &Control::EnvAdd);
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_value(1, "x");
+        assert_eq!(form.env_problem(0), None, "an empty row is no problem");
+        assert_eq!(form.env_problem(1), Some(EnvProblem::InvalidKey));
+        assert!(!form.can_submit());
+        form.edit_env_value(1, "");
+        form.edit_env_key(1, "   ");
+        assert_eq!(form.env_problem(1), None);
+        assert!(form.can_submit());
+        assert!(request_of(&form).extra_env.is_empty(), "empty rows dropped");
+    }
+
+    #[test]
+    fn runtime_switch_keeps_prompt_and_advanced_values() {
+        let mut form = ready_form();
+        press(&mut form, &Control::AdvancedToggle);
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        form.edit_prompt("p");
+        form.edit_model("m");
+        press(&mut form, &Control::Approval(Some(PermissionMode::Plan)));
+        press(&mut form, &Control::EnvAdd);
+        form.edit_env_key(0, "A");
+        form.edit_env_value(0, "1");
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        press(
+            &mut form,
+            &Control::CodexSandbox(Some(CodexSandbox::ReadOnly)),
+        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        press(&mut form, &Control::CursorPlan);
+        press(
+            &mut form,
+            &Control::CursorSandbox(Some(CursorSandbox::Enabled)),
+        );
+        press(&mut form, &Control::Runtime(Runtime::PlainShell));
+
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Claude)));
+        press(&mut form, &Control::RunMode(RunMode::Headless));
+        let request = request_of(&form);
+        assert_eq!(request.initial_prompt.as_deref(), Some("p"));
+        assert_eq!(request.model.as_deref(), Some("m"));
+        assert_eq!(
+            request.agent_options,
+            AgentOptions::Claude {
+                permission_mode: Some(PermissionMode::Plan)
+            }
+        );
+        assert_eq!(request.extra_env, env(&[("A", "1")]));
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::ReadOnly)
+            }
+        );
+        press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Cursor)));
+        assert_eq!(
+            request_of(&form).agent_options,
+            AgentOptions::Cursor {
+                plan_mode: true,
+                sandbox: Some(CursorSandbox::Enabled)
+            }
+        );
+    }
+
+    #[test]
+    fn advanced_collapsed_controls_leave_focus_ring() {
+        let mut form = ready_form();
+        assert!(!form.advanced_open(), "collapsed on open");
+        let collapsed = form.controls();
+        assert!(collapsed.contains(&Control::AdvancedToggle));
+        assert!(!collapsed.iter().any(|c| matches!(
+            c,
+            Control::Model | Control::ModelChip(_) | Control::Approval(_) | Control::EnvAdd
+        )));
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(form.advanced_open());
+        let ring = form.controls();
+        let at = ring
+            .iter()
+            .position(|c| *c == Control::AdvancedToggle)
+            .expect("the toggle");
+        assert_eq!(
+            ring[at..],
+            [
+                Control::AdvancedToggle,
+                Control::Model,
+                Control::ModelChip("opus"),
+                Control::ModelChip("sonnet"),
+                Control::ModelChip("haiku"),
+                Control::Approval(None),
+                Control::Approval(Some(PermissionMode::Default)),
+                Control::Approval(Some(PermissionMode::AcceptEdits)),
+                Control::Approval(Some(PermissionMode::BypassPermissions)),
+                Control::Approval(Some(PermissionMode::Plan)),
+                Control::EnvAdd,
+                Control::Cancel,
+                Control::Submit,
+            ]
+        );
+        press(&mut form, &Control::EnvAdd);
+        assert_eq!(form.focused(), Control::EnvKey(0), "the new row's key");
+        assert!(form.controls().contains(&Control::EnvRemove(0)));
+        press(&mut form, &Control::AdvancedToggle);
+        assert!(!form.controls().contains(&Control::EnvKey(0)));
+        assert_eq!(form.env_rows().len(), 1, "collapsing keeps the rows");
     }
 
     #[test]
