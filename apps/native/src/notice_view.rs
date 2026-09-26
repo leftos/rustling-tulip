@@ -93,7 +93,7 @@ impl RootView {
         }
     }
 
-    fn push_toast(
+    pub(crate) fn push_toast(
         &mut self,
         kind: ToastKind,
         title: &str,

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -22,8 +22,8 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, QuitFn, RootDeps, RootView,
-    bind_keys, spawn_net,
+    Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, OpenFailure, Opener, QuitFn,
+    RootDeps, RootView, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -244,6 +244,99 @@ pub struct Harness<'a> {
     outbox: Outbox,
     /// How many times the view asked the app to quit.
     quits: Rc<Cell<usize>>,
+    /// What the terminals' Ctrl+clicks opened.
+    opener: Arc<OpenRecorder>,
+}
+
+/// What a Ctrl+click on a terminal link opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    Url(String),
+    VsCode {
+        path: PathBuf,
+        line: u32,
+        column: u32,
+    },
+    DefaultApp(PathBuf),
+    /// Shown selected in its folder.
+    Reveal(PathBuf),
+}
+
+/// An opener that only records what it was asked to open, as the test
+/// platform can open nothing, and reports the mapped network hosts a spec
+/// set.
+#[derive(Default)]
+pub struct OpenRecorder {
+    opened: Mutex<Vec<Opened>>,
+    mapped_hosts: Mutex<Vec<String>>,
+}
+
+impl OpenRecorder {
+    fn record(&self, opened: Opened) {
+        self.opened
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(opened);
+    }
+}
+
+impl Opener for OpenRecorder {
+    fn url(&self, url: &str) -> Result<(), String> {
+        self.record(Opened::Url(url.to_owned()));
+        Ok(())
+    }
+
+    fn vscode(&self, path: &Path, line: u32, column: u32) -> Result<(), OpenFailure> {
+        self.record(Opened::VsCode {
+            path: path.to_path_buf(),
+            line,
+            column,
+        });
+        Ok(())
+    }
+
+    fn default_app(&self, path: &Path) -> Result<(), String> {
+        self.record(Opened::DefaultApp(path.to_path_buf()));
+        Ok(())
+    }
+
+    fn reveal(&self, path: &Path) -> Result<(), String> {
+        self.record(Opened::Reveal(path.to_path_buf()));
+        Ok(())
+    }
+
+    fn mapped_unc_hosts(&self) -> Vec<String> {
+        self.mapped_hosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// No type beyond the client's own list: the specs stay the same on
+    /// every machine.
+    fn is_dangerous_type(&self, _: &str) -> bool {
+        false
+    }
+
+    /// A network path exists as it is, so a spec never reaches the network;
+    /// any other is looked up on disk.
+    fn existing(&self, reading: &Path) -> Option<Result<PathBuf, String>> {
+        let text = reading.to_string_lossy();
+        if text.starts_with(r"\\") || text.starts_with("//") {
+            return Some(Ok(reading.to_path_buf()));
+        }
+        if !reading.exists() {
+            return None;
+        }
+        Some(
+            std::fs::canonicalize(reading)
+                .map(|resolved| {
+                    let text = resolved.to_string_lossy();
+                    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+                })
+                .map_err(|err| err.to_string()),
+        )
+    }
 }
 
 /// What the client sent, drained from its channel: the messages
@@ -272,6 +365,7 @@ impl<'a> Harness<'a> {
         let (events, rx) = unbounded();
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
+        let opener = Arc::new(OpenRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -280,6 +374,7 @@ impl<'a> Harness<'a> {
             wanted: None,
             now: clock.clock(),
             quit: quit_recorder(&quits),
+            open: opener.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -292,6 +387,7 @@ impl<'a> Harness<'a> {
             answered: HashSet::new(),
             outbox: Outbox::default(),
             quits,
+            opener,
         };
         harness.connect();
         harness
@@ -307,6 +403,7 @@ impl<'a> Harness<'a> {
         spawn_net(net, net_commands, net_events);
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
+        let opener = Arc::new(OpenRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -315,6 +412,7 @@ impl<'a> Harness<'a> {
             wanted: None,
             now: clock.clock(),
             quit: quit_recorder(&quits),
+            open: opener.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -327,12 +425,38 @@ impl<'a> Harness<'a> {
             answered: HashSet::new(),
             outbox: Outbox::default(),
             quits,
+            opener,
         }
     }
 
     /// How many times the view asked the app to quit.
     pub fn quit_requests(&self) -> usize {
         self.quits.get()
+    }
+
+    /// Everything the terminals' Ctrl+clicks opened, oldest first, once
+    /// the view has settled.
+    pub fn opened(&mut self) -> Vec<Opened> {
+        self.cx.run_until_parked();
+        self.opener
+            .opened
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reports `host` as behind a mapped network drive from now on.
+    pub fn map_unc_host(&self, host: &str) {
+        self.opener
+            .mapped_hosts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(host.to_owned());
+    }
+
+    /// The run confirm's title and detail while it is open.
+    pub fn run_confirm(&mut self) -> Option<(String, String)> {
+        self.root(|root, _| root.run_confirm_text())
     }
 
     /// Reports `conn` as the network thread would.
@@ -655,6 +779,19 @@ impl<'a> Harness<'a> {
         self.cx.run_until_parked();
     }
 
+    /// Runs `change` on the root view, then lets the view settle.
+    pub fn root_update<R>(
+        &mut self,
+        change: impl FnOnce(&mut RootView, &mut Window, &mut gpui::Context<RootView>) -> R,
+    ) -> R {
+        let root = self.root.clone();
+        let out = self
+            .cx
+            .update(|window, cx| root.update(cx, |root, cx| change(root, window, cx)));
+        self.cx.run_until_parked();
+        out
+    }
+
     pub fn click_on(&mut self, selector: &str) {
         let at = self.center(selector);
         self.click(at, Modifiers::none());
@@ -695,6 +832,25 @@ impl<'a> Harness<'a> {
         self.cx.simulate_mouse_move(to, MouseButton::Left, up);
         self.cx.simulate_mouse_up(to, MouseButton::Left, up);
         self.cx.run_until_parked();
+    }
+
+    /// Holds `modifiers` and moves the mouse to `at`, as the platform
+    /// reports them: the modifier change, then the move carrying it.
+    pub fn hover(&mut self, at: Point<Pixels>, modifiers: Modifiers) {
+        self.cx.simulate_modifiers_change(modifiers);
+        self.cx.simulate_mouse_move(at, None, modifiers);
+        self.cx.run_until_parked();
+    }
+
+    /// Changes the held modifiers without moving the mouse.
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.cx.simulate_modifiers_change(modifiers);
+        self.cx.run_until_parked();
+    }
+
+    /// The text of the link `pane` underlines.
+    pub fn hovered_link(&mut self, pane: &str) -> Option<String> {
+        self.root(|root, cx| root.pane_hovered_link(pane, cx))
     }
 
     pub fn keys(&mut self, keystrokes: &str) {

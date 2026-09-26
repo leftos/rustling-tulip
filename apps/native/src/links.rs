@@ -11,8 +11,6 @@
 //! is a boundary a reading of the path can stop at, so an over-eager stitch
 //! degrades into the fragment that was on screen.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "only the tests call these"))]
-
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -68,6 +66,40 @@ pub struct TerminalLink {
     pub start_column: usize,
     pub end_row: i32,
     pub end_column: usize,
+    /// The cells the link's own characters take, one run per row it
+    /// touches, top first. A hard-stitched row's box border and padding are
+    /// not in them.
+    pub segments: Vec<LinkSegment>,
+}
+
+/// The cells of one row a link's characters take: columns `start_column`
+/// up to `end_column`, exclusive, of row `row` (counted as the link's other
+/// rows are).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkSegment {
+    pub row: i32,
+    pub start_column: usize,
+    pub end_column: usize,
+}
+
+impl TerminalLink {
+    /// Whether the link's own characters take column `col` of row `row`.
+    #[must_use]
+    pub fn covers(&self, row: i32, col: usize) -> bool {
+        self.segments.iter().any(|segment| {
+            segment.row == row && segment.start_column <= col && col < segment.end_column
+        })
+    }
+
+    /// Moves the link down `offset` rows, as a window of rows starting at
+    /// grid line `offset` reads it on the grid.
+    pub fn shift_rows(&mut self, offset: i32) {
+        self.start_row += offset;
+        self.end_row += offset;
+        for segment in &mut self.segments {
+            segment.row += offset;
+        }
+    }
 }
 
 static URL_PATTERN: LazyLock<Regex> =
@@ -213,7 +245,9 @@ fn slice_columns(row: &TerminalRow, start: usize, end: usize, cols: usize) -> Ve
 }
 
 /// Every link in one line of text: a single row, or the logical line a group
-/// of rows assembles into.
+/// of rows assembles into. Only the tests read a bare line; the terminal
+/// reads rows through [`detect_row_links`].
+#[cfg(test)]
 #[must_use]
 pub fn detect_links(text: &str) -> Vec<TerminalLink> {
     let chars = chars_len(text);
@@ -495,7 +529,30 @@ fn build_link(
         start_column: start.column,
         end_row: row_index(end.row),
         end_column: end.after,
+        segments: link_segments(segments, start_index, end_index),
     }
+}
+
+/// The run of cells characters `start_index..end_index` of the assembled
+/// line take in each piece they touch. A stitched piece holds only its row's
+/// framed content, so the frame never lands in a run.
+fn link_segments(segments: &[Segment], start_index: usize, end_index: usize) -> Vec<LinkSegment> {
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    for segment in segments {
+        let next = offset + segment.chars();
+        let from = start_index.max(offset);
+        let to = end_index.min(next);
+        if from < to {
+            runs.push(LinkSegment {
+                row: row_index(segment.row_index),
+                start_column: segment.column(from - offset),
+                end_column: segment.column_after(to - offset - 1),
+            });
+        }
+        offset = next;
+    }
+    runs
 }
 
 /// The readings of a path, longest first: the whole match, then the match cut
@@ -616,8 +673,8 @@ fn overlaps_existing_link(start_index: usize, end_index: usize, links: &[Termina
 #[cfg(test)]
 mod tests {
     use super::{
-        LinkKind, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch, detect_links,
-        detect_row_links, group_rows, trim_link_candidate,
+        LinkKind, LinkSegment, TerminalLink, TerminalLinkCandidate, TerminalRow, can_stitch,
+        detect_links, detect_row_links, group_rows, trim_link_candidate,
     };
 
     /// A row of `text` padded to `cols`, with each character of `two_column`
@@ -745,6 +802,77 @@ mod tests {
         assert_eq!(links[0].start_column, 2);
         assert_eq!(links[0].end_row, 1);
         assert_eq!(links[0].end_column, 12);
+    }
+
+    #[test]
+    fn a_boxed_link_covers_only_its_own_cells() {
+        let cols = 28;
+        let rows = [
+            row("│ X:/dev/proj/notes-file │", cols, false),
+            row("│ le.txt:7:3             │", cols, false),
+        ];
+
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(links.len(), 1);
+        let link = &links[0];
+        assert_eq!(
+            link.segments,
+            vec![
+                LinkSegment {
+                    row: 0,
+                    start_column: 2,
+                    end_column: 24,
+                },
+                LinkSegment {
+                    row: 1,
+                    start_column: 2,
+                    end_column: 12,
+                },
+            ]
+        );
+        for (row, col, why) in [
+            (0, 0, "the left border"),
+            (0, 1, "the left padding"),
+            (0, 24, "the right padding"),
+            (0, 25, "the right border"),
+            (1, 0, "the left border below"),
+            (1, 1, "the left padding below"),
+            (1, 12, "the padding past the tail"),
+        ] {
+            assert!(!link.covers(row, col), "{why} is not the link");
+        }
+        for (row, col) in [(0, 2), (0, 23), (1, 2), (1, 11)] {
+            assert!(link.covers(row, col), "row {row}, column {col}");
+        }
+    }
+
+    #[test]
+    fn a_soft_wrapped_link_runs_to_the_row_end() {
+        let cols = 20;
+        let rows = [
+            row("See X:/dev/project/l", cols, false),
+            row("ong/name/file.ts:12", cols, true),
+        ];
+
+        let links = detect_row_links(&rows, cols);
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].segments,
+            vec![
+                LinkSegment {
+                    row: 0,
+                    start_column: 4,
+                    end_column: 20,
+                },
+                LinkSegment {
+                    row: 1,
+                    start_column: 0,
+                    end_column: 19,
+                },
+            ]
+        );
     }
 
     #[test]

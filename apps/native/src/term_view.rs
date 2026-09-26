@@ -1,28 +1,33 @@
 //! The terminal pane: one daemon session rendered with `alacritty_terminal`,
 //! with its input, resize, scroll and scrollback handling.
 
+use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use alacritty_terminal::index::Side;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::CursorShape;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, BorderStyle, Bounds, Context, DispatchPhase, ElementInputHandler, EntityInputHandler,
-    EventEmitter, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent, Keystroke, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
-    ScrollWheelEvent, SharedString, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
-    Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
+    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, HitboxBehavior,
+    KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString,
+    Subscription, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font,
+    outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionSnapshot};
 
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
+use crate::links::TerminalLink;
 use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
+use crate::open;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
@@ -75,6 +80,32 @@ pub struct TerminalPane {
     font: FontSettings,
     /// `font`'s family resolved against the installed fonts, once measured.
     family: Option<SharedString>,
+    /// The folders the session's relative link paths resolve against.
+    base_dirs: Vec<String>,
+    /// Link mode and the link under the mouse.
+    links: LinkHover,
+    /// Bumped whenever the terminal's content may have changed: output,
+    /// history, a resize or a fresh terminal. Keys the hover's link cache.
+    content_generation: u64,
+}
+
+/// Ctrl+hover state: whether Ctrl is held, the viewport cell (row, column)
+/// under the mouse while it is over this pane's grid, and the last link
+/// detection.
+#[derive(Debug, Default)]
+struct LinkHover {
+    active: bool,
+    cell: Option<(usize, usize)>,
+    cache: RefCell<Option<CachedLinks>>,
+}
+
+/// The links around one grid line, kept while the terminal's content stays
+/// the same.
+#[derive(Debug)]
+struct CachedLinks {
+    /// The pane's content generation and the hovered grid line.
+    key: (u64, i32),
+    links: Vec<TerminalLink>,
 }
 
 /// The session the pane shows, and the load of its scrollback. Only the
@@ -158,6 +189,12 @@ pub enum PaneEvent {
     /// The pane made a copy, or the program stored one (OSC 52): the root
     /// puts it on the clipboard and shows the chip.
     Copied { text: String },
+    /// Ctrl+click picked `link`; a path in it resolves against
+    /// `base_dirs`, the session's folders.
+    OpenLink {
+        link: TerminalLink,
+        base_dirs: Vec<String>,
+    },
 }
 
 impl EventEmitter<PaneEvent> for TerminalPane {}
@@ -191,6 +228,9 @@ impl TerminalPane {
             blur: None,
             font: font.normalized(),
             family: None,
+            base_dirs: Vec::new(),
+            links: LinkHover::default(),
+            content_generation: 0,
         }
     }
 
@@ -303,6 +343,7 @@ impl TerminalPane {
         let context = SessionContext::of(session);
         self.fresh_terminal(context.default_cursor_shape());
         self.session = Some(context);
+        self.base_dirs = open::base_dirs(session);
         self.attachment.attach(session.id.clone(), (self.now)());
         self.send_resize();
         self.schedule_load_tick(cx);
@@ -313,10 +354,16 @@ impl TerminalPane {
     /// old one.
     fn fresh_terminal(&mut self, cursor: CursorShape) {
         self.term = Terminal::new(self.term.size(), cursor);
+        self.content_changed();
         self.tracker = Tracker::default();
         self.last_motion = None;
         self.sync_timer = None;
         self.sync_deadline = None;
+    }
+
+    /// The terminal's content may read differently now.
+    fn content_changed(&mut self) {
+        self.content_generation = self.content_generation.wrapping_add(1);
     }
 
     /// A `LoadScrollback` for the attached session went out under
@@ -376,6 +423,7 @@ impl TerminalPane {
             match step {
                 Step::Status(text) => {
                     self.term.feed(text.as_bytes());
+                    self.content_changed();
                     self.service_term(cx);
                 }
                 Step::Request => retry = true,
@@ -407,19 +455,22 @@ impl TerminalPane {
     pub fn update_session(&mut self, session: &SessionSnapshot) {
         if self.session_id() == Some(session.id.as_str()) {
             self.session = Some(SessionContext::of(session));
+            self.base_dirs = open::base_dirs(session);
             self.drop_marked_unless_accepting();
         }
     }
 
     /// Take in a full session list: the attached session's entry, if listed.
     pub fn refresh_sessions(&mut self, sessions: &[SessionSnapshot]) {
-        if let Some(context) = self
+        let Some(session) = self
             .session_id()
-            .and_then(|id| SessionContext::find(sessions, id))
-        {
-            self.session = Some(context);
-            self.drop_marked_unless_accepting();
-        }
+            .and_then(|id| sessions.iter().find(|session| session.id == id))
+        else {
+            return;
+        };
+        self.session = Some(SessionContext::of(session));
+        self.base_dirs = open::base_dirs(session);
+        self.drop_marked_unless_accepting();
     }
 
     /// Forget the attached session. The caller sends `Detach` once no pane
@@ -428,6 +479,7 @@ impl TerminalPane {
         self.attachment.take();
         self.fresh_terminal(CursorShape::Block);
         self.session = None;
+        self.base_dirs.clear();
         self.marked = None;
         self.load_timer = None;
         self.sync_timer = None;
@@ -440,6 +492,7 @@ impl TerminalPane {
             self.fresh_terminal(CursorShape::Block);
         }
         self.session = None;
+        self.base_dirs.clear();
         self.marked = None;
         self.load_timer = None;
         self.sync_timer = None;
@@ -526,6 +579,7 @@ impl TerminalPane {
     /// already answered it and the child has printed nothing since, or when
     /// the program got its answer and now waits in silence.
     fn feed_history(&mut self, bytes: &[u8], output_follows: bool, cx: &mut Context<Self>) {
+        self.content_changed();
         match bytes.strip_suffix(CURSOR_POSITION_QUERY) {
             Some(answered) if !output_follows => {
                 self.term.feed_history(answered);
@@ -542,6 +596,7 @@ impl TerminalPane {
     /// answers for its session.
     fn feed_live(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.term.feed(bytes);
+        self.content_changed();
         self.service_term(cx);
     }
 
@@ -666,6 +721,7 @@ impl TerminalPane {
         let changed = size != self.term.size();
         if changed {
             self.term.resize(size);
+            self.content_changed();
         }
         if self.size_gate.measure(changed) {
             self.send_resize();
@@ -835,6 +891,24 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.focus.focus(window);
+        // Ctrl+click on a link opens it, ahead of a selection or a mouse
+        // report; its release then finds no gesture to end. Only the first
+        // press of a multi-click opens it; the later ones do nothing.
+        if event.button == MouseButton::Left
+            && event.modifiers.secondary()
+            && let Some(link) = self
+                .cell_within(event.position)
+                .and_then(|cell| self.link_at(cell.row, cell.col))
+        {
+            if event.click_count == 1 {
+                cx.emit(PaneEvent::OpenLink {
+                    link,
+                    base_dirs: self.base_dirs.clone(),
+                });
+            }
+            cx.notify();
+            return;
+        }
         let (Some(cell), Some(button)) =
             (self.cell_at(event.position), report_button(event.button))
         else {
@@ -893,6 +967,106 @@ impl TerminalPane {
                 cx.notify();
             }
         }
+    }
+
+    /// A move anywhere in the window: the cell under the mouse while it is
+    /// over this pane's grid (`over`), and whether Ctrl is held.
+    fn on_hover_move(&mut self, event: &MouseMoveEvent, over: bool, cx: &mut Context<Self>) {
+        let cell = over
+            .then(|| self.cell_within(event.position))
+            .flatten()
+            .map(|cell| (cell.row, cell.col));
+        let active = event.modifiers.secondary();
+        let changed = (active, cell) != (self.links.active, self.links.cell);
+        let shown = active || self.links.active;
+        self.links.active = active;
+        self.links.cell = cell;
+        if changed && shown {
+            cx.notify();
+        }
+    }
+
+    /// Holds link mode while Ctrl is down, in this pane whether it has the
+    /// focus or not.
+    /// Only a pane with a hovered cell repaints, since only it can underline.
+    pub fn set_link_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.links.active != on {
+            self.links.active = on;
+            if self.links.cell.is_some() {
+                cx.notify();
+            }
+        }
+    }
+
+    /// The pointer left the window: no cell is hovered, so nothing is
+    /// underlined.
+    fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        if self.links.cell.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The link Ctrl+hover underlines: the one under the mouse while Ctrl is
+    /// held.
+    pub fn hovered_link(&self) -> Option<TerminalLink> {
+        let (row, col) = self.links.cell.filter(|_| self.links.active)?;
+        self.link_at(row, col)
+    }
+
+    /// The link whose own characters take viewport cell (`row`, `col`). The
+    /// links around a grid line are detected again only once the terminal's
+    /// content changed or another line is hovered.
+    fn link_at(&self, row: usize, col: usize) -> Option<TerminalLink> {
+        let cell = ViewportCell {
+            row,
+            col,
+            side: Side::Left,
+        };
+        let point = cell.to_point(self.term.display_offset());
+        let (line, col) = (point.line.0, point.column.0);
+        let key = (self.content_generation, line);
+        let mut cache = self.links.cache.borrow_mut();
+        if cache.as_ref().is_none_or(|cached| cached.key != key) {
+            let links = self
+                .term
+                .link_window(line)
+                .map(|window| window.links())
+                .unwrap_or_default();
+            *cache = Some(CachedLinks { key, links });
+        }
+        cache
+            .as_ref()?
+            .links
+            .iter()
+            .find(|link| link.covers(line, col))
+            .cloned()
+    }
+
+    /// The cell under `position` when it lies on the grid itself rather
+    /// than its padding.
+    fn cell_within(&self, position: Point<Pixels>) -> Option<ViewportCell> {
+        let (origin, cell) = self.layout?;
+        let x = (position.x - origin.x) / px(1.0);
+        let y = (position.y - origin.y) / px(1.0);
+        let size = self.term.size();
+        #[expect(clippy::cast_precision_loss, reason = "grid dimensions are small")]
+        let (width, height) = (
+            size.cols as f32 * cell.width,
+            size.rows as f32 * cell.height,
+        );
+        let inside = (0.0..width).contains(&x) && (0.0..height).contains(&y);
+        if inside { self.cell_at(position) } else { None }
+    }
+
+    /// The viewport cells the hovered link's own characters take, row by
+    /// row.
+    fn hovered_link_cells(&self) -> Option<Vec<(usize, Range<usize>)>> {
+        let link = self.hovered_link()?;
+        Some(link_cells(
+            &link,
+            self.term.display_offset(),
+            self.term.size(),
+        ))
     }
 
     /// Reports motion, once per cell entered.
@@ -1117,28 +1291,52 @@ impl Render for TerminalPane {
         let font_settings = self.font.clone();
         let view = cx.entity();
         let gesture_view = view.clone();
+        let exit_view = view.clone();
         let input_view = view.clone();
         let focus = self.focus.clone();
         let background = to_rgba(self.term.snapshot().background);
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
-                let (snap, marked) = view.update(cx, |v, _| {
+                let (snap, marked, link) = view.update(cx, |v, _| {
                     v.ensure_size(grid_size(bounds, &m));
                     v.layout = Some((bounds.origin, cell_size(&m)));
-                    (v.term.snapshot(), v.marked.clone())
+                    (v.term.snapshot(), v.marked.clone(), v.hovered_link_cells())
                 });
-                (m, snap, marked)
+                let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                (m, snap, marked, link, hitbox)
             },
-            move |bounds, (m, snap, marked), window, cx| {
+            move |bounds, (m, snap, marked, link, hitbox), window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, input_view), cx);
-                // Window-wide, so a drag keeps going once the pointer leaves the pane.
-                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                if link.is_some() {
+                    window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+                }
+                // Window-wide, so a drag keeps going once the pointer leaves
+                // the pane, and a hovered link ends when it does.
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                     if phase == DispatchPhase::Bubble {
-                        gesture_view.update(cx, |pane, cx| pane.on_gesture_move(event, cx));
+                        let over = hitbox.is_hovered(window);
+                        gesture_view.update(cx, |pane, cx| {
+                            pane.on_gesture_move(event, cx);
+                            pane.on_hover_move(event, over, cx);
+                        });
                     }
                 });
-                paint_grid(bounds, &snap, &m, window, cx);
+                // Leaving the window sends no move, so the hovered cell
+                // would otherwise outlive the pointer.
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Bubble {
+                        exit_view.update(cx, TerminalPane::clear_hover);
+                    }
+                });
+                paint_grid(
+                    bounds,
+                    &snap,
+                    link.as_deref().unwrap_or_default(),
+                    &m,
+                    window,
+                    cx,
+                );
                 if let Some(text) = marked {
                     paint_preedit(bounds.origin, &snap, &text, &m, window, cx);
                 }
@@ -1238,9 +1436,31 @@ fn cell_origin(origin: Point<Pixels>, m: &Metrics, row: usize, col: usize) -> Po
     )
 }
 
+/// The viewport cells `link`'s own characters take, row by row. Rows out of
+/// view are left out.
+fn link_cells(
+    link: &TerminalLink,
+    display_offset: usize,
+    size: GridSize,
+) -> Vec<(usize, Range<usize>)> {
+    let offset = i64::try_from(display_offset).unwrap_or(i64::MAX);
+    link.segments
+        .iter()
+        .filter_map(|segment| {
+            let row = usize::try_from(i64::from(segment.row).saturating_add(offset))
+                .ok()
+                .filter(|row| *row < size.rows)?;
+            let end = segment.end_column.min(size.cols);
+            (segment.start_column < end).then_some((row, segment.start_column..end))
+        })
+        .collect()
+}
+
+/// `link` is the hovered link's cells, underlined after the text.
 fn paint_grid(
     bounds: Bounds<Pixels>,
     snap: &Snapshot,
+    link: &[(usize, Range<usize>)],
     m: &Metrics,
     window: &mut Window,
     cx: &mut App,
@@ -1260,6 +1480,40 @@ fn paint_grid(
             paint_span(bounds.origin, span, m, window, cx);
         }
     }
+    paint_link_underline(bounds.origin, link, snap, m, window);
+}
+
+/// A 1px line along the bottom of the link's cells, in its text's colour.
+fn paint_link_underline(
+    origin: Point<Pixels>,
+    cells: &[(usize, Range<usize>)],
+    snap: &Snapshot,
+    m: &Metrics,
+    window: &mut Window,
+) {
+    for (row, cols) in cells {
+        let at = cell_origin(origin, m, *row, cols.start);
+        #[expect(clippy::cast_precision_loss, reason = "grid coordinates are small")]
+        let width = m.cell_width * cols.len() as f32;
+        window.paint_quad(fill(
+            Bounds::new(
+                point(at.x, at.y + m.line_height - px(1.0)),
+                size(width, px(1.0)),
+            ),
+            to_rgba(text_color_at(snap, *row, cols.start)),
+        ));
+    }
+}
+
+/// The colour of the text in cell (`row`, `col`); the default foreground
+/// over a blank.
+fn text_color_at(snap: &Snapshot, row: usize, col: usize) -> alacritty_terminal::vte::ansi::Rgb {
+    snap.text
+        .iter()
+        .find(|span| {
+            span.row == row && span.col <= col && col < span.col + span.text.chars().count()
+        })
+        .map_or(snap.foreground, |span| span.fg)
 }
 
 fn paint_backgrounds(origin: Point<Pixels>, spans: &[BgSpan], m: &Metrics, window: &mut Window) {

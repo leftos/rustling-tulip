@@ -17,8 +17,11 @@ mod mouse;
 mod net;
 mod notice_view;
 mod notices;
+mod open;
+mod open_view;
 mod quit;
 mod quit_view;
+mod run_confirm;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
@@ -43,9 +46,9 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
     CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight, InputHandler,
-    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
-    pulsating_between, px, size,
+    KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions,
+    div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
 use std::collections::HashMap;
@@ -58,7 +61,9 @@ use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::notices::Notices;
+use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
+use crate::run_confirm::RunConfirm;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
 use crate::session_menu::{DeleteDialog, SessionMenu};
 use crate::shell_dialog::PendingQuickShell;
@@ -80,6 +85,7 @@ pub use crate::net::{
 pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind,
 };
+pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
 pub use crate::spawns::{OpenIn, PaneAim};
@@ -111,6 +117,9 @@ pub struct RootDeps {
     pub now: Clock,
     /// Quits the app once the quit flow is done.
     pub quit: QuitFn,
+    /// Opens the links Ctrl+click picks in the terminals, on background
+    /// threads.
+    pub open: Arc<dyn Opener>,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -350,6 +359,12 @@ pub struct RootView {
     exit: Option<ExitView>,
     /// The exit dialog's keyboard focus.
     quit_focus: FocusHandle,
+    /// Opens the terminals' links, on background threads.
+    opener: Arc<dyn Opener>,
+    /// The confirm open before a link runs a file that runs code.
+    run_confirm: Option<RunConfirm>,
+    /// The run confirm's keyboard focus.
+    run_focus: FocusHandle,
 }
 
 impl RootView {
@@ -381,6 +396,7 @@ impl RootView {
             wanted: wanted_session,
             now: Arc::new(Instant::now),
             quit: Box::new(|cx: &mut App| cx.quit()),
+            open: Arc::new(SystemOpener),
         };
         Self::with_transport(deps, window, cx)
     }
@@ -397,7 +413,16 @@ impl RootView {
             wanted,
             now,
             quit,
+            open,
         } = deps;
+        // Ctrl stays down in the window's record while another window has
+        // the keyboard, so leaving the window ends link mode.
+        cx.observe_window_activation(window, |root, window, cx| {
+            if !window.is_window_active() {
+                root.set_link_mode(false, cx);
+            }
+        })
+        .detach();
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // A view that is gone has nothing to ask; let the window close.
@@ -460,6 +485,9 @@ impl RootView {
             quitter: Quitter::new(quit),
             exit: None,
             quit_focus: cx.focus_handle(),
+            opener: open,
+            run_confirm: None,
+            run_focus: cx.focus_handle(),
         }
     }
 
@@ -574,6 +602,32 @@ impl RootView {
             .view()
             .read(cx)
             .cell_center(col, row)
+    }
+
+    /// The text of the link pane `pane_id` underlines: the one under the
+    /// mouse while Ctrl is held.
+    #[must_use]
+    pub fn pane_hovered_link(&self, pane_id: &str, cx: &App) -> Option<String> {
+        let slot = self.panes.get(pane_id)?;
+        slot.view().read(cx).hovered_link().map(|link| link.text)
+    }
+
+    /// Ctrl went down or up. Modifier changes reach only the focused
+    /// element's ancestors, so the root tells every pane, focused or not.
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_link_mode(event.modifiers.secondary(), cx);
+    }
+
+    fn set_link_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        for slot in self.panes.values() {
+            slot.view()
+                .update(cx, |pane, cx| pane.set_link_mode(on, cx));
+        }
     }
 
     fn save_ui(&self) {
@@ -960,6 +1014,10 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.on_run_confirm_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.on_notice_key(ks, window, cx) {
             cx.stop_propagation();
             return;
@@ -1080,6 +1138,7 @@ impl Render for RootView {
             .flex()
             .flex_col()
             .capture_key_down(cx.listener(Self::on_key_capture))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_any_mouse_down(cx.listener(Self::on_any_mouse_down))
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
@@ -1096,6 +1155,7 @@ impl Render for RootView {
             .children(delete_under)
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
+            .children(self.run_confirm_layer(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(overlay)

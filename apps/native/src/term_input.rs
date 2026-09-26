@@ -24,11 +24,6 @@ impl SessionContext {
         }
     }
 
-    /// The context of session `id` in a full session list, if it is there.
-    pub fn find(sessions: &[SessionSnapshot], id: &str) -> Option<Self> {
-        sessions.iter().find(|s| s.id == id).map(Self::of)
-    }
-
     /// A stopped or failed session takes no input: keys, pastes, mouse
     /// reports and terminal replies are all dropped.
     pub fn accepts_input(self) -> bool {
@@ -344,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn session_list_refresh_finds_the_attached_session() {
+    fn a_session_context_reads_mode_agent_and_status() {
         let snapshot = |id: &str, status: &str| -> SessionSnapshot {
             serde_json::from_value(serde_json::json!({
                 "id": id,
@@ -361,16 +356,14 @@ mod tests {
             }))
             .expect("session fixture")
         };
-        let sessions = [snapshot("a", "idle"), snapshot("b", "stopped")];
         assert_eq!(
-            SessionContext::find(&sessions, "b"),
-            Some(SessionContext {
+            SessionContext::of(&snapshot("b", "stopped")),
+            SessionContext {
                 mode: SessionMode::PlainShell,
                 agent: Agent::Codex,
                 status: SessionStatus::Stopped,
-            })
+            }
         );
-        assert_eq!(SessionContext::find(&sessions, "c"), None);
     }
 
     #[test]

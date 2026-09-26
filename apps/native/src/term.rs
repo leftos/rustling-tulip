@@ -308,10 +308,44 @@ impl Terminal {
     }
 }
 
+/// The rows around a hovered line that its links are read from, as the walk
+/// in [`Terminal::link_window`] found them.
+#[derive(Debug)]
+pub struct LinkWindow {
+    /// The grid line of the first row.
+    first: i32,
+    rows: Vec<TerminalRow>,
+    cols: usize,
+    /// The walk stopped at its cap rather than at a row that ends the line.
+    cut_above: bool,
+    cut_below: bool,
+}
+
+impl LinkWindow {
+    /// Every link in the window, its rows in grid lines. A link touching a
+    /// window edge the walk only stopped at because it ran out of window is
+    /// dropped rather than offered cut short.
+    #[must_use]
+    pub fn links(&self) -> Vec<TerminalLink> {
+        let edge = i32::try_from(self.rows.len())
+            .unwrap_or(i32::MAX)
+            .saturating_sub(1);
+        let mut links = links::detect_row_links(&self.rows, self.cols);
+        links.retain(|link| {
+            let cut_short =
+                (self.cut_above && link.start_row == 0) || (self.cut_below && link.end_row == edge);
+            !cut_short
+        });
+        for link in &mut links {
+            link.shift_rows(self.first);
+        }
+        links
+    }
+}
+
 /// The row reader the link detector works on. Every method here hands out
 /// grid lines rather than screen rows, so a line above the viewport is a
 /// negative one.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the tests call these"))]
 impl Terminal {
     /// How far the walk for a hovered line reaches, in rows each way.
     const LINK_ROW_WINDOW: i32 = 64;
@@ -324,13 +358,8 @@ impl Terminal {
     }
 
     /// The links spanning grid line `line`, stitched from the rows around it.
-    ///
-    /// The walk reaches [`Self::LINK_ROW_WINDOW`] rows back from `line`, and
-    /// as many forward, independently, while each step is a soft wrap or a
-    /// hard stitch. A link touching a window edge the walk only stopped at
-    /// because it ran out of window is dropped rather than offered cut short.
-    /// The rows of what comes back are grid lines, so a link in the history
-    /// carries a negative one.
+    /// The view reads them through [`Self::link_window`], which it caches.
+    #[cfg(test)]
     #[must_use]
     pub fn detect_links_near(&self, line: i32) -> Vec<TerminalLink> {
         self.links_near(line, Self::LINK_ROW_WINDOW)
@@ -338,10 +367,31 @@ impl Terminal {
 
     /// [`Self::detect_links_near`] with the window cap named, so that a test
     /// can reach a window edge on a small grid.
+    #[cfg(test)]
     fn links_near(&self, line: i32, cap: i32) -> Vec<TerminalLink> {
+        let Some(window) = self.window_near(line, cap) else {
+            return Vec::new();
+        };
+        let mut links = window.links();
+        links.retain(|link| link.start_row <= line && link.end_row >= line);
+        links
+    }
+
+    /// The rows the links spanning grid line `line` are read from.
+    ///
+    /// The walk reaches [`Self::LINK_ROW_WINDOW`] rows back from `line`, and
+    /// as many forward, independently, while each step is a soft wrap or a
+    /// hard stitch. `None` when `line` is not on the grid.
+    #[must_use]
+    pub fn link_window(&self, line: i32) -> Option<LinkWindow> {
+        self.window_near(line, Self::LINK_ROW_WINDOW)
+    }
+
+    /// [`Self::link_window`] with the window cap named.
+    fn window_near(&self, line: i32, cap: i32) -> Option<LinkWindow> {
         let (top, bottom) = self.line_bounds();
         if line < top || line > bottom {
-            return Vec::new();
+            return None;
         }
         let cols = self.size.cols;
         let mut above = vec![self.read_row(line)];
@@ -359,11 +409,13 @@ impl Terminal {
         }
         let cut_above = first > top && line - first >= cap;
 
-        let mut below = Vec::new();
+        let mut below: Vec<TerminalRow> = Vec::new();
         let mut last = line;
         while last < bottom && last - line < cap {
             let next = self.read_row(last + 1);
-            let Some(current) = below.last().or_else(|| above.last()) else {
+            // Each step reads the row it walked last against the next: the
+            // hovered row first, whatever the walk back found above it.
+            let Some(current) = below.last().or_else(|| above.first()) else {
                 break;
             };
             if !next.is_wrapped && !links::can_stitch(current, &next, cols) {
@@ -375,22 +427,13 @@ impl Terminal {
         let cut_below = last < bottom && last - line >= cap;
 
         above.reverse();
-        let hovered = line - first;
-        let edge = i32::try_from(above.len() + below.len())
-            .unwrap_or(i32::MAX)
-            .saturating_sub(1);
-        let rows: Vec<TerminalRow> = above.into_iter().chain(below).collect();
-        let mut links = links::detect_row_links(&rows, cols);
-        links.retain(|link| {
-            let spanning = link.start_row <= hovered && link.end_row >= hovered;
-            let cut = (cut_above && link.start_row == 0) || (cut_below && link.end_row == edge);
-            spanning && !cut
-        });
-        for link in &mut links {
-            link.start_row += first;
-            link.end_row += first;
-        }
-        links
+        Some(LinkWindow {
+            first,
+            rows: above.into_iter().chain(below).collect(),
+            cols,
+            cut_above,
+            cut_below,
+        })
     }
 
     /// One grid line as a [`TerminalRow`]: the cell of every column holding a
@@ -1104,6 +1147,41 @@ mod tests {
         assert_eq!(links[0].target, "X:/a/b.rs");
         assert_eq!(links[0].start_row, -1);
         assert_eq!(links[0].end_row, -1);
+    }
+
+    #[test]
+    fn a_stitched_path_is_the_same_link_from_each_of_its_rows() {
+        let boxed = sized(
+            "│ X:/dev/proj/notes-file │\r\n│ aaaaaaaaaaaaaaaaaaaa   │\r\n│ b.txt:7                │\r\nnext/thing"
+                .as_bytes(),
+            28,
+            6,
+        );
+        let target = format!("X:/dev/proj/notes-file{}b.txt", "a".repeat(20));
+        for line in 0..3 {
+            let links = boxed.detect_links_near(line);
+            assert_eq!(links.len(), 1, "hovered on row {line}: {links:?}");
+            assert_eq!(links[0].target, target, "hovered on row {line}");
+            assert_eq!((links[0].start_row, links[0].end_row), (0, 2));
+        }
+        let next = boxed.detect_links_near(3);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].target, "next/thing", "the next line stands alone");
+        assert_eq!((next[0].start_row, next[0].end_row), (3, 3));
+
+        // A soft-wrapped lead-in above the path's first row must not decide
+        // whether the row below the hovered one continues the path.
+        let wrapped = sized(
+            b"hello there friend, X:/dir/aaaaaaaaaaaaa\r\nbbbb.rs",
+            20,
+            4,
+        );
+        let target = format!("X:/dir/{}bbbb.rs", "a".repeat(13));
+        for line in 1..3 {
+            let links = wrapped.detect_links_near(line);
+            assert_eq!(links.len(), 1, "hovered on row {line}: {links:?}");
+            assert_eq!(links[0].target, target, "hovered on row {line}");
+        }
     }
 
     #[test]

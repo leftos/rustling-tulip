@@ -231,8 +231,8 @@ impl RootView {
             this.pane_focused(&id, cx);
             cx.notify();
         });
-        let events = cx.subscribe(&view, |this, _, event: &PaneEvent, cx| {
-            this.on_pane_event(event, cx);
+        let events = cx.subscribe_in(&view, window, |this, _, event: &PaneEvent, window, cx| {
+            this.on_pane_event(event, window, cx);
         });
         PaneSlot {
             view,
@@ -313,9 +313,10 @@ impl RootView {
         }
     }
 
-    /// A pane's scrollback retry, sent once per session and attempt, or a
-    /// pane's copy, which the root's clipboard write and chip answer.
-    fn on_pane_event(&mut self, event: &PaneEvent, cx: &mut Context<Self>) {
+    /// A pane's scrollback retry, sent once per session and attempt; a
+    /// pane's copy, which the root's clipboard write and chip answer; or a
+    /// pane's Ctrl+clicked link, which opens.
+    fn on_pane_event(&mut self, event: &PaneEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             PaneEvent::ScrollbackRetry {
                 session_id,
@@ -333,6 +334,9 @@ impl RootView {
                 }
             }
             PaneEvent::Copied { text } => self.copy_to_clipboard(text, cx),
+            PaneEvent::OpenLink { link, base_dirs } => {
+                self.open_link(link, base_dirs.clone(), window, cx);
+            }
         }
     }
 

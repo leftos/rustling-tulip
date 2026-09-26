@@ -722,14 +722,83 @@ pub fn load_ui_state(dir: &Path) -> UiState {
     })
 }
 
+/// The key in the layout file listing the network hosts a terminal link may
+/// open a `\\host\…` path on besides those behind a mapped drive. The user
+/// edits it by hand; the client reads it afresh on each use and never writes
+/// its own copy.
+const UNC_HOSTS_KEY: &str = "unc_hosts";
+
+/// The hosts listed under `unc_hosts` in `dir`'s layout file right now;
+/// none when the file or the key is missing or unreadable.
+pub fn load_unc_hosts(dir: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Listed {
+        #[serde(default)]
+        unc_hosts: Vec<String>,
+    }
+    let path = dir.join(UI_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::warn!(
+                "reading {}: {err}; no network host is listed",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    serde_json::from_str::<Listed>(&text).map_or_else(
+        |err| {
+            tracing::warn!(
+                "{} has no valid {UNC_HOSTS_KEY}: {err}; no network host is listed",
+                path.display()
+            );
+            Vec::new()
+        },
+        |listed| listed.unc_hosts,
+    )
+}
+
+/// Whatever `unc_hosts` the layout file at `path` holds right now, as it is.
+fn file_unc_hosts(path: &Path) -> Option<serde_json::Value> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!(
+                "reading {}: {err}; its {UNC_HOSTS_KEY} is not kept",
+                path.display()
+            );
+            return None;
+        }
+    };
+    let mut file: serde_json::Value = serde_json::from_str(&text)
+        .inspect_err(|err| {
+            tracing::warn!(
+                "{} is not valid: {err}; its {UNC_HOSTS_KEY} is not kept",
+                path.display()
+            );
+        })
+        .ok()?;
+    file.as_object_mut()?.remove(UNC_HOSTS_KEY)
+}
+
 /// Write the layout to `dir` through a temporary file, so a crash mid-write
-/// never leaves a torn file.
+/// never leaves a torn file. The `unc_hosts` the file holds is written back
+/// as it is; a file without one gets none.
 pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
     use anyhow::Context as _;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(UI_FILE);
     let tmp = dir.join(format!("{UI_FILE}.tmp"));
-    let json = serde_json::to_vec_pretty(state).context("serializing the sidebar layout")?;
+    let mut layout = serde_json::to_value(state).context("serializing the sidebar layout")?;
+    if let Some(hosts) = file_unc_hosts(&path)
+        && let Some(object) = layout.as_object_mut()
+    {
+        object.insert(UNC_HOSTS_KEY.to_owned(), hosts);
+    }
+    let json = serde_json::to_vec_pretty(&layout).context("serializing the sidebar layout")?;
     std::fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
 }
