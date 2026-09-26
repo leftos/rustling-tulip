@@ -9,6 +9,8 @@ pub mod appearance;
 mod branch_fate;
 mod connection;
 mod copied;
+pub mod diff_model;
+pub mod diff_view;
 pub mod fonts;
 mod footer;
 mod grid_view;
