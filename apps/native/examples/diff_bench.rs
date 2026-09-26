@@ -18,8 +18,8 @@ use gpui::{
 use rustling_tulip_native::diff_model::{DiffModel, DiffOptions};
 use rustling_tulip_native::diff_view::DiffView;
 use rustling_tulip_native::fonts::{self, FontSettings};
+use rustling_tulip_native::offscreen::{requested, show_cloaked};
 
-const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 /// The window's size in logical pixels, the client's own.
 const WINDOW_SIZE: (u16, u16) = (1000, 640);
 const LINES: usize = 5_000;
@@ -87,7 +87,7 @@ struct Bench {
 }
 
 fn open(model: DiffModel, cx: &mut App) {
-    let offscreen = std::env::var_os(OFFSCREEN_ENV).is_some_and(|value| !value.is_empty());
+    let offscreen = requested();
     let (width, height) = WINDOW_SIZE;
     let bounds = Bounds::centered(None, size(px(width.into()), px(height.into())), cx);
     let opened_at = Instant::now();
@@ -178,77 +178,4 @@ fn scroll_step(mut bench: Bench, window: &mut Window, cx: &mut App) {
     bench.step += 1;
     window.refresh();
     window.on_next_frame(move |window, cx| scroll_step(bench, window, cx));
-}
-
-/// Places `window` at the primary display's work-area origin at its full
-/// size (gpui applies neither to a window it opens hidden), cloaks it and
-/// shows it without activating it, as the client does for its smoke tier.
-#[cfg(windows)]
-fn show_cloaked(window: &Window) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let raw = HasWindowHandle::window_handle(window).map(|handle| handle.as_raw());
-    let address = match raw {
-        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get().cast_unsigned(),
-        other => {
-            tracing::error!("{OFFSCREEN_ENV}: the window has no Win32 handle ({other:?})");
-            return;
-        }
-    };
-    // Sent from gpui's own callback these messages would find its state
-    // borrowed and be lost; sent from another thread they wait for its loop.
-    let spawned = std::thread::Builder::new()
-        .name("cloak-window".to_owned())
-        .spawn(move || cloak_and_show(address));
-    if let Err(err) = spawned {
-        tracing::error!("{OFFSCREEN_ENV}: starting the thread that shows the window: {err}");
-    }
-}
-
-/// The work of [`show_cloaked`] on the window whose handle is `address`.
-#[cfg(windows)]
-fn cloak_and_show(address: usize) {
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER,
-        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetWindowPos, ShowWindow, SystemParametersInfoW,
-    };
-    use windows::core::BOOL;
-    let hwnd = HWND(std::ptr::with_exposed_provenance_mut(address));
-    let mut work_area = RECT::default();
-    let cloak = BOOL::from(true);
-    let flags = SWP_NOZORDER | SWP_NOACTIVATE;
-    // SAFETY: a plain query on this live window; 0 means it has no DPI.
-    let dpi = match unsafe { GetDpiForWindow(hwnd) } {
-        0 => 96,
-        dpi => i32::try_from(dpi).unwrap_or(96),
-    };
-    let scaled = |logical: u16| i32::from(logical) * dpi / 96;
-    let (width, height) = (scaled(WINDOW_SIZE.0), scaled(WINDOW_SIZE.1));
-    // SAFETY: `hwnd` is this live window's handle and the pointers are to
-    // locals that outlive the calls; none of the calls activates the window.
-    unsafe {
-        let area = (&raw mut work_area).cast();
-        let none = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
-        if let Err(err) = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(area), none) {
-            tracing::warn!("{OFFSCREEN_ENV}: reading the primary work area: {err}");
-        }
-        let (left, top) = (work_area.left, work_area.top);
-        if let Err(err) = SetWindowPos(hwnd, None, left, top, width, height, flags) {
-            tracing::error!("{OFFSCREEN_ENV}: moving the window onto the work area: {err}");
-        }
-        let cloak_ptr = (&raw const cloak).cast();
-        let cloak_size = u32::try_from(size_of::<BOOL>()).unwrap_or(4);
-        if let Err(err) = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, cloak_ptr, cloak_size) {
-            tracing::error!("{OFFSCREEN_ENV}: cloaking the window, so it stays hidden: {err}");
-            return;
-        }
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    }
-}
-
-#[cfg(not(windows))]
-fn show_cloaked(_window: &Window) {
-    tracing::warn!("{OFFSCREEN_ENV} is only honoured on Windows; the window stays hidden");
 }
