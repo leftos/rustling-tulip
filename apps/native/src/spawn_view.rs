@@ -2,11 +2,14 @@
 //! text fields, and its rendering. The state and every rule live in
 //! [`crate::spawn_form`]; spawning goes through [`RootView::spawn`].
 
+use std::mem;
+use std::ops::Range;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight, Keystroke,
-    SharedString, Stateful, Subscription, Task, Window, div, prelude::*, px, relative,
+    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
+    Keystroke, Pixels, ScrollHandle, SharedString, Stateful, Subscription, Task, Window, canvas,
+    div, point, prelude::*, px, relative,
 };
 use protocol::{Agent, DaemonMessage};
 
@@ -71,6 +74,11 @@ pub(crate) struct SpawnDialog {
     _subscriptions: Vec<Subscription>,
     /// Wakes the view when the wait for a branch suggestion runs out.
     timer: Option<Task<()>>,
+    /// Where the body is scrolled to.
+    scroll: ScrollHandle,
+    /// The focus moved since the body last scrolled the focused control
+    /// into view.
+    reveal: bool,
 }
 
 impl SpawnDialog {
@@ -289,6 +297,8 @@ impl RootView {
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
             timer: None,
+            scroll: ScrollHandle::new(),
+            reveal: true,
         });
         self.send_all(messages);
         self.after_spawn_change(cx);
@@ -374,6 +384,7 @@ impl RootView {
         let focus = cx.on_focus(&handle, window, move |this, _, cx| {
             if let Some(dialog) = &mut this.spawn_dialog {
                 dialog.form.set_focus(field.control());
+                dialog.reveal = true;
             }
             cx.notify();
         });
@@ -487,11 +498,13 @@ impl RootView {
     }
 
     /// The keyboard goes where the form's focus is: a text field, else the
-    /// dialog itself.
-    pub(crate) fn apply_spawn_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &self.spawn_dialog else {
+    /// dialog itself. The body then scrolls the focused control into view.
+    pub(crate) fn apply_spawn_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.spawn_dialog else {
             return;
         };
+        dialog.reveal = true;
+        let dialog = &*dialog;
         let input = if dialog.form.share_confirm().is_some() {
             None
         } else {
@@ -502,6 +515,34 @@ impl RootView {
             None => self.spawn_focus.focus(window),
         }
         cx.notify();
+    }
+
+    /// The focused control was laid out at `control`: after a focus change
+    /// the body scrolls the least that shows it whole, and the window draws
+    /// again at the new offset.
+    fn reveal_spawn_focus(
+        &mut self,
+        control: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = &mut self.spawn_dialog else {
+            return;
+        };
+        if !mem::take(&mut dialog.reveal) {
+            return;
+        }
+        let viewport = dialog.scroll.bounds();
+        let offset = dialog.scroll.offset();
+        let y = reveal_offset(
+            viewport.top()..viewport.bottom(),
+            control.top()..control.bottom(),
+            offset.y,
+        );
+        if y != offset.y {
+            dialog.scroll.set_offset(point(offset.x, y));
+            cx.defer_in(window, |_, window, _| window.refresh());
+        }
     }
 
     /// Whether a text field of the dialog holds the keyboard.
@@ -637,11 +678,13 @@ impl RootView {
         let focus = form.focused();
         let body = div()
             .id("spawn-body")
+            .debug_selector(|| "spawn-body".to_owned())
             .flex()
             .flex_col()
             .gap(px(10.0))
             .min_h(px(0.0))
             .overflow_y_scroll()
+            .track_scroll(&dialog.scroll)
             .child(target_field(form, &focus, cx))
             .child(runtime_field(form, &focus, cx))
             .child(open_in_field(form, &focus, cx))
@@ -682,7 +725,7 @@ impl RootView {
         if form.pinning() {
             worktree.push(existing_field(form, focus, cx));
         }
-        let base = (form.use_worktree() && !form.pinning()).then(|| base_field(dialog, focus));
+        let base = (form.use_worktree() && !form.pinning()).then(|| base_field(dialog, focus, cx));
         if form.is_workspace() {
             branch.into_iter().chain(worktree).chain(base).collect()
         } else {
@@ -818,6 +861,46 @@ fn option_button(
         })
         .when(!look.enabled, |button| button.opacity(0.5))
         .child(label)
+        .when(look.focused && in_body(control), |button| {
+            button.child(reveal_marker(cx))
+        })
+}
+
+/// Whether a control sits in the scrolling body, not the header or footer.
+fn in_body(control: &Control) -> bool {
+    !matches!(control, Control::Close | Control::Cancel | Control::Submit)
+}
+
+/// Laid over the focused control: where it lands tells the body how far to
+/// scroll to show it. An absolute child sits inside its parent's border, so
+/// the marker reaches out over the controls' 1px outline (`border_1`).
+fn reveal_marker(cx: &mut Context<RootView>) -> impl IntoElement {
+    let root = cx.weak_entity();
+    canvas(
+        move |bounds, window, cx| {
+            // Fails only when the view is gone, and the dialog with it.
+            root.update(cx, |this, cx| this.reveal_spawn_focus(bounds, window, cx))
+                .ok();
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset(px(-1.0))
+}
+
+/// The body's new scroll offset (negative once scrolled down) that shows
+/// `control` whole in `viewport` with the least movement, both ranges being
+/// where they lie at `offset`. A control taller than the viewport shows its
+/// top.
+fn reveal_offset(viewport: Range<Pixels>, control: Range<Pixels>, offset: Pixels) -> Pixels {
+    let too_tall = control.end - control.start > viewport.end - viewport.start;
+    if control.start < viewport.start || too_tall {
+        offset + (viewport.start - control.start)
+    } else if control.end > viewport.end {
+        offset - (control.end - viewport.end)
+    } else {
+        offset
+    }
 }
 
 fn choice(
@@ -1037,7 +1120,12 @@ fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
 }
 
 /// A text field in a box, tagged with its control's selector.
-fn input_box(control: &Control, input: &Entity<TextInput>, focus: &Control) -> Div {
+fn input_box(
+    control: &Control,
+    input: &Entity<TextInput>,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> Div {
     let selector = control.selector();
     let focused = focus == control;
     div()
@@ -1050,6 +1138,7 @@ fn input_box(control: &Control, input: &Entity<TextInput>, focus: &Control) -> D
         .border_1()
         .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
         .child(input.clone())
+        .when(focused, |field| field.child(reveal_marker(cx)))
 }
 
 fn branch_field(
@@ -1065,7 +1154,7 @@ fn branch_field(
         (false, true) => "New worktree branch",
         (false, false) => "Branch",
     };
-    let input = input_box(&Control::Branch, &dialog.branch_input, focus);
+    let input = input_box(&Control::Branch, &dialog.branch_input, focus, cx);
     let random = form.use_worktree().then(|| {
         let look = Look {
             selected: false,
@@ -1081,9 +1170,9 @@ fn branch_field(
         .into_any_element()
 }
 
-fn base_field(dialog: &SpawnDialog, focus: &Control) -> AnyElement {
+fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
     let form = &dialog.form;
-    let input = input_box(&Control::Base, &dialog.base_input, focus);
+    let input = input_box(&Control::Base, &dialog.base_input, focus, cx);
     let failed = (form.fetch_failed() && !form.is_workspace()).then(|| muted(FETCH_FAILED));
     field("Base branch (optional)")
         .child(input)
@@ -1120,7 +1209,7 @@ fn run_rows(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -
         );
     }
     if form.run_mode() == RunMode::Headless {
-        let input = input_box(&Control::Prompt, &dialog.prompt_input, focus);
+        let input = input_box(&Control::Prompt, &dialog.prompt_input, focus, cx);
         rows.push(field("Prompt").child(input).into_any_element());
     }
     rows
@@ -1182,7 +1271,7 @@ fn model_field(
     if !form.model_shown() {
         return None;
     }
-    let input = input_box(&Control::Model, &dialog.model_input, focus);
+    let input = input_box(&Control::Model, &dialog.model_input, focus, cx);
     let chips: Vec<AnyElement> = if form.model_chips_shown() {
         MODEL_ALIASES
             .into_iter()
@@ -1338,11 +1427,11 @@ fn env_row(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let problem = form.env_problem(index);
-    let key = input_box(&Control::EnvKey(index), &inputs.key, focus)
+    let key = input_box(&Control::EnvKey(index), &inputs.key, focus, cx)
         .when(problem.is_some(), |key| {
             key.border_color(gpui::rgb(WARNING))
         });
-    let value = input_box(&Control::EnvValue(index), &inputs.value, focus);
+    let value = input_box(&Control::EnvValue(index), &inputs.value, focus, cx);
     let remove_control = Control::EnvRemove(index);
     let look = Look {
         selected: false,
@@ -1389,4 +1478,37 @@ fn footer(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div 
         .gap(px(6.0))
         .child(option_button(&Control::Cancel, "Cancel", cancel, cx))
         .child(option_button(&Control::Submit, "Spawn", submit, cx))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::px;
+
+    use super::reveal_offset;
+
+    #[test]
+    fn visible_control_keeps_the_offset() {
+        let offset = reveal_offset(px(100.0)..px(300.0), px(150.0)..px(200.0), px(-40.0));
+        assert_eq!(offset, px(-40.0));
+    }
+
+    #[test]
+    fn control_below_scrolls_to_its_bottom() {
+        let offset = reveal_offset(px(100.0)..px(300.0), px(280.0)..px(330.0), px(-40.0));
+        assert_eq!(offset, px(-70.0), "its bottom meets the viewport's");
+    }
+
+    #[test]
+    fn control_above_scrolls_to_its_top() {
+        let offset = reveal_offset(px(100.0)..px(300.0), px(80.0)..px(120.0), px(-40.0));
+        assert_eq!(offset, px(-20.0), "its top meets the viewport's");
+    }
+
+    #[test]
+    fn control_taller_than_viewport_aligns_top() {
+        let below = reveal_offset(px(100.0)..px(300.0), px(250.0)..px(500.0), px(0.0));
+        assert_eq!(below, px(-150.0), "from below, its top shows");
+        let above = reveal_offset(px(100.0)..px(300.0), px(50.0)..px(320.0), px(-60.0));
+        assert_eq!(above, px(-10.0), "from above too");
+    }
 }

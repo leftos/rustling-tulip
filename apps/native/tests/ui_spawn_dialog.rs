@@ -539,3 +539,58 @@ fn closing_action_failed_over_the_dialog_refocuses_the_dialog(cx: &mut TestAppCo
     );
     assert!(h.sent_input("s1").is_empty(), "the terminal did not");
 }
+
+/// Tabs until `selector` has the focus, at most `limit` times.
+fn tab_to(h: &mut Harness<'_>, keys: &str, selector: &str, limit: usize) {
+    for _ in 0..limit {
+        if focus(h).as_deref() == Some(selector) {
+            return;
+        }
+        h.keys(keys);
+    }
+    assert_eq!(focus(h).as_deref(), Some(selector), "{keys} reached it");
+}
+
+/// Whether `selector` lies whole inside the dialog's scrolling body.
+fn shown_in_body(h: &mut Harness<'_>, selector: &str) -> bool {
+    let body = h.bounds("spawn-body");
+    let control = h.bounds(selector);
+    control.size.height > px(0.0)
+        && control.top() >= body.top()
+        && control.bottom() <= body.bottom()
+}
+
+#[gpui::test]
+fn tab_scrolls_the_focused_control_into_view(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(320.0)));
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    tab_to(&mut h, "tab", "spawn-advanced", 12);
+    assert!(
+        shown_in_body(&mut h, "spawn-advanced"),
+        "Tab scrolled down to Advanced: {:?} in {:?}",
+        h.bounds("spawn-advanced"),
+        h.bounds("spawn-body")
+    );
+
+    h.keys("space");
+    tab_to(&mut h, "tab", "spawn-env-add", 40);
+    h.keys("space");
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-env-key-0"));
+    assert!(
+        shown_in_body(&mut h, "spawn-env-key-0"),
+        "the new env row is in view: {:?} in {:?}",
+        h.bounds("spawn-env-key-0"),
+        h.bounds("spawn-body")
+    );
+
+    tab_to(&mut h, "shift-tab", "spawn-branch", 60);
+    assert!(
+        shown_in_body(&mut h, "spawn-branch"),
+        "Shift+Tab scrolled back up to the branch: {:?} in {:?}",
+        h.bounds("spawn-branch"),
+        h.bounds("spawn-body")
+    );
+}
