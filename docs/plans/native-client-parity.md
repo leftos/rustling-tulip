@@ -118,15 +118,15 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 ## Terminal
 
 - [ ] **(hard)** Rendering parity with xterm 6 + WebGL (Fit, WebFonts, Clipboard addons; DOM fallback on GPU context loss) — `components/Terminal.tsx`
-- [x] **(hard)** Scrollback first with live output buffered and drained after; retries at 2s/4s with an in-place status line; truncated / failed banners; 5000-line scrollback — `Terminal.tsx`, `api.ts` `loadScrollback` (native: all but the 5000-line cap landed in P1.6)
+- [x] **(hard)** Scrollback first with live output buffered and drained after; retries at 2s/4s with an in-place status line; truncated / failed banners; 5000-line scrollback — `Terminal.tsx`, `api.ts` `loadScrollback` (native: P1.6, and the 5000-line cap in P2.1)
 - [x] UTF-8 split across chunks; `detach` on unmount — `Terminal.tsx`
 - [x] Refit + `resize` on container resize, font change, scrollback drawn — `Terminal.tsx`
 - [x] Input dropped once the session is stopped or errored — `Terminal.tsx`
 - [x] Cursor: bar for agents, block for shells, no blink; programs can hide it or change its shape — `Terminal.tsx`
 - [x] **(hard)** Shift+Enter newline: `\` + CR for claude and shells, `\n` for codex/cursor — `Terminal.tsx`
 - [x] Ctrl/Cmd+C copies with a selection, else sends ^C; Ctrl+Shift+C always copies — `Terminal.tsx`
-- [x] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text` (native: GPUI clipboard, bracketed and sanitised, in P1.6; paste logging still missing)
-- [x] Copy on select (setting, on by default) — `Terminal.tsx`
+- [x] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text` (native: GPUI clipboard, bracketed and sanitised, in P1.6; paste logging in P2.1)
+- [x] Copy on select (setting, on by default) — `Terminal.tsx` (native: on, a constant in `mouse.rs`; the setting is P4.2)
 - [x] **(hard)** OSC 52: program clipboard writes reach the system clipboard and show the "copied" chip; reads answered empty — `components/clipboardProvider.ts`
 - [x] **(hard)** Links: URLs and paths (absolute, UNC, relative, `./`, `../`) with `:line:col`; trims trailing punctuation; stitches wrapped rows including TUI box borders (up to 4 joins within ±64 rows); shorter fallbacks if the path doesn't exist — `utils/terminalLinks.ts`
 - [x] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; disabled on remote with a toast — `Terminal.tsx`, `lib.rs` `open_terminal_path`
@@ -174,7 +174,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
 - [ ] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: error and info toasts with 8s auto-dismiss and × landed in P1.7c; no sticky or same-key update)
 - [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
-- [ ] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
+- [x] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`
 - [ ] Preset-launched sessions highlighted in the sidebar — `App.tsx`
 
 ## Pop-out windows
@@ -199,7 +199,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 - [ ] App shortcuts, ignored in inputs, the terminal, modals and pop-outs: Ctrl+B sidebar, Ctrl+T new tab, Ctrl+N spawn, Ctrl+, settings, Ctrl+(Shift+)Tab cycle tabs, Ctrl+1–9 jump to tab, Ctrl+Shift+G auto-grid, Ctrl+= / − / 0 session font, Ctrl+Shift+= / − tab font — `utils/a11y.ts`, `App.tsx`
 - [ ] Other keys: Ctrl+Enter commits; Enter/Esc in rename fields; Esc closes menus and modals; arrows in the branch combobox — various
-- [ ] Default right-click menu suppressed everywhere, Monaco included — `main.tsx`
+- [x] Default right-click menu suppressed everywhere, Monaco included — `main.tsx` (native: GPUI has no default context menu)
 - [ ] Menus stay inside the viewport; modals focus the safe option and return focus on close — `utils/a11y.ts`
 - [ ] File pickers remember the last folder per purpose — `api.ts`
 
