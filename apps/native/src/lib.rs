@@ -34,6 +34,7 @@ mod term;
 mod term_input;
 mod term_view;
 mod text_input;
+mod theme;
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt as _;

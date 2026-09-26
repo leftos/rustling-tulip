@@ -15,6 +15,7 @@ use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
 
 use crate::links::{self, TerminalLink, TerminalRow};
+use crate::theme::{self, Theme};
 
 /// Collects what the terminal asks of its client: the replies to the child
 /// (`Event::PtyWrite`: cursor-position reports, device attributes), and the
@@ -77,6 +78,9 @@ pub struct Terminal {
     parser: Processor,
     size: GridSize,
     listener: Listener,
+    /// The colours cells resolve against. A program's own palette changes
+    /// (`OSC 4`, `OSC 10`) still win over it.
+    theme: Theme,
 }
 
 /// A horizontal run of cells sharing one style, painted as one shaped line.
@@ -113,6 +117,8 @@ pub struct Snapshot {
     pub background: Rgb,
     /// The default text colour, after the program's palette changes.
     pub foreground: Rgb,
+    /// The colour the pane paints the caret in.
+    pub caret: Rgb,
 }
 
 impl Terminal {
@@ -135,11 +141,24 @@ impl Terminal {
             parser: Processor::new(),
             size,
             listener,
+            theme: Theme::default(),
         }
     }
 
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// Rebuilds the theme for a new pane background.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "a pane rebuilds its theme when its background changes"
+        )
+    )]
+    pub fn set_background(&mut self, background: Rgb) {
+        self.theme = theme::build_theme(background);
     }
 
     /// Feeds live output. Replies it provokes wait in [`Self::take_replies`].
@@ -246,9 +265,14 @@ impl Terminal {
     pub fn snapshot(&self) -> Snapshot {
         let content = self.term.renderable_content();
         let colors = content.colors;
-        let background = resolve(Color::Named(NamedColor::Background), colors);
+        let theme = &self.theme;
+        let background = resolve(Color::Named(NamedColor::Background), colors, theme);
         let offset = i32::try_from(content.display_offset).unwrap_or(i32::MAX);
-        let palette = Palette { colors, background };
+        let palette = Palette {
+            colors,
+            theme,
+            background,
+        };
         let selection = content.selection;
         let mut builder = SpanBuilder::default();
 
@@ -278,7 +302,8 @@ impl Terminal {
             cursor_point,
             cursor_shape: content.cursor.shape,
             background,
-            foreground: resolve(Color::Named(NamedColor::Foreground), colors),
+            foreground: resolve(Color::Named(NamedColor::Foreground), colors, theme),
+            caret: resolve(Color::Named(NamedColor::Cursor), colors, theme),
         }
     }
 }
@@ -406,35 +431,31 @@ impl Terminal {
     }
 }
 
-const SELECTION_FG: Rgb = Rgb {
-    r: 0xf5,
-    g: 0xf6,
-    b: 0xf8,
-};
-
-/// Laid over a selected cell's background at 30%.
-const SELECTION_TINT: Rgb = Rgb {
-    r: 91,
-    g: 155,
-    b: 255,
-};
-
-/// `tint` at 30% over `base`.
-fn blend(base: Rgb, tint: Rgb) -> Rgb {
-    let mix = |b: u8, t: u8| {
-        let v = (u16::from(b) * 7 + u16::from(t) * 3 + 5) / 10;
+/// `tint` at `alpha` over `base`, each channel rounded.
+fn blend(base: Rgb, tint: Rgb, alpha: f64) -> Rgb {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "alpha is a small non-negative fraction"
+    )]
+    let weight = (alpha * 1000.0).round() as u32;
+    let channel = |b: u8, t: u8| {
+        let v = (u32::from(b) * (1000 - weight) + u32::from(t) * weight + 500) / 1000;
         u8::try_from(v).unwrap_or(u8::MAX)
     };
     Rgb {
-        r: mix(base.r, tint.r),
-        g: mix(base.g, tint.g),
-        b: mix(base.b, tint.b),
+        r: channel(base.r, tint.r),
+        g: channel(base.g, tint.g),
+        b: channel(base.b, tint.b),
     }
 }
 
 /// The colours cells resolve against.
 struct Palette<'a> {
     colors: &'a Colors,
+    theme: &'a Theme,
+    /// The background `snapshot()` resolved, a program's `OSC 11` included: a
+    /// cell painted its colour needs no span of its own.
     background: Rgb,
 }
 
@@ -467,13 +488,17 @@ impl SpanBuilder {
         let bold = cell.flags.contains(Flags::BOLD);
         let (fg, bg) = if selected {
             (
-                SELECTION_FG,
-                blend(resolve(bg, palette.colors), SELECTION_TINT),
+                palette.theme.selection_fg,
+                blend(
+                    resolve(bg, palette.colors, palette.theme),
+                    palette.theme.selection,
+                    palette.theme.selection_alpha,
+                ),
             )
         } else {
             (
-                resolve(brighten(fg, bold), palette.colors),
-                resolve(bg, palette.colors),
+                resolve(brighten(fg, bold), palette.colors, palette.theme),
+                resolve(bg, palette.colors, palette.theme),
             )
         };
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
@@ -539,41 +564,35 @@ fn brighten(color: Color, bold: bool) -> Color {
     }
 }
 
-fn resolve(color: Color, overrides: &Colors) -> Rgb {
+fn resolve(color: Color, overrides: &Colors, theme: &Theme) -> Rgb {
     match color {
         Color::Spec(rgb) => rgb,
-        Color::Indexed(i) => overrides[usize::from(i)].unwrap_or_else(|| default_indexed(i)),
-        Color::Named(named) => overrides[named].unwrap_or_else(|| default_named(named)),
+        Color::Indexed(i) => overrides[usize::from(i)].unwrap_or_else(|| default_indexed(i, theme)),
+        Color::Named(named) => overrides[named].unwrap_or_else(|| default_named(named, theme)),
     }
 }
 
-#[expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
-fn default_named(named: NamedColor) -> Rgb {
+fn default_named(named: NamedColor, theme: &Theme) -> Rgb {
     match named {
-        NamedColor::Foreground | NamedColor::BrightForeground => rgb(0xd4d4d4),
-        NamedColor::Background => rgb(0x1e1e1e),
-        NamedColor::Cursor => rgb(0xaeafad),
-        NamedColor::DimForeground => rgb(0x8a8a8a),
+        NamedColor::Foreground | NamedColor::BrightForeground => theme.fg,
+        NamedColor::Background => theme.bg,
+        NamedColor::Cursor => theme.caret,
+        // Dim text sits between the foreground and the background.
+        NamedColor::DimForeground => theme::mix(theme.fg, theme.bg, 0.35),
         other => match u8::try_from(other as usize) {
-            Ok(i) if i < 16 => default_indexed(i),
+            Ok(i) if i < 16 => default_indexed(i, theme),
             // Dim variants (DimBlack..DimWhite) are contiguous, in base-colour order.
             _ => {
                 let base = (other as usize).checked_sub(NamedColor::DimBlack as usize);
-                default_indexed(base.and_then(|i| u8::try_from(i).ok()).unwrap_or(0))
+                default_indexed(base.and_then(|i| u8::try_from(i).ok()).unwrap_or(0), theme)
             }
         },
     }
 }
 
-#[expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
-const BASE16: [u32; 16] = [
-    0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666,
-    0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
-];
-
-fn default_indexed(i: u8) -> Rgb {
+fn default_indexed(i: u8, theme: &Theme) -> Rgb {
     match i {
-        0..16 => rgb(BASE16[usize::from(i)]),
+        0..16 => theme.ansi[usize::from(i)],
         16..232 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
@@ -590,6 +609,8 @@ fn default_indexed(i: u8) -> Rgb {
     }
 }
 
+/// A `#rrggbb` literal as a colour, for the tests' expected values.
+#[cfg(test)]
 fn rgb(hex: u32) -> Rgb {
     let [_, r, g, b] = hex.to_be_bytes();
     Rgb { r, g, b }
@@ -602,15 +623,15 @@ mod tests {
     use alacritty_terminal::selection::SelectionType;
     use alacritty_terminal::term::cell::Flags;
     use alacritty_terminal::term::color::Colors;
-    use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+    use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
+
+    use crate::theme::Theme;
 
     use super::{GridSize, SpanBuilder, Terminal, TextSpan, brighten, default_named, resolve, rgb};
 
-    const BACKGROUND: Rgb = Rgb {
-        r: 0x1e,
-        g: 0x1e,
-        b: 0x1e,
-    };
+    fn default_theme() -> Theme {
+        Theme::default()
+    }
 
     fn span(col: usize, text: &str, fg: u32, flags: Flags) -> TextSpan {
         TextSpan {
@@ -733,6 +754,7 @@ mod tests {
 
     #[test]
     fn selected_cells_are_highlighted() {
+        let theme = default_theme();
         let mut term = fed(b"abcd");
         term.start_selection(
             SelectionType::Simple,
@@ -746,14 +768,19 @@ mod tests {
             .iter()
             .map(|b| (b.row, b.col, b.len, b.color))
             .collect();
-        assert_eq!(bg, [(0, 0, 2, rgb(0x304462))]);
+        // The selection tint over the default background at 30%: each channel
+        // of #08090b moved 30% of the way to #5b9bff, rounded.
+        assert_eq!(bg, [(0, 0, 2, rgb(0x213554))]);
         let texts: Vec<_> = snap
             .text
             .iter()
             .map(|s| (s.col, s.text.as_str(), s.fg))
             .collect();
-        assert_eq!(texts[0], (0, "ab", rgb(0xf5f6f8)));
-        assert_eq!(texts[1].2, rgb(0xd4d4d4));
+        // Selected text is drawn in the theme's foreground — the selection's
+        // own foreground is that same colour — so the row is one span and the
+        // tint asserted above is what marks the selection.
+        assert_eq!(theme.selection_fg, theme.fg);
+        assert_eq!(texts[0], (0, "abcd      ", theme.fg));
         assert_eq!(term.selection_text().as_deref(), Some("ab"));
     }
 
@@ -786,8 +813,8 @@ mod tests {
     #[test]
     fn adjacent_cells_with_same_style_merge_into_one_span() {
         let mut builder = SpanBuilder::default();
-        builder.push_text(span(0, "a", 0xd4d4d4, Flags::empty()));
-        builder.push_text(span(1, "b", 0xd4d4d4, Flags::empty()));
+        builder.push_text(span(0, "a", 0xe5e6e8, Flags::empty()));
+        builder.push_text(span(1, "b", 0xe5e6e8, Flags::empty()));
         assert_eq!(builder.text.len(), 1);
         assert_eq!(builder.text[0].text, "ab");
     }
@@ -795,10 +822,10 @@ mod tests {
     #[test]
     fn style_change_starts_new_span() {
         let mut builder = SpanBuilder::default();
-        builder.push_text(span(0, "a", 0xd4d4d4, Flags::empty()));
-        builder.push_text(span(1, "b", 0xcd3131, Flags::empty()));
-        builder.push_text(span(2, "c", 0xcd3131, Flags::BOLD));
-        builder.push_text(span(4, "d", 0xcd3131, Flags::BOLD));
+        builder.push_text(span(0, "a", 0xe5e6e8, Flags::empty()));
+        builder.push_text(span(1, "b", 0xef5c5c, Flags::empty()));
+        builder.push_text(span(2, "c", 0xef5c5c, Flags::BOLD));
+        builder.push_text(span(4, "d", 0xef5c5c, Flags::BOLD));
         let texts: Vec<_> = builder.text.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, ["a", "b", "c", "d"]);
     }
@@ -822,55 +849,67 @@ mod tests {
             .iter()
             .map(|b| (b.row, b.col, b.len, b.color))
             .collect();
-        assert_eq!(bg, [(0, 0, 2, rgb(0xcd3131))]);
+        assert_eq!(bg, [(0, 0, 2, default_theme().ansi[1])]);
     }
 
     #[test]
     fn background_runs_merge_and_default_background_is_skipped() {
+        let theme = default_theme();
         let mut builder = SpanBuilder::default();
-        builder.push_bg(0, 0, 1, BACKGROUND, BACKGROUND);
-        builder.push_bg(0, 1, 1, rgb(0xcd3131), BACKGROUND);
-        builder.push_bg(0, 2, 2, rgb(0xcd3131), BACKGROUND);
-        builder.push_bg(0, 4, 1, rgb(0x0dbc79), BACKGROUND);
+        builder.push_bg(0, 0, 1, theme.bg, theme.bg);
+        builder.push_bg(0, 1, 1, theme.ansi[1], theme.bg);
+        builder.push_bg(0, 2, 2, theme.ansi[1], theme.bg);
+        builder.push_bg(0, 4, 1, theme.ansi[2], theme.bg);
         let runs: Vec<_> = builder.bg.iter().map(|b| (b.col, b.len)).collect();
         assert_eq!(runs, [(1, 3), (4, 1)]);
     }
 
     #[test]
     fn named_colour_resolves_from_palette() {
+        let theme = default_theme();
         let mut colors = Colors::default();
         assert_eq!(
-            resolve(Color::Named(NamedColor::Red), &colors),
-            rgb(0xcd3131)
+            resolve(Color::Named(NamedColor::Red), &colors, &theme),
+            theme.ansi[1]
         );
         colors[NamedColor::Red] = Some(rgb(0x123456));
         assert_eq!(
-            resolve(Color::Named(NamedColor::Red), &colors),
+            resolve(Color::Named(NamedColor::Red), &colors, &theme),
             rgb(0x123456)
         );
     }
 
     #[test]
     fn special_named_colours_have_theme_values() {
-        assert_eq!(default_named(NamedColor::Cursor), rgb(0xaeafad));
-        assert_eq!(default_named(NamedColor::DimForeground), rgb(0x8a8a8a));
-        assert_eq!(default_named(NamedColor::BrightForeground), rgb(0xd4d4d4));
+        let theme = default_theme();
+        assert_eq!(default_named(NamedColor::Cursor, &theme), theme.caret);
+        assert_eq!(
+            default_named(NamedColor::BrightForeground, &theme),
+            theme.fg
+        );
+        // Dim text sits 35% of the way from the foreground to the background.
+        assert_eq!(
+            default_named(NamedColor::DimForeground, &theme),
+            rgb(0x98999b)
+        );
     }
 
     #[test]
     fn dim_colours_map_to_their_base_hue() {
-        assert_eq!(default_named(NamedColor::DimBlack), rgb(0x000000));
-        assert_eq!(default_named(NamedColor::DimRed), rgb(0xcd3131));
-        assert_eq!(default_named(NamedColor::DimBlue), rgb(0x2472c8));
-        assert_eq!(default_named(NamedColor::DimWhite), rgb(0xe5e5e5));
+        let theme = default_theme();
+        assert_eq!(default_named(NamedColor::DimBlack, &theme), theme.ansi[0]);
+        assert_eq!(default_named(NamedColor::DimRed, &theme), theme.ansi[1]);
+        assert_eq!(default_named(NamedColor::DimBlue, &theme), theme.ansi[4]);
+        assert_eq!(default_named(NamedColor::DimWhite, &theme), theme.ansi[7]);
     }
 
     #[test]
     fn indexed_colour_resolves() {
+        let theme = default_theme();
         let mut colors = Colors::default();
-        let idx = |i: u8, colors: &Colors| resolve(Color::Indexed(i), colors);
-        assert_eq!(idx(1, &colors), rgb(0xcd3131));
-        assert_eq!(idx(15, &colors), rgb(0xffffff));
+        let idx = |i: u8, colors: &Colors| resolve(Color::Indexed(i), colors, &theme);
+        assert_eq!(idx(1, &colors), theme.ansi[1]);
+        assert_eq!(idx(15, &colors), theme.ansi[15]);
         assert_eq!(idx(16, &colors), rgb(0x000000));
         assert_eq!(idx(17, &colors), rgb(0x00005f));
         assert_eq!(idx(21, &colors), rgb(0x0000ff));
@@ -885,7 +924,10 @@ mod tests {
     #[test]
     fn truecolor_passes_through() {
         let spec = rgb(0x123456);
-        assert_eq!(resolve(Color::Spec(spec), &Colors::default()), spec);
+        assert_eq!(
+            resolve(Color::Spec(spec), &Colors::default(), &default_theme()),
+            spec
+        );
     }
 
     #[test]
@@ -903,15 +945,16 @@ mod tests {
 
     #[test]
     fn inverse_swaps_fg_and_bg() {
+        let theme = default_theme();
         let snap = fed(b"\x1b[7mX").snapshot();
         let x = snap.text.iter().find(|s| s.text.starts_with('X'));
-        assert_eq!(x.map(|s| s.fg), Some(BACKGROUND));
+        assert_eq!(x.map(|s| s.fg), Some(theme.bg));
         let bg: Vec<_> = snap
             .bg
             .iter()
             .map(|b| (b.row, b.col, b.len, b.color))
             .collect();
-        assert_eq!(bg, [(0, 0, 1, rgb(0xd4d4d4))]);
+        assert_eq!(bg, [(0, 0, 1, theme.fg)]);
     }
 
     #[test]
@@ -922,16 +965,56 @@ mod tests {
 
     #[test]
     fn default_fg_bg_resolve_to_theme_defaults() {
+        let theme = default_theme();
         let colors = Colors::default();
         assert_eq!(
-            resolve(Color::Named(NamedColor::Foreground), &colors),
-            rgb(0xd4d4d4)
+            resolve(Color::Named(NamedColor::Foreground), &colors, &theme),
+            theme.fg
         );
         assert_eq!(
-            resolve(Color::Named(NamedColor::Background), &colors),
-            BACKGROUND
+            resolve(Color::Named(NamedColor::Background), &colors, &theme),
+            theme.bg
         );
-        assert_eq!(fed(b"").snapshot().background, BACKGROUND);
+        assert_eq!(theme.bg, rgb(0x08090b));
+        assert_eq!(fed(b"").snapshot().background, theme.bg);
+        assert_eq!(fed(b"").snapshot().caret, theme.caret);
+    }
+
+    #[test]
+    fn a_new_background_rebuilds_the_theme() {
+        let mut term = fed(b"\x1b[47mX");
+        assert_eq!(term.snapshot().bg[0].color, rgb(0xe5e6e8));
+        term.set_background(rgb(0xf6f4ef));
+        let snap = term.snapshot();
+        // The Paper theme lowers the base white to clear its contrast
+        // minimum, and would not be reached if the theme were not rebuilt.
+        assert_eq!(snap.bg[0].color, rgb(0x87888a));
+        assert_eq!(snap.background, rgb(0xf6f4ef));
+        assert_eq!(snap.foreground, rgb(0x1a1c22));
+        assert_eq!(snap.caret, rgb(0x7f7f7f));
+    }
+
+    #[test]
+    fn a_program_background_resolves_over_the_theme_for_every_cell() {
+        // `OSC 11` repaints the pane, so a plain cell needs no span to sit on
+        // it.
+        let plain = fed(b"\x1b]11;#ffffff\x07ab").snapshot();
+        assert_eq!(plain.background, rgb(0xffffff));
+        assert!(plain.bg.is_empty());
+        // A cell painted the theme's own background is still a span against
+        // the program's.
+        let painted = fed(b"\x1b]11;#ffffff\x07\x1b[48;2;8;9;11mX").snapshot();
+        let bg: Vec<_> = painted
+            .bg
+            .iter()
+            .map(|b| (b.row, b.col, b.len, b.color))
+            .collect();
+        assert_eq!(bg, [(0, 0, 1, rgb(0x08090b))]);
+    }
+
+    #[test]
+    fn a_program_cursor_colour_wins_over_the_theme() {
+        assert_eq!(fed(b"\x1b]12;#ff0000\x07").snapshot().caret, rgb(0xff0000));
     }
 
     #[test]

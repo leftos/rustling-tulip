@@ -132,7 +132,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; disabled on remote with a toast — `Terminal.tsx`, `lib.rs` `open_terminal_path`
 - [ ] **(hard)** Shell integration (plain shells): OSC 133 A/B/C/D + OSC 633 E; gutter dot per command (ok / fail / unknown, exit code and duration tooltip), 1000-command cap — `components/shellIntegration.ts`
 - [ ] Gutter-dot menu: exit and duration, copy command / output / both, re-run (types the command without Enter) — `ShellCommandMenu.tsx`
-- [ ] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
+- [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
 - [ ] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts`
 - [ ] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
 - [ ] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts`

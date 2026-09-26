@@ -1191,6 +1191,7 @@ fn paint_grid(
         paint_cursor(
             cell_origin(bounds.origin, m, row, col),
             snap.cursor_shape,
+            snap.caret,
             m,
             window,
         );
@@ -1218,13 +1219,15 @@ fn paint_backgrounds(origin: Point<Pixels>, spans: &[BgSpan], m: &Metrics, windo
 
 /// Paints the cursor in `shape`. The block is translucent so the glyph under
 /// it stays readable; the thin shapes are opaque.
-fn paint_cursor(at: Point<Pixels>, shape: CursorShape, m: &Metrics, window: &mut Window) {
+fn paint_cursor(
+    at: Point<Pixels>,
+    shape: CursorShape,
+    caret: alacritty_terminal::vte::ansi::Rgb,
+    m: &Metrics,
+    window: &mut Window,
+) {
     const THICKNESS: f32 = 2.0;
-    let color = to_rgba(alacritty_terminal::vte::ansi::Rgb {
-        r: 0xae,
-        g: 0xaf,
-        b: 0xad,
-    });
+    let color = to_rgba(caret);
     let cell = Bounds::new(at, size(m.cell_width, m.line_height));
     let quad = match shape {
         CursorShape::Block => fill(cell, Rgba { a: 0.55, ..color }),
