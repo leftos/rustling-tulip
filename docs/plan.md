@@ -1,5 +1,5 @@
 # Plan: Multi-Repo Claude Code Wrapper ("rustling-tulip")
-<!-- plan-doc-hygiene: 2026-09-25 5a84a44 -->
+<!-- plan-doc-hygiene: 2026-09-25 2751368 -->
 
 A Tauri desktop app that orchestrates many parallel Claude Code sessions across repos,
 including coordinated multi-repo "workspace" sessions where a single `claude` instance
@@ -66,7 +66,7 @@ Priority order for `/nextup`: **Current focus** first, then the sections below i
 
 ### Current focus: native client
 Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` client (`apps/native`); the daemon, tracer and protocol stay. The Tauri app is frozen to bug fixes (user, 2026-09-23). Phases, rulings and brief-sized items: [native-client.md](./plans/native-client.md); feature-by-feature scope: [native-client-parity.md](./plans/native-client-parity.md).
-- [ ] **Next up:** Phase 2 (terminal depth), P2.1–P2.10. P2.2 is done; P2.1 + P2.4 and P2.3 are in progress. Phase 1 is complete. See [native-client.md](./plans/native-client.md) for the full list
+- [ ] **Next up:** finish Phase 2 with P2.10b (the appearance editor), then Phase 3 (source control): P3.1 is built on branch `p3-1-diff-spike` and awaits review, P3.3 is next, and P3.2 and P3.9 are done. Phases 1 and 2 (except P2.10b) are complete. See [native-client.md](./plans/native-client.md) for the items and their decided designs.
 - [ ] Remote file transfer: fetch a file from the host to the remote client by Ctrl-clicking it or through a "Fetch file…" popup. The daemon and protocol half (FT.1) has landed. The client side lands with Phase 6, and the Ctrl-click trigger also needs Phase 2. See [remote-file-transfer.md](./plans/remote-file-transfer.md)
 - [x] Security fix: `GetFileSnapshot` / `GetFileDiff` now pass the client-supplied `path` through `file_fetch::confine_path` / `check_relative` before using it. `repo_target_or_err` also canonicalizes `worktree_path` before checking it's under the worktrees root.
 
