@@ -2107,15 +2107,16 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             file_fetch::check_relative(&path)?;
             let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
             match git_inspect::file_snapshot(&repo, &path, against.as_deref()).await {
-                Ok((old, new)) => {
+                Ok(content) => {
                     let _ = out_tx.send(DaemonMessage::FileSnapshot {
                         id,
                         repo_id,
                         path: path.clone(),
                         against,
-                        old,
-                        new,
+                        old: content.old,
+                        new: content.new,
                         language: git_inspect::language_for_path(&path).to_string(),
+                        unavailable: content.unavailable,
                         worktree_path,
                     });
                 }
