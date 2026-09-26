@@ -24,6 +24,8 @@ mod grid_view;
 mod history;
 mod history_view;
 mod keys;
+mod layout_chooser;
+mod layout_chooser_view;
 mod links;
 mod mouse;
 mod net;
@@ -73,8 +75,7 @@ use gpui::{
     WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
-    AppearanceOverrides, ClientMessage, DaemonMessage, InitLayoutKind, RepoEntry, SessionSnapshot,
-    TabEntry,
+    AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, TabEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -405,6 +406,13 @@ pub struct RootView {
     exit: Option<ExitView>,
     /// The exit dialog's keyboard focus.
     quit_focus: FocusHandle,
+    /// The first-connect layout chooser, while open.
+    layout_chooser: Option<layout_chooser::LayoutChooser>,
+    /// The layout chooser's keyboard focus.
+    chooser_focus: FocusHandle,
+    /// The arrangement the chooser picked, applied to the daemon's next tab
+    /// list.
+    pending_arrangement: Option<layout_chooser::Arrangement>,
     /// Opens the terminals' links, on background threads.
     opener: Arc<dyn Opener>,
     /// The confirm open before a link runs a file that runs code.
@@ -594,6 +602,9 @@ impl RootView {
             quitter: Quitter::new(quit),
             exit: None,
             quit_focus: cx.focus_handle(),
+            layout_chooser: None,
+            chooser_focus: cx.focus_handle(),
+            pending_arrangement: None,
             opener: open,
             run_confirm: None,
             run_focus: cx.focus_handle(),
@@ -1000,6 +1011,7 @@ impl RootView {
             && self.stash.drop.is_none()
             && self.run_confirm.is_none()
             && !self.notices.has_modal()
+            && self.layout_chooser.is_none()
             && self.exit.is_none();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && keyboard_free
@@ -1253,6 +1265,9 @@ impl RootView {
         }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
+        if let DaemonMessage::Tabs { tabs } = &msg {
+            self.on_tab_list(tabs, window, cx);
+        }
         if self.tabs.apply(&msg) {
             self.confirm.disarm();
             self.after_tabs_change(window, cx);
@@ -1287,15 +1302,10 @@ impl RootView {
                 self.on_checkout_confirm(ask, window, cx);
             }
             DaemonMessage::LayoutInitRequired {
+                has_legacy,
                 active_session_count,
-                ..
-            } => {
-                tracing::info!(
-                    active_session_count,
-                    "first connect for this client: seeding the layout with every running session"
-                );
-                self.request_layout_seed();
-            }
+                clonable,
+            } => self.open_layout_chooser(has_legacy, active_session_count, clonable, window, cx),
             DaemonMessage::Sessions { sessions } => self.on_sessions(&sessions, window, cx),
             DaemonMessage::Scrollback {
                 session_id,
@@ -1356,6 +1366,8 @@ impl RootView {
         self.close_stash_drop_confirm(window, cx);
         self.reset_session_ui(window, cx);
         self.reset_notices(window, cx);
+        self.pending_arrangement = None;
+        self.close_layout_chooser(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the
@@ -1410,15 +1422,9 @@ impl RootView {
         self.try_wanted_session(window, cx);
     }
 
-    /// Ask the daemon to seed this client's layout with every running session.
-    fn request_layout_seed(&self) {
-        self.send(ClientMessage::InitLayout {
-            kind: InitLayoutKind::AllSessions,
-        });
-    }
-
     /// Keys the root takes before the panes see them. The exit dialog, else
-    /// a modal notice, else the delete-worktree confirm, else the spawn
+    /// the first-connect layout chooser, else the run confirm, else a modal
+    /// notice, else the delete-worktree confirm, else the spawn
     /// dialog, else the Shell… dialog, while open, holds the focus and takes
     /// every key that reaches this listener (the spawn and Shell… dialogs
     /// let typing through to their text fields); gpui runs keymap
@@ -1433,6 +1439,10 @@ impl RootView {
     ) {
         let ks = &event.keystroke;
         if self.on_exit_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.on_layout_chooser_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -1792,6 +1802,7 @@ impl Render for RootView {
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
             .children(self.run_confirm_layer(cx))
+            .children(self.layout_chooser_layer(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
             .children(overlay)

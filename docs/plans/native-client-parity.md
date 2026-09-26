@@ -31,7 +31,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Exit dialog: keep running (default), stop and keep worktrees, stop and remove worktrees (branch fate per session, "Session n of m"), abandon and quit, orphan note, force quit after 5s stuck — `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
 - [x] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
 - [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
-- [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
+- [x] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
 - [x] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries; unknown types are logged since P4.1)
 - [x] Main window size and position persisted — `lib.rs` (window-state plugin)
 

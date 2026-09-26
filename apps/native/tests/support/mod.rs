@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 
 pub mod live;
 
-const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 1;
 
 /// Whether the rail's side of the window shows what `selector` tags: the
 /// panels, the divider, the badge and the source-control panel's parts.
@@ -748,7 +748,13 @@ impl<'a> Harness<'a> {
         self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
             let sessions_shown = !root.sidebar_collapsed() && root.activity() == Activity::Sessions;
-            if selector == "exit-confirm-dialog" {
+            if selector == "layout-chooser" {
+                root.layout_chooser_open()
+            } else if selector.starts_with("layout-choose-") || selector.starts_with("chooser-") {
+                root.layout_chooser_controls()
+                    .iter()
+                    .any(|(control, _)| *control == selector)
+            } else if selector == "exit-confirm-dialog" {
                 root.exit_dialog_open()
             } else if selector.starts_with("exit-") {
                 root.exit_dialog_buttons()

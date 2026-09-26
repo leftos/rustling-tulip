@@ -1,4 +1,4 @@
-//! Tab and split-pane specs: layout init, new tab, split, close, rename,
+//! Tab and split-pane specs: new tab, split, close, rename,
 //! divider drags, detach, resize and smart placement.
 
 #![expect(
@@ -10,34 +10,13 @@
 mod support;
 
 use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SplitDirection, SplitPlace};
+use protocol::{ClientMessage, DaemonMessage, SplitDirection, SplitPlace};
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 fn two_tabs() -> Fixture {
     let mut fixture = Fixture::single(session("s1").build());
     fixture.tabs.push(tab("t2", &pane("p2", None)));
     fixture
-}
-
-#[gpui::test]
-fn layout_init_required_is_answered_with_all_sessions(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = Harness::open(cx, &dir);
-    h.send(DaemonMessage::LayoutInitRequired {
-        has_legacy: false,
-        active_session_count: 0,
-        clonable: Vec::new(),
-    });
-    let sent = h.sent();
-    assert!(
-        sent.iter().any(|m| matches!(
-            m,
-            ClientMessage::InitLayout {
-                kind: InitLayoutKind::AllSessions
-            }
-        )),
-        "sent {sent:?}"
-    );
 }
 
 #[gpui::test]
