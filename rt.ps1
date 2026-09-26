@@ -304,7 +304,9 @@ function Initialize-MsvcEnvironment {
         Write-Host '==> Loading MSVC build environment...' -ForegroundColor Cyan
     }
 
-    $cmd = "`"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
+    # VsDevCmd.bat calls vswhere.exe by bare name, so its folder must be on PATH.
+    $vsWhereDir = Split-Path (Get-VsWherePath)
+    $cmd = "set `"PATH=$vsWhereDir;%PATH%`" && `"$vsDevCmd`" -arch=x64 -host_arch=x64 >nul && set"
     $lines = & cmd.exe /d /s /c $cmd
     if ($LASTEXITCODE -ne 0) { return $false }
 
