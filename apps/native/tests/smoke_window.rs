@@ -2,8 +2,11 @@
 //! against an isolated daemon. The window opens cloaked and is never
 //! activated (`RUSTLING_TULIP_OFFSCREEN_WINDOW`), so a run never covers the
 //! user's work or takes their focus. The specs check that the window
-//! connects, and that input posted to it as window messages reaches the
-//! shell, read back from the daemon's scrollback. Ignored by default; run by
+//! connects and paints, and that input posted to it as window messages
+//! reaches the shell, read back from the daemon's scrollback, and redraws
+//! the pane. Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)`, which
+//! captures the cloaked window as rendered, at points computed from the
+//! layout rather than against golden images. Ignored by default; run by
 //! `.\rt.ps1 native-smoke`.
 
 #![cfg(windows)]
@@ -22,13 +25,20 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use protocol::ClientMessage;
-use rustling_tulip_native::{NATIVE_PROTOCOL_VERSIONS, SIDEBAR_DEFAULT_WIDTH};
+use rustling_tulip_native::{
+    BAR_BG, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, PANEL_BG, SIDEBAR_DEFAULT_WIDTH,
+};
 use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};
 use tokio_tungstenite::tungstenite::stream::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::{self, Message, WebSocket};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SelectObject,
+};
+use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PW_CLIENTONLY, PrintWindow};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
@@ -37,7 +47,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
-    PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    PW_RENDERFULLCONTENT, PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE,
 };
 use windows::core::BOOL;
 
@@ -47,8 +58,18 @@ type Socket = WebSocket<MaybeTlsStream<TcpStream>>;
 const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 /// `wParam` of a mouse message while the left button is down.
 const MK_LBUTTON: usize = 0x0001;
-/// The footer's height in logical pixels.
-const FOOTER_HEIGHT: f32 = 22.0;
+/// How long the window gets to paint its sidebar and footer once connected.
+const PAINT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The gap between two captures that must match for the pane to count as
+/// settled.
+const SETTLE_GAP: Duration = Duration::from_millis(250);
+/// How long the pane gets to draw a command once the shell has echoed it.
+const PANE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The fewest pane pixels, in square logical pixels, that typing
+/// `echo rt-smoke-marker` and its output line must change: several times
+/// the cursor cell a cursor move redraws, a quarter of the ~3,800 pixels the
+/// two lines of text change at 100% scale.
+const PANE_CHANGE_FLOOR: f32 = 1000.0;
 /// What the client logs once its handshake with the daemon succeeds
 /// (`apps/native/src/net.rs`).
 const CONNECTED_LINE: &str = "connected to daemon";
@@ -57,6 +78,8 @@ const MARKER: &str = "rt-smoke-marker";
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const KEYS_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the seeded shell gets to print its first prompt.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the test's socket waits for one reply among the broadcasts.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long one typed command gets to show up before it is typed again.
@@ -65,7 +88,8 @@ const ECHO_WAIT: Duration = Duration::from_secs(5);
 /// `WM_CHAR` that translating its key-down posts, which queues behind every
 /// key already posted; the pause lets it arrive before the next key, as it
 /// does from a real keyboard, whose input is read after posted messages.
-const KEY_GAP: Duration = Duration::from_millis(25);
+/// At 25 ms, letters overtook one another and Enter on a fully loaded CPU.
+const KEY_GAP: Duration = Duration::from_millis(100);
 
 /// The client binary, killed with everything under it on drop.
 struct Client(Child);
@@ -224,6 +248,30 @@ fn wait_for_line(ws: &mut Socket, session: &str, line: &str, within: Duration) -
     }
 }
 
+/// Polls the seeded shell's scrollback until its prompt, a line in the
+/// test's scratch dir ending in `>`, appears.
+fn wait_for_prompt(ws: &mut Socket, smoke: &Smoke) {
+    let dir = smoke
+        .daemon
+        .dir()
+        .file_name()
+        .expect("the scratch dir's name")
+        .to_string_lossy()
+        .into_owned();
+    let deadline = Instant::now() + PROMPT_TIMEOUT;
+    loop {
+        let lines = plain_lines(&scrollback(ws, &smoke.session));
+        if lines.iter().any(|l| l.ends_with('>') && l.contains(&dir)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no prompt in {dir} in the shell's scrollback within {PROMPT_TIMEOUT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn launch_client(daemon: &LiveDaemon) -> Client {
     let exe = env!("CARGO_BIN_EXE_rustling-tulip-native");
     let child = Command::new(exe)
@@ -324,16 +372,24 @@ fn physical(value: f32, scale: f32) -> i32 {
     pixels
 }
 
-/// The middle of the window's pane area, inset from the sidebar, tab bar and
-/// footer, in client pixels.
+/// The pane area of a `width` x `height` client area at `scale`, inset from
+/// the sidebar, tab bar and footer, in client pixels.
+fn pane_area((width, height): (i32, i32), scale: f32) -> RECT {
+    RECT {
+        left: physical(SIDEBAR_DEFAULT_WIDTH + 24.0, scale),
+        top: physical(40.0, scale),
+        right: width - physical(8.0, scale),
+        bottom: height - physical(FOOTER_HEIGHT + 8.0, scale),
+    }
+}
+
+/// The middle of the window's pane area.
 fn pane_center(hwnd: HWND) -> (i32, i32) {
-    let scale = scale(hwnd);
-    let (width, height) = client_size(hwnd);
-    let left = physical(SIDEBAR_DEFAULT_WIDTH + 24.0, scale);
-    let top = physical(40.0, scale);
-    let right = width - physical(8.0, scale);
-    let bottom = height - physical(FOOTER_HEIGHT + 8.0, scale);
-    (i32::midpoint(left, right), i32::midpoint(top, bottom))
+    let area = pane_area(client_size(hwnd), scale(hwnd));
+    (
+        i32::midpoint(area.left, area.right),
+        i32::midpoint(area.top, area.bottom),
+    )
 }
 
 /// The real client window on an isolated daemon with one plain shell.
@@ -442,11 +498,192 @@ fn type_line(hwnd: HWND, text: &str) {
     press(hwnd, VK_RETURN);
 }
 
+/// A capture of the window's client area as the compositor renders it, in
+/// top-down rows of BGRA pixels. The window is cloaked, so the capture is
+/// the only place its pixels are ever shown.
+struct Frame {
+    width: i32,
+    height: i32,
+    bgra: Vec<u8>,
+}
+
+impl Frame {
+    /// The pixel at client pixel `(x, y)` as `0xRRGGBB`.
+    fn rgb(&self, (x, y): (i32, i32)) -> u32 {
+        assert!(
+            (0..self.width).contains(&x) && (0..self.height).contains(&y),
+            "probe ({x}, {y}) is outside the {}x{} capture",
+            self.width,
+            self.height
+        );
+        let index = usize::try_from(y * self.width + x).expect("a pixel index") * 4;
+        let pixel = &self.bgra[index..index + 4];
+        (u32::from(pixel[2]) << 16) | (u32::from(pixel[1]) << 8) | u32::from(pixel[0])
+    }
+
+    fn size(&self) -> (i32, i32) {
+        (self.width, self.height)
+    }
+
+    /// A point in the sidebar's empty middle, below its one session row.
+    fn sidebar_probe(&self, scale: f32) -> (i32, i32) {
+        (
+            physical(SIDEBAR_DEFAULT_WIDTH / 2.0, scale),
+            self.height / 2,
+        )
+    }
+
+    /// A point at the footer's right end, past its pill and status text.
+    fn footer_probe(&self, scale: f32) -> (i32, i32) {
+        (
+            self.width - physical(8.0, scale),
+            self.height - physical(FOOTER_HEIGHT / 2.0, scale),
+        )
+    }
+
+    /// How many pixels of the pane area differ between this capture and
+    /// `other`, or `None` when the window changed size between the two.
+    fn pane_changed(&self, other: &Self, scale: f32) -> Option<usize> {
+        if self.size() != other.size() {
+            return None;
+        }
+        let area = pane_area(self.size(), scale);
+        let changed = (area.top..area.bottom)
+            .flat_map(|y| (area.left..area.right).map(move |x| (x, y)))
+            .filter(|&at| self.rgb(at) != other.rgb(at))
+            .count();
+        Some(changed)
+    }
+}
+
+/// The window's client area through `PrintWindow` with
+/// `PW_RENDERFULLCONTENT`, which reads the compositor's copy of a cloaked
+/// window without showing, moving or activating it. Each capture also
+/// checks the window is still cloaked and not in the foreground.
+fn capture(hwnd: HWND) -> Frame {
+    let (width, height) = client_size(hwnd);
+    let size = usize::try_from(width * height).expect("a client size") * 4;
+    let mut bgra = vec![0u8; size];
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: u32::try_from(size_of::<BITMAPINFOHEADER>()).expect("header size"),
+            biWidth: width,
+            // Negative: top-down rows.
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let flags = PRINT_WINDOW_FLAGS(PW_CLIENTONLY.0 | PW_RENDERFULLCONTENT);
+    // SAFETY: the DCs and bitmap are created, used and released here, on a
+    // live window; `bgra` holds the bitmap's full size in the format `info`
+    // describes.
+    let (printed, lines) = unsafe {
+        let screen = GetDC(None);
+        let dc = CreateCompatibleDC(Some(screen));
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        let previous = SelectObject(dc, bitmap.into());
+        let printed = PrintWindow(hwnd, dc, flags);
+        SelectObject(dc, previous);
+        let rows = u32::try_from(height).expect("a client height");
+        let bits = Some(bgra.as_mut_ptr().cast());
+        let lines = GetDIBits(dc, bitmap, 0, rows, bits, &raw mut info, DIB_RGB_COLORS);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+        (printed.as_bool(), lines)
+    };
+    assert!(printed, "PrintWindow failed on the smoke window");
+    assert_eq!(lines, height, "GetDIBits copied a partial capture");
+    assert_out_of_the_way(hwnd);
+    Frame {
+        width,
+        height,
+        bgra,
+    }
+}
+
+/// Captures the window until its sidebar and footer show their colours at
+/// the probe points, and returns that capture. The points are computed from
+/// each capture's own size, so a resize during startup is retried.
+fn wait_painted(hwnd: HWND) -> Frame {
+    let scale = scale(hwnd);
+    let deadline = Instant::now() + PAINT_TIMEOUT;
+    loop {
+        let frame = capture(hwnd);
+        let (sidebar, footer) = (frame.sidebar_probe(scale), frame.footer_probe(scale));
+        let seen = (frame.rgb(sidebar), frame.rgb(footer));
+        if seen == (PANEL_BG, BAR_BG) {
+            return frame;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the window did not paint within {PAINT_TIMEOUT:?}: the sidebar at {sidebar:?} \
+             reads {:06x}, not {PANEL_BG:06x}, and the footer at {footer:?} reads {:06x}, not \
+             {BAR_BG:06x} (all black means the capture sees no rendered content)",
+            seen.0,
+            seen.1
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Captures the window until two captures in a row show the same pane
+/// area, so the redraw a click causes (the focus border, the cursor) is
+/// over, and returns the last one. A resize between two captures counts as
+/// still redrawing.
+fn wait_pane_settled(hwnd: HWND) -> Frame {
+    let scale = scale(hwnd);
+    let deadline = Instant::now() + PAINT_TIMEOUT;
+    let mut last = capture(hwnd);
+    loop {
+        std::thread::sleep(SETTLE_GAP);
+        let frame = capture(hwnd);
+        let changed = frame.pane_changed(&last, scale);
+        if changed == Some(0) {
+            return frame;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane was still redrawing after {PAINT_TIMEOUT:?} ({changed:?} pixels changed \
+             in the last {SETTLE_GAP:?}; None is a resize)"
+        );
+        last = frame;
+    }
+}
+
+/// Captures the window until its pane area differs from `before` by at
+/// least a typed line's worth of pixels.
+fn wait_pane_changed(hwnd: HWND, before: &Frame) {
+    let scale = scale(hwnd);
+    let floor = physical(PANE_CHANGE_FLOOR, scale * scale);
+    let floor = usize::try_from(floor).expect("a pixel count");
+    let deadline = Instant::now() + PANE_TIMEOUT;
+    loop {
+        let changed = capture(hwnd).pane_changed(before, scale);
+        if changed.is_some_and(|changed| changed >= floor) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane drew {changed:?} changed pixels within {PANE_TIMEOUT:?} (None is a \
+             resize), fewer than the \
+             {floor} a typed command and its output draw; the shell got the keys but the \
+             window did not show them"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
 #[ignore = "smoke: run via .\\rt.ps1 native-smoke"]
 fn smoke_window_opens_cloaked_unfocused_and_connects() {
     let smoke = open("smoke-connect");
     wait_connected(&smoke);
+    wait_painted(smoke.hwnd);
     assert_out_of_the_way(smoke.hwnd);
 }
 
@@ -456,21 +693,27 @@ fn smoke_posted_keys_reach_the_shell() {
     let smoke = open("smoke-keys");
     let hwnd = smoke.hwnd;
     wait_connected(&smoke);
+    wait_painted(hwnd);
     let mut shell = connect(&smoke.daemon, "rt-smoke-reader");
+    // The pane's baseline is taken after the prompt, so the shell's startup
+    // output cannot pass for the typed command's redraw.
+    wait_for_prompt(&mut shell, &smoke);
     let deadline = Instant::now() + KEYS_TIMEOUT;
     // Typed again until it lands: keys posted before the pane has attached
     // its session are dropped.
-    loop {
+    let before = loop {
         click_at(hwnd, pane_center(hwnd));
+        let before = wait_pane_settled(hwnd);
         type_line(hwnd, &format!("echo {MARKER}"));
         if wait_for_line(&mut shell, &smoke.session, MARKER, ECHO_WAIT) {
-            break;
+            break before;
         }
         assert!(
             Instant::now() < deadline,
             "no {MARKER:?} line in the shell's scrollback within {KEYS_TIMEOUT:?}; the posted \
              keys did not reach the shell"
         );
-    }
+    };
+    wait_pane_changed(hwnd, &before);
     assert_out_of_the_way(hwnd);
 }

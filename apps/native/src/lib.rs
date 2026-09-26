@@ -221,9 +221,12 @@ fn show_cloaked(_window: &Window) {
 
 /// Text size of the footer, flyout and overlay.
 const UI_TEXT_SIZE: f32 = 12.0;
-const FOOTER_HEIGHT: f32 = 22.0;
-const BAR_BG: u32 = 0x0025_2526;
-const PANEL_BG: u32 = 0x000f_1014;
+/// The footer's height in logical pixels.
+pub const FOOTER_HEIGHT: f32 = 22.0;
+/// Background of the footer and the tab bar, as `0xRRGGBB`.
+pub const BAR_BG: u32 = 0x0025_2526;
+/// Background of the sidebar and panels, as `0xRRGGBB`.
+pub const PANEL_BG: u32 = 0x000f_1014;
 const OVERLAY_BG: u32 = 0x001e_1e1e;
 const HOVER_BG: u32 = 0x002d_2f36;
 const BORDER: u32 = 0x0020_222a;
