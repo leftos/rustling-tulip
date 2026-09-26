@@ -736,3 +736,87 @@ fn a_refused_open_raises_a_toast(cx: &mut TestAppContext) {
     h.send(opened(&id, "d1"));
     assert_eq!(active(&mut h).as_deref(), Some("t1"), "the id is forgotten");
 }
+
+// --- The panel's session -------------------------------------------------
+
+/// The source-control panel's section key ids, in order.
+fn section_ids(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.source_control_panel()
+            .sections
+            .into_iter()
+            .map(|section| section.id)
+            .collect()
+    })
+}
+
+/// Clicking the member tree's `c.rs` row; returns the `OpenDiffTab`'s id.
+fn open_from_the_member_row(h: &mut Harness<'_>) -> String {
+    h.click_on(&format!("sc-row-changes-{MEMBER}|c.rs"));
+    one_open(h).0
+}
+
+/// The menu on the member tree's `c.rs` row, as (label, enabled, separated).
+const MEMBER_MENU: [(&str, bool, bool); 3] = [
+    ("Open Changes", true, false),
+    ("Stage Changes", true, true),
+    ("Discard Changes", true, true),
+];
+
+#[gpui::test]
+fn a_diff_tab_keeps_the_sessions_sections(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = changes_panel(cx, &dir);
+    assert_eq!(section_ids(&mut h), [MEMBER.to_owned()], "the member tree");
+
+    let id = open_from_the_member_row(&mut h);
+    h.send(opened(&id, "d1"));
+    h.send(updated(&diff_tab("d1", "c.rs", None)));
+    assert_eq!(active(&mut h).as_deref(), Some("d1"));
+    assert_eq!(
+        section_ids(&mut h),
+        [MEMBER.to_owned()],
+        "the panel keeps the session the terminal tab focused"
+    );
+}
+
+#[gpui::test]
+fn a_file_menu_on_the_session_tree_survives_a_diff_tab_opening(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = changes_panel(cx, &dir);
+    let id = open_from_the_member_row(&mut h);
+    h.right_click_on(&format!("sc-row-changes-{MEMBER}|c.rs"));
+    assert_eq!(menu(&mut h), MEMBER_MENU);
+
+    h.send(opened(&id, "d1"));
+    h.send(updated(&diff_tab("d1", "c.rs", None)));
+    assert_eq!(active(&mut h).as_deref(), Some("d1"));
+    assert_eq!(
+        menu(&mut h),
+        MEMBER_MENU,
+        "the menu on the session's tree is still open"
+    );
+}
+
+#[gpui::test]
+fn the_panel_forgets_a_removed_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = changes_panel(cx, &dir);
+    let id = open_from_the_member_row(&mut h);
+    h.send(opened(&id, "d1"));
+    h.send(updated(&diff_tab("d1", "c.rs", None)));
+    assert_eq!(
+        section_ids(&mut h),
+        [MEMBER.to_owned()],
+        "kept while the diff shows"
+    );
+
+    h.send(DaemonMessage::SessionRemoved {
+        session_id: "s1".to_owned(),
+    });
+    assert_eq!(
+        section_ids(&mut h),
+        ["r1::".to_owned()],
+        "the removed session is forgotten, so the panel falls back"
+    );
+}

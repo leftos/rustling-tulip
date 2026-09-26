@@ -90,9 +90,23 @@ pub struct ScPickerRow {
 }
 
 impl RootView {
-    /// The members of the focused pane's session, when it has any.
+    /// The session whose trees the source-control panel reads: the active
+    /// terminal tab's focused pane, or the session focused last while a
+    /// non-terminal tab (a diff tab) is active.
+    fn sc_session(&self) -> Option<String> {
+        if self
+            .tabs
+            .active_tab()
+            .is_some_and(|tab| tab.grid().is_some())
+        {
+            return self.focused_session();
+        }
+        self.last_focused_session.clone()
+    }
+
+    /// The members of the panel's session, when it has any.
     pub(crate) fn sc_focused_members(&self) -> Option<&[SessionMember]> {
-        let id = self.focused_session()?;
+        let id = self.sc_session()?;
         self.sidebar
             .session(&id)
             .map(|session| session.members.as_slice())

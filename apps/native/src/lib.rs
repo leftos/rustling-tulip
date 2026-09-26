@@ -387,6 +387,9 @@ pub struct RootView {
     /// The tab active after the last tab change, so a diff tab takes the
     /// keyboard when it becomes active.
     last_active_tab: Option<String>,
+    /// The session a terminal tab focused last, so the source-control
+    /// panel keeps its sections while a diff tab is active.
+    last_focused_session: Option<String>,
 }
 
 impl RootView {
@@ -530,6 +533,7 @@ impl RootView {
             diff_tabs: HashMap::new(),
             diff_opens: diff_tab::DiffOpens::default(),
             last_active_tab: None,
+            last_focused_session: None,
         }
     }
 
@@ -898,12 +902,15 @@ impl RootView {
 
     /// After any change to the tab model: terminals follow the layout, the
     /// requested pane takes the keyboard (unless the spawn dialog, the
-    /// delete-worktree confirm, the discard or stash drop confirm, the
-    /// source-control file menu or a modal notice holds it; closing it
-    /// focuses the tab's pane), the spawn dialog's Open in follows the tabs
-    /// and the active tab is saved. A diff tab an open waited for is
-    /// activated, and a diff tab that becomes active takes the keyboard.
+    /// delete-worktree confirm, the discard or stash drop confirm, the run
+    /// confirm, the source-control file menu or a modal notice holds it;
+    /// closing it focuses the tab's pane), the spawn dialog's Open in
+    /// follows the tabs and the active tab is saved. The session the last
+    /// terminal tab focused is remembered before a diff tab takes over. A
+    /// diff tab an open waited for is activated, and a diff tab that
+    /// becomes active takes the keyboard.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focused_session();
         self.activate_pending_diff_tab();
         self.reconcile_panes(window, cx);
         self.reconcile_diff_tabs(window, cx);
@@ -917,6 +924,7 @@ impl RootView {
             && self.changes.discard.is_none()
             && self.changes.file_menu.is_none()
             && self.stash.drop.is_none()
+            && self.run_confirm.is_none()
             && !self.notices.has_modal()
             && self.exit.is_none();
         if let Some(pane_id) = self.tabs.take_focus_request()
@@ -1125,6 +1133,39 @@ impl RootView {
             || self.apply_history(msg, cx)
     }
 
+    /// Folds the message into the sidebar, and forgets the remembered
+    /// session when the message removes it.
+    fn fold_sidebar(&mut self, msg: &DaemonMessage) {
+        self.sidebar.apply(msg);
+        self.forget_remembered_session(msg);
+    }
+
+    /// Remembers the session the active terminal tab focuses, so the
+    /// source-control panel keeps reading it while a diff tab is active.
+    fn remember_focused_session(&mut self) {
+        if let Some(id) = self.focused_session() {
+            self.last_focused_session = Some(id);
+        }
+    }
+
+    /// Drops the remembered session once the daemon removes it, or its
+    /// whole list no longer names it.
+    fn forget_remembered_session(&mut self, msg: &DaemonMessage) {
+        let Some(remembered) = self.last_focused_session.as_deref() else {
+            return;
+        };
+        let gone = match msg {
+            DaemonMessage::SessionRemoved { session_id } => session_id.as_str() == remembered,
+            DaemonMessage::Sessions { sessions } => !sessions
+                .iter()
+                .any(|session| session.id.as_str() == remembered),
+            _ => false,
+        };
+        if gone {
+            self.last_focused_session = None;
+        }
+    }
+
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         // The sidebar takes the message before the panes do, so whether a
         // snapshot moved a session's appearance is read from the old one.
@@ -1132,7 +1173,7 @@ impl RootView {
             DaemonMessage::SessionUpdated { session, .. } => Some(self.appearance_moved(session)),
             _ => None,
         };
-        self.sidebar.apply(&msg);
+        self.fold_sidebar(&msg);
         if self.on_panel_message(&msg, window, cx) {
             return;
         }
