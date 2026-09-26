@@ -1,12 +1,13 @@
 //! Terminal state (`alacritty_terminal`) and the per-frame snapshot the view paints.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
@@ -14,7 +15,9 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
 
+use crate::Clock;
 use crate::links::{self, TerminalLink, TerminalRow};
+use crate::shell_marks::{Records, Scanner, ShellDot, Split};
 use crate::theme::{self, Theme};
 
 /// Collects what the terminal asks of its client: the replies to the child
@@ -81,6 +84,273 @@ pub struct Terminal {
     /// The colours cells resolve against. A program's own palette changes
     /// (`OSC 4`, `OSC 10`) still win over it.
     theme: Theme,
+    /// The shell integration marks, for a plain shell's pane only.
+    shell: Option<Shell>,
+}
+
+/// The bytes a plain shell's output is fed in, the cap enforced after
+/// each. Slicing bounds the rows the common case pushes into the history
+/// between two checks well below the headroom above the cap; a slice can
+/// still overrun it (`CSI n S` with a large `n`, a storm of `2J`), and that
+/// saturation drops every record by design.
+const FEED_SLICE: usize = 4096;
+
+/// A plain shell's command records and what anchors them to rows.
+///
+/// A row's absolute number is `base + history_size + line`: `base` counts
+/// the rows evicted from the top of the history. alacritty's own history
+/// limit sits at twice the cap plus a screen, so while it is never reached
+/// its history size counts every row pushed exactly; the cap is enforced
+/// here after each slice, with the evicted rows added to `base`.
+///
+/// Only rows pushed into the history move the anchors. A scroll inside the
+/// screen (a reverse index at the top row, `CSI T`, an insert or delete of
+/// lines, a scroll region whose top is below the first row) moves text
+/// without moving the anchors, so a dot there can sit beside another row.
+struct Shell {
+    scanner: Scanner,
+    records: Records,
+    base: u64,
+    /// The history the pane keeps.
+    cap: usize,
+    /// The history alacritty may hold before it drops rows itself.
+    limit: usize,
+    /// When a live mark arrived.
+    clock: Clock,
+    /// The anchors' logical positions, taken as the alternate screen was
+    /// entered: a resize while it is up reflows the primary screen unseen.
+    alt_snapshot: Option<Vec<(u64, Logical)>>,
+    alt_resized: bool,
+}
+
+/// Where a row sits among the logical (unwrapped) lines: the line's index
+/// counted from the cursor's line (older lines positive), and the row
+/// within it counted from its top. A column change reflows the rows but
+/// keeps both.
+#[derive(Clone, Copy, Debug)]
+struct Logical {
+    index: isize,
+    row: usize,
+}
+
+impl Shell {
+    fn in_alt(term: &Term<Listener>) -> bool {
+        term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Acts on a split the scanner found before its final byte runs.
+    fn before(&mut self, term: &mut Term<Listener>, split: &Split) {
+        let alt = Self::in_alt(term);
+        match split {
+            Split::ClearHistory if !alt => {
+                self.settle(term);
+                self.base += count(term.grid().history_size());
+                self.records.evict_below(self.base);
+            }
+            Split::Reset => {
+                if !alt {
+                    self.base += count(term.grid().history_size());
+                }
+                self.records.clear();
+                self.alt_snapshot = None;
+                self.alt_resized = false;
+            }
+            Split::AltEnter if !alt => {
+                self.settle(term);
+                let anchors = self.records.anchors();
+                self.alt_snapshot = Some(logical_positions(term.grid(), self.base, &anchors));
+                self.alt_resized = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Acts on a split the scanner found, after its bytes have run.
+    fn after(&mut self, term: &mut Term<Listener>, split: Split, at: Option<Instant>) {
+        if Self::in_alt(term) {
+            return;
+        }
+        match split {
+            Split::Mark(mark) => {
+                let grid = term.grid();
+                let line = grid.cursor.point.line.0;
+                let abs = abs_of(self.base, grid.history_size(), line);
+                self.records.apply(mark, abs, at);
+            }
+            Split::AltExit => {
+                let snapshot = self.alt_snapshot.take();
+                if std::mem::take(&mut self.alt_resized)
+                    && let Some(snapshot) = snapshot
+                {
+                    self.relocate(term.grid(), &snapshot);
+                    self.trim(term);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Enforces the cap after output (see [`Self::trim`]). Output that
+    /// filled the history to alacritty's own limit may have pushed rows out
+    /// uncounted, so every record goes.
+    fn settle(&mut self, term: &mut Term<Listener>) {
+        if Self::in_alt(term) {
+            return;
+        }
+        if term.grid().history_size() >= self.limit {
+            self.records.clear();
+        }
+        self.trim(term);
+    }
+
+    /// Enforces the cap on the primary screen's history, counting the rows
+    /// it drops into `base`. After a reflow, which can cut the history to
+    /// alacritty's limit itself, the relocation has already dropped exactly
+    /// the anchors on the rows cut and numbered the rest on the new grid.
+    fn trim(&mut self, term: &mut Term<Listener>) {
+        if Self::in_alt(term) {
+            return;
+        }
+        let history = term.grid().history_size();
+        if history > self.cap {
+            term.grid_mut().update_history(self.cap);
+            self.base += count(history - self.cap);
+            self.records.evict_below(self.base);
+        }
+        self.limit = 2 * self.cap + term.screen_lines();
+        term.grid_mut().update_history(self.limit);
+    }
+
+    /// Moves every anchor to the row its logical position now names.
+    fn relocate(&mut self, grid: &Grid<Cell>, logical: &[(u64, Logical)]) {
+        let moved = rows_of(grid, self.base, logical);
+        self.records.remap(|row| moved.get(&row).copied());
+    }
+}
+
+/// Ends a pending synchronized update (`DEC 2026`), so that a mark or a
+/// split reads the grid after the bytes the update held rather than
+/// before them. The frame may paint early there.
+fn flush_sync(parser: &mut Processor, term: &mut Term<Listener>) {
+    if parser.sync_timeout().sync_timeout().is_some() {
+        parser.stop_sync(term);
+    }
+}
+
+/// A row count as the absolute rows count them.
+fn count(rows: usize) -> u64 {
+    u64::try_from(rows).unwrap_or(u64::MAX)
+}
+
+/// The absolute number of grid line `line`.
+fn abs_of(base: u64, history: usize, line: i32) -> u64 {
+    let offset = i64::try_from(history)
+        .unwrap_or(i64::MAX)
+        .saturating_add(i64::from(line));
+    base.saturating_add(u64::try_from(offset).unwrap_or(0))
+}
+
+/// The grid line of absolute row `abs`, if it is still on the grid.
+fn line_of(abs: u64, base: u64, grid: &Grid<Cell>) -> Option<i32> {
+    let history = i128::from(count(grid.history_size()));
+    let line = i32::try_from(i128::from(abs) - i128::from(base) - history).ok()?;
+    (grid.topmost_line().0..=grid.bottommost_line().0)
+        .contains(&line)
+        .then_some(line)
+}
+
+/// Whether grid line `line` starts a logical line: the row above it did not
+/// wrap into it.
+fn starts_line(grid: &Grid<Cell>, line: i32) -> bool {
+    line <= grid.topmost_line().0
+        || !grid[Line(line - 1)][grid.last_column()]
+            .flags
+            .contains(Flags::WRAPLINE)
+}
+
+/// The grid's logical lines as (first line, last line), newest first, and
+/// the index of the one the cursor is on. They are read from the bottom up
+/// only until `enough` holds for the lines read so far and the cursor's
+/// index, once read.
+fn logical_lines(
+    grid: &Grid<Cell>,
+    enough: impl Fn(&[(i32, i32)], Option<usize>) -> bool,
+) -> (Vec<(i32, i32)>, usize) {
+    let cursor = grid.cursor.point.line.0;
+    let mut lines = Vec::new();
+    let mut at_cursor = None;
+    let mut last = grid.bottommost_line().0;
+    for line in (grid.topmost_line().0..=last).rev() {
+        if !starts_line(grid, line) {
+            continue;
+        }
+        if (line..=last).contains(&cursor) {
+            at_cursor = Some(lines.len());
+        }
+        lines.push((line, last));
+        last = line - 1;
+        if enough(&lines, at_cursor) {
+            break;
+        }
+    }
+    (lines, at_cursor.unwrap_or(0))
+}
+
+/// The logical position of each anchor still on the grid, its line counted
+/// from the cursor's: resizing keeps the cursor on its own line, while it
+/// may add or drop blank rows below it. Only the lines from the oldest
+/// anchor's down are read.
+fn logical_positions(grid: &Grid<Cell>, base: u64, anchors: &[u64]) -> Vec<(u64, Logical)> {
+    let on_grid: Vec<(u64, i32)> = anchors
+        .iter()
+        .filter_map(|&abs| Some((abs, line_of(abs, base, grid)?)))
+        .collect();
+    let Some(oldest) = on_grid.iter().map(|&(_, line)| line).min() else {
+        return Vec::new();
+    };
+    let (lines, at_cursor) = logical_lines(grid, |lines, at_cursor| {
+        at_cursor.is_some() && lines.last().is_some_and(|&(first, _)| first <= oldest)
+    });
+    on_grid
+        .into_iter()
+        .filter_map(|(abs, line)| {
+            // Newest first, so the first lines are in descending order.
+            let index = lines.partition_point(|&(first, _)| first > line);
+            let (first, _) = lines.get(index)?;
+            let logical = Logical {
+                index: signed(index) - signed(at_cursor),
+                row: usize::try_from(line - first).ok()?,
+            };
+            Some((abs, logical))
+        })
+        .collect()
+}
+
+fn signed(index: usize) -> isize {
+    isize::try_from(index).unwrap_or(isize::MAX)
+}
+
+/// The new absolute row of each anchor's logical position, clamped to its
+/// logical line's last row; one whose line is gone has none. Only the
+/// lines down from the oldest position are read.
+fn rows_of(grid: &Grid<Cell>, base: u64, logical: &[(u64, Logical)]) -> HashMap<u64, u64> {
+    let Some(oldest) = logical.iter().map(|(_, at)| at.index).max() else {
+        return HashMap::new();
+    };
+    let (lines, at_cursor) = logical_lines(grid, |lines, at_cursor| {
+        at_cursor.is_some_and(|at_cursor| signed(lines.len()) > signed(at_cursor) + oldest)
+    });
+    let history = grid.history_size();
+    logical
+        .iter()
+        .filter_map(|&(abs, at)| {
+            let index = usize::try_from(signed(at_cursor) + at.index).ok()?;
+            let &(first, last) = lines.get(index)?;
+            let row = i32::try_from(at.row).unwrap_or(i32::MAX);
+            let line = first.saturating_add(row).min(last);
+            Some((abs, abs_of(base, history, line)))
+        })
+        .collect()
 }
 
 /// A horizontal run of cells sharing one style, painted as one shaped line.
@@ -124,8 +394,34 @@ pub struct Snapshot {
 impl Terminal {
     /// A blank terminal whose cursor is `cursor` until the program sets its own.
     pub fn new(size: GridSize, cursor: CursorShape) -> Self {
+        Self::build(size, cursor, SCROLLBACK_LINES, None)
+    }
+
+    /// A blank terminal for a plain shell: it keeps records of the commands
+    /// the shell marks, their live marks stamped by `clock`.
+    pub fn with_shell_marks(size: GridSize, cursor: CursorShape, clock: Clock) -> Self {
+        Self::with_marks_capped(size, cursor, clock, SCROLLBACK_LINES)
+    }
+
+    /// [`Self::with_shell_marks`] keeping `cap` lines of history.
+    fn with_marks_capped(size: GridSize, cursor: CursorShape, clock: Clock, cap: usize) -> Self {
+        let limit = 2 * cap + size.rows;
+        let shell = Shell {
+            scanner: Scanner::default(),
+            records: Records::default(),
+            base: 0,
+            cap,
+            limit,
+            clock,
+            alt_snapshot: None,
+            alt_resized: false,
+        };
+        Self::build(size, cursor, limit, Some(shell))
+    }
+
+    fn build(size: GridSize, cursor: CursorShape, history: usize, shell: Option<Shell>) -> Self {
         let config = Config {
-            scrolling_history: SCROLLBACK_LINES,
+            scrolling_history: history,
             default_cursor_style: CursorStyle {
                 shape: cursor,
                 blinking: false,
@@ -142,6 +438,7 @@ impl Terminal {
             size,
             listener,
             theme: Theme::default(),
+            shell,
         }
     }
 
@@ -163,7 +460,78 @@ impl Terminal {
 
     /// Feeds live output. Replies it provokes wait in [`Self::take_replies`].
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        let at = self.shell.as_ref().map(|shell| (shell.clock)());
+        self.feed_at(bytes, at);
+    }
+
+    /// Feeds `bytes`, a plain shell's split at each mark and at each
+    /// sequence that moves the rows the marks are anchored to. The marks
+    /// are stamped `at`; replayed ones are not.
+    fn feed_at(&mut self, bytes: &[u8], at: Option<Instant>) {
+        let Self {
+            term,
+            parser,
+            shell,
+            ..
+        } = self;
+        let Some(shell) = shell.as_mut() else {
+            parser.advance(term, bytes);
+            return;
+        };
+        for slice in bytes.chunks(FEED_SLICE) {
+            let mut rest = slice;
+            while !rest.is_empty() {
+                let (read, split) = shell.scanner.next(rest);
+                let Some(split) = split else {
+                    parser.advance(term, rest);
+                    break;
+                };
+                if split.before_final() {
+                    let final_byte = read.saturating_sub(1);
+                    parser.advance(term, &rest[..final_byte]);
+                    flush_sync(parser, term);
+                    shell.before(term, &split);
+                    parser.advance(term, &rest[final_byte..read]);
+                } else {
+                    parser.advance(term, &rest[..read]);
+                    flush_sync(parser, term);
+                    shell.after(term, split, at);
+                }
+                rest = &rest[read..];
+            }
+            shell.settle(term);
+        }
+    }
+
+    /// The dots of the finished commands whose prompt row is on screen, top
+    /// first. None while the alternate screen is up.
+    pub fn shell_dots(&self) -> Vec<ShellDot> {
+        let Some(shell) = self.shell.as_ref() else {
+            return Vec::new();
+        };
+        if Shell::in_alt(&self.term) {
+            return Vec::new();
+        }
+        let grid = self.term.grid();
+        let offset = i64::try_from(grid.display_offset()).unwrap_or(i64::MAX);
+        let mut dots: Vec<ShellDot> = shell
+            .records
+            .iter()
+            .filter_map(|record| {
+                let line = line_of(record.prompt, shell.base, grid)?;
+                let row = usize::try_from(i64::from(line).saturating_add(offset))
+                    .ok()
+                    .filter(|row| *row < self.size.rows)?;
+                Some(ShellDot {
+                    row,
+                    status: record.status(),
+                    exit: record.exit,
+                    tooltip: record.tooltip(),
+                })
+            })
+            .collect();
+        dots.sort_by_key(|dot| dot.row);
+        dots
     }
 
     /// Feeds replayed history. The queries in it were answered when they were
@@ -174,7 +542,7 @@ impl Terminal {
     pub fn feed_history(&mut self, bytes: &[u8]) {
         let queued = self.listener.replies.borrow().len();
         let stored = self.listener.copies.borrow().len();
-        self.feed(bytes);
+        self.feed_at(bytes, None);
         if self.sync_pending() {
             self.parser.stop_sync(&mut self.term);
         }
@@ -207,9 +575,36 @@ impl Terminal {
         self.parser.stop_sync(&mut self.term);
     }
 
+    /// Resizes the grid. A plain shell's anchors follow their rows: a row
+    /// count change keeps the bottom row, and a column change reflows the
+    /// rows, which moves each anchor to its logical position's new row.
     pub fn resize(&mut self, size: GridSize) {
-        self.size = size;
-        self.term.resize(size);
+        let old = std::mem::replace(&mut self.size, size);
+        let Some(shell) = self.shell.as_mut() else {
+            self.term.resize(size);
+            return;
+        };
+        if Shell::in_alt(&self.term) {
+            self.term.resize(size);
+            // The snapshot taken at entry places the anchors on the way out;
+            // without one there is nothing to place them by.
+            if shell.alt_snapshot.is_some() {
+                shell.alt_resized = true;
+            } else {
+                shell.records.clear();
+            }
+            return;
+        }
+        shell.settle(&mut self.term);
+        if size.cols == old.cols {
+            self.term.resize(size);
+        } else {
+            let anchors = shell.records.anchors();
+            let logical = logical_positions(self.term.grid(), shell.base, &anchors);
+            self.term.resize(size);
+            shell.relocate(self.term.grid(), &logical);
+        }
+        shell.trim(&mut self.term);
     }
 
     pub fn scroll(&mut self, lines: i32) {
@@ -1192,5 +1587,433 @@ mod tests {
         assert_eq!(whole[0].start_row, 0);
         assert_eq!(whole[0].end_row, 3);
         assert!(term.links_near(0, 2).is_empty());
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a test fails with the message of the precondition it lost"
+)]
+mod shell_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::vte::ansi::CursorShape;
+
+    use super::{GridSize, SCROLLBACK_LINES, Terminal, line_of};
+    use crate::shell_marks::ShellStatus;
+
+    type Now = Arc<Mutex<Instant>>;
+
+    fn shell(cols: usize, rows: usize, cap: usize) -> (Terminal, Now) {
+        let now: Now = Arc::new(Mutex::new(Instant::now()));
+        let read = Arc::clone(&now);
+        let clock = Arc::new(move || *read.lock().expect("clock"));
+        let size = GridSize { cols, rows };
+        let term = Terminal::with_marks_capped(size, CursorShape::Block, clock, cap);
+        (term, now)
+    }
+
+    /// One command: the prompt row starts with `tag`, one line of output,
+    /// and the end with `exit`, which leaves the cursor two rows down.
+    fn cmd(tag: char, exit: i32) -> String {
+        format!("\x1b]133;A\x07{tag}\r\n\x1b]133;C\x07out\r\n\x1b]133;D;{exit}\x07")
+    }
+
+    /// The character at column 0 of each record's prompt row, oldest first;
+    /// `!` for a prompt row that is off the grid.
+    fn tags(term: &Terminal) -> Vec<char> {
+        let shell = term.shell.as_ref().expect("a shell terminal");
+        let grid = term.term.grid();
+        shell
+            .records
+            .iter()
+            .map(|record| {
+                line_of(record.prompt, shell.base, grid)
+                    .map_or('!', |line| grid[Line(line)][Column(0)].c)
+            })
+            .collect()
+    }
+
+    /// Every row of the grid, oldest first, with each record's prompt row
+    /// marked `>`, for a failure message.
+    fn dump(term: &Terminal) -> Vec<String> {
+        let shell = term.shell.as_ref().expect("a shell terminal");
+        let grid = term.term.grid();
+        let prompts: Vec<i32> = shell
+            .records
+            .iter()
+            .filter_map(|record| line_of(record.prompt, shell.base, grid))
+            .collect();
+        let (top, bottom) = term.line_bounds();
+        (top..=bottom)
+            .map(|line| {
+                let mark = if prompts.contains(&line) { '>' } else { ' ' };
+                let wrap = if term.wraps(line) { '~' } else { ' ' };
+                format!("{mark}{wrap}{line}:{}", term.read_row(line).text.trim_end())
+            })
+            .collect()
+    }
+
+    fn dot_rows(term: &Terminal) -> Vec<usize> {
+        term.shell_dots().iter().map(|dot| dot.row).collect()
+    }
+
+    fn crlf(n: usize) -> Vec<u8> {
+        "\r\n".repeat(n).into_bytes()
+    }
+
+    #[test]
+    fn a_dot_tracks_its_prompt_as_output_scrolls_below_the_cap() {
+        let (mut term, _) = shell(10, 4, 20);
+        term.feed(cmd('a', 0).as_bytes());
+        assert_eq!(dot_rows(&term), [0]);
+        term.feed(&crlf(2));
+        assert_eq!(dot_rows(&term), [] as [usize; 0], "scrolled off the screen");
+        term.scroll(1);
+        assert_eq!(dot_rows(&term), [0], "back in view in the history");
+        assert_eq!(tags(&term), ['a']);
+    }
+
+    #[test]
+    fn a_prompt_at_the_top_of_a_full_history_keeps_its_dot_until_evicted() {
+        let (mut term, _) = shell(10, 4, 5);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(6));
+        assert_eq!(term.line_bounds(), (-5, 3));
+        term.scroll(5);
+        assert_eq!(dot_rows(&term), [0], "the prompt is the oldest line");
+        term.scroll_to_bottom();
+        term.feed(&crlf(1));
+        assert_eq!(term.line_bounds(), (-5, 3), "the cap holds");
+        assert_eq!(tags(&term), [] as [char; 0], "evicted with its line");
+    }
+
+    #[test]
+    fn anchors_stay_exact_across_feeds_that_straddle_the_cap() {
+        let (mut term, _) = shell(10, 4, 5);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(3));
+        term.feed(cmd('b', 1).as_bytes());
+        term.feed(&crlf(1));
+        assert_eq!(tags(&term), ['a', 'b']);
+        term.feed(&crlf(1));
+        assert_eq!(tags(&term), ['b']);
+        term.feed(&crlf(2));
+        assert_eq!(tags(&term), ['b']);
+    }
+
+    #[test]
+    fn a_feed_that_overruns_the_headroom_drops_every_record() {
+        let (mut term, _) = shell(10, 4, 5);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(30));
+        assert_eq!(tags(&term), [] as [char; 0]);
+        term.feed(cmd('c', 0).as_bytes());
+        assert_eq!(tags(&term), ['c'], "the next mark is exact");
+        assert_eq!(term.line_bounds(), (-5, 3));
+    }
+
+    #[test]
+    fn scrolls_and_clears_move_or_drop_the_anchors() {
+        let (mut term, _) = shell(10, 4, 20);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(b"\x1b[2S");
+        assert_eq!(tags(&term), ['a'], "CSI S scrolls into the history");
+        term.feed(b"\x1b[2J");
+        assert_eq!(tags(&term), ['a'], "2J pushes the screen into the history");
+        term.feed(b"\x1b[H");
+        term.feed(cmd('b', 0).as_bytes());
+        term.feed(b"\x1b[3J");
+        assert_eq!(tags(&term), ['b'], "3J erases the history, not the screen");
+        term.feed(b"\x1b[4;1H\x1bM");
+        assert_eq!(
+            tags(&term),
+            ['b'],
+            "a reverse index off the top moves nothing"
+        );
+        term.feed(b"\x1b[3;4r\x1b[4;1H\n\n\n\x1b[r");
+        assert_eq!(
+            tags(&term),
+            ['b'],
+            "a scroll inside a lower region leaves it"
+        );
+        term.feed(b"\x1bc");
+        assert_eq!(tags(&term), [] as [char; 0], "a reset drops every record");
+        term.feed(cmd('c', 0).as_bytes());
+        assert_eq!(tags(&term), ['c']);
+    }
+
+    #[test]
+    fn marks_on_the_alternate_screen_are_ignored_and_dots_return_after_it() {
+        let (mut term, _) = shell(10, 4, 20);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(b"\x1b[?1049h\x1b]133;A\x07x\x1b]133;D;0\x07");
+        assert_eq!(
+            dot_rows(&term),
+            [] as [usize; 0],
+            "no dots over a full-screen program"
+        );
+        term.resize(GridSize { cols: 6, rows: 4 });
+        term.feed(b"\x1b[?1049l");
+        assert_eq!(
+            tags(&term),
+            ['a'],
+            "the alternate screen's marks made nothing"
+        );
+        assert_eq!(dot_rows(&term), [0]);
+        term.feed(b"\x1b[?1049h");
+        term.feed(b"\x1b[?1049l");
+        assert_eq!(tags(&term), ['a']);
+    }
+
+    #[test]
+    fn a_row_resize_at_the_cap_keeps_or_evicts_whole_anchors() {
+        let (mut term, _) = shell(10, 4, 5);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(2));
+        term.resize(GridSize { cols: 10, rows: 2 });
+        assert_eq!(tags(&term), ['a']);
+        term.resize(GridSize { cols: 10, rows: 6 });
+        assert_eq!(tags(&term), ['a']);
+
+        // The prompt is the oldest line of a full history.
+        let (mut term, _) = shell(10, 4, 5);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(6));
+        term.resize(GridSize { cols: 10, rows: 6 });
+        assert_eq!(tags(&term), ['a'], "a taller screen pulls rows back");
+        term.resize(GridSize { cols: 10, rows: 4 });
+        assert_eq!(tags(&term), ['a']);
+        term.resize(GridSize { cols: 10, rows: 3 });
+        assert_eq!(tags(&term), [] as [char; 0], "pushed past the cap");
+    }
+
+    #[test]
+    fn a_column_resize_reflows_a_wrapped_prompt_and_keeps_its_anchor() {
+        let (mut term, _) = shell(10, 6, 20);
+        term.feed(b"\x1b]133;A\x07a123456789XYZ\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+        term.feed(cmd('b', 1).as_bytes());
+        assert_eq!(tags(&term), ['a', 'b']);
+        term.resize(GridSize { cols: 6, rows: 6 });
+        assert_eq!(tags(&term), ['a', 'b']);
+        term.resize(GridSize { cols: 12, rows: 6 });
+        assert_eq!(tags(&term), ['a', 'b']);
+        let shell = term.shell.as_ref().expect("a shell terminal");
+        let ends: Vec<char> = shell
+            .records
+            .iter()
+            .map(|record| {
+                let line = record
+                    .end
+                    .and_then(|end| line_of(end, shell.base, term.term.grid()))
+                    .expect("on the grid");
+                term.term.grid()[Line(line - 1)][Column(0)].c
+            })
+            .collect();
+        assert_eq!(ends, ['o', 'o'], "each end sits below its output");
+    }
+
+    #[test]
+    fn live_commands_carry_a_duration_and_replayed_ones_do_not() {
+        let (mut term, now) = shell(20, 6, 20);
+        term.feed_history(format!("{}{}", cmd('a', 0), cmd('b', 3)).as_bytes());
+        term.feed(b"\x1b]133;A\x07c\r\n\x1b]133;C\x07");
+        *now.lock().expect("clock") += Duration::from_millis(1234);
+        term.feed(b"\x1b]133;D\x07");
+        let dots: Vec<(usize, ShellStatus, String)> = term
+            .shell_dots()
+            .into_iter()
+            .map(|dot| (dot.row, dot.status, dot.tooltip))
+            .collect();
+        assert_eq!(
+            dots,
+            [
+                (0, ShellStatus::Ok, "exit 0".to_owned()),
+                (2, ShellStatus::Fail, "exit 3".to_owned()),
+                (4, ShellStatus::Unknown, "exit ? · 1.23s".to_owned()),
+            ]
+        );
+    }
+
+    /// A small deterministic generator for the random walk.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            usize::try_from(self.0 % u64::try_from(n).expect("small")).expect("small")
+        }
+    }
+
+    /// A random walk of output, resizes and scrolls over one terminal, with
+    /// the tags of the commands it wrote on the primary screen, in order,
+    /// and the ops so far for a failure message.
+    struct Walk {
+        term: Terminal,
+        rng: Rng,
+        next_tag: u32,
+        written: Vec<char>,
+        log: Vec<String>,
+    }
+
+    impl Walk {
+        fn new(seed: u64) -> Self {
+            let (term, _) = shell(8, 4, 12);
+            Self {
+                term,
+                rng: Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+                next_tag: 0,
+                written: Vec::new(),
+                log: Vec::new(),
+            }
+        }
+
+        fn step(&mut self) {
+            let op = self.rng.below(12);
+            self.log.push(op.to_string());
+            if op < 6 {
+                self.write(op);
+            } else {
+                self.disturb(op);
+            }
+        }
+
+        /// Text, line feeds, or a whole command with a fresh tag.
+        fn write(&mut self, op: usize) {
+            match op {
+                0 | 1 => {
+                    let text: String = (0..self.rng.below(20))
+                        .map(|i| if i % 3 == 0 { 'x' } else { 'y' })
+                        .collect();
+                    self.term.feed(text.as_bytes());
+                }
+                2 | 3 => self.term.feed(&crlf(1 + self.rng.below(4))),
+                _ => self.command(),
+            }
+        }
+
+        fn command(&mut self) {
+            let tag = char::from_u32(0x100 + self.next_tag % 0x180).expect("a letter");
+            self.next_tag += 1;
+            if !super::Shell::in_alt(&self.term.term) {
+                self.written.push(tag);
+            }
+            let exit = i32::try_from(self.rng.below(3)).expect("small");
+            self.term.feed(format!("\r\n{}", cmd(tag, exit)).as_bytes());
+        }
+
+        /// A scroll, a clear, a resize, the alternate screen, a reset or a
+        /// scroll of the view.
+        fn disturb(&mut self, op: usize) {
+            match op {
+                6 => {
+                    let lines = 1 + self.rng.below(3);
+                    self.term.feed(format!("\x1b[{lines}S").as_bytes());
+                }
+                7 => self.clear(),
+                8 => self.resize(),
+                9 => self.term.feed(b"\x1b[?1049hfull\r\nscreen"),
+                10 => self.term.feed(b"\x1b[?1049l"),
+                _ => self.reset_or_view(),
+            }
+        }
+
+        fn clear(&mut self) {
+            let clear: &[u8] = if self.rng.below(2) == 0 {
+                b"\x1b[2J"
+            } else {
+                b"\x1b[3J"
+            };
+            self.term.feed(clear);
+        }
+
+        fn resize(&mut self) {
+            let size = GridSize {
+                cols: 4 + self.rng.below(10),
+                rows: 2 + self.rng.below(6),
+            };
+            self.log.push(format!("{}x{}", size.cols, size.rows));
+            self.term.resize(size);
+        }
+
+        fn reset_or_view(&mut self) {
+            if self.rng.below(8) == 0 {
+                self.term.feed(b"\x1bc");
+            } else {
+                let lines = i32::try_from(self.rng.below(5)).expect("small") - 2;
+                self.term.scroll(lines);
+            }
+        }
+
+        /// Asserts every live record sits on its tag and returns how many
+        /// there are; none are read while the alternate screen is up.
+        fn check(&self, seed: u64, step: usize) -> usize {
+            if super::Shell::in_alt(&self.term.term) {
+                return 0;
+            }
+            // Records only ever leave from the oldest end, so the live ones
+            // are the newest commands written, each on its tag.
+            let found = tags(&self.term);
+            let written = &self.written;
+            assert!(
+                written.ends_with(&found),
+                "seed {seed} step {step}: found {found:?}, written {:?}, last ops {:?}, grid {:?}",
+                &written[written.len().saturating_sub(found.len() + 2)..],
+                &self.log[self.log.len().saturating_sub(12)..],
+                dump(&self.term)
+            );
+            found.len()
+        }
+    }
+
+    #[test]
+    fn random_output_never_moves_an_anchor_off_its_tag() {
+        let mut kept = 0;
+        for seed in 1..=40_u64 {
+            let mut walk = Walk::new(seed);
+            for step in 0..300 {
+                walk.step();
+                kept += walk.check(seed, step);
+            }
+        }
+        assert!(kept > 1000, "the walk kept records to check: {kept}");
+    }
+
+    #[test]
+    fn a_mark_inside_a_synchronized_update_reads_the_grid_after_it() {
+        let (mut term, _) = shell(10, 4, 20);
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(&crlf(5));
+        term.feed(b"zz");
+        let history = term.term.grid().history_size();
+        let held = format!("\x1b[?2026h\x1b[H\x1b[2J\x1b[3J{}\x1b[?2026l", cmd('b', 0));
+        term.feed(held.as_bytes());
+        let shell = term.shell.as_ref().expect("a shell terminal");
+        assert_eq!(
+            shell.base,
+            u64::try_from(history + 4).expect("small"),
+            "3J erased the history 2J had pushed the four rows down to `zz` into"
+        );
+        assert_eq!(tags(&term), ['b']);
+        assert_eq!(dot_rows(&term), [0]);
+    }
+
+    #[test]
+    fn a_column_shrink_that_cuts_the_history_keeps_the_recent_records() {
+        let (mut term, _) = shell(150, 10, SCROLLBACK_LINES);
+        let line = format!("{}\r\n", "x".repeat(150));
+        term.feed(line.repeat(SCROLLBACK_LINES).as_bytes());
+        term.feed(cmd('a', 0).as_bytes());
+        term.feed(cmd('b', 1).as_bytes());
+        term.resize(GridSize { cols: 60, rows: 10 });
+        assert_eq!(tags(&term), ['a', 'b'], "each wide line is three rows now");
+        assert_eq!(dot_rows(&term).len(), 2);
+        assert_eq!(term.term.grid().history_size(), SCROLLBACK_LINES);
     }
 }

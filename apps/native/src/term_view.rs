@@ -20,7 +20,7 @@ use gpui::{
     Subscription, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font,
     outline, point, prelude::*, px, size,
 };
-use protocol::{ClientMessage, SessionSnapshot};
+use protocol::{ClientMessage, SessionMode, SessionSnapshot};
 
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
@@ -29,6 +29,7 @@ use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCel
 use crate::net::NetCommand;
 use crate::open;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
+use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
@@ -36,7 +37,17 @@ use crate::text_input::{offset_from_utf16, offset_to_utf16};
 /// `DSR 6`: the program asks where the cursor is and waits for the reply.
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 
+/// The width of the gutter left of a plain shell's grid, where the command
+/// dots sit.
+const GUTTER: f32 = 14.0;
+/// A command dot's diameter, and its left edge in the gutter: 10px left of
+/// the text.
+const DOT: f32 = 8.0;
+const DOT_LEFT: f32 = GUTTER - 10.0;
+
 pub struct TerminalPane {
+    /// The grid pane this terminal fills, which names its dots.
+    pane_id: String,
     term: Terminal,
     focus: FocusHandle,
     tx: UnboundedSender<NetCommand>,
@@ -201,12 +212,14 @@ impl EventEmitter<PaneEvent> for TerminalPane {}
 
 impl TerminalPane {
     pub fn new(
+        pane_id: String,
         tx: UnboundedSender<NetCommand>,
         now: Clock,
         font: FontSettings,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
+            pane_id,
             term: Terminal::new(GridSize { cols: 80, rows: 24 }, CursorShape::Block),
             focus: cx.focus_handle(),
             tx,
@@ -297,6 +310,48 @@ impl TerminalPane {
         self.term.snapshot().cursor_shape
     }
 
+    /// The dots the gutter draws: the finished commands whose prompt row is
+    /// on screen, top first.
+    pub fn shell_dots(&self) -> Vec<ShellDot> {
+        self.term.shell_dots()
+    }
+
+    /// Whether the pane keeps a gutter for command dots: only a plain
+    /// shell's does.
+    fn has_gutter(&self) -> bool {
+        self.session
+            .is_some_and(|session| session.mode == SessionMode::PlainShell)
+    }
+
+    /// Whether `position` is in the gutter left of the grid.
+    fn in_gutter(&self, position: Point<Pixels>) -> bool {
+        self.has_gutter()
+            && self
+                .layout
+                .is_some_and(|(origin, _)| (origin.x - px(GUTTER)..origin.x).contains(&position.x))
+    }
+
+    /// The gutter and its dots, each centred on its prompt row, from the
+    /// last layout's row height.
+    fn gutter(&self) -> impl IntoElement {
+        let dots: Vec<_> = self
+            .layout
+            .map(|(_, cell)| {
+                self.shell_dots()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, dot)| gutter_dot(&self.pane_id, n, dot, cell.height))
+                    .collect()
+            })
+            .unwrap_or_default();
+        div()
+            .flex_none()
+            .w(px(GUTTER))
+            .h_full()
+            .relative()
+            .children(dots)
+    }
+
     /// The window position of the centre of cell (`col`, `row`), from the
     /// last layout.
     pub fn cell_center(&self, col: usize, row: usize) -> Option<Point<Pixels>> {
@@ -341,7 +396,10 @@ impl TerminalPane {
     /// [`Self::expect_scrollback`].
     pub fn attach(&mut self, session: &SessionSnapshot, cx: &mut Context<Self>) {
         let context = SessionContext::of(session);
-        self.fresh_terminal(context.default_cursor_shape());
+        self.fresh_terminal(
+            context.default_cursor_shape(),
+            context.mode == SessionMode::PlainShell,
+        );
         self.session = Some(context);
         self.base_dirs = open::base_dirs(session);
         self.attachment.attach(session.id.clone(), (self.now)());
@@ -351,9 +409,14 @@ impl TerminalPane {
     }
 
     /// Replaces the terminal, dropping any selection or mouse gesture on the
-    /// old one.
-    fn fresh_terminal(&mut self, cursor: CursorShape) {
-        self.term = Terminal::new(self.term.size(), cursor);
+    /// old one. A plain shell's terminal keeps the commands the shell marks.
+    fn fresh_terminal(&mut self, cursor: CursorShape, plain_shell: bool) {
+        let size = self.term.size();
+        self.term = if plain_shell {
+            Terminal::with_shell_marks(size, cursor, self.now.clone())
+        } else {
+            Terminal::new(size, cursor)
+        };
         self.content_changed();
         self.tracker = Tracker::default();
         self.last_motion = None;
@@ -477,7 +540,7 @@ impl TerminalPane {
     /// shows it.
     pub fn release(&mut self) {
         self.attachment.take();
-        self.fresh_terminal(CursorShape::Block);
+        self.fresh_terminal(CursorShape::Block, false);
         self.session = None;
         self.base_dirs.clear();
         self.marked = None;
@@ -489,7 +552,7 @@ impl TerminalPane {
     /// Forget the attachment for a new connection, which starts unattached.
     pub fn reset_for_reconnect(&mut self) {
         if self.attachment.take().is_some() {
-            self.fresh_terminal(CursorShape::Block);
+            self.fresh_terminal(CursorShape::Block, false);
         }
         self.session = None;
         self.base_dirs.clear();
@@ -717,7 +780,9 @@ impl TerminalPane {
         });
     }
 
-    fn ensure_size(&mut self, size: GridSize) {
+    /// Sizes the terminal to `size`, telling the session when the size gate
+    /// allows. Returns whether the terminal was resized.
+    fn ensure_size(&mut self, size: GridSize) -> bool {
         let changed = size != self.term.size();
         if changed {
             self.term.resize(size);
@@ -726,6 +791,7 @@ impl TerminalPane {
         if self.size_gate.measure(changed) {
             self.send_resize();
         }
+        changed
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -891,6 +957,12 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.focus.focus(window);
+        // The gutter is the dots' own: a press there starts no selection
+        // and reaches no program.
+        if self.in_gutter(event.position) {
+            cx.stop_propagation();
+            return;
+        }
         // Ctrl+click on a link opens it, ahead of a selection or a mouse
         // report; its release then finds no gesture to end. Only the first
         // press of a multi-click opens it; the later ones do nothing.
@@ -939,6 +1011,7 @@ impl TerminalPane {
         if self.tracker.moving().is_some()
             || !mouse::reports(mode, event.modifiers.shift)
             || !mouse::reports_motion(mode, false)
+            || self.in_gutter(event.position)
         {
             return;
         }
@@ -1298,11 +1371,22 @@ impl Render for TerminalPane {
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
-                let (snap, marked, link) = view.update(cx, |v, _| {
-                    v.ensure_size(grid_size(bounds, &m));
-                    v.layout = Some((bounds.origin, cell_size(&m)));
-                    (v.term.snapshot(), v.marked.clone(), v.hovered_link_cells())
+                let (snap, marked, link, relaid) = view.update(cx, |v, _| {
+                    let resized = v.ensure_size(grid_size(bounds, &m));
+                    let cell = cell_size(&m);
+                    let relaid = resized || v.layout.is_none_or(|(_, old)| old != cell);
+                    v.layout = Some((bounds.origin, cell));
+                    let snap = v.term.snapshot();
+                    (snap, v.marked.clone(), v.hovered_link_cells(), relaid)
                 });
+                // The gutter was built before this layout, from the last one:
+                // a resize moves the anchors and a new cell height the rows,
+                // so the dots are rebuilt in another frame. A notify made
+                // while the frame draws is dropped, so it waits for the draw.
+                if relaid {
+                    let pane = view.clone();
+                    window.defer(cx, move |_, cx| pane.update(cx, |_, cx| cx.notify()));
+                }
                 let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
                 (m, snap, marked, link, hitbox)
             },
@@ -1341,8 +1425,8 @@ impl Render for TerminalPane {
                     paint_preedit(bounds.origin, &snap, &text, &m, window, cx);
                 }
             },
-        )
-        .size_full();
+        );
+        let gutter = self.has_gutter().then(|| self.gutter());
         let mut pane = div()
             .size_full()
             .p(px(crate::PADDING))
@@ -1357,8 +1441,46 @@ impl Render for TerminalPane {
                 .on_mouse_up(button, cx.listener(Self::on_mouse_up))
                 .on_mouse_up_out(button, cx.listener(Self::on_mouse_up));
         }
-        pane.child(grid)
+        match gutter {
+            Some(gutter) => pane
+                .flex()
+                .flex_row()
+                .child(gutter)
+                .child(grid.flex_1().h_full()),
+            None => pane.child(grid.size_full()),
+        }
     }
+}
+
+/// The dot of a finished command whose prompt is on viewport row
+/// `dot.row`, with its exit and duration as its tooltip. A click on it is
+/// taken by the gutter.
+fn gutter_dot(pane_id: &str, n: usize, dot: ShellDot, line_height: f32) -> impl IntoElement {
+    let selector = format!("shell-dot-{pane_id}-{n}");
+    #[expect(clippy::cast_precision_loss, reason = "a viewport row is small")]
+    let top = dot.row as f32 * line_height + (line_height - DOT) / 2.0;
+    div()
+        .id(SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .absolute()
+        .left(px(DOT_LEFT))
+        .top(px(top))
+        .size(px(DOT))
+        .rounded_full()
+        .bg(dot_color(dot.status))
+        .border_1()
+        .border_color(gpui::rgba(0x0000_0059))
+        .tooltip(crate::tooltip(dot.tooltip))
+}
+
+/// Green for a command that exited 0, red for any other code, muted for one
+/// the shell gave no code for.
+fn dot_color(status: ShellStatus) -> Rgba {
+    gpui::rgb(match status {
+        ShellStatus::Ok => 0x004e_c9b0,
+        ShellStatus::Fail => 0x00f4_8771,
+        ShellStatus::Unknown => crate::MUTED,
+    })
 }
 
 fn cell_size(m: &Metrics) -> CellSize {
@@ -1656,7 +1778,7 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Instant;
 
-    use super::{Attachment, ReplyVerdict, SizeGate, paste_log_line};
+    use super::{Attachment, ReplyVerdict, ShellStatus, SizeGate, dot_color, paste_log_line};
     use crate::term_input;
 
     fn attach(attachment: &mut Attachment, id: &str) {
@@ -1687,6 +1809,13 @@ mod tests {
             "paste#1 session=s1 chars=7 bracketed=true sent_bytes=19"
         );
         assert!(!line.contains(secret), "never the text, got {line}");
+    }
+
+    #[test]
+    fn dots_are_green_for_success_red_for_failure_and_muted_without_a_code() {
+        assert_eq!(dot_color(ShellStatus::Ok), gpui::rgb(0x004e_c9b0));
+        assert_eq!(dot_color(ShellStatus::Fail), gpui::rgb(0x00f4_8771));
+        assert_eq!(dot_color(ShellStatus::Unknown), gpui::rgb(crate::MUTED));
     }
 
     #[test]

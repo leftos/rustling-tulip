@@ -230,7 +230,7 @@ impl RootView {
     fn new_slot(&self, pane_id: &str, window: &mut Window, cx: &mut Context<Self>) -> PaneSlot {
         let (tx, now) = (self.tx.clone(), self.now.clone());
         let font = self.sidebar.ui_state().terminal_font.clone();
-        let view = cx.new(|cx| TerminalPane::new(tx, now, font, cx));
+        let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
         let handle = view.read(cx).focus_handle();
         let id = pane_id.to_owned();
         let focus_in = cx.on_focus_in(&handle, window, move |this, _, cx| {

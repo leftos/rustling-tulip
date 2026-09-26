@@ -26,6 +26,7 @@ mod scrollback_load;
 mod session_actions;
 mod session_menu;
 mod shell_dialog;
+mod shell_marks;
 mod shell_view;
 mod sidebar;
 mod sidebar_view;
@@ -87,6 +88,7 @@ pub use crate::notices::{
 };
 pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
+pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
 pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::text_input::bind_keys;
@@ -642,6 +644,16 @@ impl RootView {
             .view()
             .read(cx)
             .cell_center(col, row)
+    }
+
+    /// The command dots pane `pane_id` draws in its gutter: the finished
+    /// commands whose prompt row is on screen, top first.
+    #[must_use]
+    pub fn pane_shell_records(&self, pane_id: &str, cx: &App) -> Vec<ShellDot> {
+        self.panes
+            .get(pane_id)
+            .map(|slot| slot.view().read(cx).shell_dots())
+            .unwrap_or_default()
     }
 
     /// The text of the link pane `pane_id` underlines: the one under the

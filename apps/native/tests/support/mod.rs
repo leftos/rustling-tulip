@@ -685,7 +685,7 @@ impl<'a> Harness<'a> {
     /// present; their bounds alone cannot prove it.
     pub fn in_model(&mut self, selector: &str) -> bool {
         let selector = selector.to_owned();
-        self.root(move |root, _| {
+        self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
             if selector == "exit-confirm-dialog" {
                 root.exit_dialog_open()
@@ -739,6 +739,12 @@ impl<'a> Harness<'a> {
                 root.spawn_share_confirm_open()
             } else if selector.starts_with("spawn-") {
                 root.spawn_dialog_open()
+            } else if let Some((pane, n)) = selector
+                .strip_prefix("shell-dot-")
+                .and_then(|rest| rest.rsplit_once('-'))
+            {
+                n.parse::<usize>()
+                    .is_ok_and(|n| n < root.pane_shell_records(pane, cx).len())
             } else if selector == "shell-clear-default" {
                 root.shell_dialog_clears_default()
             } else if selector.starts_with("shell-") {
