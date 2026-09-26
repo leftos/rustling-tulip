@@ -2,6 +2,7 @@
 //! with its input, resize, scroll and scrollback handling.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use alacritty_terminal::term::cell::Flags;
@@ -10,11 +11,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, BorderStyle, Bounds, ClipboardItem, Context, DispatchPhase, ElementInputHandler,
-    EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent,
-    Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    Rgba, ScrollWheelEvent, SharedString, Subscription, Task, TextRun, UTF16Selection,
-    UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
+    App, BorderStyle, Bounds, Context, DispatchPhase, ElementInputHandler, EntityInputHandler,
+    EventEmitter, FocusHandle, Font, FontStyle, FontWeight, KeyDownEvent, Keystroke, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
+    ScrollWheelEvent, SharedString, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, outline, point, prelude::*, px, size,
 };
 use protocol::{ClientMessage, SessionSnapshot};
 
@@ -22,7 +23,7 @@ use crate::Clock;
 use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
-use crate::term::{BgSpan, GridSize, Snapshot, Terminal, TextSpan};
+use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
 
@@ -42,6 +43,11 @@ pub struct TerminalPane {
     session: Option<SessionContext>,
     /// Wakes the scrollback load at its next timeout or retry.
     load_timer: Option<Task<()>>,
+    /// Wakes the pane when a synchronized update's timeout passes.
+    sync_timer: Option<Task<()>>,
+    /// Our deadline for the synchronized update that is pending, on the
+    /// injected clock; `None` when none is pending.
+    sync_deadline: Option<Instant>,
     scroll_accum: f32,
     /// The grid's top-left corner in the window and its cell size, from the
     /// last layout; mouse positions map to cells through it.
@@ -121,6 +127,22 @@ impl SizeGate {
     }
 }
 
+/// A daemon scrollback reply, which the root hands to every pane showing the
+/// session it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScrollbackReply {
+    /// The session the history belongs to.
+    pub session_id: String,
+    /// The history, base64-encoded.
+    pub data_b64: String,
+    /// Whether the daemon's scrollback ring had dropped bytes before it.
+    pub truncated: bool,
+    /// The `LoadScrollback` request the reply answers, when it names one.
+    pub request_id: Option<String>,
+    /// The daemon restarted the session's output forwarder with this reply.
+    pub forwarder_restarted: bool,
+}
+
 /// What a pane asks of the root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneEvent {
@@ -131,6 +153,9 @@ pub enum PaneEvent {
         attempt: usize,
         request_id: Option<String>,
     },
+    /// The pane made a copy, or the program stored one (OSC 52): the root
+    /// puts it on the clipboard and shows the chip.
+    Copied { text: String },
 }
 
 impl EventEmitter<PaneEvent> for TerminalPane {}
@@ -145,6 +170,8 @@ impl TerminalPane {
             attachment: Attachment::default(),
             session: None,
             load_timer: None,
+            sync_timer: None,
+            sync_deadline: None,
             scroll_accum: 0.0,
             layout: None,
             tracker: Tracker::default(),
@@ -247,6 +274,8 @@ impl TerminalPane {
         self.term = Terminal::new(self.term.size(), cursor);
         self.tracker = Tracker::default();
         self.last_motion = None;
+        self.sync_timer = None;
+        self.sync_deadline = None;
     }
 
     /// A `LoadScrollback` for the attached session went out under
@@ -287,7 +316,7 @@ impl TerminalPane {
                 scrollback_load::RETRY_DELAYS.len()
             );
         }
-        if self.run_load_steps(steps) {
+        if self.run_load_steps(steps, cx) {
             self.emit_retry(cx);
         }
         self.schedule_load_tick(cx);
@@ -296,7 +325,7 @@ impl TerminalPane {
 
     /// Runs the load's steps; returns whether a retry is due. The root
     /// sends it, once for every pane showing the session.
-    fn run_load_steps(&mut self, steps: Vec<Step>) -> bool {
+    fn run_load_steps(&mut self, steps: Vec<Step>, cx: &mut Context<Self>) -> bool {
         let mut retry = false;
         // The load's live output always comes after its history.
         let output_follows = steps
@@ -304,10 +333,13 @@ impl TerminalPane {
             .any(|step| matches!(step, Step::Live(bytes) if !bytes.is_empty()));
         for step in steps {
             match step {
-                Step::Status(text) => self.term.feed(text.as_bytes()),
+                Step::Status(text) => {
+                    self.term.feed(text.as_bytes());
+                    self.service_term(cx);
+                }
                 Step::Request => retry = true,
-                Step::History(bytes) => self.feed_history(&bytes, output_follows),
-                Step::Live(bytes) => self.feed_live(&bytes),
+                Step::History(bytes) => self.feed_history(&bytes, output_follows, cx),
+                Step::Live(bytes) => self.feed_live(&bytes, cx),
                 Step::Resize => self.send_resize(),
             }
         }
@@ -357,6 +389,8 @@ impl TerminalPane {
         self.session = None;
         self.marked = None;
         self.load_timer = None;
+        self.sync_timer = None;
+        self.sync_deadline = None;
     }
 
     /// Forget the attachment for a new connection, which starts unattached.
@@ -367,6 +401,8 @@ impl TerminalPane {
         self.session = None;
         self.marked = None;
         self.load_timer = None;
+        self.sync_timer = None;
+        self.sync_deadline = None;
     }
 
     /// Whether the attached session takes input; a composition is only
@@ -394,32 +430,38 @@ impl TerminalPane {
     /// answers the latest request.
     pub fn on_scrollback(
         &mut self,
-        data_b64: &str,
-        truncated: bool,
-        request_id: Option<&str>,
-        forwarder_restarted: bool,
+        reply: &ScrollbackReply,
+        cx: &mut Context<Self>,
     ) -> Result<(), base64::DecodeError> {
         let Some(load) = self.attachment.load.as_mut() else {
             return Ok(());
         };
-        let verdict = load.on_reply(request_id, forwarder_restarted, truncated, || {
-            B64.decode(data_b64)
-        })?;
+        let verdict = load.on_reply(
+            reply.request_id.as_deref(),
+            reply.forwarder_restarted,
+            reply.truncated,
+            || B64.decode(&reply.data_b64),
+        )?;
         match verdict {
             ReplyVerdict::Accepted(steps) => {
                 self.load_timer = None;
-                self.run_load_steps(steps);
+                self.run_load_steps(steps, cx);
             }
             ReplyVerdict::Stale => tracing::debug!(
-                "dropping a scrollback reply for session {:?} to an earlier request {request_id:?}",
-                self.attachment.session_id
+                "dropping a scrollback reply for session {:?} to an earlier request {:?}",
+                reply.session_id,
+                reply.request_id
             ),
             ReplyVerdict::NotLoading => {}
         }
         Ok(())
     }
 
-    pub fn on_pty_output(&mut self, data_b64: &str) -> Result<(), base64::DecodeError> {
+    pub fn on_pty_output(
+        &mut self,
+        data_b64: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), base64::DecodeError> {
         let bytes = B64.decode(data_b64)?;
         let live = self
             .attachment
@@ -427,7 +469,7 @@ impl TerminalPane {
             .as_mut()
             .and_then(|load| load.on_output(bytes));
         if let Some(bytes) = live {
-            self.feed_live(&bytes);
+            self.feed_live(&bytes, cx);
         }
         Ok(())
     }
@@ -442,23 +484,91 @@ impl TerminalPane {
     /// Known limit: the query is answered a second time when another client
     /// already answered it and the child has printed nothing since, or when
     /// the program got its answer and now waits in silence.
-    fn feed_history(&mut self, bytes: &[u8], output_follows: bool) {
+    fn feed_history(&mut self, bytes: &[u8], output_follows: bool, cx: &mut Context<Self>) {
         match bytes.strip_suffix(CURSOR_POSITION_QUERY) {
             Some(answered) if !output_follows => {
                 self.term.feed_history(answered);
-                self.feed_live(CURSOR_POSITION_QUERY);
+                self.feed_live(CURSOR_POSITION_QUERY, cx);
             }
-            _ => self.term.feed_history(bytes),
+            _ => {
+                self.term.feed_history(bytes);
+                self.service_term(cx);
+            }
         }
     }
 
-    /// Feeds live output and answers the queries in it when this pane
+    /// Feeds live output and answers what it asks for when this pane
     /// answers for its session.
-    fn feed_live(&mut self, bytes: &[u8]) {
+    fn feed_live(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.term.feed(bytes);
+        self.service_term(cx);
+    }
+
+    /// Answers what the terminal asked for while it advanced: the replies it
+    /// queues for the child and the texts the program stored on the clipboard
+    /// (OSC 52), both only from the pane that answers for the session, and
+    /// then the check for a synchronized update still pending.
+    fn service_term(&mut self, cx: &mut Context<Self>) {
         let replies = self.term.take_replies();
         if self.answers_queries && !replies.is_empty() {
             self.send_to_child(&replies);
+        }
+        let copies = self.term.take_copies();
+        if self.answers_queries {
+            for text in copies {
+                cx.emit(PaneEvent::Copied { text });
+            }
+        }
+        self.track_sync(cx);
+    }
+
+    /// Follows the terminal's synchronized update (`DEC 2026`): records the
+    /// pane's own deadline for one that has just become pending, drops it
+    /// when none is, and arms the timer for it — only when the deadline
+    /// moved, so a chunk of output does not restart an armed timer.
+    fn track_sync(&mut self, cx: &mut Context<Self>) {
+        let deadline = if self.term.sync_pending() {
+            match self.sync_deadline {
+                Some(deadline) => Some(deadline),
+                // vte times the update on a real clock, which the injected
+                // one cannot move, so the pane keeps its own.
+                None => Some((self.now)() + SYNC_TIMEOUT),
+            }
+        } else {
+            None
+        };
+        if deadline != self.sync_deadline {
+            self.sync_deadline = deadline;
+            self.arm_sync_tick(cx);
+        }
+    }
+
+    /// Arms the timer that wakes the pane at the pending synchronized
+    /// update's deadline, or disarms it when none is pending.
+    fn arm_sync_tick(&mut self, cx: &mut Context<Self>) {
+        self.sync_timer = self.sync_deadline.map(|deadline| {
+            let delay = deadline.saturating_duration_since((self.now)());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                // Fails only when the pane is gone, and its terminal with it.
+                this.update(cx, TerminalPane::tick_sync).ok();
+            })
+        });
+    }
+
+    /// The timer fired: end the synchronized update whose deadline has
+    /// passed, writing what it buffered to the grid. One the timer ran ahead
+    /// of waits for its deadline again.
+    fn tick_sync(&mut self, cx: &mut Context<Self>) {
+        let Some(deadline) = self.sync_deadline else {
+            return;
+        };
+        if deadline <= (self.now)() {
+            self.term.stop_sync();
+            self.service_term(cx);
+            cx.notify();
+        } else {
+            self.arm_sync_tick(cx);
         }
     }
 
@@ -469,26 +579,28 @@ impl TerminalPane {
     }
 
     /// Sends what the user typed or pasted, and scrolls to the live screen.
-    fn send_input(&mut self, bytes: &[u8]) {
-        if self.send_to_child(bytes) {
+    /// Returns the session it went to, or `None` when it sent nothing.
+    fn send_input(&mut self, bytes: &[u8]) -> Option<String> {
+        let sent_to = self.send_to_child(bytes);
+        if sent_to.is_some() {
             self.term.scroll_to_bottom();
         }
+        sent_to
     }
 
     /// Sends `bytes` as input unless nothing is attached or the session has
-    /// stopped. Returns whether it sent.
-    fn send_to_child(&self, bytes: &[u8]) -> bool {
-        let Some(session_id) = self.attachment.session_id.clone() else {
-            return false;
-        };
+    /// stopped. Returns the session it sent to, or `None` when it sent
+    /// nothing.
+    fn send_to_child(&self, bytes: &[u8]) -> Option<String> {
+        let session_id = self.attachment.session_id.clone()?;
         if !self.session.is_some_and(SessionContext::accepts_input) {
-            return false;
+            return None;
         }
         self.send(ClientMessage::SendInput {
-            session_id,
+            session_id: session_id.clone(),
             data_b64: B64.encode(bytes),
         });
-        true
+        Some(session_id)
     }
 
     fn send_resize(&self) {
@@ -577,7 +689,7 @@ impl TerminalPane {
 
     fn copy_selection(&mut self, clear_selection: bool, cx: &mut Context<Self>) {
         if let Some(text) = self.term.selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.emit(PaneEvent::Copied { text });
         }
         if clear_selection {
             self.term.clear_selection();
@@ -588,8 +700,21 @@ impl TerminalPane {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
             return;
         };
-        let bytes = term_input::paste_bytes(&text, self.term.bracketed_paste());
-        self.send_input(&bytes);
+        let bracketed = self.term.bracketed_paste();
+        let bytes = term_input::paste_bytes(&text, bracketed);
+        // A paste no session took is not logged: nothing saw it.
+        if let Some(session_id) = self.send_input(&bytes) {
+            tracing::info!(
+                "{}",
+                paste_log_line(
+                    next_paste_number(),
+                    &session_id,
+                    text.chars().count(),
+                    bracketed,
+                    bytes.len(),
+                )
+            );
+        }
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -756,10 +881,32 @@ impl TerminalPane {
             self.term.clear_selection();
         } else if let Some(text) = mouse::copy_on_select(COPY_ON_SELECT, self.term.selection_text())
         {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.emit(PaneEvent::Copied { text });
         }
         cx.notify();
     }
+}
+
+/// The number of pastes this process has logged, shared by every pane, so a
+/// paste's number names exactly one of them.
+static PASTES: AtomicU64 = AtomicU64::new(0);
+
+/// The next paste's number, counted from one for the process.
+fn next_paste_number() -> u64 {
+    PASTES.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// The line a paste logs: what was sent and how big it was, never the text.
+fn paste_log_line(
+    n: u64,
+    session: &str,
+    chars: usize,
+    bracketed: bool,
+    sent_bytes: usize,
+) -> String {
+    format!(
+        "paste#{n} session={session} chars={chars} bracketed={bracketed} sent_bytes={sent_bytes}"
+    )
 }
 
 /// The byte range of the UTF-16 range `range` in `text`, clamped to it.
@@ -1193,7 +1340,8 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Instant;
 
-    use super::{Attachment, ReplyVerdict, SizeGate};
+    use super::{Attachment, ReplyVerdict, SizeGate, paste_log_line};
+    use crate::term_input;
 
     fn attach(attachment: &mut Attachment, id: &str) {
         attachment.attach(id.to_owned(), Instant::now());
@@ -1205,6 +1353,24 @@ mod tests {
             let verdict = load.on_reply(None, false, false, || Ok::<_, Infallible>(Vec::new()));
             matches!(verdict, Ok(ReplyVerdict::Accepted(_)))
         })
+    }
+
+    #[test]
+    fn the_paste_log_line_carries_sizes_and_never_the_text() {
+        assert_eq!(
+            paste_log_line(3, "s1", 5, false, 5),
+            "paste#3 session=s1 chars=5 bracketed=false sent_bytes=5"
+        );
+
+        let secret = "hunter2";
+        let bracketed = term_input::paste_bytes(secret, true);
+        assert_eq!(bracketed.len(), 19, "the wrapped paste, got {bracketed:?}");
+        let line = paste_log_line(1, "s1", secret.chars().count(), true, bracketed.len());
+        assert_eq!(
+            line,
+            "paste#1 session=s1 chars=7 bracketed=true sent_bytes=19"
+        );
+        assert!(!line.contains(secret), "never the text, got {line}");
     }
 
     #[test]

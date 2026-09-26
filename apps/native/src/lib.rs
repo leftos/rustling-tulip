@@ -7,6 +7,7 @@
 
 mod branch_fate;
 mod connection;
+mod copied;
 mod footer;
 mod grid_view;
 mod keys;
@@ -38,11 +39,11 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, ClipboardItem,
-    Context, CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
-    InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions,
-    div, prelude::*, pulsating_between, px, size,
+    Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
+    CursorStyle, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight, InputHandler,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions, div, prelude::*,
+    pulsating_between, px, size,
 };
 use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
 use std::collections::HashMap;
@@ -51,6 +52,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::connection::{DotKind, Footer};
+use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::notices::Notices;
@@ -65,6 +67,7 @@ use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
 use crate::tab_bar::Rename;
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
+use crate::term_view::ScrollbackReply;
 
 pub use crate::connection::Connection;
 pub use crate::footer::LogPaths;
@@ -297,8 +300,10 @@ pub struct RootView {
     flyout_open: bool,
     /// The flyout's two-click stop.
     stop: StopConfirm,
-    /// The handshake path was copied since the flyout opened.
-    copied: bool,
+    /// The last copy, while its "copied" chip is up.
+    copy_chip: Copied,
+    /// Wakes the view when the chip's time is up.
+    chip_timer: Option<Task<()>>,
     /// The flyout's files, or why the config dir could not be resolved.
     paths: Result<LogPaths, String>,
     /// The session context menu, while open.
@@ -429,7 +434,8 @@ impl RootView {
             status: String::new(),
             flyout_open: false,
             stop: StopConfirm::default(),
-            copied: false,
+            copy_chip: Copied::default(),
+            chip_timer: None,
             paths,
             menu: None,
             menu_focus: cx.focus_handle(),
@@ -748,7 +754,6 @@ impl RootView {
     fn close_flyout(&mut self) {
         self.flyout_open = false;
         self.stop.reset();
-        self.copied = false;
     }
 
     /// Restart the daemon. The old daemon's handshake is dropped so the
@@ -856,9 +861,7 @@ impl RootView {
                     active_session_count,
                     "first connect for this client: seeding the layout with every running session"
                 );
-                self.send(ClientMessage::InitLayout {
-                    kind: InitLayoutKind::AllSessions,
-                });
+                self.request_layout_seed();
             }
             DaemonMessage::Sessions { sessions } => {
                 self.sessions_loaded = true;
@@ -874,18 +877,20 @@ impl RootView {
                 truncated,
                 request_id,
                 forwarder_restarted,
-            } => self.feed_panes(&session_id, cx, |pane| {
-                pane.on_scrollback(
-                    &data_b64,
+            } => self.feed_scrollback(
+                &ScrollbackReply {
+                    session_id,
+                    data_b64,
                     truncated,
-                    request_id.as_deref(),
+                    request_id,
                     forwarder_restarted,
-                )
-            }),
+                },
+                cx,
+            ),
             DaemonMessage::PtyOutput {
                 session_id,
                 data_b64,
-            } => self.feed_panes(&session_id, cx, |pane| pane.on_pty_output(&data_b64)),
+            } => self.feed_output(&session_id, &data_b64, cx),
             DaemonMessage::SessionUpdated {
                 session,
                 request_id,
@@ -904,6 +909,13 @@ impl RootView {
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             _ => {}
         }
+    }
+
+    /// Ask the daemon to seed this client's layout with every running session.
+    fn request_layout_seed(&self) {
+        self.send(ClientMessage::InitLayout {
+            kind: InitLayoutKind::AllSessions,
+        });
     }
 
     /// Keys the root takes before the panes see them. The exit dialog, else
@@ -1052,6 +1064,10 @@ impl Render for RootView {
             .child(self.footer_bar(&footer, cx))
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
+            // Above the flyout's backdrop, so the chip's tooltip is reachable
+            // while the flyout is open: its own copy button has no other
+            // confirmation to show.
+            .children(self.chip_layer())
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
             .children(delete_under)
@@ -1168,18 +1184,16 @@ impl RootView {
             .into_any_element()
     }
 
-    /// The "Handshake file" row with its copy button.
+    /// The "Handshake file" row with its copy button. The button keeps its
+    /// label and the copy answers with the chip, which draws over the flyout.
     fn handshake_row(&self, cx: &mut Context<Self>) -> Div {
-        let label = if self.copied { "copied" } else { "copy" };
-        let button = action_button("copy-handshake", label, TEXT, self.paths.is_ok());
+        let button = action_button("copy-handshake", "copy", TEXT, self.paths.is_ok());
         let button = match &self.paths {
             Ok(paths) => {
                 let path = paths.handshake.display().to_string();
                 button.tooltip(tooltip(path.clone())).on_click(cx.listener(
                     move |this, _: &ClickEvent, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
-                        this.copied = true;
-                        cx.notify();
+                        this.copy_to_clipboard(&path, cx);
                     },
                 ))
             }

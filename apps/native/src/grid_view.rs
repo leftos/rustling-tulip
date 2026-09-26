@@ -19,7 +19,7 @@ use crate::sidebar::can_attach;
 use crate::spawn_view::SpawnEntry;
 use crate::spawns::{OpenIn, PaneAim};
 use crate::tabs::{self, PaneBinding, TabsModel};
-use crate::term_view::{PaneEvent, TerminalPane};
+use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::{
     BAR_BG, BORDER, DIVIDER_WIDTH, Drag, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE,
     drag_handle, new_request_id, tooltip,
@@ -312,22 +312,26 @@ impl RootView {
         }
     }
 
-    /// A pane's scrollback retry: sent once per session and attempt, and the
-    /// reply reaches every pane showing the session.
+    /// A pane's scrollback retry, sent once per session and attempt, or a
+    /// pane's copy, which the root's clipboard write and chip answer.
     fn on_pane_event(&mut self, event: &PaneEvent, cx: &mut Context<Self>) {
-        let PaneEvent::ScrollbackRetry {
-            session_id,
-            attempt,
-            request_id,
-        } = event;
-        if let Some(request_id) = self
-            .retries
-            .claim(session_id, request_id.as_deref(), *attempt)
-        {
-            tracing::warn!(
-                "scrollback request for session {session_id} timed out; retry {attempt}"
-            );
-            self.request_scrollback(session_id, request_id, cx);
+        match event {
+            PaneEvent::ScrollbackRetry {
+                session_id,
+                attempt,
+                request_id,
+            } => {
+                if let Some(request_id) =
+                    self.retries
+                        .claim(session_id, request_id.as_deref(), *attempt)
+                {
+                    tracing::warn!(
+                        "scrollback request for session {session_id} timed out; retry {attempt}"
+                    );
+                    self.request_scrollback(session_id, request_id, cx);
+                }
+            }
+            PaneEvent::Copied { text } => self.copy_to_clipboard(text, cx),
         }
     }
 
@@ -366,17 +370,32 @@ impl RootView {
             .collect()
     }
 
+    /// Hands a session's scrollback reply to every pane showing it.
+    pub(crate) fn feed_scrollback(&mut self, reply: &ScrollbackReply, cx: &mut Context<Self>) {
+        self.feed_panes(&reply.session_id, cx, |pane, cx| {
+            pane.on_scrollback(reply, cx)
+        });
+    }
+
+    /// Hands live output for `session_id` to every pane showing it.
+    pub(crate) fn feed_output(&mut self, session_id: &str, data_b64: &str, cx: &mut Context<Self>) {
+        self.feed_panes(session_id, cx, |pane, cx| pane.on_pty_output(data_b64, cx));
+    }
+
     /// Hands daemon output for `session_id` to every pane showing it.
     pub(crate) fn feed_panes(
         &mut self,
         session_id: &str,
         cx: &mut Context<Self>,
-        mut feed: impl FnMut(&mut TerminalPane) -> Result<(), base64::DecodeError>,
+        mut feed: impl FnMut(
+            &mut TerminalPane,
+            &mut Context<TerminalPane>,
+        ) -> Result<(), base64::DecodeError>,
     ) {
         for view in self.pane_views(Some(session_id)) {
             let fed = view.update(cx, |pane, cx| {
                 cx.notify();
-                feed(pane)
+                feed(pane, cx)
             });
             if let Err(err) = fed {
                 self.status = format!("bad base64 from daemon: {err}");

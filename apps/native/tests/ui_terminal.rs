@@ -594,3 +594,102 @@ fn cursor_is_a_bar_for_claude_and_a_block_for_a_shell(cx: &mut TestAppContext) {
         assert_eq!(shape, Some(want), "session {id}");
     }
 }
+
+#[gpui::test]
+fn osc52_write_reaches_the_clipboard_and_shows_the_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b]52;c;aGk=\x07");
+    assert_eq!(h.clipboard().as_deref(), Some("hi"));
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(2));
+}
+
+#[gpui::test]
+fn osc52_read_is_answered_empty(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b]52;c;?\x07");
+    assert_eq!(h.sent_input("s1"), b"\x1b]52;c;\x07".to_vec());
+}
+
+#[gpui::test]
+fn osc52_in_loaded_history_is_ignored(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"\x1b]52;c;aGk=\x07");
+    assert_ne!(
+        h.clipboard().as_deref(),
+        Some("hi"),
+        "a store in the history copies nothing"
+    );
+    assert_eq!(h.root(|root, _| root.copied_chip()), None);
+}
+
+#[gpui::test]
+fn osc52_in_a_session_shown_twice_copies_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_panes_on_s1(cx, &dir);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    h.pty("s1", b"\x1b]52;c;aGk=\x07");
+    assert_eq!(h.clipboard().as_deref(), Some("hi"));
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(2));
+    assert_eq!(
+        h.root(|root, _| root.copied_chip_generation()),
+        1,
+        "one pane copies for the session"
+    );
+}
+
+#[gpui::test]
+fn selection_copy_shows_the_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"hello world");
+
+    let (from, to) = (near(&mut h, 0, 0, -2.0), near(&mut h, 4, 0, 2.0));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert_eq!(h.clipboard().as_deref(), Some("hello"), "copy on select");
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(5));
+
+    h.set_clipboard("other");
+    h.keys("ctrl-shift-c");
+    assert_eq!(h.clipboard().as_deref(), Some("hello"));
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(5));
+    assert_eq!(
+        h.root(|root, _| root.copied_chip_generation()),
+        2,
+        "the second copy restarts the chip"
+    );
+}
+
+#[gpui::test]
+fn chip_fades_after_1200ms(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"hello world");
+    let (from, to) = (near(&mut h, 0, 0, -2.0), near(&mut h, 4, 0, 2.0));
+    h.drag(from, to, [Modifiers::none(); 2]);
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(5));
+
+    h.advance(Duration::from_millis(1199));
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(5), "still shown");
+    h.advance(Duration::from_millis(1));
+    assert_eq!(h.root(|root, _| root.copied_chip()), None, "it went");
+}
+
+#[gpui::test]
+fn a_sync_update_holds_output_back_until_its_timeout(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, session("s1").build());
+    h.pty("s1", b"\x1b[?2026hheld");
+    assert_eq!(h.grid_text("p1")[0], "", "held back");
+
+    // The pane wakes at the deadline it set when the update began: 150 ms on
+    // the injected clock, which the harness moves together with its timers.
+    h.advance(Duration::from_millis(150));
+    assert_eq!(h.grid_text("p1")[0], "held", "the timeout releases it");
+
+    h.pty("s1", b"\x1b[?2026hhello\x1b[?2026l");
+    assert_eq!(h.grid_text("p1")[0], "heldhello", "an end releases it too");
+}

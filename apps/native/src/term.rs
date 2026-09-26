@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
@@ -10,22 +11,38 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, Osc52, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
 
 use crate::links::{self, TerminalLink, TerminalRow};
 
-/// Collects terminal replies (`Event::PtyWrite`: cursor-position reports,
-/// device attributes) for the pane to send to the child as input.
+/// Collects what the terminal asks of its client: the replies to the child
+/// (`Event::PtyWrite`: cursor-position reports, device attributes), and the
+/// texts it wants on the clipboard (`Event::ClipboardStore`, OSC 52).
 #[derive(Clone, Default)]
 pub struct Listener {
     replies: Rc<RefCell<Vec<u8>>>,
+    copies: Rc<RefCell<Vec<String>>>,
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.replies.borrow_mut().extend_from_slice(text.as_bytes());
+        match event {
+            Event::PtyWrite(text) => self.replies.borrow_mut().extend_from_slice(text.as_bytes()),
+            // Only the clipboard target reaches the system clipboard: Windows
+            // has no primary selection, and a program that keeps both in step
+            // sends the same text to `c` and to `p`/`s`.
+            Event::ClipboardStore(ClipboardType::Clipboard, text) if !text.is_empty() => {
+                self.copies.borrow_mut().push(text);
+            }
+            // The program read the clipboard: the client keeps none in the
+            // terminal, so it answers with an empty one.
+            Event::ClipboardLoad(_, formatter) => {
+                self.replies
+                    .borrow_mut()
+                    .extend_from_slice(formatter("").as_bytes());
+            }
+            _ => {}
         }
     }
 }
@@ -47,6 +64,13 @@ impl Dimensions for GridSize {
         self.cols
     }
 }
+
+/// How many lines of scrollback a session keeps.
+pub const SCROLLBACK_LINES: usize = 5000;
+
+/// How long a program's synchronized update (`DEC 2026`) may hold the bytes
+/// it wrote back before the client writes them anyway.
+pub const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
 pub struct Terminal {
     term: Term<Listener>,
@@ -95,10 +119,14 @@ impl Terminal {
     /// A blank terminal whose cursor is `cursor` until the program sets its own.
     pub fn new(size: GridSize, cursor: CursorShape) -> Self {
         let config = Config {
+            scrolling_history: SCROLLBACK_LINES,
             default_cursor_style: CursorStyle {
                 shape: cursor,
                 blinking: false,
             },
+            // Both directions: a program may put text on the clipboard, and
+            // read it back, which the pane answers with an empty one.
+            osc52: Osc52::CopyPaste,
             ..Config::default()
         };
         let listener = Listener::default();
@@ -120,16 +148,44 @@ impl Terminal {
     }
 
     /// Feeds replayed history. The queries in it were answered when they were
-    /// first made, so the replies they provoke now are discarded.
+    /// first made, so the replies they provoke now are discarded, and so are
+    /// the clipboard stores: the copy happened when the line was written. A
+    /// synchronized update the history left open is ended here, before its
+    /// bytes could run later as if they had just arrived.
     pub fn feed_history(&mut self, bytes: &[u8]) {
         let queued = self.listener.replies.borrow().len();
+        let stored = self.listener.copies.borrow().len();
         self.feed(bytes);
+        if self.sync_pending() {
+            self.parser.stop_sync(&mut self.term);
+        }
         self.listener.replies.borrow_mut().truncate(queued);
+        self.listener.copies.borrow_mut().truncate(stored);
     }
 
     /// The replies queued since the last call, to send to the child.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.listener.replies.borrow_mut())
+    }
+
+    /// The clipboard texts the program stored since the last call, oldest
+    /// first.
+    pub fn take_copies(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.listener.copies.borrow_mut())
+    }
+
+    /// Whether a synchronized update (`DEC 2026`) is pending, holding the
+    /// bytes written since it began back until it ends or the client times it
+    /// out. The deadline vte records is on a real clock, which a test's clock
+    /// cannot move, so the pane times the update itself.
+    pub fn sync_pending(&self) -> bool {
+        self.parser.sync_timeout().sync_timeout().is_some()
+    }
+
+    /// Ends a synchronized update whose timeout has passed, writing what it
+    /// buffered to the grid.
+    pub fn stop_sync(&mut self) {
+        self.parser.stop_sync(&mut self.term);
     }
 
     pub fn resize(&mut self, size: GridSize) {
@@ -576,6 +632,103 @@ mod tests {
         let mut term = Terminal::new(GridSize { cols, rows }, CursorShape::Block);
         term.feed(bytes);
         term
+    }
+
+    /// The text of grid line `line`, trailing blanks trimmed.
+    fn row_text(term: &Terminal, line: i32) -> String {
+        term.read_row(line).text.trim_end().to_owned()
+    }
+
+    #[test]
+    fn scrollback_keeps_five_thousand_lines() {
+        let mut term = Terminal::new(GridSize { cols: 10, rows: 3 }, CursorShape::Block);
+        term.feed("x\r\n".repeat(6000).as_bytes());
+        assert_eq!(term.line_bounds(), (-5000, 2), "history is capped");
+    }
+
+    #[test]
+    fn a_utf8_sequence_split_across_feeds_still_lands() {
+        let mut term = fed(b"");
+        let bytes = "中".as_bytes();
+        term.feed(&bytes[..2]);
+        term.feed(&bytes[2..]);
+        assert_eq!(row_text(&term, 0), "中");
+    }
+
+    #[test]
+    fn a_utf8_sequence_split_between_history_and_live_still_lands() {
+        let mut term = fed(b"");
+        let bytes = "中".as_bytes();
+        term.feed_history(&bytes[..1]);
+        term.feed(&bytes[1..]);
+        assert_eq!(row_text(&term, 0), "中");
+    }
+
+    #[test]
+    fn a_pending_sync_holds_output_until_it_is_stopped() {
+        let mut term = fed(b"\x1b[?2026hhello");
+        assert_eq!(row_text(&term, 0), "", "held back");
+        assert!(term.sync_pending(), "a sync is pending");
+        term.stop_sync();
+        assert_eq!(row_text(&term, 0), "hello");
+        assert!(!term.sync_pending());
+    }
+
+    #[test]
+    fn an_ended_sync_writes_its_bytes_and_leaves_none_pending() {
+        let term = fed(b"\x1b[?2026hhello\x1b[?2026l");
+        assert!(!term.sync_pending());
+        assert_eq!(row_text(&term, 0), "hello");
+    }
+
+    #[test]
+    fn a_sync_left_open_by_history_never_fires_later() {
+        let mut term = fed(b"");
+        term.feed_history(b"\x1b[?2026h\x1b]52;c;aGk=\x07\x1b[c");
+        assert!(term.take_copies().is_empty(), "the history copies nothing");
+        assert!(
+            term.take_replies().is_empty(),
+            "the history answers nothing"
+        );
+        assert!(!term.sync_pending(), "the history leaves no sync pending");
+
+        // The queries and stores it held back do not run when a later
+        // synchronized update writes its own bytes.
+        term.feed(b"\x1b[?2026hx\x1b[?2026l");
+        assert!(term.take_copies().is_empty(), "no copy ran later");
+        assert!(term.take_replies().is_empty(), "no reply ran later");
+        assert_eq!(row_text(&term, 0), "x");
+    }
+
+    #[test]
+    fn osc52_store_to_the_selection_target_is_ignored() {
+        let mut term = fed(b"\x1b]52;p;aGk=\x07");
+        assert!(term.take_copies().is_empty(), "only `c` reaches the chip");
+        assert!(term.take_replies().is_empty());
+    }
+
+    #[test]
+    fn osc52_store_is_collected() {
+        let mut term = fed(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(term.take_copies(), ["hi".to_owned()]);
+        assert!(term.take_copies().is_empty());
+        assert!(term.take_replies().is_empty(), "a store provokes no reply");
+    }
+
+    #[test]
+    fn osc52_store_in_history_is_discarded() {
+        let mut term = fed(b"");
+        term.feed_history(b"\x1b]52;c;aGk=\x07");
+        assert!(term.take_copies().is_empty());
+        term.feed(b"\x1b]52;c;aGk=\x07");
+        assert_eq!(term.take_copies(), ["hi".to_owned()]);
+    }
+
+    #[test]
+    fn osc52_load_is_answered_with_an_empty_clipboard() {
+        let mut term = fed(b"\x1b]52;c;?\x07");
+        assert_eq!(term.take_replies(), b"\x1b]52;c;\x07".to_vec());
+        assert!(term.take_copies().is_empty());
     }
 
     #[test]
