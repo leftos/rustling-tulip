@@ -55,4 +55,6 @@ See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
 - **Tauri freeze**: the Tauri app takes bug fixes only while the native client catches up; new features go to the native client.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
+- **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
+- **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
 - **P1.1, P1.2, …**: item ids in `docs/plans/native-client.md`, as phase number and item number.

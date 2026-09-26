@@ -2,6 +2,7 @@
 //! blocking notice of a refused action, and the prompt before an in-place
 //! checkout switches a dirty working tree.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use protocol::CheckoutStrategy;
@@ -81,6 +82,34 @@ impl CheckoutChoice {
     }
 }
 
+/// A `CheckoutConfirmRequired` as the daemon sent it, before it is resolved
+/// to a pending spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckoutAsk {
+    pub repo_id: String,
+    pub branch: String,
+    pub dirty_count: u32,
+    /// The declined spawn's request id; None from an older daemon.
+    pub request_id: Option<String>,
+}
+
+impl CheckoutAsk {
+    #[must_use]
+    pub(crate) fn new(
+        repo_id: String,
+        branch: String,
+        dirty_count: u32,
+        request_id: Option<String>,
+    ) -> Self {
+        Self {
+            repo_id,
+            branch,
+            dirty_count,
+            request_id,
+        }
+    }
+}
+
 /// The daemon declined an in-place spawn that would switch a dirty working
 /// tree to another branch, and asks how to go on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +174,17 @@ pub struct Notices {
     toasts: Vec<Toast>,
     next_id: u64,
     action_failed: Option<ActionFailedNotice>,
+    /// The checkout prompt on screen. It and [`Self::reask`] share one slot:
+    /// at most one of them is set.
     checkout: Option<CheckoutPrompt>,
+    /// The spawn asked again for a fresh prompt, whose answer has not come
+    /// back yet.
+    reask: Option<String>,
+    /// The spawns of the prompts waiting for the slot, oldest first. Their
+    /// measured numbers are not kept: each is asked again in turn.
+    waiting: VecDeque<String>,
+    /// Prompts answered in this batch, for the heading's count.
+    answered: usize,
 }
 
 impl Notices {
@@ -223,14 +262,31 @@ impl Notices {
         self.action_failed.take().is_some()
     }
 
-    /// Shows the checkout prompt, Cancel focused, in place of the one shown.
-    pub fn ask_checkout(
-        &mut self,
-        repo_id: String,
-        branch: String,
-        dirty_count: u32,
-        request_id: Option<String>,
-    ) {
+    /// The prompt that arrived, its `request_id` being the pending spawn it
+    /// resolved to; returns whether it shows now, with Cancel focused. It
+    /// shows when the slot is free, or when it answers the spawn asked again,
+    /// which holds the slot; otherwise its spawn waits at the back of the
+    /// queue, to be asked again in turn. A prompt that resolved to no spawn
+    /// cannot be asked again, so it is dropped rather than queued.
+    pub fn ask_checkout(&mut self, ask: CheckoutAsk) -> bool {
+        let CheckoutAsk {
+            repo_id,
+            branch,
+            dirty_count,
+            request_id,
+        } = ask;
+        let answers_reask = request_id.is_some() && request_id == self.reask;
+        let slot_free = self.checkout.is_none() && self.reask.is_none();
+        if !answers_reask && !slot_free {
+            if let Some(request_id) = request_id
+                && !self.waiting.contains(&request_id)
+            {
+                self.waiting.push_back(request_id);
+            }
+            return false;
+        }
+        self.reask = None;
+        self.waiting.retain(|id| Some(id) != request_id.as_ref());
         self.checkout = Some(CheckoutPrompt {
             repo_id,
             branch,
@@ -238,6 +294,7 @@ impl Notices {
             request_id,
             focused: CheckoutChoice::Cancel,
         });
+        true
     }
 
     #[must_use]
@@ -249,21 +306,81 @@ impl Notices {
         self.checkout.as_mut()
     }
 
+    /// The prompt on screen is answered and frees the slot; the caller then
+    /// runs [`Self::pump`].
     pub fn close_checkout(&mut self) -> Option<CheckoutPrompt> {
-        self.checkout.take()
+        let shown = self.checkout.take()?;
+        self.answered += 1;
+        Some(shown)
     }
 
-    /// Whether a modal notice is open.
+    /// The spawn `request_id` was placed or failed: a prompt waiting for it
+    /// leaves the queue, and a re-ask of it frees the slot. The caller then
+    /// runs [`Self::pump`].
+    pub fn spawn_settled(&mut self, request_id: &str) {
+        self.waiting.retain(|id| id != request_id);
+        if self.reask.as_deref() == Some(request_id) {
+            self.reask = None;
+        }
+    }
+
+    /// Fills a free slot: the oldest waiting prompt's spawn is asked again by
+    /// `resend`, which returns the message for a spawn still pending and None
+    /// for one that is gone, dropped here and the next one tried. Returns the
+    /// message to send. Once the slot is free and nothing waits, the batch
+    /// is over and the count starts again.
+    pub fn pump<M>(&mut self, mut resend: impl FnMut(&str) -> Option<M>) -> Option<M> {
+        if self.checkout.is_some() || self.reask.is_some() {
+            return None;
+        }
+        while let Some(request_id) = self.waiting.pop_front() {
+            if let Some(msg) = resend(&request_id) {
+                self.reask = Some(request_id);
+                return Some(msg);
+            }
+        }
+        self.answered = 0;
+        None
+    }
+
+    /// The heading of the prompt on screen, counting this batch: the prompts
+    /// answered, the shown one and those waiting. None when none is shown. A
+    /// lone prompt reads [`CHECKOUT_TITLE`] alone.
+    #[must_use]
+    pub fn checkout_title(&self) -> Option<String> {
+        self.checkout.as_ref()?;
+        let total = self.answered + 1 + self.waiting.len();
+        Some(if total > 1 {
+            format!("{CHECKOUT_TITLE} ({} of {total})", self.answered + 1)
+        } else {
+            CHECKOUT_TITLE.to_owned()
+        })
+    }
+
+    /// Whether a modal notice is open or a re-ask holds the checkout prompt's
+    /// place: either way the notice focus holds the keyboard.
     #[must_use]
     pub fn has_modal(&self) -> bool {
-        self.action_failed.is_some() || self.checkout.is_some()
+        self.action_failed.is_some() || self.checkout.is_some() || self.reask.is_some()
     }
 
-    /// Closes both modal notices; returns whether either was open.
+    /// Whether a spawn is being asked again for a fresh prompt; its keys go
+    /// nowhere until the answer comes back.
+    #[must_use]
+    pub fn reasking(&self) -> bool {
+        self.reask.is_some()
+    }
+
+    /// Closes both modal notices, the checkout prompt on screen, the re-ask
+    /// on its way and every prompt waiting; returns whether anything was open.
     pub fn close_modals(&mut self) -> bool {
         let failed = self.close_action_failed();
-        let checkout = self.close_checkout().is_some();
-        failed || checkout
+        let checkout = self.checkout.take().is_some();
+        let reask = self.reask.take().is_some();
+        let waiting = !self.waiting.is_empty();
+        self.waiting.clear();
+        self.answered = 0;
+        failed || checkout || reask || waiting
     }
 }
 
@@ -355,7 +472,12 @@ mod tests {
     #[test]
     fn checkout_prompt_starts_on_cancel_and_cycles() {
         let mut notices = Notices::default();
-        notices.ask_checkout("r1".to_owned(), "feature".to_owned(), 1, None);
+        assert!(notices.ask_checkout(CheckoutAsk::new(
+            "r1".to_owned(),
+            "feature".to_owned(),
+            1,
+            None
+        )));
         let prompt = notices.checkout_mut().expect("a prompt");
         assert_eq!(prompt.focused(), CheckoutChoice::Cancel);
         assert_eq!(
@@ -375,7 +497,17 @@ mod tests {
             "Shift+Tab wraps back"
         );
 
-        notices.ask_checkout("r1".to_owned(), "main".to_owned(), 3, Some("q1".to_owned()));
+        let closed = notices.close_checkout().expect("the prompt closes");
+        assert_eq!(closed.branch, "feature");
+        assert_eq!(closed.focused(), CheckoutChoice::Carry, "as it was left");
+        assert!(notices.close_checkout().is_none(), "it closes once");
+
+        assert!(notices.ask_checkout(CheckoutAsk::new(
+            "r1".to_owned(),
+            "main".to_owned(),
+            3,
+            Some("q1".to_owned())
+        )));
         let prompt = notices.checkout().expect("a prompt");
         assert!(
             prompt
@@ -385,5 +517,232 @@ mod tests {
         assert_eq!(prompt.focused(), CheckoutChoice::Cancel);
         assert!(notices.close_modals());
         assert!(notices.checkout().is_none());
+    }
+
+    /// A prompt of one change for branch `id` of `r1`, resolved to spawn `id`.
+    fn ask(notices: &mut Notices, id: &str) -> bool {
+        notices.ask_checkout(CheckoutAsk::new(
+            "r1".to_owned(),
+            id.to_owned(),
+            1,
+            Some(id.to_owned()),
+        ))
+    }
+
+    /// Runs `pump` with every spawn still pending; returns the spawn asked
+    /// again.
+    fn pump_all(notices: &mut Notices) -> Option<String> {
+        notices.pump(|id| Some(id.to_owned()))
+    }
+
+    fn title(notices: &Notices) -> Option<String> {
+        notices.checkout_title()
+    }
+
+    #[test]
+    fn a_prompt_waits_while_the_slot_is_taken() {
+        let mut notices = Notices::default();
+        assert!(ask(&mut notices, "a"), "the slot is free");
+        assert!(!ask(&mut notices, "b"), "the slot holds A");
+        assert_eq!(
+            notices.checkout().expect("A shows").branch,
+            "a",
+            "the prompt on screen is untouched"
+        );
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (1 of 2)")
+        );
+        assert!(!notices.ask_checkout(CheckoutAsk::new("r1".to_owned(), "z".to_owned(), 1, None)));
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (1 of 2)"),
+            "a prompt of no spawn cannot be asked again, so it is not queued"
+        );
+        assert_eq!(pump_all(&mut notices), None, "the slot is taken");
+        assert_eq!(notices.checkout().expect("A shows").branch, "a");
+    }
+
+    #[test]
+    fn pump_asks_the_oldest_waiting_spawn_again_and_holds_the_slot() {
+        let mut notices = Notices::default();
+        ask(&mut notices, "a");
+        ask(&mut notices, "b");
+        ask(&mut notices, "c");
+        assert_eq!(pump_all(&mut notices), None, "A is on screen");
+
+        assert!(notices.close_checkout().is_some());
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("b"));
+        assert!(title(&notices).is_none(), "nothing on screen");
+        assert!(notices.reasking());
+        assert!(
+            notices.has_modal(),
+            "a re-ask on its way holds the keyboard"
+        );
+        assert_eq!(pump_all(&mut notices), None, "the re-ask holds the slot");
+
+        assert!(!ask(&mut notices, "d"), "D arrives while B's re-ask is out");
+        assert!(
+            !notices.ask_checkout(CheckoutAsk::new(
+                "r1".to_owned(),
+                "c".to_owned(),
+                9,
+                Some("c".to_owned())
+            )),
+            "C's own prompt still waits its turn"
+        );
+        assert!(
+            notices.ask_checkout(CheckoutAsk::new(
+                "r1".to_owned(),
+                "b".to_owned(),
+                5,
+                Some("b".to_owned())
+            )),
+            "B's fresh prompt shows at once, ahead of C and D"
+        );
+        assert_eq!(notices.checkout().expect("B shows").dirty_count, 5);
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (2 of 4)")
+        );
+
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("c"), "C is older");
+        ask(&mut notices, "c");
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("d"));
+        ask(&mut notices, "d");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (4 of 4)")
+        );
+    }
+
+    #[test]
+    fn pump_skips_spawns_that_are_gone() {
+        let mut notices = Notices::default();
+        ask(&mut notices, "a");
+        ask(&mut notices, "b");
+        ask(&mut notices, "c");
+        notices.close_checkout();
+
+        let mut asked = Vec::new();
+        let sent = notices.pump(|id| {
+            asked.push(id.to_owned());
+            (id == "c").then(|| id.to_owned())
+        });
+        assert_eq!(sent.as_deref(), Some("c"));
+        assert_eq!(asked, ["b", "c"], "B is gone, so C is asked");
+        ask(&mut notices, "c");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (2 of 2)"),
+            "B is no longer counted"
+        );
+    }
+
+    #[test]
+    fn a_reask_that_settles_frees_the_slot_for_the_next() {
+        let mut notices = Notices::default();
+        ask(&mut notices, "a");
+        ask(&mut notices, "b");
+        ask(&mut notices, "c");
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("b"));
+
+        notices.spawn_settled("b");
+        assert_eq!(
+            pump_all(&mut notices).as_deref(),
+            Some("c"),
+            "B came back as a session, so C's turn comes"
+        );
+        assert!(ask(&mut notices, "c"));
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (2 of 2)")
+        );
+    }
+
+    #[test]
+    fn a_waiting_spawn_that_settles_leaves_the_queue() {
+        let mut notices = Notices::default();
+        ask(&mut notices, "a");
+        ask(&mut notices, "b");
+        ask(&mut notices, "c");
+        notices.spawn_settled("b");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (1 of 2)"),
+            "B no longer counts"
+        );
+        notices.close_checkout();
+        assert_eq!(
+            pump_all(&mut notices).as_deref(),
+            Some("c"),
+            "B gets no turn"
+        );
+        notices.spawn_settled("c");
+        assert_eq!(pump_all(&mut notices), None, "nothing waits");
+    }
+
+    #[test]
+    fn the_batch_starts_over_once_the_slot_frees_and_nothing_waits() {
+        let mut notices = Notices::default();
+        assert!(title(&notices).is_none(), "nothing on screen");
+        ask(&mut notices, "a");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some(CHECKOUT_TITLE),
+            "a single prompt"
+        );
+        ask(&mut notices, "b");
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("b"));
+        notices.spawn_settled("b");
+        assert_eq!(pump_all(&mut notices), None);
+
+        ask(&mut notices, "c");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some(CHECKOUT_TITLE),
+            "B failed while re-asked, which ended the batch"
+        );
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices), None);
+
+        ask(&mut notices, "d");
+        ask(&mut notices, "e");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some("Switch branch in place? (1 of 2)"),
+            "answering the last prompt ended that batch too"
+        );
+    }
+
+    #[test]
+    fn close_modals_clears_the_queue_and_the_reask() {
+        let mut notices = Notices::default();
+        ask(&mut notices, "a");
+        ask(&mut notices, "b");
+        notices.close_checkout();
+        assert_eq!(pump_all(&mut notices).as_deref(), Some("b"));
+        ask(&mut notices, "c");
+        assert!(notices.close_modals(), "a re-ask on its way counts as open");
+        assert!(!notices.close_modals(), "nothing is open now");
+
+        let mut asked = Vec::new();
+        let sent = notices.pump(|id| {
+            asked.push(id.to_owned());
+            Some(())
+        });
+        assert_eq!(sent, None);
+        assert!(asked.is_empty(), "C's queued spawn went with the rest");
+
+        assert!(ask(&mut notices, "b"), "the slot is free again");
+        assert_eq!(
+            title(&notices).as_deref(),
+            Some(CHECKOUT_TITLE),
+            "the counter starts over"
+        );
     }
 }

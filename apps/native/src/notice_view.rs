@@ -9,7 +9,7 @@ use gpui::{
 use protocol::{SessionSnapshot, SpawnRequest};
 
 use crate::notices::{
-    ActionFailedNotice, CHECKOUT_TITLE, CheckoutChoice, CheckoutPrompt, Toast, ToastKind,
+    ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind,
 };
 use crate::session_menu::{BACKDROP_TINT, dialog_button};
 use crate::spawns::OpenIn;
@@ -55,6 +55,12 @@ impl RootView {
         self.notices
             .checkout()
             .map(|prompt| prompt.focused().selector())
+    }
+
+    /// The checkout prompt's heading, counting the prompts waiting behind it.
+    #[must_use]
+    pub fn checkout_title(&self) -> Option<String> {
+        self.notices.checkout_title()
     }
 
     /// Whether a modal notice holds the keyboard.
@@ -110,11 +116,43 @@ impl RootView {
         self.schedule_toast_expiry(cx);
     }
 
-    /// A spawn or duplicate the daemon refused is no longer on the way.
-    fn fail_request(&mut self, request_id: Option<&str>) {
+    /// A spawn or duplicate the daemon refused is no longer on the way, nor
+    /// is any checkout prompt for it.
+    fn fail_request(
+        &mut self,
+        request_id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.fail_duplicate(request_id);
         if let Some(id) = request_id {
             self.spawns.fail(id);
+            self.settle_checkout(id, window, cx);
+        }
+    }
+
+    /// The spawn `request_id` was placed or failed: its prompt waiting, or
+    /// its re-ask holding the slot, goes, and the next prompt gets its turn.
+    /// A re-ask that held the keyboard with nothing to follow it hands the
+    /// keyboard back.
+    fn settle_checkout(&mut self, request_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let held = self.notices.reasking();
+        self.notices.spawn_settled(request_id);
+        self.pump_checkout();
+        if held && !self.notices.has_modal() {
+            self.after_notice_closed(window, cx);
+        }
+    }
+
+    /// When no checkout prompt is shown and none is being asked again, the
+    /// oldest waiting prompt's spawn is sent again, unchanged, so the daemon
+    /// answers with a freshly measured prompt or with the session itself. A
+    /// waiting spawn that cannot be asked again is forgotten. No toast: the
+    /// spawn showed one when it started.
+    fn pump_checkout(&mut self) {
+        let spawns = &mut self.spawns;
+        if let Some(msg) = self.notices.pump(|id| spawns.reask(id)) {
+            self.send(msg);
         }
     }
 
@@ -123,9 +161,10 @@ impl RootView {
         &mut self,
         message: String,
         request_id: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fail_request(request_id);
+        self.fail_request(request_id, window, cx);
         self.push_toast(ToastKind::Error, DAEMON_ERROR_TITLE, Some(message), cx);
     }
 
@@ -138,7 +177,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.fail_request(request_id);
+        self.fail_request(request_id, window, cx);
         let ActionFailedNotice {
             title,
             detail,
@@ -149,27 +188,48 @@ impl RootView {
         cx.notify();
     }
 
-    /// `CheckoutConfirmRequired`: the prompt takes the keyboard, Cancel
-    /// focused.
+    /// `CheckoutConfirmRequired`, resolved to the pending spawn its
+    /// `request_id` names (by repo and branch when an older daemon sent
+    /// none). Shown at once, holding the keyboard with Cancel focused, when
+    /// no prompt is shown and none is being asked again, or when it answers
+    /// the spawn being asked again; otherwise it waits its turn, to be asked
+    /// again then.
     pub(crate) fn on_checkout_confirm(
         &mut self,
-        repo_id: String,
-        branch: String,
-        dirty_count: u32,
+        mut ask: CheckoutAsk,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let request_id = self.spawns.resolve_checkout(&repo_id, &branch);
-        if request_id.is_none() {
-            tracing::warn!(
-                repo_id,
-                branch,
-                "checkout prompt matches no pending in-place spawn; its answer will send nothing"
-            );
+        let sent_id = ask.request_id.take();
+        ask.request_id =
+            self.spawns
+                .resolve_checkout(sent_id.as_deref(), &ask.repo_id, &ask.branch);
+        let unresolved = ask
+            .request_id
+            .is_none()
+            .then(|| (ask.repo_id.clone(), ask.branch.clone()));
+        let shown = self.notices.ask_checkout(ask);
+        if let Some((repo_id, branch)) = unresolved {
+            let request_id = sent_id.as_deref();
+            if shown {
+                tracing::warn!(
+                    repo_id,
+                    branch,
+                    request_id,
+                    "checkout prompt matches no pending in-place spawn; its answer will send nothing"
+                );
+            } else {
+                tracing::warn!(
+                    repo_id,
+                    branch,
+                    request_id,
+                    "checkout prompt dropped: no pending spawn and another prompt is shown"
+                );
+            }
         }
-        self.notices
-            .ask_checkout(repo_id, branch, dirty_count, request_id);
-        self.notice_focus.focus(window);
+        if shown {
+            self.notice_focus.focus(window);
+        }
         cx.notify();
     }
 
@@ -194,6 +254,7 @@ impl RootView {
         };
         self.confirm.disarm();
         self.send(placed.message);
+        self.settle_checkout(request_id, window, cx);
         if placed.relayout {
             self.after_tabs_change(window, cx);
         }
@@ -208,7 +269,8 @@ impl RootView {
         }
     }
 
-    /// A key while a modal notice is open; returns whether one was. The
+    /// A key while a modal notice is open or a re-ask holds the checkout
+    /// prompt's place; returns whether either was. The
     /// action-failed notice closes on Esc, Enter or Space. The checkout
     /// prompt cancels on Esc, presses its focused button on Enter or Space,
     /// and moves the focus on Tab and Shift+Tab.
@@ -226,7 +288,9 @@ impl RootView {
             return true;
         }
         let Some(prompt) = self.notices.checkout_mut() else {
-            return false;
+            // A re-ask holds the prompt's place: every key, Esc included,
+            // goes nowhere until its answer comes back.
+            return self.notices.reasking();
         };
         match key {
             "escape" => self.answer_checkout(CheckoutChoice::Cancel, window, cx),
@@ -249,10 +313,11 @@ impl RootView {
         }
     }
 
-    /// The user's answer to the checkout prompt, for the spawn it resolved
-    /// to: Cancel forgets that spawn; Stash or Carry resends it with that
-    /// strategy and the same request id. A prompt that matched no spawn only
-    /// closes.
+    /// The user's answer to the shown checkout prompt, for the spawn it
+    /// resolved to: Cancel forgets that spawn; Stash or Carry resends it with
+    /// that strategy and the same request id. A prompt that matched no spawn
+    /// only closes. The prompt waiting next, if any, is not shown from the
+    /// numbers the daemon measured earlier: its spawn is asked again.
     fn answer_checkout(
         &mut self,
         choice: CheckoutChoice,
@@ -265,15 +330,16 @@ impl RootView {
         match (prompt.request_id, choice.strategy()) {
             (None, _) => {}
             (Some(request_id), None) => {
-                self.spawns.cancel_checkout(&request_id);
+                self.spawns.fail(&request_id);
             }
-            (Some(request_id), Some(strategy)) => {
-                if let Some(msg) = self.spawns.retry_checkout(&request_id, strategy) {
+            (Some(request_id), strategy @ Some(_)) => {
+                if let Some(msg) = self.spawns.resend(&request_id, strategy) {
                     self.send(msg);
                     self.push_spawning_toast(cx);
                 }
             }
         }
+        self.pump_checkout();
         self.after_notice_closed(window, cx);
     }
 
@@ -321,7 +387,8 @@ impl RootView {
         let checkout = self
             .notices
             .checkout()
-            .map(|prompt| self.checkout_layer(prompt, failed.is_none(), cx));
+            .zip(self.notices.checkout_title())
+            .map(|(prompt, title)| self.checkout_layer(prompt, &title, failed.is_none(), cx));
         let failed = failed.map(|notice| self.action_failed_layer(notice, cx));
         checkout.into_iter().chain(failed).collect()
     }
@@ -358,6 +425,7 @@ impl RootView {
     fn checkout_layer(
         &self,
         prompt: &CheckoutPrompt,
+        title: &str,
         focused_layer: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -373,7 +441,7 @@ impl RootView {
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(CHECKOUT_TITLE),
+                    .child(title.to_owned()),
             )
             .child(close);
         let notes = prompt

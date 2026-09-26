@@ -32,11 +32,16 @@ pub(crate) struct SpawnPlaced {
 #[derive(Debug)]
 struct Pending {
     open_in: OpenIn,
-    /// Start order, so the oldest of alike spawns answers a prompt first.
+    /// Start order, so the oldest of alike spawns answers an id-less prompt
+    /// first.
     seq: u64,
     /// The request as last sent, kept for an in-place spawn only: the
     /// daemon may ask how to switch its dirty tree, and the answer resends it.
     in_place: Option<SpawnRequest>,
+    /// Whether an id-less checkout prompt (an older daemon's) has claimed
+    /// this spawn, so a second one for the same repo and branch resolves to
+    /// another spawn.
+    prompted: bool,
 }
 
 /// The spawns waiting for their reply, by request id.
@@ -60,6 +65,7 @@ impl PendingSpawns {
             open_in,
             seq: self.next_seq,
             in_place: is_in_place(&request).then(|| request.clone()),
+            prompted: false,
         };
         self.pending.insert(request_id, pending);
         ClientMessage::SpawnSession(request)
@@ -104,7 +110,8 @@ impl PendingSpawns {
         })
     }
 
-    /// A failure reply for `request_id`; returns whether it was pending.
+    /// Spawn `request_id` ends without a session: a failure reply, or Cancel
+    /// on its checkout prompt. Returns whether it was pending.
     pub(crate) fn fail(&mut self, request_id: &str) -> bool {
         self.pending.remove(request_id).is_some()
     }
@@ -114,45 +121,81 @@ impl PendingSpawns {
         self.pending.clear();
     }
 
-    /// The spawn a `CheckoutConfirmRequired` for `branch` of `repo_id` asks
-    /// about: the oldest pending in-place spawn of that branch and repo that
-    /// has no strategy yet. The daemon's prompt copies both from the request
-    /// and carries no request id.
-    pub(crate) fn resolve_checkout(&self, repo_id: &str, branch: &str) -> Option<String> {
-        self.pending
-            .iter()
-            .filter(|(_, pending)| {
-                pending
-                    .in_place
-                    .as_ref()
-                    .is_some_and(|request| awaits_checkout(request, repo_id, branch))
-            })
-            .min_by_key(|(_, pending)| pending.seq)
-            .map(|(id, _)| id.clone())
+    /// The pending spawn a `CheckoutConfirmRequired` for `branch` of
+    /// `repo_id` declines. A prompt carrying `request_id` names its spawn;
+    /// None when that spawn is no longer pending. A prompt without one comes
+    /// from an older daemon and falls back to [`Self::claim_checkout`].
+    pub(crate) fn resolve_checkout(
+        &mut self,
+        request_id: Option<&str>,
+        repo_id: &str,
+        branch: &str,
+    ) -> Option<String> {
+        match request_id {
+            Some(id) => self
+                .pending
+                .get(id)
+                .and_then(|pending| pending.in_place.as_ref())
+                .is_some_and(|request| awaits_checkout(request, repo_id, branch))
+                .then(|| id.to_owned()),
+            None => self.claim_checkout(repo_id, branch),
+        }
     }
 
-    /// The in-place spawn `request_id` again, with `strategy` and the same
-    /// request id, while it still waits for its reply.
-    pub(crate) fn retry_checkout(
+    /// Fallback for a prompt without a request id: the oldest pending
+    /// in-place spawn of `branch` in `repo_id` that has no strategy yet and
+    /// that no prompt has claimed. Claims it, so a second prompt for the same
+    /// repo and branch resolves to another spawn.
+    fn claim_checkout(&mut self, repo_id: &str, branch: &str) -> Option<String> {
+        let id = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| {
+                !pending.prompted
+                    && pending
+                        .in_place
+                        .as_ref()
+                        .is_some_and(|request| awaits_checkout(request, repo_id, branch))
+            })
+            .min_by_key(|(_, pending)| pending.seq)
+            .map(|(id, _)| id.clone())?;
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.prompted = true;
+        }
+        Some(id)
+    }
+
+    /// A waiting prompt's spawn `request_id` asked again, exactly as first
+    /// sent. None when it cannot be: it is then forgotten, so nothing waits
+    /// for it until a reconnect.
+    pub(crate) fn reask(&mut self, request_id: &str) -> Option<ClientMessage> {
+        let msg = self.resend(request_id, None);
+        if msg.is_none() {
+            self.fail(request_id);
+        }
+        msg
+    }
+
+    /// The in-place spawn `request_id` again, under the same request id,
+    /// while it still waits for its reply: with `strategy` to answer its
+    /// prompt, or without one, exactly as first sent, to ask for a freshly
+    /// measured prompt (or the session itself).
+    pub(crate) fn resend(
         &mut self,
         request_id: &str,
-        strategy: CheckoutStrategy,
+        strategy: Option<CheckoutStrategy>,
     ) -> Option<ClientMessage> {
-        let request = self.pending.get_mut(request_id)?.in_place.as_mut()?;
+        let pending = self.pending.get_mut(request_id)?;
+        let request = pending.in_place.as_mut()?;
         let SpawnTarget::Single {
             checkout_strategy, ..
         } = &mut request.target
         else {
             return None;
         };
-        *checkout_strategy = Some(strategy);
+        *checkout_strategy = strategy;
+        pending.prompted = false;
         Some(ClientMessage::SpawnSession(request.clone()))
-    }
-
-    /// Cancel on the checkout prompt: spawn `request_id` is dropped; returns
-    /// whether it was still pending.
-    pub(crate) fn cancel_checkout(&mut self, request_id: &str) -> bool {
-        self.pending.remove(request_id).is_some()
     }
 }
 
@@ -386,15 +429,11 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            spawns.resolve_checkout("r1", "feature"),
+            spawns.resolve_checkout(None, "r1", "feature"),
             None,
             "a failed spawn cannot be prompted for"
         );
-        assert!(
-            spawns
-                .retry_checkout("q1", CheckoutStrategy::Stash)
-                .is_none()
-        );
+        assert!(spawns.resend("q1", Some(CheckoutStrategy::Stash)).is_none());
     }
 
     #[test]
@@ -410,7 +449,7 @@ mod tests {
                 .place("q2", &session("new", None, None), &mut tabs, &[])
                 .is_none()
         );
-        assert_eq!(spawns.resolve_checkout("r1", "feature"), None);
+        assert_eq!(spawns.resolve_checkout(None, "r1", "feature"), None);
     }
 
     #[test]
@@ -420,11 +459,11 @@ mod tests {
         spawns.start(request(true), "q2".to_owned(), OpenIn::NewTab);
 
         let id = spawns
-            .resolve_checkout("r1", "feature")
+            .resolve_checkout(None, "r1", "feature")
             .expect("the in-place spawn");
         assert_eq!(id, "q1", "the worktree spawn is never prompted for");
         let retry = spawns
-            .retry_checkout(&id, CheckoutStrategy::Stash)
+            .resend(&id, Some(CheckoutStrategy::Stash))
             .expect("a retry");
         let retried = sent_request(&retry);
         assert_eq!(retried.request_id.as_deref(), Some("q1"));
@@ -438,19 +477,15 @@ mod tests {
         ));
         assert!(spawns.has_request("q1"), "the retry is still on the way");
         assert_eq!(
-            spawns.resolve_checkout("r1", "feature"),
+            spawns.resolve_checkout(None, "r1", "feature"),
             None,
             "a spawn with a strategy is not asked about again"
         );
 
-        assert!(spawns.cancel_checkout("q1"));
+        assert!(spawns.fail("q1"));
         assert!(!spawns.has_request("q1"), "Cancel forgets the spawn");
         assert!(spawns.has_request("q2"));
-        assert!(
-            spawns
-                .retry_checkout("q1", CheckoutStrategy::Carry)
-                .is_none()
-        );
+        assert!(spawns.resend("q1", Some(CheckoutStrategy::Carry)).is_none());
     }
 
     #[test]
@@ -459,10 +494,12 @@ mod tests {
         spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
         spawns.start(in_place("R2", "y"), "b".to_owned(), OpenIn::NewTab);
 
-        let id = spawns.resolve_checkout("R1", "x").expect("A is named");
+        let id = spawns
+            .resolve_checkout(None, "R1", "x")
+            .expect("A is named");
         assert_eq!(id, "a");
         let retry = spawns
-            .retry_checkout(&id, CheckoutStrategy::Stash)
+            .resend(&id, Some(CheckoutStrategy::Stash))
             .expect("a retry");
         assert_eq!(sent_request(&retry).request_id.as_deref(), Some("a"));
         assert_eq!(
@@ -471,31 +508,188 @@ mod tests {
             "A's own request, not the latest spawn's"
         );
         assert!(spawns.has_request("b"), "B still waits, untouched");
-        assert_eq!(spawns.resolve_checkout("R2", "y").as_deref(), Some("b"));
+        assert_eq!(
+            spawns.resolve_checkout(None, "R2", "y").as_deref(),
+            Some("b")
+        );
 
         spawns.start(in_place("R3", "z"), "c".to_owned(), OpenIn::NewTab);
         spawns.start(in_place("R3", "z"), "d".to_owned(), OpenIn::NewTab);
         assert_eq!(
-            spawns.resolve_checkout("R3", "z").as_deref(),
+            spawns.resolve_checkout(None, "R3", "z").as_deref(),
             Some("c"),
             "the oldest of two alike"
         );
-        assert!(spawns.cancel_checkout("c"));
-        assert_eq!(spawns.resolve_checkout("R3", "z").as_deref(), Some("d"));
+        assert!(spawns.fail("c"));
+        assert_eq!(
+            spawns.resolve_checkout(None, "R3", "z").as_deref(),
+            Some("d")
+        );
     }
 
     #[test]
     fn checkout_prompt_without_matching_spawn_resends_nothing() {
         let mut spawns = PendingSpawns::default();
         spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
-        assert_eq!(spawns.resolve_checkout("R1", "other"), None);
-        assert_eq!(spawns.resolve_checkout("R9", "x"), None);
+        assert_eq!(spawns.resolve_checkout(None, "R1", "other"), None);
+        assert_eq!(spawns.resolve_checkout(None, "R9", "x"), None);
         assert!(
             spawns
-                .retry_checkout("nope", CheckoutStrategy::Stash)
+                .resend("nope", Some(CheckoutStrategy::Stash))
                 .is_none()
         );
-        assert!(!spawns.cancel_checkout("nope"));
+        assert!(!spawns.fail("nope"));
         assert!(spawns.has_request("a"), "A is left alone");
+    }
+
+    #[test]
+    fn resolve_checkout_claims_each_spawn_once() {
+        let mut spawns = PendingSpawns::default();
+        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(in_place("R1", "x"), "b".to_owned(), OpenIn::NewTab);
+
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x").as_deref(),
+            Some("a"),
+            "the oldest unclaimed"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x").as_deref(),
+            Some("b"),
+            "the prompt on screen has claimed A"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x"),
+            None,
+            "both are spoken for"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(None, "R9", "z"),
+            None,
+            "another repo has nothing to claim"
+        );
+    }
+
+    #[test]
+    fn resend_without_strategy_clears_the_claim() {
+        let mut spawns = PendingSpawns::default();
+        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x").as_deref(),
+            Some("a")
+        );
+
+        let resent = spawns.resend("a", None).expect("a resend");
+        assert_eq!(sent_request(&resent).request_id.as_deref(), Some("a"));
+        assert_eq!(
+            target_of(&resent),
+            ("R1", "x", None),
+            "asked again exactly as first sent"
+        );
+        assert!(spawns.has_request("a"), "still on its way");
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x").as_deref(),
+            Some("a"),
+            "the fresh prompt resolves to it again"
+        );
+        assert!(
+            spawns.resend("nope", None).is_none(),
+            "a spawn nothing waits for is not resent"
+        );
+    }
+
+    #[test]
+    fn prompt_with_an_id_resolves_to_that_spawn() {
+        let mut spawns = PendingSpawns::default();
+        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+        spawns.start(in_place("R1", "x"), "b".to_owned(), OpenIn::NewTab);
+
+        assert_eq!(
+            spawns.resolve_checkout(Some("b"), "R1", "x").as_deref(),
+            Some("b"),
+            "the id wins over the oldest of alike spawns"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(Some("b"), "R1", "x").as_deref(),
+            Some("b"),
+            "an id is not a claim: B's fresh prompt resolves to it again"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(None, "R1", "x").as_deref(),
+            Some("a"),
+            "the id-less fallback is untouched by it"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(Some("gone"), "R1", "x"),
+            None,
+            "an id of no pending spawn does not fall back to the branch"
+        );
+        assert!(spawns.fail("b"));
+        assert_eq!(spawns.resolve_checkout(Some("b"), "R1", "x"), None);
+
+        let carry = spawns
+            .resend("a", Some(CheckoutStrategy::Carry))
+            .expect("a retry");
+        assert_eq!(
+            target_of(&carry),
+            ("R1", "x", Some(CheckoutStrategy::Carry))
+        );
+        let again = spawns.resend("a", None).expect("a re-ask");
+        assert_eq!(
+            target_of(&again),
+            ("R1", "x", None),
+            "one resend takes the strategy off again"
+        );
+    }
+
+    #[test]
+    fn prompt_id_resolves_only_to_an_in_place_spawn_awaiting_a_strategy() {
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "wt".to_owned(), OpenIn::NewTab);
+        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+
+        assert_eq!(
+            spawns.resolve_checkout(Some("wt"), "r1", "feature"),
+            None,
+            "a worktree spawn is never declined over a dirty tree"
+        );
+        assert_eq!(
+            spawns.resolve_checkout(Some("a"), "R9", "x"),
+            None,
+            "the prompt names another repo than the spawn"
+        );
+        spawns.resend("a", Some(CheckoutStrategy::Stash));
+        assert_eq!(
+            spawns.resolve_checkout(Some("a"), "R1", "x"),
+            None,
+            "a spawn that already has a strategy is not asked about"
+        );
+        spawns.resend("a", None);
+        assert_eq!(
+            spawns.resolve_checkout(Some("a"), "R1", "x").as_deref(),
+            Some("a")
+        );
+    }
+
+    #[test]
+    fn reask_forgets_a_spawn_it_cannot_resend() {
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "wt".to_owned(), OpenIn::NewTab);
+        spawns.start(in_place("R1", "x"), "a".to_owned(), OpenIn::NewTab);
+
+        let again = spawns.reask("a").expect("an in-place spawn is asked again");
+        assert_eq!(sent_request(&again).request_id.as_deref(), Some("a"));
+        assert_eq!(target_of(&again), ("R1", "x", None));
+        assert!(spawns.has_request("a"), "still on its way");
+
+        assert!(
+            spawns.reask("wt").is_none(),
+            "a worktree spawn has no prompt"
+        );
+        assert!(
+            !spawns.has_request("wt"),
+            "and is forgotten rather than left pending until a reconnect"
+        );
+        assert!(spawns.reask("gone").is_none());
     }
 }

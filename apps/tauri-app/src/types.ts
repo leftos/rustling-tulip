@@ -1219,6 +1219,8 @@ export type DaemonMessage =
       repo_id: string;
       branch: string;
       dirty_count: number;
+      // The request_id of the declined spawn; absent from older daemons.
+      request_id?: string;
     }
   | {
       type: "spawn_config_reply";

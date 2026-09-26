@@ -759,7 +759,7 @@ impl RootView {
             DaemonMessage::Error {
                 message,
                 request_id,
-            } => self.on_daemon_error(message, request_id.as_deref(), cx),
+            } => self.on_daemon_error(message, request_id.as_deref(), window, cx),
             DaemonMessage::ActionFailed {
                 title,
                 detail,
@@ -777,7 +777,11 @@ impl RootView {
                 repo_id,
                 branch,
                 dirty_count,
-            } => self.on_checkout_confirm(repo_id, branch, dirty_count, window, cx),
+                request_id,
+            } => {
+                let ask = notices::CheckoutAsk::new(repo_id, branch, dirty_count, request_id);
+                self.on_checkout_confirm(ask, window, cx);
+            }
             DaemonMessage::LayoutInitRequired {
                 active_session_count,
                 ..

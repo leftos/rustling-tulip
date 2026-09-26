@@ -3027,11 +3027,12 @@ async fn in_place_checkout_confirm(hub: &Hub, req: &SpawnRequest) -> Option<Daem
         return None;
     }
     match git::in_place_checkout_preflight(&repo_path, branch_name).await {
-        Ok(git::InPlaceCheckout::Dirty { count }) => Some(DaemonMessage::CheckoutConfirmRequired {
-            repo_id: repo_id.clone(),
-            branch: branch_name.clone(),
-            dirty_count: u32::try_from(count).unwrap_or(u32::MAX),
-        }),
+        Ok(git::InPlaceCheckout::Dirty { count }) => Some(checkout_confirm_reply(
+            repo_id,
+            branch_name,
+            req.request_id.as_deref(),
+            count,
+        )),
         Ok(_) => None,
         Err(err) => {
             warn!(
@@ -3040,6 +3041,23 @@ async fn in_place_checkout_confirm(hub: &Hub, req: &SpawnRequest) -> Option<Daem
             );
             None
         }
+    }
+}
+
+/// The prompt for an in-place spawn of `branch` in `repo_id` whose tree has
+/// `dirty_count` uncommitted changes, echoing the spawn's `request_id`: it
+/// goes to the requester only.
+fn checkout_confirm_reply(
+    repo_id: &str,
+    branch: &str,
+    request_id: Option<&str>,
+    dirty_count: usize,
+) -> DaemonMessage {
+    DaemonMessage::CheckoutConfirmRequired {
+        repo_id: repo_id.to_owned(),
+        branch: branch.to_owned(),
+        dirty_count: u32::try_from(dirty_count).unwrap_or(u32::MAX),
+        request_id: request_id.map(str::to_owned),
     }
 }
 
@@ -6148,6 +6166,34 @@ mod tests {
             worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
             existing_worktree: existing_worktree.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn checkout_confirm_echoes_the_spawn_request_id() {
+        let reply = checkout_confirm_reply("r1", "wt/x", Some("req-9"), 4);
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::CheckoutConfirmRequired {
+                    repo_id,
+                    branch,
+                    dirty_count: 4,
+                    request_id: Some(id),
+                } if repo_id == "r1" && branch == "wt/x" && id == "req-9"
+            ),
+            "{reply:?}"
+        );
+        let reply = checkout_confirm_reply("r1", "wt/x", None, 4);
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::CheckoutConfirmRequired {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "a spawn without an id gets a prompt without one: {reply:?}"
+        );
     }
 
     #[test]

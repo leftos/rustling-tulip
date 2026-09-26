@@ -140,6 +140,37 @@ fn checkout_focus(h: &mut Harness<'_>) -> Option<&'static str> {
     h.root(|root, _| root.checkout_focus())
 }
 
+/// The checkout prompt's heading, counting the prompts waiting behind it.
+fn checkout_title(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.checkout_title())
+}
+
+/// The dirty count of the checkout prompt on screen.
+fn checkout_count(h: &mut Harness<'_>) -> Option<u32> {
+    h.root(|root, _| root.checkout_prompt().map(|prompt| prompt.dirty_count))
+}
+
+/// Every spawn sent, as its request id and checkout strategy, in order.
+fn requested(sent: Vec<ClientMessage>) -> Vec<(String, Option<CheckoutStrategy>)> {
+    sent.into_iter()
+        .map(|msg| {
+            let request = match msg {
+                ClientMessage::SpawnSession(request) => request,
+                other => panic!("expected a SpawnSession, sent {other:?}"),
+            };
+            match (request.request_id, request.target) {
+                (
+                    Some(id),
+                    SpawnTarget::Single {
+                        checkout_strategy, ..
+                    },
+                ) => (id, checkout_strategy),
+                other => panic!("expected an in-place spawn with an id, got {other:?}"),
+            }
+        })
+        .collect()
+}
+
 fn failed(title: &str, request_id: Option<&str>) -> DaemonMessage {
     DaemonMessage::ActionFailed {
         title: title.to_owned(),
@@ -149,12 +180,50 @@ fn failed(title: &str, request_id: Option<&str>) -> DaemonMessage {
     }
 }
 
-fn dirty() -> DaemonMessage {
+/// A dirty-tree prompt of two changes for `feature` of `r1`, declining the
+/// spawn `request_id` (none from an older daemon).
+fn dirty(request_id: Option<&str>) -> DaemonMessage {
+    dirty_of("r1", "feature", 2, request_id)
+}
+
+/// A prompt of one change for `branch` of `repo`, declining spawn `request_id`.
+fn dirty_at(repo: &str, branch: &str, request_id: &str) -> DaemonMessage {
+    dirty_of(repo, branch, 1, Some(request_id))
+}
+
+/// A dirty-tree prompt for `branch` of `repo`, counting `count` changes.
+fn dirty_of(repo: &str, branch: &str, count: u32, request_id: Option<&str>) -> DaemonMessage {
     DaemonMessage::CheckoutConfirmRequired {
-        repo_id: "r1".to_owned(),
-        branch: "feature".to_owned(),
-        dirty_count: 2,
+        repo_id: repo.to_owned(),
+        branch: branch.to_owned(),
+        dirty_count: count,
+        request_id: request_id.map(str::to_owned),
     }
+}
+
+/// An in-place spawn of `branch` in `repo`.
+fn in_place(repo: &str, branch: &str) -> SpawnRequest {
+    let mut request = request(false);
+    if let SpawnTarget::Single {
+        repo_id,
+        branch_name,
+        ..
+    } = &mut request.target
+    {
+        repo.clone_into(repo_id);
+        branch.clone_into(branch_name);
+    }
+    request
+}
+
+/// `sent` split into the spawns, as [`requested`] lists them, and the rest.
+fn split_spawns(
+    sent: Vec<ClientMessage>,
+) -> (Vec<(String, Option<CheckoutStrategy>)>, Vec<ClientMessage>) {
+    let (spawns, rest) = sent
+        .into_iter()
+        .partition(|msg| matches!(msg, ClientMessage::SpawnSession(_)));
+    (requested(spawns), rest)
 }
 
 /// `s1` alone in pane `p1` of tab `t1`, its scrollback in and nothing sent.
@@ -415,13 +484,18 @@ fn checkout_confirm_stash_resends_with_same_request_id(cx: &mut TestAppContext) 
     let mut h = single(cx, &dir);
 
     let id = spawn(&mut h, request(false), OpenIn::NewTab);
-    h.send(dirty());
+    h.send(dirty(Some(&id)));
     assert!(painted(&mut h, "checkout-confirm"));
     assert!(notice_focused(&mut h));
     assert_eq!(
         checkout_focus(&mut h),
         Some("checkout-cancel"),
         "safe button first"
+    );
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place?"),
+        "a lone prompt has no count"
     );
     let message = h.root(|root, _| {
         root.checkout_prompt()
@@ -458,7 +532,7 @@ fn checkout_confirm_stash_resends_with_same_request_id(cx: &mut TestAppContext) 
     assert_eq!(placements(h.sent()).len(), 1, "the retry is placed");
 
     let carry_id = spawn(&mut h, request(false), OpenIn::NewTab);
-    h.send(dirty());
+    h.send(dirty(Some(&carry_id)));
     h.click_on("checkout-carry");
     let retry = spawned(&h.sent());
     assert_eq!(retry.request_id.as_deref(), Some(carry_id.as_str()));
@@ -471,29 +545,6 @@ fn checkout_confirm_stash_resends_with_same_request_id(cx: &mut TestAppContext) 
     ));
 }
 
-/// An in-place spawn of `branch` in `repo`.
-fn in_place(repo: &str, branch: &str) -> SpawnRequest {
-    let mut request = request(false);
-    if let SpawnTarget::Single {
-        repo_id,
-        branch_name,
-        ..
-    } = &mut request.target
-    {
-        repo.clone_into(repo_id);
-        branch.clone_into(branch_name);
-    }
-    request
-}
-
-fn dirty_at(repo: &str, branch: &str) -> DaemonMessage {
-    DaemonMessage::CheckoutConfirmRequired {
-        repo_id: repo.to_owned(),
-        branch: branch.to_owned(),
-        dirty_count: 1,
-    }
-}
-
 #[gpui::test]
 fn checkout_confirm_with_two_spawns_resends_the_named_one(cx: &mut TestAppContext) {
     let dir = TestDir::new();
@@ -501,7 +552,7 @@ fn checkout_confirm_with_two_spawns_resends_the_named_one(cx: &mut TestAppContex
 
     let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
     let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
-    h.send(dirty_at("R1", "x"));
+    h.send(dirty_at("R1", "x", &a));
     h.click_on("checkout-stash");
     let retry = spawned(&h.sent());
     assert_eq!(retry.request_id.as_deref(), Some(a.as_str()), "A is resent");
@@ -511,7 +562,7 @@ fn checkout_confirm_with_two_spawns_resends_the_named_one(cx: &mut TestAppContex
             if repo_id == "R1" && branch_name == "x"
     ));
 
-    h.send(dirty_at("R2", "y"));
+    h.send(dirty_at("R2", "y", &b));
     h.keys("escape");
     assert!(h.sent().is_empty(), "Cancel sends nothing");
     h.send(updated(session("s2").build(), Some(&a)));
@@ -519,14 +570,22 @@ fn checkout_confirm_with_two_spawns_resends_the_named_one(cx: &mut TestAppContex
     h.send(updated(session("s3").build(), Some(&b)));
     assert!(placements(h.sent()).is_empty(), "Cancel forgot B only");
 
-    h.send(dirty_at("R9", "z"));
+    h.send(dirty_at("R9", "z", "nobody"));
     assert!(
         checkout_focus(&mut h).is_some(),
-        "an unmatched prompt still shows"
+        "a prompt for no pending spawn still shows"
     );
     h.click_on("checkout-carry");
     assert_eq!(checkout_focus(&mut h), None);
-    assert!(h.sent().is_empty(), "an unmatched prompt resends nothing");
+    assert!(h.sent().is_empty(), "and its answer resends nothing");
+
+    h.send(dirty_of("R9", "z", 1, None));
+    assert!(
+        checkout_focus(&mut h).is_some(),
+        "so does an id-less one no spawn matches"
+    );
+    h.click_on("checkout-stash");
+    assert!(h.sent().is_empty());
 }
 
 #[gpui::test]
@@ -535,7 +594,7 @@ fn checkout_confirm_cancel_forgets_the_spawn(cx: &mut TestAppContext) {
     let mut h = single(cx, &dir);
 
     let id = spawn(&mut h, request(false), OpenIn::NewTab);
-    h.send(dirty());
+    h.send(dirty(Some(&id)));
     h.keys("escape");
     assert_eq!(checkout_focus(&mut h), None, "Esc cancels");
     assert!(h.sent().is_empty(), "Cancel sends nothing");
@@ -543,7 +602,7 @@ fn checkout_confirm_cancel_forgets_the_spawn(cx: &mut TestAppContext) {
     assert!(placements(h.sent()).is_empty(), "the spawn is forgotten");
 
     let id = spawn(&mut h, request(false), OpenIn::NewTab);
-    h.send(dirty());
+    h.send(dirty(Some(&id)));
     h.click_on("checkout-cancel");
     assert_eq!(checkout_focus(&mut h), None);
     assert!(h.sent().is_empty());
@@ -551,6 +610,99 @@ fn checkout_confirm_cancel_forgets_the_spawn(cx: &mut TestAppContext) {
     assert!(placements(h.sent()).is_empty());
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard back");
+
+    let id = spawn(&mut h, request(false), OpenIn::NewTab);
+    h.send(dirty(Some(&id)));
+    h.click_on("checkout-close");
+    assert_eq!(checkout_focus(&mut h), None, "× cancels too");
+    assert!(h.sent().is_empty());
+}
+
+#[gpui::test]
+fn second_checkout_prompt_queues_and_both_resolve(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)"),
+        "the second prompt waits behind the first"
+    );
+    assert_eq!(checkout_focus(&mut h), Some("checkout-cancel"));
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [
+            (a.clone(), Some(CheckoutStrategy::Carry)),
+            (b.clone(), None),
+        ],
+        "A is retried and B is asked again as first sent"
+    );
+    assert_eq!(checkout_title(&mut h), None, "B's prompt is not shown yet");
+    assert_eq!(checkout_focus(&mut h), None);
+    assert!(
+        notice_focused(&mut h),
+        "while B is asked again, the notice holds the keyboard"
+    );
+
+    h.send(dirty_of("R2", "y", 3, Some(&b)));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 2)")
+    );
+    assert_eq!(checkout_count(&mut h), Some(3), "the fresh numbers");
+    assert!(
+        notice_focused(&mut h),
+        "the fresh prompt takes the keyboard"
+    );
+    h.click_on("checkout-stash");
+    assert_eq!(
+        requested(h.sent()),
+        [(b, Some(CheckoutStrategy::Stash))],
+        "B's retry answers its fresh prompt"
+    );
+    assert_eq!(checkout_title(&mut h), None, "the batch is over");
+}
+
+#[gpui::test]
+fn cancel_moves_to_the_next_prompt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+
+    h.keys("escape");
+    assert_eq!(
+        requested(h.sent()),
+        [(b.clone(), None)],
+        "Cancel forgets A and asks B again"
+    );
+    assert_eq!(checkout_focus(&mut h), None, "until B's answer comes back");
+
+    h.send(dirty_at("R2", "y", &b));
+    assert_eq!(
+        checkout_focus(&mut h),
+        Some("checkout-cancel"),
+        "the fresh prompt starts on Cancel"
+    );
+    assert!(notice_focused(&mut h), "and takes the keyboard");
+
+    h.send(updated(session("s2").build(), Some(&a)));
+    assert!(placements(h.sent()).is_empty(), "Cancel forgot A only");
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(b, Some(CheckoutStrategy::Carry))],
+        "B's own spawn is retried"
+    );
 }
 
 #[gpui::test]
@@ -559,7 +711,7 @@ fn modals_close_on_reconnect(cx: &mut TestAppContext) {
     let mut h = single(cx, &dir);
 
     let id = spawn(&mut h, request(false), OpenIn::NewTab);
-    h.send(dirty());
+    h.send(dirty(Some(&id)));
     h.send(failed("Worktree in use", None));
     assert!(action_failed(&mut h).is_some());
     assert!(checkout_focus(&mut h).is_some());
@@ -575,7 +727,7 @@ fn modals_close_on_reconnect(cx: &mut TestAppContext) {
         "a new connection forgets the spawns"
     );
 
-    h.send(dirty());
+    h.send(dirty(None));
     h.send(failed("Again", None));
     h.lose_connection();
     assert_eq!(action_failed(&mut h), None, "a lost connection closes them");
@@ -603,7 +755,7 @@ fn terminal_does_not_take_focus_while_modal_open(cx: &mut TestAppContext) {
     h.keys("enter");
     assert!(!notice_focused(&mut h));
 
-    h.send(dirty());
+    h.send(dirty(None));
     h.send(DaemonMessage::TabUpdated {
         tab: tab("t1", &pane("p1", Some("s1"))),
     });
@@ -611,4 +763,512 @@ fn terminal_does_not_take_focus_while_modal_open(cx: &mut TestAppContext) {
     h.keys("escape");
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a");
+}
+
+#[gpui::test]
+fn queued_prompt_is_reasked_not_shown_stale(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_of("R1", "x", 2, Some(&b)));
+    assert_eq!(checkout_count(&mut h), Some(1));
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry)), (b.clone(), None)],
+        "B's stored prompt is thrown away and its spawn asked again"
+    );
+    assert_eq!(checkout_focus(&mut h), None, "nothing is on screen");
+    assert_eq!(checkout_title(&mut h), None);
+
+    h.send(dirty_of("R1", "x", 4, Some(&b)));
+    assert_eq!(
+        checkout_count(&mut h),
+        Some(4),
+        "the numbers measured now, not B's stale ones"
+    );
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 2)")
+    );
+    h.click_on("checkout-carry");
+    assert_eq!(requested(h.sent()), [(b, Some(CheckoutStrategy::Carry))]);
+    assert_eq!(checkout_title(&mut h), None);
+}
+
+#[gpui::test]
+fn reasked_spawn_that_no_longer_needs_a_prompt_is_placed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    assert_ne!(a, b, "two spawns of the same branch");
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R1", "x", &b));
+    h.click_on("checkout-carry");
+    h.sent();
+    assert_eq!(checkout_title(&mut h), None);
+
+    h.send(updated(session("s2").build(), Some(&b)));
+    assert_eq!(
+        placements(h.sent()).len(),
+        1,
+        "B is placed without ever prompting again"
+    );
+
+    let c = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place?"),
+        "B left the batch, so the next prompt starts a new count"
+    );
+    assert!(checkout_focus(&mut h).is_some());
+}
+
+#[gpui::test]
+fn counter_advances_through_the_queue(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    let c = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.send(dirty_at("R3", "z", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 3)")
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry)), (b.clone(), None)]
+    );
+    h.send(dirty_at("R2", "y", &b));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 3)")
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(b, Some(CheckoutStrategy::Carry)), (c.clone(), None)]
+    );
+    h.send(dirty_at("R3", "z", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (3 of 3)")
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(requested(h.sent()), [(c, Some(CheckoutStrategy::Carry))]);
+    assert_eq!(checkout_title(&mut h), None, "the batch is over");
+}
+
+#[gpui::test]
+fn reconnect_clears_queued_prompts(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    let c = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.send(dirty_at("R3", "z", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 3)")
+    );
+    h.keys("escape");
+    assert_eq!(requested(h.sent()), [(b.clone(), None)], "B is asked again");
+
+    h.send(DaemonMessage::Welcome {
+        protocol_version: 1,
+        supported_versions: vec![1],
+    });
+    assert_eq!(checkout_focus(&mut h), None, "nothing is shown");
+    assert_eq!(checkout_title(&mut h), None);
+    let after = h.sent();
+    assert!(
+        !after
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::SpawnSession(_))),
+        "neither C nor B is asked for again, sent {after:?}"
+    );
+
+    h.send(updated(session("s2").build(), Some(&b)));
+    h.send(updated(session("s3").build(), Some(&c)));
+    assert!(
+        placements(h.sent()).is_empty(),
+        "a new connection forgets the spawns"
+    );
+    let late = spawn(&mut h, in_place("R4", "w"), OpenIn::NewTab);
+    h.send(dirty_at("R4", "w", &late));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place?"),
+        "the queue and the count went with the connection"
+    );
+}
+
+#[gpui::test]
+fn action_failed_over_a_queued_prompt_returns_to_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.send(failed("Worktree in use", None));
+    assert!(action_failed(&mut h).is_some(), "it draws over the prompt");
+    assert!(notice_focused(&mut h));
+
+    h.keys("escape");
+    assert_eq!(action_failed(&mut h), None, "Esc closes it");
+    assert!(
+        notice_focused(&mut h),
+        "the checkout prompt has the keyboard back"
+    );
+    assert_eq!(checkout_focus(&mut h), Some("checkout-cancel"));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)"),
+        "the counter is intact"
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry)), (b, None)],
+        "the queued prompt still answers its own spawn"
+    );
+}
+
+#[gpui::test]
+fn three_prompts_where_a_reask_returns_a_session_still_reach_the_third(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    let c = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.send(dirty_at("R3", "z", &c));
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry)), (b.clone(), None)]
+    );
+
+    h.send(updated(session("s2").build(), Some(&b)));
+    let (spawns, rest) = split_spawns(h.sent());
+    assert_eq!(placements(rest).len(), 1, "B no longer needed a prompt");
+    assert_eq!(spawns, [(c.clone(), None)], "so C's turn comes");
+    assert_eq!(checkout_focus(&mut h), None);
+
+    h.send(dirty_at("R3", "z", &c));
+    assert_eq!(checkout_focus(&mut h), Some("checkout-cancel"));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 2)"),
+        "B left the batch without being answered"
+    );
+    h.click_on("checkout-carry");
+    assert_eq!(requested(h.sent()), [(c, Some(CheckoutStrategy::Carry))]);
+    assert_eq!(checkout_title(&mut h), None);
+}
+
+#[gpui::test]
+fn prompt_with_request_id_resolves_to_that_spawn_even_for_the_same_branch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let c = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &b));
+    h.send(dirty_at("R1", "x", &a));
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [
+            (b.clone(), Some(CheckoutStrategy::Carry)),
+            (a.clone(), None),
+        ],
+        "the shown prompt names B, the older A waited"
+    );
+
+    h.send(dirty_at("R1", "x", &c));
+    assert_eq!(
+        checkout_focus(&mut h),
+        None,
+        "C's prompt, arriving while A is asked again, does not take A's place"
+    );
+    h.send(dirty_of("R1", "x", 4, Some(&a)));
+    assert_eq!(checkout_count(&mut h), Some(4), "A's fresh prompt shows");
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 3)"),
+        "ahead of C, which waits"
+    );
+    h.click_on("checkout-stash");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Stash)), (c.clone(), None)],
+        "the answer goes to A, and C is asked again"
+    );
+
+    h.send(dirty_at("R1", "x", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (3 of 3)")
+    );
+    h.keys("escape");
+    assert!(h.sent().is_empty(), "Cancel sends nothing");
+    assert_eq!(checkout_title(&mut h), None);
+    h.send(updated(session("s2").build(), Some(&c)));
+    assert!(placements(h.sent()).is_empty(), "Cancel forgot C");
+}
+
+#[gpui::test]
+fn id_less_prompt_falls_back_to_repo_and_branch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    assert_ne!(a, b, "two spawns of the same branch");
+    h.send(dirty_of("R1", "x", 1, None));
+    h.send(dirty_of("R1", "x", 1, None));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)"),
+        "the second resolves to the other spawn and waits"
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [
+            (a.clone(), Some(CheckoutStrategy::Carry)),
+            (b.clone(), None),
+        ],
+        "the shown prompt answers the oldest, A, and B is asked again"
+    );
+
+    h.send(dirty_of("R1", "x", 6, None));
+    assert_eq!(checkout_count(&mut h), Some(6), "B's fresh prompt shows");
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(b, Some(CheckoutStrategy::Carry))],
+        "the fresh prompt answers B, not A again"
+    );
+    assert_eq!(checkout_title(&mut h), None);
+}
+
+#[gpui::test]
+fn waiting_prompt_whose_spawn_fails_is_dropped_and_not_counted(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    let c = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.send(dirty_at("R3", "z", &c));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 3)")
+    );
+
+    h.send(DaemonMessage::Error {
+        message: "no such repo".to_owned(),
+        request_id: Some(b),
+    });
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)"),
+        "B failed while it waited, so it is not counted"
+    );
+    h.send(updated(session("s2").build(), Some(&c)));
+    assert_eq!(
+        placements(h.sent()).len(),
+        1,
+        "C was placed while it waited"
+    );
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place?"),
+        "nor is C"
+    );
+
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry))],
+        "neither B nor C gets a turn"
+    );
+    assert_eq!(checkout_title(&mut h), None);
+}
+
+#[gpui::test]
+fn reask_shows_no_extra_toast(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    assert_eq!(toasts(&mut h), [owned(SPAWNING), owned(SPAWNING)]);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+
+    h.keys("escape");
+    assert_eq!(requested(h.sent()), [(b.clone(), None)], "B is asked again");
+    assert_eq!(
+        toasts(&mut h),
+        [owned(SPAWNING), owned(SPAWNING)],
+        "B showed its toast when it started"
+    );
+
+    h.send(dirty_at("R2", "y", &b));
+    h.click_on("checkout-stash");
+    assert_eq!(requested(h.sent()), [(b, Some(CheckoutStrategy::Stash))]);
+    assert_eq!(
+        toasts(&mut h),
+        [owned(SPAWNING), owned(SPAWNING), owned(SPAWNING)],
+        "an answer that retries the spawn keeps its toast"
+    );
+}
+
+#[gpui::test]
+fn counter_resets_between_batches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.click_on("checkout-carry");
+    assert_eq!(
+        requested(h.sent()),
+        [(a, Some(CheckoutStrategy::Carry)), (b.clone(), None)]
+    );
+    h.send(failed("Worktree in use", Some(&b)));
+    h.keys("escape");
+    assert_eq!(action_failed(&mut h), None);
+    assert!(
+        h.sent().is_empty(),
+        "B failed while asked again, and nothing waits"
+    );
+
+    let third = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    h.send(dirty_at("R3", "z", &third));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place?"),
+        "the first batch ended with B's failure"
+    );
+    let fourth = spawn(&mut h, in_place("R4", "w"), OpenIn::NewTab);
+    h.send(dirty_at("R4", "w", &fourth));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)")
+    );
+    h.keys("escape");
+    assert_eq!(requested(h.sent()), [(fourth.clone(), None)]);
+    h.send(dirty_at("R4", "w", &fourth));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (2 of 2)")
+    );
+    h.keys("escape");
+    assert!(h.sent().is_empty());
+
+    let fifth = spawn(&mut h, in_place("R5", "v"), OpenIn::NewTab);
+    let sixth = spawn(&mut h, in_place("R6", "u"), OpenIn::NewTab);
+    h.send(dirty_at("R5", "v", &fifth));
+    h.send(dirty_at("R6", "u", &sixth));
+    assert_eq!(
+        checkout_title(&mut h).as_deref(),
+        Some("Switch branch in place? (1 of 2)"),
+        "answering the last prompt ended the second batch"
+    );
+}
+
+/// Whether `sent` holds input for any session.
+fn any_input(sent: &[ClientMessage]) -> bool {
+    sent.iter()
+        .any(|msg| matches!(msg, ClientMessage::SendInput { .. }))
+}
+
+#[gpui::test]
+fn keys_during_a_reask_do_not_reach_the_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir);
+
+    let a = spawn(&mut h, in_place("R1", "x"), OpenIn::NewTab);
+    let b = spawn(&mut h, in_place("R2", "y"), OpenIn::NewTab);
+    h.send(dirty_at("R1", "x", &a));
+    h.send(dirty_at("R2", "y", &b));
+    h.keys("enter");
+    assert_eq!(
+        requested(h.sent()),
+        [(b.clone(), None)],
+        "Enter on Cancel answers A and asks B again"
+    );
+    assert!(notice_focused(&mut h), "the re-ask holds the keyboard");
+
+    h.keys("enter");
+    h.keys("a");
+    h.keys("escape");
+    let sent = h.sent();
+    assert!(!any_input(&sent), "no key reached a session: sent {sent:?}");
+    assert!(
+        sent.is_empty(),
+        "nor did Esc cancel anything: sent {sent:?}"
+    );
+
+    h.send(dirty_at("R2", "y", &b));
+    assert_eq!(
+        checkout_focus(&mut h),
+        Some("checkout-cancel"),
+        "B's fresh prompt takes the keyboard"
+    );
+    assert!(notice_focused(&mut h));
+    h.keys("escape");
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard back");
+
+    let third = spawn(&mut h, in_place("R3", "z"), OpenIn::NewTab);
+    let fourth = spawn(&mut h, in_place("R4", "w"), OpenIn::NewTab);
+    h.send(dirty_at("R3", "z", &third));
+    h.send(dirty_at("R4", "w", &fourth));
+    h.keys("escape");
+    assert_eq!(requested(h.sent()), [(fourth.clone(), None)]);
+    h.keys("a");
+    assert!(!any_input(&h.sent()), "D's re-ask holds the keyboard");
+
+    h.send(updated(session("s2").build(), Some(&fourth)));
+    assert_eq!(placements(h.sent()).len(), 1, "D no longer needed a prompt");
+    assert!(
+        !notice_focused(&mut h),
+        "with nothing left to ask, the notice lets go"
+    );
+    h.keys("a");
+    assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard back");
 }

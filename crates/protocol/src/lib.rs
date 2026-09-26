@@ -601,8 +601,9 @@ pub struct SpawnRequest {
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
     /// Chosen by the client so it can tell its own spawn's reply apart: the
-    /// daemon echoes it on the [`DaemonMessage::SessionUpdated`] it sends
-    /// back to the requester. Broadcasts never carry it.
+    /// daemon echoes it on the [`DaemonMessage::SessionUpdated`] or
+    /// [`DaemonMessage::CheckoutConfirmRequired`] it sends back to the
+    /// requester. Broadcasts never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
@@ -2717,6 +2718,10 @@ pub enum DaemonMessage {
         /// Count of uncommitted (index + worktree) changes that would be
         /// affected, for the confirmation prompt.
         dirty_count: u32,
+        /// The `request_id` of the spawn this prompt declines; only the
+        /// requester receives the prompt. Absent from older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Reply to [`ClientMessage::GetSpawnConfig`]. `config` is `None` when
     /// the session no longer exists or pre-dates spawn-config persistence
@@ -4801,6 +4806,44 @@ mod tests {
                     forwarder_restarted: true,
                     ..
                 }
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn checkout_confirm_request_id_is_optional_and_round_trips() {
+        let old: DaemonMessage = serde_json::from_str(
+            r#"{"type":"checkout_confirm_required","repo_id":"r1","branch":"b","dirty_count":2}"#,
+        )
+        .expect("a prompt without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                DaemonMessage::CheckoutConfirmRequired {
+                    dirty_count: 2,
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+        let unset = serde_json::to_string(&old).expect("serialize");
+        assert!(!unset.contains("request_id"), "{unset}");
+        let msg = DaemonMessage::CheckoutConfirmRequired {
+            repo_id: "r1".to_string(),
+            branch: "b".to_string(),
+            dirty_count: 3,
+            request_id: Some("req-7".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""request_id":"req-7""#), "{json}");
+        let decoded: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                DaemonMessage::CheckoutConfirmRequired { repo_id, branch, dirty_count: 3, request_id: Some(id) }
+                    if repo_id == "r1" && branch == "b" && id == "req-7"
             ),
             "{decoded:?}"
         );
