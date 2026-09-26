@@ -6789,6 +6789,7 @@ dependencies = [
  "gpui",
  "protocol",
  "raw-window-handle",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

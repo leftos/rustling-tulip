@@ -6,12 +6,14 @@ use std::rc::Rc;
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Point, Side};
+use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb};
+
+use crate::links::{self, TerminalLink, TerminalRow};
 
 /// Collects terminal replies (`Event::PtyWrite`: cursor-position reports,
 /// device attributes) for the pane to send to the child as input.
@@ -222,6 +224,129 @@ impl Terminal {
             background,
             foreground: resolve(Color::Named(NamedColor::Foreground), colors),
         }
+    }
+}
+
+/// The row reader the link detector works on. Every method here hands out
+/// grid lines rather than screen rows, so a line above the viewport is a
+/// negative one.
+#[cfg_attr(not(test), expect(dead_code, reason = "only the tests call these"))]
+impl Terminal {
+    /// How far the walk for a hovered line reaches, in rows each way.
+    const LINK_ROW_WINDOW: i32 = 64;
+
+    /// The grid lines that exist: the oldest line of the history and the
+    /// bottom line of the screen.
+    fn line_bounds(&self) -> (i32, i32) {
+        let grid = self.term.grid();
+        (grid.topmost_line().0, grid.bottommost_line().0)
+    }
+
+    /// The links spanning grid line `line`, stitched from the rows around it.
+    ///
+    /// The walk reaches [`Self::LINK_ROW_WINDOW`] rows back from `line`, and
+    /// as many forward, independently, while each step is a soft wrap or a
+    /// hard stitch. A link touching a window edge the walk only stopped at
+    /// because it ran out of window is dropped rather than offered cut short.
+    /// The rows of what comes back are grid lines, so a link in the history
+    /// carries a negative one.
+    #[must_use]
+    pub fn detect_links_near(&self, line: i32) -> Vec<TerminalLink> {
+        self.links_near(line, Self::LINK_ROW_WINDOW)
+    }
+
+    /// [`Self::detect_links_near`] with the window cap named, so that a test
+    /// can reach a window edge on a small grid.
+    fn links_near(&self, line: i32, cap: i32) -> Vec<TerminalLink> {
+        let (top, bottom) = self.line_bounds();
+        if line < top || line > bottom {
+            return Vec::new();
+        }
+        let cols = self.size.cols;
+        let mut above = vec![self.read_row(line)];
+        let mut first = line;
+        while first > top && line - first < cap {
+            let previous = self.read_row(first - 1);
+            let Some(current) = above.last() else {
+                break;
+            };
+            if !current.is_wrapped && !links::can_stitch(&previous, current, cols) {
+                break;
+            }
+            above.push(previous);
+            first -= 1;
+        }
+        let cut_above = first > top && line - first >= cap;
+
+        let mut below = Vec::new();
+        let mut last = line;
+        while last < bottom && last - line < cap {
+            let next = self.read_row(last + 1);
+            let Some(current) = below.last().or_else(|| above.last()) else {
+                break;
+            };
+            if !next.is_wrapped && !links::can_stitch(current, &next, cols) {
+                break;
+            }
+            below.push(next);
+            last += 1;
+        }
+        let cut_below = last < bottom && last - line >= cap;
+
+        above.reverse();
+        let hovered = line - first;
+        let edge = i32::try_from(above.len() + below.len())
+            .unwrap_or(i32::MAX)
+            .saturating_sub(1);
+        let rows: Vec<TerminalRow> = above.into_iter().chain(below).collect();
+        let mut links = links::detect_row_links(&rows, cols);
+        links.retain(|link| {
+            let spanning = link.start_row <= hovered && link.end_row >= hovered;
+            let cut = (cut_above && link.start_row == 0) || (cut_below && link.end_row == edge);
+            spanning && !cut
+        });
+        for link in &mut links {
+            link.start_row += first;
+            link.end_row += first;
+        }
+        links
+    }
+
+    /// One grid line as a [`TerminalRow`]: the cell of every column holding a
+    /// glyph, in column order, with the spacer cell behind a wide glyph left
+    /// out and every cell's column kept in the row's map.
+    fn read_row(&self, line: i32) -> TerminalRow {
+        let grid = self.term.grid();
+        let mut row = TerminalRow {
+            text: String::with_capacity(grid.columns()),
+            columns: Vec::with_capacity(grid.columns()),
+            is_wrapped: self.wraps(line),
+        };
+        for column in 0..grid.columns() {
+            let cell = &grid[Line(line)][Column(column)];
+            if cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            {
+                continue;
+            }
+            row.text.push(cell.c);
+            row.columns.push(links::column_limit(column));
+        }
+        row
+    }
+
+    /// Whether `line` continues the line above it. The grid marks a wrap on
+    /// the last cell of the row that wrapped.
+    fn wraps(&self, line: i32) -> bool {
+        let (top, _) = self.line_bounds();
+        if line <= top {
+            return false;
+        }
+        let grid = self.term.grid();
+        grid[Line(line - 1)][grid.last_column()]
+            .flags
+            .contains(Flags::WRAPLINE)
     }
 }
 
@@ -447,6 +572,12 @@ mod tests {
         term
     }
 
+    fn sized(bytes: &[u8], cols: usize, rows: usize) -> Terminal {
+        let mut term = Terminal::new(GridSize { cols, rows }, CursorShape::Block);
+        term.feed(bytes);
+        term
+    }
+
     #[test]
     fn selected_cells_are_highlighted() {
         let mut term = fed(b"abcd");
@@ -654,5 +785,98 @@ mod tests {
     fn cursor_is_reported_only_while_visible() {
         assert_eq!(fed(b"ab").snapshot().cursor, Some((0, 2)));
         assert_eq!(fed(b"ab\x1b[?25l").snapshot().cursor, None);
+    }
+
+    #[test]
+    fn a_soft_wrap_is_marked_on_the_continuation() {
+        let term = sized(b"X:/dev/project/long/name/file.ts\r\none\r\ntwo", 20, 3);
+        assert_eq!(term.line_bounds(), (-1, 2));
+        let head = term.read_row(-1);
+        assert!(!head.is_wrapped);
+        assert_eq!(head.text, "X:/dev/project/long/");
+        let tail = term.read_row(0);
+        assert!(tail.is_wrapped);
+        assert_eq!(tail.text, "name/file.ts        ");
+        let links = term.detect_links_near(-1);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "X:/dev/project/long/name/file.ts");
+        assert_eq!(links[0].start_row, -1);
+        assert_eq!(links[0].end_row, 0);
+    }
+
+    #[test]
+    fn links_are_found_from_either_row_of_a_wrap() {
+        let term = sized(b"X:/dev/project/long/name/file.ts", 20, 3);
+        let target = "X:/dev/project/long/name/file.ts";
+        let first = term.detect_links_near(0);
+        let second = term.detect_links_near(1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].target, target);
+        assert_eq!(second[0].target, target);
+        assert_eq!(first[0].start_row, 0);
+        assert_eq!(first[0].end_row, 1);
+        assert_eq!(second[0].start_row, 0);
+        assert_eq!(second[0].end_row, 1);
+        assert_eq!(first[0].start_column, 0);
+        assert_eq!(first[0].end_column, 12);
+    }
+
+    #[test]
+    fn a_wide_glyph_before_a_path_keeps_its_column() {
+        let term = sized("中 X:/a/b.rs:3".as_bytes(), 20, 3);
+        let row = term.read_row(0);
+        assert_eq!(row.text, "中 X:/a/b.rs:3      ");
+        assert_eq!(row.columns[2], 3);
+        let links = term.detect_links_near(0);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "X:/a/b.rs");
+        assert_eq!(links[0].line, Some(3));
+        assert_eq!(links[0].start_row, 0);
+        assert_eq!(links[0].end_row, 0);
+        assert_eq!(links[0].start_column, 3);
+        assert_eq!(links[0].end_column, 14);
+    }
+
+    #[test]
+    fn a_wide_glyph_wrapping_to_the_next_row_adds_no_phantom_char() {
+        let term = sized("X:/dir/aaaaaaaaaaaa中.rs".as_bytes(), 20, 4);
+        let head = term.read_row(0);
+        assert!(!head.is_wrapped);
+        assert_eq!(head.text, "X:/dir/aaaaaaaaaaaa");
+        let tail = term.read_row(1);
+        assert!(tail.is_wrapped);
+        assert_eq!(tail.text, format!("中.rs{}", " ".repeat(15)));
+        let links = term.detect_links_near(0);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "X:/dir/aaaaaaaaaaaa中.rs");
+        assert_eq!(links[0].start_row, 0);
+        assert_eq!(links[0].end_row, 1);
+        assert_eq!(links[0].start_column, 0);
+        assert_eq!(links[0].end_column, 5);
+    }
+
+    #[test]
+    fn a_line_scrolled_into_history_is_readable() {
+        let term = sized(b"X:/a/b.rs\r\nalpha\r\nbravo\r\ncharlie", 20, 3);
+        assert_eq!(term.line_bounds(), (-1, 2));
+        assert!(term.detect_links_near(9).is_empty());
+        let row = term.read_row(-1);
+        assert_eq!(row.text, "X:/a/b.rs           ");
+        let links = term.detect_links_near(-1);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "X:/a/b.rs");
+        assert_eq!(links[0].start_row, -1);
+        assert_eq!(links[0].end_row, -1);
+    }
+
+    #[test]
+    fn a_link_cut_by_the_window_cap_is_not_offered() {
+        let term = sized(format!("X:/dir/{}", "a".repeat(73)).as_bytes(), 20, 5);
+        let whole = term.links_near(0, 64);
+        assert_eq!(whole.len(), 1);
+        assert_eq!(whole[0].start_row, 0);
+        assert_eq!(whole[0].end_row, 3);
+        assert!(term.links_near(0, 2).is_empty());
     }
 }

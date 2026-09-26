@@ -10,6 +10,7 @@ mod connection;
 mod footer;
 mod grid_view;
 mod keys;
+mod links;
 mod mouse;
 mod net;
 mod notice_view;
