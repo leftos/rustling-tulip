@@ -15,6 +15,7 @@ use crate::spawn_form::{
     Control, FormInputs, OpenChoice, Outcome, Runtime, ShareButton, SpawnForm, TabChoices, Target,
     WorktreeMode,
 };
+use crate::spawns::PaneAim;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
@@ -30,9 +31,25 @@ const SUGGESTING: &str = "Picking a name no existing branch uses…";
 const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the last fetched refs.";
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
 
+/// Where the spawn dialog was opened from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SpawnEntry {
+    /// "+ Session", Ctrl+Shift+N or the main area's "Spawn a session".
+    Toolbar,
+    /// A pane's "New session…": the pane takes the session when the Open-in
+    /// choice is the current tab. `preselect` names the session whose repo
+    /// or workspace the dialog starts on.
+    Pane {
+        aim: PaneAim,
+        preselect: Option<String>,
+    },
+}
+
 /// The open spawn dialog: its form and its two text fields.
 pub(crate) struct SpawnDialog {
     form: SpawnForm,
+    /// The pane it was opened from, if any.
+    aim: Option<PaneAim>,
     branch_input: Entity<TextInput>,
     base_input: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
@@ -126,9 +143,15 @@ impl RootView {
         Some(dialog.base_input.read(cx).text().to_owned())
     }
 
-    /// Opens the dialog, unless there is no repo, the connection is down or
-    /// another dialog or menu is open.
-    pub(crate) fn open_spawn_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the dialog from `entry`, unless there is no repo, the
+    /// connection is down or another dialog or menu is open. It starts on
+    /// the preselected session's repo or workspace, else the focused one's.
+    pub(crate) fn open_spawn_dialog(
+        &mut self,
+        entry: SpawnEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let blocked = self.spawn_dialog.is_some()
             || self.exit.is_some()
             || self.shell_dialog.is_some()
@@ -136,10 +159,14 @@ impl RootView {
             || self.menu.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
-        if blocked || self.sidebar.repos().is_empty() {
+        if blocked || !self.has_repos() {
             return;
         }
-        let focused = self.focused_session();
+        let (aim, preselect) = match entry {
+            SpawnEntry::Toolbar => (None, None),
+            SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect),
+        };
+        let focused = preselect.or_else(|| self.focused_session());
         let inputs = FormInputs {
             repos: self.sidebar.repos(),
             workspaces: self.sidebar.workspaces(),
@@ -158,6 +185,7 @@ impl RootView {
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
         self.spawn_dialog = Some(SpawnDialog {
             form,
+            aim,
             branch_input,
             base_input,
             _subscriptions: subscriptions,
@@ -265,8 +293,13 @@ impl RootView {
                 if let Some(msg) = submission.default_change {
                     self.send(msg);
                 }
+                let aim = self.spawn_dialog.as_mut().and_then(|d| d.aim.take());
+                let open_in = match aim {
+                    Some(aim) => aim.open_in(submission.open_in),
+                    None => submission.open_in,
+                };
                 self.close_spawn_dialog(window, cx);
-                self.spawn(submission.request, submission.open_in, cx);
+                self.spawn(submission.request, open_in, cx);
             }
         }
     }

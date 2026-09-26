@@ -620,6 +620,17 @@ impl<'a> Harness<'a> {
                 || selector == "sidebar-shell-dialog"
             {
                 !root.sidebar_collapsed()
+            } else if let Some(id) = selector
+                .strip_prefix("empty-pane-new-session-")
+                .or_else(|| selector.strip_prefix("empty-pane-shell-"))
+            {
+                root.empty_pane_ids().iter().any(|p| p == id)
+            } else if selector.starts_with("exited-") {
+                root.exited_overlay_selectors().contains(&selector)
+            } else if selector == "empty-spawn-session" || selector == "empty-open-shell" {
+                root.no_tab_choices_shown()
+            } else if selector == "empty-repo-hint" {
+                root.no_tab_choices_shown() && !root.has_repos()
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
             } else if selector == "sidebar-panel" || selector == "sidebar-divider" {

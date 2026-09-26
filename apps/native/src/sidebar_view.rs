@@ -8,7 +8,9 @@ use gpui::{
 use protocol::SessionStatus;
 
 use crate::connection::DotKind;
+use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
 use crate::sidebar::{Container, Leaf};
+use crate::spawn_view::SpawnEntry;
 use crate::{
     BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color, drag_handle,
     status_dot, tooltip,
@@ -84,7 +86,7 @@ impl RootView {
             .text_color(gpui::rgb(TEXT))
             .child(header(cx))
             .child(toolbar(
-                !self.sidebar.repos().is_empty(),
+                self.has_repos(),
                 self.sidebar.quick_shell_dir(),
                 cx,
             ))
@@ -94,11 +96,7 @@ impl RootView {
 
 /// "+ Session", which opens the spawn dialog; disabled with no repo.
 fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
-    let tip = if has_repos {
-        "Spawn a new session"
-    } else {
-        "Register a repo to spawn repo-tied sessions."
-    };
+    let tip = if has_repos { SPAWN_TIP } else { NO_REPOS_TIP };
     div()
         .id("sidebar-add-session")
         .debug_selector(|| "sidebar-add-session".to_owned())
@@ -111,7 +109,7 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
                 .cursor_pointer()
                 .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.open_spawn_dialog(window, cx);
+                    this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
                 }))
         })
         .when(!has_repos, |button| button.opacity(0.5))

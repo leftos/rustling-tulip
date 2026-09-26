@@ -274,7 +274,9 @@ impl RootView {
         };
         self.remember_quick_shell(request_id);
         self.confirm.disarm();
-        self.send(placed.message);
+        for msg in placed.messages {
+            self.send(msg);
+        }
         self.settle_checkout(request_id, window, cx);
         if placed.relayout {
             self.after_tabs_change(window, cx);

@@ -9,15 +9,19 @@ use gpui::{
 use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
+use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::session_actions::{
     MenuEntry, MenuMode, SessionAction, Step, exit_code_label, exited_message,
     header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
 };
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
+use crate::{
+    BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip,
+};
 
 const MENU_WIDTH: f32 = 240.0;
+const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
 /// The stopped-pane overlay: translucent, so the terminal shows through.
 const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
 /// The dim layer behind the delete-worktree confirm.
@@ -513,10 +517,70 @@ impl RootView {
         ]
     }
 
-    /// The layer over an exited session's terminal: the exit code and what
-    /// to do with the pane.
+    /// The overlay's "New session…": the spawn dialog aimed at this pane,
+    /// whose new session replaces the stopped one. Disabled with no repo,
+    /// and while a spawn aimed at the pane is on its way.
+    fn overlay_new_session(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pending = self.spawns.aims_at(tab_id, pane_id);
+        let tip = if !self.has_repos() {
+            NO_REPOS_TIP
+        } else if pending {
+            PANE_PENDING_TIP
+        } else {
+            NEW_SESSION_TIP
+        };
+        let button = BorderedButton {
+            selector: format!("exited-new-session-{pane_id}"),
+            label: "New session…",
+            tip,
+            enabled: self.has_repos() && !pending,
+        };
+        let (tab_id, pane_id, session_id) =
+            (tab_id.to_owned(), pane_id.to_owned(), session_id.to_owned());
+        bordered_button(button, cx, move |this, window, cx| {
+            this.new_session_in_pane(&tab_id, &pane_id, Some(&session_id), window, cx);
+        })
+        .into_any_element()
+    }
+
+    /// The selectors of the stopped-pane overlays of the tab on screen:
+    /// each overlay and its buttons, as [`Self::exited_overlay`] draws them.
+    #[must_use]
+    pub fn exited_overlay_selectors(&self) -> Vec<String> {
+        let Some(grid) = self.tabs.active_tab().and_then(TabEntry::grid) else {
+            return Vec::new();
+        };
+        let mut selectors = Vec::new();
+        for pane in collect_panes(grid) {
+            let Some(session) = pane
+                .session
+                .and_then(|id| self.sidebar.session(id))
+                .filter(|session| pane_shows_exit(session))
+            else {
+                continue;
+            };
+            let mut keys: Vec<&str> = overlay_actions(session)
+                .into_iter()
+                .map(SessionAction::key)
+                .collect();
+            keys.insert(1, "new-session");
+            selectors.push(format!("exited-{}", pane.id));
+            selectors.extend(keys.iter().map(|key| format!("exited-{key}-{}", pane.id)));
+        }
+        selectors
+    }
+
+    /// The layer over an exited session's terminal in `tab_id`: the exit
+    /// code and what to do with the pane.
     pub(crate) fn exited_overlay(
         &self,
+        tab_id: &str,
         pane_id: &str,
         session_id: Option<&str>,
         cx: &mut Context<Self>,
@@ -524,7 +588,7 @@ impl RootView {
         let session = session_id
             .and_then(|id| self.sidebar.session(id))
             .filter(|session| pane_shows_exit(session))?;
-        let buttons: Vec<AnyElement> = overlay_actions(session)
+        let mut buttons: Vec<AnyElement> = overlay_actions(session)
             .into_iter()
             .map(|action| {
                 let selector = format!("exited-{}-{pane_id}", action.key());
@@ -535,6 +599,10 @@ impl RootView {
                     .into_any_element()
             })
             .collect();
+        buttons.insert(
+            1,
+            self.overlay_new_session(tab_id, pane_id, &session.id, cx),
+        );
         let name = format!("exited-{pane_id}");
         Some(
             div()
@@ -901,6 +969,47 @@ fn on_press(
             cx.notify();
         }),
     )
+}
+
+/// A bordered text button of an empty pane, the empty main area or the
+/// stopped-pane overlay.
+pub(crate) struct BorderedButton {
+    pub selector: String,
+    pub label: &'static str,
+    pub tip: &'static str,
+    pub enabled: bool,
+}
+
+/// `button`, which runs `act` on a left press as [`on_press`] does. A
+/// disabled one is dimmed, has no hover and the default cursor, and its
+/// press only stops at it.
+pub(crate) fn bordered_button(
+    button: BorderedButton,
+    cx: &mut Context<RootView>,
+    act: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static,
+) -> Stateful<Div> {
+    let name = button.selector;
+    let base = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(BORDER))
+        .text_color(gpui::rgb(TEXT))
+        .tooltip(tooltip(button.tip))
+        .child(button.label);
+    if button.enabled {
+        let base = base
+            .cursor_pointer()
+            .hover(|style| style.bg(gpui::rgb(HOVER_BG)));
+        on_press(base, cx, act)
+    } else {
+        base.opacity(0.6)
+            .cursor_default()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    }
 }
 
 /// Whether an action shows in the danger colour, as in the Tauri menu.

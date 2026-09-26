@@ -326,6 +326,32 @@ pub fn balance_split_direction(rect: Rect) -> SplitDirection {
     }
 }
 
+/// The first session, left to right, in the subtree `pane_id` sits beside
+/// at its parent split: the pane it was split off from. None when
+/// `pane_id` is the root pane or not in `grid`, or when that subtree shows
+/// no session. Ported from `findSplitSiblingSession` in the Tauri app's
+/// `utils/grid.ts`.
+pub fn split_sibling_session<'a>(grid: &'a GridNode, pane_id: &str) -> Option<&'a str> {
+    let GridNode::Split { first, second, .. } = grid else {
+        return None;
+    };
+    let is_it =
+        |node: &GridNode| matches!(node, GridNode::Pane { pane_id: id, .. } if id == pane_id);
+    if is_it(first) {
+        return first_session(second);
+    }
+    if is_it(second) {
+        return first_session(first);
+    }
+    split_sibling_session(first, pane_id).or_else(|| split_sibling_session(second, pane_id))
+}
+
+fn first_session(node: &GridNode) -> Option<&str> {
+    collect_panes(node)
+        .into_iter()
+        .find_map(|pane| pane.session)
+}
+
 /// The largest pane (the first of equals), split along its longer side with
 /// the new pane second.
 pub fn pick_balanced_split_target(grid: &GridNode) -> Option<SplitTarget> {
@@ -1054,6 +1080,59 @@ pub(crate) mod tests {
             place: SplitPlace::Second,
         };
         assert_eq!(pick_balanced_split_target(&wide), Some(target));
+    }
+
+    #[test]
+    fn tabs_sibling_of_a_root_or_missing_pane_is_none() {
+        assert_eq!(split_sibling_session(&pane("a", None), "a"), None);
+        assert_eq!(split_sibling_session(&three(), "zz"), None);
+    }
+
+    #[test]
+    fn tabs_sibling_pane_session_on_either_side() {
+        let grid = split(H, 0.5, pane("a", Some("s1")), pane("b", None));
+        assert_eq!(split_sibling_session(&grid, "b"), Some("s1"));
+        let flipped = split(H, 0.5, pane("b", None), pane("a", Some("s1")));
+        assert_eq!(split_sibling_session(&flipped, "b"), Some("s1"));
+    }
+
+    #[test]
+    fn tabs_sibling_subtree_gives_its_first_session_left_to_right() {
+        let sibling = split(
+            V,
+            0.5,
+            pane("x", None),
+            split(H, 0.5, pane("y", Some("s2")), pane("z", Some("s3"))),
+        );
+        let grid = split(H, 0.5, sibling, pane("e", None));
+        assert_eq!(split_sibling_session(&grid, "e"), Some("s2"));
+    }
+
+    #[test]
+    fn tabs_sibling_without_a_session_is_none() {
+        let grid = split(H, 0.5, pane("a", None), pane("b", None));
+        assert_eq!(split_sibling_session(&grid, "b"), None);
+        let grid = split(
+            H,
+            0.5,
+            pane("far", Some("s9")),
+            split(V, 0.5, pane("x", None), pane("e", None)),
+        );
+        assert_eq!(
+            split_sibling_session(&grid, "e"),
+            None,
+            "only the immediate sibling counts, not a farther pane"
+        );
+    }
+
+    #[test]
+    fn tabs_sibling_of_a_nested_pane() {
+        assert_eq!(
+            split_sibling_session(&three(), "b"),
+            Some("s2"),
+            "b's sibling is c, not a"
+        );
+        assert_eq!(split_sibling_session(&three(), "a"), Some("s2"));
     }
 
     #[test]

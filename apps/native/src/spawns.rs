@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use protocol::{CheckoutStrategy, ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
-use crate::tabs::{PaneTarget, Placement, TabsModel};
+use crate::tabs::{PaneTarget, Placement, TabsModel, collect_panes};
 
 /// Where a spawned session opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,13 +16,41 @@ pub enum OpenIn {
     Tab(String),
     /// A tab of its own.
     NewTab,
+    /// The pane the spawn was aimed at.
+    Pane(PaneAim),
+}
+
+/// A pane a spawn is aimed at, as it was when the spawn was aimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAim {
+    pub tab_id: String,
+    pub pane_id: String,
+    /// What the pane showed: nothing for an empty pane, the stopped session
+    /// under the overlay. The reply takes the pane only while it still
+    /// shows exactly this.
+    pub expected: Option<String>,
+    /// A stopped session the new one takes the place of: every pane that
+    /// shows it is rebound, then it is discarded, worktree kept.
+    pub discard: Option<String>,
+}
+
+impl PaneAim {
+    /// Where a spawn from a dialog aimed here opens: this pane for the
+    /// current-tab choice, else the tab picked, without the discard.
+    pub(crate) fn open_in(self, chosen: OpenIn) -> OpenIn {
+        match chosen {
+            OpenIn::CurrentTab(_) => OpenIn::Pane(self),
+            other => other,
+        }
+    }
 }
 
 /// What placing a spawn's reply takes.
 #[derive(Debug)]
 pub(crate) struct SpawnPlaced {
-    /// The request that puts the session in its pane or tab.
-    pub message: ClientMessage,
+    /// The requests that put the session in its pane or tab, in order: a
+    /// discard of the session it replaces goes last.
+    pub messages: Vec<ClientMessage>,
     /// The tab model changed (a tab activated, a pane focused), so the view
     /// must follow it.
     pub relayout: bool,
@@ -77,10 +105,22 @@ impl PendingSpawns {
         self.pending.contains_key(request_id)
     }
 
+    /// Whether a spawn aimed at pane `pane_id` of `tab_id` waits for its
+    /// reply.
+    pub(crate) fn aims_at(&self, tab_id: &str, pane_id: &str) -> bool {
+        self.pending.values().any(|pending| {
+            matches!(&pending.open_in, OpenIn::Pane(aim) if aim.tab_id == tab_id && aim.pane_id == pane_id)
+        })
+    }
+
     /// When `request_id` names a pending spawn: where `session` goes. A new
     /// tab is armed so the tab's arrival activates it; a named tab is
     /// activated so the new pane takes its focus, and a filled empty pane is
-    /// focused at once.
+    /// focused at once. An aimed pane that still shows what it showed takes
+    /// the session and the focus, with every other pane showing the session
+    /// it replaces, and that session is discarded last. Otherwise the
+    /// session goes to the aimed tab (else the active one) and nothing is
+    /// discarded.
     pub(crate) fn place(
         &mut self,
         request_id: &str,
@@ -89,12 +129,22 @@ impl PendingSpawns {
         sessions: &[SessionSnapshot],
     ) -> Option<SpawnPlaced> {
         let open_in = self.pending.remove(request_id)?.open_in;
+        if let OpenIn::Pane(aim) = &open_in
+            && pane_shows(tabs, aim)
+        {
+            return Some(into_pane(aim, session, tabs));
+        }
         let placement = match &open_in {
             OpenIn::NewTab => Placement::NewTab,
             OpenIn::CurrentTab(tab_id) | OpenIn::Tab(tab_id) => {
                 tabs.activate(tab_id);
                 tabs.place_in(tab_id, session, sessions)
             }
+            OpenIn::Pane(aim) if tabs.tab(&aim.tab_id).is_some() => {
+                tabs.activate(&aim.tab_id);
+                tabs.place_in(&aim.tab_id, session, sessions)
+            }
+            OpenIn::Pane(_) => tabs.place(session, sessions),
         };
         match &placement {
             Placement::NewTab => tabs.arm_create(),
@@ -105,7 +155,7 @@ impl PendingSpawns {
             Placement::Pane { .. } => {}
         }
         Some(SpawnPlaced {
-            message: placement.message(&session.id),
+            messages: vec![placement.message(&session.id)],
             relayout: open_in != OpenIn::NewTab,
         })
     }
@@ -199,6 +249,59 @@ impl PendingSpawns {
     }
 }
 
+/// Whether the aimed pane is still there and shows exactly what it showed
+/// when the spawn was aimed.
+fn pane_shows(tabs: &TabsModel, aim: &PaneAim) -> bool {
+    tabs.tab(&aim.tab_id)
+        .and_then(protocol::TabEntry::grid)
+        .is_some_and(|grid| {
+            collect_panes(grid)
+                .iter()
+                .any(|pane| pane.id == aim.pane_id && pane.session == aim.expected.as_deref())
+        })
+}
+
+/// `session` into the aimed pane, which takes the focus, and into every
+/// other pane of any tab that shows the session it replaces; then the
+/// discard of that session, sent last so the daemon has rebound the panes
+/// before it closes the replaced session's, as
+/// [`crate::session_actions::Duplicates::place`] orders it.
+fn into_pane(aim: &PaneAim, session: &SessionSnapshot, tabs: &mut TabsModel) -> SpawnPlaced {
+    let mut panes = vec![(aim.tab_id.clone(), aim.pane_id.clone())];
+    if let Some(discard) = &aim.discard {
+        panes.extend(
+            tabs.bindings()
+                .into_iter()
+                .filter(|binding| binding.session_id.as_ref() == Some(discard))
+                .filter(|binding| binding.tab_id != aim.tab_id || binding.pane_id != aim.pane_id)
+                .map(|binding| (binding.tab_id, binding.pane_id)),
+        );
+    }
+    tabs.focus_pane(&aim.tab_id, &aim.pane_id);
+    let mut messages: Vec<ClientMessage> = panes
+        .into_iter()
+        .map(|(tab_id, pane_id)| {
+            Placement::Pane {
+                tab_id,
+                target: PaneTarget::Replace { pane_id },
+            }
+            .message(&session.id)
+        })
+        .collect();
+    messages.extend(
+        aim.discard
+            .as_ref()
+            .map(|id| ClientMessage::DiscardSession {
+                session_id: id.to_owned(),
+                cleanup: Vec::new(),
+            }),
+    );
+    SpawnPlaced {
+        messages,
+        relayout: true,
+    }
+}
+
 /// Whether `request` is an in-place spawn of `branch` in `repo` that the
 /// daemon may still decline over a dirty tree.
 fn awaits_checkout(request: &SpawnRequest, repo: &str, branch: &str) -> bool {
@@ -269,6 +372,238 @@ mod tests {
         }
     }
 
+    /// The one message a placement sends.
+    fn only(placed: &SpawnPlaced) -> &ClientMessage {
+        match placed.messages.as_slice() {
+            [msg] => msg,
+            other => panic!("expected one message, got {other:?}"),
+        }
+    }
+
+    /// A spawn aimed at a pane showing `stopped` (None for an empty pane),
+    /// which it replaces and discards, as the pane's buttons aim one.
+    fn aim_at(tab_id: &str, pane_id: &str, stopped: Option<&str>) -> OpenIn {
+        OpenIn::Pane(PaneAim {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+            expected: stopped.map(str::to_owned),
+            discard: stopped.map(str::to_owned),
+        })
+    }
+
+    fn discard_msg(session_id: &str) -> serde_json::Value {
+        wire(&ClientMessage::DiscardSession {
+            session_id: session_id.to_owned(),
+            cleanup: Vec::new(),
+        })
+    }
+
+    fn replace_msg(tab_id: &str, pane_id: &str, session_id: &str) -> serde_json::Value {
+        wire(&ClientMessage::ReplacePaneSession {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+            session_id: Some(session_id.to_owned()),
+        })
+    }
+
+    #[test]
+    fn pane_spawn_replaces_its_pane_and_focuses_it() {
+        let grid = protocol::GridNode::Split {
+            direction: protocol::SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("a", Some("s1"))),
+            second: Box::new(pane("b", None)),
+        };
+        let mut tabs = model_with(&[tab("t1", &pane("x", None)), tab("t2", &grid)]);
+        assert_eq!(tabs.active_id(), Some("t1"));
+        tabs.take_focus_request();
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "q1".to_owned(), aim_at("t2", "b", None));
+
+        let new = session("new", Some("r1"), None);
+        let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
+        assert_eq!(wire(only(&placed)), replace_msg("t2", "b", "new"));
+        assert!(placed.relayout);
+        assert_eq!(
+            tabs.active_id(),
+            Some("t2"),
+            "the pane's tab comes to the front"
+        );
+        assert_eq!(tabs.take_focus_request().as_deref(), Some("b"));
+        assert!(!spawns.has_request("q1"), "placed once");
+    }
+
+    #[test]
+    fn pane_spawn_replaces_a_stopped_session_then_discards_it_last() {
+        let mut tabs = model_with(&[tab("t1", &pane("a", Some("old")))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", Some("old")),
+        );
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        let sent: Vec<serde_json::Value> = placed.messages.iter().map(wire).collect();
+        assert_eq!(
+            sent,
+            [replace_msg("t1", "a", "new"), discard_msg("old")],
+            "the pane is rebound before the old session goes, worktree kept"
+        );
+        assert_eq!(tabs.take_focus_request().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn pane_spawn_rebinds_every_pane_showing_the_stopped_session() {
+        let grid = protocol::GridNode::Split {
+            direction: protocol::SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("c", Some("old"))),
+            second: Box::new(pane("d", Some("s2"))),
+        };
+        let mut tabs = model_with(&[tab("t1", &pane("a", Some("old"))), tab("t2", &grid)]);
+        tabs.take_focus_request();
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", Some("old")),
+        );
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        let sent: Vec<serde_json::Value> = placed.messages.iter().map(wire).collect();
+        assert_eq!(
+            sent,
+            [
+                replace_msg("t1", "a", "new"),
+                replace_msg("t2", "c", "new"),
+                discard_msg("old"),
+            ],
+            "every pane of the stopped session is rebound before it goes"
+        );
+        assert_eq!(tabs.active_id(), Some("t1"), "the aimed pane's tab");
+        assert_eq!(tabs.take_focus_request().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn pane_spawn_whose_pane_closed_is_placed_in_its_tab_without_discard() {
+        let mut tabs = model_with(&[
+            tab("t1", &pane("x", None)),
+            tab("t2", &pane("a", Some("s1"))),
+        ]);
+        assert_eq!(tabs.active_id(), Some("t1"));
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("t2", "gone", Some("old")),
+        );
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t2" && pane_id == "a"),
+            "smart placement in the aimed tab, not the active one, and no discard: {:?}",
+            placed.messages
+        );
+        assert!(placed.relayout);
+        assert_eq!(
+            tabs.active_id(),
+            Some("t2"),
+            "the aimed tab comes to the front"
+        );
+    }
+
+    #[test]
+    fn pane_spawn_whose_pane_took_another_session_evicts_nothing() {
+        let mut tabs = model_with(&[
+            tab("t1", &pane("x", None)),
+            tab("t2", &pane("b", Some("restarted"))),
+        ]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("t2", "b", Some("old")),
+        );
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t2" && pane_id == "b"),
+            "the pane keeps what it took; the new session goes beside it: {:?}",
+            placed.messages
+        );
+        assert_eq!(tabs.active_id(), Some("t2"));
+    }
+
+    #[test]
+    fn empty_pane_spawn_whose_pane_filled_meanwhile_evicts_nothing() {
+        let mut tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "q1".to_owned(), aim_at("t1", "a", None));
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::SplitPane { tab_id, pane_id, .. } if tab_id == "t1" && pane_id == "a"),
+            "sent {:?}",
+            placed.messages
+        );
+    }
+
+    #[test]
+    fn aims_at_names_the_panes_a_spawn_waits_for() {
+        let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "q0".to_owned(), OpenIn::NewTab);
+        assert!(!spawns.aims_at("t1", "a"));
+
+        spawns.start(request(true), "q1".to_owned(), aim_at("t1", "a", None));
+        assert!(spawns.aims_at("t1", "a"));
+        assert!(!spawns.aims_at("t1", "b"), "another pane");
+        assert!(!spawns.aims_at("t2", "a"), "another tab");
+        spawns.place("q1", &session("new", None, None), &mut tabs, &[]);
+        assert!(!spawns.aims_at("t1", "a"), "placed");
+
+        spawns.start(request(true), "q2".to_owned(), aim_at("t1", "a", None));
+        assert!(spawns.fail("q2"));
+        assert!(!spawns.aims_at("t1", "a"), "failed");
+    }
+
+    #[test]
+    fn pane_spawn_whose_tab_closed_falls_back_to_the_active_tab_else_a_new_one() {
+        let mut tabs = model_with(&[tab("t1", &pane("a", None))]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("gone", "b", Some("old")),
+        );
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert_eq!(wire(only(&placed)), replace_msg("t1", "a", "new"));
+
+        let mut empty = TabsModel::new(None);
+        spawns.start(
+            request(true),
+            "q2".to_owned(),
+            aim_at("gone", "b", Some("old")),
+        );
+        let placed = spawns
+            .place("q2", &session("new", None, None), &mut empty, &[])
+            .expect("placed");
+        assert!(matches!(only(&placed), ClientMessage::CreateTab { .. }));
+    }
+
     #[test]
     fn start_stamps_the_request_id() {
         let mut spawns = PendingSpawns::default();
@@ -290,7 +625,7 @@ mod tests {
         let new = session("new", Some("r1"), None);
         let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
         assert_eq!(
-            wire(&placed.message),
+            wire(only(&placed)),
             wire(&ClientMessage::ReplacePaneSession {
                 tab_id: "t2".to_owned(),
                 pane_id: "b".to_owned(),
@@ -316,7 +651,7 @@ mod tests {
         let new = session("new", None, None);
         let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
         assert!(
-            matches!(placed.message, ClientMessage::SplitPane { ref pane_id, .. } if pane_id == "a")
+            matches!(only(&placed), ClientMessage::SplitPane { pane_id, .. } if pane_id == "a")
         );
         tabs.take_focus_request();
 
@@ -339,7 +674,7 @@ mod tests {
         let new = session("new", None, None);
         let placed = spawns.place("q1", &new, &mut tabs, &[]).expect("placed");
         assert_eq!(
-            wire(&placed.message),
+            wire(only(&placed)),
             wire(&ClientMessage::CreateTab {
                 name: None,
                 initial_session_id: Some("new".to_owned()),
@@ -362,7 +697,7 @@ mod tests {
         let placed = spawns
             .place("q1", &session("new", None, None), &mut tabs, &[])
             .expect("placed");
-        assert!(matches!(placed.message, ClientMessage::CreateTab { .. }));
+        assert!(matches!(only(&placed), ClientMessage::CreateTab { .. }));
         assert!(tabs.apply(&updated(&tab("t9", &pane("n", Some("new"))))));
         assert_eq!(tabs.active_id(), Some("t9"));
     }

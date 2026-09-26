@@ -77,7 +77,7 @@ pub use crate::notices::{
 };
 pub use crate::quit_view::QuitFn;
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
-pub use crate::spawns::OpenIn;
+pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::text_input::bind_keys;
 
 const PADDING: f32 = 6.0;
@@ -972,7 +972,7 @@ impl RootView {
         } else if ctrl_only && ks.key == "b" && self.outside_terminal(window, cx) {
             self.toggle_sidebar(window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
-            self.open_spawn_dialog(window, cx);
+            self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
         } else {
             return false;
         }

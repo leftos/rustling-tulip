@@ -5,18 +5,34 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent,
-    Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*, px, relative,
+    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, MouseButton,
+    MouseDownEvent, Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*,
+    px, relative,
 };
-use protocol::{ClientMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabContent};
+use protocol::{
+    ClientMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabContent, TabEntry,
+};
 
+use crate::session_menu::{BorderedButton, bordered_button};
+use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::can_attach;
+use crate::spawn_view::SpawnEntry;
+use crate::spawns::{OpenIn, PaneAim};
 use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term_view::{PaneEvent, TerminalPane};
 use crate::{
     BAR_BG, BORDER, DIVIDER_WIDTH, Drag, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE,
     drag_handle, new_request_id, tooltip,
 };
+
+/// Why a repo-tied spawn button is disabled.
+pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessions.";
+/// Why a pane's spawn buttons are disabled while a spawn aimed at it waits.
+pub(crate) const PANE_PENDING_TIP: &str = "A new session is on its way to this pane";
+const PANE_SPAWN_TIP: &str = "Open the spawn dialog; the new session fills this pane";
+const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered folder";
+pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
+const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
 const PANE_HEADER_HEIGHT: f32 = 20.0;
 /// The border of the pane that has its tab's focus.
@@ -416,11 +432,209 @@ impl RootView {
         });
     }
 
-    /// The active tab: its split tree, a notice for a diff tab, or a hint
-    /// when there is no tab.
+    /// Whether any repo is registered, which a repo-tied spawn needs.
+    #[must_use]
+    pub fn has_repos(&self) -> bool {
+        !self.sidebar.repos().is_empty()
+    }
+
+    /// The panes of the tab on screen that show no session.
+    #[must_use]
+    pub fn empty_pane_ids(&self) -> Vec<String> {
+        self.active_panes(|session| session.is_none())
+    }
+
+    /// Whether the main area with no tab open offers its spawn choices: only
+    /// once the connection is open and the tab list and the repo list have
+    /// arrived, so a repo-less hint never flashes before the repos do.
+    #[must_use]
+    pub fn no_tab_choices_shown(&self) -> bool {
+        self.tabs.active_tab().is_none()
+            && self.conn.is_open()
+            && self.tabs.is_loaded()
+            && self.sidebar.repos_loaded()
+    }
+
+    fn active_panes(&self, keep: impl Fn(Option<&str>) -> bool) -> Vec<String> {
+        self.tabs
+            .active_tab()
+            .and_then(TabEntry::grid)
+            .map(|grid| {
+                tabs::collect_panes(grid)
+                    .into_iter()
+                    .filter(|pane| keep(pane.session))
+                    .map(|pane| pane.id.to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Gives pane `pane_id` of `tab_id` its tab's focus and the keyboard.
+    fn focus_pane_in(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) {
+        self.tabs.set_focused(tab_id, pane_id);
+        self.focus_pane_view(pane_id, window, cx);
+    }
+
+    /// A pane's "New session…": focuses the pane and opens the spawn dialog
+    /// aimed at it. Over a stopped session (`replacing`) the dialog starts
+    /// on that session's repo or workspace and the session is discarded
+    /// once the new one takes the pane; in an empty pane it starts on the
+    /// split sibling's. Nothing while a spawn aimed at the pane is on its
+    /// way.
+    pub(crate) fn new_session_in_pane(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        replacing: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.spawns.aims_at(tab_id, pane_id) {
+            return;
+        }
+        self.focus_pane_in(tab_id, pane_id, window, cx);
+        let preselect = match replacing {
+            Some(id) => Some(id.to_owned()),
+            None => self
+                .tabs
+                .tab(tab_id)
+                .and_then(TabEntry::grid)
+                .and_then(|grid| tabs::split_sibling_session(grid, pane_id))
+                .map(str::to_owned),
+        };
+        let aim = PaneAim {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+            expected: replacing.map(str::to_owned),
+            discard: replacing.map(str::to_owned),
+        };
+        self.open_spawn_dialog(SpawnEntry::Pane { aim, preselect }, window, cx);
+        cx.notify();
+    }
+
+    /// An empty pane's "Shell here": the quick shell, into this pane.
+    /// Nothing while a spawn aimed at the pane is on its way.
+    fn shell_in_pane(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.spawns.aims_at(tab_id, pane_id) {
+            return;
+        }
+        self.focus_pane_in(tab_id, pane_id, window, cx);
+        let cwd = self.sidebar.quick_shell_dir().map(str::to_owned);
+        let open_in = OpenIn::Pane(PaneAim {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+            expected: None,
+            discard: None,
+        });
+        self.spawn(standalone_shell_request(cwd), open_in, cx);
+        cx.notify();
+    }
+
+    /// The main area with no tab open: "Spawn a session" and "Open shell",
+    /// and why the first is disabled when no repo is registered. Before the
+    /// connection, the tabs and the repos are in, only "No tab open".
+    fn no_tab(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.no_tab_choices_shown() {
+            return muted_note("No tab open").into_any_element();
+        }
+        let has_repos = self.has_repos();
+        let spawn = BorderedButton {
+            selector: "empty-spawn-session".to_owned(),
+            label: "Spawn a session",
+            tip: if has_repos { SPAWN_TIP } else { NO_REPOS_TIP },
+            enabled: has_repos,
+        };
+        let spawn = bordered_button(spawn, cx, |this, window, cx| {
+            this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
+        });
+        let shell = BorderedButton {
+            selector: "empty-open-shell".to_owned(),
+            label: "Open shell",
+            tip: OPEN_SHELL_TIP,
+            enabled: true,
+        };
+        let shell = bordered_button(shell, cx, |this, _, cx| this.quick_shell(cx));
+        spawn_choices("No tab open", [spawn, shell])
+            .when(!has_repos, |note| {
+                note.child(
+                    div()
+                        .debug_selector(|| "empty-repo-hint".to_owned())
+                        .child(NO_REPOS_TIP),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// An empty pane: "No session" over "New session…" and "Shell here". A
+    /// press on it gives the pane the keyboard.
+    fn empty_pane(
+        &self,
+        tab_id: &str,
+        pane_id: &str,
+        focus: Option<FocusHandle>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_repos = self.has_repos();
+        let pending = self.spawns.aims_at(tab_id, pane_id);
+        let spawn = BorderedButton {
+            selector: format!("empty-pane-new-session-{pane_id}"),
+            label: "New session…",
+            tip: if !has_repos {
+                NO_REPOS_TIP
+            } else if pending {
+                PANE_PENDING_TIP
+            } else {
+                PANE_SPAWN_TIP
+            },
+            enabled: has_repos && !pending,
+        };
+        let ids = (tab_id.to_owned(), pane_id.to_owned());
+        let spawn = bordered_button(spawn, cx, move |this, window, cx| {
+            this.new_session_in_pane(&ids.0, &ids.1, None, window, cx);
+        });
+        let shell = BorderedButton {
+            selector: format!("empty-pane-shell-{pane_id}"),
+            label: "Shell here",
+            tip: if pending {
+                PANE_PENDING_TIP
+            } else {
+                PANE_SHELL_TIP
+            },
+            enabled: !pending,
+        };
+        let ids = (tab_id.to_owned(), pane_id.to_owned());
+        let shell = bordered_button(shell, cx, move |this, window, cx| {
+            this.shell_in_pane(&ids.0, &ids.1, window, cx);
+        });
+        let body = spawn_choices("No session", [spawn, shell]);
+        match focus {
+            Some(handle) => body
+                .track_focus(&handle)
+                .on_mouse_down(MouseButton::Left, move |_, window, _| {
+                    handle.focus(window);
+                })
+                .into_any_element(),
+            None => body.into_any_element(),
+        }
+    }
+
+    /// The active tab: its split tree, a notice for a diff tab, or the
+    /// spawn choices when there is no tab.
     pub(crate) fn grid_area(&self, cx: &mut Context<Self>) -> Div {
         let content = match self.tabs.active_tab() {
-            None => muted_note("No tab open").into_any_element(),
+            None => self.no_tab(cx),
             Some(tab) => match &tab.content {
                 TabContent::Diff { .. } => {
                     muted_note("Diff tab (not yet supported)").into_any_element()
@@ -517,14 +731,9 @@ impl RootView {
             }
             (None, Some(slot)) => {
                 let handle = slot.view.read(cx).focus_handle();
-                muted_note("Empty pane")
-                    .track_focus(&handle)
-                    .on_mouse_down(MouseButton::Left, move |_, window, _| {
-                        handle.focus(window);
-                    })
-                    .into_any_element()
+                self.empty_pane(tab_id, pane_id, Some(handle), cx)
             }
-            (None, None) => muted_note("Empty pane").into_any_element(),
+            (None, None) => self.empty_pane(tab_id, pane_id, None, cx),
         };
         let body = div()
             .relative()
@@ -533,7 +742,7 @@ impl RootView {
             .flex_1()
             .min_h(px(0.0))
             .child(body)
-            .children(self.exited_overlay(pane_id, session_id, cx));
+            .children(self.exited_overlay(tab_id, pane_id, session_id, cx));
         div()
             .flex()
             .flex_col()
@@ -657,6 +866,19 @@ fn muted_note(text: &'static str) -> Div {
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(MUTED))
         .child(text)
+}
+
+/// A muted `heading` over a row of `buttons`, centred in the space it is
+/// given.
+fn spawn_choices(heading: &'static str, buttons: [Stateful<Div>; 2]) -> Div {
+    muted_note(heading).flex_col().gap(px(8.0)).child(
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap(px(6.0))
+            .children(buttons),
+    )
 }
 
 /// A small glyph button in a pane header.

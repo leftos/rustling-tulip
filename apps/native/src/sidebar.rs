@@ -120,6 +120,7 @@ impl Default for UiState {
 #[derive(Debug, Default)]
 pub struct SidebarModel {
     repos: Vec<RepoEntry>,
+    repos_loaded: bool,
     workspaces: Vec<WorkspaceEntry>,
     sessions: Vec<SessionSnapshot>,
     container_order: Vec<ContainerRef>,
@@ -140,7 +141,10 @@ impl SidebarModel {
     /// ignored.
     pub fn apply(&mut self, msg: &DaemonMessage) {
         match msg {
-            DaemonMessage::Repos { repos } => repos.clone_into(&mut self.repos),
+            DaemonMessage::Repos { repos } => {
+                repos.clone_into(&mut self.repos);
+                self.repos_loaded = true;
+            }
             DaemonMessage::Workspaces { workspaces } => workspaces.clone_into(&mut self.workspaces),
             DaemonMessage::ContainersReordered { ordered } => {
                 ordered.clone_into(&mut self.container_order);
@@ -193,6 +197,11 @@ impl SidebarModel {
     /// The registered repos, in the daemon's order.
     pub fn repos(&self) -> &[RepoEntry] {
         &self.repos
+    }
+
+    /// Whether the daemon's repo list has arrived.
+    pub fn repos_loaded(&self) -> bool {
+        self.repos_loaded
     }
 
     /// The registered workspaces, in the daemon's order.

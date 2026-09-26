@@ -55,7 +55,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
 - [ ] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx`
 - [ ] Daemon-pushed "VS Code workspace detected" prompt: Not now / Create / Create & watch — `VscodeSuggestionToast.tsx`
-- [ ] Empty states: no repos (different wording on remote); main area shows Select a tab / Spawn a session / Open shell + Add repo — `Sidebar.tsx`, `App.tsx` `EmptyState`
+- [ ] Empty states: no repos (different wording on remote); main area shows Select a tab / Spawn a session / Open shell + Add repo — `Sidebar.tsx`, `App.tsx` `EmptyState` (native: Spawn a session and Open shell landed in P1.7d; Add repo waits for the repo picker)
 
 ## Sessions
 
@@ -63,7 +63,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
 - [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx`
-- [ ] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
+- [x] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
 - [ ] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx`
 - [ ] Headless view: status, tokens in/out, cost, recent-actions log (last 200, "Show all") — `SessionPane.tsx` `HeadlessView`
 - [ ] Display label order: user label → shell cwd name → terminal title (skipping bare shell names) → daemon label → runtime — `utils/sessionLabel.ts`
