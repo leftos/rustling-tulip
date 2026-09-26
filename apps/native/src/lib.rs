@@ -71,7 +71,7 @@ use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
-use crate::session_menu::{DeleteDialog, SessionMenu};
+use crate::session_menu::{DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
@@ -80,6 +80,7 @@ use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
+use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 
 pub use crate::connection::Connection;
@@ -331,6 +332,8 @@ pub struct RootView {
     paths: Result<LogPaths, String>,
     /// The session context menu, while open.
     menu: Option<SessionMenu>,
+    /// The gutter-dot command menu, while open.
+    shell_menu: Option<ShellMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
     /// The tab context menu, while open.
@@ -448,6 +451,12 @@ impl RootView {
             }
         })
         .detach();
+        // A resize moves every dot, so an open gutter menu closes with it
+        // rather than point at a row that is no longer there.
+        cx.observe_window_bounds(window, |root, window, cx| {
+            root.close_shell_menu(window, cx);
+        })
+        .detach();
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // A view that is gone has nothing to ask; let the window close.
@@ -491,6 +500,7 @@ impl RootView {
             chip_timer: None,
             paths,
             menu: None,
+            shell_menu: None,
             menu_focus: cx.focus_handle(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
@@ -680,6 +690,22 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// The finished command the gutter dot at `index` of pane `pane_id`
+    /// stands for, as its menu shows it.
+    #[must_use]
+    pub fn pane_shell_command(
+        &self,
+        pane_id: &str,
+        index: usize,
+        cx: &App,
+    ) -> Option<ShellCommand> {
+        self.panes
+            .get(pane_id)?
+            .view()
+            .read(cx)
+            .shell_command(index)
+    }
+
     /// The text of the link pane `pane_id` underlines: the one under the
     /// mouse while Ctrl is held.
     #[must_use]
@@ -761,6 +787,7 @@ impl RootView {
     /// Hide or show the sidebar; hiding it hands the keyboard back to the
     /// active tab's focused pane, since the sidebar may have held it.
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_shell_menu(window, cx);
         self.sidebar.toggle_sidebar();
         self.drag = None;
         self.save_ui();
@@ -1240,9 +1267,12 @@ impl RootView {
             self.close_tab_menu(window, cx);
         } else if self.menu.is_some() && ks.key == "escape" {
             self.close_session_menu(window, cx);
+        } else if self.shell_menu.is_some() && ks.key == "escape" {
+            self.close_shell_menu(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
             self.close_flyout();
         } else if let Some(key) = font_key(ks) {
+            self.close_shell_menu(window, cx);
             self.on_font_key(key, cx);
         } else if ctrl_only && ks.key == "b" && self.outside_terminal(window, cx) {
             self.toggle_sidebar(window, cx);
@@ -1489,6 +1519,7 @@ impl Render for RootView {
             .child(self.main_row(window, cx))
             .child(self.footer_bar(&footer, cx))
             .children(self.session_menu_layer(cx).into_iter().flatten())
+            .children(self.shell_menu_layer(cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             // Above the flyout's backdrop, so the chip's tooltip is reachable

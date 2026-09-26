@@ -3,8 +3,8 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable as _,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
-    Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
+    SharedString, Stateful, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
@@ -13,8 +13,9 @@ use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::notices::ToastKind;
 use crate::session_actions::{
-    MenuEntry, MenuMode, SessionAction, Step, exit_code_label, exited_message,
-    header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
+    ActionState, MenuEntry, MenuMode, SessionAction, Step, action_state, exit_code_label,
+    exited_message, header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan,
+    rename_message,
 };
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -131,6 +132,32 @@ fn preset_selector(name: &str) -> String {
 fn recent_selector(color: u32) -> String {
     format!("accent-recent-{color:06x}")
 }
+
+/// The open gutter-dot command menu. Its texts are taken when it opens, so
+/// output, or a gutter re-indexed while the menu is up, leaves it pointing
+/// at the command it was opened for.
+pub(crate) struct ShellMenu {
+    /// The pane whose dot opened it.
+    pane_id: String,
+    /// The session that pane shows, when it shows one.
+    session_id: Option<String>,
+    /// The header row: the dot's tooltip.
+    header: String,
+    /// The command line, `""` when the shell left none.
+    command: String,
+    /// The command's output, `""` when there is none.
+    output: String,
+    /// Where the dot's top-right corner is, in window coordinates.
+    at: Point<Pixels>,
+}
+
+/// The four rows of the gutter menu, with the selector of each.
+const SHELL_MENU_ROWS: [&str; 4] = [
+    "shell-menu-copy-command",
+    "shell-menu-copy-output",
+    "shell-menu-copy-both",
+    "shell-menu-rerun",
+];
 
 /// A menu row as shown: its selector, its text, and what it does.
 struct Row {
@@ -446,6 +473,7 @@ impl RootView {
     /// armed confirm, as when the connection goes.
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
+        self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_delete_dialog(window, cx);
     }
@@ -1296,4 +1324,206 @@ fn rename_row(input: &Entity<TextInput>) -> AnyElement {
         )
         .child(div().w_full().child(input.clone()))
         .into_any_element()
+}
+
+impl RootView {
+    /// Whether the gutter-dot command menu is open.
+    #[must_use]
+    pub fn shell_menu_open(&self) -> bool {
+        self.shell_menu.is_some()
+    }
+
+    /// The selectors of the gutter menu's rows, empty while it is closed.
+    #[must_use]
+    pub fn shell_menu_rows(&self) -> Vec<String> {
+        self.shell_menu
+            .as_ref()
+            .map(|_| SHELL_MENU_ROWS.map(str::to_owned).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// The header row the gutter menu shows.
+    #[must_use]
+    pub fn shell_menu_header(&self) -> Option<String> {
+        self.shell_menu.as_ref().map(|menu| menu.header.clone())
+    }
+
+    /// Whether the gutter menu's "Re-run command" acts: its command is not
+    /// empty, its session still takes input, and its pane can take the
+    /// command (a multi-line one only as a bracketed paste).
+    #[must_use]
+    pub fn shell_menu_can_rerun(&self, cx: &App) -> bool {
+        self.shell_menu
+            .as_ref()
+            .is_some_and(|menu| self.can_rerun(menu, cx))
+    }
+
+    /// Opens the gutter menu of the dot at `index` of the pane `pane_id`,
+    /// which the pane anchored at `at`.
+    pub(crate) fn open_shell_menu(
+        &mut self,
+        pane_id: &str,
+        index: usize,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(command) = self.pane_shell_command(pane_id, index, cx) else {
+            return;
+        };
+        self.close_session_menu(window, cx);
+        self.close_tab_menu(window, cx);
+        self.shell_menu = Some(ShellMenu {
+            pane_id: pane_id.to_owned(),
+            session_id: self.pane_session(pane_id),
+            header: command.header,
+            command: command.command,
+            output: command.output,
+            at,
+        });
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Closes the gutter menu and hands the keyboard back to the active
+    /// pane.
+    pub(crate) fn close_shell_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell_menu.take().is_some() {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Whether `menu`'s command can be typed again: it is not empty, its
+    /// session still takes input, and its pane takes the command's bytes.
+    fn can_rerun(&self, menu: &ShellMenu, cx: &App) -> bool {
+        !menu.command.is_empty()
+            && menu.session_id.as_deref().is_some_and(|id| {
+                self.sidebar
+                    .session(id)
+                    .is_some_and(|session| action_state(session) == ActionState::Running)
+            })
+            && self
+                .panes
+                .get(&menu.pane_id)
+                .is_some_and(|slot| slot.view().read(cx).rerun_bytes(&menu.command).is_some())
+    }
+
+    /// The open gutter menu over a layer that keeps a click outside it from
+    /// reaching what lies beneath. The layer takes the wheel too, so a
+    /// scroll anywhere, which would move the menu's dot, closes it.
+    pub(crate) fn shell_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let menu = self.shell_menu.as_ref()?;
+        let backdrop = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, window, cx| {
+                this.close_shell_menu(window, cx);
+            }));
+        let panel = anchored()
+            .position(menu.at)
+            .snap_to_window()
+            .child(self.shell_menu_panel(menu, cx));
+        Some([
+            backdrop.into_any_element(),
+            deferred(panel).with_priority(1).into_any_element(),
+        ])
+    }
+
+    fn shell_menu_panel(&self, menu: &ShellMenu, cx: &mut Context<Self>) -> Stateful<Div> {
+        let both = if menu.output.is_empty() {
+            menu.command.clone()
+        } else {
+            format!("{}\n{}", menu.command, menu.output)
+        };
+        menu_frame(
+            "shell-menu",
+            &self.menu_focus,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.close_shell_menu(window, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .child(muted_row(menu.header.clone()))
+        .child(Self::shell_copy_row(
+            SHELL_MENU_ROWS[0],
+            "Copy command",
+            menu.command.clone(),
+            cx,
+        ))
+        .child(Self::shell_copy_row(
+            SHELL_MENU_ROWS[1],
+            "Copy output only",
+            menu.output.clone(),
+            cx,
+        ))
+        .child(Self::shell_copy_row(
+            SHELL_MENU_ROWS[2],
+            "Copy command and output",
+            both,
+            cx,
+        ))
+        .child(self.shell_rerun_row(menu, cx))
+    }
+
+    /// A copy row: it puts `text` on the clipboard, chip included, and
+    /// closes the menu.
+    fn shell_copy_row(
+        selector: &str,
+        label: &'static str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        menu_item(selector, label, false)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.copy_to_clipboard(&text, cx);
+                    this.close_shell_menu(window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The re-run row: inert and dimmed while its session is stopped, its
+    /// command empty, or its session gone.
+    fn shell_rerun_row(&self, menu: &ShellMenu, cx: &mut Context<Self>) -> AnyElement {
+        let row = menu_item(SHELL_MENU_ROWS[3], "Re-run command", false);
+        if !self.can_rerun(menu, cx) {
+            return row.opacity(0.6).cursor_default().into_any_element();
+        }
+        let (pane_id, command) = (menu.pane_id.clone(), menu.command.clone());
+        row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                // First, so the keyboard it hands the tab's focused pane
+                // back is then taken by the command's pane.
+                this.close_shell_menu(window, cx);
+                this.rerun_command(&pane_id, &command, window, cx);
+            }),
+        )
+        .into_any_element()
+    }
+
+    /// Types `command` at `pane_id`'s session without a newline and makes
+    /// that pane its tab's focused one, keyboard included, as the menu's
+    /// re-run does.
+    fn rerun_command(
+        &mut self,
+        pane_id: &str,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.panes.get(pane_id).map(|slot| slot.view().clone()) else {
+            return;
+        };
+        view.update(cx, |pane, cx| pane.rerun_command(command, window, cx));
+        self.pane_focused(pane_id, cx);
+    }
 }

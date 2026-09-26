@@ -253,7 +253,7 @@ impl RootView {
         }
     }
 
-    fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
         if let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) {
             self.tabs.set_focused(&tab_id, pane_id);
             self.update_pane_roles(cx);
@@ -437,6 +437,9 @@ impl RootView {
             PaneEvent::Copied { text } => self.copy_to_clipboard(text, cx),
             PaneEvent::OpenLink { link, base_dirs } => {
                 self.open_link(link, base_dirs.clone(), window, cx);
+            }
+            PaneEvent::ShellDotMenu { pane_id, index, at } => {
+                self.open_shell_menu(pane_id, *index, *at, window, cx);
             }
         }
     }

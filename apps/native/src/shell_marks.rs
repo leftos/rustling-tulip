@@ -58,9 +58,15 @@ pub struct Record {
     /// The row the output started on (`OSC 133;C`), when the shell said and
     /// the row is still known.
     pub output: Option<u64>,
+    /// The cursor's column at the output start: 0 when the shell marked it
+    /// after the Enter's newline, as bash, zsh and pwsh do.
+    pub output_col: usize,
     /// The row the cursor was on when the command ended (`OSC 133;D`), while
     /// the row is still known: a reflow can lose it and keep the prompt.
     pub end: Option<u64>,
+    /// The cursor's column at the end: 0 when the output ended with a
+    /// newline, so the end row is the next prompt's.
+    pub end_col: usize,
     pub exit: Option<i32>,
     /// The command line (`OSC 633;E`), when the shell sent it.
     pub command: Option<String>,
@@ -273,6 +279,7 @@ fn parse_osc(params: &[&[u8]]) -> Option<Mark> {
 struct Open {
     prompt: u64,
     output: Option<u64>,
+    output_col: usize,
     command: Option<String>,
     prompt_at: Option<Instant>,
     output_at: Option<Instant>,
@@ -299,6 +306,7 @@ impl Records {
         self.open = Some(Open {
             prompt: abs,
             output: None,
+            output_col: 0,
             command: None,
             prompt_at: at,
             output_at: None,
@@ -306,9 +314,11 @@ impl Records {
         });
     }
 
-    pub fn output(&mut self, abs: u64, at: Option<Instant>) {
+    /// The output starts on row `abs`, the cursor at column `col`.
+    pub fn output(&mut self, abs: u64, col: usize, at: Option<Instant>) {
         if let Some(open) = self.open.as_mut() {
             open.output = Some(abs);
+            open.output_col = col;
             open.output_at = at;
             open.ran = true;
         }
@@ -321,17 +331,20 @@ impl Records {
         }
     }
 
-    /// Ends the command in flight on row `abs`, if there is one. A prompt
-    /// that ran no command (an empty Enter or Ctrl+C, which zsh's and bash's
-    /// hooks still end) is dropped with no record.
-    pub fn end(&mut self, abs: u64, exit: Option<i32>, at: Option<Instant>) {
+    /// Ends the command in flight on row `abs`, the cursor at column `col`,
+    /// if there is one. A prompt that ran no command (an empty Enter or
+    /// Ctrl+C, which zsh's and bash's hooks still end) is dropped with no
+    /// record.
+    pub fn end(&mut self, abs: u64, col: usize, exit: Option<i32>, at: Option<Instant>) {
         let Some(open) = self.open.take().filter(|open| open.ran) else {
             return;
         };
         self.done.push_back(Record {
             prompt: open.prompt,
             output: open.output,
+            output_col: open.output_col,
             end: Some(abs),
+            end_col: col,
             exit,
             command: open.command,
             prompt_at: open.prompt_at,
@@ -343,11 +356,12 @@ impl Records {
         }
     }
 
-    pub fn apply(&mut self, mark: Mark, abs: u64, at: Option<Instant>) {
+    /// Applies `mark`, found with the cursor on row `abs` at column `col`.
+    pub fn apply(&mut self, mark: Mark, abs: u64, col: usize, at: Option<Instant>) {
         match mark {
             Mark::Prompt => self.prompt(abs, at),
-            Mark::Output => self.output(abs, at),
-            Mark::End(exit) => self.end(abs, exit, at),
+            Mark::Output => self.output(abs, col, at),
+            Mark::End(exit) => self.end(abs, col, exit, at),
             Mark::Command(text) => self.command(text),
         }
     }
@@ -548,8 +562,8 @@ mod tests {
         let mut records = Records::default();
         records.prompt(3, Some(t));
         records.command("make".to_owned());
-        records.output(4, Some(t + ms(100)));
-        records.end(9, Some(1), Some(t + ms(1600)));
+        records.output(4, 0, Some(t + ms(100)));
+        records.end(9, 0, Some(1), Some(t + ms(1600)));
         let done: Vec<_> = records.iter().collect();
         assert_eq!(done.len(), 1);
         assert_eq!(
@@ -572,7 +586,7 @@ mod tests {
         let mut records = Records::default();
         records.prompt(0, Some(t));
         records.command("true".to_owned());
-        records.end(1, None, Some(t + ms(40)));
+        records.end(1, 0, None, Some(t + ms(40)));
         let record = records.iter().next().expect("a record");
         assert_eq!(record.status(), ShellStatus::Unknown);
         assert_eq!(record.tooltip(), "exit ? · 40ms");
@@ -582,8 +596,8 @@ mod tests {
     fn replayed_marks_make_records_without_a_duration() {
         let mut records = Records::default();
         records.prompt(0, None);
-        records.output(1, None);
-        records.end(2, Some(0), None);
+        records.output(1, 0, None);
+        records.end(2, 0, Some(0), None);
         let record = records.iter().next().expect("a record");
         assert_eq!(record.duration(), None);
         assert_eq!(record.tooltip(), "exit 0");
@@ -593,13 +607,13 @@ mod tests {
     fn a_prompt_on_a_new_row_before_the_end_drops_the_command() {
         let mut records = Records::default();
         records.prompt(0, None);
-        records.output(0, None);
+        records.output(0, 0, None);
         records.prompt(1, None);
-        records.output(2, None);
-        records.end(3, Some(0), None);
+        records.output(2, 0, None);
+        records.end(3, 0, Some(0), None);
         let prompts: Vec<u64> = records.iter().map(|r| r.prompt).collect();
         assert_eq!(prompts, [1], "the first command never ended");
-        records.end(4, Some(0), None);
+        records.end(4, 0, Some(0), None);
         assert_eq!(
             records.iter().count(),
             1,
@@ -611,30 +625,30 @@ mod tests {
     fn an_end_with_no_command_since_the_prompt_makes_no_record() {
         // zsh: its precmd hook ends every prompt, an empty Enter's too.
         let mut records = Records::default();
-        records.end(0, Some(0), None);
+        records.end(0, 0, Some(0), None);
         records.prompt(0, None);
-        records.end(1, Some(0), None);
+        records.end(1, 0, Some(0), None);
         records.prompt(1, None);
         assert_eq!(records.iter().count(), 0, "an empty Enter makes no dot");
         records.command("ls".to_owned());
-        records.end(2, Some(0), None);
+        records.end(2, 0, Some(0), None);
         let prompts: Vec<u64> = records.iter().map(|r| r.prompt).collect();
         assert_eq!(prompts, [1], "a command line alone makes one");
 
         // bash: the PROMPT_COMMAND trap ends a prompt left by Ctrl+C.
         let mut records = Records::default();
         records.prompt(5, None);
-        records.end(6, Some(130), None);
-        records.output(6, None);
-        records.end(7, Some(0), None);
+        records.end(6, 0, Some(130), None);
+        records.output(6, 0, None);
+        records.end(7, 0, Some(0), None);
         assert_eq!(
             records.iter().count(),
             0,
             "the end dropped the prompt, so nothing is in flight"
         );
         records.prompt(7, None);
-        records.output(8, None);
-        records.end(9, Some(130), None);
+        records.output(8, 0, None);
+        records.end(9, 0, Some(130), None);
         let exits: Vec<Option<i32>> = records.iter().map(|r| r.exit).collect();
         assert_eq!(exits, [Some(130)], "an output start alone makes one");
     }
@@ -644,8 +658,8 @@ mod tests {
         let mut records = Records::default();
         records.prompt(1, None);
         records.command("make".to_owned());
-        records.output(2, None);
-        records.end(3, Some(0), None);
+        records.output(2, 0, None);
+        records.end(3, 0, Some(0), None);
         records.remap(|row| (row == 1).then_some(10));
         let record = records.iter().next().expect("kept by its prompt");
         assert_eq!((record.prompt, record.output, record.end), (10, None, None));
@@ -658,9 +672,9 @@ mod tests {
         let t = Instant::now();
         let mut records = Records::default();
         records.prompt(5, Some(t));
-        records.output(6, Some(t + ms(10)));
+        records.output(6, 0, Some(t + ms(10)));
         records.prompt(5, Some(t + ms(20)));
-        records.end(7, Some(0), Some(t + ms(30)));
+        records.end(7, 0, Some(0), Some(t + ms(30)));
         let record = records.iter().next().expect("a record");
         assert_eq!(record.output, Some(6));
         assert_eq!(record.prompt_at, Some(t));
@@ -671,8 +685,8 @@ mod tests {
         let mut records = Records::default();
         for n in 0..=u64::try_from(MAX_RECORDS).expect("small") {
             records.prompt(n, None);
-            records.output(n, None);
-            records.end(n, Some(0), None);
+            records.output(n, 0, None);
+            records.end(n, 0, Some(0), None);
         }
         assert_eq!(records.iter().count(), MAX_RECORDS);
         assert_eq!(records.iter().next().map(|r| r.prompt), Some(1));
@@ -683,8 +697,8 @@ mod tests {
         let mut records = Records::default();
         for n in [2, 5, 8] {
             records.prompt(n, None);
-            records.output(n + 1, None);
-            records.end(n + 2, Some(0), None);
+            records.output(n + 1, 0, None);
+            records.end(n + 2, 0, Some(0), None);
         }
         records.prompt(11, None);
         assert_eq!(records.anchors(), [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);

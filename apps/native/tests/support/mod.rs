@@ -747,6 +747,10 @@ impl<'a> Harness<'a> {
             {
                 n.parse::<usize>()
                     .is_ok_and(|n| n < root.pane_shell_records(pane, cx).len())
+            } else if selector == "shell-menu" {
+                root.shell_menu_open()
+            } else if selector.starts_with("shell-menu-") {
+                root.shell_menu_rows().contains(&selector)
             } else if selector == "shell-clear-default" {
                 root.shell_dialog_clears_default()
             } else if selector.starts_with("shell-") {

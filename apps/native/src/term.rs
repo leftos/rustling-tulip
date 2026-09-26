@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor,
 
 use crate::Clock;
 use crate::links::{self, TerminalLink, TerminalRow};
-use crate::shell_marks::{Records, Scanner, ShellDot, Split};
+use crate::shell_marks::{Record, Records, Scanner, ShellDot, Split};
 use crate::theme::{self, Theme};
 
 /// Collects what the terminal asks of its client: the replies to the child
@@ -175,7 +176,8 @@ impl Shell {
                 let grid = term.grid();
                 let line = grid.cursor.point.line.0;
                 let abs = abs_of(self.base, grid.history_size(), line);
-                self.records.apply(mark, abs, at);
+                self.records
+                    .apply(mark, abs, grid.cursor.point.column.0, at);
             }
             Split::AltExit => {
                 let snapshot = self.alt_snapshot.take();
@@ -257,6 +259,30 @@ fn line_of(abs: u64, base: u64, grid: &Grid<Cell>) -> Option<i32> {
     (grid.topmost_line().0..=grid.bottommost_line().0)
         .contains(&line)
         .then_some(line)
+}
+
+/// The grid line absolute row `abs` names, clamped into the grid: a row the
+/// history no longer holds reads the nearest line that is left.
+fn clamped_line(abs: u64, base: u64, grid: &Grid<Cell>) -> i32 {
+    let line = i128::from(abs) - i128::from(base) - i128::from(count(grid.history_size()));
+    let line = i32::try_from(line).unwrap_or(if line.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    });
+    line.clamp(grid.topmost_line().0, grid.bottommost_line().0)
+}
+
+/// Everything after the last `"$ "`, `"> "`, `"# "` or `"% "` in `line`,
+/// the line unchanged when it holds none. The first separator present wins;
+/// its last occurrence is the cut.
+fn strip_prompt_prefix(line: &str) -> &str {
+    for sep in ["$ ", "> ", "# ", "% "] {
+        if let Some(at) = line.rfind(sep) {
+            return &line[at + sep.len()..];
+        }
+    }
+    line
 }
 
 /// Whether grid line `line` starts a logical line: the row above it did not
@@ -391,6 +417,18 @@ pub struct Snapshot {
     pub caret: Rgb,
 }
 
+/// One finished command as its gutter dot's menu shows it: the header line
+/// and the two texts the copy rows put on the clipboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellCommand {
+    /// `exit N · 1.23s`, the dot's tooltip.
+    pub header: String,
+    /// The command line, and `""` when the shell left none.
+    pub command: String,
+    /// The command's output, and `""` when there is none.
+    pub output: String,
+}
+
 impl Terminal {
     /// A blank terminal whose cursor is `cursor` until the program sets its own.
     pub fn new(size: GridSize, cursor: CursorShape) -> Self {
@@ -499,6 +537,21 @@ impl Terminal {
     /// The dots of the finished commands whose prompt row is on screen, top
     /// first. None while the alternate screen is up.
     pub fn shell_dots(&self) -> Vec<ShellDot> {
+        self.visible_records()
+            .into_iter()
+            .map(|(record, row)| ShellDot {
+                row,
+                status: record.status(),
+                exit: record.exit,
+                tooltip: record.tooltip(),
+            })
+            .collect()
+    }
+
+    /// The finished commands whose prompt row is on screen, with the
+    /// viewport row of each, top first. Empty while the alternate screen is
+    /// up.
+    fn visible_records(&self) -> Vec<(&Record, usize)> {
         let Some(shell) = self.shell.as_ref() else {
             return Vec::new();
         };
@@ -507,7 +560,7 @@ impl Terminal {
         }
         let grid = self.term.grid();
         let offset = i64::try_from(grid.display_offset()).unwrap_or(i64::MAX);
-        let mut dots: Vec<ShellDot> = shell
+        let mut found: Vec<(&Record, usize)> = shell
             .records
             .iter()
             .filter_map(|record| {
@@ -515,16 +568,109 @@ impl Terminal {
                 let row = usize::try_from(i64::from(line).saturating_add(offset))
                     .ok()
                     .filter(|row| *row < self.size.rows)?;
-                Some(ShellDot {
-                    row,
-                    status: record.status(),
-                    exit: record.exit,
-                    tooltip: record.tooltip(),
-                })
+                Some((record, row))
             })
             .collect();
-        dots.sort_by_key(|dot| dot.row);
-        dots
+        found.sort_by_key(|(_, row)| *row);
+        found
+    }
+
+    /// The finished command the gutter dot at `index` (top first) stands
+    /// for, as its menu shows it.
+    pub fn shell_command(&self, index: usize) -> Option<ShellCommand> {
+        let (record, _) = *self.visible_records().get(index)?;
+        Some(ShellCommand {
+            header: record.tooltip(),
+            command: self.command_text(record),
+            output: self.output_text(record),
+        })
+    }
+
+    /// The command line of `record`: the shell's own `OSC 633;E` text when
+    /// it sent one, else its rows from the prompt's through the last one
+    /// before the output: the output start's row, or the row above it when
+    /// the output starts at column 0. Those rows are one wrapped line, so
+    /// they join with no separator; a row that wraps keeps its trailing
+    /// blanks, the others are right-trimmed, and the first loses its prompt
+    /// prefix.
+    pub fn command_text(&self, record: &Record) -> String {
+        if let Some(command) = &record.command {
+            return command.clone();
+        }
+        let Some(base) = self.shell.as_ref().map(|shell| shell.base) else {
+            return String::new();
+        };
+        let last = match record.output {
+            None => Some(record.prompt),
+            Some(start) if record.output_col == 0 => start.checked_sub(1),
+            Some(start) => Some(start),
+        };
+        let Some(lines) = last.and_then(|last| self.lines_between(base, record.prompt, last))
+        else {
+            return String::new();
+        };
+        let grid = self.term.grid();
+        let mut text = String::new();
+        for line in lines {
+            let row = self.read_row(line).text;
+            let full = grid[Line(line)][grid.last_column()]
+                .flags
+                .contains(Flags::WRAPLINE);
+            let part = if full { row.as_str() } else { row.trim_end() };
+            text.push_str(if text.is_empty() {
+                strip_prompt_prefix(part)
+            } else {
+                part
+            });
+        }
+        text.trim_end().to_owned()
+    }
+
+    /// The output of `record`, one line a row, each right-trimmed, with its
+    /// trailing blank rows dropped. It starts on the output start's row
+    /// when that start is at column 0, else on the row after it, and ends
+    /// on the row above the end's when the end is at column 0 (the next
+    /// prompt's row), else on the end's row; with no end, on the cursor's
+    /// row. Empty without an output start.
+    pub fn output_text(&self, record: &Record) -> String {
+        let (Some(base), Some(start)) =
+            (self.shell.as_ref().map(|shell| shell.base), record.output)
+        else {
+            return String::new();
+        };
+        let grid = self.term.grid();
+        let first = if record.output_col == 0 {
+            start
+        } else {
+            start.saturating_add(1)
+        };
+        let last = match record.end {
+            Some(end) if record.end_col == 0 => end.checked_sub(1),
+            Some(end) => Some(end),
+            None => Some(abs_of(base, grid.history_size(), grid.cursor.point.line.0)),
+        };
+        let Some(lines) = last.and_then(|last| self.lines_between(base, first, last)) else {
+            return String::new();
+        };
+        let mut rows: Vec<String> = lines
+            .map(|line| self.read_row(line).text.trim_end().to_owned())
+            .collect();
+        while rows.last().is_some_and(|row| row.trim().is_empty()) {
+            rows.pop();
+        }
+        rows.join("\n")
+    }
+
+    /// The grid lines of absolute rows `first` through `last`, a `first`
+    /// the history dropped read from the topmost line. `None` when `last`
+    /// is above `first`, or the history dropped `last` too (the topmost
+    /// line's absolute row is `base`): the whole span is gone.
+    fn lines_between(&self, base: u64, first: u64, last: u64) -> Option<RangeInclusive<i32>> {
+        if last < first || last < base {
+            return None;
+        }
+        let grid = self.term.grid();
+        Some(clamped_line(first, base, grid)..=clamped_line(last, base, grid))
     }
 
     /// Feeds replayed history. The queries in it were answered when they were
@@ -1608,7 +1754,7 @@ mod shell_tests {
     use alacritty_terminal::vte::ansi::CursorShape;
 
     use super::{GridSize, SCROLLBACK_LINES, Terminal, line_of};
-    use crate::shell_marks::ShellStatus;
+    use crate::shell_marks::{Record, ShellStatus};
 
     type Now = Arc<Mutex<Instant>>;
 
@@ -2019,5 +2165,178 @@ mod shell_tests {
         assert_eq!(tags(&term), ['a', 'b'], "each wide line is three rows now");
         assert_eq!(dot_rows(&term).len(), 2);
         assert_eq!(term.term.grid().history_size(), SCROLLBACK_LINES);
+    }
+
+    /// The one finished command a terminal keeps.
+    fn record(term: &Terminal) -> Record {
+        term.shell
+            .as_ref()
+            .expect("a shell terminal")
+            .records
+            .iter()
+            .next()
+            .cloned()
+            .expect("a finished command")
+    }
+
+    const PROMPT: &str = "\x1b]133;A\x07";
+    const TYPED: &str = "\x1b]133;B\x07";
+    const OUTPUT: &str = "\x1b]133;C\x07";
+
+    /// One command in the order bash, zsh and pwsh write it: the prompt,
+    /// the typed command, the Enter's newline, the output mark at the start
+    /// of the next row, `out`, the end at the start of the row after it,
+    /// and the next prompt there.
+    fn rows_command(prompt: &str, typed: &str, out: &str, exit: i32) -> String {
+        format!(
+            "{PROMPT}{prompt}{TYPED}{typed}\r\n{OUTPUT}{out}\r\n\x1b]133;D;{exit}\x07{PROMPT}$ "
+        )
+    }
+
+    /// A finished command whose anchors are given, with no command line.
+    fn anchored(prompt: u64, output: (u64, usize), end: (u64, usize)) -> Record {
+        Record {
+            prompt,
+            output: Some(output.0),
+            output_col: output.1,
+            end: Some(end.0),
+            end_col: end.1,
+            exit: Some(0),
+            command: None,
+            prompt_at: None,
+            output_at: None,
+            end_at: None,
+        }
+    }
+
+    #[test]
+    fn the_shells_own_command_line_wins_over_the_rows() {
+        let (mut term, _) = shell(24, 6, 20);
+        term.feed(
+            format!(
+                "{PROMPT}$ {TYPED}ls\r\n\x1b]633;E;ls --color=auto\x07{OUTPUT}out\r\n\x1b]133;D;0\x07{PROMPT}$ "
+            )
+            .as_bytes(),
+        );
+        assert_eq!(term.command_text(&record(&term)), "ls --color=auto");
+    }
+
+    #[test]
+    fn the_command_rows_strip_each_prompt_suffix() {
+        for (prompt, typed, expected) in [
+            ("$ ", "ls -la", "ls -la"),
+            ("PS> ", "Get-Item", "Get-Item"),
+            ("root# ", "reboot", "reboot"),
+            ("% ", "echo hi", "echo hi"),
+            ("", "ls", "ls"),
+        ] {
+            let (mut term, _) = shell(24, 6, 20);
+            term.feed(rows_command(prompt, typed, "out", 0).as_bytes());
+            assert_eq!(term.command_text(&record(&term)), expected, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn the_command_rows_in_shell_order_stop_above_the_output() {
+        let (mut term, _) = shell(24, 6, 20);
+        term.feed(rows_command("$ ", "ls -la", "one", 0).as_bytes());
+        assert_eq!(
+            term.command_text(&record(&term)),
+            "ls -la",
+            "the output start's row is the output's first"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_command_row_joins_the_next_with_nothing_between() {
+        let (mut term, _) = shell(8, 6, 20);
+        // `$ ls -l ` fills the first row, its blank included; `/tmp` wraps.
+        term.feed(rows_command("$ ", "ls -l /tmp", "out", 0).as_bytes());
+        assert_eq!(term.command_text(&record(&term)), "ls -l /tmp");
+    }
+
+    #[test]
+    fn the_output_in_shell_order_is_exactly_the_output_lines() {
+        let (mut term, _) = shell(24, 8, 20);
+        term.feed(rows_command("$ ", "ls", "one\r\ntwo", 0).as_bytes());
+        assert_eq!(
+            term.output_text(&record(&term)),
+            "one\ntwo",
+            "the first line kept, the next prompt left out"
+        );
+    }
+
+    #[test]
+    fn an_output_mark_mid_row_starts_the_output_on_the_next_row() {
+        let (mut term, _) = shell(24, 6, 20);
+        term.feed(format!("{PROMPT}$ ls{OUTPUT}\r\none\r\n\x1b]133;D;0\x07{PROMPT}$ ").as_bytes());
+        let record = record(&term);
+        assert_eq!(record.output_col, 4);
+        assert_eq!(term.output_text(&record), "one");
+        assert_eq!(term.command_text(&record), "ls", "the output start's row");
+    }
+
+    #[test]
+    fn an_end_mid_row_keeps_its_row_in_the_output() {
+        let (mut term, _) = shell(24, 6, 20);
+        term.feed(
+            format!("{PROMPT}$ {TYPED}printf hi\r\n{OUTPUT}hi\x1b]133;D;0\x07\r\n{PROMPT}$ ")
+                .as_bytes(),
+        );
+        assert_eq!(term.output_text(&record(&term)), "hi");
+    }
+
+    #[test]
+    fn the_output_rows_are_trimmed_and_their_trailing_blanks_dropped() {
+        let (mut term, _) = shell(24, 8, 20);
+        term.feed(rows_command("$ ", "ls", "one  \r\ntwo\r\n\r\n", 0).as_bytes());
+        assert_eq!(term.output_text(&record(&term)), "one\ntwo");
+    }
+
+    #[test]
+    fn a_command_without_an_output_mark_has_no_output() {
+        let (mut term, _) = shell(24, 6, 20);
+        term.feed(
+            format!("{PROMPT}$ {TYPED}true\r\n\x1b]633;E;true\x07\x1b]133;D;0\x07{PROMPT}$ ")
+                .as_bytes(),
+        );
+        let record = record(&term);
+        assert_eq!(term.output_text(&record), "");
+        assert_eq!(term.command_text(&record), "true");
+    }
+
+    #[test]
+    fn a_wrapped_output_row_is_a_line_of_its_own() {
+        let (mut term, _) = shell(8, 8, 20);
+        term.feed(rows_command("$ ", "ls", "abcdefghij", 0).as_bytes());
+        assert_eq!(term.output_text(&record(&term)), "abcdefgh\nij");
+    }
+
+    /// A terminal whose history dropped its oldest row: absolute row 0
+    /// (`AAAA`) is gone, and row 1 (`BBBB`) is the topmost line.
+    fn dropped_one_row() -> Terminal {
+        let (mut term, _) = shell(8, 4, 2);
+        term.feed(b"AAAA\r\nBBBB\r\nCCCC\r\nDDDD\r\nEEEE\r\nFFFF\r\n");
+        let base = term.shell.as_ref().expect("a shell terminal").base;
+        assert_eq!(base, 1, "the cap dropped the oldest row");
+        term
+    }
+
+    #[test]
+    fn an_output_start_the_history_left_behind_reads_from_the_topmost_line() {
+        let term = dropped_one_row();
+        let record = anchored(0, (0, 0), (3, 0));
+        assert_eq!(term.output_text(&record), "BBBB\nCCCC");
+    }
+
+    #[test]
+    fn a_record_the_history_left_behind_has_no_output_and_no_command() {
+        let term = dropped_one_row();
+        // The first's output ends on absolute row 0, which is gone; the
+        // second's command rows end on its output start's, row 0 too.
+        for record in [anchored(0, (0, 0), (1, 0)), anchored(0, (0, 3), (0, 5))] {
+            assert_eq!(term.output_text(&record), "", "{record:?}");
+            assert_eq!(term.command_text(&record), "", "{record:?}");
+        }
     }
 }

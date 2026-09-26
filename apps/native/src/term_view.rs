@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
 use gpui::{
-    App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
+    AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Font, FontStyle, FontWeight, HitboxBehavior,
     KeyDownEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollWheelEvent, SharedString,
@@ -30,7 +30,7 @@ use crate::net::NetCommand;
 use crate::open;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
-use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
+use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
 use crate::theme;
@@ -45,6 +45,8 @@ const GUTTER: f32 = 14.0;
 /// the text.
 const DOT: f32 = 8.0;
 const DOT_LEFT: f32 = GUTTER - 10.0;
+/// How far right of a dot's right edge its menu opens.
+const MENU_GAP: f32 = 4.0;
 
 pub struct TerminalPane {
     /// The grid pane this terminal fills, which names its dots.
@@ -212,6 +214,13 @@ pub enum PaneEvent {
         link: TerminalLink,
         base_dirs: Vec<String>,
     },
+    /// A left press on the gutter dot at `index` (top first): the root opens
+    /// that command's menu at `at`, in window coordinates.
+    ShellDotMenu {
+        pane_id: String,
+        index: usize,
+        at: Point<Pixels>,
+    },
 }
 
 impl EventEmitter<PaneEvent> for TerminalPane {}
@@ -353,6 +362,13 @@ impl TerminalPane {
         self.term.shell_dots()
     }
 
+    /// The finished command the gutter dot at `index` stands for, as its
+    /// menu shows it.
+    #[must_use]
+    pub fn shell_command(&self, index: usize) -> Option<ShellCommand> {
+        self.term.shell_command(index)
+    }
+
     /// Whether the pane keeps a gutter for command dots: only a plain
     /// shell's does.
     fn has_gutter(&self) -> bool {
@@ -369,24 +385,79 @@ impl TerminalPane {
     }
 
     /// The gutter and its dots, each centred on its prompt row, from the
-    /// last layout's row height.
-    fn gutter(&self) -> impl IntoElement {
-        let dots: Vec<_> = self
-            .layout
-            .map(|(_, cell)| {
-                self.shell_dots()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(n, dot)| gutter_dot(&self.pane_id, n, dot, cell.height))
-                    .collect()
-            })
-            .unwrap_or_default();
+    /// last layout's row height. A press on a dot asks the root for its
+    /// command menu.
+    fn gutter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mut dots: Vec<AnyElement> = Vec::new();
+        if let Some((_, cell)) = self.layout {
+            for (n, dot) in self.shell_dots().into_iter().enumerate() {
+                dots.push(gutter_dot(&self.pane_id, n, dot, cell.height, cx).into_any_element());
+            }
+        }
         div()
             .flex_none()
             .w(px(GUTTER))
             .h_full()
             .relative()
             .children(dots)
+    }
+
+    /// Where the gutter dot on viewport row `row` sits: the point its menu
+    /// anchors from, four pixels right of its right edge and level with its
+    /// top.
+    fn dot_anchor(&self, row: usize) -> Option<Point<Pixels>> {
+        let (origin, cell) = self.layout?;
+        #[expect(clippy::cast_precision_loss, reason = "a viewport row is small")]
+        let top = row as f32 * cell.height + (cell.height - DOT) / 2.0;
+        Some(point(
+            origin.x + px(DOT_LEFT + DOT + MENU_GAP - GUTTER),
+            origin.y + px(top),
+        ))
+    }
+
+    /// A left press on the gutter's dot `index`: the root opens its command
+    /// menu, anchored to the dot.
+    fn open_shell_menu(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(at) = self
+            .shell_dots()
+            .get(index)
+            .and_then(|dot| self.dot_anchor(dot.row))
+        else {
+            return;
+        };
+        cx.emit(PaneEvent::ShellDotMenu {
+            pane_id: self.pane_id.clone(),
+            index,
+            at,
+        });
+    }
+
+    /// The bytes the gutter menu's "Re-run command" types for `command`:
+    /// the line as it is, or a multi-line command as a bracketed paste with
+    /// its newlines kept. `None` when the command holds a carriage return,
+    /// which would run it partway, or when a multi-line command cannot go:
+    /// the terminal has bracketed paste off, or the command holds an escape
+    /// that could end the paste early.
+    #[must_use]
+    pub fn rerun_bytes(&self, command: &str) -> Option<Vec<u8>> {
+        rerun_bytes(command, self.term.bracketed_paste())
+    }
+
+    /// Types `command` at the pane's session without a newline, as the
+    /// gutter menu's "Re-run command" does, and hands the pane the keyboard
+    /// back. A multi-line command the terminal cannot take as a paste is
+    /// not typed.
+    pub(crate) fn rerun_command(
+        &mut self,
+        command: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(bytes) = self.rerun_bytes(command) {
+            self.send_input(&bytes);
+        }
+        self.focus(window);
+        cx.notify();
     }
 
     /// The window position of the centre of cell (`col`, `row`), from the
@@ -1465,7 +1536,11 @@ impl Render for TerminalPane {
                 }
             },
         );
-        let gutter = self.has_gutter().then(|| self.gutter());
+        let gutter = if self.has_gutter() {
+            Some(self.gutter(cx))
+        } else {
+            None
+        };
         let mut pane = div()
             .size_full()
             .p(px(crate::PADDING))
@@ -1491,10 +1566,34 @@ impl Render for TerminalPane {
     }
 }
 
+/// What "Re-run command" types for `command` (see
+/// [`TerminalPane::rerun_bytes`]), `bracketed` saying whether the terminal
+/// takes a bracketed paste.
+fn rerun_bytes(command: &str, bracketed: bool) -> Option<Vec<u8>> {
+    // A carriage return would press Enter partway through the command.
+    if command.contains('\r') {
+        return None;
+    }
+    if !command.contains('\n') {
+        return Some(command.as_bytes().to_vec());
+    }
+    if !bracketed || command.contains('\x1b') {
+        return None;
+    }
+    Some(format!("\x1b[200~{command}\x1b[201~").into_bytes())
+}
+
 /// The dot of a finished command whose prompt is on viewport row
-/// `dot.row`, with its exit and duration as its tooltip. A click on it is
-/// taken by the gutter.
-fn gutter_dot(pane_id: &str, n: usize, dot: ShellDot, line_height: f32) -> impl IntoElement {
+/// `dot.row`, with its exit and duration as its tooltip. A press on it asks
+/// the root for the command's menu and stops there, so the gutter's own
+/// press handling never sees it.
+fn gutter_dot(
+    pane_id: &str,
+    n: usize,
+    dot: ShellDot,
+    line_height: f32,
+    cx: &mut Context<TerminalPane>,
+) -> impl IntoElement {
     let selector = format!("shell-dot-{pane_id}-{n}");
     #[expect(clippy::cast_precision_loss, reason = "a viewport row is small")]
     let top = dot.row as f32 * line_height + (line_height - DOT) / 2.0;
@@ -1510,6 +1609,13 @@ fn gutter_dot(pane_id: &str, n: usize, dot: ShellDot, line_height: f32) -> impl 
         .border_1()
         .border_color(gpui::rgba(0x0000_0059))
         .tooltip(crate::tooltip(dot.tooltip))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |pane, _: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                pane.open_shell_menu(n, cx);
+            }),
+        )
 }
 
 /// Green for a command that exited 0, red for any other code, muted for one

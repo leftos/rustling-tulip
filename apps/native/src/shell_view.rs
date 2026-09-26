@@ -100,6 +100,7 @@ impl RootView {
             || self.spawn_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()
+            || self.shell_menu.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
         if blocked {

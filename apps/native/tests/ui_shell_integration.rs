@@ -13,12 +13,13 @@ mod support;
 use std::time::Duration;
 
 use gpui::{Modifiers, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext, point, px};
-use protocol::{ClientMessage, SessionSnapshot, SplitDirection};
+use protocol::{ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::fonts::FontSettings;
-use rustling_tulip_native::{ShellDot, ShellStatus};
-use support::{Fixture, Harness, TestDir, pane, session, split, tab};
+use rustling_tulip_native::{RootView, ShellDot, ShellStatus};
+use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 const PROMPT: &str = "\x1b]133;A\x07";
+const TYPED: &str = "\x1b]133;B\x07";
 const OUTPUT: &str = "\x1b]133;C\x07";
 
 fn shell() -> SessionSnapshot {
@@ -257,16 +258,18 @@ fn gutter_click_starts_no_selection(cx: &mut TestAppContext) {
     h.drag(blank_gutter, text, [Modifiers::none(); 2]);
     assert_eq!(h.clipboard(), None, "nor does one from the empty gutter");
 
-    // The program asked for the mouse: a click in the gutter reaches it not.
+    // The program asked for the mouse: a click on the grid reaches it, a
+    // click on the dot (which only opens its menu) not. The grid click
+    // comes first, before the menu's own layer is up.
     h.pty("s1", b"\x1b[?1000h");
-    h.click(dot, Modifiers::none());
-    assert!(h.sent_input("s1").is_empty(), "nothing reported");
     let cell = h.cell_center("p1", 2, 2);
     h.click(cell, Modifiers::none());
     assert!(
         !h.sent_input("s1").is_empty(),
         "a click on the grid still is"
     );
+    h.click(dot, Modifiers::none());
+    assert!(h.sent_input("s1").is_empty(), "nothing reported");
 }
 
 #[gpui::test]
@@ -291,4 +294,332 @@ fn replayed_history_dots_have_no_duration(cx: &mut TestAppContext) {
         "exit 0 · 20ms",
         "a live one its duration"
     );
+}
+
+/// One command in the order bash, zsh and pwsh write it: the prompt, the
+/// typed `line`, the Enter's newline, the output mark at the start of the
+/// next row, `out`, the end at the start of the row after it, and the next
+/// prompt there.
+fn ran(line: &str, out: &str, exit: &str) -> String {
+    format!("{PROMPT}$ {TYPED}{line}\r\n{OUTPUT}{out}\r\n\x1b]133;D{exit}\x07{PROMPT}$ ")
+}
+
+/// `s` alone in pane `p1` with one finished command in it, its dot on row
+/// zero.
+fn with_command<'a>(
+    cx: &'a mut TestAppContext,
+    dir: &TestDir,
+    line: &str,
+    out: &str,
+) -> Harness<'a> {
+    let mut h = attached(cx, dir, shell(), b"");
+    h.pty("s1", ran(line, out, ";0").as_bytes());
+    h
+}
+
+#[gpui::test]
+fn clicking_a_dot_opens_its_menu_with_the_exit_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell(), b"");
+    h.pty(
+        "s1",
+        format!("{PROMPT}$ {TYPED}make\r\n{OUTPUT}").as_bytes(),
+    );
+    h.advance(Duration::from_millis(1500));
+    h.pty(
+        "s1",
+        format!("built\r\n\x1b]133;D;0\x07{PROMPT}$ ").as_bytes(),
+    );
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"), "the dot's menu opened");
+    for row in [
+        "shell-menu-copy-command",
+        "shell-menu-copy-output",
+        "shell-menu-copy-both",
+        "shell-menu-rerun",
+    ] {
+        assert!(h.in_model(row), "{row} is in the menu");
+    }
+    assert_eq!(
+        h.root(|root, _| root.shell_menu_header()),
+        Some("exit 0 · 1.50s".to_owned())
+    );
+    let dot = h.bounds("shell-dot-p1-0");
+    let menu = h.bounds("shell-menu");
+    assert!(
+        (menu.origin.x - (dot.origin.x + dot.size.width) - px(4.0)).abs() < px(0.5),
+        "the menu opens 4px right of the dot: {menu:?} vs {dot:?}"
+    );
+    assert!(
+        (menu.origin.y - dot.origin.y).abs() < px(1.0),
+        "and level with its top: {menu:?} vs {dot:?}"
+    );
+}
+
+#[gpui::test]
+fn copy_command_copies_the_633e_text_and_shows_the_chip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell(), b"");
+    // The shell's own line differs from the row it drew, and wins.
+    h.pty(
+        "s1",
+        format!(
+            "{PROMPT}$ {TYPED}ls\r\n\x1b]633;E;ls --color=auto\x07{OUTPUT}out\r\n\x1b]133;D;0\x07{PROMPT}$ "
+        )
+        .as_bytes(),
+    );
+    h.click_on("shell-dot-p1-0");
+    h.click_on("shell-menu-copy-command");
+    assert_eq!(h.clipboard().as_deref(), Some("ls --color=auto"));
+    assert_eq!(h.root(|root, _| root.copied_chip()), Some(15));
+    assert!(!h.in_model("shell-menu"), "the copy closed the menu");
+}
+
+#[gpui::test]
+fn copy_output_copies_the_rows_between_c_and_d(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one\r\ntwo");
+    h.click_on("shell-dot-p1-0");
+    h.click_on("shell-menu-copy-output");
+    assert_eq!(h.clipboard().as_deref(), Some("one\ntwo"));
+}
+
+#[gpui::test]
+fn copy_both_joins_with_a_newline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls -la", "one");
+    h.click_on("shell-dot-p1-0");
+    h.click_on("shell-menu-copy-both");
+    assert_eq!(h.clipboard().as_deref(), Some("ls -la\none"));
+}
+
+#[gpui::test]
+fn rerun_types_the_command_without_enter(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls -la", "one");
+    h.click_on("shell-dot-p1-0");
+    h.click_on("shell-menu-rerun");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"ls -la".to_vec(),
+        "the command's bytes, with no newline"
+    );
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p1".to_owned()));
+}
+
+#[gpui::test]
+fn rerun_is_disabled_for_a_stopped_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.root(RootView::shell_menu_can_rerun));
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").shell("C:/work").exited(0).build(),
+        request_id: None,
+    });
+    assert!(
+        !h.root(RootView::shell_menu_can_rerun),
+        "a stopped session's command cannot be re-run"
+    );
+    h.click_on("shell-menu-rerun");
+    assert!(h.sent_input("s1").is_empty(), "nothing was typed");
+}
+
+#[gpui::test]
+fn escape_and_outside_click_close_the_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"));
+    h.keys("escape");
+    assert!(!h.in_model("shell-menu"), "Esc closes the menu");
+
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"));
+    let grid = h.bounds("pane-grid-p1");
+    let far = point(
+        grid.origin.x + grid.size.width - px(10.0),
+        grid.origin.y + grid.size.height - px(10.0),
+    );
+    assert!(
+        !h.bounds("shell-menu").contains(&far),
+        "the click is over the pane, not the menu"
+    );
+    h.click(far, Modifiers::none());
+    assert!(!h.in_model("shell-menu"), "and a click outside it");
+    assert_eq!(h.clipboard(), None, "which acted on no menu row");
+}
+
+#[gpui::test]
+fn output_does_not_close_the_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"));
+    h.pty("s1", b"more output\r\n");
+    assert!(
+        h.in_model("shell-menu"),
+        "output leaves it up; only a scroll dismisses it"
+    );
+}
+
+#[gpui::test]
+fn a_wheel_over_the_pane_closes_the_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"));
+    let grid = h.bounds("pane-grid-p1");
+    let far = point(
+        grid.origin.x + grid.size.width - px(10.0),
+        grid.origin.y + grid.size.height - px(10.0),
+    );
+    assert!(
+        !h.bounds("shell-menu").contains(&far),
+        "the wheel is over the pane, not the menu"
+    );
+    wheel(&mut h, far, 1.0);
+    assert!(!h.in_model("shell-menu"), "the wheel closed the menu");
+}
+
+#[gpui::test]
+fn rerun_from_a_pane_without_focus_focuses_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![shell(), session("s2").shell("C:/work").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.answer_scrollback("s2", b"");
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+    h.sent();
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p1".to_owned()));
+    h.pty("s2", ran("ls -la", "one", ";0").as_bytes());
+    h.click_on("shell-dot-p2-0");
+    h.click_on("shell-menu-rerun");
+    assert_eq!(h.sent_input("s2"), b"ls -la".to_vec());
+    assert!(h.sent_input("s1").is_empty(), "the other pane got nothing");
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p2".to_owned()),
+        "the command's pane is its tab's focused one"
+    );
+}
+
+/// `s` alone in `p1` with one finished two-line command, as the shell's
+/// own `OSC 633;E` line, and its dot's menu open.
+fn with_two_line_command<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut h = attached(cx, dir, shell(), b"");
+    h.pty(
+        "s1",
+        format!(
+            "{PROMPT}$ {TYPED}echo a\r\n> echo b\r\n\x1b]633;E;echo a\\x0aecho b\x07{OUTPUT}a\r\nb\r\n\x1b]133;D;0\x07{PROMPT}$ "
+        )
+        .as_bytes(),
+    );
+    h
+}
+
+#[gpui::test]
+fn rerun_sends_a_multi_line_command_as_a_bracketed_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_two_line_command(cx, &dir);
+    h.pty("s1", b"\x1b[?2004h");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.root(RootView::shell_menu_can_rerun));
+    h.click_on("shell-menu-rerun");
+    assert_eq!(
+        h.sent_input("s1"),
+        b"\x1b[200~echo a\necho b\x1b[201~".to_vec(),
+        "wrapped as a paste, its newline kept and no Enter after it"
+    );
+}
+
+#[gpui::test]
+fn rerun_is_disabled_for_a_multi_line_command_without_bracketed_paste(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_two_line_command(cx, &dir);
+    h.click_on("shell-dot-p1-0");
+    assert!(
+        !h.root(RootView::shell_menu_can_rerun),
+        "a newline would run the first line alone"
+    );
+    h.click_on("shell-menu-rerun");
+    assert!(h.sent_input("s1").is_empty(), "nothing was typed");
+}
+
+#[gpui::test]
+fn rerun_is_disabled_for_an_empty_command(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell(), b"");
+    // No `OSC 633;E`, and the prompt row holds nothing to read it from.
+    h.pty(
+        "s1",
+        format!("{PROMPT}{TYPED}\r\n{OUTPUT}out\r\n\x1b]133;D;0\x07{PROMPT}$ ").as_bytes(),
+    );
+    h.click_on("shell-dot-p1-0");
+    assert!(!h.root(RootView::shell_menu_can_rerun));
+    h.click_on("shell-menu-rerun");
+    assert!(h.sent_input("s1").is_empty(), "nothing was typed");
+}
+
+#[gpui::test]
+fn rerun_is_disabled_for_a_command_holding_a_carriage_return(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = attached(cx, &dir, shell(), b"");
+    h.pty("s1", b"\x1b[?2004h");
+    h.pty(
+        "s1",
+        format!(
+            "{PROMPT}$ {TYPED}ls\r\n\x1b]633;E;ls\\x0drm x\x07{OUTPUT}out\r\n\x1b]133;D;0\x07{PROMPT}$ "
+        )
+        .as_bytes(),
+    );
+    h.click_on("shell-dot-p1-0");
+    assert!(
+        !h.root(RootView::shell_menu_can_rerun),
+        "the carriage return would run `ls` before the rest was typed"
+    );
+    h.click_on("shell-menu-rerun");
+    assert!(h.sent_input("s1").is_empty(), "nothing was typed");
+}
+
+#[gpui::test]
+fn ctrl_shift_n_with_the_menu_open_opens_no_spawn_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(shell());
+    fixture.repos = vec![repo("r1", "C:/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.pty("s1", ran("ls", "one", ";0").as_bytes());
+    h.click_on("shell-dot-p1-0");
+    h.keys("ctrl-shift-n");
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "the dot menu blocks the spawn dialog"
+    );
+    h.keys("escape");
+    h.keys("ctrl-shift-n");
+    assert!(
+        h.root(|root, _| root.spawn_dialog_open()),
+        "with the menu closed, it opens"
+    );
+}
+
+#[gpui::test]
+fn a_font_key_closes_the_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = with_command(cx, &dir, "ls", "one");
+    h.click_on("shell-dot-p1-0");
+    assert!(h.in_model("shell-menu"));
+    h.keys("ctrl-=");
+    assert!(!h.in_model("shell-menu"), "Ctrl+= closed the menu");
 }
