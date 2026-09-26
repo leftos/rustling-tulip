@@ -52,6 +52,7 @@ fn status_requests(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
             ClientMessage::RepoStatus {
                 repo_id,
                 worktree_path,
+                ..
             } => Some((repo_id, worktree_path)),
             _ => None,
         })

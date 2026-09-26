@@ -889,8 +889,11 @@ export type ClientMessage =
       offset?: number;
       // Session worktree path. Omit / null = registered repo's main tree.
       worktree_path?: string | null;
+      // Echoed on the `error` reply when this read fails, so the requester
+      // can match the failure to its request.
+      request_id?: string;
     }
-  | { type: "get_commit"; repo_id: string; sha: string }
+  | { type: "get_commit"; repo_id: string; sha: string; request_id?: string }
   | {
       type: "get_file_diff";
       repo_id: string;
@@ -898,8 +901,13 @@ export type ClientMessage =
       against: string | null;
       worktree_path?: string | null;
     }
-  | { type: "get_remote_url"; repo_id: string }
-  | { type: "repo_status"; repo_id: string; worktree_path?: string | null }
+  | { type: "get_remote_url"; repo_id: string; request_id?: string }
+  | {
+      type: "repo_status";
+      repo_id: string;
+      worktree_path?: string | null;
+      request_id?: string;
+    }
   | {
       type: "stage_files";
       repo_id: string;
@@ -930,7 +938,12 @@ export type ClientMessage =
       message: string;
       worktree_path?: string | null;
     }
-  | { type: "list_stashes"; repo_id: string; worktree_path?: string | null }
+  | {
+      type: "list_stashes";
+      repo_id: string;
+      worktree_path?: string | null;
+      request_id?: string;
+    }
   | {
       type: "stash_pop";
       repo_id: string;

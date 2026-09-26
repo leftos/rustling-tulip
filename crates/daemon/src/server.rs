@@ -1826,21 +1826,35 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             limit,
             offset,
             worktree_path,
+            request_id,
         } => {
-            let path = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-            let commits =
-                git_inspect::list_commits(&path, branch.as_deref(), limit, offset).await?;
-            let _ = out_tx.send(DaemonMessage::Commits {
-                repo_id,
-                commits,
-                offset,
-                worktree_path,
-            });
+            reply_git_read(out_tx, &repo_id, request_id, "commit list", async {
+                let path = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                let commits =
+                    git_inspect::list_commits(&path, branch.as_deref(), limit, offset).await?;
+                Ok(DaemonMessage::Commits {
+                    repo_id: repo_id.clone(),
+                    commits,
+                    offset,
+                    worktree_path: worktree_path.clone(),
+                })
+            })
+            .await;
         }
-        ClientMessage::GetCommit { repo_id, sha } => {
-            let path = repo_path_or_err(hub, &repo_id)?;
-            let detail = git_inspect::get_commit(&path, &sha).await?;
-            let _ = out_tx.send(DaemonMessage::CommitDetail { repo_id, detail });
+        ClientMessage::GetCommit {
+            repo_id,
+            sha,
+            request_id,
+        } => {
+            reply_git_read(out_tx, &repo_id, request_id, "commit detail", async {
+                let path = repo_path_or_err(hub, &repo_id)?;
+                let detail = git_inspect::get_commit(&path, &sha).await?;
+                Ok(DaemonMessage::CommitDetail {
+                    repo_id: repo_id.clone(),
+                    detail,
+                })
+            })
+            .await;
         }
         ClientMessage::GetFileDiff {
             repo_id,
@@ -1859,23 +1873,33 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 worktree_path,
             });
         }
-        ClientMessage::GetRemoteUrl { repo_id } => {
-            let repo = repo_path_or_err(hub, &repo_id)?;
-            let info = git_inspect::remote_url(&repo_id, &repo).await?;
-            let _ = out_tx.send(DaemonMessage::RemoteUrl(info));
+        ClientMessage::GetRemoteUrl {
+            repo_id,
+            request_id,
+        } => {
+            reply_git_read(out_tx, &repo_id, request_id, "remote url", async {
+                let repo = repo_path_or_err(hub, &repo_id)?;
+                let info = git_inspect::remote_url(&repo_id, &repo).await?;
+                Ok(DaemonMessage::RemoteUrl(info))
+            })
+            .await;
         }
         ClientMessage::RepoStatus {
             repo_id,
             worktree_path,
+            request_id,
         } => {
-            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-            let (index_changes, worktree_changes) = git_inspect::repo_status(&repo).await?;
-            let _ = out_tx.send(DaemonMessage::RepoStatus {
-                repo_id,
-                index_changes,
-                worktree_changes,
-                worktree_path,
-            });
+            reply_git_read(out_tx, &repo_id, request_id, "status", async {
+                let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                let (index_changes, worktree_changes) = git_inspect::repo_status(&repo).await?;
+                Ok(DaemonMessage::RepoStatus {
+                    repo_id: repo_id.clone(),
+                    index_changes,
+                    worktree_changes,
+                    worktree_path: worktree_path.clone(),
+                })
+            })
+            .await;
         }
         ClientMessage::StageFiles {
             repo_id,
@@ -1979,30 +2003,19 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::ListStashes {
             repo_id,
             worktree_path,
-        } => match repo_target_or_err(hub, &repo_id, worktree_path.as_deref()) {
-            Ok(repo) => match git_write::stash_list(&repo).await {
-                Ok(stashes) => {
-                    let _ = out_tx.send(DaemonMessage::Stashes {
-                        repo_id,
-                        stashes,
-                        worktree_path,
-                    });
-                }
-                Err(err) => {
-                    warn!(?err, repo_id, "stash_list failed");
-                    let _ = out_tx.send(DaemonMessage::Error {
-                        message: format!("stash list failed: {err:#}"),
-                        request_id: None,
-                    });
-                }
-            },
-            Err(err) => {
-                let _ = out_tx.send(DaemonMessage::Error {
-                    message: format!("{err:#}"),
-                    request_id: None,
-                });
-            }
-        },
+            request_id,
+        } => {
+            reply_git_read(out_tx, &repo_id, request_id, "stash list", async {
+                let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
+                let stashes = git_write::stash_list(&repo).await?;
+                Ok(DaemonMessage::Stashes {
+                    repo_id: repo_id.clone(),
+                    stashes,
+                    worktree_path: worktree_path.clone(),
+                })
+            })
+            .await;
+        }
         ClientMessage::StashPop {
             repo_id,
             stash_id,
@@ -2828,6 +2841,34 @@ fn repo_target_or_err(
          does not match the registered repo path",
         wt_root.display()
     ))
+}
+
+/// Runs a git read (`RepoStatus`, `ListStashes`, `ListCommits`, `GetCommit`,
+/// `GetRemoteUrl`) and puts the message `body` produces on the wire. A
+/// failure becomes a `Error` sent to this requester only, carrying the
+/// `request_id` it asked with, so the client can tell which read failed
+/// instead of leaving its section stuck on "loading…".
+async fn reply_git_read<F>(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    repo_id: &str,
+    request_id: Option<String>,
+    label: &str,
+    body: F,
+) where
+    F: std::future::Future<Output = anyhow::Result<DaemonMessage>>,
+{
+    match body.await {
+        Ok(msg) => {
+            let _ = out_tx.send(msg);
+        }
+        Err(err) => {
+            warn!(?err, repo_id, label, "git read failed");
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: format!("{label} failed: {err:#}"),
+                request_id,
+            });
+        }
+    }
 }
 
 /// Runs a stage/unstage/commit body, then on success broadcasts the fresh
@@ -6170,6 +6211,185 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
 )]
 mod tests {
     use super::*;
+
+    /// A scratch directory for a hub's config, state and worktrees, removed
+    /// when the test ends.
+    struct ScratchDir {
+        path: PathBuf,
+    }
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rt-server-{tag}-{}-{}",
+                std::process::id(),
+                NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A hub over a scratch config dir with no repos registered.
+    fn test_hub(tag: &str) -> (Hub, ScratchDir) {
+        let scratch = ScratchDir::new(tag);
+        let config = scratch.path().join("config");
+        let dirs = Dirs {
+            config: config.clone(),
+            state_file: config.join("state.json"),
+            handshake_file: config.join("daemon.json"),
+            lan_config_file: config.join("lan.json"),
+            lan_cert_file: config.join("lan-cert.pem"),
+            lan_key_file: config.join("lan-key.pem"),
+            sessions_dir: config.join("sessions"),
+            worktrees_dir: scratch.path().join("worktrees"),
+            binaries_dir: scratch.path().join("binaries"),
+        };
+        std::fs::create_dir_all(&dirs.sessions_dir).expect("create sessions dir");
+        std::fs::create_dir_all(&dirs.worktrees_dir).expect("create worktrees dir");
+        std::fs::create_dir_all(&dirs.binaries_dir).expect("create binaries dir");
+        let state = Arc::new(AppState::load_or_default(&dirs).expect("load test state"));
+        let sessions = SessionRegistry::new(dirs.clone());
+        let (attention_tx, _) = mpsc::unbounded_channel();
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (tab_events, _) = broadcast::channel(16);
+        let (preset_events, _) = broadcast::channel(16);
+        let (state_events, _) = broadcast::channel(16);
+        let (client_count, _) = tokio::sync::watch::channel(0usize);
+        let (keep_awake_enabled, _) = tokio::sync::watch::channel(true);
+        let (_, keep_awake_status) = tokio::sync::watch::channel(crate::keep_awake::Status {
+            enabled: true,
+            active: false,
+        });
+        let hub = Hub {
+            state,
+            sessions,
+            auth_token: "test-token".to_string(),
+            attention_tx,
+            dirs,
+            shutdown_tx,
+            tab_events,
+            preset_events,
+            preset_cancellations: Arc::new(AsyncMutex::new(HashMap::new())),
+            state_events,
+            client_count: Arc::new(client_count),
+            lan_handle: Arc::new(AsyncMutex::new(None)),
+            advertiser: Arc::new(AsyncMutex::new(None)),
+            pairing: Arc::new(AsyncMutex::new(None)),
+            keep_awake_enabled: Arc::new(keep_awake_enabled),
+            keep_awake_status,
+        };
+        (hub, scratch)
+    }
+
+    /// Dispatch `msg` against `hub` and return the single message it put on
+    /// the wire, failing when it dispatched none or more than one.
+    async fn dispatch_one(hub: &Hub, msg: ClientMessage) -> DaemonMessage {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+        };
+        dispatch(hub, msg, &ctx)
+            .await
+            .expect("a failed read is reported on the wire, not returned from dispatch");
+        let first = out_rx.try_recv().expect("one reply is sent");
+        assert!(out_rx.try_recv().is_err(), "exactly one reply is sent");
+        first
+    }
+
+    /// `git init` a fresh repo at `repo` (no remotes).
+    fn git_init(repo: &Path) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_repo_status_read_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("status-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::RepoStatus {
+                repo_id: "no-such-repo".to_string(),
+                worktree_path: None,
+                request_id: Some("q1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "q1" && message.starts_with("status failed:")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_remote_url_read_echoes_its_request_id() {
+        let (hub, scratch) = test_hub("remote-rid");
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        hub.state
+            .mutate(|s| {
+                s.repos.push(protocol::RepoEntry {
+                    id: "r1".to_string(),
+                    name: "r1".to_string(),
+                    path: repo.to_string_lossy().into_owned(),
+                    default_branch: None,
+                    default_use_worktree: true,
+                    appearance: AppearanceOverrides::default(),
+                    last_agent: None,
+                    last_spawn_config: None,
+                });
+            })
+            .expect("register repo");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::GetRemoteUrl {
+                repo_id: "r1".to_string(),
+                request_id: Some("q2".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "q2" && message.starts_with("remote url failed:")
+            ),
+            "{msg:?}"
+        );
+    }
 
     /// Output the PTY produced after the snapshot waits in its live receiver;
     /// the reply must still reach the client first. Multi-threaded, so a

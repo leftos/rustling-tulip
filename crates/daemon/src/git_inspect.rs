@@ -128,13 +128,19 @@ pub async fn get_commit(repo: &Path, sha: &str) -> anyhow::Result<GitCommitDetai
 fn parse_name_status_line(line: &str) -> Option<GitFileChange> {
     let mut cols = line.split('\t');
     let status_raw = cols.next()?;
-    let path = cols.next()?.to_string();
-    let from = cols.next();
+    let first = cols.next()?.to_string();
     let status = status_raw.chars().next()?.to_string();
+    // A rename or copy line carries a third column — `<old>\t<new>` — so the
+    // second column is the original path and the third (when present) the
+    // current one. `path` is always the current path.
+    let (path, from_path) = match cols.next() {
+        Some(new_path) => (new_path.to_string(), Some(first)),
+        None => (first, None),
+    };
     Some(GitFileChange {
-        path: from.map_or_else(|| path.clone(), |_| path.clone()),
+        path,
         status,
-        from_path: from.map(String::from).filter(|f| f != &path),
+        from_path,
     })
 }
 
@@ -415,6 +421,26 @@ mod tests {
         let (index, worktree) = parse_porcelain_z("");
         assert!(index.is_empty());
         assert!(worktree.is_empty());
+    }
+
+    #[test]
+    fn parse_name_status_rename_keeps_the_new_path_in_path() {
+        // `git show --name-status` prints a rename as `R100<TAB>old<TAB>new`;
+        // `path` is the current name, `from_path` the original.
+        let rename = parse_name_status_line("R100\told.rs\tnew.rs").expect("rename line parses");
+        assert_eq!(rename.path, "new.rs");
+        assert_eq!(rename.status, "R");
+        assert_eq!(rename.from_path.as_deref(), Some("old.rs"));
+
+        let copy = parse_name_status_line("C75\ta.rs\tb.rs").expect("copy line parses");
+        assert_eq!(copy.path, "b.rs");
+        assert_eq!(copy.status, "C");
+        assert_eq!(copy.from_path.as_deref(), Some("a.rs"));
+
+        let modified = parse_name_status_line("M\tsrc/x.rs").expect("modify line parses");
+        assert_eq!(modified.path, "src/x.rs");
+        assert_eq!(modified.status, "M");
+        assert_eq!(modified.from_path, None);
     }
 
     #[tokio::test]

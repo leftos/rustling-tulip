@@ -1957,11 +1957,17 @@ pub enum ClientMessage {
         /// registered repo path.
         #[serde(default)]
         worktree_path: Option<String>,
+        /// Echoed on the [`DaemonMessage::Error`] sent to the requester when this read fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Full detail (subject, body, parents, file list) for one commit.
     GetCommit {
         repo_id: String,
         sha: String,
+        /// Echoed on the [`DaemonMessage::Error`] sent to the requester when this read fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Unified diff for a single file. `against` is `None` for working-tree
     /// vs index, `Some("HEAD")` for index vs HEAD, or a sha for that commit.
@@ -1978,6 +1984,9 @@ pub enum ClientMessage {
     /// for "Open in GitHub" actions.
     GetRemoteUrl {
         repo_id: String,
+        /// Echoed on the [`DaemonMessage::Error`] sent to the requester when this read fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Working-tree status (changed files) for a single repo. Useful for the
     /// non-session-scoped repo view. Daemon replies with
@@ -1990,6 +1999,9 @@ pub enum ClientMessage {
         repo_id: String,
         #[serde(default)]
         worktree_path: Option<String>,
+        /// Echoed on the [`DaemonMessage::Error`] sent to the requester when this read fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Stage one or more paths in `repo_id` (`git add -- <path>`...). On
     /// success the daemon broadcasts a fresh [`DaemonMessage::RepoStatus`]
@@ -2049,6 +2061,9 @@ pub enum ClientMessage {
         repo_id: String,
         #[serde(default)]
         worktree_path: Option<String>,
+        /// Echoed on the [`DaemonMessage::Error`] sent to the requester when this read fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// `git stash pop <stash_id>` — apply and drop. Broadcasts fresh
     /// `RepoStatus` + `Stashes` on success.
@@ -3108,8 +3123,10 @@ pub enum DaemonMessage {
     },
     Error {
         message: String,
-        /// The `request_id` of the spawn, duplicate or session appearance
-        /// change that failed, on the reply to its requester.
+        /// The `request_id` of the spawn, duplicate, session appearance
+        /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
+        /// `GetCommit`, `GetRemoteUrl`) that failed, on the reply to its
+        /// requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3489,6 +3506,32 @@ mod tests {
         assert!(matches!(
             back,
             ClientMessage::SetSessionAppearance { request_id: Some(id), .. } if id == "req-7"
+        ));
+    }
+
+    #[test]
+    fn git_read_request_id_is_optional_and_round_trips() {
+        let decoded: ClientMessage =
+            serde_json::from_str(r#"{"type":"repo_status","repo_id":"r1"}"#)
+                .expect("a git read without request_id decodes");
+        assert!(matches!(
+            decoded,
+            ClientMessage::RepoStatus {
+                request_id: None,
+                ..
+            }
+        ));
+        let msg = ClientMessage::RepoStatus {
+            repo_id: "r1".to_owned(),
+            worktree_path: None,
+            request_id: Some("q1".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""request_id":"q1""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(
+            back,
+            ClientMessage::RepoStatus { request_id: Some(id), .. } if id == "q1"
         ));
     }
 

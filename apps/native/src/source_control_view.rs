@@ -275,6 +275,7 @@ impl RootView {
             self.send(ClientMessage::RepoStatus {
                 repo_id: key.repo_id,
                 worktree_path: key.worktree,
+                request_id: None,
             });
         }
     }
@@ -287,6 +288,7 @@ impl RootView {
             self.send(ClientMessage::RepoStatus {
                 repo_id: section.key.repo_id,
                 worktree_path: section.key.worktree,
+                request_id: None,
             });
         }
     }
