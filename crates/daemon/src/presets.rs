@@ -1517,7 +1517,7 @@ async fn spawn_one(
         prompt_injector: Some(injector),
         request_id: None,
     };
-    let snapshot = spawn_session(hub, req).await.map_err(|e| {
+    let snapshot = spawn_session(hub, req, None).await.map_err(|e| {
         LaunchFailure::new(format!("spawn failed at #{index}: {e}"))
             .with_partials(session_ids, &plan.tab_state.tab_ids)
     })?;

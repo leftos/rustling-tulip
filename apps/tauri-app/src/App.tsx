@@ -544,10 +544,10 @@ export default function App() {
   //   - State updater functions must stay pure (StrictMode double-invokes them
   //     in dev to surface side effects), so we cannot `client.send(...)` from
   //     inside one without double-firing the message.
-  //   - The daemon emits each `session_updated` twice for a new session (once
-  //     from the registry broadcast, once from the spawn-dispatch direct send),
-  //     and click handlers may fire faster than React can commit a render. A
-  //     synchronous ref guarantees one-shot semantics across those races.
+  //   - A new session's `session_updated` is followed at once by more of them
+  //     (status, title), and click handlers may fire faster than React can
+  //     commit a render. A synchronous ref guarantees one-shot semantics
+  //     across those races.
   const seenSessionIdsRef = useRef(new Set<string>());
   /// Last-processed status per session id, maintained synchronously by the
   /// message handlers. The self-exit detector needs the status of the
@@ -591,6 +591,10 @@ export default function App() {
     incoming_count: number;
     local_count: number;
   } | null>(null);
+  /// True from `welcome` until the connection's first `sessions` list. Only
+  /// that list is the initial snapshot; a later one is the daemon resyncing
+  /// a connection that fell behind, and must not offer an import.
+  const awaitingInitialSessionsRef = useRef(false);
 
   /// Captured when the spawn dialog is opened from an empty pane's "+ spawn"
   /// button or a stopped pane's "New session" button. Read at `onSpawned` to
@@ -760,6 +764,7 @@ export default function App() {
             pendingSpawnIntentRef,
             pendingArrangementRef,
             pendingSessionImportRef,
+            awaitingInitialSessionsRef,
             pendingPaneFocusRef,
             latestStateRef,
           ),
@@ -3679,6 +3684,7 @@ function handleMessage(
     incoming_count: number;
     local_count: number;
   } | null>,
+  awaitingInitialSessionsRef: React.MutableRefObject<boolean>,
   pendingPaneFocusRef: React.MutableRefObject<
     { tabId: string; knownPaneIds: Set<string> } | null
   >,
@@ -3686,6 +3692,7 @@ function handleMessage(
 ) {
   switch (msg.type) {
     case "welcome":
+      awaitingInitialSessionsRef.current = true;
       return;
     case "auth_failed":
       setState((s) => ({
@@ -3719,21 +3726,30 @@ function handleMessage(
       setState((s) => ({ ...s, workspaces: msg.workspaces }));
       return;
     case "sessions": {
-      // Initial snapshot. Seed the seen-set so a subsequent session_updated
-      // for one of these ids is recognized as not-new, and the status map so
-      // the self-exit detector has a baseline.
+      // The whole list: the initial snapshot after `welcome`, or a resync
+      // after the connection fell behind. Seed the seen-set so a subsequent
+      // session_updated for one of these ids is recognized as not-new, and
+      // the status map so the self-exit detector has a baseline.
       const incoming = msg.sessions;
+      const isInitial = awaitingInitialSessionsRef.current;
+      awaitingInitialSessionsRef.current = false;
       for (const s of incoming) {
         seenSessionIdsRef.current.add(s.id);
         sessionStatusRef.current.set(s.id, s.status);
       }
-      // On remote connections, stash the count mismatch so the `tabs` handler
-      // can offer the import-arrangement modal. The `layout_init_required`
-      // handler clears this if LayoutChooser will handle layout init instead.
+      // On remote connections, stash the initial list's count mismatch so the
+      // `tabs` handler can offer the import-arrangement modal. The
+      // `layout_init_required` handler clears this if LayoutChooser will
+      // handle layout init instead.
       const localCount = latestStateRef.current?.sessions.length ?? 0;
       const isRemote =
         latestStateRef.current?.connectionTarget.kind === "remote";
-      if (isRemote && incoming.length > 0 && incoming.length !== localCount) {
+      if (
+        isInitial &&
+        isRemote &&
+        incoming.length > 0 &&
+        incoming.length !== localCount
+      ) {
         pendingSessionImportRef.current = {
           incoming_count: incoming.length,
           local_count: localCount,
@@ -3746,8 +3762,9 @@ function handleMessage(
       // Decide one-shot follow-up BEFORE setState so the state updater stays
       // pure (StrictMode double-invokes updaters in dev). The seen-set is the
       // source of truth for "is this a new session id" — relying on state in
-      // the reducer would mis-fire if the daemon emits the same id back-to-back
-      // (which it currently does after a spawn).
+      // the reducer would mis-fire when the daemon emits the same id
+      // back-to-back (a spawn's snapshot is followed at once by its status
+      // updates). The requester gets one spawn snapshot.
       const session = msg.session;
       const isNew = !seenSessionIdsRef.current.has(session.id);
       if (isNew) seenSessionIdsRef.current.add(session.id);

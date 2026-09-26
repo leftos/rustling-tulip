@@ -29,7 +29,7 @@ const RECENT_ACTIONS_TAIL_ENTRIES: usize = 10;
 /// keeps sidecars compact. Entries are dropped from the front until the
 /// remaining set fits.
 const RECENT_ACTIONS_TAIL_BYTE_CAP: usize = 1024;
-const EVENT_BROADCAST_CAPACITY: usize = 256;
+pub(crate) const EVENT_BROADCAST_CAPACITY: usize = 256;
 
 /// The connection whose request made a session update, and the request's
 /// id. Its own connection's forwarder echoes the id; no other client sees it.
@@ -160,6 +160,10 @@ pub struct SessionRecord {
     /// in those cases `LoadScrollback` falls back to a direct file read with
     /// no live forwarder.
     pub scrollback_snapshot_req: Option<ScrollbackSnapshotReq>,
+    /// The request that spawned this session, when it carried an id. Kept
+    /// so a connection that lagged past its spawn reply gets it again after
+    /// the resync list.
+    pub spawn_origin: Option<UpdateOrigin>,
 }
 
 impl SessionRecord {
@@ -244,13 +248,31 @@ impl SessionRegistry {
         guard.values().map(|rec| lock(rec).snapshot()).collect()
     }
 
+    /// Every session's snapshot with the origin of the request that spawned
+    /// it, each pair read under one lock.
+    pub fn snapshots_with_spawn_origins(&self) -> Vec<(SessionSnapshot, Option<UpdateOrigin>)> {
+        let guard = read(&self.by_id);
+        guard
+            .values()
+            .map(|rec| {
+                let rec = lock(rec);
+                (rec.snapshot(), rec.spawn_origin.clone())
+            })
+            .collect()
+    }
+
     pub fn get(&self, id: &str) -> Option<Arc<Mutex<SessionRecord>>> {
         let guard = read(&self.by_id);
         guard.get(id).cloned()
     }
 
     pub fn insert(&self, record: SessionRecord) {
-        self.insert_pending(record).publish();
+        self.insert_from(record, None);
+    }
+
+    /// [`Self::insert`], its broadcast carrying `origin`.
+    pub fn insert_from(&self, record: SessionRecord, origin: Option<UpdateOrigin>) {
+        self.insert_pending(record).publish_from(origin);
     }
 
     /// Put `record` into the registry map WITHOUT firing `SessionUpdated`. The
@@ -338,11 +360,28 @@ impl PendingInsert<'_> {
     }
 
     pub fn publish(self) {
-        let snap = lock(&self.arc).snapshot();
+        self.publish_from(None);
+    }
+
+    /// Takes the unpublished record back out of the registry. No client
+    /// heard of it, so nothing is broadcast.
+    pub fn discard(self) {
+        let id = lock(&self.arc).id.clone();
+        write(&self.registry.by_id).remove(&id);
+    }
+
+    /// [`Self::publish`], its broadcast carrying `origin`, which the record
+    /// keeps as its spawn origin.
+    pub fn publish_from(self, origin: Option<UpdateOrigin>) {
+        let snap = {
+            let mut rec = lock(&self.arc);
+            rec.spawn_origin.clone_from(&origin);
+            rec.snapshot()
+        };
         let _ = self
             .registry
             .events
-            .send(SessionEvent::Updated(Box::new(snap), None));
+            .send(SessionEvent::Updated(Box::new(snap), origin));
     }
 }
 
@@ -612,6 +651,7 @@ impl SessionRegistry {
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
             scrollback_snapshot_req: None,
+            spawn_origin: None,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -656,6 +696,7 @@ impl SessionRegistry {
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
             scrollback_snapshot_req: None,
+            spawn_origin: None,
         };
         push_recent_action(
             &mut record,
@@ -697,6 +738,7 @@ impl SessionRegistry {
             last_prompt: meta.last_prompt.clone(),
             input_notifier: None,
             scrollback_snapshot_req: None,
+            spawn_origin: None,
         };
         push_recent_action(
             &mut record,

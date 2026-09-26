@@ -415,6 +415,41 @@ fn a_refused_send_raises_a_toast_and_stops_overlaying(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_session_list_keeps_the_sends_in_flight_of_the_sessions_it_holds(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/repos/r1")],
+        ..Fixture::single(session("s1").in_repo("r1").build())
+    };
+    let mut h = focused(cx, &dir, &fixture);
+    let other = session("s2").in_repo("r1").build();
+    pick_preset(&mut h, "s1", "sky");
+    h.sent();
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").in_repo("r1").build(), other.clone()],
+    });
+    assert_eq!(
+        next_step(&mut h),
+        (Some(14), Some("#38bdf8".to_owned())),
+        "a listed session's pick may still be on the wire, so the next send carries it"
+    );
+
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![other],
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s1").in_repo("r1").build(),
+        request_id: None,
+    });
+    assert_eq!(
+        next_step(&mut h),
+        (Some(14), None),
+        "a session the list no longer holds loses its sends in flight"
+    );
+}
+
+#[gpui::test]
 fn a_program_background_fills_the_grid_and_an_unset_ring(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = focused(cx, &dir, &Fixture::single(session("s1").build()));

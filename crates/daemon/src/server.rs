@@ -860,7 +860,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
     let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
-    let event_task = spawn_session_forwarder(hub.sessions.subscribe(), out_tx.clone(), connection);
+    let event_task = spawn_session_forwarder(Arc::clone(&hub.sessions), out_tx.clone(), connection);
 
     // Subscribe to tab-layout and preset-launch events. Tab events are
     // filtered to this connection's `client_id` (per-client layouts); preset
@@ -1591,15 +1591,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
             } else {
+                // The requester hears of its spawn through the registry's one
+                // broadcast, which carries `request_id` on this connection.
                 let request_id = req.request_id.clone();
-                match spawn_session(hub, req).await {
-                    Ok(snap) => {
-                        let _ = out_tx.send(DaemonMessage::SessionUpdated {
-                            session: snap,
-                            request_id,
-                        });
-                    }
-                    Err(err) => send_spawn_failure(out_tx, &err, request_id.as_deref()),
+                let origin = request_origin(connection, request_id.clone());
+                if let Err(err) = spawn_session(hub, req, origin).await {
+                    send_spawn_failure(out_tx, &err, request_id.as_deref());
                 }
             }
         }
@@ -1607,7 +1604,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             session_id,
             request_id,
         } => {
-            duplicate_session(hub, &session_id, request_id, out_tx).await;
+            duplicate_session(hub, &session_id, request_id, connection, out_tx).await;
         }
         ClientMessage::GetSpawnConfig { session_id } => {
             let config = hub
@@ -3017,6 +3014,7 @@ fn checkout_confirm_reply(
 pub(crate) async fn spawn_session(
     hub: &Hub,
     req: SpawnRequest,
+    origin: Option<UpdateOrigin>,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // Phase-level timing for the spawn pipeline so we can tell at a glance
     // whether a slow spawn was the git worktree setup, the PTY/child boot,
@@ -3126,6 +3124,7 @@ pub(crate) async fn spawn_session(
         model,
         extra_env,
         prompt_injector,
+        origin,
     };
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
@@ -3419,6 +3418,9 @@ struct SpawnArgs {
     /// injector is responsible for delivering the prompt. Ignored by the
     /// headless and plain-shell paths.
     prompt_injector: Option<protocol::PromptInjector>,
+    /// The request that asked for this spawn; the session's first broadcast
+    /// carries it, so the requester hears of its spawn once, in order.
+    origin: Option<UpdateOrigin>,
 }
 
 impl SpawnArgs {
@@ -3528,6 +3530,7 @@ async fn spawn_interactive_session(
         last_prompt: last_prompt.clone(),
         input_notifier: None,
         scrollback_snapshot_req: None,
+        spawn_origin: None,
     };
     push_recent_action(&mut record, "session started".to_string());
 
@@ -3566,7 +3569,7 @@ async fn spawn_interactive_session(
         false,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
-    pending.publish();
+    pending.publish_from(cfg.origin.clone());
 
     // Post-C.3 the direct daemon child is rt-tracer.exe, not the agent CLI.
     // Sidecar's `pid` + `program_name` therefore describe the tracer; the
@@ -3714,6 +3717,7 @@ async fn spawn_plain_shell_session(
         last_prompt: None,
         input_notifier: None,
         scrollback_snapshot_req: None,
+        spawn_origin: None,
     };
     push_recent_action(
         &mut record,
@@ -3752,7 +3756,7 @@ async fn spawn_plain_shell_session(
         true,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
-    pending.publish();
+    pending.publish_from(cfg.origin.clone());
 
     if let Some(pid) = pid
         && let Ok(meta) = orphan::meta_from_record(
@@ -3844,12 +3848,25 @@ fn spawn_headless_session(
         last_prompt: last_prompt.clone(),
         input_notifier: None,
         scrollback_snapshot_req: None,
+        spawn_origin: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
-    hub.sessions.insert(record);
-
-    let handle = headless::spawn(&spec, &hub.sessions, session_id.clone(), hub.dirs.clone())
-        .with_context(|| format!("spawning headless {}", cfg.agent().as_label()))?;
+    // Held unpublished until the child runs, so a failed spawn is never
+    // broadcast and the first snapshot clients see carries its handle.
+    let pending = hub.sessions.insert_pending(record);
+    let handle = match headless::spawn(&spec, &hub.sessions, session_id.clone(), hub.dirs.clone()) {
+        Ok(handle) => handle,
+        Err(err) => {
+            pending.discard();
+            return Err(err.context(format!("spawning headless {}", cfg.agent().as_label())));
+        }
+    };
+    let snap = {
+        let mut rec = crate::sync::lock(pending.arc());
+        rec.headless = Some(Arc::clone(&handle));
+        rec.snapshot()
+    };
+    pending.publish_from(cfg.origin.clone());
 
     if let Some(pid) = handle.pid()
         && let Ok(meta) = orphan::meta_from_record(
@@ -3877,15 +3894,6 @@ fn spawn_headless_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
-    hub.sessions.update(&session_id, |rec| {
-        rec.headless = Some(Arc::clone(&handle));
-    });
-
-    let snap = hub
-        .sessions
-        .get(&session_id)
-        .map(|rec| crate::sync::lock(&rec).snapshot())
-        .ok_or_else(|| anyhow!("session vanished"))?;
     Ok(snap)
 }
 
@@ -4109,15 +4117,14 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> spawn_plan
     }
 }
 
-/// Send a spawn failure to the requesting client as a blocking `ActionFailed`
-/// modal. Uses the structured `SpawnFailure` fields when present; otherwise
-/// surfaces the full anyhow chain under a generic title.
-/// Spawns a copy of `session_id` from its stored config. The reply to the
-/// requester, success or failure, carries `request_id`.
+/// Spawns a copy of `session_id` from its stored config. The copy's first
+/// broadcast carries `request_id` on connection `connection`; a failure
+/// answers the requester directly, carrying it too.
 async fn duplicate_session(
     hub: &Hub,
     session_id: &str,
     request_id: Option<String>,
+    connection: u64,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
     let req = match duplicate_request(hub, session_id).await {
@@ -4130,15 +4137,20 @@ async fn duplicate_session(
             return;
         }
     };
-    match spawn_session(hub, req).await {
-        Ok(snap) => {
-            let _ = out_tx.send(DaemonMessage::SessionUpdated {
-                session: snap,
-                request_id,
-            });
-        }
-        Err(err) => send_spawn_failure(out_tx, &err, request_id.as_deref()),
+    let origin = request_origin(connection, request_id.clone());
+    if let Err(err) = spawn_session(hub, req, origin).await {
+        send_spawn_failure(out_tx, &err, request_id.as_deref());
     }
+}
+
+/// The origin of a registry update made by connection `connection`'s
+/// request `request_id`; `None` when the request carried no id, since
+/// there is then nothing to echo.
+fn request_origin(connection: u64, request_id: Option<String>) -> Option<UpdateOrigin> {
+    request_id.map(|request_id| UpdateOrigin {
+        connection,
+        request_id,
+    })
 }
 
 /// The request that duplicates `session_id`. A worktree duplicate runs on
@@ -4219,10 +4231,7 @@ fn set_session_appearance(
             return;
         }
     };
-    let origin = request_id.clone().map(|request_id| UpdateOrigin {
-        connection,
-        request_id,
-    });
+    let origin = request_origin(connection, request_id.clone());
     let found = sessions.update_from(session_id, origin, |guard| {
         guard.appearance.clone_from(&appearance);
     });
@@ -4237,12 +4246,17 @@ fn set_session_appearance(
 }
 
 /// Forwards the registry's session events to connection `connection`, in
-/// the order the registry sent them.
+/// the order the registry sent them. A connection that falls behind the
+/// broadcast buffer gets the whole `Sessions` list in place of the events it
+/// missed, and the events after it.
 fn spawn_session_forwarder(
-    mut rx: broadcast::Receiver<SessionEvent>,
+    registry: Arc<SessionRegistry>,
     out_tx: mpsc::UnboundedSender<DaemonMessage>,
     connection: u64,
 ) -> tokio::task::JoinHandle<()> {
+    // Subscribed before the task starts, so no event sent after this call
+    // is missed.
+    let mut rx = registry.subscribe();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -4250,7 +4264,17 @@ fn spawn_session_forwarder(
                     let _ = out_tx.send(session_event_message(event, connection));
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "client event stream lagged");
+                    warn!(
+                        lagged = n,
+                        connection, "client event stream lagged; resending the session list"
+                    );
+                    // Subscribe before taking the list: the stale buffered
+                    // events go with the old receiver, and every event after
+                    // the list applies on top of it.
+                    rx = registry.subscribe();
+                    for msg in resync_messages(&registry, connection) {
+                        let _ = out_tx.send(msg);
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -4258,7 +4282,32 @@ fn spawn_session_forwarder(
     })
 }
 
-/// Tells the requester its spawn failed, echoing the request's id.
+/// What a connection that lagged past the broadcast buffer gets: the whole
+/// `Sessions` list, then each listed session's spawn reply once more for the
+/// sessions this connection's own requests spawned, since the list carries
+/// no `request_id` and the reply may have been among the events it missed.
+fn resync_messages(registry: &SessionRegistry, connection: u64) -> Vec<DaemonMessage> {
+    let listed = registry.snapshots_with_spawn_origins();
+    let replies: Vec<DaemonMessage> = listed
+        .iter()
+        .filter_map(|(session, origin)| {
+            let origin = origin.as_ref().filter(|o| o.connection == connection)?;
+            Some(DaemonMessage::SessionUpdated {
+                session: session.clone(),
+                request_id: Some(origin.request_id.clone()),
+            })
+        })
+        .collect();
+    let sessions = listed.into_iter().map(|(session, _)| session).collect();
+    std::iter::once(DaemonMessage::Sessions { sessions })
+        .chain(replies)
+        .collect()
+}
+
+/// Send a spawn failure to the requesting client as a blocking `ActionFailed`
+/// modal, echoing the request's id. Uses the structured `SpawnFailure` fields
+/// when present; otherwise surfaces the full anyhow chain under a generic
+/// title.
 fn send_spawn_failure(
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
     err: &anyhow::Error,
@@ -4899,7 +4948,7 @@ async fn resume_abandoned(
     };
     let mut req = stored.to_clone_request();
     req.initial_prompt = last_prompt;
-    let snap = spawn_session(hub, req).await?;
+    let snap = spawn_session(hub, req, None).await?;
 
     // Rebind any pane that pointed at the abandoned session to the fresh one,
     // in every client layout, so the resume reattaches to its original slot
@@ -4910,11 +4959,6 @@ async fn resume_abandoned(
     // after the spawn succeeds. If spawn failed, the placeholder stays
     // so the user can try again.
     discard_abandoned(hub, session_id, out_tx);
-
-    let _ = out_tx.send(DaemonMessage::SessionUpdated {
-        session: snap,
-        request_id: None,
-    });
     Ok(())
 }
 
@@ -4922,8 +4966,8 @@ async fn resume_abandoned(
 /// registry snapshot (taken upfront to avoid mutating it while iterating),
 /// calls `resume_abandoned` for each, and emits an `Error` message per
 /// failure so the user can see which ones didn't make it. Successful
-/// resumes are handled by `resume_abandoned` itself (it emits
-/// `SessionUpdated` and consumes the sidecar).
+/// resumes are handled by `resume_abandoned` itself (the spawn broadcasts
+/// the new session's `SessionUpdated`, and it consumes the sidecar).
 async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
     let abandoned_ids: Vec<String> = hub
         .sessions
@@ -6189,10 +6233,16 @@ mod tests {
             binaries_dir: root.join("binaries"),
         };
         let sessions = SessionRegistry::new(dirs.clone());
-        sessions.insert(SessionRecord {
-            id: "s1".to_string(),
-            label: "s1".to_string(),
-            default_label: "s1".to_string(),
+        sessions.insert(idle_record("s1"));
+        (sessions, dirs)
+    }
+
+    /// An idle standalone session `id` with no process behind it.
+    fn idle_record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.to_string(),
+            label: id.to_string(),
+            default_label: id.to_string(),
             user_label: None,
             kind: SessionKind::Standalone,
             members: Vec::new(),
@@ -6217,8 +6267,8 @@ mod tests {
             last_prompt: None,
             input_notifier: None,
             scrollback_snapshot_req: None,
-        });
-        (sessions, dirs)
+            spawn_origin: None,
+        }
     }
 
     fn accent(color: &str) -> AppearanceOverrides {
@@ -6260,8 +6310,8 @@ mod tests {
         let (out_tx, mut requester) = mpsc::unbounded_channel();
         let (other_tx, mut other) = mpsc::unbounded_channel();
         let forwarders = [
-            spawn_session_forwarder(sessions.subscribe(), out_tx.clone(), 1),
-            spawn_session_forwarder(sessions.subscribe(), other_tx, 2),
+            spawn_session_forwarder(Arc::clone(&sessions), out_tx.clone(), 1),
+            spawn_session_forwarder(Arc::clone(&sessions), other_tx, 2),
         ];
 
         sessions.update("s1", |guard| {
@@ -6296,6 +6346,180 @@ mod tests {
         for forwarder in forwarders {
             forwarder.abort();
         }
+    }
+
+    /// The next message on `rx`.
+    async fn next_message(rx: &mut mpsc::UnboundedReceiver<DaemonMessage>) -> DaemonMessage {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the forwarder delivers a message")
+            .expect("the channel is open")
+    }
+
+    /// The session id and `request_id` of the one message on `rx`, which
+    /// must be a `SessionUpdated`; then checks nothing follows.
+    async fn only_update(
+        rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+    ) -> (String, Option<String>) {
+        let update = match next_message(rx).await {
+            DaemonMessage::SessionUpdated {
+                session,
+                request_id,
+            } => Some((session.id, request_id)),
+            _ => None,
+        };
+        let extra = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(extra.is_err(), "one message per update: {extra:?}");
+        update.expect("only a SessionUpdated arrives")
+    }
+
+    #[tokio::test]
+    async fn a_spawn_reply_reaches_the_requester_once_with_its_request_id() {
+        let (sessions, _dirs) = appearance_registry("spawn-reply");
+        let (requester_tx, mut requester) = mpsc::unbounded_channel();
+        let (other_tx, mut other) = mpsc::unbounded_channel();
+        let forwarders = [
+            spawn_session_forwarder(Arc::clone(&sessions), requester_tx, 1),
+            spawn_session_forwarder(Arc::clone(&sessions), other_tx, 2),
+        ];
+
+        // A spawn needs a real child, so this drives the seam the handler
+        // uses: the origin it builds, published the way the interactive and
+        // plain-shell spawn paths publish their record.
+        let pending = sessions.insert_pending(idle_record("s2"));
+        pending.publish_from(request_origin(1, Some("r1".to_string())));
+
+        assert_eq!(
+            only_update(&mut requester).await,
+            ("s2".to_string(), Some("r1".to_string())),
+            "the requester hears of its spawn once, with its id"
+        );
+        assert_eq!(
+            only_update(&mut other).await,
+            ("s2".to_string(), None),
+            "another connection hears of it once, without the id"
+        );
+        for forwarder in forwarders {
+            forwarder.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_reply_reaches_the_requester_once_with_its_request_id() {
+        let (sessions, _dirs) = appearance_registry("duplicate-reply");
+        let (other_tx, mut other) = mpsc::unbounded_channel();
+        let (requester_tx, mut requester) = mpsc::unbounded_channel();
+        let forwarders = [
+            spawn_session_forwarder(Arc::clone(&sessions), other_tx, 1),
+            spawn_session_forwarder(Arc::clone(&sessions), requester_tx, 2),
+        ];
+
+        // The duplicate's origin, published the way the headless spawn path
+        // inserts its record.
+        sessions.insert_from(idle_record("s2"), request_origin(2, Some("d1".to_string())));
+        assert_eq!(
+            only_update(&mut requester).await,
+            ("s2".to_string(), Some("d1".to_string())),
+            "the requester hears of its duplicate once, with its id"
+        );
+        assert_eq!(only_update(&mut other).await, ("s2".to_string(), None));
+
+        sessions.insert_from(idle_record("s3"), request_origin(2, None));
+        assert_eq!(
+            only_update(&mut requester).await,
+            ("s3".to_string(), None),
+            "a request without an id has nothing to echo"
+        );
+        assert_eq!(only_update(&mut other).await, ("s3".to_string(), None));
+        for forwarder in forwarders {
+            forwarder.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lagged_forwarder_resyncs_with_a_sessions_list() {
+        let (sessions, _dirs) = appearance_registry("lagged");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_session_forwarder(Arc::clone(&sessions), out_tx, 1);
+
+        // The current-thread runtime first polls the forwarder at the await
+        // below, by which time the broadcast buffer has overflowed.
+        for step in 0..=crate::session::EVENT_BROADCAST_CAPACITY {
+            sessions.update("s1", |guard| {
+                guard.terminal_title = Some(format!("step {step}"));
+            });
+        }
+        let listed = match next_message(&mut rx).await {
+            DaemonMessage::Sessions { sessions } => Some(sessions),
+            _ => None,
+        };
+        assert_eq!(
+            listed.expect("the lagged connection gets the session list"),
+            sessions.snapshots(),
+            "the list is the registry as it stands"
+        );
+
+        sessions.update("s1", |guard| {
+            guard.terminal_title = Some("after".to_string());
+        });
+        let title = match next_message(&mut rx).await {
+            DaemonMessage::SessionUpdated { session, .. } => Some(session.terminal_title),
+            _ => None,
+        };
+        assert_eq!(
+            title.expect("updates after the list still arrive"),
+            Some("after".to_string()),
+            "the missed updates are not replayed after the list"
+        );
+        forwarder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lag_resends_the_spawn_reply_to_its_requester() {
+        let (sessions, _dirs) = appearance_registry("lag-reply");
+        let (out_tx, mut rx) = mpsc::unbounded_channel();
+        let forwarder = spawn_session_forwarder(Arc::clone(&sessions), out_tx, 1);
+
+        // Connection 1 spawns s2 and connection 2 spawns s3; the updates
+        // after them push both replies out of connection 1's buffer.
+        sessions
+            .insert_pending(idle_record("s2"))
+            .publish_from(request_origin(1, Some("r1".to_string())));
+        sessions.insert_from(idle_record("s3"), request_origin(2, Some("r2".to_string())));
+        for step in 0..=crate::session::EVENT_BROADCAST_CAPACITY {
+            sessions.update("s1", |guard| {
+                guard.terminal_title = Some(format!("step {step}"));
+            });
+        }
+
+        let listed = match next_message(&mut rx).await {
+            DaemonMessage::Sessions { sessions } => Some(sessions.len()),
+            _ => None,
+        };
+        assert_eq!(listed, Some(3), "the resync lists every session first");
+        assert_eq!(
+            only_update(&mut rx).await,
+            ("s2".to_string(), Some("r1".to_string())),
+            "the lost reply follows the list, to its requester only"
+        );
+        forwarder.abort();
+    }
+
+    #[test]
+    fn a_discarded_pending_insert_leaves_no_trace() {
+        let (sessions, _dirs) = appearance_registry("discard");
+        let mut events = sessions.subscribe();
+
+        sessions.insert_pending(idle_record("s2")).discard();
+
+        assert!(sessions.get("s2").is_none(), "the record is gone");
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "no client ever hears of a record that was never published"
+        );
     }
 
     #[test]

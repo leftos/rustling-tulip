@@ -550,6 +550,7 @@ mod hysteresis_tests {
             last_prompt: None,
             input_notifier: None,
             scrollback_snapshot_req: None,
+            spawn_origin: None,
         }
     }
 
