@@ -96,6 +96,7 @@ impl RootView {
     /// dialog, menu or modal notice is up. No repo is needed.
     pub(crate) fn open_shell_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let blocked = self.shell_dialog.is_some()
+            || self.exit.is_some()
             || self.spawn_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()

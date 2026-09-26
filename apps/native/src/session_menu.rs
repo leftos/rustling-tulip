@@ -43,9 +43,31 @@ pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyEleme
         .into_any_element()
 }
 
+/// Who opened the delete-worktree confirm, and so what its answer does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmOwner {
+    /// The session menu or the exited overlay: a delete answer sends the
+    /// stop and the discard.
+    Menu,
+    /// The quit's branch-fate walk, at session `index` of `total`: the
+    /// answer is recorded and the walk moves on; Cancel ends the walk.
+    ExitWalk { index: usize, total: usize },
+}
+
+impl ConfirmOwner {
+    /// The walk's "Session n of m" line under the heading.
+    fn progress(self) -> Option<String> {
+        match self {
+            Self::Menu => None,
+            Self::ExitWalk { index, total } => Some(format!("Session {index} of {total}")),
+        }
+    }
+}
+
 /// The open delete-worktree confirm.
 pub(crate) struct DeleteDialog {
     confirm: DeleteWorktreeConfirm,
+    owner: ConfirmOwner,
     /// Wakes the dialog at the preview's deadline; replacing or dropping
     /// it cancels the wake-up.
     timer: Option<Task<()>>,
@@ -150,8 +172,9 @@ impl RootView {
         }
     }
 
-    /// Closes the menu and the delete-worktree confirm of a session the
-    /// daemon no longer lists.
+    /// Closes the menu and the menu's delete-worktree confirm of a session
+    /// the daemon no longer lists. The quit's walk skips such a session
+    /// itself.
     pub(crate) fn drop_stale_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self
             .menu
@@ -160,10 +183,10 @@ impl RootView {
         {
             self.close_session_menu(window, cx);
         }
-        if self
-            .delete_dialog_session()
-            .is_some_and(|id| self.sidebar.session(id).is_none())
-        {
+        if self.delete_dialog.as_ref().is_some_and(|dialog| {
+            dialog.owner == ConfirmOwner::Menu
+                && self.sidebar.session(dialog.confirm.session_id()).is_none()
+        }) {
             self.close_delete_dialog(window, cx);
         }
     }
@@ -197,7 +220,7 @@ impl RootView {
         match plan(action, &session, self.is_shown(session_id)) {
             Step::ConfirmWorktreeDelete => {
                 self.close_session_menu(window, cx);
-                self.open_delete_dialog(session_id, window, cx);
+                self.open_delete_dialog(session_id, ConfirmOwner::Menu, window, cx);
             }
             Step::Send(messages) => {
                 for msg in messages {
@@ -576,7 +599,8 @@ impl RootView {
         };
         let confirm = &dialog.confirm;
         let label = self.session_label(confirm.session_id());
-        let mut lines = vec![format!("Removing the worktree for {label}.")];
+        let mut lines: Vec<String> = dialog.owner.progress().into_iter().collect();
+        lines.push(format!("Removing the worktree for {label}."));
         lines.extend(confirm.status_note().map(str::to_owned));
         lines.extend(
             confirm
@@ -595,12 +619,20 @@ impl RootView {
             .map(|dialog| dialog.confirm.focused().selector().to_owned())
     }
 
-    /// Opens the confirm for `session_id`: asks the daemon for its branch
-    /// fates, arms the fallback at the preview's deadline and takes the
-    /// keyboard.
+    /// Whether the open confirm is the quit's branch-fate walk.
+    pub(crate) fn exit_walk_confirm_open(&self) -> bool {
+        self.delete_dialog
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.owner, ConfirmOwner::ExitWalk { .. }))
+    }
+
+    /// Opens the confirm for `session_id` on behalf of `owner`, replacing
+    /// any confirm open: asks the daemon for its branch fates, arms the
+    /// fallback at the preview's deadline and takes the keyboard.
     pub(crate) fn open_delete_dialog(
         &mut self,
         session_id: &str,
+        owner: ConfirmOwner,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -608,6 +640,7 @@ impl RootView {
         self.send(confirm.request());
         self.delete_dialog = Some(DeleteDialog {
             confirm,
+            owner,
             timer: None,
         });
         self.schedule_delete_dialog_tick(cx);
@@ -659,16 +692,23 @@ impl RootView {
         }
     }
 
-    /// Closes the confirm and hands the keyboard back to the active pane.
+    /// Closes the confirm and hands the keyboard back to the active pane;
+    /// closing the quit's walk ends the walk and returns to the exit dialog.
     pub(crate) fn close_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.delete_dialog.take().is_some() {
-            self.focus_active_pane(window, cx);
-            cx.notify();
+        let Some(dialog) = self.delete_dialog.take() else {
+            return;
+        };
+        match dialog.owner {
+            ConfirmOwner::Menu => self.focus_active_pane(window, cx),
+            ConfirmOwner::ExitWalk { .. } => self.cancel_exit_walk(window, cx),
         }
+        cx.notify();
     }
 
-    /// The user's answer. A delete sends the confirm's messages for the
-    /// session as it stands now; Cancel sends nothing.
+    /// The user's answer. For the menu, a delete sends the confirm's
+    /// messages for the session as it stands now; Cancel sends nothing. For
+    /// the quit's walk, a delete records the branch choice and Cancel ends
+    /// the walk.
     fn answer_delete_dialog(
         &mut self,
         button: DialogButton,
@@ -678,6 +718,16 @@ impl RootView {
         let Some(dialog) = self.delete_dialog.take() else {
             return;
         };
+        if let ConfirmOwner::ExitWalk { .. } = dialog.owner {
+            match button.branch() {
+                Some(branch) => {
+                    self.answer_exit_walk(dialog.confirm.session_id(), branch, window, cx);
+                }
+                None => self.cancel_exit_walk(window, cx),
+            }
+            cx.notify();
+            return;
+        }
         let session = self.sidebar.session(dialog.confirm.session_id()).cloned();
         if let (Some(branch), Some(session)) = (button.branch(), session) {
             for msg in confirm_messages(&session, branch) {
@@ -716,19 +766,30 @@ impl RootView {
     /// The confirm over a backdrop that takes every click beneath it; a
     /// click on the backdrop itself does nothing.
     pub(crate) fn delete_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let confirm = &self.delete_dialog.as_ref()?.confirm;
+        let dialog = self.delete_dialog.as_ref()?;
+        let confirm = &dialog.confirm;
         let close = dialog_button("delete-worktree-dialog-close", "✕".to_owned(), false, false)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.close_delete_dialog(window, cx);
             }));
+        let progress = dialog
+            .owner
+            .progress()
+            .map(|line| div().text_color(gpui::rgb(MUTED)).child(line));
         let header = div()
             .flex()
             .items_center()
             .justify_between()
             .child(
                 div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Delete worktree?"),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Delete worktree?"),
+                    )
+                    .children(progress),
             )
             .child(close);
         let buttons: Vec<AnyElement> = confirm

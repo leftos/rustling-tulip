@@ -15,6 +15,8 @@ mod mouse;
 mod net;
 mod notice_view;
 mod notices;
+mod quit;
+mod quit_view;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
@@ -52,6 +54,7 @@ use crate::connection::{DotKind, Footer};
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::notices::Notices;
+use crate::quit_view::{ExitView, Quitter};
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
 use crate::session_menu::{DeleteDialog, SessionMenu};
 use crate::shell_dialog::PendingQuickShell;
@@ -72,6 +75,7 @@ pub use crate::net::{
 pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind,
 };
+pub use crate::quit_view::QuitFn;
 pub use crate::sidebar::{Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf};
 pub use crate::spawns::OpenIn;
 pub use crate::text_input::bind_keys;
@@ -100,6 +104,8 @@ pub struct RootDeps {
     /// The session to focus once the layout and the sessions arrive.
     pub wanted: Option<String>,
     pub now: Clock,
+    /// Quits the app once the quit flow is done.
+    pub quit: QuitFn,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -330,6 +336,12 @@ pub struct RootView {
     quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
     branch_cache: BranchCache,
+    /// Quits the app, once.
+    quitter: Quitter,
+    /// The exit dialog, while open.
+    exit: Option<ExitView>,
+    /// The exit dialog's keyboard focus.
+    quit_focus: FocusHandle,
 }
 
 impl RootView {
@@ -360,12 +372,14 @@ impl RootView {
                 .map_err(|err| format!("config folder unavailable: {err:#}")),
             wanted: wanted_session,
             now: Arc::new(Instant::now),
+            quit: Box::new(|cx: &mut App| cx.quit()),
         };
         Self::with_transport(deps, window, cx)
     }
 
     /// A view over `deps`: it sends through `deps.tx` and handles every
-    /// event `deps.events` delivers.
+    /// event `deps.events` delivers. A request to close the window goes
+    /// through the quit flow.
     pub fn with_transport(deps: RootDeps, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let RootDeps {
             tx,
@@ -374,7 +388,14 @@ impl RootView {
             paths,
             wanted,
             now,
+            quit,
         } = deps;
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            // A view that is gone has nothing to ask; let the window close.
+            view.update(cx, |root, cx| root.on_close_requested(window, cx))
+                .unwrap_or(true)
+        });
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
@@ -427,6 +448,9 @@ impl RootView {
             shell_generation: 0,
             quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
+            quitter: Quitter::new(quit),
+            exit: None,
+            quit_focus: cx.focus_handle(),
         }
     }
 
@@ -616,6 +640,7 @@ impl RootView {
             && self.shell_dialog.is_none()
             && self.delete_dialog.is_none()
             && !self.notices.has_modal()
+            && self.exit.is_none()
         {
             self.focus_pane_view(&pane_id, window, cx);
         }
@@ -744,10 +769,24 @@ impl RootView {
     }
 
     fn on_net(&mut self, event: NetEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Only the connection and the session list move the exit dialog's
+        // wait, walk and focus.
+        let exit_relevant = match &event {
+            NetEvent::State(_) => true,
+            NetEvent::Message(msg) => matches!(
+                **msg,
+                DaemonMessage::Sessions { .. }
+                    | DaemonMessage::SessionUpdated { .. }
+                    | DaemonMessage::SessionRemoved { .. }
+            ),
+            NetEvent::Handshake(_) | NetEvent::ShutdownSent | NetEvent::ShutdownFailed => false,
+        };
         match event {
             NetEvent::State(conn) => self.conn = conn,
             NetEvent::Handshake(info) => self.handshake = Some(info),
             NetEvent::Message(msg) => self.on_message(*msg, window, cx),
+            NetEvent::ShutdownSent => self.on_shutdown_sent(),
+            NetEvent::ShutdownFailed => self.on_shutdown_failed(window, cx),
         }
         // The overlay covers the footer; a flyout left open under it would
         // reappear (possibly armed) when the overlay goes.
@@ -757,6 +796,9 @@ impl RootView {
             self.close_shell_dialog(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
+        }
+        if exit_relevant {
+            self.after_exit_event(window, cx);
         }
         cx.notify();
     }
@@ -859,14 +901,16 @@ impl RootView {
                 session_id,
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
+            DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
             _ => {}
         }
     }
 
-    /// Keys the root takes before the panes see them. A modal notice, else
-    /// the delete-worktree confirm, else the spawn dialog, while open, holds
-    /// the focus and takes every key that reaches this listener (the spawn
-    /// dialog lets typing through to its text fields); gpui runs keymap
+    /// Keys the root takes before the panes see them. The exit dialog, else
+    /// a modal notice, else the delete-worktree confirm, else the spawn
+    /// dialog, else the Shell… dialog, while open, holds the focus and takes
+    /// every key that reaches this listener (the spawn and Shell… dialogs
+    /// let typing through to their text fields); gpui runs keymap
     /// actions before capture listeners, so that holds only while no
     /// key-bound context (a text input) has the focus. Esc drops an armed
     /// tab close (and still reaches the pane).
@@ -877,6 +921,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
+        if self.on_exit_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.on_notice_key(ks, window, cx) {
             cx.stop_propagation();
             return;
@@ -983,6 +1031,13 @@ impl Render for RootView {
             .conn
             .overlay()
             .map(|text| connecting_overlay(text, footer.dot, cx));
+        // The quit's walk draws its confirm above the exit dialog.
+        let delete_dialog = self.delete_dialog_layer(cx);
+        let (delete_under, delete_over) = if self.exit_walk_confirm_open() {
+            (None, delete_dialog)
+        } else {
+            (delete_dialog, None)
+        };
 
         div()
             .relative()
@@ -999,9 +1054,11 @@ impl Render for RootView {
             .children(flyout.into_iter().flatten())
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
-            .children(self.delete_dialog_layer(cx))
+            .children(delete_under)
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
+            .children(self.exit_layer(cx))
+            .children(delete_over)
             .children(overlay)
     }
 }

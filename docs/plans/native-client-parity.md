@@ -27,9 +27,9 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Restart daemon (graceful `shutdown` then respawn; forced fresh connect in auth-failed/stopped) — `App.tsx` `onRestartDaemon`
 - [ ] "Reconnect" in place of Restart on a remote connection (Phase 6) — `App.tsx` `onRestartDaemon`
 - [x] Stop daemon with two-click confirm (kill pid, remove handshake, no respawn) — `DaemonFooter.tsx`, `lib.rs` `stop_daemon`
-- [ ] Main-window close intercepted; quits silently when no sessions are active — `App.tsx` `onCloseRequested`
-- [ ] Exit dialog: keep running (default), stop and keep worktrees, stop and remove worktrees (branch fate per session, "Session n of m"), abandon and quit, orphan note, force quit after 5s stuck — `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
-- [ ] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
+- [x] Main-window close intercepted; quits silently when no sessions are active — `App.tsx` `onCloseRequested`
+- [x] Exit dialog: keep running (default), stop and keep worktrees, stop and remove worktrees (branch fate per session, "Session n of m"), abandon and quit, orphan note, force quit after 5s stuck — `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
+- [x] Wait for `shutdown_ack` or WS close, then exit from the host side — `App.tsx`, `lib.rs` `quit_app`
 - [x] app.log rotation on boot; frontend logging through `log_message` — `lib.rs`, `utils/logger.ts` (native: tracing writes `logs/native.log`, rotated to `native.log.old` on boot)
 - [ ] First-connect layout chooser (cannot be dismissed): start empty / open all active sessions (grid, side-by-side or stacked, max per tab) / adopt previous / copy another client's layout — `LayoutChooser.tsx`
 - [ ] Daemon `error` becomes a toast and cancels pending spawn routing; unknown message types logged — `App.tsx` `handleMessage` (native: the toast landed in P1.7c; it cancels only the spawn whose request_id it carries)

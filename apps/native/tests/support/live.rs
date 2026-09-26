@@ -538,6 +538,7 @@ impl<'a> Harness<'a> {
         let states = Arc::new(Mutex::new(Vec::new()));
         tee_states(from_net, to_view, Arc::clone(&states));
         let clock = TestClock::new();
+        let quits = std::rc::Rc::new(std::cell::Cell::new(0));
         let deps = RootDeps {
             tx: tx.clone(),
             events: view_events,
@@ -545,6 +546,7 @@ impl<'a> Harness<'a> {
             paths: Err("live specs have no log paths".to_owned()),
             wanted: None,
             now: clock.clock(),
+            quit: super::quit_recorder(&quits),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -556,6 +558,7 @@ impl<'a> Harness<'a> {
             clock,
             answered: HashSet::new(),
             outbox: Outbox::default(),
+            quits,
         };
         (harness, LiveClient { tx, states })
     }

@@ -80,6 +80,14 @@ pub enum NetCommand {
     Restart,
     /// Force-stop the daemon and stop reconnecting.
     Stop,
+    /// The app is quitting: send `before` in order, then ask the daemon to
+    /// shut down (`drain` stops its sessions first), and never reconnect or
+    /// respawn it after the connection closes. All or nothing: with no live
+    /// socket nothing is sent and [`NetEvent::ShutdownFailed`] follows.
+    Shutdown {
+        before: Vec<ClientMessage>,
+        drain: bool,
+    },
 }
 
 /// The running daemon's handshake without its auth token.
@@ -111,6 +119,12 @@ pub enum NetEvent {
     Handshake(HandshakeInfo),
     /// A message from the daemon.
     Message(Box<DaemonMessage>),
+    /// A [`NetCommand::Shutdown`] went out in full; the close that follows
+    /// is the daemon exiting.
+    ShutdownSent,
+    /// A [`NetCommand::Shutdown`] arrived with no live socket, so nothing
+    /// of it was sent.
+    ShutdownFailed,
 }
 
 /// Spawns the network thread on the production [`NetDeps`]. It runs until
@@ -411,6 +425,31 @@ impl Net {
                 self.stop().await;
                 Step::Continue
             }
+            Some(NetCommand::Shutdown { before, drain }) => self.shutdown(ws, &before, drain).await,
+        }
+    }
+
+    /// Sends `before`, then the shutdown, and reports it sent. A failed send
+    /// closes the socket; the view's wait then offers Force quit.
+    async fn shutdown(&mut self, ws: &mut Socket, before: &[ClientMessage], drain: bool) -> Step {
+        info!(
+            drain,
+            before = before.len(),
+            "quitting: sending the stops, then asking the daemon to shut down; no reconnect after"
+        );
+        for msg in before {
+            if let Err(err) = send(ws, msg).await {
+                return Step::Close(format!("{err:#}"));
+            }
+        }
+        // Before the send, so the close that follows never reconnects.
+        self.conn.stop();
+        match send(ws, &ClientMessage::Shutdown { drain }).await {
+            Ok(()) => {
+                self.emit(NetEvent::ShutdownSent);
+                Step::Continue
+            }
+            Err(err) => Step::Close(format!("{err:#}")),
         }
     }
 
@@ -487,6 +526,15 @@ impl Net {
             Some(NetCommand::Stop) => {
                 self.stop().await;
                 Some(Next::Wait(None))
+            }
+            Some(NetCommand::Shutdown { before, drain }) => {
+                warn!(
+                    drain,
+                    before = before.len(),
+                    "quit while disconnected: nothing sent; the exit dialog stays open"
+                );
+                self.emit(NetEvent::ShutdownFailed);
+                None
             }
         }
     }

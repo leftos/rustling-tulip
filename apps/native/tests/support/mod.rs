@@ -1,8 +1,10 @@
 //! A fake daemon for the native client's UI specs: the root view on a test
 //! window, fed daemon messages, read back through the commands it sends.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -20,7 +22,8 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Clock, Connection, HandshakeInfo, NetCommand, NetEvent, RootDeps, RootView, bind_keys,
+    Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, QuitFn, RootDeps, RootView,
+    bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -153,6 +156,11 @@ impl SessionBuilder {
             .set("is_abandoned", json!(true))
     }
 
+    /// Still running, but its PTY was lost across a daemon restart.
+    pub fn orphan(self) -> Self {
+        self.set("is_orphan", json!(true))
+    }
+
     /// Parked: stopped and kept in the sidebar to resume.
     pub fn inactive(self) -> Self {
         self.set("status", json!("stopped"))
@@ -234,15 +242,26 @@ pub struct Harness<'a> {
     clock: TestClock,
     answered: HashSet<String>,
     outbox: Outbox,
+    /// How many times the view asked the app to quit.
+    quits: Rc<Cell<usize>>,
 }
 
 /// What the client sent, drained from its channel: the messages
-/// [`Harness::sent`] has not returned yet, and the ids of its
-/// `LoadScrollback` requests by session, in the order sent.
+/// [`Harness::sent`] has not returned yet, the other commands
+/// [`Harness::commands`] has not, and the ids of its `LoadScrollback`
+/// requests by session, in the order sent.
 #[derive(Default)]
 pub struct Outbox {
     unread: Vec<ClientMessage>,
+    commands: Vec<NetCommand>,
     scrollback_ids: HashMap<String, Vec<String>>,
+}
+
+/// A quit that only counts itself in `quits`, as the test platform's quit
+/// does nothing.
+pub fn quit_recorder(quits: &Rc<Cell<usize>>) -> QuitFn {
+    let quits = Rc::clone(quits);
+    Box::new(move |_| quits.set(quits.get() + 1))
 }
 
 impl<'a> Harness<'a> {
@@ -252,6 +271,7 @@ impl<'a> Harness<'a> {
         let (tx, commands) = unbounded();
         let (events, rx) = unbounded();
         let clock = TestClock::new();
+        let quits = Rc::new(Cell::new(0));
         let deps = RootDeps {
             tx,
             events: rx,
@@ -259,6 +279,7 @@ impl<'a> Harness<'a> {
             paths: Err("specs have no config dir".to_owned()),
             wanted: None,
             now: clock.clock(),
+            quit: quit_recorder(&quits),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -270,9 +291,53 @@ impl<'a> Harness<'a> {
             clock,
             answered: HashSet::new(),
             outbox: Outbox::default(),
+            quits,
         };
         harness.connect();
         harness
+    }
+
+    /// Opens the window on the real network thread over `net`. The
+    /// fake-daemon half of the harness ([`Self::send`], [`Self::sent`])
+    /// does nothing here.
+    pub fn open_on_net(cx: &'a mut TestAppContext, dir: &TestDir, net: NetDeps) -> Self {
+        cx.update(bind_keys);
+        let (tx, net_commands) = unbounded();
+        let (net_events, rx) = unbounded();
+        spawn_net(net, net_commands, net_events);
+        let clock = TestClock::new();
+        let quits = Rc::new(Cell::new(0));
+        let deps = RootDeps {
+            tx,
+            events: rx,
+            ui_dir: Some(dir.path().to_path_buf()),
+            paths: Err("specs have no config dir".to_owned()),
+            wanted: None,
+            now: clock.clock(),
+            quit: quit_recorder(&quits),
+        };
+        let (root, cx) =
+            cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
+        Self {
+            cx,
+            root,
+            events: unbounded().0,
+            commands: unbounded().1,
+            clock,
+            answered: HashSet::new(),
+            outbox: Outbox::default(),
+            quits,
+        }
+    }
+
+    /// How many times the view asked the app to quit.
+    pub fn quit_requests(&self) -> usize {
+        self.quits.get()
+    }
+
+    /// Reports `conn` as the network thread would.
+    pub fn set_connection(&mut self, conn: Connection) {
+        self.event(NetEvent::State(conn));
     }
 
     /// Opens the window and delivers `fixture` as a daemon's first
@@ -321,7 +386,9 @@ impl<'a> Harness<'a> {
         self.event(NetEvent::State(Connection::new()));
     }
 
-    fn event(&mut self, event: NetEvent) {
+    /// Delivers `event` as the network thread would and lets the view
+    /// settle.
+    pub fn event(&mut self, event: NetEvent) {
         self.events
             .unbounded_send(event)
             .expect("the root view listens");
@@ -339,12 +406,23 @@ impl<'a> Harness<'a> {
         std::mem::take(&mut self.outbox.unread)
     }
 
+    /// Every command other than a message the client sent since the last
+    /// call.
+    pub fn commands(&mut self) -> Vec<NetCommand> {
+        self.drain();
+        std::mem::take(&mut self.outbox.commands)
+    }
+
     /// Moves what the client sent into the outbox, noting the id of every
     /// `LoadScrollback` on the way.
     fn drain(&mut self) {
         self.cx.run_until_parked();
         while let Ok(command) = self.commands.try_recv() {
-            if let NetCommand::Send(msg) = command {
+            let NetCommand::Send(msg) = command else {
+                self.outbox.commands.push(command);
+                continue;
+            };
+            {
                 if let ClientMessage::LoadScrollback {
                     session_id,
                     request_id: Some(id),
@@ -485,7 +563,13 @@ impl<'a> Harness<'a> {
         let selector = selector.to_owned();
         self.root(move |root, _| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
-            if let Some(id) = selector.strip_prefix("tab-close-") {
+            if selector == "exit-confirm-dialog" {
+                root.exit_dialog_open()
+            } else if selector.starts_with("exit-") {
+                root.exit_dialog_buttons()
+                    .iter()
+                    .any(|(button, _, _)| *button == selector)
+            } else if let Some(id) = selector.strip_prefix("tab-close-") {
                 root.tab_ids().iter().any(|t| t == id)
             } else if let Some(id) = selector.strip_prefix("tab-") {
                 root.tab_ids().iter().any(|t| t == id)

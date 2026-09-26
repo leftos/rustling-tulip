@@ -2051,24 +2051,21 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// Stop every active session and exit the daemon process. The client is
-    /// expected to wait for the WebSocket to close as the shutdown signal —
-    /// no explicit response is sent. Issued by the desktop app's exit
-    /// confirmation when the user opts to terminate everything.
-    /// Graceful daemon shutdown.
+    /// Exit the daemon process. Once its teardown is done the daemon replies
+    /// [`DaemonMessage::ShutdownAck`] to the sender, then closes the
+    /// connection; a client waits for the ack or the close, whichever comes
+    /// first. Issued by the desktop apps' exit confirmation and by Restart.
     ///
-    /// `drain = true` (default, current behaviour): every live session is
-    /// stopped cleanly via `stop_session` and its sidecar deleted. Used
-    /// for "quit and stop everything".
+    /// `drain = true` (default): every live session is stopped cleanly via
+    /// `stop_session` and its sidecar deleted. Used for "quit and stop
+    /// everything".
     ///
-    /// `drain = false`: sessions are NOT stopped; their sidecars are
-    /// flipped to abandoned-on-next-startup state and the daemon exits
-    /// without firing the worktree-remove cleanup. Today (pre-Phase-C)
-    /// the children still die when the daemon's `ConPTY` master handle
-    /// closes — but the next daemon start will surface them in the
-    /// "Abandoned" bucket where the user can Resume. Once Phase C lands
-    /// (per-session tracer) `drain = false` will actually preserve the
-    /// live processes.
+    /// `drain = false`: sessions are not stopped. Their sidecars stay on
+    /// disk and the daemon exits without the worktree-remove cleanup. A
+    /// tracer-backed session keeps running under its `rt-tracer` after the
+    /// daemon exits; the next daemon start reattaches it through the
+    /// tracer's pipe, or, when the tracer is gone or unreachable, lists it
+    /// as abandoned for the user to Resume.
     Shutdown {
         #[serde(default = "default_true")]
         drain: bool,

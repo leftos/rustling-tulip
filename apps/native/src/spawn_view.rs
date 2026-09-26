@@ -130,6 +130,7 @@ impl RootView {
     /// another dialog or menu is open.
     pub(crate) fn open_spawn_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let blocked = self.spawn_dialog.is_some()
+            || self.exit.is_some()
             || self.shell_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()
