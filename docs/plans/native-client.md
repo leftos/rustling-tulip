@@ -154,8 +154,19 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - Commit-detail files send `OpenDiffTab` against the sha.
 
     Original text: 50 commits at a time with "load more", a tooltip (sha, author, date), a commit detail pane with clickable files, the resizable changes / history split, and the forge link. Needs P3.3.
-  - [ ] **P3.8 Diff tab.** File clicks send `OpenDiffTab` with the worktree path. Diff tabs render the P3.1 view with the path, "worktree vs index" / "vs HEAD" / "@ sha", a whitespace toggle (saved), a change count, first / previous / next / last (wrapping), and loading and error states. Needs P3.1 and P3.4.
+  - [x] **P3.8 Diff tab.** As built:
+    - The model is `diff_tab.rs` and the view is `diff_tab_view.rs`, one entity per diff tab.
+    - The model is built on the background executor, and `DiffView::set_model` keeps the scroll position.
+    - A tab activates on `DiffTabOpened` in either arrival order. A tab that is already active is refocused. Neither steals the keyboard from an open confirm or menu.
+    - Worktree and staged tabs refresh live on `RepoStatus`; `@ sha` tabs never refresh.
+    - Whitespace is a global saved toggle (`diff_include_whitespace`).
+    - Binary, too-large and empty states each show their own note.
+    - Changes-tree rows and the file menu's Open item open diffs.
+    - The daemon answers a failed `OpenDiffTab` or `GetFileSnapshot` with the request's id.
+
+    Original text: File clicks send `OpenDiffTab` with the worktree path. Diff tabs render the P3.1 view with the path, "worktree vs index" / "vs HEAD" / "@ sha", a whitespace toggle (saved), a change count, first / previous / next / last (wrapping), and loading and error states. Needs P3.1 and P3.4.
   - [x] **P3.9 Daemon diff hardening.** `16fd93b` dropped it by accident: it was committed from an older base and undid `312260c` byte for byte. Restored 2026-09-26. As built (312260c): a side is refused when binary (a NUL in the first 8000 bytes, or not UTF-8) or over 2 MiB, with the reason in `FileSnapshot.unavailable`; a committed blob's size is checked before it is read. Original text: `file_snapshot` detects binary files and caps size, using additive fields on `FileSnapshot`, so the diff tab can show "Binary file" or "File too large" instead of garbage. Independent.
+  - [ ] **P3.8b Keep the session's sections while a diff tab is active.** Activating a diff tab leaves no session pane focused, so `sections()` falls back to the repos' main trees. The session's worktree sections disappear, and any file menu, discard confirm or drop confirm on them closes. Orchestrator ruling (2026-09-26): while a non-terminal tab is active, the panel keeps the last focused session's sections. Also add `run_confirm` to `keyboard_free` (`lib.rs`), so a pending diff activation can't take the keyboard from it.
   - [ ] **P3.10 Syntax highlighting in the diff.** syntect with `default-fancy` (no C), by the daemon's `language`; a separate item because of its binary-size cost. Needs P3.8.
 - [ ] **Phase 4 — flows and settings:** preset launch wizard, worktree manager, cleanup-failed dialog, first-connect layout chooser, settings modal, OS notifications and attention, toasts beyond P1.7c's error and spawn toasts, the spawn dialog's headless mode, Advanced section, spawn preview, collision radios and branch combobox, undo shelf, workspace creator, VS Code workspace prompt, headless view.
 - [ ] **Phase 5 — windows and drag-and-drop:** pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder.

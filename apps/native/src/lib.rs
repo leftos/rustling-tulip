@@ -14,6 +14,8 @@ mod changes_view;
 mod connection;
 mod copied;
 pub mod diff_model;
+mod diff_tab;
+mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
 pub mod fonts;
@@ -108,6 +110,10 @@ pub use crate::changes_view::{
     DiscardConfirmView, ScAction, ScBucketRow, ScButton, ScFileRow, ScFolderRow, ScTreeRow,
 };
 pub use crate::connection::Connection;
+pub use crate::diff_tab::{
+    BINARY_TEXT, DiffTabBody, DiffTabHeader, EMPTY_TEXT, FINAL_NEWLINE_NOTE, LINE_ENDINGS_NOTE,
+    LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
+};
 pub use crate::footer::LogPaths;
 pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
@@ -374,6 +380,13 @@ pub struct RootView {
     /// The stash lists, the stash writes out, the push inputs and the drop
     /// confirm.
     stash: StashUi,
+    /// A view for every diff tab, by tab id.
+    diff_tabs: HashMap<String, diff_tab_view::DiffSlot>,
+    /// The diff requests' ids, and the tab an open waits to activate.
+    diff_opens: diff_tab::DiffOpens,
+    /// The tab active after the last tab change, so a diff tab takes the
+    /// keyboard when it becomes active.
+    last_active_tab: Option<String>,
 }
 
 impl RootView {
@@ -434,7 +447,7 @@ impl RootView {
     pub fn with_transport(deps: RootDeps, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let RootDeps {
             tx,
-            mut events,
+            events,
             ui_dir,
             paths,
             wanted,
@@ -449,17 +462,7 @@ impl RootView {
             view.update(cx, |root, cx| root.on_close_requested(window, cx))
                 .unwrap_or(true)
         });
-        cx.spawn_in(window, async move |this, cx| {
-            while let Some(event) = events.next().await {
-                if this
-                    .update_in(cx, |view, window, cx| view.on_net(event, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        Self::forward_net_events(events, window, cx);
         let ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
@@ -524,7 +527,29 @@ impl RootView {
             sc_layout: history::ScLayout::default(),
             changes: ChangesUi::new(cx.focus_handle()),
             stash: StashUi::new(cx.focus_handle()),
+            diff_tabs: HashMap::new(),
+            diff_opens: diff_tab::DiffOpens::default(),
+            last_active_tab: None,
         }
+    }
+
+    /// Handles every event `events` delivers, until the view is gone.
+    fn forward_net_events(
+        mut events: UnboundedReceiver<NetEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = events.next().await {
+                if this
+                    .update_in(cx, |view, window, cx| view.on_net(event, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The sidebar's containers, in the order it shows them.
@@ -873,23 +898,38 @@ impl RootView {
 
     /// After any change to the tab model: terminals follow the layout, the
     /// requested pane takes the keyboard (unless the spawn dialog, the
-    /// delete-worktree confirm or a modal notice holds it; closing it
+    /// delete-worktree confirm, the discard or stash drop confirm, the
+    /// source-control file menu or a modal notice holds it; closing it
     /// focuses the tab's pane), the spawn dialog's Open in follows the tabs
-    /// and the active tab is saved.
+    /// and the active tab is saved. A diff tab an open waited for is
+    /// activated, and a diff tab that becomes active takes the keyboard.
     fn after_tabs_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_pending_diff_tab();
         self.reconcile_panes(window, cx);
+        self.reconcile_diff_tabs(window, cx);
         self.prune_tab_font_sizes();
         self.apply_pane_fonts(cx);
         self.refresh_spawn_tabs();
-        if let Some(pane_id) = self.tabs.take_focus_request()
-            && self.spawn_dialog.is_none()
+        let keyboard_free = self.spawn_dialog.is_none()
             && self.shell_dialog.is_none()
             && self.appearance_editor.is_none()
             && self.delete_dialog.is_none()
+            && self.changes.discard.is_none()
+            && self.changes.file_menu.is_none()
+            && self.stash.drop.is_none()
             && !self.notices.has_modal()
-            && self.exit.is_none()
+            && self.exit.is_none();
+        if let Some(pane_id) = self.tabs.take_focus_request()
+            && keyboard_free
         {
             self.focus_pane_view(&pane_id, window, cx);
+        }
+        let active = self.tabs.active_id().map(str::to_owned);
+        if active != self.last_active_tab {
+            self.last_active_tab = active;
+            if keyboard_free {
+                self.focus_active_diff_tab(window, cx);
+            }
         }
         if self.sidebar.set_active_tab(self.tabs.active_id()) {
             self.save_ui();
@@ -1071,6 +1111,20 @@ impl RootView {
         cx.notify();
     }
 
+    /// Folds a message in to the diff tabs and the source-control panel's
+    /// parts; returns whether nothing else is owed it.
+    fn on_panel_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.on_diff_message(msg, window, cx)
+            || self.on_sc_message(msg, cx)
+            || self.on_stash_message(msg, window, cx)
+            || self.apply_history(msg, cx)
+    }
+
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
         // The sidebar takes the message before the panes do, so whether a
         // snapshot moved a session's appearance is read from the old one.
@@ -1079,10 +1133,7 @@ impl RootView {
             _ => None,
         };
         self.sidebar.apply(&msg);
-        if self.on_sc_message(&msg, cx) || self.on_stash_message(&msg, window, cx) {
-            return;
-        }
-        if self.apply_history(&msg, cx) {
+        if self.on_panel_message(&msg, window, cx) {
             return;
         }
         self.drop_stale_session_ui(window, cx);

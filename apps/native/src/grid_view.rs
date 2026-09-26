@@ -14,6 +14,7 @@ use protocol::{
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
+use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::can_attach;
@@ -532,7 +533,12 @@ impl RootView {
         }
     }
 
+    /// Gives the keyboard to the active tab: its focused pane, or a diff
+    /// tab's view.
     pub(crate) fn focus_active_pane(&self, window: &mut Window, cx: &Context<Self>) {
+        if self.focus_active_diff_tab(window, cx) {
+            return;
+        }
         if let Some(pane_id) = self
             .tabs
             .active_id()
@@ -771,9 +777,9 @@ impl RootView {
         let content = match self.tabs.active_tab() {
             None => self.no_tab(cx),
             Some(tab) => match &tab.content {
-                TabContent::Diff { .. } => {
-                    muted_note("Diff tab (not yet supported)").into_any_element()
-                }
+                TabContent::Diff { .. } => self
+                    .diff_tab_element(&tab.id)
+                    .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
                 TabContent::Grid { grid } => self.render_node(&tab.id, grid, &mut Vec::new(), cx),
             },
         };

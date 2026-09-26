@@ -145,12 +145,12 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [x] Refresh; collapsible sections (dirty ones open, clean closed; saved) — `SourceControlSidebar.tsx`
 - [x] Staged / Changes folder trees with M/A/D/R/U status; per-file hover buttons (unstage; discard, stage); Unstage all / Discard all / Stage all — `ChangesTree.tsx`, `utils/changesTree.ts`
 - [ ] Commit box once something is staged; Ctrl+Enter; "Committing…"; dismissable error — `SourceControlSidebar.tsx`
-- [ ] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx` (native: stage / unstage and the discard confirm landed in P3.4; the open items come with the diff tab)
+- [x] File menu: open (staged) changes, stage / unstage, discard with a confirm listing the paths — `DiscardConfirmDialog.tsx`
 - [x] Stashes: collapsible, stash with optional message, pop / apply / drop, live updates — `StashesSection.tsx`
 - [x] History: 50 at a time with "load more", hover card (sha, author, date); selecting a commit shows header, body and file list — `SourceControlSidebar.tsx` `HistoryView`, `DiffView`
 - [x] Open in forge (GitHub / GitLab / Bitbucket) — `api.ts` `getRemoteUrl`
-- [ ] Click a file to open or focus its diff tab — `api.ts` `openDiffTab`
-- [ ] **(hard)** Side-by-side read-only diff: path, "worktree vs index" / "vs HEAD", whitespace toggle (saved), change count, first / previous / next / last (wraps), loading and error states — `components/DiffPane.tsx` (Monaco `createDiffEditor`; language from the daemon; no language services)
+- [x] Click a file to open or focus its diff tab — `api.ts` `openDiffTab`
+- [x] **(hard)** Side-by-side read-only diff: path, "worktree vs index" / "vs HEAD", whitespace toggle (saved), change count, first / previous / next / last (wraps), loading and error states — `components/DiffPane.tsx` (Monaco `createDiffEditor`; language from the daemon; no language services)
 - [x] Resizable changes / history split — `ResizableSplit.tsx`
 
 ## Worktrees

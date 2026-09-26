@@ -2084,14 +2084,24 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 &path,
                 against.as_deref(),
                 worktree_path.as_deref(),
-            )?;
-            if let Some(new_tab) = outcome.created {
-                hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+            );
+            match outcome {
+                Ok(outcome) => {
+                    if let Some(new_tab) = outcome.created {
+                        hub.emit_tab(client_id, TabEvent::Updated(new_tab));
+                    }
+                    let _ = out_tx.send(DaemonMessage::DiffTabOpened {
+                        id,
+                        tab_id: outcome.tab_id,
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(DaemonMessage::Error {
+                        message: format!("open diff tab failed: {err:#}"),
+                        request_id: Some(id),
+                    });
+                }
             }
-            let _ = out_tx.send(DaemonMessage::DiffTabOpened {
-                id,
-                tab_id: outcome.tab_id,
-            });
         }
         ClientMessage::GetFileSnapshot {
             id,
@@ -2100,9 +2110,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             against,
             worktree_path,
         } => {
-            file_fetch::check_relative(&path)?;
-            let repo = repo_target_or_err(hub, &repo_id, worktree_path.as_deref())?;
-            match git_inspect::file_snapshot(&repo, &path, against.as_deref()).await {
+            let snapshot = match file_fetch::check_relative(&path)
+                .and_then(|()| repo_target_or_err(hub, &repo_id, worktree_path.as_deref()))
+            {
+                Ok(repo) => git_inspect::file_snapshot(&repo, &path, against.as_deref()).await,
+                Err(err) => Err(err),
+            };
+            match snapshot {
                 Ok(content) => {
                     let _ = out_tx.send(DaemonMessage::FileSnapshot {
                         id,
@@ -2709,6 +2723,7 @@ fn open_diff_tab(
     against: Option<&str>,
     worktree_path: Option<&str>,
 ) -> anyhow::Result<OpenDiffOutcome> {
+    repo_path_or_err(hub, repo_id)?;
     let against_owned = against.map(str::to_string);
     let worktree_path_owned = worktree_path.map(str::to_string);
     let outcome: anyhow::Result<OpenDiffOutcome> = hub.state.mutate_client_layout(client_id, |tabs| {
@@ -6408,6 +6423,54 @@ mod tests {
                 &msg,
                 DaemonMessage::Error { message, request_id: Some(id) }
                     if id == "q2" && message.starts_with("remote url failed:")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_of_a_path_escaping_the_repo_answers_with_its_id() {
+        let (hub, _scratch) = test_hub("snapshot-escape");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::GetFileSnapshot {
+                id: "diff-snap-1".to_string(),
+                repo_id: "r1".to_string(),
+                path: "../outside.txt".to_string(),
+                against: None,
+                worktree_path: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::FileSnapshotError { id, path, error, .. }
+                    if id == "diff-snap-1" && path == "../outside.txt" && !error.is_empty()
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opening_a_diff_tab_of_an_unknown_repo_answers_with_its_request_id() {
+        let (hub, _scratch) = test_hub("open-diff-unknown");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::OpenDiffTab {
+                id: "diff-open-1".to_string(),
+                repo_id: "no-such-repo".to_string(),
+                path: "src/a.rs".to_string(),
+                against: None,
+                worktree_path: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "diff-open-1" && message.contains("unknown repo")
             ),
             "{msg:?}"
         );

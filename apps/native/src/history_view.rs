@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, IntoElement, MouseButton, MouseDownEvent,
     SharedString, Stateful, Window, canvas, div, prelude::*, px,
 };
-use protocol::{ClientMessage, DaemonMessage};
+use protocol::DaemonMessage;
 
 use crate::history::{
     Applied, CommitRow, DetailPane, ForgeButton, HistoryBlock, HistoryBody, MIN_CHANGES_SIDE,
@@ -19,7 +19,7 @@ use crate::open::{self, OpenJob};
 use crate::open_view::{COULD_NOT_OPEN, Then};
 use crate::sidebar::Activity;
 use crate::source_control::{Part, ScKey, Section, sections};
-use crate::{BORDER, Drag, HOVER_BG, MUTED, RootView, TEXT, drag_handle, new_request_id, tooltip};
+use crate::{BORDER, Drag, HOVER_BG, MUTED, RootView, TEXT, drag_handle, tooltip};
 
 /// The forge button's label.
 pub const FORGE_LABEL: &str = "Open in forge";
@@ -157,14 +157,8 @@ impl RootView {
 
     /// A click on a file of the detail pane: its diff against the commit,
     /// in the section's tree.
-    fn open_commit_file(&self, key: &ScKey, sha: &str, path: &str) {
-        self.send(ClientMessage::OpenDiffTab {
-            id: new_request_id(),
-            repo_id: key.repo_id.clone(),
-            path: path.to_owned(),
-            against: Some(sha.to_owned()),
-            worktree_path: key.worktree.clone(),
-        });
+    fn open_commit_file(&mut self, key: &ScKey, sha: &str, path: &str) {
+        self.open_diff(key, path, Some(sha.to_owned()));
     }
 
     fn open_forge(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {

@@ -123,22 +123,7 @@ pub struct DiffView {
 impl DiffView {
     /// A view of `model` in `font`, the app's terminal font.
     pub fn new(model: DiffModel, font: FontSettings, cx: &mut Context<Self>) -> Self {
-        let (mut largest, mut longest) = (0, 0);
-        for row in model.rows() {
-            for (side, text) in [
-                (
-                    row.left.as_ref(),
-                    row.left.as_ref().map(|s| model.old_text(s)),
-                ),
-                (
-                    row.right.as_ref(),
-                    row.right.as_ref().map(|s| model.new_text(s)),
-                ),
-            ] {
-                largest = largest.max(side.map_or(0, |s| s.line_no));
-                longest = longest.max(text.map_or(0, |t| t.chars().count()));
-            }
-        }
+        let (gutter_digits, longest_line) = measure(&model);
         Self {
             model,
             font: font.normalized(),
@@ -150,9 +135,39 @@ impl DiffView {
             rendered: 0..0,
             shown: Vec::new(),
             column_width: Rc::new(Cell::new(0.0)),
-            gutter_digits: largest.max(1).to_string().len(),
-            longest_line: longest,
+            gutter_digits,
+            longest_line,
         }
+    }
+
+    /// Shows `model` in place of the current one. The row at the top stays
+    /// at the top, clamped to the new rows, and no hunk is current.
+    pub fn set_model(&mut self, model: DiffModel, cx: &mut Context<Self>) {
+        let top = self.top_row();
+        (self.gutter_digits, self.longest_line) = measure(&model);
+        self.model = model;
+        self.current = None;
+        if let Some(last) = self.model.rows().len().checked_sub(1) {
+            self.scroll
+                .scroll_to_item_strict(top.min(last), ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
+
+    /// The row at the top of the viewport.
+    fn top_row(&self) -> usize {
+        let line_height = self
+            .metrics
+            .as_ref()
+            .map_or(16.0, |m| m.line_height)
+            .max(1.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative row index far below usize::MAX"
+        )]
+        let row = (self.scroll_top() / line_height).floor().max(0.0) as usize;
+        row
     }
 
     #[must_use]
@@ -503,6 +518,28 @@ impl DiffView {
             );
         (cell, Some(text))
     }
+}
+
+/// The digits of `model`'s largest line number, and the characters of its
+/// longest line on either side.
+fn measure(model: &DiffModel) -> (usize, usize) {
+    let (mut largest, mut longest) = (0, 0);
+    for row in model.rows() {
+        for (side, text) in [
+            (
+                row.left.as_ref(),
+                row.left.as_ref().map(|s| model.old_text(s)),
+            ),
+            (
+                row.right.as_ref(),
+                row.right.as_ref().map(|s| model.new_text(s)),
+            ),
+        ] {
+            largest = largest.max(side.map_or(0, |s| s.line_no));
+            longest = longest.max(text.map_or(0, |t| t.chars().count()));
+        }
+    }
+    (largest.max(1).to_string().len(), longest)
 }
 
 /// The `len` characters of `text` from character `start`, with `spans` (byte

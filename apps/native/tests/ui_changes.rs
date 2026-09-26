@@ -71,29 +71,42 @@ fn status_requests(h: &mut Harness<'_>) -> Vec<(String, Option<String>)> {
 /// A git write the client sent: its kind, repo, paths and worktree.
 type Write = (&'static str, String, Vec<String>, Option<String>);
 
+fn as_write(msg: ClientMessage) -> Option<Write> {
+    match msg {
+        ClientMessage::StageFiles {
+            repo_id,
+            paths,
+            worktree_path,
+        } => Some(("stage", repo_id, paths, worktree_path)),
+        ClientMessage::UnstageFiles {
+            repo_id,
+            paths,
+            worktree_path,
+        } => Some(("unstage", repo_id, paths, worktree_path)),
+        ClientMessage::DiscardChanges {
+            repo_id,
+            paths,
+            worktree_path,
+        } => Some(("discard", repo_id, paths, worktree_path)),
+        _ => None,
+    }
+}
+
 /// The git writes sent since the last read.
 fn writes(h: &mut Harness<'_>) -> Vec<Write> {
-    h.sent()
-        .into_iter()
-        .filter_map(|msg| match msg {
-            ClientMessage::StageFiles {
-                repo_id,
-                paths,
-                worktree_path,
-            } => Some(("stage", repo_id, paths, worktree_path)),
-            ClientMessage::UnstageFiles {
-                repo_id,
-                paths,
-                worktree_path,
-            } => Some(("unstage", repo_id, paths, worktree_path)),
-            ClientMessage::DiscardChanges {
-                repo_id,
-                paths,
-                worktree_path,
-            } => Some(("discard", repo_id, paths, worktree_path)),
-            _ => None,
-        })
-        .collect()
+    h.sent().into_iter().filter_map(as_write).collect()
+}
+
+/// The git writes sent since the last read, which opened no diff tab.
+fn writes_without_open(h: &mut Harness<'_>) -> Vec<Write> {
+    let sent = h.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|msg| matches!(msg, ClientMessage::OpenDiffTab { .. })),
+        "a row button opens no diff: {sent:?}"
+    );
+    sent.into_iter().filter_map(as_write).collect()
 }
 
 fn write(kind: &'static str, paths: &[&str]) -> Write {
@@ -386,17 +399,23 @@ fn the_row_hover_buttons_send_their_message(cx: &mut TestAppContext) {
 
     hover_on(&mut h, "sc-row-staged-r1::|new.rs");
     h.click_on("sc-unstage-r1::|new.rs");
-    assert_eq!(writes(&mut h), [write("unstage", &["old.rs", "new.rs"])]);
+    assert_eq!(
+        writes_without_open(&mut h),
+        [write("unstage", &["old.rs", "new.rs"])]
+    );
 
     h.send(listing());
     hover_on(&mut h, "sc-row-changes-r1::|src/b.rs");
     h.click_on("sc-stage-r1::|src/b.rs");
-    assert_eq!(writes(&mut h), [write("stage", &["src/b.rs"])]);
+    assert_eq!(writes_without_open(&mut h), [write("stage", &["src/b.rs"])]);
 
     h.send(listing());
     hover_on(&mut h, "sc-row-changes-r1::|src/b.rs");
     h.click_on("sc-discard-r1::|src/b.rs");
-    assert!(writes(&mut h).is_empty(), "a discard asks first");
+    assert!(
+        writes_without_open(&mut h).is_empty(),
+        "a discard asks first"
+    );
     let confirm = h
         .root(|root, _| root.discard_confirm_view())
         .expect("the discard confirm");
@@ -414,7 +433,11 @@ fn the_right_click_menu_stages_and_discards(cx: &mut TestAppContext) {
     h.right_click_on("sc-row-changes-r1::|c.rs");
     assert_eq!(
         menu_items(&mut h),
-        Some(vec![("Stage Changes", true), ("Discard Changes", true)])
+        Some(vec![
+            ("Open Changes", true),
+            ("Stage Changes", true),
+            ("Discard Changes", true)
+        ])
     );
     let looks: Vec<(bool, bool)> = h
         .root(|root, _| root.sc_file_menu_items())
@@ -424,8 +447,8 @@ fn the_right_click_menu_stages_and_discards(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(
         looks,
-        [(false, false), (true, true)],
-        "Discard is red, under a separator"
+        [(false, false), (false, true), (true, true)],
+        "Stage and Discard under separators, Discard red"
     );
     h.click_on("sc-file-menu-stage");
     assert!(!h.root(|root, _| root.sc_file_menu_open()));
@@ -444,7 +467,13 @@ fn the_right_click_menu_stages_and_discards(cx: &mut TestAppContext) {
 
     h.send(listing());
     h.right_click_on("sc-row-staged-r1::|s.rs");
-    assert_eq!(menu_items(&mut h), Some(vec![("Unstage Changes", true)]));
+    assert_eq!(
+        menu_items(&mut h),
+        Some(vec![
+            ("Open Staged Changes", true),
+            ("Unstage Changes", true)
+        ])
+    );
     h.keys("escape");
     assert!(!h.root(|root, _| root.sc_file_menu_open()), "Esc closes it");
 }
@@ -602,7 +631,11 @@ fn pending_disables_the_buttons_until_a_status(cx: &mut TestAppContext) {
     h.right_click_on("sc-row-changes-r1::|c.rs");
     assert_eq!(
         menu_items(&mut h),
-        Some(vec![("Stage Changes", false), ("Discard Changes", false)])
+        Some(vec![
+            ("Open Changes", true),
+            ("Stage Changes", false),
+            ("Discard Changes", false)
+        ])
     );
     h.click_on("sc-file-menu-stage");
     assert!(writes(&mut h).is_empty(), "a disabled item sends nothing");

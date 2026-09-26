@@ -51,6 +51,8 @@ pub enum ScAction {
     Stage,
     Unstage,
     Discard,
+    /// Opens the file's diff tab.
+    Open,
 }
 
 impl ScAction {
@@ -63,6 +65,7 @@ impl ScAction {
             Self::Stage => "+",
             Self::Unstage => "−",
             Self::Discard => "↺",
+            Self::Open => "Open Changes",
         }
     }
 
@@ -72,7 +75,7 @@ impl ScAction {
             Self::Stage => Some("Stage"),
             Self::Unstage => Some("Unstage"),
             Self::Discard => Some("Discard"),
-            Self::StageAll | Self::UnstageAll | Self::DiscardAll => None,
+            Self::StageAll | Self::UnstageAll | Self::DiscardAll | Self::Open => None,
         }
     }
 
@@ -136,6 +139,8 @@ pub struct ScFileRow {
     pub status: String,
     /// The file's basename.
     pub name: String,
+    /// The file's path, whose diff a click opens.
+    pub path: String,
     /// The full path, or `<from_path> → <path>` for a rename or copy.
     pub tooltip: String,
     pub depth: usize,
@@ -190,6 +195,8 @@ impl ChangesUi {
 pub(crate) struct ScFileMenu {
     key: ScKey,
     bucket: Bucket,
+    /// The file's path, whose diff Open opens.
+    path: String,
     paths: Vec<String>,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
@@ -267,6 +274,7 @@ fn file_row(ctx: &TreeCtx<'_>, change: &GitFileChange, depth: usize) -> ScFileRo
         selector: format!("sc-row-{}-{id}|{path}", bucket_name(ctx.bucket)),
         status: change.status.clone(),
         name: path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned(),
+        path: path.clone(),
         tooltip: change
             .from_path
             .as_ref()
@@ -515,8 +523,20 @@ impl RootView {
             ScAction::Discard | ScAction::DiscardAll => {
                 self.open_discard_confirm(key.clone(), paths, window, cx);
             }
+            // Opens by path and bucket, which the file menu holds.
+            ScAction::Open => {}
         }
         cx.notify();
+    }
+
+    /// Opens the diff tab of `path` in the tree `key`: a Changes file's
+    /// worktree against the index, a Staged file's index against HEAD.
+    fn open_file_diff(&mut self, key: &ScKey, bucket: Bucket, path: &str) {
+        let against = match bucket {
+            Bucket::Changes => None,
+            Bucket::Staged => Some("HEAD".to_owned()),
+        };
+        self.open_diff(key, path, against);
     }
 
     /// Whether a file row's right-click menu is open.
@@ -525,7 +545,8 @@ impl RootView {
         self.changes.file_menu.is_some()
     }
 
-    /// The open file menu's items, top to bottom.
+    /// The open file menu's items, top to bottom: Open, which a write out
+    /// does not disable, then the writes under a separator.
     #[must_use]
     pub fn sc_file_menu_items(&self) -> Option<Vec<ScButton>> {
         let menu = self.changes.file_menu.as_ref()?;
@@ -539,14 +560,28 @@ impl RootView {
             enabled,
             separated: false,
         };
+        let open_label = match menu.bucket {
+            Bucket::Staged => "Open Staged Changes",
+            Bucket::Changes => "Open Changes",
+        };
+        let open = ScButton {
+            enabled: true,
+            ..item("sc-file-menu-open", open_label, ScAction::Open)
+        };
         Some(match menu.bucket {
-            Bucket::Staged => vec![item(
-                "sc-file-menu-unstage",
-                "Unstage Changes",
-                ScAction::Unstage,
-            )],
+            Bucket::Staged => vec![
+                open,
+                ScButton {
+                    separated: true,
+                    ..item("sc-file-menu-unstage", "Unstage Changes", ScAction::Unstage)
+                },
+            ],
             Bucket::Changes => vec![
-                item("sc-file-menu-stage", "Stage Changes", ScAction::Stage),
+                open,
+                ScButton {
+                    separated: true,
+                    ..item("sc-file-menu-stage", "Stage Changes", ScAction::Stage)
+                },
                 ScButton {
                     separated: true,
                     ..item("sc-file-menu-discard", "Discard Changes", ScAction::Discard)
@@ -597,7 +632,7 @@ impl RootView {
             if item.separated {
                 frame = frame.child(menu_separator());
             }
-            frame = frame.child(file_menu_item(&item, &menu.key, menu.paths.clone(), cx));
+            frame = frame.child(file_menu_item(&item, menu, cx));
         }
         let panel = anchored().position(menu.at).snap_to_window().child(frame);
         Some([
@@ -737,23 +772,27 @@ impl RootView {
     }
 }
 
-/// A file menu item: closes the menu, then runs its action on the row's
-/// paths. A disabled one is dimmed and takes no click.
-fn file_menu_item(
-    item: &ScButton,
-    key: &ScKey,
-    paths: Vec<String>,
-    cx: &mut Context<RootView>,
-) -> Stateful<Div> {
+/// A file menu item: closes the menu, then opens the row's diff or runs its
+/// action on the row's paths. A disabled one is dimmed and takes no click.
+fn file_menu_item(item: &ScButton, menu: &ScFileMenu, cx: &mut Context<RootView>) -> Stateful<Div> {
     let row = menu_item(&item.selector, item.label, item.danger);
     if !item.enabled {
         return row.opacity(0.5).cursor_default();
     }
-    let key = key.clone();
+    let (key, bucket, path, paths) = (
+        menu.key.clone(),
+        menu.bucket,
+        menu.path.clone(),
+        menu.paths.clone(),
+    );
     let action = item.action;
     row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.close_sc_file_menu(window, cx);
-        this.run_sc_action(&key, action, paths.clone(), window, cx);
+        if action == ScAction::Open {
+            this.open_file_diff(&key, bucket, &path);
+        } else {
+            this.run_sc_action(&key, action, paths.clone(), window, cx);
+        }
     }))
 }
 
@@ -949,7 +988,9 @@ fn file_row_view(
         .map(|button| action_button(button, key, file.paths.clone(), cx))
         .collect();
     let menu_key = key.clone();
+    let menu_path = file.path.clone();
     let menu_paths = file.paths.clone();
+    let (open_key, open_path) = (key.clone(), file.path.clone());
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -960,7 +1001,12 @@ fn file_row_view(
         .h(px(ROW_HEIGHT))
         .pl(indent(file.depth))
         .pr(px(ROW_PADDING))
+        .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.open_file_diff(&open_key, bucket, &open_path);
+            cx.notify();
+        }))
         .tooltip(tooltip(file.tooltip.clone()))
         .child(
             div()
@@ -992,6 +1038,7 @@ fn file_row_view(
                 let menu = ScFileMenu {
                     key: menu_key.clone(),
                     bucket,
+                    path: menu_path.clone(),
                     paths: menu_paths.clone(),
                     at: event.position,
                 };

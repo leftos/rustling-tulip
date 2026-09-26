@@ -134,6 +134,15 @@ pub struct UiState {
     /// The custom colours chosen lately, newest first, `#rrggbb`.
     #[serde(default)]
     pub recent_colors: Vec<String>,
+    /// Whether the diff tabs show whitespace-only changes.
+    #[serde(default = "include_whitespace_by_default")]
+    pub diff_include_whitespace: bool,
+}
+
+/// A layout saved before the diff tabs' whitespace toggle existed shows
+/// whitespace changes.
+fn include_whitespace_by_default() -> bool {
+    true
 }
 
 impl Default for UiState {
@@ -150,6 +159,7 @@ impl Default for UiState {
             source_control: ScUiState::default(),
             app_appearance: AppColors::default(),
             recent_colors: Vec::new(),
+            diff_include_whitespace: true,
         }
     }
 }
@@ -356,6 +366,11 @@ impl SidebarModel {
 
     pub fn set_terminal_font(&mut self, font: FontSettings) {
         self.ui.terminal_font = font;
+    }
+
+    /// Whether the diff tabs show whitespace-only changes.
+    pub fn set_diff_include_whitespace(&mut self, include: bool) {
+        self.ui.diff_include_whitespace = include;
     }
 
     /// The size stored for `tab_id`, if the tab has an override.
@@ -1623,6 +1638,7 @@ mod tests {
                 terminal_frame_color: None,
             },
             recent_colors: vec!["#abcdef".to_owned()],
+            diff_include_whitespace: false,
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
