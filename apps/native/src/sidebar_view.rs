@@ -82,7 +82,12 @@ impl RootView {
             .bg(gpui::rgb(PANEL_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(header(!self.sidebar.repos().is_empty(), cx))
+            .child(header(cx))
+            .child(toolbar(
+                !self.sidebar.repos().is_empty(),
+                self.sidebar.quick_shell_dir(),
+                cx,
+            ))
             .child(body)
     }
 }
@@ -112,8 +117,43 @@ fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
         .when(!has_repos, |button| button.opacity(0.5))
 }
 
-/// "Sessions", "+ Session" and the button that hides the sidebar.
-fn header(has_repos: bool, cx: &mut Context<RootView>) -> Div {
+/// "+ Shell", a standalone shell in the remembered folder; enabled even
+/// with no repo.
+fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let tip = match quick_shell_dir {
+        Some(dir) => format!("Open a standalone shell in {dir}"),
+        None => "Open a standalone shell in your home folder".to_owned(),
+    };
+    div()
+        .id("sidebar-add-shell")
+        .debug_selector(|| "sidebar-add-shell".to_owned())
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .child("+ Shell")
+        .tooltip(tooltip(tip))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
+}
+
+/// "Shell…", which opens the folder dialog; enabled even with no repo.
+fn add_shell_dialog(cx: &mut Context<RootView>) -> Stateful<Div> {
+    div()
+        .id("sidebar-shell-dialog")
+        .debug_selector(|| "sidebar-shell-dialog".to_owned())
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .child("Shell…")
+        .tooltip(tooltip("Choose a folder for a standalone shell"))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_shell_dialog(window, cx);
+        }))
+}
+
+/// "Sessions" and the button that hides the sidebar.
+fn header(cx: &mut Context<RootView>) -> Div {
     let hide = div()
         .id("sidebar-hide")
         .px(px(6.0))
@@ -136,14 +176,25 @@ fn header(has_repos: bool, cx: &mut Context<RootView>) -> Div {
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(MUTED))
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Sessions"))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .child(add_session(has_repos, cx))
-                .child(hide),
-        )
+        .child(hide)
+}
+
+/// The spawns, under the header; the row wraps when the sidebar is too
+/// narrow to hold them in one line.
+fn toolbar(has_repos: bool, quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.0))
+        .px(px(ROW_PADDING))
+        .py(px(4.0))
+        .border_b_1()
+        .border_color(gpui::rgb(BORDER))
+        .text_color(gpui::rgb(MUTED))
+        .child(add_session(has_repos, cx))
+        .child(add_shell(quick_shell_dir, cx))
+        .child(add_shell_dialog(cx))
 }
 
 /// The slim strip a hidden sidebar leaves at the left edge, with the button

@@ -17,6 +17,8 @@ mod notices;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
+mod shell_dialog;
+mod shell_view;
 mod sidebar;
 mod sidebar_view;
 mod spawn_form;
@@ -51,6 +53,8 @@ use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::notices::Notices;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
 use crate::session_menu::{DeleteDialog, SessionMenu};
+use crate::shell_dialog::PendingQuickShell;
+use crate::shell_view::ShellDialog;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
 use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnDialog;
@@ -314,6 +318,15 @@ pub struct RootView {
     spawn_dialog: Option<SpawnDialog>,
     /// The spawn dialog's keyboard focus when no text field of it holds it.
     spawn_focus: FocusHandle,
+    /// The Shell… dialog, while open.
+    shell_dialog: Option<ShellDialog>,
+    /// The Shell… dialog's keyboard focus when its folder field has it not.
+    shell_focus: FocusHandle,
+    /// Numbers the Shell… dialogs, so a folder picker's answer reaches only
+    /// the dialog that asked for it.
+    shell_generation: u64,
+    /// Quick-shell folders waiting for the spawn they came with to land.
+    quick_shell_saves: PendingQuickShell,
     /// Branch names the daemon suggested, per repo or workspace.
     branch_cache: BranchCache,
 }
@@ -408,6 +421,10 @@ impl RootView {
             spawns: PendingSpawns::default(),
             spawn_dialog: None,
             spawn_focus: cx.focus_handle(),
+            shell_dialog: None,
+            shell_focus: cx.focus_handle(),
+            shell_generation: 0,
+            quick_shell_saves: PendingQuickShell::default(),
             branch_cache: BranchCache::default(),
         }
     }
@@ -595,6 +612,7 @@ impl RootView {
         self.refresh_spawn_tabs();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && self.spawn_dialog.is_none()
+            && self.shell_dialog.is_none()
             && self.delete_dialog.is_none()
             && !self.notices.has_modal()
         {
@@ -735,6 +753,7 @@ impl RootView {
         if self.conn.overlay().is_some() {
             self.close_flyout();
             self.close_spawn_dialog(window, cx);
+            self.close_shell_dialog(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
         }
@@ -756,6 +775,7 @@ impl RootView {
                 self.status.clear();
                 self.duplicates.clear();
                 self.close_spawn_dialog(window, cx);
+                self.close_shell_dialog(window, cx);
                 self.reset_session_ui(window, cx);
                 self.reset_notices(window, cx);
             }
@@ -871,6 +891,12 @@ impl RootView {
             }
             return;
         }
+        if self.shell_dialog.is_some() {
+            if self.on_shell_dialog_key(ks, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
             if self.confirm.disarm() || tab_close {
@@ -971,6 +997,7 @@ impl Render for RootView {
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             .children(self.spawn_dialog_layers(cx))
+            .children(self.shell_dialog_layer(cx))
             .children(self.delete_dialog_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))

@@ -10,7 +10,7 @@ use gpui::{
 };
 use protocol::DaemonMessage;
 
-use crate::session_menu::{BACKDROP_TINT, dialog_button};
+use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     Control, FormInputs, OpenChoice, Outcome, Runtime, ShareButton, SpawnForm, TabChoices, Target,
     WorktreeMode,
@@ -130,6 +130,7 @@ impl RootView {
     /// another dialog or menu is open.
     pub(crate) fn open_spawn_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let blocked = self.spawn_dialog.is_some()
+            || self.shell_dialog.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()
             || self.notices.has_modal()
@@ -560,25 +561,6 @@ fn panel(id: &'static str) -> Stateful<Div> {
         .rounded(px(6.0))
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
-}
-
-/// `panel` centred over a tinted layer that takes every click beneath it;
-/// a click on the layer itself does nothing.
-fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyElement {
-    div()
-        .id(selector)
-        .debug_selector(|| selector.to_owned())
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui::rgba(BACKDROP_TINT))
-        .occlude()
-        .child(panel)
-        .into_any_element()
 }
 
 fn dialog_header(close_focused: bool, cx: &mut Context<RootView>) -> Div {

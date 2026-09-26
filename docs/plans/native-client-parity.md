@@ -40,7 +40,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Activity bar (Sessions / Source control) with a change badge (caps at 99+); clicking the active item collapses the sidebar; persisted — `ActivityBar.tsx`
 - [x] Resizable, collapsible sidebar with persisted width — `ResizableSplit.tsx`
 - [ ] Header: brand, Settings, Repos/Tabs view toggle (also saved as the default) — `Sidebar.tsx`
-- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c)
+- [ ] Toolbar: + Session (disabled with "needs repo"), + Shell, Shell…, + Repo (picker remembers the last dir), + Workspace (needs 2 repos), "Resume all (N)" — `Sidebar.tsx` (native: + Session landed in P1.7c, + Shell and Shell… in P1.7d, in a toolbar row under the header that wraps)
 - [ ] Repos view: workspace, repo, SH and DIR containers plus a "Detached" bucket with a banner — `Sidebar.tsx` `buildContainers` (native: containers and Detached bucket done in P1.4; the Detached banner is still missing)
 - [x] Plain-shell sessions regroup under the container matching their live cwd — `Sidebar.tsx` `findContainerForCwd`
 - [ ] Tabs view: one container per tab plus an "Unbound" bucket with a banner — `Sidebar.tsx` `buildTabContainers`
@@ -90,7 +90,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Dirty in-place checkout prompts Carry changes / Stash & switch, then resends — `CheckoutConfirmModal.tsx`
 - [x] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`
 - [ ] Launch last again: replays the config; worktree launches wait for a fresh branch name (toast on timeout); trusted configs open the full dialog with a warning — `App.tsx` `onLaunchLast`
-- [ ] Standalone shell: quick default dir, or a dialog with Browse and "Use as quick shell default" — `StandaloneShellDialog.tsx`
+- [x] Standalone shell: quick default dir, or a dialog with Browse and "Use as quick shell default" — `StandaloneShellDialog.tsx`
 - [ ] Preset wizard: source (file / folder / inline / GitHub issue ranges) → variables (toggle / file / folder / text, required fields) → preview (grouped by tab, max panes per tab, script commands) → launching (progress, counts, Cancel, Select launched, Stop all) — `PresetLaunchDialog.tsx`, `utils/parsePrompts.ts`, `utils/parseIssueSpec.ts`
 - [ ] Sticky preset progress and failure toasts, one per job; the first tab created becomes active — `App.tsx`
 

@@ -24,6 +24,25 @@ const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
 pub(crate) const BACKDROP_TINT: u32 = 0x0000_0099;
 const DIALOG_WIDTH: f32 = 440.0;
 
+/// `panel` centred over a tinted layer that takes every click beneath it, and
+/// tags it `selector`; a click on the layer itself does nothing.
+pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyElement {
+    div()
+        .id(selector)
+        .debug_selector(|| selector.to_owned())
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::rgba(BACKDROP_TINT))
+        .occlude()
+        .child(panel)
+        .into_any_element()
+}
+
 /// The open delete-worktree confirm.
 pub(crate) struct DeleteDialog {
     confirm: DeleteWorktreeConfirm,
@@ -746,22 +765,7 @@ impl RootView {
             .child(header)
             .child(self.delete_dialog_body(confirm))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
-        Some(
-            div()
-                .id("delete-worktree-dialog")
-                .debug_selector(|| "delete-worktree-dialog".to_owned())
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui::rgba(BACKDROP_TINT))
-                .occlude()
-                .child(panel)
-                .into_any_element(),
-        )
+        Some(backdrop("delete-worktree-dialog", panel))
     }
 
     /// Whose worktree goes, the wait or its failure, and each member's

@@ -98,6 +98,9 @@ pub struct UiState {
     /// The tab shown when the client last ran, restored when the daemon
     /// sends the tab list.
     pub active_tab_id: Option<String>,
+    /// The folder "+ Shell" opens in, when the user picked one.
+    #[serde(default)]
+    pub quick_shell_dir: Option<String>,
 }
 
 impl Default for UiState {
@@ -107,6 +110,7 @@ impl Default for UiState {
             sidebar_collapsed: false,
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
+            quick_shell_dir: None,
         }
     }
 }
@@ -250,6 +254,21 @@ impl SidebarModel {
             return false;
         }
         self.ui.active_tab_id = tab_id.map(str::to_owned);
+        true
+    }
+
+    /// The folder a quick shell opens in, when the user picked one.
+    pub fn quick_shell_dir(&self) -> Option<&str> {
+        self.ui.quick_shell_dir.as_deref()
+    }
+
+    /// Records the quick shell's folder; returns whether it changed, so the
+    /// caller knows whether there is anything to save.
+    pub fn set_quick_shell_dir(&mut self, dir: Option<&str>) -> bool {
+        if self.ui.quick_shell_dir.as_deref() == dir {
+            return false;
+        }
+        self.ui.quick_shell_dir = dir.map(str::to_owned);
         true
     }
 }
@@ -1279,6 +1298,10 @@ mod tests {
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.sidebar_collapsed);
         assert!((loaded.sidebar_width - DEFAULT_WIDTH).abs() < f32::EPSILON);
+        assert!(
+            loaded.quick_shell_dir.is_none(),
+            "an older file has no folder"
+        );
     }
 
     #[test]
@@ -1289,10 +1312,30 @@ mod tests {
             sidebar_collapsed: true,
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
+            quick_shell_dir: Some("C:\\work".to_owned()),
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn quick_shell_dir_is_set_and_round_trips() {
+        let mut model = SidebarModel::default();
+        assert_eq!(model.quick_shell_dir(), None);
+        assert!(model.set_quick_shell_dir(Some("C:\\work\\deep")));
+        assert!(
+            !model.set_quick_shell_dir(Some("C:\\work\\deep")),
+            "unchanged"
+        );
+        assert_eq!(model.quick_shell_dir(), Some("C:\\work\\deep"));
+
+        let dir = TestDir::new("quick-shell");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        assert_eq!(&load_ui_state(&dir.0), model.ui_state());
+
+        assert!(model.set_quick_shell_dir(None));
+        assert_eq!(model.quick_shell_dir(), None);
     }
 }

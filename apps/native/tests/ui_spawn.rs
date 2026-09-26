@@ -65,7 +65,11 @@ fn spawned(sent: &[ClientMessage]) -> SpawnRequest {
 /// the request id it went out under.
 fn spawn(h: &mut Harness<'_>, request: SpawnRequest, open_in: OpenIn) -> String {
     let root = h.root.clone();
-    h.cx.update(|_, cx| root.update(cx, |root, cx| root.spawn(request, open_in, cx)));
+    h.cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.spawn(request, open_in, cx);
+        });
+    });
     spawned(&h.sent()).request_id.expect("a request id")
 }
 
@@ -241,7 +245,9 @@ fn spawn_sends_request_with_request_id_and_shows_toast(cx: &mut TestAppContext) 
 
     let root = h.root.clone();
     h.cx.update(|_, cx| {
-        root.update(cx, |root, cx| root.spawn(request(true), OpenIn::NewTab, cx));
+        root.update(cx, |root, cx| {
+            root.spawn(request(true), OpenIn::NewTab, cx);
+        });
     });
     let sent = spawned(&h.sent());
     let first = sent.request_id.clone().expect("an id");

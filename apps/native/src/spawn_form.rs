@@ -1269,10 +1269,10 @@ impl SpawnForm {
     }
 
     fn placement(&self) -> OpenIn {
-        match (&self.open_in, &self.tabs.current) {
-            (OpenChoice::CurrentTab, Some(current)) => OpenIn::CurrentTab(current.id.clone()),
-            (OpenChoice::CurrentTab, None) | (OpenChoice::NewTab, _) => OpenIn::NewTab,
-            (OpenChoice::Tab(id), _) => OpenIn::Tab(id.clone()),
+        match &self.open_in {
+            OpenChoice::CurrentTab => current_tab_open_in(&self.tabs),
+            OpenChoice::NewTab => OpenIn::NewTab,
+            OpenChoice::Tab(id) => OpenIn::Tab(id.clone()),
         }
     }
 
@@ -1345,6 +1345,15 @@ fn agent_options(agent: Agent) -> AgentOptions {
             plan_mode: false,
             sandbox: None,
         },
+    }
+}
+
+/// Where a spawn asked for the current tab opens: the tab on screen when it
+/// can hold panes, else a tab of its own.
+pub(crate) fn current_tab_open_in(tabs: &TabChoices) -> OpenIn {
+    match &tabs.current {
+        Some(current) => OpenIn::CurrentTab(current.id.clone()),
+        None => OpenIn::NewTab,
     }
 }
 

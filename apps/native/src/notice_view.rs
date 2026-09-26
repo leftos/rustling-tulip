@@ -6,12 +6,12 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke, SharedString, Stateful,
     Window, div, prelude::*, px,
 };
-use protocol::{SessionSnapshot, SpawnRequest};
+use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
 use crate::notices::{
     ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind,
 };
-use crate::session_menu::{BACKDROP_TINT, dialog_button};
+use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
 use crate::{BORDER, DANGER, FOOTER_HEIGHT, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
 
@@ -19,16 +19,25 @@ const TOAST_WIDTH: f32 = 320.0;
 const MODAL_WIDTH: f32 = 440.0;
 const SPAWNING_TITLE: &str = "Spawning session…";
 const SPAWNING_DETAIL: &str = "Worktree creation may take a few seconds.";
+const SHELL_SPAWNING_DETAIL: &str = "Shell startup may take a few seconds.";
 const DAEMON_ERROR_TITLE: &str = "Daemon error";
 
 impl RootView {
     /// Asks the daemon for a new session and places it by `open_in` when
-    /// its reply arrives. A "Spawning session…" toast shows meanwhile.
-    pub fn spawn(&mut self, request: SpawnRequest, open_in: OpenIn, cx: &mut Context<Self>) {
+    /// its reply arrives, under the request id it went out with. A
+    /// "Spawning session…" toast shows meanwhile.
+    pub fn spawn(
+        &mut self,
+        request: SpawnRequest,
+        open_in: OpenIn,
+        cx: &mut Context<Self>,
+    ) -> String {
         let request_id = crate::new_request_id();
-        let msg = self.spawns.start(request, request_id, open_in);
+        let detail = spawning_detail(&request);
+        let msg = self.spawns.start(request, request_id.clone(), open_in);
         self.send(msg);
-        self.push_spawning_toast(cx);
+        self.push_spawning_toast(detail, cx);
+        request_id
     }
 
     /// The toasts on screen, oldest first.
@@ -69,9 +78,19 @@ impl RootView {
         self.notice_focus.is_focused(window)
     }
 
-    fn push_spawning_toast(&mut self, cx: &mut Context<Self>) {
-        let detail = Some(SPAWNING_DETAIL.to_owned());
+    fn push_spawning_toast(&mut self, detail: &str, cx: &mut Context<Self>) {
+        let detail = Some(detail.to_owned());
         self.push_toast(ToastKind::Info, SPAWNING_TITLE, detail, cx);
+    }
+
+    /// A spawn that landed: the quick-shell folder it came with, if one was
+    /// waiting on it, becomes the remembered one.
+    fn remember_quick_shell(&mut self, request_id: &str) {
+        if let Some(folder) = self.quick_shell_saves.succeed(request_id)
+            && self.sidebar.set_quick_shell_dir(Some(&folder))
+        {
+            self.save_ui();
+        }
     }
 
     fn push_toast(
@@ -127,6 +146,7 @@ impl RootView {
         self.fail_duplicate(request_id);
         if let Some(id) = request_id {
             self.spawns.fail(id);
+            self.quick_shell_saves.fail(id);
             self.settle_checkout(id, window, cx);
         }
     }
@@ -252,6 +272,7 @@ impl RootView {
         else {
             return;
         };
+        self.remember_quick_shell(request_id);
         self.confirm.disarm();
         self.send(placed.message);
         self.settle_checkout(request_id, window, cx);
@@ -264,6 +285,7 @@ impl RootView {
     /// connection must.
     pub(crate) fn reset_notices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.spawns.clear();
+        self.quick_shell_saves.clear();
         if self.notices.close_modals() {
             self.after_notice_closed(window, cx);
         }
@@ -334,8 +356,9 @@ impl RootView {
             }
             (Some(request_id), strategy @ Some(_)) => {
                 if let Some(msg) = self.spawns.resend(&request_id, strategy) {
+                    let detail = spawn_detail_of(&msg);
                     self.send(msg);
-                    self.push_spawning_toast(cx);
+                    self.push_spawning_toast(detail, cx);
                 }
             }
         }
@@ -351,6 +374,8 @@ impl RootView {
             self.notice_focus.focus(window);
         } else if self.spawn_dialog.is_some() {
             self.apply_spawn_focus(window, cx);
+        } else if self.shell_dialog.is_some() {
+            self.apply_shell_focus(window, cx);
         } else if self.delete_dialog.is_some() {
             self.dialog_focus.focus(window);
         } else {
@@ -537,21 +562,21 @@ fn modal_panel(id: &'static str) -> Stateful<Div> {
         .text_color(gpui::rgb(TEXT))
 }
 
-/// `panel` centred over a backdrop that takes every click beneath it; a
-/// click on the backdrop itself does nothing.
-fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyElement {
-    div()
-        .id(selector)
-        .debug_selector(|| selector.to_owned())
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(gpui::rgba(BACKDROP_TINT))
-        .occlude()
-        .child(panel)
-        .into_any_element()
+/// What the "Spawning session…" toast says under its title, which is what
+/// the spawn's target makes the wait: a shell starts sooner than a worktree.
+fn spawning_detail(request: &SpawnRequest) -> &'static str {
+    match request.target {
+        SpawnTarget::Standalone { .. } => SHELL_SPAWNING_DETAIL,
+        SpawnTarget::Single { .. } | SpawnTarget::Workspace { .. } => SPAWNING_DETAIL,
+    }
+}
+
+/// What the toast says for spawn `msg`, going out again as it first did.
+fn spawn_detail_of(msg: &ClientMessage) -> &'static str {
+    match msg {
+        ClientMessage::SpawnSession(request) => spawning_detail(request),
+        // No other message a spawn goes out as; a worktree is the safe wait
+        // to name.
+        _ => SPAWNING_DETAIL,
+    }
 }

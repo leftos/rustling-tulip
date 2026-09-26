@@ -527,7 +527,14 @@ impl<'a> Harness<'a> {
                 root.spawn_share_confirm_open()
             } else if selector.starts_with("spawn-") {
                 root.spawn_dialog_open()
-            } else if selector == "sidebar-add-session" {
+            } else if selector == "shell-clear-default" {
+                root.shell_dialog_clears_default()
+            } else if selector.starts_with("shell-") {
+                root.shell_dialog_open()
+            } else if selector == "sidebar-add-session"
+                || selector == "sidebar-add-shell"
+                || selector == "sidebar-shell-dialog"
+            {
                 !root.sidebar_collapsed()
             } else if selector == "sidebar-show" {
                 root.sidebar_collapsed()
