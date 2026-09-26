@@ -25,7 +25,7 @@ use protocol::{
 };
 use rustling_tulip_native::{Connection, NetCommand, NetDeps, NetEvent};
 use serde_json::Value;
-use support::{Fixture, Harness, TestDir, pane, session, tab};
+use support::{Fixture, Harness, TestDir, pane, repo, session, tab};
 use tokio_tungstenite::tungstenite::{self, Message};
 
 const TITLE: &str = "Quit rustling-tulip?";
@@ -467,6 +467,45 @@ fn closing_the_window_cancels_an_open_delete_confirm(cx: &mut TestAppContext) {
     h.keys("escape");
     assert!(!exit_open(&mut h), "the exit dialog has the keyboard");
     assert_eq!(walk_session(&mut h), None, "the confirm stays closed");
+}
+
+#[gpui::test]
+fn closing_the_window_closes_the_appearance_editor_settings_and_container_menu(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = loaded(cx, &dir, vec![session("s1").in_repo("r1").build()]);
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/repos/r1")],
+    });
+    let editor_open = |h: &mut Harness<'_>| h.root(|root, _| root.appearance_editor_title());
+
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-appearance");
+    assert!(editor_open(&mut h).is_some());
+    assert!(!close(&mut h));
+    assert!(exit_open(&mut h));
+    assert!(editor_open(&mut h).is_none(), "the editor is closed");
+    h.keys("escape");
+    assert!(!exit_open(&mut h), "the exit dialog has the keyboard");
+
+    h.keys("ctrl-,");
+    assert!(h.root(|root, _| root.settings_open()));
+    assert!(!close(&mut h));
+    assert!(
+        !h.root(|root, _| root.settings_open()),
+        "Settings is closed"
+    );
+    h.keys("escape");
+
+    h.right_click_on("container-repo:r1");
+    assert!(h.root(|root, _| root.container_menu_open()));
+    assert!(!close(&mut h));
+    assert!(
+        !h.root(|root, _| root.container_menu_open()),
+        "the container menu is closed"
+    );
+    assert!(h.sent().is_empty(), "and nothing was sent");
 }
 
 #[gpui::test]

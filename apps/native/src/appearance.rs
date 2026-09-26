@@ -246,6 +246,30 @@ impl AppearanceChange {
         }
     }
 
+    /// The terminal background set to `color`, or cleared.
+    #[must_use]
+    pub fn background(color: Option<String>) -> Self {
+        Self {
+            values: AppearanceOverrides {
+                terminal_background_color: color,
+                ..AppearanceOverrides::default()
+            },
+            fields: vec![AppearanceField::Background],
+        }
+    }
+
+    /// The font family set to `family`, or cleared.
+    #[must_use]
+    pub fn font_family(family: Option<String>) -> Self {
+        Self {
+            values: AppearanceOverrides {
+                terminal_font_family: family,
+                ..AppearanceOverrides::default()
+            },
+            fields: vec![AppearanceField::FontFamily],
+        }
+    }
+
     /// The font size set to `size`, or cleared.
     #[must_use]
     pub fn font_size(size: Option<u16>) -> Self {
@@ -255,6 +279,18 @@ impl AppearanceChange {
                 ..AppearanceOverrides::default()
             },
             fields: vec![AppearanceField::FontSize],
+        }
+    }
+
+    /// Bold text set on or off, or cleared.
+    #[must_use]
+    pub fn font_bold(bold: Option<bool>) -> Self {
+        Self {
+            values: AppearanceOverrides {
+                terminal_font_bold: bold,
+                ..AppearanceOverrides::default()
+            },
+            fields: vec![AppearanceField::FontBold],
         }
     }
 
@@ -401,40 +437,71 @@ pub fn resolve(
             Source::Container,
         ),
     ];
+    resolve_levels(&levels, app)
+}
+
+/// Every field as a repo or workspace whose own overrides are `container`
+/// resolves it: its value, else the app's, else the built-in one.
+#[must_use]
+pub fn resolve_container(container: &AppearanceOverrides, app: AppLevel<'_>) -> Resolved {
+    resolve_levels(
+        &[
+            (Some(container), Source::Container),
+            (None, Source::Session),
+        ],
+        app,
+    )
+}
+
+/// Every field from the first of `levels` that sets it, else the app's,
+/// else the built-in one. An app size at the default and an app bold that
+/// is off set nothing, so they report the built-in level.
+fn resolve_levels(levels: &Levels<'_>, app: AppLevel<'_>) -> Resolved {
+    let app_size = fonts::clamp_size(app.font.size);
+    let size_source = if (app_size - fonts::DEFAULT_SIZE).abs() < f32::EPSILON {
+        Source::BuiltIn
+    } else {
+        Source::App
+    };
+    let bold_source = if app.font.bold {
+        Source::App
+    } else {
+        Source::BuiltIn
+    };
     let family = app.font.family.clone().map_or_else(
         || Field::new(None, Source::BuiltIn),
         |family| Field::new(Some(family), Source::App),
     );
     Resolved {
         accent: color(
-            &levels,
+            levels,
             |a| a.accent_color.as_deref(),
             app.colors.accent_color.as_deref(),
             BUILTIN_ACCENT,
         ),
         background: color(
-            &levels,
+            levels,
             |a| a.terminal_background_color.as_deref(),
             app.colors.terminal_background_color.as_deref(),
             BUILTIN_BACKGROUND,
         ),
         frame: colour_field(
-            &levels,
+            levels,
             |a| a.terminal_frame_color.as_deref(),
             app.colors.terminal_frame_color.as_deref(),
         )
         .map_or(Field::new(None, Source::BuiltIn), |field| {
             Field::new(Some(field.value), field.source)
         }),
-        font_family: first(&levels, |a| non_blank(a.terminal_font_family.as_deref()))
+        font_family: first(levels, |a| non_blank(a.terminal_font_family.as_deref()))
             .map_or(family, |field| Field::new(Some(field.value), field.source)),
-        font_size: first(&levels, |a| {
+        font_size: first(levels, |a| {
             a.terminal_font_size
                 .map(|size| fonts::clamp_size(f32::from(size)))
         })
-        .unwrap_or_else(|| Field::new(fonts::clamp_size(app.font.size), Source::App)),
-        font_bold: first(&levels, |a| a.terminal_font_bold)
-            .unwrap_or_else(|| Field::new(app.font.bold, Source::App)),
+        .unwrap_or_else(|| Field::new(app_size, size_source)),
+        font_bold: first(levels, |a| a.terminal_font_bold)
+            .unwrap_or_else(|| Field::new(app.font.bold, bold_source)),
     }
 }
 
@@ -493,6 +560,51 @@ pub fn parse_color(raw: &str) -> Option<u32> {
 #[must_use]
 pub fn hex(color: u32) -> String {
     format!("#{:06x}", color & 0x00ff_ffff)
+}
+
+/// What the user typed in a colour field as the `#rrggbb` to store: six
+/// hex digits, with or without the `#`, in any case, surrounding space
+/// ignored.
+#[must_use]
+pub fn parse_hex_input(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    parse_color(&format!("#{digits}")).map(hex)
+}
+
+/// The app level as overrides, so a change applies to it as to any other
+/// level: a size at the default and bold that is off set nothing.
+#[must_use]
+pub fn app_overrides(app: AppLevel<'_>) -> AppearanceOverrides {
+    let size = fonts::clamp_size(app.font.size);
+    let whole = crate::font_size_to_u16(size);
+    AppearanceOverrides {
+        accent_color: app.colors.accent_color.clone(),
+        terminal_background_color: app.colors.terminal_background_color.clone(),
+        terminal_frame_color: app.colors.terminal_frame_color.clone(),
+        terminal_font_family: app.font.family.clone(),
+        terminal_font_size: ((size - fonts::DEFAULT_SIZE).abs() >= f32::EPSILON).then_some(whole),
+        terminal_font_bold: app.font.bold.then_some(true),
+    }
+}
+
+/// The app level's colours and font `overrides` stands for: an unset
+/// size is the default and an unset bold is off.
+#[must_use]
+pub fn app_from_overrides(overrides: &AppearanceOverrides) -> (AppColors, FontSettings) {
+    let colors = AppColors {
+        accent_color: overrides.accent_color.clone(),
+        terminal_background_color: overrides.terminal_background_color.clone(),
+        terminal_frame_color: overrides.terminal_frame_color.clone(),
+    };
+    let font = FontSettings {
+        family: overrides.terminal_font_family.clone(),
+        size: overrides
+            .terminal_font_size
+            .map_or(fonts::DEFAULT_SIZE, f32::from),
+        bold: overrides.terminal_font_bold.unwrap_or(false),
+    };
+    (colors, font.normalized())
 }
 
 /// `color` as the terminal's colour type.
@@ -725,9 +837,139 @@ mod tests {
         assert_eq!(built_in.font_family, Field::new(None, Source::BuiltIn));
         assert_eq!(
             built_in.font_size,
-            Field::new(fonts::DEFAULT_SIZE, Source::App),
-            "the app font always carries a size"
+            Field::new(fonts::DEFAULT_SIZE, Source::BuiltIn),
+            "an app size at the default sets nothing"
         );
+        assert_eq!(
+            built_in.font_bold,
+            Field::new(false, Source::BuiltIn),
+            "an app bold that is off sets nothing"
+        );
+    }
+
+    #[test]
+    fn a_container_resolves_through_the_app_to_the_built_in_values() {
+        let font = FontSettings {
+            family: Some("App Mono".to_owned()),
+            size: 18.0,
+            bold: false,
+        };
+        let colors = AppColors {
+            accent_color: Some("#333333".to_owned()),
+            ..AppColors::default()
+        };
+        let app = AppLevel {
+            colors: &colors,
+            font: &font,
+        };
+        let own = overrides(json!({
+            "terminal_background_color": REPO_ALL,
+            "terminal_font_bold": true,
+        }));
+        let resolved = resolve_container(&own, app);
+        assert_eq!(resolved.background, Field::new(0x222222, Source::Container));
+        assert_eq!(resolved.font_bold, Field::new(true, Source::Container));
+        assert_eq!(resolved.accent, Field::new(0x333333, Source::App));
+        assert_eq!(
+            resolved.font_family,
+            Field::new(Some("App Mono".to_owned()), Source::App)
+        );
+        assert_eq!(resolved.font_size, Field::new(18.0, Source::App));
+        assert_eq!(resolved.frame, Field::new(None, Source::BuiltIn));
+
+        let bare = resolve_container(&AppearanceOverrides::default(), app);
+        assert_eq!(
+            bare.font_bold,
+            Field::new(false, Source::BuiltIn),
+            "an app bold that is off is the built-in value"
+        );
+    }
+
+    #[test]
+    fn the_app_level_resolves_to_the_built_in_values_it_does_not_set() {
+        let colors = AppColors {
+            terminal_background_color: Some("#0b1020".to_owned()),
+            ..AppColors::default()
+        };
+        let font = FontSettings::default();
+        let app = AppLevel {
+            colors: &colors,
+            font: &font,
+        };
+        let resolved = resolve(None, &[], &[], app);
+        assert_eq!(resolved.background, Field::new(0x0b1020, Source::App));
+        assert_eq!(resolved.accent, Field::new(BUILTIN_ACCENT, Source::BuiltIn));
+        assert_eq!(resolved.font_family, Field::new(None, Source::BuiltIn));
+        assert_eq!(
+            resolved.font_size,
+            Field::new(fonts::DEFAULT_SIZE, Source::BuiltIn)
+        );
+        assert_eq!(resolved.font_bold, Field::new(false, Source::BuiltIn));
+
+        let set = FontSettings {
+            family: None,
+            size: 20.0,
+            bold: true,
+        };
+        let resolved = resolve(
+            None,
+            &[],
+            &[],
+            AppLevel {
+                colors: &colors,
+                font: &set,
+            },
+        );
+        assert_eq!(resolved.font_size, Field::new(20.0, Source::App));
+        assert_eq!(resolved.font_bold, Field::new(true, Source::App));
+    }
+
+    #[test]
+    fn the_app_level_round_trips_through_overrides() {
+        let colors = app_colors("#123456");
+        let font = FontSettings {
+            family: Some("Fira Code".to_owned()),
+            size: 20.0,
+            bold: true,
+        };
+        let own = app_overrides(AppLevel {
+            colors: &colors,
+            font: &font,
+        });
+        assert_eq!(own.terminal_font_size, Some(20));
+        assert_eq!(own.terminal_font_bold, Some(true));
+        assert_eq!(app_from_overrides(&own), (colors, font.clone()));
+
+        let plain = app_overrides(AppLevel {
+            colors: &AppColors::default(),
+            font: &FontSettings::default(),
+        });
+        assert_eq!(
+            plain,
+            AppearanceOverrides::default(),
+            "the defaults set nothing"
+        );
+        let cleared = AppearanceChange::font_size(None).apply_to(&own);
+        assert_eq!(
+            app_from_overrides(&cleared).1,
+            FontSettings {
+                size: fonts::DEFAULT_SIZE,
+                ..font
+            },
+            "a cleared size is the default"
+        );
+    }
+
+    #[test]
+    fn typed_hex_takes_six_digits_with_or_without_the_hash() {
+        assert_eq!(parse_hex_input("#A1B2C3").as_deref(), Some("#a1b2c3"));
+        assert_eq!(parse_hex_input("a1b2c3").as_deref(), Some("#a1b2c3"));
+        assert_eq!(parse_hex_input("  ABCDEF ").as_deref(), Some("#abcdef"));
+        for bad in [
+            "", "#", "#12345", "1234567", "#1234567", "##123456", "#12345g", "red", "#12 456",
+        ] {
+            assert_eq!(parse_hex_input(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -823,7 +1065,7 @@ mod tests {
         };
         assert_eq!(
             resolve_levels(json!({}), json!({}), &colors, &nan).font_size,
-            Field::new(fonts::DEFAULT_SIZE, Source::App),
+            Field::new(fonts::DEFAULT_SIZE, Source::BuiltIn),
             "an app size that is not a number is the default"
         );
     }

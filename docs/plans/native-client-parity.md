@@ -49,7 +49,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Detached container "stop all" with two-click confirm — `Sidebar.tsx`
 - [ ] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx`
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`
-- [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu`
+- [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10)
 - [ ] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill`
 - [ ] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession`
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
@@ -59,7 +59,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Sessions
 
-- [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx`
+- [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10)
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
 - [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx`
@@ -133,7 +133,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] **(hard)** Shell integration (plain shells): OSC 133 A/B/C/D + OSC 633 E; gutter dot per command (ok / fail / unknown, exit code and duration tooltip), 1000-command cap — `components/shellIntegration.ts`
 - [x] Gutter-dot menu: exit and duration, copy command / output / both, re-run (types the command without Enter) — `ShellCommandMenu.tsx`
 - [x] Theme: fixed palette, ANSI colours contrast-adjusted against the background, white caret, blue selection — `utils/terminalTheme.ts`
-- [ ] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code) and applies a font model live; choosing a family, the bold toggle and the system list come with the P2.10 editor)
+- [x] **(hard)** Fonts: Geist Mono preloaded; Fira Code / JetBrains Mono / Cascadia Code bundled; system fonts listed; bold toggle; size 8–32; applied live — `Terminal.tsx`, `utils/bundledFonts.ts` (native: P2.8 bundled the four families with italics (none for Fira Code); the P2.10 editor chooses the family from the bundled and system lists, and sets size and bold)
 - [x] Font size per app / repo / session (Ctrl+= / − / 0) / tab (Ctrl+Shift+= / −, tab menu) — `utils/fontSize.ts`
 - [ ] Focus goes to the terminal after spawn and when a pop-out opens — `utils/autofocus.ts`
 
@@ -160,11 +160,11 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Settings & appearance
 
-- [ ] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts`
+- [ ] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the modal and its Appearance tab landed in P2.10)
 - [ ] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx`
 - [ ] Spawn defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx`
 - [ ] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
-- [ ] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
+- [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
 - [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`
 
 ## Notifications & attention

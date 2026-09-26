@@ -195,9 +195,17 @@ pub fn available_families(text: &TextSystem) -> Vec<SharedString> {
 /// The installed families that are not bundled, sorted, for a font picker.
 #[must_use]
 pub fn system_families(cx: &App) -> Vec<SharedString> {
-    let mut families: Vec<SharedString> = available_families(cx.text_system())
+    picker_families(available_families(cx.text_system()))
+}
+
+/// `families` as a font picker lists them: sorted, each once, without the
+/// bundled ones and without the hidden system faces whose names start
+/// with `.`.
+fn picker_families(families: Vec<SharedString>) -> Vec<SharedString> {
+    let mut families: Vec<SharedString> = families
         .into_iter()
         .filter(|family| !BUNDLED_FAMILIES.contains(&family.as_ref()))
+        .filter(|family| !family.starts_with('.'))
         .collect();
     families.sort();
     families.dedup();
@@ -215,6 +223,19 @@ mod tests {
 
     fn names(list: &[&'static str]) -> Vec<SharedString> {
         list.iter().copied().map(SharedString::new_static).collect()
+    }
+
+    #[test]
+    fn the_picker_drops_bundled_and_dot_named_families() {
+        let listed = picker_families(names(&[
+            "Consolas",
+            ".SF NS Mono",
+            "Fira Code",
+            "Arial",
+            ".Hidden",
+            "Consolas",
+        ]));
+        assert_eq!(listed, names(&["Arial", "Consolas"]));
     }
 
     #[test]

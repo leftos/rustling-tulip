@@ -384,6 +384,8 @@ impl RootView {
             self.apply_spawn_focus(window, cx);
         } else if self.shell_dialog.is_some() {
             self.apply_shell_focus(window, cx);
+        } else if self.appearance_editor.is_some() {
+            self.appearance_focus.focus(window);
         } else if self.delete_dialog.is_some() {
             self.dialog_focus.focus(window);
         } else {

@@ -9,6 +9,7 @@ use gpui::{
 use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
+use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::notices::ToastKind;
@@ -117,6 +118,8 @@ pub(crate) struct SessionMenu {
     accent: bool,
 }
 
+/// The row that opens the appearance editor.
+const APPEARANCE_ROW: &str = "session-menu-appearance";
 /// The row that opens the Accent submenu.
 const ACCENT_ROW: &str = "session-menu-accent";
 const INHERIT_ROW: &str = "accent-inherit";
@@ -124,6 +127,16 @@ const INHERIT_ROW: &str = "accent-inherit";
 const BACK_ROW: &str = "accent-back";
 /// The toast a colour the protocol refuses raises.
 const ACCENT_FAILED_TITLE: &str = "Couldn't set the accent";
+/// The container menu's one row.
+const CONTAINER_APPEARANCE_ROW: &str = "container-menu-appearance";
+
+/// The open repo or workspace context menu.
+pub(crate) struct ContainerMenu {
+    /// The repo or workspace it acts on.
+    level: Level,
+    /// Where the right-click was, in window coordinates.
+    at: Point<Pixels>,
+}
 
 fn preset_selector(name: &str) -> String {
     format!("accent-preset-{}", name.to_ascii_lowercase())
@@ -204,16 +217,16 @@ impl RootView {
             .filter(|menu| self.sidebar.session(&menu.session_id).is_some())
     }
 
-    /// The selectors of the menu's accent rows as shown now: the row that
-    /// opens the Accent submenu under the actions, or the submenu's Back,
-    /// presets, recent colours and Inherit.
+    /// The selectors of the menu's appearance rows as shown now: the rows
+    /// that open the appearance editor and the Accent submenu under the
+    /// actions, or the submenu's Back, presets, recent colours and Inherit.
     #[must_use]
     pub fn accent_menu_rows(&self) -> Vec<String> {
         let Some(menu) = self.accent_menu() else {
             return Vec::new();
         };
         if !menu.accent {
-            return vec![ACCENT_ROW.to_owned()];
+            return vec![APPEARANCE_ROW.to_owned(), ACCENT_ROW.to_owned()];
         }
         let presets = ACCENT_PRESETS.iter().map(|p| preset_selector(p.name));
         let recent = self
@@ -303,6 +316,86 @@ impl RootView {
         }) {
             self.close_delete_dialog(window, cx);
         }
+        if self
+            .container_menu
+            .as_ref()
+            .is_some_and(|menu| !self.container_listed(&menu.level))
+        {
+            self.close_container_menu(window, cx);
+        }
+        self.drop_stale_appearance_editor(window, cx);
+    }
+
+    /// Whether the repo or workspace `level` names is registered.
+    fn container_listed(&self, level: &Level) -> bool {
+        match level {
+            Level::Repo(id) => self.sidebar.repos().iter().any(|repo| &repo.id == id),
+            Level::Workspace(id) => self.sidebar.workspaces().iter().any(|ws| &ws.id == id),
+            Level::Session(_) | Level::App => false,
+        }
+    }
+
+    /// Whether a repo's or workspace's context menu is open.
+    #[must_use]
+    pub fn container_menu_open(&self) -> bool {
+        self.container_menu.is_some()
+    }
+
+    /// Opens the context menu of the repo or workspace `level` at `at`,
+    /// taking the keyboard so Esc reaches it; any other menu gives way.
+    pub(crate) fn open_container_menu(
+        &mut self,
+        level: Level,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.container_listed(&level) {
+            return;
+        }
+        self.close_session_menu(window, cx);
+        self.close_shell_menu(window, cx);
+        self.close_tab_menu(window, cx);
+        self.container_menu = Some(ContainerMenu { level, at });
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Closes the container menu and hands the keyboard back to the active
+    /// pane.
+    pub(crate) fn close_container_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.container_menu.take().is_some() {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The open container menu over a layer that keeps a click outside it
+    /// from reaching what lies beneath.
+    pub(crate) fn container_menu_layer(&self, cx: &mut Context<Self>) -> Option<[AnyElement; 2]> {
+        let menu = self.container_menu.as_ref()?;
+        let backdrop = div().absolute().top_0().left_0().size_full().occlude();
+        let level = menu.level.clone();
+        let row = menu_item(CONTAINER_APPEARANCE_ROW, "Appearance…", false).on_click(cx.listener(
+            move |this, _: &ClickEvent, window, cx| {
+                this.close_container_menu(window, cx);
+                this.open_appearance_editor(level.clone(), window, cx);
+            },
+        ));
+        let frame = menu_frame(
+            "container-menu",
+            &self.menu_focus,
+            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                this.close_container_menu(window, cx);
+                cx.stop_propagation();
+            }),
+        )
+        .child(row);
+        let panel = anchored().position(menu.at).snap_to_window().child(frame);
+        Some([
+            backdrop.into_any_element(),
+            deferred(panel).with_priority(1).into_any_element(),
+        ])
     }
 
     fn set_menu_mode(&mut self, mode: MenuMode, window: &mut Window, cx: &mut Context<Self>) {
@@ -473,6 +566,7 @@ impl RootView {
     /// armed confirm, as when the connection goes.
     pub(crate) fn reset_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_session_menu(window, cx);
+        self.close_container_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_delete_dialog(window, cx);
@@ -529,10 +623,20 @@ impl RootView {
         let session_id = menu.session_id.as_str();
         if !menu.accent {
             let current = self.sidebar.appearance(Some(session_id)).accent.value;
+            let level = Level::Session(session_id.to_owned());
+            let editor = swatch_row(APPEARANCE_ROW, "Appearance…", None).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| {
+                    this.open_appearance_editor(level.clone(), window, cx);
+                },
+            ));
             let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current)).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| this.show_accent_menu(true, window, cx),
             ));
-            return vec![menu_separator().into_any_element(), row.into_any_element()];
+            return vec![
+                menu_separator().into_any_element(),
+                editor.into_any_element(),
+                row.into_any_element(),
+            ];
         }
         let back =
             swatch_row(BACK_ROW, "‹ Back", None).on_click(cx.listener(

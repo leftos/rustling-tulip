@@ -98,8 +98,10 @@ impl RootView {
         let blocked = self.shell_dialog.is_some()
             || self.exit.is_some()
             || self.spawn_dialog.is_some()
+            || self.appearance_editor.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()
+            || self.container_menu.is_some()
             || self.shell_menu.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();

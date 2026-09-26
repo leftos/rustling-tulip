@@ -6,6 +6,7 @@
 //! over their own transport with [`RootView::with_transport`].
 
 pub mod appearance;
+mod appearance_view;
 mod branch_fate;
 mod connection;
 mod copied;
@@ -28,6 +29,7 @@ mod run_confirm;
 mod scrollback_load;
 mod session_actions;
 mod session_menu;
+mod settings_view;
 mod shell_dialog;
 mod shell_marks;
 mod shell_view;
@@ -64,6 +66,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::appearance::AppearanceChange;
+use crate::appearance_view::AppearanceEditor;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
@@ -73,7 +76,7 @@ use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
 use crate::session_actions::{Duplicates, HeaderStopConfirm};
-use crate::session_menu::{DeleteDialog, SessionMenu, ShellMenu};
+use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
@@ -338,6 +341,18 @@ pub struct RootView {
     shell_menu: Option<ShellMenu>,
     /// The open menu's keyboard focus, so Esc reaches it.
     menu_focus: FocusHandle,
+    /// The repo or workspace context menu, while open.
+    container_menu: Option<ContainerMenu>,
+    /// The appearance editor, or the Settings modal holding it at the app
+    /// level, while open.
+    appearance_editor: Option<AppearanceEditor>,
+    /// The editor's keyboard focus when none of its fields holds it.
+    appearance_focus: FocusHandle,
+    /// Each repo's or workspace's last appearance sent, until the daemon's
+    /// list echoes it: the daemon answers with the whole list and no
+    /// request id, so the next change builds on this, not on what is
+    /// stored.
+    container_sends: HashMap<appearance_view::Level, AppearanceOverrides>,
     /// The tab context menu, while open.
     tab_menu: Option<TabMenu>,
     /// The open tab menu's keyboard focus, so Esc reaches it.
@@ -504,6 +519,10 @@ impl RootView {
             menu: None,
             shell_menu: None,
             menu_focus: cx.focus_handle(),
+            container_menu: None,
+            appearance_editor: None,
+            appearance_focus: cx.focus_handle(),
+            container_sends: HashMap::new(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
             pending_appearance: appearance::InFlightAppearance::default(),
@@ -871,6 +890,7 @@ impl RootView {
         if let Some(pane_id) = self.tabs.take_focus_request()
             && self.spawn_dialog.is_none()
             && self.shell_dialog.is_none()
+            && self.appearance_editor.is_none()
             && self.delete_dialog.is_none()
             && !self.notices.has_modal()
             && self.exit.is_none()
@@ -1027,6 +1047,7 @@ impl RootView {
             self.close_flyout();
             self.close_spawn_dialog(window, cx);
             self.close_shell_dialog(window, cx);
+            self.close_appearance_editor(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
         }
@@ -1052,16 +1073,7 @@ impl RootView {
             return;
         }
         match msg {
-            DaemonMessage::Welcome { .. } => {
-                self.reset_panes(cx);
-                self.pending_appearance.clear();
-                self.status.clear();
-                self.duplicates.clear();
-                self.close_spawn_dialog(window, cx);
-                self.close_shell_dialog(window, cx);
-                self.reset_session_ui(window, cx);
-                self.reset_notices(window, cx);
-            }
+            DaemonMessage::Welcome { .. } => self.on_welcome(window, cx),
             DaemonMessage::Error {
                 message,
                 request_id,
@@ -1137,10 +1149,26 @@ impl RootView {
             // A repo's or workspace's appearance is a level above the
             // session's.
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. } => {
+                self.settle_container_sends();
                 self.apply_pane_fonts(cx);
             }
             _ => {}
         }
+    }
+
+    /// A new connection: fresh panes, nothing in flight, and every dialog,
+    /// menu and notice of the old one closed.
+    fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_panes(cx);
+        self.pending_appearance.clear();
+        self.container_sends.clear();
+        self.status.clear();
+        self.duplicates.clear();
+        self.close_spawn_dialog(window, cx);
+        self.close_shell_dialog(window, cx);
+        self.close_appearance_editor(window, cx);
+        self.reset_session_ui(window, cx);
+        self.reset_notices(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the
@@ -1246,6 +1274,12 @@ impl RootView {
             }
             return;
         }
+        if self.appearance_editor.is_some() {
+            if self.on_appearance_key(ks, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if ks.key == "escape" {
             let tab_close = self.tabs.close_confirm.disarm();
             if self.confirm.disarm() || tab_close {
@@ -1269,6 +1303,8 @@ impl RootView {
             self.close_tab_menu(window, cx);
         } else if self.menu.is_some() && ks.key == "escape" {
             self.close_session_menu(window, cx);
+        } else if self.container_menu.is_some() && ks.key == "escape" {
+            self.close_container_menu(window, cx);
         } else if self.shell_menu.is_some() && ks.key == "escape" {
             self.close_shell_menu(window, cx);
         } else if self.flyout_open && ks.key == "escape" {
@@ -1278,6 +1314,8 @@ impl RootView {
             self.on_font_key(key, cx);
         } else if ctrl_only && ks.key == "b" && self.outside_terminal(window, cx) {
             self.toggle_sidebar(window, cx);
+        } else if ctrl_only && ks.key == "," {
+            self.open_settings(window, cx);
         } else if self.is_spawn_shortcut(ks, window, cx) {
             self.open_spawn_dialog(crate::spawn_view::SpawnEntry::Toolbar, window, cx);
         } else {
@@ -1523,6 +1561,7 @@ impl Render for RootView {
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(self.shell_menu_layer(cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
+            .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())
             // Above the flyout's backdrop, so the chip's tooltip is reachable
             // while the flyout is open: its own copy button has no other
@@ -1530,6 +1569,8 @@ impl Render for RootView {
             .children(self.chip_layer())
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
+            .children(self.appearance_editor_layer(cx))
+            .children(self.settings_layer(cx))
             .children(delete_under)
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))

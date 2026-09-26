@@ -10,9 +10,10 @@ use gpui::{
 use protocol::SessionStatus;
 
 use crate::appearance;
+use crate::appearance_view::Level;
 use crate::connection::DotKind;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
-use crate::sidebar::{Container, Leaf};
+use crate::sidebar::{Container, ContainerKind, Leaf};
 use crate::spawn_view::SpawnEntry;
 use crate::{
     BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color, drag_handle,
@@ -155,8 +156,20 @@ fn add_shell_dialog(cx: &mut Context<RootView>) -> Stateful<Div> {
         }))
 }
 
-/// "Sessions" and the button that hides the sidebar.
+/// "Sessions", the Settings gear and the button that hides the sidebar.
 fn header(cx: &mut Context<RootView>) -> Div {
+    let settings = div()
+        .id("settings-open")
+        .debug_selector(|| "settings-open".to_owned())
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .child("⚙")
+        .tooltip(tooltip("Settings (Ctrl+,)"))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_settings(window, cx);
+        }));
     let hide = div()
         .id("sidebar-hide")
         .px(px(6.0))
@@ -179,7 +192,7 @@ fn header(cx: &mut Context<RootView>) -> Div {
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(MUTED))
         .child(div().font_weight(FontWeight::SEMIBOLD).child("Sessions"))
-        .child(hide)
+        .child(div().flex().items_center().child(settings).child(hide))
 }
 
 /// The spawns, under the header; the row wraps when the sidebar is too
@@ -259,10 +272,17 @@ fn container_rows(
     rows
 }
 
+/// A container row: a click folds it; a right-click on a repo or
+/// workspace opens its menu.
 fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<Div> {
     let key = container.key.clone();
     let chip = if container.collapsed { "▸" } else { "▾" };
     let name = format!("container-{}", container.key);
+    let level = match container.kind {
+        ContainerKind::Repo => Some(Level::Repo(container.id.clone())),
+        ContainerKind::Workspace => Some(Level::Workspace(container.id.clone())),
+        ContainerKind::Shell | ContainerKind::Dir | ContainerKind::Detached => None,
+    };
     div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
@@ -302,6 +322,15 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
                 .text_color(gpui::rgb(MUTED))
                 .child(container.leaves.len().to_string()),
         )
+        .when_some(level, |row, level| {
+            row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_container_menu(level.clone(), event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        })
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_container(&key);
             cx.notify();

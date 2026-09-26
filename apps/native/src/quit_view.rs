@@ -146,11 +146,14 @@ impl RootView {
         self.close_session_menu(window, cx);
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
+        self.close_container_menu(window, cx);
         // The menu's delete confirm and the spawn and Shell… dialogs have
-        // sent nothing yet, so they can go.
+        // sent nothing yet, so they can go; the appearance editor and
+        // Settings have already applied every change.
         self.close_delete_dialog(window, cx);
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
+        self.close_appearance_editor(window, cx);
         self.close_flyout();
         self.exit = Some(ExitView {
             model: ExitDialog::new(),

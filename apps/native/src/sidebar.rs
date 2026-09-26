@@ -373,6 +373,12 @@ impl SidebarModel {
         appearance::recent_swatches(&self.ui.recent_colors)
     }
 
+    /// Puts `color` first among the recent custom colours; returns whether
+    /// it went in.
+    pub fn push_recent_color(&mut self, color: &str) -> bool {
+        appearance::push_recent(&mut self.ui.recent_colors, color)
+    }
+
     /// Records the active tab; returns whether it changed.
     pub fn set_active_tab(&mut self, tab_id: Option<&str>) -> bool {
         if self.ui.active_tab_id.as_deref() == tab_id {

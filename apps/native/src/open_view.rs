@@ -181,13 +181,14 @@ impl RootView {
         cx.notify();
     }
 
-    /// The exit, delete-worktree, spawn, Shell… or checkout dialog, or an
-    /// action-failed notice, is open.
+    /// The exit, delete-worktree, spawn, Shell…, appearance, Settings or
+    /// checkout dialog, or an action-failed notice, is open.
     fn modal_open(&self) -> bool {
         self.exit.is_some()
             || self.delete_dialog.is_some()
             || self.spawn_dialog.is_some()
             || self.shell_dialog.is_some()
+            || self.appearance_editor.is_some()
             || self.notices.has_modal()
     }
 
