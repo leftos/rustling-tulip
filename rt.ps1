@@ -132,10 +132,10 @@ function Get-ConfigDir {
         return $env:RUSTLING_TULIP_CONFIG_DIR
     }
     if ($IsWindows) {
-        return Join-Path $env:APPDATA 'leftos' 'rustling-tulip' 'config'
+        return Join-Path -Path $env:APPDATA -ChildPath 'leftos' -AdditionalChildPath 'rustling-tulip', 'config'
     }
     if ($IsMacOS) {
-        return Join-Path $HOME 'Library' 'Application Support' 'dev.leftos.rustling-tulip'
+        return Join-Path -Path $HOME -ChildPath 'Library' -AdditionalChildPath 'Application Support', 'dev.leftos.rustling-tulip'
     }
     # Linux / other Unix: XDG config home (app name only).
     $xdg = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }
@@ -147,13 +147,13 @@ function Get-ConfigDir {
 # ---------------------------------------------------------------------------
 
 $ScriptDir       = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AppDir          = Join-Path $ScriptDir 'apps' 'tauri-app'
+$AppDir          = Join-Path -Path $ScriptDir -ChildPath 'apps' -AdditionalChildPath 'tauri-app'
 $ManifestPath    = Join-Path $ScriptDir 'Cargo.toml'
 $ImageName       = 'rustling-tulipd'
 $TracerImageName = 'rt-tracer'
 $AppImageName    = 'rustling-tulip-app'
 $HandshakeFile   = Join-Path (Get-ConfigDir) 'daemon.json'
-$SidecarStageDir = Join-Path $AppDir 'src-tauri' 'binaries'
+$SidecarStageDir = Join-Path -Path $AppDir -ChildPath 'src-tauri' -AdditionalChildPath 'binaries'
 
 # Cached host triple from `rustc -vV`. Tauri's build script appends this
 # suffix to every externalBin entry and refuses to build when the
@@ -166,16 +166,16 @@ function Get-DaemonBin {
     # `$Profile` is a PowerShell automatic variable for the user's profile
     # path; use `$BuildProfile` here to avoid the collision.
     param([string]$BuildProfile)
-    Join-Path $ScriptDir 'target' $BuildProfile "$ImageName$ExeSuffix"
+    Join-Path -Path $ScriptDir -ChildPath 'target' -AdditionalChildPath $BuildProfile, "$ImageName$ExeSuffix"
 }
 
 function Get-TracerBin {
     param([string]$BuildProfile)
-    Join-Path $ScriptDir 'target' $BuildProfile "$TracerImageName$ExeSuffix"
+    Join-Path -Path $ScriptDir -ChildPath 'target' -AdditionalChildPath $BuildProfile, "$TracerImageName$ExeSuffix"
 }
 
 function Get-AppExe {
-    Join-Path $ScriptDir 'target' 'release' "$AppImageName$ExeSuffix"
+    Join-Path -Path $ScriptDir -ChildPath 'target' -AdditionalChildPath 'release', "$AppImageName$ExeSuffix"
 }
 
 # ---------------------------------------------------------------------------
@@ -927,7 +927,7 @@ function Invoke-Installer {
         } finally {
             Pop-Location
         }
-        $bundleDir = Join-Path $ScriptDir 'target' 'release' 'bundle'
+        $bundleDir = Join-Path -Path $ScriptDir -ChildPath 'target' -AdditionalChildPath 'release', 'bundle'
         if (Test-Path $bundleDir) {
             Write-Host "==> Bundles written under $bundleDir" -ForegroundColor Green
         }
