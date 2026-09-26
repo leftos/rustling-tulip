@@ -191,6 +191,7 @@ impl RootView {
             || self.shell_dialog.is_some()
             || self.appearance_editor.is_some()
             || self.changes.discard.is_some()
+            || self.stash.drop.is_some()
             || self.changes.file_menu.is_some()
             || self.notices.has_modal()
     }

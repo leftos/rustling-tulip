@@ -4,8 +4,8 @@
 //! asks the daemon for the statuses the panel and the rail's badge read.
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, MouseDownEvent, SharedString, Stateful,
-    Window, anchored, deferred, div, point, prelude::*, px, svg,
+    AnyElement, ClickEvent, Context, Div, Entity, FontWeight, MouseDownEvent, SharedString,
+    Stateful, Window, anchored, deferred, div, point, prelude::*, px, svg,
 };
 use protocol::{ClientMessage, SessionMember};
 
@@ -16,6 +16,8 @@ use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
 use crate::source_control::{Part, ScKey, Section, sections};
+use crate::stash_view::{ScStashes, stashes_part};
+use crate::text_input::TextInput;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 /// The panel's title.
@@ -59,6 +61,9 @@ pub struct ScSectionRow {
     pub body: Option<String>,
     /// The non-empty buckets, Staged first.
     pub buckets: Vec<ScBucketRow>,
+    /// The Stashes part, below the buckets: shown while the Changes part
+    /// is unfolded, and while the tree is loaded with nothing changed.
+    pub stashes: Option<ScStashes>,
 }
 
 /// Everything the source-control panel draws, as text.
@@ -103,7 +108,7 @@ impl RootView {
             .filter(|id| self.sidebar.repos().iter().any(|repo| repo.id == *id))
     }
 
-    fn sc_sections(&self) -> Vec<Section> {
+    pub(crate) fn sc_sections(&self) -> Vec<Section> {
         sections(
             self.sidebar.repos(),
             self.sc_focused_members(),
@@ -265,6 +270,8 @@ impl RootView {
         } else {
             self.sc_changes(&section.key)
         };
+        let clean = loaded && count == 0;
+        let stashes = (!collapsed || clean).then(|| self.sc_stashes(&section.key));
         ScSectionRow {
             key: section.key.clone(),
             id: section.key.id(),
@@ -274,21 +281,31 @@ impl RootView {
             banner: changes.banner,
             body: changes.body,
             buckets: changes.buckets,
+            stashes,
         }
     }
 
     /// Asks for the status of every tree the panel or the badge reads that
     /// has none and no request out: the current sections, and every
-    /// registered repo's main tree. The file menu and the discard confirm
-    /// of a tree that left the sections go; returns whether one did, so
-    /// the caller hands the keyboard back.
-    pub(crate) fn seed_source_control(&mut self) -> bool {
+    /// registered repo's main tree; and the stash list of every section's
+    /// repo that has none. The file menu, the discard confirm and the drop
+    /// confirm of a tree that left the sections go; returns whether one
+    /// did, so the caller hands the keyboard back.
+    pub(crate) fn seed_source_control(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let mut wanted: Vec<ScKey> = self
             .sc_sections()
             .into_iter()
             .map(|section| section.key)
             .collect();
-        let dropped = self.drop_stale_sc_changes(&wanted);
+        let dropped_changes = self.drop_stale_sc_changes(&wanted);
+        let dropped_stash = self.drop_stale_stash_ui(&wanted);
+        self.make_stash_inputs(&wanted, window, cx);
+        let dropped = dropped_changes || dropped_stash;
+        self.seed_stashes(&wanted);
         wanted.extend(self.sc_main_keys());
         for key in self.sc.wanted_missing(&wanted) {
             self.request_sc_status(key);
@@ -298,13 +315,20 @@ impl RootView {
     }
 
     /// Asks again for every current section's status, a failed one
-    /// included, and its history, and forgets the section's pending write;
-    /// the stored ones stay on screen until the answers replace them.
+    /// included, its repo's stash list and its history, and forgets the
+    /// section's pending write and its repo's pending stash write; the
+    /// stored ones stay on screen until the answers replace them.
     fn refresh_source_control(&mut self) {
-        for section in self.sc_sections() {
-            self.changes.writes.clear_pending(&section.key);
-            self.request_sc_status(section.key);
+        let keys: Vec<ScKey> = self
+            .sc_sections()
+            .into_iter()
+            .map(|section| section.key)
+            .collect();
+        for key in &keys {
+            self.changes.writes.clear_pending(key);
+            self.request_sc_status(key.clone());
         }
+        self.refresh_stashes(&keys);
         self.refresh_history();
     }
 
@@ -329,6 +353,7 @@ impl RootView {
             || self.delete_dialog.is_some()
             || self.run_confirm.is_some()
             || self.changes.discard.is_some()
+            || self.stash.drop.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
         if blocked {
@@ -364,7 +389,7 @@ impl RootView {
         self.close_sc_picker(window, cx);
         if self.sidebar.set_pinned_repo(repo_id) {
             self.save_ui();
-            if self.seed_source_control() {
+            if self.seed_source_control(window, cx) {
                 self.after_notice_closed(window, cx);
             }
         }
@@ -407,7 +432,7 @@ impl RootView {
                 panel
                     .sections
                     .iter()
-                    .map(|row| section_view(row, cx))
+                    .map(|row| section_view(row, self.stash_input(&row.key), cx))
                     .collect(),
                 cx,
             ),
@@ -559,9 +584,13 @@ fn context_line(context: ScContext) -> Stateful<Div> {
         .when_some(context.tooltip, |line, tip| line.tooltip(tooltip(tip)))
 }
 
-/// A section's header row, which folds its Changes part, and its body
-/// unless folded.
-fn section_view(row: &ScSectionRow, cx: &mut Context<RootView>) -> AnyElement {
+/// A section's header row, which folds its Changes part, and its body:
+/// the changes unless folded, then the Stashes part when it shows.
+fn section_view(
+    row: &ScSectionRow,
+    stash_input: Option<Entity<TextInput>>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
     let name = format!("sc-section-{}", row.id);
     let body_name = format!("sc-section-body-{}", row.id);
     let key = row.key.clone();
@@ -595,7 +624,7 @@ fn section_view(row: &ScSectionRow, cx: &mut Context<RootView>) -> AnyElement {
                     .child(count.to_string()),
             )
         });
-    let body = (!row.collapsed).then(|| {
+    let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()
             .id(SharedString::from(body_name.clone()))
             .debug_selector(|| body_name)
@@ -603,6 +632,7 @@ fn section_view(row: &ScSectionRow, cx: &mut Context<RootView>) -> AnyElement {
             .flex_col()
             .pb(px(6.0))
             .children(changes_body(row, cx))
+            .children(stashes_part(row, stash_input, cx))
     });
     div()
         .flex()

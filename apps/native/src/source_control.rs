@@ -1,12 +1,12 @@
 //! The source-control model: the sections a focused session or the picked repo
-//! shows, the status and stash stores keyed by (repo, worktree), the badge
+//! shows, the status store keyed by (repo, worktree), the badge
 //! total, the folded changes tree, and the collapse state `native-ui.json`
 //! keeps.
 //!
 //! Plain Rust, so every rule is unit-tested; the panel view renders it and
 //! requests the statuses [`ScModel::wanted_missing`] names.
 
-use protocol::{DaemonMessage, GitFileChange, GitStash, RepoEntry, SessionMember};
+use protocol::{DaemonMessage, GitFileChange, RepoEntry, SessionMember};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -135,10 +135,6 @@ pub enum Bucket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Part {
     Changes,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the panel draws no stash part, so none is built")
-    )]
     Stashes,
     History,
 }
@@ -161,13 +157,11 @@ const STATUS_FAILED_PREFIX: &str = "status failed: ";
 /// The prefix of every status request id this model hands out.
 const STATUS_REQUEST_PREFIX: &str = "sc-status-";
 
-/// The status and stash stores, the statuses asked for and not yet
-/// answered, the ones whose request failed, and the in-memory folder
-/// collapse.
+/// The status store, the statuses asked for and not yet answered, the ones
+/// whose request failed, and the in-memory folder collapse.
 #[derive(Debug, Default)]
 pub struct ScModel {
     status: HashMap<ScKey, Status>,
-    stashes: HashMap<ScKey, Vec<GitStash>>,
     requested: HashSet<ScKey>,
     /// The status requests handed out, by request id.
     request_ids: HashMap<String, ScKey>,
@@ -186,10 +180,8 @@ impl ScModel {
     pub fn apply(&mut self, msg: &DaemonMessage) -> bool {
         match msg {
             DaemonMessage::Welcome { .. } => {
-                let changed =
-                    !self.status.is_empty() || !self.stashes.is_empty() || !self.failed.is_empty();
+                let changed = !self.status.is_empty() || !self.failed.is_empty();
                 self.status.clear();
-                self.stashes.clear();
                 self.requested.clear();
                 self.request_ids.clear();
                 self.failed.clear();
@@ -216,19 +208,6 @@ impl ScModel {
                 self.status.insert(key, status);
                 changed || recovered
             }
-            DaemonMessage::Stashes {
-                repo_id,
-                stashes,
-                worktree_path,
-            } => {
-                let key = ScKey {
-                    repo_id: repo_id.clone(),
-                    worktree: worktree_path.clone(),
-                };
-                let changed = self.stashes.get(&key) != Some(stashes);
-                self.stashes.insert(key, stashes.clone());
-                changed
-            }
             // A registry snapshot that no longer lists a repo is the only
             // removal signal the protocol carries, so its keys go with it.
             DaemonMessage::Repos { repos } => self.retain_repos(repos),
@@ -239,10 +218,8 @@ impl ScModel {
     /// Drop every key whose repo is not in `repos`; `true` when any went.
     fn retain_repos(&mut self, repos: &[RepoEntry]) -> bool {
         let ids: HashSet<&str> = repos.iter().map(|repo| repo.id.as_str()).collect();
-        let before = self.status.len() + self.stashes.len() + self.failed.len();
+        let before = self.status.len() + self.failed.len();
         self.status
-            .retain(|key, _| ids.contains(key.repo_id.as_str()));
-        self.stashes
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
         self.requested
             .retain(|key| ids.contains(key.repo_id.as_str()));
@@ -250,7 +227,7 @@ impl ScModel {
             .retain(|_, key| ids.contains(key.repo_id.as_str()));
         self.failed
             .retain(|key, _| ids.contains(key.repo_id.as_str()));
-        before != self.status.len() + self.stashes.len() + self.failed.len()
+        before != self.status.len() + self.failed.len()
     }
 
     /// Record that a status for `key` is being asked for, so it is not asked
@@ -321,16 +298,6 @@ impl ScModel {
     #[must_use]
     pub fn status(&self, key: &ScKey) -> Option<&Status> {
         self.status.get(key)
-    }
-
-    /// The stashes of a key, when a list has arrived.
-    #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the panel draws no stash part to read it")
-    )]
-    pub fn stashes(&self, key: &ScKey) -> Option<&[GitStash]> {
-        self.stashes.get(key).map(Vec::as_slice)
     }
 
     /// Whether a status has arrived for a key.
@@ -628,19 +595,6 @@ mod tests {
         .expect("status fixture")
     }
 
-    fn stashes_message(repo_id: &str, worktree: Option<&str>, count: usize) -> DaemonMessage {
-        let stashes: Vec<serde_json::Value> = (0..count)
-            .map(|i| json!({ "id": format!("stash@{i}"), "subject": "WIP", "created_at": "2026-01-01T00:00:00Z" }))
-            .collect();
-        serde_json::from_value(json!({
-            "type": "stashes",
-            "repo_id": repo_id,
-            "stashes": stashes,
-            "worktree_path": worktree,
-        }))
-        .expect("stashes fixture")
-    }
-
     fn main_tree(repo_id: &str) -> ScKey {
         ScKey {
             repo_id: repo_id.to_owned(),
@@ -733,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn status_and_stashes_are_stored_per_repo_and_worktree() {
+    fn status_is_stored_per_repo_and_worktree() {
         let mut model = ScModel::default();
         assert!(
             !model.apply(&DaemonMessage::Sessions {
@@ -769,18 +723,6 @@ mod tests {
             !model.apply(&status_message("r1", None, changes(&["a.rs"]), Vec::new())),
             "an identical broadcast is no change"
         );
-
-        assert!(model.apply(&stashes_message("r1", None, 2)));
-        assert!(model.apply(&stashes_message("r1", Some("D:\\r1-wt"), 0)));
-        assert_eq!(model.stashes(&main).expect("main stashes").len(), 2);
-        assert_eq!(
-            model
-                .stashes(&worktree_key)
-                .expect("worktree stashes")
-                .len(),
-            0
-        );
-        assert!(model.stashes(&main_tree("r9")).is_none());
     }
 
     #[test]
@@ -788,7 +730,6 @@ mod tests {
         let mut model = ScModel::default();
         model.apply(&status_message("r1", None, changes(&["a.rs"]), Vec::new()));
         model.apply(&status_message("r2", None, Vec::new(), changes(&["b.rs"])));
-        model.apply(&stashes_message("r1", None, 1));
         assert!(
             model.apply(&DaemonMessage::Welcome {
                 protocol_version: 22,
@@ -797,7 +738,6 @@ mod tests {
             "clearing a populated store is a change"
         );
         assert!(!model.is_loaded(&main_tree("r1")));
-        assert!(model.stashes(&main_tree("r1")).is_none());
         assert!(
             !model.apply(&DaemonMessage::Welcome {
                 protocol_version: 22,
@@ -876,7 +816,6 @@ mod tests {
         model.apply(&DaemonMessage::Repos {
             repos: vec![repo("r1", "D:\\r1")],
         });
-        model.apply(&stashes_message("r1", None, 0));
         assert!(
             !model.requested.contains(&main_tree("r1")),
             "its status arrived, so the request is answered"

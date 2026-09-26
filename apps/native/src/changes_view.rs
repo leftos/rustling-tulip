@@ -474,6 +474,7 @@ impl RootView {
             || self.delete_dialog.is_some()
             || self.run_confirm.is_some()
             || self.changes.discard.is_some()
+            || self.stash.drop.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some()
     }

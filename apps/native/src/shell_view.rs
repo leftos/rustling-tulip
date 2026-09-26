@@ -106,6 +106,7 @@ impl RootView {
             || self.sc_picker_open
             || self.changes.file_menu.is_some()
             || self.changes.discard.is_some()
+            || self.stash.drop.is_some()
             || self.notices.has_modal()
             || self.conn.overlay().is_some();
         if blocked {

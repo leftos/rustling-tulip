@@ -1637,6 +1637,6 @@ impl RootView {
             return;
         };
         view.update(cx, |pane, cx| pane.rerun_command(command, window, cx));
-        self.pane_focused(pane_id, cx);
+        self.pane_focused(pane_id, window, cx);
     }
 }

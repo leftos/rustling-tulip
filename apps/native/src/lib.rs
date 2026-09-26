@@ -48,6 +48,8 @@ mod source_control_view;
 mod spawn_form;
 mod spawn_view;
 mod spawns;
+mod stash_view;
+mod stashes;
 mod tab_bar;
 mod tabs;
 mod term;
@@ -95,6 +97,7 @@ use crate::source_control::ScModel;
 use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
+use crate::stash_view::StashUi;
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
 use crate::term::ShellCommand;
@@ -126,6 +129,9 @@ pub use crate::sidebar::{
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
+pub use crate::stash_view::{
+    ScStashPush, ScStashRow, ScStashes, StashAction, StashButton, StashDropView,
+};
 pub use crate::text_input::bind_keys;
 
 const PADDING: f32 = 6.0;
@@ -365,6 +371,9 @@ pub struct RootView {
     /// The source-control writes out, the banners failed ones left, the
     /// file menu and the discard confirm.
     changes: ChangesUi,
+    /// The stash lists, the stash writes out, the push inputs and the drop
+    /// confirm.
+    stash: StashUi,
 }
 
 impl RootView {
@@ -401,6 +410,24 @@ impl RootView {
         Self::with_transport(deps, window, cx)
     }
 
+    /// Follows the window's activation and bounds. Ctrl stays down in the
+    /// window's record while another window has the keyboard, so leaving
+    /// the window ends link mode; a resize moves every dot, so an open
+    /// gutter menu closes with it rather than point at a row that is no
+    /// longer there.
+    fn watch_window(window: &mut Window, cx: &mut Context<Self>) {
+        cx.observe_window_activation(window, |root, window, cx| {
+            if !window.is_window_active() {
+                root.set_link_mode(false, cx);
+            }
+        })
+        .detach();
+        cx.observe_window_bounds(window, |root, window, cx| {
+            root.close_shell_menu(window, cx);
+        })
+        .detach();
+    }
+
     /// A view over `deps`: it sends through `deps.tx` and handles every
     /// event `deps.events` delivers. A request to close the window goes
     /// through the quit flow.
@@ -415,20 +442,7 @@ impl RootView {
             quit,
             open,
         } = deps;
-        // Ctrl stays down in the window's record while another window has
-        // the keyboard, so leaving the window ends link mode.
-        cx.observe_window_activation(window, |root, window, cx| {
-            if !window.is_window_active() {
-                root.set_link_mode(false, cx);
-            }
-        })
-        .detach();
-        // A resize moves every dot, so an open gutter menu closes with it
-        // rather than point at a row that is no longer there.
-        cx.observe_window_bounds(window, |root, window, cx| {
-            root.close_shell_menu(window, cx);
-        })
-        .detach();
+        Self::watch_window(window, cx);
         let view = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // A view that is gone has nothing to ask; let the window close.
@@ -509,6 +523,7 @@ impl RootView {
             history: history::HistoryModel::default(),
             sc_layout: history::ScLayout::default(),
             changes: ChangesUi::new(cx.focus_handle()),
+            stash: StashUi::new(cx.focus_handle()),
         }
     }
 
@@ -889,7 +904,7 @@ impl RootView {
         self.drop_stale_tab_menu();
         let dropped_picker = self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
-        let dropped_changes = self.seed_source_control();
+        let dropped_changes = self.seed_source_control(window, cx);
         if dropped_picker || dropped_changes {
             self.after_notice_closed(window, cx);
         }
@@ -1030,7 +1045,7 @@ impl RootView {
                 let reseed = moves_source_control_inputs(&msg);
                 self.on_message(*msg, window, cx);
                 let dropped_picker = self.drop_stale_sc_picker();
-                let dropped_changes = reseed && self.seed_source_control();
+                let dropped_changes = reseed && self.seed_source_control(window, cx);
                 if dropped_picker || dropped_changes {
                     self.after_notice_closed(window, cx);
                 }
@@ -1046,6 +1061,7 @@ impl RootView {
             self.close_shell_dialog(window, cx);
             self.close_appearance_editor(window, cx);
             self.close_discard_confirm(window, cx);
+            self.close_stash_drop_confirm(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
         }
@@ -1063,7 +1079,7 @@ impl RootView {
             _ => None,
         };
         self.sidebar.apply(&msg);
-        if self.on_sc_message(&msg, cx) {
+        if self.on_sc_message(&msg, cx) || self.on_stash_message(&msg, window, cx) {
             return;
         }
         if self.apply_history(&msg, cx) {
@@ -1171,6 +1187,7 @@ impl RootView {
         self.close_shell_dialog(window, cx);
         self.close_appearance_editor(window, cx);
         self.close_discard_confirm(window, cx);
+        self.close_stash_drop_confirm(window, cx);
         self.reset_session_ui(window, cx);
         self.reset_notices(window, cx);
     }
@@ -1262,6 +1279,10 @@ impl RootView {
             return;
         }
         if self.on_discard_confirm_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.on_stash_drop_key(ks, window, cx) {
             cx.stop_propagation();
             return;
         }
@@ -1601,6 +1622,7 @@ impl Render for RootView {
             .children(self.settings_layer(cx))
             .children(delete_under)
             .children(self.discard_confirm_layer(cx))
+            .children(self.stash_drop_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
             .children(self.run_confirm_layer(cx))

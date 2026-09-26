@@ -140,7 +140,13 @@ Each is split into brief-sized items (like Phase 1) when it becomes the current 
     - When a commit fails, the daemon's error includes git's stdout if stderr is empty, and no longer echoes the args.
 
     Original P3.5 text: A multi-line input (extend `TextInput`), Ctrl+Enter, "Committing…", `CommitOk` clears it, and a dismissable error. Needs P3.4. Note: a commit that succeeds but whose status refresh fails gets `GitWriteError { operation: "commit", error: "status refresh failed: …" }` and then `CommitOk`. Treat the commit as done: clear the box, and show only the refresh banner.
-  - [ ] **P3.6 Stashes.** A collapsible section with a count, stash with an optional message, pop / apply / drop, and live updates from the `Stashes` broadcast. Needs P3.3.
+  - [x] **P3.6 Stashes.** As built:
+    - `stashes.rs` holds one list per repo, request ids and pending per repo; `stash_view.rs` renders it.
+    - Each section has a Stashes part under its buckets, with a push input created on seed.
+    - `pop` / `apply` / `drop`; drop asks in a confirm that closes with a `Stash list changed` toast if the list moves under it.
+    - Every stash action checks the stash is still the one shown (id, subject and date) before sending.
+
+    Original text: A collapsible section with a count, stash with an optional message, pop / apply / drop, and live updates from the `Stashes` broadcast. Needs P3.3.
   - [x] **P3.7 History, commit detail, open in forge.** As built:
     - `history.rs` holds the model: paging by offset with sha dedupe, request-id routing for the three reads, retiring stale reads, a detail cache per sha, the remote per repo, `branch_url`, and the split clamps.
     - `history_view.rs` holds the view: one History block per section under a saved changes / history split, the detail pane under the list behind its own saved divider, and the forge button with its three disabled tooltips.

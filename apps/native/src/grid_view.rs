@@ -235,8 +235,8 @@ impl RootView {
         let view = cx.new(|cx| TerminalPane::new(pane_id.to_owned(), tx, now, font, cx));
         let handle = view.read(cx).focus_handle();
         let id = pane_id.to_owned();
-        let focus_in = cx.on_focus_in(&handle, window, move |this, _, cx| {
-            this.pane_focused(&id, cx);
+        let focus_in = cx.on_focus_in(&handle, window, move |this, window, cx| {
+            this.pane_focused(&id, window, cx);
             cx.notify();
         });
         let events = cx.subscribe_in(&view, window, |this, _, event: &PaneEvent, window, cx| {
@@ -253,12 +253,17 @@ impl RootView {
         }
     }
 
-    pub(crate) fn pane_focused(&mut self, pane_id: &str, cx: &mut Context<Self>) {
+    pub(crate) fn pane_focused(
+        &mut self,
+        pane_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) {
             self.tabs.set_focused(&tab_id, pane_id);
             self.update_pane_roles(cx);
             self.drop_stale_sc_picker();
-            self.seed_source_control();
+            self.seed_source_control(window, cx);
         }
     }
 
