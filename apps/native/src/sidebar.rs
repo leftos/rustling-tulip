@@ -3,14 +3,15 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    ContainerRef, DaemonMessage, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
-    SessionStatus, WorkspaceEntry,
+    AppearanceOverrides, ContainerRef, DaemonMessage, RepoEntry, SessionKind, SessionMode,
+    SessionSnapshot, SessionStatus, WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::ScUiState;
 
@@ -114,6 +115,13 @@ pub struct UiState {
     /// The source-control panel's pinned repo and collapsed sections.
     #[serde(default)]
     pub source_control: ScUiState,
+    /// The app level's colours, below every repo's, workspace's and
+    /// session's.
+    #[serde(default)]
+    pub app_appearance: AppColors,
+    /// The custom colours chosen lately, newest first, `#rrggbb`.
+    #[serde(default)]
+    pub recent_colors: Vec<String>,
 }
 
 impl Default for UiState {
@@ -127,6 +135,8 @@ impl Default for UiState {
             terminal_font: FontSettings::default(),
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
+            app_appearance: AppColors::default(),
+            recent_colors: Vec::new(),
         }
     }
 }
@@ -308,15 +318,59 @@ impl SidebarModel {
     /// draws at: the tab's override, else the session's size, else its
     /// container's, else the app's.
     pub fn resolved_font_size(&self, tab_size: Option<f32>, session_id: Option<&str>) -> f32 {
-        let session = session_id.and_then(|id| self.session(id));
-        let container =
-            session.and_then(|s| fonts::container_size(s, &self.repos, &self.workspaces));
-        fonts::resolve_size(
-            tab_size,
-            session.and_then(|s| s.appearance.terminal_font_size),
-            container,
-            self.ui.terminal_font.size,
+        self.appearance(session_id)
+            .with_tab_size(tab_size)
+            .font_size
+            .value
+    }
+
+    /// Every appearance field of `session_id` (or of a pane showing none)
+    /// as it resolves through the session, its container and the app.
+    pub fn appearance(&self, session_id: Option<&str>) -> Resolved {
+        self.resolve(session_id.and_then(|id| self.session(id)))
+    }
+
+    /// Every appearance field of `session_id` as it resolves when its own
+    /// overrides are `own` rather than those it holds; `None` for a
+    /// session the list does not hold.
+    pub fn appearance_with(&self, session_id: &str, own: &AppearanceOverrides) -> Option<Resolved> {
+        let mut session = self.session(session_id)?.clone();
+        session.appearance.clone_from(own);
+        Some(self.resolve(Some(&session)))
+    }
+
+    /// Each session's resolved accent, `0xRRGGBB`, by session id.
+    pub fn session_accents(&self) -> HashMap<&str, u32> {
+        self.sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.id.as_str(),
+                    self.resolve(Some(session)).accent.value,
+                )
+            })
+            .collect()
+    }
+
+    fn resolve(&self, session: Option<&SessionSnapshot>) -> Resolved {
+        appearance::resolve(
+            session,
+            &self.repos,
+            &self.workspaces,
+            AppLevel {
+                colors: &self.ui.app_appearance,
+                font: &self.ui.terminal_font,
+            },
         )
+    }
+
+    pub fn set_app_colors(&mut self, colors: AppColors) {
+        self.ui.app_appearance = colors;
+    }
+
+    /// The recent custom colours to offer, `0xRRGGBB`, newest first.
+    pub fn recent_colors(&self) -> Vec<u32> {
+        appearance::recent_swatches(&self.ui.recent_colors)
     }
 
     /// Records the active tab; returns whether it changed.
@@ -1463,6 +1517,12 @@ mod tests {
                 pinned_repo: Some("r1".to_owned()),
                 ..ScUiState::default()
             },
+            app_appearance: AppColors {
+                accent_color: Some("#38bdf8".to_owned()),
+                terminal_background_color: Some("#f6f4ef".to_owned()),
+                terminal_frame_color: None,
+            },
+            recent_colors: vec!["#abcdef".to_owned()],
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use alacritty_terminal::index::Side;
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::channel::mpsc::UnboundedSender;
@@ -33,6 +33,7 @@ use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, Snapshot, Terminal, TextSpan};
 use crate::term_input::{self, DeadKeyFate, KeyAction, SessionContext};
 use crate::text_input::{offset_from_utf16, offset_to_utf16};
+use crate::theme;
 
 /// `DSR 6`: the program asks where the cursor is and waits for the reply.
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
@@ -98,6 +99,11 @@ pub struct TerminalPane {
     /// Bumped whenever the terminal's content may have changed: output,
     /// history, a resize or a fresh terminal. Keys the hover's link cache.
     content_generation: u64,
+    /// The terminal's background, which every fresh terminal is given.
+    background: Rgb,
+    /// The padding's colour around the terminal; `None` follows the
+    /// terminal's background.
+    frame: Option<Rgb>,
 }
 
 /// Ctrl+hover state: whether Ctrl is held, the viewport cell (row, column)
@@ -244,7 +250,38 @@ impl TerminalPane {
             base_dirs: Vec::new(),
             links: LinkHover::default(),
             content_generation: 0,
+            background: theme::DEFAULT_BACKGROUND,
+            frame: None,
         }
+    }
+
+    /// Paints the terminal on `background`, whose theme it rebuilds, and the
+    /// padding around it in `frame`, or in the terminal's background when
+    /// `frame` is `None`.
+    pub fn set_colors(&mut self, background: Rgb, frame: Option<Rgb>, cx: &mut Context<Self>) {
+        if background == self.background && frame == self.frame {
+            return;
+        }
+        if background != self.background {
+            self.background = background;
+            self.term.set_background(background);
+        }
+        self.frame = frame;
+        cx.notify();
+    }
+
+    /// What the pane fills: the terminal's area with the terminal's
+    /// background (a program's `OSC 11` included), and the padding ring
+    /// around it with the frame, which follows that background when unset.
+    pub fn fills(&self) -> (Rgb, Rgb) {
+        let background = self.term.background();
+        (background, self.frame.unwrap_or(background))
+    }
+
+    /// The terminal's background and default text colour as it paints them.
+    pub fn terminal_colors(&self) -> (Rgb, Rgb) {
+        let snapshot = self.term.snapshot();
+        (snapshot.background, snapshot.foreground)
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -417,6 +454,7 @@ impl TerminalPane {
         } else {
             Terminal::new(size, cursor)
         };
+        self.term.set_background(self.background);
         self.content_changed();
         self.tracker = Tracker::default();
         self.last_motion = None;
@@ -1367,7 +1405,7 @@ impl Render for TerminalPane {
         let exit_view = view.clone();
         let input_view = view.clone();
         let focus = self.focus.clone();
-        let background = to_rgba(self.term.snapshot().background);
+        let (grid_fill, ring_fill) = self.fills();
         let grid = canvas(
             move |bounds, window, cx| {
                 let m = metrics(window, family, &font_settings);
@@ -1413,6 +1451,7 @@ impl Render for TerminalPane {
                         exit_view.update(cx, TerminalPane::clear_hover);
                     }
                 });
+                window.paint_quad(fill(bounds, to_rgba(grid_fill)));
                 paint_grid(
                     bounds,
                     &snap,
@@ -1430,7 +1469,7 @@ impl Render for TerminalPane {
         let mut pane = div()
             .size_full()
             .p(px(crate::PADDING))
-            .bg(background)
+            .bg(to_rgba(ring_fill))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))

@@ -202,6 +202,82 @@ pub struct AppearanceOverrides {
     pub terminal_font_bold: Option<bool>,
 }
 
+/// The terminal font sizes an appearance level may set, in px.
+pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u16> = 8..=32;
+
+/// Why an appearance cannot be stored.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppearanceError {
+    /// `field` holds `value`, which is not `#RRGGBB`.
+    #[error("{field} must use #RRGGBB format")]
+    Color { field: &'static str, value: String },
+    /// The font size is outside [`TERMINAL_FONT_SIZES`].
+    #[error(
+        "terminal font size must be between {} and {}",
+        TERMINAL_FONT_SIZES.start(),
+        TERMINAL_FONT_SIZES.end()
+    )]
+    FontSize(u16),
+}
+
+impl AppearanceOverrides {
+    /// This appearance as it is stored: colours lowercase `#rrggbb`, a
+    /// blank colour or family unset, the family trimmed.
+    ///
+    /// # Errors
+    ///
+    /// A colour that is not `#RRGGBB` (surrounding space ignored), or a
+    /// font size outside [`TERMINAL_FONT_SIZES`].
+    pub fn normalized(&self) -> Result<Self, AppearanceError> {
+        let accent_color = normalized_color(self.accent_color.as_deref(), "accent color")?;
+        let terminal_background_color = normalized_color(
+            self.terminal_background_color.as_deref(),
+            "terminal background color",
+        )?;
+        let terminal_frame_color =
+            normalized_color(self.terminal_frame_color.as_deref(), "terminal frame color")?;
+        if let Some(size) = self.terminal_font_size
+            && !TERMINAL_FONT_SIZES.contains(&size)
+        {
+            return Err(AppearanceError::FontSize(size));
+        }
+        Ok(Self {
+            accent_color,
+            terminal_background_color,
+            terminal_frame_color,
+            terminal_font_family: self.terminal_font_family.as_deref().and_then(|family| {
+                let trimmed = family.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            }),
+            terminal_font_size: self.terminal_font_size,
+            terminal_font_bold: self.terminal_font_bold,
+        })
+    }
+}
+
+/// `color` as lowercase `#rrggbb`; blank is unset.
+fn normalized_color(
+    color: Option<&str>,
+    field: &'static str,
+) -> Result<Option<String>, AppearanceError> {
+    let Some(raw) = color else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.strip_prefix('#') {
+        Some(hex) if hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Ok(Some(format!("#{}", hex.to_ascii_lowercase())))
+        }
+        _ => Err(AppearanceError::Color {
+            field,
+            value: raw.to_owned(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoEntry {
     pub id: String,
@@ -1781,6 +1857,10 @@ pub enum ClientMessage {
     SetSessionAppearance {
         session_id: String,
         appearance: AppearanceOverrides,
+        /// Echoed on the requester's [`DaemonMessage::SessionUpdated`] for
+        /// the change, or on the [`DaemonMessage::Error`] that refuses it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     Attach {
         session_id: String,
@@ -2696,8 +2776,9 @@ pub enum DaemonMessage {
     },
     SessionUpdated {
         session: SessionSnapshot,
-        /// The `request_id` of the spawn or duplicate this reply answers;
-        /// only on the reply sent to the requester, never on a broadcast.
+        /// The `request_id` of the spawn, duplicate or session appearance
+        /// change this reply answers; only on the reply sent to the
+        /// requester, never on a broadcast.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3027,8 +3108,8 @@ pub enum DaemonMessage {
     },
     Error {
         message: String,
-        /// The `request_id` of the spawn or duplicate that failed, on the
-        /// reply to its requester.
+        /// The `request_id` of the spawn, duplicate or session appearance
+        /// change that failed, on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3043,8 +3124,8 @@ pub enum DaemonMessage {
         detail: String,
         #[serde(default)]
         hint: Option<String>,
-        /// The `request_id` of the spawn or duplicate that failed, on the
-        /// reply to its requester.
+        /// The `request_id` of the spawn, duplicate or session appearance
+        /// change that failed, on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -3295,6 +3376,121 @@ pub struct GitRemoteUrl {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_normalizes_colours_and_drops_blanks() {
+        let normalized = AppearanceOverrides {
+            accent_color: Some(" #ABCDEF ".to_owned()),
+            terminal_background_color: Some(String::new()),
+            terminal_frame_color: Some("#0a0B0c".to_owned()),
+            terminal_font_family: Some("   ".to_owned()),
+            terminal_font_size: Some(8),
+            terminal_font_bold: Some(true),
+        }
+        .normalized()
+        .expect("valid");
+        assert_eq!(
+            normalized,
+            AppearanceOverrides {
+                accent_color: Some("#abcdef".to_owned()),
+                terminal_frame_color: Some("#0a0b0c".to_owned()),
+                terminal_font_size: Some(8),
+                terminal_font_bold: Some(true),
+                ..AppearanceOverrides::default()
+            },
+            "blank colours and families are unset"
+        );
+        let family = AppearanceOverrides {
+            terminal_font_family: Some("  Fira Code ".to_owned()),
+            terminal_font_size: Some(32),
+            ..AppearanceOverrides::default()
+        }
+        .normalized()
+        .expect("valid");
+        assert_eq!(family.terminal_font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(family.terminal_font_size, Some(32));
+    }
+
+    #[test]
+    fn appearance_refuses_bad_hex_and_sizes_out_of_range() {
+        for bad in ["blue", "#abc", "abcdef", "#abcdeg", "#abcdef0", "#+bcdef"] {
+            let error = AppearanceOverrides {
+                accent_color: Some(bad.to_owned()),
+                ..AppearanceOverrides::default()
+            }
+            .normalized();
+            assert_eq!(
+                error,
+                Err(AppearanceError::Color {
+                    field: "accent color",
+                    value: bad.to_owned(),
+                }),
+                "{bad:?} is not #RRGGBB"
+            );
+        }
+        let frame = AppearanceOverrides {
+            terminal_frame_color: Some("#12".to_owned()),
+            ..AppearanceOverrides::default()
+        }
+        .normalized()
+        .expect_err("not #RRGGBB");
+        assert_eq!(
+            frame.to_string(),
+            "terminal frame color must use #RRGGBB format"
+        );
+        for size in [7, 33] {
+            let error = AppearanceOverrides {
+                terminal_font_size: Some(size),
+                ..AppearanceOverrides::default()
+            }
+            .normalized()
+            .expect_err("out of range");
+            assert_eq!(error, AppearanceError::FontSize(size));
+            assert_eq!(
+                error.to_string(),
+                "terminal font size must be between 8 and 32"
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_reports_a_bad_colour_before_a_bad_size() {
+        let error = AppearanceOverrides {
+            accent_color: Some("blue".to_owned()),
+            terminal_font_size: Some(40),
+            ..AppearanceOverrides::default()
+        }
+        .normalized()
+        .expect_err("both fields are invalid");
+        assert_eq!(error.to_string(), "accent color must use #RRGGBB format");
+    }
+
+    #[test]
+    fn set_session_appearance_request_id_is_optional_and_round_trips() {
+        let decoded: ClientMessage = serde_json::from_str(
+            r#"{"type":"set_session_appearance","session_id":"s1","appearance":{}}"#,
+        )
+        .expect("a message without request_id decodes");
+        assert!(matches!(
+            decoded,
+            ClientMessage::SetSessionAppearance {
+                request_id: None,
+                ..
+            }
+        ));
+        let msg = ClientMessage::SetSessionAppearance {
+            session_id: "s1".to_owned(),
+            appearance: AppearanceOverrides::default(),
+            request_id: Some("req-7".to_owned()),
+        };
+        let json = serde_json::to_string(&msg).expect("serializes");
+        assert!(json.contains(r#""request_id":"req-7""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(
+            back,
+            ClientMessage::SetSessionAppearance { request_id: Some(id), .. } if id == "req-7"
+        ));
+    }
 
     fn sample_tab() -> TabEntry {
         TabEntry {

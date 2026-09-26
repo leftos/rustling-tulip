@@ -17,8 +17,8 @@ use crate::registry::{
     set_workspace_worktree_default, upsert_workspace,
 };
 use crate::session::{
-    ScrollbackSnapshot, SessionEvent, SessionRecord, SessionRegistry, attach_lifecycle,
-    build_replay_snapshot, new_id, push_recent_action,
+    ScrollbackSnapshot, SessionEvent, SessionRecord, SessionRegistry, UpdateOrigin,
+    attach_lifecycle, build_replay_snapshot, new_id, push_recent_action,
 };
 use crate::state::AppState;
 use crate::tabs;
@@ -51,12 +51,16 @@ use std::collections::hash_map::Entry;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// The id the next client connection takes.
+static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct Hub {
@@ -855,30 +859,8 @@ async fn client_session(hub: Hub, socket: WebSocket) {
 
     // Subscribe to global session events. After splitting PtyOutput out, this
     // channel only carries low-volume control events.
-    let mut events_rx = hub.sessions.subscribe();
-    let out_for_events = out_tx.clone();
-    let event_task = tokio::spawn(async move {
-        loop {
-            match events_rx.recv().await {
-                Ok(SessionEvent::Updated(snap)) => {
-                    let _ = out_for_events.send(DaemonMessage::SessionUpdated {
-                        session: *snap,
-                        request_id: None,
-                    });
-                }
-                Ok(SessionEvent::Removed(id)) => {
-                    let _ = out_for_events.send(DaemonMessage::SessionRemoved { session_id: id });
-                }
-                Ok(SessionEvent::Attention { session_id, reason }) => {
-                    let _ = out_for_events.send(DaemonMessage::Attention { session_id, reason });
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(lagged = n, "client event stream lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
+    let connection = NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed);
+    let event_task = spawn_session_forwarder(hub.sessions.subscribe(), out_tx.clone(), connection);
 
     // Subscribe to tab-layout and preset-launch events. Tab events are
     // filtered to this connection's `client_id` (per-client layouts); preset
@@ -902,6 +884,7 @@ async fn client_session(hub: Hub, socket: WebSocket) {
         fetches: &fetches,
         client_id: &client_id,
         client_name: client_name.as_deref(),
+        connection,
     };
     recv_loop(&hub, &mut receiver, &ctx).await;
 
@@ -1130,6 +1113,9 @@ struct ConnCtx<'a> {
     fetches: &'a FetchRegistry,
     client_id: &'a str,
     client_name: Option<&'a str>,
+    /// This connection's id, unique for the daemon's run: a client may hold
+    /// several connections under one `client_id`.
+    connection: u64,
 }
 
 /// Drain a connection's outbound queues into its WebSocket. Control and PTY
@@ -1436,6 +1422,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         pty_forwarders,
         client_id,
         client_name,
+        connection,
         ..
     } = *ctx;
     match msg {
@@ -1668,7 +1655,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             repo_id,
             appearance,
         } => {
-            let appearance = normalize_appearance(appearance)?;
+            let appearance = appearance.normalized()?;
             set_repo_appearance(&hub.state, &repo_id, appearance)?;
             let repos = hub.state.with_persisted(|s| s.repos.clone());
             let _ = hub.state_events.send(StateEvent::Repos(repos));
@@ -1677,7 +1664,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             workspace_id,
             appearance,
         } => {
-            let appearance = normalize_appearance(appearance)?;
+            let appearance = appearance.normalized()?;
             set_workspace_appearance(&hub.state, &workspace_id, appearance)?;
             let workspaces = hub.state.with_persisted(|s| s.workspaces.clone());
             let _ = hub.state_events.send(StateEvent::Workspaces(workspaces));
@@ -1685,16 +1672,15 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::SetSessionAppearance {
             session_id,
             appearance,
+            request_id,
         } => {
-            let appearance = normalize_appearance(appearance)?;
-            let mut applied = None;
-            hub.sessions.update(&session_id, |guard| {
-                guard.appearance.clone_from(&appearance);
-                applied = Some(guard.appearance.clone());
-            });
-            if let Some(appearance) = applied {
-                orphan::try_update_appearance(&hub.dirs, &session_id, &appearance);
-            }
+            let change = AppearanceChangeRequest {
+                session_id: &session_id,
+                appearance: &appearance,
+                request_id,
+                connection,
+            };
+            set_session_appearance(&hub.sessions, &hub.dirs, change, out_tx);
         }
         ClientMessage::Detach { session_id } => {
             let mut forwarders = pty_forwarders.lock().await;
@@ -2618,45 +2604,6 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         }
     }
     Ok(())
-}
-
-fn normalize_appearance(
-    mut appearance: AppearanceOverrides,
-) -> anyhow::Result<AppearanceOverrides> {
-    appearance.accent_color = normalize_color(appearance.accent_color, "accent color")?;
-    appearance.terminal_background_color = normalize_color(
-        appearance.terminal_background_color,
-        "terminal background color",
-    )?;
-    appearance.terminal_frame_color =
-        normalize_color(appearance.terminal_frame_color, "terminal frame color")?;
-    appearance.terminal_font_family = appearance.terminal_font_family.and_then(|family| {
-        let trimmed = family.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    });
-    if let Some(size) = appearance.terminal_font_size
-        && !(8..=32).contains(&size)
-    {
-        return Err(anyhow!("terminal font size must be between 8 and 32"));
-    }
-    Ok(appearance)
-}
-
-fn normalize_color(color: Option<String>, field_name: &str) -> anyhow::Result<Option<String>> {
-    let Some(raw) = color else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let Some(hex) = trimmed.strip_prefix('#') else {
-        return Err(anyhow!("{field_name} must use #RRGGBB format"));
-    };
-    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(anyhow!("{field_name} must use #RRGGBB format"));
-    }
-    Ok(Some(format!("#{}", hex.to_ascii_lowercase())))
 }
 
 enum CloseOutcome {
@@ -4216,6 +4163,99 @@ async fn duplicate_request(hub: &Hub, session_id: &str) -> anyhow::Result<SpawnR
     };
     info!(source = %session_id, ?fresh, "duplicate_session: spawning");
     Ok(stored.to_duplicate_request(fresh))
+}
+
+/// What connection `connection` receives for a registry event. A
+/// `SessionUpdated` carries the `request_id` of the request that made it
+/// only on the connection that sent that request.
+fn session_event_message(event: SessionEvent, connection: u64) -> DaemonMessage {
+    match event {
+        SessionEvent::Updated(snap, origin) => DaemonMessage::SessionUpdated {
+            session: *snap,
+            request_id: origin
+                .filter(|origin| origin.connection == connection)
+                .map(|origin| origin.request_id),
+        },
+        SessionEvent::Removed(session_id) => DaemonMessage::SessionRemoved { session_id },
+        SessionEvent::Attention { session_id, reason } => {
+            DaemonMessage::Attention { session_id, reason }
+        }
+    }
+}
+
+/// A [`ClientMessage::SetSessionAppearance`], as the daemon handles it.
+struct AppearanceChangeRequest<'a> {
+    session_id: &'a str,
+    appearance: &'a AppearanceOverrides,
+    request_id: Option<String>,
+    /// The connection that sent the request.
+    connection: u64,
+}
+
+/// Stores a session's appearance. Every client sees the change through the
+/// registry's one `SessionUpdated` broadcast, in order with every other
+/// update; on the requester's connection it carries `request_id`. A refused
+/// appearance, or a session the registry does not hold, answers the
+/// requester with an `Error` carrying it.
+fn set_session_appearance(
+    sessions: &SessionRegistry,
+    dirs: &Dirs,
+    change: AppearanceChangeRequest<'_>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    let AppearanceChangeRequest {
+        session_id,
+        appearance,
+        request_id,
+        connection,
+    } = change;
+    let appearance = match appearance.normalized() {
+        Ok(appearance) => appearance,
+        Err(err) => {
+            let _ = out_tx.send(DaemonMessage::Error {
+                message: err.to_string(),
+                request_id,
+            });
+            return;
+        }
+    };
+    let origin = request_id.clone().map(|request_id| UpdateOrigin {
+        connection,
+        request_id,
+    });
+    let found = sessions.update_from(session_id, origin, |guard| {
+        guard.appearance.clone_from(&appearance);
+    });
+    if found {
+        orphan::try_update_appearance(dirs, session_id, &appearance);
+    } else {
+        let _ = out_tx.send(DaemonMessage::Error {
+            message: format!("unknown session: {session_id}"),
+            request_id,
+        });
+    }
+}
+
+/// Forwards the registry's session events to connection `connection`, in
+/// the order the registry sent them.
+fn spawn_session_forwarder(
+    mut rx: broadcast::Receiver<SessionEvent>,
+    out_tx: mpsc::UnboundedSender<DaemonMessage>,
+    connection: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let _ = out_tx.send(session_event_message(event, connection));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(lagged = n, "client event stream lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Tells the requester its spawn failed, echoing the request's id.
@@ -6130,6 +6170,184 @@ mod tests {
             "{second:?}"
         );
         assert!(forwarders.lock().await.contains_key("s1"));
+    }
+
+    /// A registry holding one session `s1`, under a scratch config dir.
+    fn appearance_registry(tag: &str) -> (Arc<SessionRegistry>, Dirs) {
+        let root = std::env::temp_dir().join(format!("rt-appearance-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        let dirs = Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        };
+        let sessions = SessionRegistry::new(dirs.clone());
+        sessions.insert(SessionRecord {
+            id: "s1".to_string(),
+            label: "s1".to_string(),
+            default_label: "s1".to_string(),
+            user_label: None,
+            kind: SessionKind::Standalone,
+            members: Vec::new(),
+            mode: SessionMode::Interactive,
+            started_at: Utc::now(),
+            status: SessionStatus::Idle,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+            workspace_id: None,
+            agent: Agent::default(),
+            terminal_title: None,
+            program_name: None,
+            current_cwd: None,
+            appearance: AppearanceOverrides::default(),
+            spawn_config: None,
+            is_abandoned: false,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
+            last_prompt: None,
+            input_notifier: None,
+            scrollback_snapshot_req: None,
+        });
+        (sessions, dirs)
+    }
+
+    fn accent(color: &str) -> AppearanceOverrides {
+        AppearanceOverrides {
+            accent_color: Some(color.to_string()),
+            ..AppearanceOverrides::default()
+        }
+    }
+
+    /// The accent and `request_id` of each of the next `count` messages on
+    /// `rx`, which must all be `SessionUpdated`s; then checks nothing follows.
+    async fn next_updates(
+        rx: &mut mpsc::UnboundedReceiver<DaemonMessage>,
+        count: usize,
+    ) -> Vec<(Option<String>, Option<String>)> {
+        let mut updates = Vec::new();
+        for _ in 0..count {
+            let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("the forwarder delivers the update")
+                .expect("the channel is open");
+            let update = match msg {
+                DaemonMessage::SessionUpdated {
+                    session,
+                    request_id,
+                } => Some((session.appearance.accent_color, request_id)),
+                _ => None,
+            };
+            updates.push(update.expect("only SessionUpdated messages arrive"));
+        }
+        let extra = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(extra.is_err(), "one message per update: {extra:?}");
+        updates
+    }
+
+    #[tokio::test]
+    async fn session_appearance_echoes_the_request_id_in_order_to_the_requester_only() {
+        let (sessions, dirs) = appearance_registry("echo");
+        let (out_tx, mut requester) = mpsc::unbounded_channel();
+        let (other_tx, mut other) = mpsc::unbounded_channel();
+        let forwarders = [
+            spawn_session_forwarder(sessions.subscribe(), out_tx.clone(), 1),
+            spawn_session_forwarder(sessions.subscribe(), other_tx, 2),
+        ];
+
+        sessions.update("s1", |guard| {
+            guard.terminal_title = Some("busy".to_string());
+        });
+        for (color, id) in [("#38BDF8", "req-a"), ("#FB7185", "req-b")] {
+            let change = AppearanceChangeRequest {
+                session_id: "s1",
+                appearance: &accent(color),
+                request_id: Some(id.to_string()),
+                connection: 1,
+            };
+            set_session_appearance(&sessions, &dirs, change, &out_tx);
+        }
+
+        let sky = Some("#38bdf8".to_string());
+        let rose = Some("#fb7185".to_string());
+        assert_eq!(
+            next_updates(&mut requester, 3).await,
+            [
+                (None, None),
+                (sky.clone(), Some("req-a".to_string())),
+                (rose.clone(), Some("req-b".to_string())),
+            ],
+            "the requester's echoes follow the earlier broadcast, once each"
+        );
+        assert_eq!(
+            next_updates(&mut other, 3).await,
+            [(None, None), (sky, None), (rose, None)],
+            "another connection sees the same updates without the id"
+        );
+        for forwarder in forwarders {
+            forwarder.abort();
+        }
+    }
+
+    #[test]
+    fn a_session_appearance_for_an_unknown_session_echoes_the_request_id_on_the_error() {
+        let (sessions, dirs) = appearance_registry("unknown");
+        let mut other_client = sessions.subscribe();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let change = AppearanceChangeRequest {
+            session_id: "gone",
+            appearance: &accent("#FB7185"),
+            request_id: Some("req-11".to_string()),
+            connection: 1,
+        };
+
+        set_session_appearance(&sessions, &dirs, change, &out_tx);
+
+        let reply = out_rx.try_recv().expect("the requester hears of the miss");
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "req-11" && message == "unknown session: gone"
+            ),
+            "{reply:?}"
+        );
+        assert!(other_client.try_recv().is_err(), "nothing changed");
+    }
+
+    #[test]
+    fn a_refused_session_appearance_echoes_the_request_id_on_the_error() {
+        let (sessions, dirs) = appearance_registry("refused");
+        let mut other_client = sessions.subscribe();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let change = AppearanceChangeRequest {
+            session_id: "s1",
+            appearance: &accent("blue"),
+            request_id: Some("req-10".to_string()),
+            connection: 1,
+        };
+
+        set_session_appearance(&sessions, &dirs, change, &out_tx);
+
+        let reply = out_rx.try_recv().expect("the requester hears the refusal");
+        assert!(
+            matches!(
+                &reply,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "req-10" && message == "accent color must use #RRGGBB format"
+            ),
+            "{reply:?}"
+        );
+        assert!(other_client.try_recv().is_err(), "nothing changed");
     }
 
     #[test]

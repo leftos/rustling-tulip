@@ -31,11 +31,20 @@ const RECENT_ACTIONS_TAIL_ENTRIES: usize = 10;
 const RECENT_ACTIONS_TAIL_BYTE_CAP: usize = 1024;
 const EVENT_BROADCAST_CAPACITY: usize = 256;
 
+/// The connection whose request made a session update, and the request's
+/// id. Its own connection's forwarder echoes the id; no other client sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateOrigin {
+    pub connection: u64,
+    pub request_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     /// Boxed because `SessionSnapshot` is wide; keeping it inline makes
-    /// every other variant of this enum that big too.
-    Updated(Box<SessionSnapshot>),
+    /// every other variant of this enum that big too. The origin is set
+    /// when a client's request made the update.
+    Updated(Box<SessionSnapshot>, Option<UpdateOrigin>),
     Removed(String),
     Attention {
         session_id: String,
@@ -274,7 +283,18 @@ impl SessionRegistry {
     where
         F: FnOnce(&mut SessionRecord),
     {
-        let Some(arc) = self.get(id) else { return };
+        self.update_from(id, None, f);
+    }
+
+    /// [`Self::update`], its broadcast carrying `origin`. Returns whether
+    /// the registry holds `id`.
+    pub fn update_from<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
+    where
+        F: FnOnce(&mut SessionRecord),
+    {
+        let Some(arc) = self.get(id) else {
+            return false;
+        };
         let (snap, recent_tail) = {
             let mut guard = lock(&arc);
             f(&mut guard);
@@ -289,7 +309,10 @@ impl SessionRegistry {
         if let Some(dirs) = &self.dirs {
             orphan::try_update_recent_actions_tail(dirs, id, &recent_tail);
         }
-        let _ = self.events.send(SessionEvent::Updated(Box::new(snap)));
+        let _ = self
+            .events
+            .send(SessionEvent::Updated(Box::new(snap), origin));
+        true
     }
 
     pub fn fan_out_attention(&self, session_id: String, reason: protocol::AttentionReason) {
@@ -319,7 +342,7 @@ impl PendingInsert<'_> {
         let _ = self
             .registry
             .events
-            .send(SessionEvent::Updated(Box::new(snap)));
+            .send(SessionEvent::Updated(Box::new(snap), None));
     }
 }
 

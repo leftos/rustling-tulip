@@ -5,6 +5,7 @@
 //! The binary opens [`open_main_window`]; the UI specs build a [`RootView`]
 //! over their own transport with [`RootView::with_transport`].
 
+pub mod appearance;
 mod branch_fate;
 mod connection;
 mod copied;
@@ -52,12 +53,15 @@ use gpui::{
     MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window, WindowBounds, WindowOptions,
     div, prelude::*, pulsating_between, px, size,
 };
-use protocol::{ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry};
+use protocol::{
+    AppearanceOverrides, ClientMessage, DaemonMessage, InitLayoutKind, SessionSnapshot, TabEntry,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::appearance::AppearanceChange;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
@@ -100,6 +104,8 @@ const PADDING: f32 = 6.0;
 const DIVIDER_WIDTH: f32 = 4.0;
 /// How long tab font steps wait before the layout is written out.
 const FONT_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// The toast a session appearance change the daemon refused raises.
+const APPEARANCE_FAILED_TITLE: &str = "Couldn't change the appearance";
 /// This client's log file, under `<config dir>/logs/`.
 pub const LOG_FILE: &str = "native.log";
 
@@ -331,9 +337,12 @@ pub struct RootView {
     tab_menu: Option<TabMenu>,
     /// The open tab menu's keyboard focus, so Esc reaches it.
     tab_menu_focus: FocusHandle,
-    /// The session sizes the client sent but the daemon has not echoed, so
-    /// a held key steps from where its last press left off.
-    pending_session_font: HashMap<String, u16>,
+    /// Each session's appearance changes the client sent and the daemon has
+    /// not answered, keyed by request. Every send starts from the stored
+    /// appearance with these over it, so a held key steps from where its
+    /// last press left off and one change does not undo another still on
+    /// its way.
+    pending_appearance: appearance::InFlightAppearance,
     /// When the pending tab-font save is due, if one is.
     font_save_deadline: Option<Instant>,
     /// Wakes the view when the tab-font save is due.
@@ -485,7 +494,7 @@ impl RootView {
             menu_focus: cx.focus_handle(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
-            pending_session_font: HashMap::new(),
+            pending_appearance: appearance::InFlightAppearance::default(),
             font_save_deadline: None,
             font_save_timer: None,
             confirm: HeaderStopConfirm::default(),
@@ -597,13 +606,27 @@ impl RootView {
         self.after_font_change(cx);
     }
 
+    /// Sets the app level's colours, below every repo's, workspace's and
+    /// session's; every pane and sidebar row re-resolves its own.
+    pub fn set_app_colors(&mut self, colors: appearance::AppColors, cx: &mut Context<Self>) {
+        self.sidebar.set_app_colors(colors);
+        self.after_font_change(cx);
+    }
+
+    /// The accent session `session_id` resolves to, `0xRRGGBB`.
+    #[must_use]
+    pub fn session_accent(&self, session_id: &str) -> Option<u32> {
+        self.sidebar.session_accents().get(session_id).copied()
+    }
+
     /// The session the pane `pane_id` shows.
     #[must_use]
     pub fn pane_session(&self, pane_id: &str) -> Option<String> {
         Some(self.panes.get(pane_id)?.session()?.to_owned())
     }
 
-    /// Saves the layout, re-applies every pane's resolved font and redraws.
+    /// Saves the layout, re-applies every pane's resolved font and colours
+    /// and redraws.
     fn after_font_change(&mut self, cx: &mut Context<Self>) {
         self.save_ui();
         self.apply_pane_fonts(cx);
@@ -1002,7 +1025,7 @@ impl RootView {
         match msg {
             DaemonMessage::Welcome { .. } => {
                 self.reset_panes(cx);
-                self.pending_session_font.clear();
+                self.pending_appearance.clear();
                 self.status.clear();
                 self.duplicates.clear();
                 self.close_spawn_dialog(window, cx);
@@ -1082,7 +1105,8 @@ impl RootView {
                 members,
             } => self.on_discard_preview(&session_id, &members, cx),
             DaemonMessage::ShutdownAck {} => self.on_shutdown_ack(cx),
-            // A repo's or workspace's size is a level above the session's.
+            // A repo's or workspace's appearance is a level above the
+            // session's.
             DaemonMessage::Repos { .. } | DaemonMessage::Workspaces { .. } => {
                 self.apply_pane_fonts(cx);
             }
@@ -1113,7 +1137,9 @@ impl RootView {
         for view in self.pane_views(Some(&session.id)) {
             view.update(cx, |pane, _| pane.update_session(session));
         }
-        self.pending_session_font.remove(&session.id);
+        if let Some(request_id) = request_id {
+            self.pending_appearance.answered(&session.id, request_id);
+        }
         self.attach_waiting_panes(cx);
         if moved {
             self.apply_session_pane_fonts(&session.id, cx);
@@ -1256,25 +1282,67 @@ impl RootView {
         let Some(session_id) = self.pane_session(&pane_id) else {
             return;
         };
-        let Some(session) = self.sidebar.session(&session_id).cloned() else {
+        let Some(own) = self.effective_appearance(&session_id) else {
             return;
         };
-        let current = self.pending_session_font.get(&session_id).map_or_else(
-            || self.sidebar.resolved_font_size(None, Some(&session_id)),
-            |size| fonts::clamp_size(f32::from(*size)),
-        );
-        let Some(next) = fonts::stepped(current, step) else {
+        let Some(resolved) = self.sidebar.appearance_with(&session_id, &own) else {
             return;
         };
-        let size = font_size_to_u16(next);
-        let mut appearance = session.appearance.clone();
-        appearance.terminal_font_size = Some(size);
-        self.pending_session_font.insert(session_id.clone(), size);
-        self.send(ClientMessage::SetSessionAppearance {
-            session_id,
-            appearance,
-        });
+        let Some(next) = fonts::stepped(resolved.font_size.value, step) else {
+            return;
+        };
+        let change = AppearanceChange::font_size(Some(font_size_to_u16(next)));
+        self.send_session_appearance(&session_id, &own, &change);
         cx.notify();
+    }
+
+    /// `session_id`'s stored appearance with each change sent and not yet
+    /// answered over it, in order; `None` for a session the list does not
+    /// hold.
+    pub(crate) fn effective_appearance(&self, session_id: &str) -> Option<AppearanceOverrides> {
+        let stored = &self.sidebar.session(session_id)?.appearance;
+        Some(self.pending_appearance.overlay(session_id, stored))
+    }
+
+    /// Sends `session_id` `own` (its effective appearance) with `change`
+    /// over it, and holds `change` in flight until the daemon answers its
+    /// request.
+    pub(crate) fn send_session_appearance(
+        &mut self,
+        session_id: &str,
+        own: &AppearanceOverrides,
+        change: &AppearanceChange,
+    ) {
+        let appearance = change.apply_to(own);
+        let request_id = new_request_id();
+        self.pending_appearance
+            .push(session_id, request_id.clone(), change.clone());
+        self.send(ClientMessage::SetSessionAppearance {
+            session_id: session_id.to_owned(),
+            appearance,
+            request_id: Some(request_id),
+        });
+    }
+
+    /// Whether `request_id` answers an appearance send, which the daemon
+    /// refused: the send stops overlaying later ones, and a toast says so.
+    fn refuse_appearance(
+        &mut self,
+        request_id: Option<&str>,
+        detail: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !request_id.is_some_and(|id| self.pending_appearance.refused(id)) {
+            return false;
+        }
+        tracing::warn!("the daemon refused an appearance change: {detail}");
+        self.push_toast(
+            ToastKind::Error,
+            APPEARANCE_FAILED_TITLE,
+            Some(detail.to_owned()),
+            cx,
+        );
+        true
     }
 
     /// Clears the focused session's size and the active tab's override, so
@@ -1285,24 +1353,12 @@ impl RootView {
         let target = self
             .focused_pane()
             .and_then(|pane_id| self.pane_session(&pane_id));
-        if let Some(session_id) = target {
-            let clearable = self.sidebar.session(&session_id).map(|session| {
-                (
-                    session.appearance.clone(),
-                    session.appearance.terminal_font_size.is_some(),
-                )
-            });
-            if let Some((mut appearance, has_size)) = clearable
-                && (has_size || self.pending_session_font.contains_key(&session_id))
-            {
-                appearance.terminal_font_size = None;
-                self.pending_session_font.remove(&session_id);
-                self.send(ClientMessage::SetSessionAppearance {
-                    session_id,
-                    appearance,
-                });
-                changed = true;
-            }
+        if let Some(session_id) = target
+            && let Some(own) = self.effective_appearance(&session_id)
+            && own.terminal_font_size.is_some()
+        {
+            self.send_session_appearance(&session_id, &own, &AppearanceChange::font_size(None));
+            changed = true;
         }
         let tab_id = self.tabs.active_id().map(str::to_owned);
         if let Some(tab_id) = tab_id

@@ -8,8 +8,10 @@ use gpui::{
 };
 use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 
+use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
+use crate::notices::ToastKind;
 use crate::session_actions::{
     MenuEntry, MenuMode, SessionAction, Step, exit_code_label, exited_message,
     header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
@@ -110,6 +112,24 @@ pub(crate) struct SessionMenu {
     mode: MenuMode,
     /// The name editor, which replaces the rows while renaming.
     rename: Option<(Entity<TextInput>, Subscription)>,
+    /// Whether the Accent submenu replaces the rows.
+    accent: bool,
+}
+
+/// The row that opens the Accent submenu.
+const ACCENT_ROW: &str = "session-menu-accent";
+const INHERIT_ROW: &str = "accent-inherit";
+/// The Accent submenu's row back to the actions.
+const BACK_ROW: &str = "accent-back";
+/// The toast a colour the protocol refuses raises.
+const ACCENT_FAILED_TITLE: &str = "Couldn't set the accent";
+
+fn preset_selector(name: &str) -> String {
+    format!("accent-preset-{}", name.to_ascii_lowercase())
+}
+
+fn recent_selector(color: u32) -> String {
+    format!("accent-recent-{color:06x}")
 }
 
 /// A menu row as shown: its selector, its text, and what it does.
@@ -146,6 +166,40 @@ impl RootView {
             Some(menu) if menu.rename.is_some() => vec!["menu-rename-input".to_owned()],
             _ => self.rows().into_iter().map(|row| row.selector).collect(),
         }
+    }
+
+    /// The open menu when it shows accent rows: its actions list or its
+    /// Accent submenu, for a session the list holds.
+    fn accent_menu(&self) -> Option<&SessionMenu> {
+        self.menu
+            .as_ref()
+            .filter(|menu| menu.rename.is_none() && menu.mode == MenuMode::Actions)
+            .filter(|menu| self.sidebar.session(&menu.session_id).is_some())
+    }
+
+    /// The selectors of the menu's accent rows as shown now: the row that
+    /// opens the Accent submenu under the actions, or the submenu's Back,
+    /// presets, recent colours and Inherit.
+    #[must_use]
+    pub fn accent_menu_rows(&self) -> Vec<String> {
+        let Some(menu) = self.accent_menu() else {
+            return Vec::new();
+        };
+        if !menu.accent {
+            return vec![ACCENT_ROW.to_owned()];
+        }
+        let presets = ACCENT_PRESETS.iter().map(|p| preset_selector(p.name));
+        let recent = self
+            .sidebar
+            .recent_colors()
+            .into_iter()
+            .map(recent_selector);
+        [BACK_ROW.to_owned()]
+            .into_iter()
+            .chain(presets)
+            .chain(recent)
+            .chain([INHERIT_ROW.to_owned()])
+            .collect()
     }
 
     /// The labels of the menu's rows as shown now.
@@ -186,6 +240,7 @@ impl RootView {
             at,
             mode: MenuMode::Actions,
             rename: None,
+            accent: false,
         });
         self.confirm.disarm();
         self.menu_focus.focus(window);
@@ -202,9 +257,12 @@ impl RootView {
     }
 
     /// Closes the menu and the menu's delete-worktree confirm of a session
-    /// the daemon no longer lists. The quit's walk skips such a session
-    /// itself.
+    /// the daemon no longer lists, and forgets its appearance sends still
+    /// in flight. The quit's walk skips such a session itself.
     pub(crate) fn drop_stale_session_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sidebar = &self.sidebar;
+        self.pending_appearance
+            .retain_sessions(|session_id| sidebar.session(session_id).is_some());
         if self
             .menu
             .as_ref()
@@ -226,9 +284,51 @@ impl RootView {
         };
         menu.mode = mode;
         menu.rename = None;
+        menu.accent = false;
         self.confirm.disarm();
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    /// Swaps the menu's rows for the Accent submenu (`open`), or back to
+    /// the actions.
+    fn show_accent_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        menu.accent = open;
+        self.confirm.disarm();
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Sets `session_id`'s accent and frame colour both to `color`, or
+    /// clears both (`None`), keeping its other fields and any change still
+    /// on its way, and closes the menu. A choice that changes nothing sends
+    /// nothing; a colour the protocol refuses raises a toast.
+    fn pick_accent(
+        &mut self,
+        session_id: &str,
+        color: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(own) = self.effective_appearance(session_id) {
+            match AppearanceChange::accent_and_frame(color.map(appearance::hex)).normalized() {
+                Ok(change) if change.changes_nothing_in(&own) => {}
+                Ok(change) => self.send_session_appearance(session_id, &own, &change),
+                Err(err) => {
+                    tracing::warn!("not sending session {session_id}'s accent: {err}");
+                    self.push_toast(
+                        ToastKind::Error,
+                        ACCENT_FAILED_TITLE,
+                        Some(err.to_string()),
+                        cx,
+                    );
+                }
+            }
+        }
+        self.close_session_menu(window, cx);
     }
 
     /// Carries out `action` on `session_id`, disarming the header Stop. A
@@ -389,11 +489,89 @@ impl RootView {
             panel.child(muted_row("Stop session?"))
         })
         .children(rows)
+        .children(self.accent_rows(menu, cx))
     }
 
-    /// The open menu's rows for its session's current state.
+    /// The Accent row under the actions, or, once it is chosen, the
+    /// submenu: Back, the presets, the recent colours and Inherit.
+    fn accent_rows(&self, menu: &SessionMenu, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if self.accent_menu().is_none() {
+            return Vec::new();
+        }
+        let session_id = menu.session_id.as_str();
+        if !menu.accent {
+            let current = self.sidebar.appearance(Some(session_id)).accent.value;
+            let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current)).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| this.show_accent_menu(true, window, cx),
+            ));
+            return vec![menu_separator().into_any_element(), row.into_any_element()];
+        }
+        let back =
+            swatch_row(BACK_ROW, "‹ Back", None).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| this.show_accent_menu(false, window, cx),
+            ));
+        let mut rows = vec![back.into_any_element(), menu_separator().into_any_element()];
+        rows.extend(ACCENT_PRESETS.iter().map(|preset| {
+            swatch_row(
+                &preset_selector(preset.name),
+                preset.name,
+                Some(preset.color),
+            )
+            .on_click(Self::accent_choice(session_id, Some(preset.color), cx))
+            .into_any_element()
+        }));
+        let recent = self.sidebar.recent_colors();
+        if !recent.is_empty() {
+            let swatches = recent.into_iter().map(|color| {
+                let name = recent_selector(color);
+                div()
+                    .id(ElementId::Name(SharedString::from(name.clone())))
+                    .debug_selector(|| name)
+                    .size(px(16.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(gpui::rgb(BORDER))
+                    .bg(gpui::rgb(color))
+                    .cursor_pointer()
+                    .on_click(Self::accent_choice(session_id, Some(color), cx))
+            });
+            rows.push(muted_row("Recent").into_any_element());
+            rows.push(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .children(swatches)
+                    .into_any_element(),
+            );
+        }
+        rows.push(menu_separator().into_any_element());
+        rows.push(
+            swatch_row(INHERIT_ROW, "Inherit", None)
+                .on_click(Self::accent_choice(session_id, None, cx))
+                .into_any_element(),
+        );
+        rows
+    }
+
+    /// The click handler that picks `color` (or Inherit) for `session_id`.
+    fn accent_choice(
+        session_id: &str,
+        color: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+        let session_id = session_id.to_owned();
+        cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.pick_accent(&session_id, color, window, cx);
+        })
+    }
+
+    /// The open menu's rows for its session's current state; none while the
+    /// Accent submenu replaces them.
     fn rows(&self) -> Vec<Row> {
-        let Some(menu) = &self.menu else {
+        let Some(menu) = self.menu.as_ref().filter(|menu| !menu.accent) else {
             return Vec::new();
         };
         let Some(session) = self.sidebar.session(&menu.session_id) else {
@@ -1051,6 +1229,31 @@ pub(crate) fn menu_item(selector: &str, label: &'static str, danger: bool) -> St
         .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .child(label)
+}
+
+/// A clickable menu row with a colour swatch before its label; no swatch
+/// leaves the space empty so the labels line up.
+fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Stateful<Div> {
+    let name = selector.to_owned();
+    let swatch = div().flex_none().size(px(12.0)).rounded(px(3.0));
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(4.0))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .child(swatch.when_some(color, |swatch, color| swatch.bg(gpui::rgb(color))))
+        .child(label)
+}
+
+/// A thin line between groups of menu rows.
+fn menu_separator() -> Div {
+    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(BORDER))
 }
 
 /// A small text button in a pane header.

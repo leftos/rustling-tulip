@@ -840,6 +840,7 @@ export type ClientMessage =
       type: "set_session_appearance";
       session_id: string;
       appearance: AppearanceOverrides;
+      request_id?: string;
     }
   | { type: "attach"; session_id: string }
   | { type: "detach"; session_id: string }
@@ -1209,6 +1210,9 @@ export type DaemonMessage =
   // `target` echoes the request.
   | { type: "branch_name_suggestion"; target: SuggestTarget; name: string }
   | { type: "sessions"; sessions: SessionSnapshot[] }
+  // `request_id` is that of the spawn, duplicate or session appearance change
+  // this reply answers; only on the reply sent to the requester, never on a
+  // broadcast.
   | { type: "session_updated"; session: SessionSnapshot; request_id?: string }
   | { type: "session_removed"; session_id: string }
   // An in-place spawn would switch a dirty tree to a different branch; the
@@ -1408,7 +1412,10 @@ export type DaemonMessage =
       title: string;
       detail: string;
       hint: string | null;
-      // The failed spawn's request_id, on the reply to its requester.
+      // The request_id of the spawn, duplicate or session appearance change
+      // that failed, on the reply to its requester.
       request_id?: string;
     }
+  // `request_id` is that of the spawn, duplicate or session appearance change
+  // that failed, on the reply to its requester.
   | { type: "error"; message: string; request_id?: string };

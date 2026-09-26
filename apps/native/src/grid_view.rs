@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, MouseButton,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, MouseButton,
     MouseDownEvent, Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*,
     px, relative,
 };
@@ -13,7 +13,7 @@ use protocol::{
     ClientMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
-use crate::fonts;
+use crate::appearance::{self, PaneFrame, Resolved};
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::can_attach;
@@ -36,8 +36,8 @@ pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
 const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
 const PANE_HEADER_HEIGHT: f32 = 20.0;
-/// The border of the pane that has its tab's focus.
-const FOCUS_BORDER: u32 = 0x0045_6a9a;
+/// The accent line down a pane's left edge.
+const ACCENT_LINE_WIDTH: f32 = 3.0;
 
 /// A pane's terminal and the session it shows.
 pub(crate) struct PaneSlot {
@@ -46,6 +46,8 @@ pub(crate) struct PaneSlot {
     /// The pane's session; attached once the session list names it.
     session: Option<String>,
     attached: bool,
+    /// The accent the pane's last apply resolved, `0xRRGGBB`.
+    accent: u32,
     _focus_in: Subscription,
     _events: Subscription,
 }
@@ -245,6 +247,7 @@ impl RootView {
             tab_id: String::new(),
             session: None,
             attached: false,
+            accent: appearance::BUILTIN_ACCENT,
             _focus_in: focus_in,
             _events: events,
         }
@@ -319,36 +322,96 @@ impl RootView {
         }
     }
 
-    /// Gives every pane the size it resolves to — its tab's override, else
-    /// its session's size, else its container's, else the app's — with the
-    /// app's family and weight.
+    /// Gives every pane the font and colours it resolves to: each field its
+    /// session's, else its container's, else the app's, and for the size
+    /// its tab's override above all of them.
     pub(crate) fn apply_pane_fonts(&mut self, cx: &mut Context<Self>) {
         self.apply_fonts_where(|_| true, cx);
     }
 
-    /// Gives the panes showing `session_id` the size they resolve to, as a
-    /// snapshot that moved that session's appearance must.
+    /// Gives the panes showing `session_id` the font and colours they
+    /// resolve to, as a snapshot that moved that session's appearance must.
     pub(crate) fn apply_session_pane_fonts(&mut self, session_id: &str, cx: &mut Context<Self>) {
         self.apply_fonts_where(|slot| slot.session.as_deref() == Some(session_id), cx);
     }
 
-    /// Gives every pane `keep` takes the size it resolves to.
+    /// Gives every pane `keep` takes the font and colours it resolves to.
     fn apply_fonts_where(&mut self, keep: impl Fn(&PaneSlot) -> bool, cx: &mut Context<Self>) {
-        for slot in self.panes.values().filter(|slot| keep(slot)) {
-            let settings = self.pane_font_settings(&slot.tab_id, slot.session.as_deref());
-            slot.view
-                .update(cx, |pane, cx| pane.set_font(settings.clone(), cx));
+        let resolved: Vec<(String, Resolved)> = self
+            .panes
+            .iter()
+            .filter(|(_, slot)| keep(slot))
+            .map(|(pane_id, slot)| {
+                let resolved = self.pane_appearance(&slot.tab_id, slot.session.as_deref());
+                (pane_id.clone(), resolved)
+            })
+            .collect();
+        for (pane_id, resolved) in resolved {
+            let Some(slot) = self.panes.get_mut(&pane_id) else {
+                continue;
+            };
+            slot.accent = resolved.accent.value;
+            let background = appearance::term_rgb(resolved.background.value);
+            let frame = resolved.frame.value.map(appearance::term_rgb);
+            slot.view.update(cx, |pane, cx| {
+                pane.set_font(resolved.font(), cx);
+                pane.set_colors(background, frame, cx);
+            });
         }
     }
 
-    /// The font a pane of `tab_id` showing `session` draws with.
-    fn pane_font_settings(&self, tab_id: &str, session: Option<&str>) -> fonts::FontSettings {
-        fonts::FontSettings {
-            size: self
-                .sidebar
-                .resolved_font_size(self.sidebar.tab_font_size(tab_id), session),
-            ..self.sidebar.ui_state().terminal_font.clone()
+    /// The appearance a pane of `tab_id` showing `session` resolves to.
+    fn pane_appearance(&self, tab_id: &str, session: Option<&str>) -> Resolved {
+        self.sidebar
+            .appearance(session)
+            .with_tab_size(self.sidebar.tab_font_size(tab_id))
+    }
+
+    /// The colours pane `pane_id` paints on its edges: its border and its
+    /// accent line.
+    #[must_use]
+    pub fn pane_frame_colors(&self, pane_id: &str) -> Option<PaneFrame> {
+        let (tab_id, session) = self.tabs.tabs().iter().find_map(|tab| {
+            let pane = tabs::collect_panes(tab.grid()?)
+                .into_iter()
+                .find(|pane| pane.id == pane_id)?;
+            Some((tab.id.as_str(), pane.session))
+        })?;
+        let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
+        Some(self.frame_colors(pane_id, session, focused))
+    }
+
+    /// The colours pane `pane_id`, showing `session`, paints on its edges,
+    /// from the accent its last apply resolved; a pane without a terminal
+    /// yet resolves its session's.
+    fn frame_colors(&self, pane_id: &str, session: Option<&str>, focused: bool) -> PaneFrame {
+        let accent = self.panes.get(pane_id).map_or_else(
+            || self.sidebar.appearance(session).accent.value,
+            |slot| slot.accent,
+        );
+        PaneFrame {
+            border: if focused { accent } else { BORDER },
+            accent_line: accent,
         }
+    }
+
+    /// What pane `pane_id` fills, `0xRRGGBB`: the terminal's area, and the
+    /// padding ring around it.
+    #[must_use]
+    pub fn pane_fills(&self, pane_id: &str, cx: &App) -> Option<(u32, u32)> {
+        let (grid, ring) = self.panes.get(pane_id)?.view.read(cx).fills();
+        Some((appearance::packed(grid), appearance::packed(ring)))
+    }
+
+    /// The background and default text colour pane `pane_id`'s terminal
+    /// paints with, `0xRRGGBB`.
+    #[must_use]
+    pub fn pane_terminal_colors(&self, pane_id: &str, cx: &App) -> Option<(u32, u32)> {
+        let (background, foreground) = self.panes.get(pane_id)?.view.read(cx).terminal_colors();
+        Some((
+            appearance::packed(background),
+            appearance::packed(foreground),
+        ))
     }
 
     /// A pane's scrollback retry, sent once per session and attempt; a
@@ -805,14 +868,25 @@ impl RootView {
             .min_h(px(0.0))
             .child(body)
             .children(self.exited_overlay(tab_id, pane_id, session_id, cx));
+        let colors = self.frame_colors(pane_id, session_id, focused);
         div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .border_1()
-            .border_color(gpui::rgb(if focused { FOCUS_BORDER } else { BORDER }))
+            .border_color(gpui::rgb(colors.border))
             .child(self.pane_header(tab_id, pane_id, session_id, cx))
             .child(body)
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(ACCENT_LINE_WIDTH))
+                    .bg(gpui::rgb(colors.accent_line)),
+            )
             .into_any_element()
     }
 

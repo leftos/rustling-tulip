@@ -5,14 +5,15 @@
 use std::borrow::Cow;
 
 use gpui::{App, SharedString, TextSystem};
-use protocol::{RepoEntry, SessionSnapshot, WorkspaceEntry};
 use serde::{Deserialize, Serialize};
 
 /// The family a pane renders in when the settings name none.
 pub const DEFAULT_FAMILY: &str = "Geist Mono";
 pub const DEFAULT_SIZE: f32 = 13.0;
-pub const MIN_SIZE: f32 = 8.0;
-pub const MAX_SIZE: f32 = 32.0;
+/// The smallest size any level may set: the protocol's.
+pub const MIN_SIZE: f32 = *protocol::TERMINAL_FONT_SIZES.start() as f32;
+/// The largest size any level may set: the protocol's.
+pub const MAX_SIZE: f32 = *protocol::TERMINAL_FONT_SIZES.end() as f32;
 
 /// The families the client ships, as their fonts name them.
 pub const BUNDLED_FAMILIES: [&str; 4] =
@@ -137,42 +138,6 @@ pub fn stepped(size: f32, delta: f32) -> Option<f32> {
     ((next - size).abs() > f32::EPSILON).then_some(next)
 }
 
-/// The terminal font size `session`'s container sets: its workspace's when it
-/// belongs to one, else its first member's repo's.
-#[must_use]
-pub fn container_size(
-    session: &SessionSnapshot,
-    repos: &[RepoEntry],
-    workspaces: &[WorkspaceEntry],
-) -> Option<u16> {
-    if let Some(id) = session.workspace_id.as_deref() {
-        return workspaces
-            .iter()
-            .find(|workspace| workspace.id == id)
-            .and_then(|workspace| workspace.appearance.terminal_font_size);
-    }
-    let id = session.members.first()?.repo_id.as_str();
-    repos
-        .iter()
-        .find(|repo| repo.id == id)
-        .and_then(|repo| repo.appearance.terminal_font_size)
-}
-
-/// The size a pane draws at: its tab's override, else its session's size,
-/// else its container's, else the app's. The winner is clamped.
-#[must_use]
-pub fn resolve_size(
-    tab: Option<f32>,
-    session: Option<u16>,
-    container: Option<u16>,
-    app: f32,
-) -> f32 {
-    let level = tab
-        .or_else(|| session.map(f32::from))
-        .or_else(|| container.map(f32::from));
-    clamp_size(level.unwrap_or(app))
-}
-
 /// The family to render `requested` (or [`DEFAULT_FAMILY`]) with: itself
 /// when `available` has it, else the first of the fallback chain that it
 /// has. With nothing to check against, the family is returned unchecked.
@@ -247,113 +212,9 @@ pub fn system_families(cx: &App) -> Vec<SharedString> {
 mod tests {
     use super::*;
     use crate::sidebar::UiState;
-    use serde_json::json;
 
     fn names(list: &[&'static str]) -> Vec<SharedString> {
         list.iter().copied().map(SharedString::new_static).collect()
-    }
-
-    /// A single session whose members are `repos`, in workspace `workspace`.
-    fn session_with(workspace: Option<&str>, repos: &[&str]) -> SessionSnapshot {
-        let members: Vec<serde_json::Value> = repos
-            .iter()
-            .map(|id| {
-                json!({
-                    "repo_id": id,
-                    "repo_name": id,
-                    "branch": "main",
-                    "worktree_path": "",
-                })
-            })
-            .collect();
-        serde_json::from_value(json!({
-            "id": "s1",
-            "label": "s1",
-            "kind": "single",
-            "members": members,
-            "status": "idle",
-            "mode": "interactive",
-            "started_at": "2026-01-01T00:00:00Z",
-            "exit_code": null,
-            "metrics": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cost_usd": 0.0,
-                "last_activity_at": null,
-            },
-            "recent_actions": [],
-            "agent": "claude",
-            "workspace_id": workspace,
-        }))
-        .expect("session fixture")
-    }
-
-    fn repo_with(id: &str, size: u16) -> RepoEntry {
-        serde_json::from_value(json!({
-            "id": id,
-            "name": id,
-            "path": "C:/repos/r",
-            "appearance": { "terminal_font_size": size },
-        }))
-        .expect("repo fixture")
-    }
-
-    fn workspace_with(id: &str, size: u16) -> WorkspaceEntry {
-        serde_json::from_value(json!({
-            "id": id,
-            "name": id,
-            "member_repo_ids": ["r1"],
-            "appearance": { "terminal_font_size": size },
-        }))
-        .expect("workspace fixture")
-    }
-
-    #[test]
-    fn resolution_prefers_tab_then_session_then_container_then_app() {
-        assert!((resolve_size(Some(20.0), Some(16), Some(15), 13.0) - 20.0).abs() < f32::EPSILON);
-        assert!((resolve_size(None, Some(16), Some(15), 13.0) - 16.0).abs() < f32::EPSILON);
-        assert!((resolve_size(None, None, Some(15), 13.0) - 15.0).abs() < f32::EPSILON);
-        assert!((resolve_size(None, None, None, 18.0) - 18.0).abs() < f32::EPSILON);
-        assert!(
-            (resolve_size(None, None, None, DEFAULT_SIZE) - DEFAULT_SIZE).abs() < f32::EPSILON,
-            "the app default is the built-in 13"
-        );
-    }
-
-    #[test]
-    fn resolution_clamps_the_winning_level() {
-        assert!((resolve_size(Some(99.0), None, None, 13.0) - MAX_SIZE).abs() < f32::EPSILON);
-        assert!((resolve_size(None, Some(1), Some(9), 13.0) - MIN_SIZE).abs() < f32::EPSILON);
-        assert!(
-            (resolve_size(None, None, None, f32::NAN) - DEFAULT_SIZE).abs() < f32::EPSILON,
-            "an app size that is not a number is the default"
-        );
-    }
-
-    #[test]
-    fn a_workspace_container_wins_over_the_first_members_repo() {
-        let repos = [repo_with("r1", 20)];
-        let workspaces = [workspace_with("w1", 16)];
-        assert_eq!(
-            container_size(&session_with(Some("w1"), &["r1"]), &repos, &workspaces),
-            Some(16),
-            "the session's workspace is its container"
-        );
-        assert_eq!(
-            container_size(&session_with(None, &["r1"]), &repos, &workspaces),
-            Some(20),
-            "without a workspace, its first member's repo is"
-        );
-        assert_eq!(
-            container_size(&session_with(None, &["r1", "r2"]), &repos, &workspaces),
-            Some(20),
-            "the first member's repo, not any member's"
-        );
-        assert_eq!(
-            container_size(&session_with(Some("w9"), &["r1"]), &repos, &workspaces),
-            None,
-            "a container the registry does not hold sets nothing"
-        );
     }
 
     #[test]

@@ -85,6 +85,8 @@ M0–M3 are code-complete (2026-05-30, `667739d`): tracer IPC over `interprocess
 - [ ] M4 packaging, signing and notarization: deferred while distribution is local dev builds only
 
 ### Tooling cleanups (singles)
+
+- [ ] Daemon: send the `SpawnSession` / `DuplicateSession` reply through the ordered session-event stream with an origin, as `SetSessionAppearance` does, instead of a direct copy plus a broadcast (the requester gets two copies, and a queued broadcast can arrive after the reply); and on a `Lagged` session-event stream, push a fresh `Sessions` list so a dropped echo can't leave a client's in-flight appearance change pending until reconnect (the native client would drop its in-flight sends on `Sessions`)
 Pre-existing warnings and traps noticed during the 2026-09-24 native-client session.
 - [ ] Drop the unused `Unicode-DFS-2016` entry from `deny.toml` `[licenses] allow`; `cargo deny check` reports it as never encountered
 - [ ] Clear cargo's future-incompatibility warning for `proc-macro-error2` v2.0.1: find which dependency pulls it in (`cargo tree -i proc-macro-error2`) and update it if a newer release drops it. Waits for the next gpui release (checked 2026-09-25): the chain is `gpui` 0.2.2 (latest) → `stacksafe` 0.1.4 (latest 0.1.x) → `stacksafe-macro` 0.1.4 → `proc-macro-error2`, whose last commit is from 2024-09. `stacksafe-macro` 1.0.3 no longer uses it, and zed's main branch already has `stacksafe = "1.0"`. A `[patch]` can't cross from 0.1 to 1.0, so bump gpui when a release after 0.2.2 ships

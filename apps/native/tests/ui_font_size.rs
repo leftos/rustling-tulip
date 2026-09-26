@@ -49,7 +49,22 @@ fn session_appearances(sent: &[ClientMessage], session: &str) -> Vec<AppearanceO
             ClientMessage::SetSessionAppearance {
                 session_id,
                 appearance,
+                ..
             } if session_id == session => Some(appearance.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `request_id`s of the `SetSessionAppearance`s sent for `session`.
+fn appearance_request_ids(sent: &[ClientMessage], session: &str) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::SetSessionAppearance {
+                session_id,
+                request_id,
+                ..
+            } if session_id == session => request_id.clone(),
             _ => None,
         })
         .collect()
@@ -428,7 +443,28 @@ fn held_keys_step_from_the_pending_size(cx: &mut TestAppContext) {
     );
 
     h.send(DaemonMessage::SessionUpdated {
-        session: sized(15),
+        session: sized(14),
+        request_id: None,
+    });
+    h.keys("ctrl-=");
+    let sent = h.sent();
+    assert_eq!(
+        session_appearances(&sent, "s1")
+            .first()
+            .and_then(|appearance| appearance.terminal_font_size),
+        Some(16),
+        "a broadcast answers no send, so the press steps from 15 still on its way"
+    );
+
+    let last = appearance_request_ids(&sent, "s1")
+        .pop()
+        .expect("the send carries a request id");
+    h.send(DaemonMessage::SessionUpdated {
+        session: sized(16),
+        request_id: Some(last),
+    });
+    h.send(DaemonMessage::SessionUpdated {
+        session: sized(20),
         request_id: None,
     });
     h.keys("ctrl-=");
@@ -436,8 +472,8 @@ fn held_keys_step_from_the_pending_size(cx: &mut TestAppContext) {
         session_appearances(&h.sent(), "s1")
             .first()
             .and_then(|appearance| appearance.terminal_font_size),
-        Some(16),
-        "the echo is the size the next press steps from"
+        Some(21),
+        "answering the last send answers every send before it"
     );
 }
 

@@ -184,6 +184,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_appearance(request_id, &message, cx) {
+            return;
+        }
         self.fail_request(request_id, window, cx);
         self.push_toast(ToastKind::Error, DAEMON_ERROR_TITLE, Some(message), cx);
     }
@@ -197,6 +200,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_appearance(request_id, &notice.detail, cx) {
+            return;
+        }
         self.fail_request(request_id, window, cx);
         let ActionFailedNotice {
             title,

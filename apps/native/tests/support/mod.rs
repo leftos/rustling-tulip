@@ -709,6 +709,8 @@ impl<'a> Harness<'a> {
                         .any(|c| !c.collapsed && c.leaves.iter().any(|leaf| leaf.id == id))
             } else if let Some(id) = selector.strip_prefix("pane-grid-") {
                 pane(id)
+            } else if selector == "session-menu-accent" || selector.starts_with("accent-") {
+                root.accent_menu_rows().contains(&selector)
             } else if selector == "session-menu" {
                 root.session_menu().is_some()
             } else if selector.starts_with("menu-") {

@@ -1,12 +1,15 @@
 //! Renders the sidebar model beside the terminal: a header with the hide
 //! button, container rows and session leaves, and the drag divider.
 
+use std::collections::HashMap;
+
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString,
     Stateful, Window, div, prelude::*, px,
 };
 use protocol::SessionStatus;
 
+use crate::appearance;
 use crate::connection::DotKind;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
 use crate::sidebar::{Container, Leaf};
@@ -22,6 +25,7 @@ const LEAF_INDENT: f32 = 22.0;
 const SELECTED_BG: u32 = 0x0037_3a44;
 const TAG_TEXT_SIZE: f32 = 10.0;
 const COLLAPSED_STRIP_WIDTH: f32 = 16.0;
+const ACCENT_STRIPE_WIDTH: f32 = 3.0;
 
 impl RootView {
     /// The sidebar, the divider and the terminal pane side by side; a hidden
@@ -67,9 +71,10 @@ impl RootView {
                     .child("No sessions"),
             )
         } else {
+            let accents = self.sidebar.session_accents();
             let mut rows = Vec::new();
             for container in &containers {
-                rows.extend(container_rows(container, attached.as_deref(), cx));
+                rows.extend(container_rows(container, attached.as_deref(), &accents, cx));
             }
             body.children(rows)
         };
@@ -237,13 +242,18 @@ fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
 fn container_rows(
     container: &Container,
     attached: Option<&str>,
+    accents: &HashMap<&str, u32>,
     cx: &mut Context<RootView>,
 ) -> Vec<AnyElement> {
     let mut rows = vec![container_row(container, cx).into_any_element()];
     if !container.collapsed {
         for leaf in &container.leaves {
             let selected = attached == Some(leaf.id.as_str());
-            rows.push(leaf_row(leaf, selected, cx).into_any_element());
+            let accent = accents
+                .get(leaf.id.as_str())
+                .copied()
+                .unwrap_or(appearance::BUILTIN_ACCENT);
+            rows.push(leaf_row(leaf, selected, accent, cx).into_any_element());
         }
     }
     rows
@@ -298,13 +308,15 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
         }))
 }
 
-fn leaf_row(leaf: &Leaf, selected: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+/// A session's row, with a stripe in its accent down its left edge.
+fn leaf_row(leaf: &Leaf, selected: bool, accent: u32, cx: &mut Context<RootView>) -> Stateful<Div> {
     let id = leaf.id.clone();
     let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
     div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
+        .relative()
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -332,6 +344,15 @@ fn leaf_row(leaf: &Leaf, selected: bool, cx: &mut Context<RootView>) -> Stateful
             )
         })
         .when(leaf.attention, |row| row.child(attention_mark()))
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(ACCENT_STRIPE_WIDTH))
+                .bg(gpui::rgb(accent)),
+        )
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {

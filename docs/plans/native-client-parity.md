@@ -165,7 +165,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 - [ ] Spawn defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx`
 - [ ] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
 - [ ] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
-- [ ] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`
+- [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`
 
 ## Notifications & attention
 

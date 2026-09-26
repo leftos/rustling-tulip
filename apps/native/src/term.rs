@@ -447,13 +447,6 @@ impl Terminal {
     }
 
     /// Rebuilds the theme for a new pane background.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "a pane rebuilds its theme when its background changes"
-        )
-    )]
     pub fn set_background(&mut self, background: Rgb) {
         self.theme = theme::build_theme(background);
     }
@@ -655,6 +648,17 @@ impl Terminal {
         self.term
             .selection_to_string()
             .filter(|text| !text.is_empty())
+    }
+
+    /// The background the terminal paints: a program's `OSC 11`, else the
+    /// configured one. Resolved as [`Self::snapshot`] resolves it, without
+    /// walking the cells.
+    pub fn background(&self) -> Rgb {
+        resolve(
+            Color::Named(NamedColor::Background),
+            self.term.colors(),
+            &self.theme,
+        )
     }
 
     pub fn snapshot(&self) -> Snapshot {
