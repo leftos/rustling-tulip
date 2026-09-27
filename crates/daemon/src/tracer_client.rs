@@ -33,6 +33,12 @@ use tracing::{debug, info, warn};
 const OUTPUT_BROADCAST_CAPACITY: usize = 256;
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const PIPE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+/// How long to wait for the tracer's `TracerWelcome` reply to our
+/// `TracerHello`. The tracer's accept loop serves one daemon at a time: a
+/// connect that lands while another daemon is attached is accepted but its
+/// Hello is not read, so without this bound that daemon would wait for Welcome
+/// forever.
+const TRACER_WELCOME_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const OUTPUT_SUBSCRIBER_WAIT_INTERVAL: Duration = Duration::from_millis(5);
 const TRACER_PIPE_PREFIX_ENV: &str = "RUSTLING_TULIP_TRACER_PIPE_PREFIX";
@@ -441,6 +447,37 @@ async fn connect_with_retry(pipe: &str) -> anyhow::Result<Stream> {
     }
 }
 
+/// Read the `TracerWelcome` line the tracer sends in reply to our
+/// `TracerHello`, bounded by `timeout`.
+///
+/// The tracer's accept loop services one client at a time, so a connection
+/// that lands while another daemon is attached is accepted but its frame sits
+/// unread until that client leaves. The bound turns that into a fast error —
+/// the caller routes a failed reattach to the abandoned bucket — instead of a
+/// wait that never ends.
+async fn read_welcome_line<R>(
+    reader: &mut BufReader<R>,
+    timeout: Duration,
+) -> anyhow::Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut welcome_line = String::new();
+    let n = tokio::time::timeout(timeout, reader.read_line(&mut welcome_line))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "tracer did not send TracerWelcome within {timeout:?}; \
+                 another daemon may be attached to it"
+            )
+        })?
+        .context("reading TracerWelcome")?;
+    if n == 0 {
+        return Err(anyhow!("tracer closed pipe before Welcome"));
+    }
+    Ok(welcome_line)
+}
+
 async fn handshake_and_wire<S>(
     client: S,
     session_id: String,
@@ -462,14 +499,7 @@ where
     write_struct(&mut writer, &hello).await?;
 
     // Read TracerWelcome.
-    let mut welcome_line = String::new();
-    let n = reader
-        .read_line(&mut welcome_line)
-        .await
-        .context("reading TracerWelcome")?;
-    if n == 0 {
-        return Err(anyhow!("tracer closed pipe before Welcome"));
-    }
+    let welcome_line = read_welcome_line(&mut reader, TRACER_WELCOME_TIMEOUT).await?;
     let welcome: TracerWelcome =
         serde_json::from_str(welcome_line.trim_end()).context("parsing TracerWelcome")?;
     // `negotiate` already intersects the tracer's scalar *and* its advertised
@@ -682,9 +712,14 @@ impl ChildKiller for TracerKiller {
     reason = "tests assert scratch setup preconditions with expect for clear failure messages"
 )]
 mod tests {
-    use super::{locate_tracer_template_candidate, resolve_socket_name, sanitize_pipe_prefix};
+    use super::{
+        locate_tracer_template_candidate, read_welcome_line, resolve_socket_name,
+        sanitize_pipe_prefix,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use tokio::io::{AsyncWriteExt as _, BufReader};
     use uuid::Uuid;
 
     struct Scratch {
@@ -762,5 +797,52 @@ mod tests {
                 .expect("installed tracer fallback should resolve");
 
         assert_eq!(located, installed_tracer);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_welcome_times_out_when_tracer_never_replies() {
+        // Hold the peer open but silent: the tracer accepted the connection
+        // and never read our Hello, so no Welcome is coming.
+        let (daemon_side, _tracer_side) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(daemon_side);
+
+        let err = read_welcome_line(&mut reader, Duration::from_secs(10))
+            .await
+            .expect_err("a silent tracer must not be waited on forever");
+        assert!(
+            err.to_string().contains("did not send TracerWelcome"),
+            "the error must name the missing Welcome, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_welcome_returns_line_when_tracer_replies() {
+        let (daemon_side, mut tracer_side) = tokio::io::duplex(256);
+        let payload = "{\"version\":1,\"supported\":[1]}\n";
+        tracer_side
+            .write_all(payload.as_bytes())
+            .await
+            .expect("write the tracer's Welcome frame");
+
+        let mut reader = BufReader::new(daemon_side);
+        let line = read_welcome_line(&mut reader, Duration::from_secs(10))
+            .await
+            .expect("a replied Welcome arrives within the timeout");
+        assert_eq!(line, payload);
+    }
+
+    #[tokio::test]
+    async fn read_welcome_errors_on_eof() {
+        let (daemon_side, tracer_side) = tokio::io::duplex(64);
+        drop(tracer_side);
+
+        let mut reader = BufReader::new(daemon_side);
+        let err = read_welcome_line(&mut reader, Duration::from_secs(10))
+            .await
+            .expect_err("a closed pipe is an error, not a Welcome");
+        assert!(
+            !err.to_string().contains("did not send TracerWelcome"),
+            "EOF must not be reported as a timeout, got: {err}"
+        );
     }
 }
