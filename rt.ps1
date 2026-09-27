@@ -36,7 +36,8 @@
                  default; -Release for the release profile. Extra arguments
                  go to the client (an optional session id to focus, or to place in the active tab).
       native-e2e Build the daemon and tracer, then run the native client's
-                 end-to-end specs (`--test e2e_live -- --ignored`) against
+                 end-to-end specs (`--test e2e_live --test e2e_recover
+                 -- --ignored`) against
                  a real daemon isolated under `.tmp\native-e2e\`. The
                  fake-claude spec needs `node` on PATH. -Release for the
                  release profile.
@@ -1066,17 +1067,19 @@ function Invoke-Native {
 # own daemon from the binaries beside the test binary, so the daemon and
 # tracer are built first in the same profile. One thread: each spec owns a
 # daemon and, for the smoke specs, a client window.
-function Invoke-NativeSpecFile([string]$TestFile) {
+function Invoke-NativeSpecFile([string[]]$TestFiles) {
     Build-DaemonAndTracer
-    $testArgs = @('test', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native', '--test', $TestFile)
+    $testArgs = @('test', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
+    foreach ($file in $TestFiles) { $testArgs += @('--test', $file) }
     if ($Release) { $testArgs += '--release' }
     $testArgs += @('--', '--ignored', '--test-threads=1')
-    Write-Host "==> Running native specs: $TestFile..." -ForegroundColor Cyan
+    $names = $TestFiles -join ', '
+    Write-Host "==> Running native specs: $names..." -ForegroundColor Cyan
     & cargo @testArgs
-    Test-CargoExitOk "cargo test -p rustling-tulip-native --test $TestFile"
+    Test-CargoExitOk "cargo test -p rustling-tulip-native ($names)"
 }
 
-function Invoke-NativeE2e { Invoke-NativeSpecFile 'e2e_live' }
+function Invoke-NativeE2e { Invoke-NativeSpecFile @('e2e_live', 'e2e_recover') }
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile 'smoke_window' }
 

@@ -15,8 +15,8 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow};
 use chrono::Utc;
 use protocol::{
-    FooterLine, GridNode, InjectorStep, InjectorTemplate, LaunchPresetSource, PresetEntry,
-    PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetTarget, PresetVariable,
+    FooterLine, GridNode, InjectorStartup, InjectorStep, InjectorTemplate, LaunchPresetSource,
+    PresetEntry, PresetLaunchJobSnapshot, PresetLaunchJobStatus, PresetTarget, PresetVariable,
     PresetVariableKind, PromptInjector, RepoEntry, ScriptCommandPreview, SessionMode, SpawnRequest,
     SpawnTarget, SplitDirection, TabEntry, TabGroupingConfig, TabLayout,
 };
@@ -955,6 +955,7 @@ fn build_injector(template: &InjectorTemplate, prompt_text: &str) -> PromptInjec
     PromptInjector {
         steps,
         verify_mode_marker: template.verify_mode_marker.clone(),
+        startup: InjectorStartup::AgentTui,
     }
 }
 

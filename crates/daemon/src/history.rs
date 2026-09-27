@@ -18,9 +18,10 @@ use crate::transcripts;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
-    Agent, AgentOptions, ConversationCandidate, HistoryEntry, HistorySource, InjectorStep,
-    PromptInjector, RecoverAs, RecoverItem, RepoEntry, SessionEnd, SessionHistoryItem, SessionKind,
-    SessionMember, SessionMode, SpawnRequest, SpawnTarget, WorkspaceEntry,
+    Agent, AgentOptions, ConversationCandidate, HistoryEntry, HistorySource, InjectorStartup,
+    InjectorStep, PromptInjector, RecoverAs, RecoverItem, RepoEntry, SessionEnd,
+    SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnRequest, SpawnTarget,
+    WorkspaceEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -37,8 +38,9 @@ const CANDIDATE_LIMIT: usize = 5;
 const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
 /// How far before its end a session with no known start is searched from.
 const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
-/// How long a recovered shell waits before typing `claude --resume <id>`.
-const SHELL_RESUME_DELAY_MS: u32 = 1500;
+/// The longest a recovered shell waits for its prompt before typing
+/// `claude --resume <id>`; it types sooner once the prompt has printed.
+const SHELL_RESUME_DELAY_MS: u32 = 2000;
 /// Program file stems an imported plain-shell session may have run.
 const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
 
@@ -727,6 +729,7 @@ fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
             },
         ],
         verify_mode_marker: None,
+        startup: InjectorStartup::ShellPrompt,
     });
     SpawnRequest {
         label: None,
@@ -1620,10 +1623,12 @@ mod recovery_tests {
             }
         );
         assert_eq!(req.resume_conversation, None);
+        let injector = req.prompt_injector.expect("injector");
+        assert_eq!(injector.startup, InjectorStartup::ShellPrompt);
         assert_eq!(
-            req.prompt_injector.expect("injector").steps,
+            injector.steps,
             [
-                InjectorStep::Delay { ms: 1500 },
+                InjectorStep::Delay { ms: 2000 },
                 InjectorStep::Text {
                     content: format!("claude --resume {CONV}"),
                     newline: true,

@@ -1340,6 +1340,26 @@ pub struct PromptInjector {
     /// prompt-text `Text` step.
     #[serde(default)]
     pub verify_mode_marker: Option<String>,
+    /// How a leading `Delay` step decides the program is ready for input.
+    #[serde(default)]
+    pub startup: InjectorStartup,
+}
+
+/// How a [`PromptInjector`]'s leading `Delay` step waits for the program it
+/// types into. The step's `ms` is the cap either way.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectorStartup {
+    /// An agent's TUI: at least 3 s, then 1.5 s of quiet once 1 KiB has
+    /// printed, capped at `ms` or 15 s, whichever is longer.
+    #[default]
+    AgentTui,
+    /// A shell prompt: 300 ms of quiet once the shell has printed more than
+    /// a lone terminal query, capped at `ms`.
+    ShellPrompt,
+    /// A rule from a newer client; waits as [`Self::AgentTui`] does.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Template form of [`PromptInjector`] used inside a [`PresetEntry`]. The
@@ -4249,6 +4269,7 @@ mod tests {
                     },
                 ],
                 verify_mode_marker: None,
+                startup: InjectorStartup::AgentTui,
             }),
             request_id: None,
             resume_conversation: None,
@@ -4256,6 +4277,19 @@ mod tests {
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn injector_startup_defaults_to_agent_tui_and_absorbs_unknown_rules() {
+        let old: PromptInjector =
+            serde_json::from_str(r#"{"steps":[{"kind":"delay","ms":6000}]}"#).expect("decode");
+        assert_eq!(old.startup, InjectorStartup::AgentTui);
+        let shell: PromptInjector =
+            serde_json::from_str(r#"{"steps":[],"startup":"shell_prompt"}"#).expect("decode");
+        assert_eq!(shell.startup, InjectorStartup::ShellPrompt);
+        let newer: PromptInjector =
+            serde_json::from_str(r#"{"steps":[],"startup":"from_the_future"}"#).expect("decode");
+        assert_eq!(newer.startup, InjectorStartup::Unknown);
     }
 
     #[test]
