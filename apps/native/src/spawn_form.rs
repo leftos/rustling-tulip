@@ -1647,6 +1647,7 @@ impl SpawnForm {
             extra_env: self.extra_env(),
             prompt_injector: None,
             request_id: None,
+            resume_conversation: None,
         };
         (request, self.placement(), self.worktree_default_change())
     }

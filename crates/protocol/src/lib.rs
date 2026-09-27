@@ -593,6 +593,14 @@ pub struct HistoryEntry {
     pub source: HistorySource,
     #[serde(default)]
     pub recovered_at: Option<DateTime<Utc>>,
+    /// Whether the session ran with permission prompts skipped, when known
+    /// without a `spawn_config` (an imported tracer log). `None` when the
+    /// `spawn_config` carries it or nothing recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_permissions: Option<bool>,
+    /// The model the session ran, when known without a `spawn_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -681,6 +689,10 @@ pub enum SpawnTarget {
         /// choose its platform default, usually the user's home directory.
         #[serde(default)]
         cwd: Option<String>,
+        /// Extra directories an interactive Claude session is given with
+        /// `--add-dir`. Plain shells ignore them.
+        #[serde(default)]
+        add_dirs: Vec<String>,
     },
 }
 
@@ -750,7 +762,7 @@ pub struct SpawnRequest {
     /// Optional scripted PTY input fed to the child after the PTY comes up.
     /// When set on `SessionMode::Interactive`, the daemon omits the positional
     /// prompt arg (the injector is expected to deliver the prompt instead).
-    /// Ignored entirely for headless and plain-shell sessions.
+    /// A plain shell runs it as typed input. Ignored for headless sessions.
     #[serde(default)]
     pub prompt_injector: Option<PromptInjector>,
     /// Chosen by the client so it can tell its own spawn's reply apart: the
@@ -759,6 +771,11 @@ pub struct SpawnRequest {
     /// requester. Broadcasts never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// A Claude conversation to resume: an interactive Claude spawn passes
+    /// `--resume <id>` instead of a fresh `--session-id`, and no initial
+    /// prompt. Not part of [`SpawnConfig`], so it is never replayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_conversation: Option<String>,
 }
 
 impl SpawnRequest {
@@ -918,6 +935,7 @@ impl SpawnConfig {
             extra_env: self.extra_env.clone(),
             prompt_injector: None,
             request_id: None,
+            resume_conversation: None,
         }
     }
 
@@ -2526,6 +2544,83 @@ pub enum ClientMessage {
         #[serde(default)]
         variable_values: Vec<(String, String)>,
     },
+    /// Ask for the ended-session history. The daemon replies with
+    /// [`DaemonMessage::SessionHistory`] carrying this `request_id`.
+    ListSessionHistory {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+    /// Recover ended sessions from the history, in order. The daemon replies
+    /// once, to the requester only, with [`DaemonMessage::RecoverResult`];
+    /// the new sessions arrive through the usual `session_updated` broadcasts.
+    RecoverSessions {
+        #[serde(default)]
+        request_id: Option<String>,
+        items: Vec<RecoverItem>,
+    },
+}
+
+/// One history entry to recover, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoverItem {
+    /// The ended session's id: its history entry's `session_id`.
+    pub history_id: String,
+    /// The Claude conversation to resume, when one was chosen.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    pub how: RecoverAs,
+}
+
+/// What a recovery starts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RecoverAs {
+    /// Claude resuming the conversation, in the session's own target.
+    Claude,
+    /// Register `path` as a repo, then Claude resuming the conversation there.
+    RegisterRepoThenClaude { path: String },
+    /// A plain shell in the session's folder, typing `claude --resume <id>`
+    /// when a conversation was chosen.
+    Shell,
+    /// A kind from a newer client. The item fails with an error.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One history entry with what the client needs to offer it for recovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionHistoryItem {
+    pub entry: HistoryEntry,
+    /// Conversations that may be the session's, newest first. Just the one
+    /// when the entry knows its `claude_session_id`.
+    pub candidates: Vec<ConversationCandidate>,
+    /// Whether the entry's folder is a git repo, registered or not.
+    pub folder_is_git_repo: bool,
+    /// The registered repo whose path is the entry's folder.
+    #[serde(default)]
+    pub folder_repo_id: Option<String>,
+}
+
+/// A Claude conversation a history entry may be recovered into.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationCandidate {
+    /// The conversation id `claude --resume` takes.
+    pub id: String,
+    /// When the conversation's transcript was last written.
+    pub last_active: DateTime<Utc>,
+    /// Its summary, else its first user message.
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// How one [`RecoverItem`] went: the new session's id, or why it failed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoverItemResult {
+    pub history_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3253,6 +3348,21 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
+    /// The ended-session history, newest end first. Sent to the requester of
+    /// [`ClientMessage::ListSessionHistory`] with its `request_id`, and
+    /// broadcast with `request_id: null` whenever the history changes.
+    SessionHistory {
+        #[serde(default)]
+        request_id: Option<String>,
+        items: Vec<SessionHistoryItem>,
+    },
+    /// The outcome of [`ClientMessage::RecoverSessions`], one result per item
+    /// in request order, sent to the requester only.
+    RecoverResult {
+        #[serde(default)]
+        request_id: Option<String>,
+        results: Vec<RecoverItemResult>,
+    },
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
@@ -3266,6 +3376,11 @@ pub enum DaemonMessage {
 /// wrapper, the daemon logs the unknown type and continues servicing the
 /// connection.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a parse-time wrapper that lives only until dispatch; boxing the known message \
+              would change every consumer to save bytes on a value never stored"
+)]
 pub enum InboundClientMessage {
     Known(ClientMessage),
     Unknown {
@@ -4136,6 +4251,7 @@ mod tests {
                 verify_mode_marker: None,
             }),
             request_id: None,
+            resume_conversation: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4164,6 +4280,7 @@ mod tests {
             extra_env: vec![],
             prompt_injector: None,
             request_id: None,
+            resume_conversation: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4197,6 +4314,7 @@ mod tests {
             extra_env: vec![],
             prompt_injector: None,
             request_id: None,
+            resume_conversation: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4213,6 +4331,7 @@ mod tests {
             label: None,
             target: SpawnTarget::Standalone {
                 cwd: Some("X:/scratch".to_string()),
+                add_dirs: Vec::new(),
             },
             mode: SessionMode::PlainShell,
             initial_prompt: None,
@@ -4224,6 +4343,7 @@ mod tests {
             extra_env: vec![],
             prompt_injector: None,
             request_id: None,
+            resume_conversation: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let decoded: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
@@ -4367,6 +4487,7 @@ mod tests {
     fn duplicate_request_leaves_a_standalone_shell_alone() {
         let config = duplicate_source_config(SpawnTarget::Standalone {
             cwd: Some("X:/scratch".to_string()),
+            add_dirs: Vec::new(),
         });
         let req = config.to_duplicate_request(Some("wt/quick-fox".to_string()));
 
@@ -5002,6 +5123,7 @@ mod tests {
             extra_env: vec![],
             prompt_injector: None,
             request_id: Some("req-1".to_string()),
+            resume_conversation: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(json.contains(r#""request_id":"req-1""#), "{json}");
@@ -5470,5 +5592,179 @@ mod tests {
         assert_eq!(entry.started_at, None);
         assert_eq!(entry.claude_session_id, None);
         assert_eq!(entry.recovered_at, None);
+    }
+
+    /// Decode `json` as `T` and check it re-encodes to the same JSON value.
+    fn assert_round_trip<T: Serialize + serde::de::DeserializeOwned>(json: &str) -> T {
+        let decoded: T = serde_json::from_str(json).expect("decode contract json");
+        let expected: serde_json::Value = serde_json::from_str(json).expect("contract is json");
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("encode"),
+            expected,
+            "re-encoding changes the wire shape"
+        );
+        decoded
+    }
+
+    #[test]
+    fn list_session_history_matches_the_wire_contract() {
+        let msg: ClientMessage =
+            assert_round_trip(r#"{"type":"list_session_history","request_id":"r1"}"#);
+        assert!(matches!(
+            msg,
+            ClientMessage::ListSessionHistory { request_id: Some(ref id) } if id == "r1"
+        ));
+    }
+
+    const SESSION_HISTORY_JSON: &str = r#"{"type":"session_history","request_id":"r1","items":[
+      {"entry":{"session_id":"f6216fc2-54b1-497c-a257-7c297f7d9859","label":"yaat:main","kind":"workspace","mode":"interactive","agent":"claude",
+                "spawn_config":{"target":{"kind":"workspace","workspace_id":"ws1","branch_name":"main","base_branch":null,
+                                          "use_worktree":false,"worktree_reuse":"reuse","existing_worktrees":[]},
+                                "mode":"interactive","dangerously_skip_permissions":true,
+                                "agent_options":{"kind":"claude","permission_mode":null},"model":null,"extra_env":[]},
+                "members":[{"repo_id":"repo-yaat","repo_name":"yaat","branch":"main","worktree_path":"D:\\yaat"}],
+                "workspace_id":"ws1",
+                "primary_cwd":"D:\\yaat","current_cwd":null,"program_name":"claude",
+                "started_at":"2026-09-27T11:09:41Z","ended_at":"2026-09-27T18:29:06Z",
+                "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null},
+       "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
+       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
+    ]}"#;
+
+    #[test]
+    fn session_history_matches_the_wire_contract() {
+        let msg: DaemonMessage = assert_round_trip(SESSION_HISTORY_JSON);
+        let DaemonMessage::SessionHistory { request_id, items } = msg else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.entry.end, SessionEnd::TracerLost);
+        assert_eq!(item.entry.source, HistorySource::TracerLog);
+        assert_eq!(
+            item.candidates[0].id,
+            "85573bb1-c581-489e-baaa-94d5a384744c"
+        );
+        assert_eq!(item.candidates[0].title.as_deref(), Some("Fix the …"));
+        assert!(item.folder_is_git_repo);
+        assert_eq!(item.folder_repo_id.as_deref(), Some("repo-yaat"));
+    }
+
+    #[test]
+    fn history_entry_round_trips_recorded_flags_and_defaults_them_when_absent() {
+        let entry: HistoryEntry = assert_round_trip(
+            r#"{"session_id":"s1","label":"","kind":"standalone","mode":"interactive","agent":"claude",
+                "spawn_config":null,"members":[],"workspace_id":null,"primary_cwd":"D:\\proj",
+                "current_cwd":null,"program_name":"claude","started_at":null,
+                "ended_at":"2026-09-27T18:29:06Z","end":{"type":"tracer_lost"},
+                "claude_session_id":null,"source":"tracer_log","recovered_at":null,
+                "skip_permissions":true,"model":"opus"}"#,
+        );
+        assert_eq!(entry.skip_permissions, Some(true));
+        assert_eq!(entry.model.as_deref(), Some("opus"));
+
+        let msg: DaemonMessage = assert_round_trip(SESSION_HISTORY_JSON);
+        let DaemonMessage::SessionHistory { items, .. } = msg else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(items[0].entry.skip_permissions, None);
+        assert_eq!(items[0].entry.model, None);
+    }
+
+    #[test]
+    fn session_history_broadcast_carries_a_null_request_id() {
+        let json = serde_json::to_value(DaemonMessage::SessionHistory {
+            request_id: None,
+            items: Vec::new(),
+        })
+        .expect("encode");
+        assert_eq!(
+            json,
+            serde_json::json!({"type": "session_history", "request_id": null, "items": []})
+        );
+    }
+
+    #[test]
+    fn recover_sessions_matches_the_wire_contract() {
+        let json = r#"{"type":"recover_sessions","request_id":"r2","items":[
+          {"history_id":"h1","conversation_id":null,"how":{"type":"claude"}},
+          {"history_id":"h2","conversation_id":"85573bb1","how":{"type":"register_repo_then_claude","path":"D:\\foo"}},
+          {"history_id":"h3","conversation_id":"85573bb1","how":{"type":"shell"}}
+        ]}"#;
+        let msg: ClientMessage = assert_round_trip(json);
+        let ClientMessage::RecoverSessions { request_id, items } = msg else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(request_id.as_deref(), Some("r2"));
+        let hows: Vec<RecoverAs> = items.into_iter().map(|item| item.how).collect();
+        assert_eq!(
+            hows,
+            [
+                RecoverAs::Claude,
+                RecoverAs::RegisterRepoThenClaude {
+                    path: r"D:\foo".to_owned()
+                },
+                RecoverAs::Shell,
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_recovery_kind_decodes_as_unknown() {
+        let item: RecoverItem = serde_json::from_str(
+            r#"{"history_id":"h1","conversation_id":null,"how":{"type":"teleport","to":"mars"}}"#,
+        )
+        .expect("decode");
+        assert_eq!(item.how, RecoverAs::Unknown);
+    }
+
+    #[test]
+    fn recover_result_matches_the_wire_contract() {
+        let json = r#"{"type":"recover_result","request_id":"r2","results":[
+          {"history_id":"h1","session_id":"new-1","error":null},
+          {"history_id":"h2","session_id":null,"error":"worktree D:\\x could not be recreated: gone"}
+        ]}"#;
+        let msg: DaemonMessage = assert_round_trip(json);
+        let DaemonMessage::RecoverResult {
+            request_id,
+            results,
+        } = msg
+        else {
+            panic!("decoded as another message");
+        };
+        assert_eq!(request_id.as_deref(), Some("r2"));
+        assert_eq!(results[0].session_id.as_deref(), Some("new-1"));
+        assert_eq!(results[1].session_id, None);
+        assert!(results[1].error.is_some());
+    }
+
+    #[test]
+    fn inbound_parser_knows_session_history() {
+        let parsed = InboundDaemonMessage::from_json_str(SESSION_HISTORY_JSON).expect("parse");
+        let InboundDaemonMessage::Known(msg) = parsed else {
+            panic!("session_history parsed as unknown");
+        };
+        assert!(matches!(*msg, DaemonMessage::SessionHistory { .. }));
+    }
+
+    #[test]
+    fn resume_conversation_and_add_dirs_default_when_absent() {
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"standalone","cwd":"D:\\x"},"mode":"interactive",
+                "initial_prompt":null,"dangerously_skip_permissions":false,
+                "agent_options":{"kind":"claude"},"model":null}"#,
+        )
+        .expect("decode a request from an older client");
+        assert_eq!(req.resume_conversation, None);
+        assert_eq!(
+            req.target,
+            SpawnTarget::Standalone {
+                cwd: Some(r"D:\x".to_owned()),
+                add_dirs: Vec::new()
+            }
+        );
+        let json = serde_json::to_value(&req).expect("encode");
+        assert!(json.get("resume_conversation").is_none(), "{json}");
     }
 }

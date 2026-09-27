@@ -231,7 +231,10 @@ impl ShellForm {
 pub(crate) fn standalone_shell_request(cwd: Option<String>) -> SpawnRequest {
     SpawnRequest {
         label: None,
-        target: SpawnTarget::Standalone { cwd },
+        target: SpawnTarget::Standalone {
+            cwd,
+            add_dirs: Vec::new(),
+        },
         mode: SessionMode::PlainShell,
         initial_prompt: None,
         dangerously_skip_permissions: false,
@@ -242,6 +245,7 @@ pub(crate) fn standalone_shell_request(cwd: Option<String>) -> SpawnRequest {
         extra_env: Vec::new(),
         prompt_injector: None,
         request_id: None,
+        resume_conversation: None,
     }
 }
 
@@ -480,6 +484,7 @@ mod tests {
             request.target,
             SpawnTarget::Standalone {
                 cwd: Some("C:\\work".to_owned()),
+                add_dirs: Vec::new(),
             }
         );
         assert_eq!(request.mode, SessionMode::PlainShell);
@@ -497,7 +502,10 @@ mod tests {
         assert!(request.request_id.is_none(), "the view stamps its own");
         assert_eq!(
             standalone_shell_request(None).target,
-            SpawnTarget::Standalone { cwd: None },
+            SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
             "no folder: the daemon's own default"
         );
     }

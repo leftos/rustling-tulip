@@ -121,7 +121,10 @@ fn quick_shell_spawns_standalone_in_home_when_no_default(cx: &mut TestAppContext
     assert!(request.request_id.is_some());
     assert_eq!(
         request.target,
-        SpawnTarget::Standalone { cwd: None },
+        SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        },
         "no remembered folder: the daemon picks the home directory"
     );
     assert_eq!(request.mode, SessionMode::PlainShell);
@@ -149,6 +152,7 @@ fn quick_shell_uses_the_remembered_folder(cx: &mut TestAppContext) {
         the_spawn(&h.sent()).target,
         SpawnTarget::Standalone {
             cwd: Some("C:\\work".to_owned()),
+            add_dirs: Vec::new(),
         }
     );
 }
@@ -185,6 +189,7 @@ fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestApp
         request.target,
         SpawnTarget::Standalone {
             cwd: Some("C:/work".to_owned()),
+            add_dirs: Vec::new(),
         }
     );
     assert!(
@@ -279,6 +284,7 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
         the_spawn(&h.sent()).target,
         SpawnTarget::Standalone {
             cwd: Some("C:/work".to_owned()),
+            add_dirs: Vec::new(),
         }
     );
 }
@@ -305,7 +311,10 @@ fn clear_default_returns_plus_shell_to_home(cx: &mut TestAppContext) {
     h.click_on("sidebar-add-shell");
     assert_eq!(
         the_spawn(&h.sent()).target,
-        SpawnTarget::Standalone { cwd: None },
+        SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        },
         "+ Shell goes to the home folder again"
     );
 }
@@ -424,7 +433,10 @@ fn shell_buttons_work_without_repos(cx: &mut TestAppContext) {
     h.click_on("sidebar-add-shell");
     assert_eq!(
         the_spawn(&h.sent()).target,
-        SpawnTarget::Standalone { cwd: None },
+        SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        },
         "a shell needs no repo"
     );
 

@@ -44,6 +44,10 @@ impl AgentBackend for ClaudeBackend {
             args.push("--add-dir".to_string());
             args.push(extra.worktree_path.clone());
         }
+        for dir in common.add_dirs {
+            args.push("--add-dir".to_string());
+            args.push(dir.clone());
+        }
         // Workspace-context prelude rides on --append-system-prompt so it's
         // invisible to the user but the model sees it. Only emitted for 2+
         // member sessions (where the worktree-vs-original-path mismatch
@@ -53,6 +57,13 @@ impl AgentBackend for ClaudeBackend {
             args.push(prelude);
         }
         extend_common(&mut args, common, permission_mode);
+        // A resumed conversation keeps its own id and history, so it takes
+        // neither a fresh `--session-id` nor a kickoff prompt.
+        if let Some(id) = common.resume_conversation {
+            args.push("--resume".to_string());
+            args.push(id.to_string());
+            return args;
+        }
         if let Some(id) = common.claude_session_id {
             args.push("--session-id".to_string());
             args.push(id.to_string());
@@ -257,7 +268,61 @@ mod tests {
             model,
             has_prompt_injector: has_injector,
             claude_session_id: None,
+            resume_conversation: None,
+            add_dirs: &[],
         }
+    }
+
+    const RESUME_ID: &str = "85573bb1-c581-489e-baaa-94d5a384744c";
+
+    #[test]
+    fn resume_replaces_session_id_and_drops_the_prompt() {
+        let m = members(&["X:/dev/a", "X:/dev/b"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+        };
+        let common = CommonSpawnFields {
+            resume_conversation: Some(RESUME_ID),
+            ..with_session_id(true, None, false)
+        };
+        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, Some("hello"));
+        assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
+        assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
+        assert!(!args.contains(&"-p".to_string()), "{args:?}");
+        assert!(!args.contains(&"hello".to_string()), "{args:?}");
+        let tail: Vec<&str> = args.iter().map(String::as_str).skip(2).collect();
+        assert_eq!(args[..2], ["--add-dir", "X:/dev/b"]);
+        assert_eq!(tail[0], "--append-system-prompt");
+        assert_eq!(
+            tail[2..],
+            ["--dangerously-skip-permissions", "--resume", RESUME_ID]
+        );
+    }
+
+    #[test]
+    fn standalone_add_dirs_follow_member_add_dirs() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+        };
+        let extra = vec!["X:/dev/b".to_string(), "X:/dev/c".to_string()];
+        let common = CommonSpawnFields {
+            add_dirs: &extra,
+            resume_conversation: Some(RESUME_ID),
+            ..common(false, None, false)
+        };
+        let args = ClaudeBackend.build_interactive_args(&opts, &common, &m, None);
+        assert_eq!(
+            args,
+            vec![
+                "--add-dir",
+                "X:/dev/b",
+                "--add-dir",
+                "X:/dev/c",
+                "--resume",
+                RESUME_ID
+            ]
+        );
     }
 
     const SESSION_ID: &str = "0b6f4c7e-1111-4222-8333-944455556666";

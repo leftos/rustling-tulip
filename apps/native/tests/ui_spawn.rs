@@ -50,6 +50,7 @@ fn request(use_worktree: bool) -> SpawnRequest {
         extra_env: Vec::new(),
         prompt_injector: None,
         request_id: None,
+        resume_conversation: None,
     }
 }
 

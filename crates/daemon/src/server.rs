@@ -220,6 +220,8 @@ pub enum StateEvent {
         enabled: bool,
         active: bool,
     },
+    /// The whole session history, broadcast after it changes.
+    SessionHistory(Vec<protocol::SessionHistoryItem>),
 }
 
 #[derive(Debug, Clone)]
@@ -507,19 +509,7 @@ pub async fn run(
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
     };
-
-    // Idle self-exit: once the last client disconnects and no session has a
-    // live child for a full grace period, flip the shutdown watch so a
-    // resident daemon doesn't pin a stale executable across app updates.
-    // Mirrors the HTTP /shutdown path (no drain): sidecars stay on disk, and
-    // abandoned sessions come back from them on the next daemon start.
-    crate::idle_exit::spawn(
-        Arc::clone(&hub.sessions),
-        client_count_rx,
-        hub.shutdown_tx.clone(),
-        Arc::clone(&hub.preset_cancellations),
-        crate::idle_exit::GRACE_PERIOD,
-    );
+    start_hub_tasks(&hub, client_count_rx);
 
     let app = build_router(hub.clone());
 
@@ -1042,6 +1032,12 @@ fn spawn_state_forwarder(
                 Ok(StateEvent::KeepAwakeStatus { enabled, active }) => {
                     let _ = out_tx.send(DaemonMessage::KeepAwakeStatus { enabled, active });
                 }
+                Ok(StateEvent::SessionHistory(items)) => {
+                    let _ = out_tx.send(DaemonMessage::SessionHistory {
+                        request_id: None,
+                        items,
+                    });
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!(lagged = n, "client state event stream lagged");
                 }
@@ -1440,23 +1436,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             let _ = out_tx.send(DaemonMessage::Repos { repos });
         }
         ClientMessage::AddRepo { path, name } => {
-            let entry = add_repo(&hub.state, &path, name).await?;
-            let (repos, container_order) = hub
-                .state
-                .with_persisted(|s| (s.repos.clone(), s.container_order.clone()));
-            let _ = hub.state_events.send(StateEvent::Repos(repos));
-            let _ = hub
-                .state_events
-                .send(StateEvent::ContainersReordered(container_order));
-            for suggestion in scan_vscode_workspaces(hub, &entry.path) {
-                // VSCode workspace suggestions are per-client (only the
-                // adder gets prompted), so this stays on out_tx.
-                let _ = out_tx.send(DaemonMessage::VscodeWorkspaceSuggestion {
-                    repo_id: entry.id.clone(),
-                    suggestion,
-                });
-            }
-            debug!(repo_id = %entry.id, "repo added");
+            register_repo(hub, &path, name, out_tx).await?;
         }
         ClientMessage::RemoveRepo { repo_id } => {
             remove_repo(&hub.state, &repo_id)?;
@@ -2595,6 +2575,17 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             }
         }
+        ClientMessage::ListSessionHistory { request_id } => {
+            let items = session_history_items(hub).await;
+            let _ = out_tx.send(DaemonMessage::SessionHistory { request_id, items });
+        }
+        ClientMessage::RecoverSessions { request_id, items } => {
+            let results = recover_sessions(hub, &items, out_tx).await;
+            let _ = out_tx.send(DaemonMessage::RecoverResult {
+                request_id,
+                results,
+            });
+        }
         ClientMessage::ResolvePresetScripts {
             id,
             target,
@@ -3153,6 +3144,7 @@ pub(crate) async fn spawn_session(
         extra_env,
         prompt_injector,
         request_id: _,
+        resume_conversation,
     } = req;
     let agent = agent_options.agent();
     info!(
@@ -3165,9 +3157,9 @@ pub(crate) async fn spawn_session(
         },
         "spawn_session: begin"
     );
-    if matches!(&target, SpawnTarget::Standalone { .. }) && mode != SessionMode::PlainShell {
+    if matches!(&target, SpawnTarget::Standalone { .. }) && !standalone_supports(mode, agent) {
         return Err(anyhow!(
-            "standalone targets only support plain_shell sessions"
+            "standalone targets only support plain_shell sessions and interactive Claude"
         ));
     }
     reject_pin_without_worktree(&target)?;
@@ -3180,6 +3172,7 @@ pub(crate) async fn spawn_session(
     }
 
     let t_resolve = std::time::Instant::now();
+    let mut standalone_add_dirs = Vec::new();
     let (kind, members, primary_cwd, default_label, workspace_id) = match target {
         SpawnTarget::Single {
             repo_id,
@@ -3225,7 +3218,14 @@ pub(crate) async fn spawn_session(
             )
             .await?
         }
-        SpawnTarget::Standalone { cwd } => spawn_standalone_shell(cwd.as_deref())?,
+        SpawnTarget::Standalone { cwd, add_dirs } => {
+            if mode == SessionMode::Interactive {
+                standalone_add_dirs = add_dirs;
+                spawn_standalone_agent(cwd.as_deref())?
+            } else {
+                spawn_standalone_shell(cwd.as_deref())?
+            }
+        }
     };
     info!(
         elapsed_ms = u64::try_from(t_resolve.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -3243,6 +3243,8 @@ pub(crate) async fn spawn_session(
         extra_env,
         prompt_injector,
         origin,
+        resume_conversation,
+        add_dirs: standalone_add_dirs,
     };
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
@@ -3539,6 +3541,10 @@ struct SpawnArgs {
     /// The request that asked for this spawn; the session's first broadcast
     /// carries it, so the requester hears of its spawn once, in order.
     origin: Option<UpdateOrigin>,
+    /// The Claude conversation an interactive Claude spawn resumes.
+    resume_conversation: Option<String>,
+    /// A standalone target's extra `--add-dir` directories.
+    add_dirs: Vec<String>,
 }
 
 impl SpawnArgs {
@@ -3554,6 +3560,8 @@ impl SpawnArgs {
             model: self.model.as_deref(),
             has_prompt_injector: self.prompt_injector.is_some(),
             claude_session_id: None,
+            resume_conversation: self.resume_conversation.as_deref(),
+            add_dirs: &self.add_dirs,
         }
     }
 }
@@ -3578,9 +3586,12 @@ async fn spawn_interactive_session(
     let last_prompt = initial_prompt.clone();
     let backend = crate::agents::backend_for(cfg.agent());
     // Claude gets a known conversation id so the session can be resumed with
-    // `claude --resume <id>` after it ends.
-    let claude_session_id =
-        (cfg.agent() == Agent::Claude).then(|| uuid::Uuid::new_v4().to_string());
+    // `claude --resume <id>` after it ends. A resumed conversation keeps its id.
+    let claude_session_id = (cfg.agent() == Agent::Claude).then(|| {
+        cfg.resume_conversation
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    });
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
         ..cfg.common()
@@ -3913,6 +3924,10 @@ async fn spawn_plain_shell_session(
         orphan::try_write_meta(&hub.dirs, &meta);
     }
 
+    // A recovered shell types `claude --resume <id>` through an injector.
+    if let Some(injector) = cfg.prompt_injector.clone() {
+        inject::run(session_id.clone(), Arc::clone(&pty), injector);
+    }
     Ok(snap)
 }
 
@@ -4930,6 +4945,24 @@ fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> 
     Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
 }
 
+/// Whether a standalone (no repo) target can run `mode` for `agent`: a plain
+/// shell, or Claude interactively in a folder. Codex and Cursor still need a
+/// repo or workspace.
+fn standalone_supports(mode: SessionMode, agent: Agent) -> bool {
+    match mode {
+        SessionMode::PlainShell => true,
+        SessionMode::Interactive => agent == Agent::Claude,
+        SessionMode::Headless => false,
+    }
+}
+
+/// An agent running in a plain folder, labelled with the folder's name.
+fn spawn_standalone_agent(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> {
+    let cwd = resolve_standalone_cwd(cwd)?;
+    let label = path_leaf_label(&cwd);
+    Ok((SessionKind::Standalone, Vec::new(), cwd, label, None))
+}
+
 fn resolve_standalone_cwd(cwd: Option<&str>) -> anyhow::Result<PathBuf> {
     let path = match cwd.map(str::trim).filter(|s| !s.is_empty()) {
         Some(path) => PathBuf::from(path),
@@ -5130,6 +5163,134 @@ fn record_end(hub: &Hub, session_id: &str, end: SessionEnd) {
     history::record_session_end(&hub.sessions, &hub.dirs, session_id, end);
 }
 
+/// Register the folder at `path` as a repo (or find it already registered),
+/// broadcast the new registry, and offer the requester any VS Code workspace
+/// found beside it.
+async fn register_repo(
+    hub: &Hub,
+    path: &str,
+    name: Option<String>,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> anyhow::Result<protocol::RepoEntry> {
+    let entry = add_repo(&hub.state, path, name).await?;
+    let (repos, container_order) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.container_order.clone()));
+    let _ = hub.state_events.send(StateEvent::Repos(repos));
+    let _ = hub
+        .state_events
+        .send(StateEvent::ContainersReordered(container_order));
+    for suggestion in scan_vscode_workspaces(hub, &entry.path) {
+        // VSCode workspace suggestions are per-client (only the
+        // adder gets prompted), so this stays on out_tx.
+        let _ = out_tx.send(DaemonMessage::VscodeWorkspaceSuggestion {
+            repo_id: entry.id.clone(),
+            suggestion,
+        });
+    }
+    debug!(repo_id = %entry.id, "repo added");
+    Ok(entry)
+}
+
+/// The session history as the client lists it, read off the async runtime.
+async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
+    let dirs = hub.dirs.clone();
+    let repos = hub.state.with_persisted(|s| s.repos.clone());
+    tokio::task::spawn_blocking(move || {
+        let claude_home = crate::transcripts::claude_home();
+        history::history_items(&dirs, &repos, claude_home.as_deref())
+    })
+    .await
+    .unwrap_or_else(|err| {
+        warn!(?err, "building the session history failed");
+        Vec::new()
+    })
+}
+
+/// Start the tasks that watch the hub for the daemon's lifetime.
+fn start_hub_tasks(hub: &Hub, client_count_rx: tokio::sync::watch::Receiver<usize>) {
+    start_history_broadcaster(hub);
+    // Idle self-exit: once the last client disconnects and no session has a
+    // live child for a full grace period, flip the shutdown watch so a
+    // resident daemon doesn't pin a stale executable across app updates.
+    // Mirrors the HTTP /shutdown path (no drain): sidecars stay on disk, and
+    // abandoned sessions come back from them on the next daemon start.
+    crate::idle_exit::spawn(
+        Arc::clone(&hub.sessions),
+        client_count_rx,
+        hub.shutdown_tx.clone(),
+        Arc::clone(&hub.preset_cancellations),
+        crate::idle_exit::GRACE_PERIOD,
+    );
+}
+
+/// Broadcast the session history to every client whenever it changes while
+/// the daemon runs: a session ending, or one being recovered.
+fn start_history_broadcaster(hub: &Hub) {
+    let hub = hub.clone();
+    let mut changes = history::subscribe_changes();
+    tokio::spawn(async move {
+        while changes.changed().await.is_ok() {
+            let items = session_history_items(&hub).await;
+            let _ = hub.state_events.send(StateEvent::SessionHistory(items));
+        }
+    });
+}
+
+/// Recover each item in order: plan it from its history entry, register its
+/// repo when asked, spawn it, and mark the entry recovered. A failed item
+/// doesn't stop the others; each gets its own result.
+async fn recover_sessions(
+    hub: &Hub,
+    items: &[protocol::RecoverItem],
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Vec<protocol::RecoverItemResult> {
+    let mut results = Vec::with_capacity(items.len());
+    for item in items {
+        let outcome = recover_one(hub, item, out_tx).await;
+        if let Err(error) = &outcome {
+            warn!(history_id = %item.history_id, %error, "recover_sessions: item failed");
+        }
+        let (session_id, error) = match outcome {
+            Ok(id) => (Some(id), None),
+            Err(error) => (None, Some(error)),
+        };
+        results.push(protocol::RecoverItemResult {
+            history_id: item.history_id.clone(),
+            session_id,
+            error,
+        });
+    }
+    results
+}
+
+async fn recover_one(
+    hub: &Hub,
+    item: &protocol::RecoverItem,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) -> Result<String, String> {
+    let entry = history::read_one(&hub.dirs, &item.history_id)
+        .ok_or_else(|| format!("no history entry {}", item.history_id))?;
+    let claude_home = crate::transcripts::claude_home();
+    let plan = history::plan_recovery(&entry, item, |folder, id| {
+        claude_home
+            .as_deref()
+            .is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
+    })?;
+    if let Some(path) = &plan.register_repo {
+        register_repo(hub, path, None, out_tx)
+            .await
+            .map_err(|err| format!("registering {path}: {err:#}"))?;
+    }
+    let snapshot = spawn_session(hub, plan.request, None)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+    if let Err(err) = history::mark_recovered(&hub.dirs, &item.history_id, chrono::Utc::now()) {
+        warn!(?err, history_id = %item.history_id, "failed to mark history entry recovered");
+    }
+    Ok(snapshot.id)
+}
+
 /// Remove an abandoned session from the registry + delete its sidecar.
 /// Used both as the cleanup step after a successful Resume and as the
 /// user-initiated "Dismiss" action for sessions they don't want to
@@ -5155,6 +5316,9 @@ async fn park_session(hub: &Hub, session_id: &str) {
         let guard = crate::sync::lock(&rec);
         (guard.pty.clone(), guard.headless.clone())
     };
+    // Recorded before the kill, so this wins over the exit watcher's later
+    // `Exited` for the same session.
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
     if let Some(pty) = pty {
         pty.kill();
     }
@@ -6829,6 +6993,200 @@ mod tests {
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].end, SessionEnd::DaemonShutdown);
+    }
+
+    #[tokio::test]
+    async fn park_writes_stopped_by_user() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("park-history");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        park_session(&hub, "s1").await;
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    /// A test hub whose spawns fail before any process starts: its binaries
+    /// dir is a plain file, so staging the `rt-tracer` into the binary cache
+    /// fails and no tracer (and so no child) is ever launched.
+    fn spawnless_test_hub(tag: &str) -> (Hub, ScratchDir) {
+        let (hub, scratch) = test_hub(tag);
+        std::fs::remove_dir_all(&hub.dirs.binaries_dir).expect("remove binaries dir");
+        std::fs::write(&hub.dirs.binaries_dir, b"not a directory").expect("block binaries dir");
+        (hub, scratch)
+    }
+
+    /// Write a history entry for `id` in `mode`, recovered or not.
+    fn write_history(hub: &Hub, id: &str, mode: SessionMode, recovered: bool) {
+        let mut entry = history::entry_from_record(
+            &crate::history::test_support::record(id, mode),
+            SessionEnd::TracerLost,
+            chrono::Utc::now(),
+        );
+        entry.primary_cwd = Some(hub.dirs.config.to_string_lossy().into_owned());
+        entry.recovered_at = recovered.then(chrono::Utc::now);
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn list_session_history_replies_with_its_request_id() {
+        let (hub, _scratch) = spawnless_test_hub("list-history");
+        write_history(&hub, "shell", SessionMode::PlainShell, false);
+        write_history(&hub, "headless", SessionMode::Headless, false);
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListSessionHistory {
+                request_id: Some("r1".to_owned()),
+            },
+        )
+        .await;
+        let DaemonMessage::SessionHistory { request_id, items } = reply else {
+            panic!("expected session_history, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
+        assert_eq!(ids, ["shell"]);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recover_sessions_reports_each_failure_in_order() {
+        let (hub, _scratch) = spawnless_test_hub("recover-errors");
+        write_history(&hub, "done", SessionMode::Interactive, true);
+        let items = ["missing", "done", "done"]
+            .into_iter()
+            .zip([
+                protocol::RecoverAs::Claude,
+                protocol::RecoverAs::Shell,
+                protocol::RecoverAs::Unknown,
+            ])
+            .map(|(id, how)| protocol::RecoverItem {
+                history_id: id.to_owned(),
+                conversation_id: None,
+                how,
+            })
+            .collect();
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: Some("r2".to_owned()),
+                items,
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult {
+            request_id,
+            results,
+        } = reply
+        else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r2"));
+        let outcome: Vec<(&str, Option<&str>, Option<&str>)> = results
+            .iter()
+            .map(|r| {
+                (
+                    r.history_id.as_str(),
+                    r.session_id.as_deref(),
+                    r.error.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            outcome,
+            [
+                ("missing", None, Some("no history entry missing")),
+                ("done", None, Some("already recovered")),
+                ("done", None, Some("already recovered")),
+            ]
+        );
+        assert!(
+            hub.sessions.snapshots().is_empty(),
+            "a refused item spawns nothing"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recovery_under_test_hub_cannot_spawn() {
+        let (hub, _scratch) = spawnless_test_hub("recover-cannot-spawn");
+        write_history(&hub, "shell", SessionMode::PlainShell, false);
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: "shell".to_owned(),
+                    conversation_id: None,
+                    how: protocol::RecoverAs::Shell,
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, None);
+        let error = results[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("cache dir"), "{error}");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+        let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
+        assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
+    }
+
+    #[tokio::test]
+    async fn standalone_target_refuses_codex_and_headless() {
+        let (hub, _scratch) = spawnless_test_hub("standalone-agents");
+        for (mode, agent_options) in [
+            (
+                SessionMode::Interactive,
+                AgentOptions::Codex { sandbox: None },
+            ),
+            (
+                SessionMode::Headless,
+                AgentOptions::Claude {
+                    permission_mode: None,
+                },
+            ),
+        ] {
+            let req = SpawnRequest {
+                label: None,
+                target: SpawnTarget::Standalone {
+                    cwd: None,
+                    add_dirs: Vec::new(),
+                },
+                mode,
+                initial_prompt: Some("x".to_owned()),
+                dangerously_skip_permissions: false,
+                agent_options,
+                model: None,
+                extra_env: Vec::new(),
+                prompt_injector: None,
+                request_id: None,
+                resume_conversation: None,
+            };
+            let err = spawn_session(&hub, req, None)
+                .await
+                .expect_err("refused before anything spawns");
+            assert!(
+                err.to_string().contains("standalone targets only support"),
+                "{err:#}"
+            );
+        }
+        assert!(standalone_supports(SessionMode::Interactive, Agent::Claude));
+        assert!(standalone_supports(SessionMode::PlainShell, Agent::Codex));
+        assert!(!standalone_supports(
+            SessionMode::Interactive,
+            Agent::Cursor
+        ));
     }
 
     fn accent(color: &str) -> AppearanceOverrides {
