@@ -1,9 +1,10 @@
 //! In-memory session registry: spawned `claude` processes plus their state.
 
 use crate::headless::HeadlessHandle;
+use crate::history;
 use crate::orphan::{self, OrphanMeta};
 use crate::paths::Dirs;
-use crate::pty::PtyHandle;
+use crate::pty::{PtyExit, PtyHandle};
 use crate::scrollback;
 use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
@@ -164,6 +165,10 @@ pub struct SessionRecord {
     /// so a connection that lagged past its spawn reply gets it again after
     /// the resync list.
     pub spawn_origin: Option<UpdateOrigin>,
+    /// The Claude conversation id passed as `--session-id` at spawn. `None`
+    /// for shells, headless runs, other agents, and sessions whose sidecar
+    /// predates the field.
+    pub claude_session_id: Option<String>,
 }
 
 impl SessionRecord {
@@ -216,6 +221,7 @@ impl SessionRecord {
             has_per_session_worktree,
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
+            claude_session_id: self.claude_session_id.clone(),
         }
     }
 }
@@ -569,27 +575,37 @@ pub fn attach_lifecycle(
 
     // Exit watcher.
     if let Some(rx) = pty.take_exit() {
-        let registry_for_exit = Arc::clone(registry);
-        let session_for_exit = session_id;
-        tokio::spawn(async move {
-            let code = rx.await.unwrap_or(-1);
-            registry_for_exit.update(&session_for_exit, |rec| {
-                rec.status = SessionStatus::Stopped;
-                rec.exit_code = Some(code);
-                rec.pty = None;
-                rec.input_notifier = None;
-                rec.scrollback_snapshot_req = None;
-                push_recent_action(rec, format!("exited with code {code}"));
-            });
-            registry_for_exit
-                .fan_out_attention(session_for_exit.clone(), protocol::AttentionReason::Stopped);
-            if let Some(dirs) = dirs {
-                orphan::try_delete_meta(&dirs, &session_for_exit);
-            }
-        });
+        tokio::spawn(watch_exit(Arc::clone(registry), session_id, rx, dirs));
     }
 
     snap_tx
+}
+
+/// Exit watcher: mark the session stopped once its PTY exit arrives, record
+/// how it ended in the history, then drop its sidecar.
+async fn watch_exit(
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+    rx: oneshot::Receiver<PtyExit>,
+    dirs: Option<Dirs>,
+) {
+    // A dropped sender means the reader task died without reporting an exit,
+    // which is a lost tracer as far as anyone can tell.
+    let exit = rx.await.unwrap_or(PtyExit::TracerLost);
+    let code = exit.code();
+    registry.update(&session_id, |rec| {
+        rec.status = SessionStatus::Stopped;
+        rec.exit_code = Some(code);
+        rec.pty = None;
+        rec.input_notifier = None;
+        rec.scrollback_snapshot_req = None;
+        push_recent_action(rec, format!("exited with code {code}"));
+    });
+    registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
+    if let Some(dirs) = dirs {
+        history::record_session_end(&registry, &dirs, &session_id, history::end_for_exit(exit));
+        orphan::try_delete_meta(&dirs, &session_id);
+    }
 }
 
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
@@ -652,6 +668,7 @@ impl SessionRegistry {
             input_notifier: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
+            claude_session_id: meta.claude_session_id.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -697,6 +714,7 @@ impl SessionRegistry {
             input_notifier: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
+            claude_session_id: meta.claude_session_id.clone(),
         };
         push_recent_action(
             &mut record,
@@ -739,6 +757,7 @@ impl SessionRegistry {
             input_notifier: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
+            claude_session_id: meta.claude_session_id.clone(),
         };
         push_recent_action(
             &mut record,

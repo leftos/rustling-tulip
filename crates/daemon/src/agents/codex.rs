@@ -422,6 +422,7 @@ mod tests {
             dangerously_skip_permissions: skip,
             model,
             has_prompt_injector: has_injector,
+            claude_session_id: None,
         }
     }
 

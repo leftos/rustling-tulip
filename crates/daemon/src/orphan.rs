@@ -143,10 +143,24 @@ pub struct OrphanMeta {
     /// known-in-use paths in its retain set.
     #[serde(default)]
     pub tracer_exe_path: Option<String>,
+    /// The Claude conversation id passed as `--session-id` at spawn. `None`
+    /// for shells, headless runs, other agents, and sidecars written before
+    /// this field existed.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
     dirs.sessions_dir.join(session_id).join("meta.json")
+}
+
+/// Write `bytes` to `path` through a sibling `.tmp` file and a rename, so a
+/// reader never sees a half-written file.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("renaming onto {}", path.display()))?;
+    Ok(())
 }
 
 pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
@@ -154,10 +168,7 @@ pub fn write_meta(dirs: &Dirs, meta: &OrphanMeta) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir).context("creating session sidecar dir")?;
     let path = dir.join("meta.json");
     let bytes = serde_json::to_vec_pretty(meta).context("serializing orphan meta")?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes).context("writing meta tmp")?;
-    std::fs::rename(&tmp, &path).context("renaming meta")?;
-    Ok(())
+    write_atomic(&path, &bytes).context("writing meta")
 }
 
 /// Read a single session's meta sidecar. Used by `stop_session` to recover
@@ -405,6 +416,7 @@ pub fn meta_from_record(
     tracer_pid: Option<u32>,
     tracer_pipe: Option<String>,
     tracer_exe_path: Option<String>,
+    claude_session_id: Option<String>,
 ) -> anyhow::Result<OrphanMeta> {
     if pid == 0 {
         return Err(anyhow!("refusing to write orphan meta with pid=0"));
@@ -436,6 +448,7 @@ pub fn meta_from_record(
         tracer_pid,
         tracer_pipe,
         tracer_exe_path,
+        claude_session_id,
     })
 }
 
@@ -747,6 +760,7 @@ mod tests {
             tracer_pid: Some(1234),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
+            claude_session_id: None,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -812,5 +826,54 @@ mod tests {
         assert_eq!(meta.tracer_pid, None);
         assert_eq!(meta.tracer_pipe, None);
         assert_eq!(meta.program_name.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn claude_session_id_round_trips_and_defaults_on_old_meta() {
+        let dirs = scratch_dirs("claude-session-id");
+        let meta = meta_from_record(
+            "s-claude".to_string(),
+            4242,
+            "repo:main".to_string(),
+            SessionKind::Single,
+            SessionMode::Interactive,
+            vec![],
+            chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            None,
+            Some("rt-tracer".to_string()),
+            Agent::Claude,
+            None,
+            None,
+            None,
+            Some(4242),
+            Some(r"\\.\pipe\rt-tracer-s-claude".to_string()),
+            None,
+            Some("0b6f4c7e-1111-4222-8333-944455556666".to_string()),
+        )
+        .expect("build meta");
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s-claude").expect("load meta");
+        assert_eq!(
+            loaded.claude_session_id.as_deref(),
+            Some("0b6f4c7e-1111-4222-8333-944455556666")
+        );
+
+        // A sidecar written before the field existed decodes with `None`.
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "program_name": "rt-tracer",
+            "tracer_pid": 9001,
+            "tracer_pipe": "\\\\.\\pipe\\rt-tracer-old"
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert_eq!(old_meta.claude_session_id, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

@@ -209,6 +209,13 @@ impl Dirs {
             config,
         })
     }
+
+    /// Ended-session history: `<config>/history/<session-id>.json`, one entry
+    /// per session (see [`crate::history`]). Created on first write.
+    #[must_use]
+    pub fn history_dir(&self) -> PathBuf {
+        self.config.join("history")
+    }
 }
 
 /// Resolve the config directory, honoring `RUSTLING_TULIP_CONFIG_DIR` when

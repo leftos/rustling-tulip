@@ -5,6 +5,7 @@ use crate::branch_fate::{self, FateInput, SessionBase};
 use crate::branch_names;
 use crate::discovery;
 use crate::file_fetch;
+use crate::history;
 use crate::lan;
 use crate::orphan::{self, OrphanMeta};
 use crate::pairing;
@@ -43,8 +44,9 @@ use protocol::{
     Agent, AgentOptions, AppearanceOverrides, AttentionReason, BranchCleanup, ClientMessage,
     ClonableLayout, DaemonHandshake, DaemonMessage, InboundClientMessage, InitLayoutKind,
     MemberBranchFate, PROTOCOL_VERSION, PaneDropEdge, PresetLaunchJobSnapshot,
-    SUPPORTED_PROTOCOL_VERSIONS, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry, VscodeWorkspaceSuggestion,
+    SUPPORTED_PROTOCOL_VERSIONS, SessionEnd, SessionKind, SessionMember, SessionMetrics,
+    SessionMode, SessionStatus, SpawnRequest, SpawnTarget, TabContent, TabEntry,
+    VscodeWorkspaceSuggestion,
 };
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -2694,6 +2696,11 @@ fn move_pane(
 async fn shutdown_all(hub: &Hub) {
     let ids: Vec<String> = hub.sessions.snapshots().into_iter().map(|s| s.id).collect();
     info!(count = ids.len(), "shutdown_all: starting");
+    // Recorded before the stops so the shutdown, not their `StoppedByUser`,
+    // is what the history keeps.
+    for id in &ids {
+        record_end(hub, id, SessionEnd::DaemonShutdown);
+    }
     for id in &ids {
         info!(session_id = %id, "shutdown_all: stopping session");
         if let Err(err) = stop_session(hub, id).await {
@@ -3546,6 +3553,7 @@ impl SpawnArgs {
             dangerously_skip_permissions: self.dangerously_skip_permissions,
             model: self.model.as_deref(),
             has_prompt_injector: self.prompt_injector.is_some(),
+            claude_session_id: None,
         }
     }
 }
@@ -3569,9 +3577,17 @@ async fn spawn_interactive_session(
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
     let backend = crate::agents::backend_for(cfg.agent());
+    // Claude gets a known conversation id so the session can be resumed with
+    // `claude --resume <id>` after it ends.
+    let claude_session_id =
+        (cfg.agent() == Agent::Claude).then(|| uuid::Uuid::new_v4().to_string());
+    let common = CommonSpawnFields {
+        claude_session_id: claude_session_id.as_deref(),
+        ..cfg.common()
+    };
     let args = backend.build_interactive_args(
         &cfg.agent_options,
-        &cfg.common(),
+        &common,
         &members,
         initial_prompt.as_deref(),
     );
@@ -3642,6 +3658,7 @@ async fn spawn_interactive_session(
         input_notifier: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
+        claude_session_id: claude_session_id.clone(),
     };
     push_recent_action(&mut record, "session started".to_string());
 
@@ -3704,6 +3721,7 @@ async fn spawn_interactive_session(
             Some(tracer_pid),
             Some(tracer_pipe),
             Some(tracer_exe_path),
+            claude_session_id,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -3829,6 +3847,7 @@ async fn spawn_plain_shell_session(
         input_notifier: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
+        claude_session_id: None,
     };
     push_recent_action(
         &mut record,
@@ -3888,6 +3907,7 @@ async fn spawn_plain_shell_session(
             Some(tracer_pid),
             Some(tracer_pipe),
             Some(tracer_exe_path),
+            None,
         )
     {
         orphan::try_write_meta(&hub.dirs, &meta);
@@ -3960,6 +3980,7 @@ fn spawn_headless_session(
         input_notifier: None,
         scrollback_snapshot_req: None,
         spawn_origin: None,
+        claude_session_id: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -3997,6 +4018,7 @@ fn spawn_headless_session(
             Some(initial_cwd),
             // Headless `claude --print` doesn't use a PTY and therefore doesn't
             // go through rt-tracer; the tracer fields stay None.
+            None,
             None,
             None,
             None,
@@ -5102,11 +5124,18 @@ async fn resume_all_abandoned(hub: &Hub, out_tx: &mpsc::UnboundedSender<DaemonMe
     }
 }
 
+/// Record in the session history that `session_id` ended for `end`. The first
+/// record for a session wins; see [`history::write_if_absent`].
+fn record_end(hub: &Hub, session_id: &str, end: SessionEnd) {
+    history::record_session_end(&hub.sessions, &hub.dirs, session_id, end);
+}
+
 /// Remove an abandoned session from the registry + delete its sidecar.
 /// Used both as the cleanup step after a successful Resume and as the
 /// user-initiated "Dismiss" action for sessions they don't want to
 /// recover.
 fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
@@ -5460,6 +5489,7 @@ async fn discard_session(
     for parent in &member_parents {
         crate::worktree_cleanup::prune_empty_ancestors(parent, &worktrees_root);
     }
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
     orphan::try_delete_meta(&hub.dirs, session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
@@ -5585,6 +5615,9 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
         (guard.pty.clone(), guard.headless.clone())
     };
     let had_live_handle = pty.is_some() || headless_handle.is_some();
+    // Recorded before the kill, so this wins over the exit watcher's later
+    // `Exited` for the same session.
+    record_end(hub, session_id, SessionEnd::StoppedByUser);
     // Mark the session stopped BEFORE killing the child.
     //
     // The child's own exit watcher (`session::attach_lifecycle`) also marks it
@@ -6711,7 +6744,91 @@ mod tests {
             input_notifier: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
+            claude_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn stop_then_exit_keeps_stopped_by_user() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        use crate::pty::PtyExit;
+        let (hub, _scratch) = test_hub("stop-then-exit");
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        stop_session(&hub, "s1").await.expect("stop");
+        // The exit watcher deletes meta.json as its last step, so a fresh one
+        // tells the test when the watcher has finished.
+        let meta = orphan::meta_from_record(
+            "s1".to_string(),
+            1,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        orphan::write_meta(&hub.dirs, &meta).expect("write meta");
+        exit_tx.send(PtyExit::Code(0)).expect("report the exit");
+        for _ in 0..500 {
+            if orphan::load_meta(&hub.dirs, "s1").is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            orphan::load_meta(&hub.dirs, "s1").is_err(),
+            "the exit watcher ran"
+        );
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    #[tokio::test]
+    async fn discard_writes_stopped_by_user() {
+        use crate::history::test_support::record;
+        let (hub, _scratch) = test_hub("discard-history");
+        hub.sessions.insert(record("s1", SessionMode::PlainShell));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        discard_session(&hub, "s1", &[], &out_tx).await;
+        assert!(hub.sessions.get("s1").is_none(), "the session is gone");
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, "s1");
+        assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    #[tokio::test]
+    async fn drained_shutdown_writes_daemon_shutdown() {
+        use crate::history::test_support::{fake_pty, insert_live, record};
+        let (hub, _scratch) = test_hub("shutdown-history");
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        shutdown_all(&hub).await;
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].end, SessionEnd::DaemonShutdown);
     }
 
     fn accent(color: &str) -> AppearanceOverrides {

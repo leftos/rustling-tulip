@@ -12,7 +12,7 @@
 
 use crate::binary_cache;
 use crate::paths::Dirs;
-use crate::pty::{PtyHandle, PtyHandleParts, PtySpawnSpec};
+use crate::pty::{PtyExit, PtyHandle, PtyHandleParts, PtySpawnSpec};
 use anyhow::{Context as _, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use interprocess::local_socket::tokio::{Stream, prelude::*};
@@ -526,10 +526,10 @@ where
     let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
     let (stop_tx, stop_rx) = mpsc::unbounded_channel::<()>();
-    let (exit_tx, exit_rx) = oneshot::channel::<i32>();
+    let (exit_tx, exit_rx) = oneshot::channel::<PtyExit>();
 
     // Reader task: parse TracerResponse frames, route to output broadcast +
-    // exit oneshot. On stream EOF or parse error, transition exit to -1.
+    // exit oneshot. On stream EOF or read error, the exit is `TracerLost`.
     //
     // Critical: yield until every startup subscriber has called
     // `output_tx.subscribe()` before starting the pipe read loop. Otherwise
@@ -565,8 +565,8 @@ where
             elapsed = ?started.elapsed(),
             "tracer_client: reader starting"
         );
-        let exit_code = read_loop(reader, output_for_reader, &session_id_for_reader).await;
-        let _ = exit_tx.send(exit_code);
+        let exit = read_loop(reader, output_for_reader, &session_id_for_reader).await;
+        let _ = exit_tx.send(exit);
     });
 
     // Writer task: pump input/resize/stop into the pipe.
@@ -593,7 +593,13 @@ where
     Ok((handle, negotiated))
 }
 
-async fn read_loop<R>(mut reader: R, output_tx: broadcast::Sender<Vec<u8>>, session_id: &str) -> i32
+/// Pump tracer frames until the tracer reports the child's exit
+/// ([`PtyExit::Code`]) or the pipe ends without one ([`PtyExit::TracerLost`]).
+async fn read_loop<R>(
+    mut reader: R,
+    output_tx: broadcast::Sender<Vec<u8>>,
+    session_id: &str,
+) -> PtyExit
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -603,12 +609,12 @@ where
         match reader.read_line(&mut line).await {
             Ok(0) => {
                 debug!(%session_id, "tracer_client: pipe EOF");
-                return -1;
+                return PtyExit::TracerLost;
             }
             Ok(_) => {}
             Err(err) => {
                 debug!(?err, %session_id, "tracer_client: pipe read error");
-                return -1;
+                return PtyExit::TracerLost;
             }
         }
         let parsed = match InboundTracerResponse::from_json_str(line.trim_end()) {
@@ -639,7 +645,7 @@ where
             }
             InboundTracerResponse::Known(TracerResponse::Exited { code }) => {
                 info!(%session_id, code, "tracer_client: child exited");
-                return code;
+                return PtyExit::Code(code);
             }
             InboundTracerResponse::Known(TracerResponse::Error { message }) => {
                 warn!(%session_id, %message, "tracer_client: tracer error frame");
@@ -844,5 +850,72 @@ mod tests {
             !err.to_string().contains("did not send TracerWelcome"),
             "EOF must not be reported as a timeout, got: {err}"
         );
+    }
+
+    /// Run a session whose tracer sends `frames` and then closes its pipe,
+    /// and return the history entry its exit watcher writes.
+    async fn history_after_tracer_frames(tag: &str, frames: String) -> protocol::HistoryEntry {
+        use super::{TracerKiller, read_loop};
+        use crate::history::test_support::{insert_live, record, scratch_dirs, wait_for_entry};
+        use crate::pty::{PtyHandle, PtyHandleParts};
+        use crate::session::SessionRegistry;
+        use protocol::SessionMode;
+        use std::sync::Arc;
+        use tokio::sync::{broadcast, mpsc, oneshot};
+
+        let dirs = scratch_dirs(tag);
+        let registry = SessionRegistry::new(dirs.clone());
+        let (output, _) = broadcast::channel(16);
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
+        let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let pty = Arc::new(PtyHandle::from_parts(PtyHandleParts {
+            output: output.clone(),
+            input_tx,
+            resize_tx,
+            exit_rx,
+            killer: Box::new(TracerKiller { stop_tx }),
+            pid: None,
+        }));
+        insert_live(
+            &registry,
+            &dirs,
+            record(tag, SessionMode::Interactive),
+            &pty,
+        );
+        let session_id = tag.to_string();
+        tokio::spawn(async move {
+            let pipe = BufReader::new(std::io::Cursor::new(frames.into_bytes()));
+            let exit = read_loop(pipe, output, &session_id).await;
+            let _ = exit_tx.send(exit);
+        });
+        let entry = wait_for_entry(&dirs, tag).await;
+        let _ = fs::remove_dir_all(&dirs.config);
+        entry
+    }
+
+    fn frame(response: &tracer_protocol::TracerResponse) -> String {
+        let mut line = serde_json::to_string(response).expect("encode tracer frame");
+        line.push('\n');
+        line
+    }
+
+    #[tokio::test]
+    async fn tracer_eof_writes_tracer_lost() {
+        let output = frame(&tracer_protocol::TracerResponse::Output {
+            data_b64: "aGk=".to_string(),
+        });
+        let entry = history_after_tracer_frames("tracer-eof", output).await;
+        assert_eq!(entry.end, protocol::SessionEnd::TracerLost);
+    }
+
+    #[tokio::test]
+    async fn child_exit_writes_exited_with_code() {
+        // -1 is a real exit code here, reported by the tracer: only a pipe that
+        // closes without an `Exited` frame means the tracer was lost.
+        let exited = frame(&tracer_protocol::TracerResponse::Exited { code: -1 });
+        let entry = history_after_tracer_frames("child-exit", exited).await;
+        assert_eq!(entry.end, protocol::SessionEnd::Exited { code: -1 });
     }
 }

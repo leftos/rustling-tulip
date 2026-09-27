@@ -11,6 +11,7 @@ mod git_inspect;
 mod git_watch;
 mod git_write;
 mod headless;
+mod history;
 mod idle_exit;
 mod inject;
 mod instance_lock;
@@ -107,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
     // a Resume swaps the abandoned session out for the freshly-spawned one
     // without the user losing their layout.
     prune_stale_tabs(&state, &live, &dead);
+    history::prune(&dirs, chrono::Utc::now(), history::HISTORY_RETENTION);
 
     let result = server::run(state, dirs, live, dead).await;
     info!(?result, "rustling-tulipd main returning");

@@ -516,6 +516,83 @@ pub struct SessionSnapshot {
     /// worktrees are currently in active use.
     #[serde(default)]
     pub worktree_paths: Vec<String>,
+    /// The Claude conversation id the daemon passed as `--session-id` when it
+    /// spawned this session. `None` for shells, headless runs, other agents,
+    /// and sessions spawned before the daemon recorded it.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+}
+
+/// How a session ended, as recorded in its history entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEnd {
+    /// The child exited on its own with this code.
+    Exited { code: i32 },
+    /// The user stopped or discarded the session.
+    StoppedByUser,
+    /// The tracer's pipe closed before it reported an exit: the tracer was
+    /// killed or crashed.
+    TracerLost,
+    /// The daemon stopped the session while shutting down.
+    DaemonShutdown,
+    /// An end reason from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+impl SessionEnd {
+    /// True when the session ended without anyone asking it to.
+    #[must_use]
+    pub fn is_unexpected(self) -> bool {
+        matches!(self, Self::TracerLost)
+    }
+}
+
+/// Where a history entry came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySource {
+    /// Written by the daemon when the session ended.
+    Record,
+    /// Imported from a tracer log.
+    TracerLog,
+    /// A source from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One ended session, kept so it can be recovered later.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryEntry {
+    pub session_id: String,
+    pub label: String,
+    pub kind: SessionKind,
+    pub mode: SessionMode,
+    pub agent: Agent,
+    #[serde(default)]
+    pub spawn_config: Option<SpawnConfig>,
+    pub members: Vec<SessionMember>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// The folder the session started in: the first member's worktree, or a
+    /// standalone shell's directory.
+    #[serde(default)]
+    pub primary_cwd: Option<String>,
+    /// The last folder the session reported (a shell's OSC 7 cwd).
+    #[serde(default)]
+    pub current_cwd: Option<String>,
+    #[serde(default)]
+    pub program_name: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: DateTime<Utc>,
+    pub end: SessionEnd,
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+    pub source: HistorySource,
+    #[serde(default)]
+    pub recovered_at: Option<DateTime<Utc>>,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -2666,6 +2743,11 @@ pub enum SnapshotUnavailable {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "SessionUpdated carries the whole SessionSnapshot, the most common message on \
+              the wire; boxing it would change every producer and consumer for ~200 bytes"
+)]
 pub enum DaemonMessage {
     /// `protocol_version` is the negotiated wire version the daemon picked
     /// from the intersection of its `SUPPORTED_PROTOCOL_VERSIONS` and the
@@ -5323,5 +5405,70 @@ mod tests {
                 "{unknown:?}"
             );
         }
+    }
+
+    #[test]
+    fn session_end_round_trips() {
+        for end in [
+            SessionEnd::Exited { code: -1 },
+            SessionEnd::Exited { code: 3 },
+            SessionEnd::StoppedByUser,
+            SessionEnd::TracerLost,
+            SessionEnd::DaemonShutdown,
+        ] {
+            let json = serde_json::to_string(&end).expect("encode");
+            let back: SessionEnd = serde_json::from_str(&json).expect("decode");
+            assert_eq!(back, end, "{json}");
+        }
+        assert_eq!(
+            serde_json::to_string(&SessionEnd::Exited { code: 3 }).expect("encode"),
+            r#"{"type":"exited","code":3}"#
+        );
+        assert!(SessionEnd::TracerLost.is_unexpected());
+        assert!(!SessionEnd::Exited { code: -1 }.is_unexpected());
+        assert!(!SessionEnd::StoppedByUser.is_unexpected());
+        assert!(!SessionEnd::DaemonShutdown.is_unexpected());
+    }
+
+    #[test]
+    fn unknown_session_end_is_unknown() {
+        let end: SessionEnd =
+            serde_json::from_str(r#"{"type":"eaten_by_grue"}"#).expect("decode unknown end");
+        assert_eq!(end, SessionEnd::Unknown);
+        assert!(!end.is_unexpected());
+    }
+
+    #[test]
+    fn unknown_history_source_is_unknown() {
+        let source: HistorySource =
+            serde_json::from_str(r#""carrier_pigeon""#).expect("decode unknown source");
+        assert_eq!(source, HistorySource::Unknown);
+        assert_eq!(
+            serde_json::from_str::<HistorySource>(r#""tracer_log""#).expect("decode"),
+            HistorySource::TracerLog
+        );
+    }
+
+    #[test]
+    fn minimal_history_entry_decodes() {
+        let json = r#"{
+            "session_id": "s1",
+            "label": "repo:main",
+            "kind": "single",
+            "mode": "interactive",
+            "agent": "claude",
+            "members": [],
+            "ended_at": "2026-09-27T10:00:00Z",
+            "end": {"type": "tracer_lost"},
+            "source": "record"
+        }"#;
+        let entry: HistoryEntry = serde_json::from_str(json).expect("decode minimal entry");
+        assert_eq!(entry.session_id, "s1");
+        assert_eq!(entry.end, SessionEnd::TracerLost);
+        assert_eq!(entry.source, HistorySource::Record);
+        assert_eq!(entry.spawn_config, None);
+        assert_eq!(entry.started_at, None);
+        assert_eq!(entry.claude_session_id, None);
+        assert_eq!(entry.recovered_at, None);
     }
 }

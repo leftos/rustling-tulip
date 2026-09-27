@@ -27,6 +27,9 @@ pub struct CommonSpawnFields<'a> {
     /// injector delivers it through the PTY post-spawn instead. Ignored by
     /// headless paths.
     pub has_prompt_injector: bool,
+    /// Conversation id the Claude backend passes as `--session-id` on an
+    /// interactive spawn. Ignored by headless paths and by other backends.
+    pub claude_session_id: Option<&'a str>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller

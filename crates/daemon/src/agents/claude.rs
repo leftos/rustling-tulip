@@ -53,6 +53,10 @@ impl AgentBackend for ClaudeBackend {
             args.push(prelude);
         }
         extend_common(&mut args, common, permission_mode);
+        if let Some(id) = common.claude_session_id {
+            args.push("--session-id".to_string());
+            args.push(id.to_string());
+        }
         // When a prompt injector is attached, it carries the prompt as
         // scripted PTY input — passing `-p` would race the injector and
         // disable plan mode. The injector path takes over.
@@ -252,7 +256,76 @@ mod tests {
             dangerously_skip_permissions: skip,
             model,
             has_prompt_injector: has_injector,
+            claude_session_id: None,
         }
+    }
+
+    const SESSION_ID: &str = "0b6f4c7e-1111-4222-8333-944455556666";
+
+    fn with_session_id(
+        skip: bool,
+        model: Option<&str>,
+        has_injector: bool,
+    ) -> CommonSpawnFields<'_> {
+        CommonSpawnFields {
+            claude_session_id: Some(SESSION_ID),
+            ..common(skip, model, has_injector)
+        }
+    }
+
+    #[test]
+    fn interactive_args_include_session_id() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+        };
+        let args = ClaudeBackend.build_interactive_args(
+            &opts,
+            &with_session_id(false, Some("opus"), false),
+            &m,
+            None,
+        );
+        assert_eq!(args, vec!["--model", "opus", "--session-id", SESSION_ID]);
+    }
+
+    #[test]
+    fn interactive_args_with_prompt_include_session_id() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+        };
+        let args = ClaudeBackend.build_interactive_args(
+            &opts,
+            &with_session_id(false, None, false),
+            &m,
+            Some("hello"),
+        );
+        assert_eq!(args, vec!["--session-id", SESSION_ID, "-p", "hello"]);
+
+        // With an injector the prompt stays off the argv; the id does not.
+        let injected = ClaudeBackend.build_interactive_args(
+            &opts,
+            &with_session_id(false, None, true),
+            &m,
+            Some("hello"),
+        );
+        assert_eq!(injected, vec!["--session-id", SESSION_ID]);
+    }
+
+    #[test]
+    fn headless_args_have_no_session_id() {
+        let m = members(&["X:/dev/a"]);
+        let opts = AgentOptions::Claude {
+            permission_mode: None,
+        };
+        let args = ClaudeBackend.build_headless_args(
+            &opts,
+            &with_session_id(false, None, false),
+            &m,
+            "hello",
+        );
+        assert!(!args.contains(&"--session-id".to_string()), "{args:?}");
+        assert!(!args.contains(&SESSION_ID.to_string()), "{args:?}");
     }
 
     #[test]
