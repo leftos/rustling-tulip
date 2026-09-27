@@ -21,7 +21,7 @@ The goal: a native-client "Recover sessions" flow. It lists sessions that ended 
 - **Scope:** everything that ended in the last 7 days, newest first. Unexpected ends (tracer lost, daemon lost it) are grouped by when they happened and pre-ticked. User-closed sessions are listed unticked.
 - **Backfill:** import older ends from `logs/tracer-<id>.log`, so today's 7 show up too.
 - **Other rules:**
-  - Native client only; the Tauri app is frozen.
+  - Both clients: the Tauri app first, then the native client (user, 2026-09-27, overriding "Native client only").
   - Headless sessions are not recoverable (claude `--print` runs) and are left out of the list.
   - Codex and Cursor sessions are out of scope.
 
@@ -100,9 +100,67 @@ Imported entries have `source: tracer_log`, no label (the UI shows the folder), 
 
 - `ClientMessage::ListSessionHistory { request_id: Option<String> }` → `DaemonMessage::SessionHistory { entries: Vec<HistoryEntry> }`. Entries include candidates. The daemon also broadcasts `SessionHistory` when the history changes: after an unexpected end, and after a recovery.
 - `ClientMessage::RecoverSessions { items: Vec<RecoverItem>, request_id }`. Each `RecoverItem` is `{ history_id, conversation_id: Option<String>, how: RecoverAs }`, where `RecoverAs` is `Claude`, `RegisterRepoThenClaude { path }`, `Shell`, or an `Unknown` fallback via `#[serde(other)]`.
-- Per item, the daemon replies with `SessionUpdated` (echoing `request_id`) or `ActionFailed` naming the item.
+- After every item has run, the daemon replies once with `RecoverResult { request_id, results }`, one result per item: the new session id or an error (see the wire contract below).
 - The new nested enums get `#[serde(other)] Unknown` from day one.
 - The Tauri TS mirror is not extended (frozen). Its default arm drops the unknown broadcast with a log line; this is checked in the protocol round-trip tests.
+
+#### Wire contract (pinned 2026-09-27, so the Tauri UI and the daemon can be built in parallel)
+
+All messages are snake_case tagged, as elsewhere in the protocol.
+
+**`list_session_history` and its reply.** The client sends:
+
+```json
+{"type":"list_session_history","request_id":"r1"}
+```
+
+The daemon replies with `session_history`. It also broadcasts the same message, with `request_id: null`, whenever the history changes:
+
+```json
+{"type":"session_history","request_id":"r1","items":[
+  {"entry":{"session_id":"<rt id>","label":"yaat:main","kind":"workspace","mode":"interactive","agent":"claude",
+            "spawn_config":{},"members":[],"workspace_id":"ws1",
+            "primary_cwd":"D:\\yaat","current_cwd":null,"program_name":"claude",
+            "started_at":"2026-09-27T11:09:41Z","ended_at":"2026-09-27T18:29:06Z",
+            "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null},
+   "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
+   "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
+]}
+```
+
+- `entry` is `HistoryEntry` (Design 1). The `kind`, `mode`, `agent`, `spawn_config` and `members` values use the same shapes as `SessionSnapshot` and `SpawnConfig` today.
+- `end` is one of:
+  - `{"type":"exited","code":N}`
+  - `{"type":"stopped_by_user"}`
+  - `{"type":"tracer_lost"}`
+  - `{"type":"daemon_shutdown"}`
+  - Unknown values are kept as `unknown`.
+- `source` is `record` or `tracer_log`.
+- `candidates` are newest first. When `claude_session_id` is known, `candidates` holds just that one conversation.
+- `folder_is_git_repo` is true when the folder (`current_cwd`, else `primary_cwd`) is a git repo, registered or not.
+- `folder_repo_id` is the registered repo whose path is that folder, else null.
+
+**`recover_sessions` and its reply.** The client sends:
+
+```json
+{"type":"recover_sessions","request_id":"r2","items":[
+  {"history_id":"<rt id>","conversation_id":"<uuid or null>","how":{"type":"claude"}},
+  {"history_id":"<rt id>","conversation_id":"<uuid>","how":{"type":"register_repo_then_claude","path":"D:\\foo"}},
+  {"history_id":"<rt id>","conversation_id":"<uuid or null>","how":{"type":"shell"}}
+]}
+```
+
+After every item has run, the daemon replies to the requester only:
+
+```json
+{"type":"recover_result","request_id":"r2","results":[
+  {"history_id":"<rt id>","session_id":"<new rt id>","error":null},
+  {"history_id":"<rt id>","session_id":null,"error":"worktree D:\\… could not be recreated: …"}
+]}
+```
+
+- The new sessions arrive through the normal `session_updated` broadcasts.
+- An unknown `how` type decodes as `unknown`, and that item fails with an error.
 
 ### 5. Daemon: recovery (`server.rs`, new `recover_sessions` handler)
 
@@ -137,8 +195,14 @@ Per item:
 1. **History, part 1 (daemon + protocol types):** `history.rs` storage, end-reason capture on every end path, retention, and `--session-id` on Claude spawns.
 2. **History, part 2:** `transcripts.rs` matching, the tracer-log importer, `ListSessionHistory` / `SessionHistory`.
 3. **Recovery:** `RecoverSessions` with the three `RecoverAs` paths, `resume_conversation` plumbing, Standalone Claude target.
-4. **Native client:** rail button, badge and dialog.
-5. Docs and plan tick. Then an e2e run through `.\rt.ps1 native-e2e` only.
+4. **Tauri app first** (user, 2026-09-27: an exception to the Tauri freeze, so recovery is usable during the native buildout):
+   - TS mirror of the new messages and types in `apps/tauri-app/src/types.ts` and `api.ts`.
+   - A "Recover sessions" button with the unexpected-end badge in the sidebar header, near the existing "Resume all".
+   - The same dialog as Design 6, in React.
+   - A Vitest or e2e spec where the suite supports it.
+   - Then ship it with `.\rt.ps1 installer`.
+5. **Native client:** rail button, badge and dialog, as in Design 6.
+6. Docs and plan tick. Then an e2e run through `.\rt.ps1 native-e2e` only.
 
 ## Verification
 
