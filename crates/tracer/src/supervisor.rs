@@ -30,6 +30,7 @@ use interprocess::local_socket::tokio::prelude::*;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWrite, AsyncWriteExt as _, BufReader};
@@ -394,7 +395,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let stop_handler = tokio::spawn(async move {
         while stop_rx.recv().await.is_some() {
             info!("supervisor: stop request received, killing child");
-            if let Err(err) = child_killer.kill() {
+            let result = child_killer.kill();
+            // portable-pty 0.9's WinChildKiller::kill inverts TerminateProcess's check: Err on success.
+            #[cfg(windows)]
+            debug!(kill_result = ?result, "supervisor: child kill requested");
+            #[cfg(not(windows))]
+            if let Err(err) = result {
                 debug!(?err, "supervisor: child kill failed (likely already gone)");
             }
         }
@@ -418,12 +424,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // already broadcast), then abort it.
     let exit_code = child_wait.await.unwrap_or(-1);
     info!(exit_code, "supervisor: child exited; shutting down");
+    let watchdog = ShutdownWatchdog::start(SHUTDOWN_WATCHDOG_DEADLINES.to_vec());
 
     // Brief grace period so the socket handler can flush the Exited frame.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    info!("supervisor: shutdown grace done");
+    watchdog.advance(ShutdownStep::Aborts);
     pipe_accept.abort();
     stop_handler.abort();
     heartbeat.abort();
+    info!("supervisor: shutdown aborts done");
+    watchdog.advance(ShutdownStep::ResizeTask);
 
     // Unix mirror of the Windows KILL_ON_JOB_CLOSE job object: take out any
     // surviving descendants in the child's process group (dev servers, node,
@@ -451,9 +462,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // awaiting the aborted task guarantees its clone has been dropped.
     resize_task.abort();
     let _ = resize_task.await;
+    info!("supervisor: resize task awaited");
+    watchdog.advance(ShutdownStep::MasterDrop);
+    let drop_started = Instant::now();
     drop(master);
+    info!(
+        elapsed_ms = millis(drop_started.elapsed()),
+        "supervisor: master dropped"
+    );
+    watchdog.advance(ShutdownStep::ReaderWait);
 
-    wait_for_reader(&reader_handle).await;
+    let reader_started = Instant::now();
+    let reader_eof = wait_for_reader(&reader_handle).await;
+    info!(
+        elapsed_ms = millis(reader_started.elapsed()),
+        eof = reader_eof,
+        "supervisor: reader waited"
+    );
+    watchdog.advance(ShutdownStep::Exiting);
 
     let ring_bytes = shared.lock().map_or(0, |s| s.ring.len());
     let overflowed = shared.lock().is_ok_and(|s| s.ring.overflowed());
@@ -470,19 +496,107 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 /// Wait for the PTY reader thread to reach EOF, up to
 /// [`READER_JOIN_TIMEOUT`]. A reader that is still blocked after that is left
 /// behind: the process exits anyway, and the OS reclaims the thread and its
-/// handles.
-async fn wait_for_reader(reader_handle: &std::thread::JoinHandle<()>) {
+/// handles. Returns whether the reader reached EOF.
+async fn wait_for_reader(reader_handle: &std::thread::JoinHandle<()>) -> bool {
     let started = Instant::now();
     while !reader_handle.is_finished() {
         if started.elapsed() >= READER_JOIN_TIMEOUT {
             warn!(
-                timeout_ms = u64::try_from(READER_JOIN_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                timeout_ms = millis(READER_JOIN_TIMEOUT),
                 "supervisor: PTY reader did not reach EOF in time; exiting without it"
             );
-            return;
+            return false;
         }
         tokio::time::sleep(READER_JOIN_POLL).await;
     }
+    true
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// When the shutdown watchdog checks progress, measured from the child's exit.
+const SHUTDOWN_WATCHDOG_DEADLINES: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// The shutdown step `run` is in, from the child's exit to `exiting`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum ShutdownStep {
+    Grace = 0,
+    Aborts = 1,
+    ResizeTask = 2,
+    MasterDrop = 3,
+    ReaderWait = 4,
+    Exiting = 5,
+}
+
+/// Name of the step a stored step counter value stands for.
+fn shutdown_step_name(step: u8) -> &'static str {
+    match step {
+        0 => "grace",
+        1 => "aborts",
+        2 => "resize_task",
+        3 => "master_drop",
+        4 => "reader_wait",
+        5 => "exiting",
+        _ => "unknown",
+    }
+}
+
+/// Whether shutdown is stalled when a deadline passes at `step`: it is
+/// stalled until it has reached `exiting`.
+fn shutdown_stalled(step: u8) -> bool {
+    step < ShutdownStep::Exiting as u8
+}
+
+/// Watches the shutdown sequence from a plain OS thread, so it still reports
+/// when the tokio runtime makes no progress (the tokio sleeps in `run` cannot).
+/// The thread is detached: it never delays exit and never exits the process.
+struct ShutdownWatchdog {
+    step: Arc<AtomicU8>,
+}
+
+impl ShutdownWatchdog {
+    fn start(deadlines: Vec<Duration>) -> Self {
+        let step = Arc::new(AtomicU8::new(ShutdownStep::Grace as u8));
+        let watched = Arc::clone(&step);
+        let spawned = std::thread::Builder::new()
+            .name("shutdown-watchdog".into())
+            .spawn(move || {
+                watch_shutdown(&watched, &deadlines);
+            });
+        if let Err(err) = spawned {
+            warn!(?err, "supervisor: could not start the shutdown watchdog");
+        }
+        Self { step }
+    }
+
+    fn advance(&self, step: ShutdownStep) {
+        self.step.store(step as u8, Ordering::Release);
+    }
+}
+
+/// Sleep until each deadline (measured from the call) and warn if shutdown
+/// has not reached `exiting` by then. Returns the steps it warned at.
+fn watch_shutdown(step: &AtomicU8, deadlines: &[Duration]) -> Vec<&'static str> {
+    let started = Instant::now();
+    let mut stalled_at = Vec::new();
+    for deadline in deadlines {
+        std::thread::sleep(deadline.saturating_sub(started.elapsed()));
+        let current = step.load(Ordering::Acquire);
+        if !shutdown_stalled(current) {
+            break;
+        }
+        let name = shutdown_step_name(current);
+        warn!(
+            step = name,
+            after_ms = millis(*deadline),
+            "supervisor: shutdown stalled"
+        );
+        stalled_at.push(name);
+    }
+    stalled_at
 }
 
 /// Convert a stored socket-name string into an `interprocess` `Name`. The
@@ -920,3 +1034,62 @@ const _: () = {
     // Sanity: re-export the version we negotiate against.
     assert!(TRACER_VERSION > 0);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_STEPS: [ShutdownStep; 6] = [
+        ShutdownStep::Grace,
+        ShutdownStep::Aborts,
+        ShutdownStep::ResizeTask,
+        ShutdownStep::MasterDrop,
+        ShutdownStep::ReaderWait,
+        ShutdownStep::Exiting,
+    ];
+
+    #[test]
+    fn shutdown_steps_have_their_names() {
+        let names: Vec<_> = ALL_STEPS
+            .iter()
+            .map(|step| shutdown_step_name(*step as u8))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "grace",
+                "aborts",
+                "resize_task",
+                "master_drop",
+                "reader_wait",
+                "exiting"
+            ]
+        );
+        assert_eq!(shutdown_step_name(200), "unknown");
+    }
+
+    #[test]
+    fn shutdown_is_stalled_until_it_reaches_exiting() {
+        for step in &ALL_STEPS[..5] {
+            assert!(shutdown_stalled(*step as u8), "{step:?} counts as stalled");
+        }
+        assert!(!shutdown_stalled(ShutdownStep::Exiting as u8));
+    }
+
+    #[test]
+    fn watchdog_warns_at_every_deadline_while_stalled() {
+        let step = AtomicU8::new(ShutdownStep::ReaderWait as u8);
+        let deadlines = [Duration::from_millis(10), Duration::from_millis(30)];
+        assert_eq!(
+            watch_shutdown(&step, &deadlines),
+            ["reader_wait", "reader_wait"]
+        );
+    }
+
+    #[test]
+    fn watchdog_is_silent_once_shutdown_reaches_exiting() {
+        let step = AtomicU8::new(ShutdownStep::Exiting as u8);
+        let deadlines = [Duration::from_millis(10), Duration::from_millis(30)];
+        assert!(watch_shutdown(&step, &deadlines).is_empty());
+    }
+}
