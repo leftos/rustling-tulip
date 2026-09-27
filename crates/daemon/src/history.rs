@@ -41,6 +41,9 @@ const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
 /// The longest a recovered shell waits for its prompt before typing
 /// `claude --resume <id>`; it types sooner once the prompt has printed.
 const SHELL_RESUME_DELAY_MS: u32 = 2000;
+/// The tracer-log importer's revision, stamped on every entry it writes. An
+/// unrecovered import from an older revision is imported again.
+pub const IMPORT_REV: u32 = 1;
 /// Program file stems an imported plain-shell session may have run.
 const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
 
@@ -114,6 +117,8 @@ pub fn entry_from_record(
         recovered_at: None,
         skip_permissions: None,
         model: None,
+        end_time_known: true,
+        import_rev: 0,
     }
 }
 
@@ -272,9 +277,12 @@ pub struct Registered<'a> {
 /// Import the sessions that ended before the daemon kept a history, from
 /// their `<config>/logs/tracer-<id>.log` files modified within
 /// [`HISTORY_RETENTION`] of `now`. A session in `skip` (a live or abandoned
-/// sidecar) or already in the history is left alone, and so is a log naming
-/// no program or one that is neither Claude nor a known shell. Returns how
-/// many entries were written.
+/// sidecar) is left alone, and so is one already in the history unless it is
+/// an unrecovered import from before [`IMPORT_REV`], which is imported again.
+/// A log naming no program or one that is neither Claude nor a known shell is
+/// skipped. A session with no end line in the daemon logs gets the log's
+/// modified time as `ended_at` and `end_time_known: false`. Returns how many
+/// entries were written.
 pub fn import_tracer_logs(
     dirs: &Dirs,
     registered: &Registered<'_>,
@@ -296,18 +304,27 @@ pub fn import_tracer_logs(
         let Some(id) = tracer_log_id(&path) else {
             continue;
         };
-        if skip.contains(&id) || entry_path(dirs, &id).exists() {
+        if skip.contains(&id) || !is_importable(&entry_path(dirs, &id)) {
             continue;
         }
         let Some((modified, summary)) = read_recent_tracer_log(&path, now) else {
             continue;
         };
         let ends = end_times.get_or_insert_with(|| daemon_end_times(&logs_dir));
-        let ended_at = ends.get(&id).copied().unwrap_or(modified);
-        let Some(entry) = entry_from_tracer_log(&id, &summary, ended_at, registered) else {
+        let end = match ends.get(&id) {
+            Some(at) => ImportEnd {
+                at: *at,
+                known: true,
+            },
+            None => ImportEnd {
+                at: modified,
+                known: false,
+            },
+        };
+        let Some(entry) = entry_from_tracer_log(&id, &summary, end, registered) else {
             continue;
         };
-        match write_if_absent(dirs, &entry) {
+        match write_import(dirs, &entry) {
             Ok(true) => imported += 1,
             Ok(false) => {}
             Err(err) => warn!(?err, session_id = %id, "failed to import tracer log"),
@@ -317,6 +334,44 @@ pub fn import_tracer_logs(
         info!(imported, "imported ended sessions from tracer logs");
     }
     imported
+}
+
+/// Whether the importer may write the history file at `path`: there is none,
+/// or it holds an unrecovered import from before [`IMPORT_REV`]. A recorded
+/// entry, a recovered one, a current import and an unreadable file are kept.
+fn is_importable(path: &Path) -> bool {
+    if !path.exists() {
+        return true;
+    }
+    match read_entry(path) {
+        Ok(existing) => {
+            existing.source == HistorySource::TracerLog
+                && existing.import_rev < IMPORT_REV
+                && existing.recovered_at.is_none()
+        }
+        Err(err) => {
+            warn!(?err, "keeping unreadable session history file");
+            false
+        }
+    }
+}
+
+/// Write an imported `entry` when [`is_importable`] still allows it, checked
+/// under the write lock. Returns `Ok(true)` when this call wrote it.
+fn write_import(dirs: &Dirs, entry: &HistoryEntry) -> anyhow::Result<bool> {
+    let _guard = lock(&WRITE_LOCK);
+    if !is_importable(&entry_path(dirs, &entry.session_id)) {
+        return Ok(false);
+    }
+    write_entry(dirs, entry)?;
+    Ok(true)
+}
+
+/// When an imported session ended, and whether a daemon log said so.
+#[derive(Debug, Clone, Copy)]
+struct ImportEnd {
+    at: DateTime<Utc>,
+    known: bool,
 }
 
 /// `<id>` of a `tracer-<id>.log` file name.
@@ -392,7 +447,7 @@ fn end_from_log(end: TracerLogEnd) -> SessionEnd {
 fn entry_from_tracer_log(
     id: &str,
     summary: &TracerLogSummary,
-    ended_at: DateTime<Utc>,
+    end: ImportEnd,
     registered: &Registered<'_>,
 ) -> Option<HistoryEntry> {
     let stem = program_stem(&summary.program)?;
@@ -424,7 +479,7 @@ fn entry_from_tracer_log(
         current_cwd: (!is_claude).then_some(cwd),
         program_name: Some(program_name),
         started_at: Some(summary.started_at),
-        ended_at,
+        ended_at: end.at,
         end: end_from_log(summary.end),
         claude_session_id: None,
         source: HistorySource::TracerLog,
@@ -440,6 +495,8 @@ fn entry_from_tracer_log(
         } else {
             None
         },
+        end_time_known: end.known,
+        import_rev: IMPORT_REV,
     })
 }
 
@@ -539,10 +596,11 @@ pub fn history_items(
     repos: &[RepoEntry],
     claude_home: Option<&Path>,
 ) -> Vec<SessionHistoryItem> {
+    let now = Utc::now();
     read_all(dirs)
         .into_iter()
         .filter(|entry| entry.mode != SessionMode::Headless)
-        .map(|entry| history_item(entry, repos, claude_home))
+        .map(|entry| history_item(entry, repos, claude_home, now))
         .collect()
 }
 
@@ -550,10 +608,11 @@ fn history_item(
     entry: HistoryEntry,
     repos: &[RepoEntry],
     claude_home: Option<&Path>,
+    now: DateTime<Utc>,
 ) -> SessionHistoryItem {
     let folder = entry_folder(&entry).map(str::to_owned);
     let candidates = match (claude_home, folder.as_deref()) {
-        (Some(home), Some(folder)) => conversation_candidates(&entry, home, folder),
+        (Some(home), Some(folder)) => conversation_candidates(&entry, home, folder, now),
         _ => Vec::new(),
     };
     let folder_is_git_repo = folder
@@ -573,21 +632,19 @@ fn history_item(
 
 /// The entry's own conversation when it knows one and its transcript is
 /// still there; otherwise the transcripts written in `folder` while the
-/// session ran.
+/// session ran, up to `now` when its end time is unknown.
 fn conversation_candidates(
     entry: &HistoryEntry,
     claude_home: &Path,
     folder: &str,
+    now: DateTime<Utc>,
 ) -> Vec<ConversationCandidate> {
     let found = if let Some(id) = &entry.claude_session_id {
         transcripts::known_conversation(claude_home, folder, id)
             .into_iter()
             .collect()
     } else {
-        let start = entry
-            .started_at
-            .unwrap_or(entry.ended_at - UNKNOWN_START_LOOKBACK);
-        let end = entry.ended_at + CANDIDATE_GRACE;
+        let (start, end) = candidate_window(entry, now);
         transcripts::candidates(claude_home, folder, start, end, CANDIDATE_LIMIT)
     };
     found
@@ -598,6 +655,21 @@ fn conversation_candidates(
             title: c.title,
         })
         .collect()
+}
+
+/// The span a session's conversation may have been written in. A known end
+/// reaches [`CANDIDATE_GRACE`] past it; an unknown one reaches `now`, from the
+/// start or, with no start either, from [`HISTORY_RETENTION`] before `now`.
+fn candidate_window(entry: &HistoryEntry, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+    if entry.end_time_known {
+        let start = entry
+            .started_at
+            .unwrap_or(entry.ended_at - UNKNOWN_START_LOOKBACK);
+        (start, entry.ended_at + CANDIDATE_GRACE)
+    } else {
+        let start = entry.started_at.unwrap_or(now - HISTORY_RETENTION);
+        (start, now)
+    }
 }
 
 /// What recovering one history entry does: register `register_repo` first
@@ -1264,7 +1336,10 @@ mod import_tests {
 
         import(&dirs, &[], &[]);
 
-        assert_eq!(only(&dirs, YAAT_ID).ended_at, ts("2026-09-27T18:29:06Z"));
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.ended_at, ts("2026-09-27T18:29:06Z"));
+        assert!(entry.end_time_known, "a daemon-log end line is a known end");
+        assert_eq!(entry.import_rev, IMPORT_REV);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -1279,7 +1354,73 @@ mod import_tests {
 
         import(&dirs, &[], &[]);
 
-        assert_eq!(only(&dirs, YAAT_ID).ended_at, mtime);
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.ended_at, mtime);
+        assert!(!entry.end_time_known, "no end line leaves the end unknown");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// An imported entry for `id` as an importer of revision `rev` wrote it.
+    fn imported(id: &str, rev: u32, label: &str) -> HistoryEntry {
+        let mut e = entry_from_record(
+            &super::test_support::record(id, SessionMode::Interactive),
+            SessionEnd::TracerLost,
+            Utc::now(),
+        );
+        e.source = HistorySource::TracerLog;
+        e.import_rev = rev;
+        e.label = label.to_owned();
+        e
+    }
+
+    #[test]
+    fn stale_unrecovered_import_is_replaced() {
+        let dirs = scratch_dirs("reimport-stale");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        write_if_absent(&dirs, &imported(YAAT_ID, 0, "stale")).expect("write stale");
+
+        assert_eq!(import(&dirs, &[], &[]), 1);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.import_rev, IMPORT_REV);
+        assert_eq!(
+            entry.label, "",
+            "the importer's entry replaced the stale one"
+        );
+        assert!(!entry.end_time_known);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn recovered_record_and_current_entries_are_not_reimported() {
+        let dirs = scratch_dirs("reimport-kept");
+        let mut recovered = imported(YAAT_ID, 0, "recovered");
+        recovered.recovered_at = Some(Utc::now());
+        let recorded = {
+            let mut e = entry_from_record(
+                &super::test_support::record(PWSH_ID, SessionMode::Interactive),
+                SessionEnd::TracerLost,
+                Utc::now(),
+            );
+            e.label = "recorded".to_owned();
+            e
+        };
+        let current = imported(STOP_ID, IMPORT_REV, "current");
+        for (id, e) in [
+            (YAAT_ID, &recovered),
+            (PWSH_ID, &recorded),
+            (STOP_ID, &current),
+        ] {
+            write_log(&dirs, &format!("tracer-{id}.log"), &YAAT_LOG);
+            write_if_absent(&dirs, e).expect("write existing");
+        }
+
+        assert_eq!(import(&dirs, &[], &[]), 0);
+
+        assert_eq!(only(&dirs, YAAT_ID).label, "recovered");
+        assert_eq!(only(&dirs, PWSH_ID).label, "recorded");
+        assert_eq!(only(&dirs, PWSH_ID).source, HistorySource::Record);
+        assert_eq!(only(&dirs, STOP_ID).label, "current");
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
@@ -1799,5 +1940,78 @@ mod recovery_tests {
         assert_eq!(ids, ["within-a-day"]);
         assert!(!items[0].folder_is_git_repo);
         let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Candidate ids for one entry `e` alone in a fresh history.
+    fn candidate_ids(
+        tag: &str,
+        e: &HistoryEntry,
+        transcripts: &[(&str, DateTime<Utc>)],
+    ) -> Vec<String> {
+        let dirs = scratch_dirs(tag);
+        let home = dirs.config.join("claude-home");
+        let folder = e.primary_cwd.clone().expect("folder");
+        for (id, at) in transcripts {
+            write_transcript(&home, &folder, id, *at);
+        }
+        write_if_absent(&dirs, e).expect("write entry");
+        let items = history_items(&dirs, &[], Some(&home));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+        items[0].candidates.iter().map(|c| c.id.clone()).collect()
+    }
+
+    #[test]
+    fn unknown_end_searches_up_to_now() {
+        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).expect("time");
+        let started = now - TimeDelta::hours(6);
+        let mut e = history_entry("s", SessionMode::PlainShell, r"D:\unknown-end", started);
+        e.started_at = Some(started);
+        e.ended_at = started + TimeDelta::seconds(5);
+        e.end_time_known = false;
+        let transcripts = [
+            ("hours-later", now - TimeDelta::hours(2)),
+            ("before-start", started - TimeDelta::hours(1)),
+        ];
+
+        assert_eq!(
+            candidate_ids("items-unknown-end", &e, &transcripts),
+            ["hours-later"]
+        );
+    }
+
+    #[test]
+    fn unknown_end_without_a_start_searches_the_retention() {
+        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).expect("time");
+        let mut e = history_entry("s", SessionMode::PlainShell, r"D:\unknown-both", now);
+        e.started_at = None;
+        e.ended_at = now - TimeDelta::days(3);
+        e.end_time_known = false;
+        let transcripts = [
+            ("six-days-ago", now - TimeDelta::days(6)),
+            ("eight-days-ago", now - TimeDelta::days(8)),
+        ];
+
+        assert_eq!(
+            candidate_ids("items-unknown-both", &e, &transcripts),
+            ["six-days-ago"]
+        );
+    }
+
+    #[test]
+    fn known_end_window_stops_at_the_grace() {
+        let now = DateTime::from_timestamp(Utc::now().timestamp(), 0).expect("time");
+        let ended = now - TimeDelta::hours(6);
+        let e = history_entry("s", SessionMode::PlainShell, r"D:\known-end", ended);
+        assert!(e.end_time_known);
+        let transcripts = [
+            ("in-session", ended - TimeDelta::minutes(30)),
+            ("in-grace", ended + TimeDelta::minutes(1)),
+            ("hours-later", now - TimeDelta::hours(2)),
+        ];
+
+        assert_eq!(
+            candidate_ids("items-known-end", &e, &transcripts),
+            ["in-grace", "in-session"]
+        );
     }
 }

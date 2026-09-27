@@ -601,6 +601,15 @@ pub struct HistoryEntry {
     /// The model the session ran, when known without a `spawn_config`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// False when an imported session's end time could not be found and
+    /// `ended_at` is only the tracer log's last write, a sort key. Absent
+    /// (every recorded entry) means true.
+    #[serde(default = "default_true")]
+    pub end_time_known: bool,
+    /// The importer revision that wrote an imported entry; 0 for recorded
+    /// entries and for imports from before revisions were stamped.
+    #[serde(default)]
+    pub import_rev: u32,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -5660,7 +5669,8 @@ mod tests {
                 "workspace_id":"ws1",
                 "primary_cwd":"D:\\yaat","current_cwd":null,"program_name":"claude",
                 "started_at":"2026-09-27T11:09:41Z","ended_at":"2026-09-27T18:29:06Z",
-                "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null},
+                "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null,
+                "end_time_known":true,"import_rev":1},
        "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
        "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
     ]}"#;
@@ -5693,7 +5703,7 @@ mod tests {
                 "current_cwd":null,"program_name":"claude","started_at":null,
                 "ended_at":"2026-09-27T18:29:06Z","end":{"type":"tracer_lost"},
                 "claude_session_id":null,"source":"tracer_log","recovered_at":null,
-                "skip_permissions":true,"model":"opus"}"#,
+                "skip_permissions":true,"model":"opus","end_time_known":true,"import_rev":0}"#,
         );
         assert_eq!(entry.skip_permissions, Some(true));
         assert_eq!(entry.model.as_deref(), Some("opus"));
@@ -5704,6 +5714,33 @@ mod tests {
         };
         assert_eq!(items[0].entry.skip_permissions, None);
         assert_eq!(items[0].entry.model, None);
+    }
+
+    const IMPORTED_ENTRY_PREFIX: &str = r#"{"session_id":"s1","label":"","kind":"standalone","mode":"plain_shell",
+        "agent":"claude","spawn_config":null,"members":[],"workspace_id":null,"primary_cwd":"D:\\",
+        "current_cwd":"D:\\","program_name":"pwsh","started_at":"2026-09-27T10:31:00Z",
+        "ended_at":"2026-09-27T10:31:05Z","end":{"type":"tracer_lost"},"claude_session_id":null,
+        "source":"tracer_log","recovered_at":null"#;
+
+    #[test]
+    fn history_entry_defaults_end_time_known_and_import_rev_when_absent() {
+        let json = format!("{IMPORTED_ENTRY_PREFIX}}}");
+        let entry: HistoryEntry = serde_json::from_str(&json).expect("decode");
+        assert!(entry.end_time_known, "absent end_time_known means true");
+        assert_eq!(entry.import_rev, 0);
+        let encoded = serde_json::to_value(&entry).expect("encode");
+        assert_eq!(encoded["end_time_known"], serde_json::json!(true));
+        assert_eq!(encoded["import_rev"], serde_json::json!(0));
+        let again: HistoryEntry = serde_json::from_value(encoded).expect("decode again");
+        assert_eq!(again, entry);
+    }
+
+    #[test]
+    fn history_entry_round_trips_end_time_known_and_import_rev() {
+        let json = format!(r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":false,"import_rev":1}}"#);
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert!(!entry.end_time_known);
+        assert_eq!(entry.import_rev, 1);
     }
 
     #[test]

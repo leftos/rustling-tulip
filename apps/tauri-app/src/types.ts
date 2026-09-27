@@ -834,6 +834,11 @@ export interface SessionHistoryEntry {
   // whose spawn_config carries them.
   skip_permissions?: boolean;
   model?: string;
+  // False when an imported session's end time was not found; ended_at is then
+  // only the tracer log's last write.
+  end_time_known: boolean;
+  // The importer revision that wrote an imported entry; 0 for recorded ones.
+  import_rev: number;
 }
 
 // A claude conversation the session may have been running.
