@@ -84,7 +84,8 @@ pub async fn spawn(
         "tracer_client: spawning tracer"
     );
 
-    let tracer_pid = spawn_tracer_process(&tracer_path, &spec, &pipe)?;
+    let log_path = tracer_log_path(dirs, &spec.session_id);
+    let tracer_pid = spawn_tracer_process(&tracer_path, &spec, &pipe, log_path.as_deref())?;
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
     let client = connect_with_retry(&pipe).await?;
@@ -267,6 +268,7 @@ fn spawn_tracer_process(
     tracer: &Path,
     spec: &PtySpawnSpec,
     pipe_name: &str,
+    log_path: Option<&Path>,
 ) -> anyhow::Result<u32> {
     use std::os::windows::process::CommandExt;
     /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
@@ -291,11 +293,10 @@ fn spawn_tracer_process(
     }
     // Per-session tracer log so we can debug spawn issues for things like
     // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
-    // Best-effort: if the log dir can't be resolved (no APPDATA on a weird
-    // host, locked filesystem, etc.) we silently skip — losing logs is not
-    // a reason to fail a session spawn.
-    if let Some(log_path) = tracer_log_path(&spec.session_id) {
-        cmd.env("RUSTLING_TULIP_TRACER_LOG", &log_path);
+    // Best-effort: if the log dir can't be created we skip the log — losing
+    // logs is not a reason to fail a session spawn.
+    if let Some(log_path) = log_path {
+        cmd.env("RUSTLING_TULIP_TRACER_LOG", log_path);
     }
     // Trailing program-and-args: program first, then its args. portable-pty
     // expects this shape on the tracer side.
@@ -314,19 +315,13 @@ fn spawn_tracer_process(
     Ok(child.id())
 }
 
-/// Build the per-session tracer log path under `<config>/logs/`. Uses the
-/// same `directories` resolution as `paths::Dirs` so both processes see
-/// the same root.
-fn tracer_log_path(session_id: &str) -> Option<PathBuf> {
-    let dir = if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
-        && !value.is_empty()
-    {
-        PathBuf::from(value).join("logs")
-    } else {
-        let pd = directories::ProjectDirs::from("dev", "leftos", "rustling-tulip")?;
-        pd.config_dir().join("logs")
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
+/// The per-session tracer log path, `<dirs.config>/logs/tracer-<id>.log`,
+/// where the history importer reads it back. `None` when the logs dir can't
+/// be created.
+fn tracer_log_path(dirs: &Dirs, session_id: &str) -> Option<PathBuf> {
+    let dir = dirs.config.join("logs");
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        warn!(?err, dir = %dir.display(), "cannot create tracer log dir; spawning without a tracer log");
         return None;
     }
     Some(dir.join(format!("tracer-{session_id}.log")))
@@ -337,6 +332,7 @@ fn spawn_tracer_process(
     tracer: &Path,
     spec: &PtySpawnSpec,
     pipe_name: &str,
+    log_path: Option<&Path>,
 ) -> anyhow::Result<u32> {
     let mut cmd = std::process::Command::new(tracer);
     cmd.arg("--session-id")
@@ -352,8 +348,8 @@ fn spawn_tracer_process(
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
-    if let Some(log_path) = tracer_log_path(&spec.session_id) {
-        cmd.env("RUSTLING_TULIP_TRACER_LOG", &log_path);
+    if let Some(log_path) = log_path {
+        cmd.env("RUSTLING_TULIP_TRACER_LOG", log_path);
     }
     cmd.arg(&spec.program);
     for arg in &spec.args {
@@ -899,6 +895,14 @@ mod tests {
         let mut line = serde_json::to_string(response).expect("encode tracer frame");
         line.push('\n');
         line
+    }
+
+    #[test]
+    fn tracer_log_path_is_under_the_given_config_dir() {
+        let dirs = crate::history::test_support::scratch_dirs("tracer-log-path");
+        let path = super::tracer_log_path(&dirs, "abc-123").expect("log path");
+        assert_eq!(path, dirs.config.join("logs").join("tracer-abc-123.log"));
+        assert!(dirs.config.join("logs").is_dir(), "logs dir is created");
     }
 
     #[tokio::test]

@@ -7,12 +7,15 @@ import type {
 } from "../types";
 import {
   badgeLabel,
+  defaultConversations,
   disabledReason,
+  endedText,
   endReasonLabel,
   formatClock,
   groupHistory,
   isPreTicked,
   OTHER_GROUP_TITLE,
+  otherToggleLabel,
   recoverAsOptions,
   recoverBadgeCount,
 } from "./recoverModel";
@@ -49,6 +52,8 @@ function item(
     candidates?: SessionHistoryItem["candidates"];
     folderIsGitRepo?: boolean;
     folderRepoId?: string | null;
+    endTimeKnown?: boolean;
+    folder?: string;
   } = {},
 ): SessionHistoryItem {
   return {
@@ -62,7 +67,7 @@ function item(
         overrides.spawnConfig === undefined ? SPAWN_CONFIG : overrides.spawnConfig,
       members: [],
       workspace_id: null,
-      primary_cwd: "D:\\yaat",
+      primary_cwd: overrides.folder ?? "D:\\yaat",
       current_cwd: null,
       program_name: "claude",
       started_at: "2026-09-27T11:00:00Z",
@@ -71,6 +76,8 @@ function item(
       claude_session_id: null,
       source: "tracer_log",
       recovered_at: overrides.recoveredAt ?? null,
+      end_time_known: overrides.endTimeKnown ?? true,
+      import_rev: 1,
     },
     candidates: overrides.candidates ?? [CANDIDATE],
     folder_is_git_repo: overrides.folderIsGitRepo ?? true,
@@ -297,5 +304,131 @@ describe("endReasonLabel", () => {
     expect(
       endReasonLabel({ type: "from_the_future" } as unknown as SessionEnd),
     ).toBe("ended");
+  });
+});
+
+describe("lost at an unknown time", () => {
+  const unknown = (id: string, endedAt: string, recoveredAt?: string) =>
+    item(id, endedAt, { endTimeKnown: false, recoveredAt: recoveredAt ?? null });
+
+  it("puts every unrecovered one in one group, first", () => {
+    const groups = groupHistory([
+      item("known", "2026-09-27T18:29:06Z"),
+      unknown("u1", "2026-09-27T10:31:00Z"),
+      unknown("u2", "2026-09-26T22:27:00Z"),
+      unknown("u3", "2026-09-27T04:07:00Z"),
+    ]);
+    expect(groups.map((g) => g.title)).toEqual([
+      "3 sessions lost (time unknown)",
+      `1 session lost at ${formatClock(new Date("2026-09-27T18:29:06Z"))}`,
+    ]);
+    expect(ids(groups[0]!)).toEqual(["u1", "u3", "u2"]);
+    expect(groups[0]!.items.every(isPreTicked)).toBe(true);
+  });
+
+  it("keeps recovered ones under Other", () => {
+    const groups = groupHistory([
+      unknown("u1", "2026-09-27T10:31:00Z"),
+      unknown("done", "2026-09-27T10:30:00Z", "2026-09-27T12:00:00Z"),
+    ]);
+    expect(groups.map((g) => g.title)).toEqual([
+      "1 session lost (time unknown)",
+      OTHER_GROUP_TITLE,
+    ]);
+    expect(ids(groups[1]!)).toEqual(["done"]);
+  });
+
+  it("keeps 60 s bursts for known times around unknown ones", () => {
+    const groups = groupHistory([
+      item("a", "2026-09-27T18:30:00Z"),
+      unknown("u", "2026-09-27T18:29:30Z"),
+      item("b", "2026-09-27T18:29:10Z"),
+    ]);
+    expect(groups.map(ids)).toEqual([["u"], ["a", "b"]]);
+  });
+
+  it("says the time is unknown in the row", () => {
+    const now = new Date("2026-09-27T19:00:00Z");
+    expect(endedText(unknown("u", "2026-09-27T10:31:00Z"), now)).toBe(
+      "lost · time unknown",
+    );
+    const known = item("k", "2026-09-27T18:29:06Z");
+    expect(endedText(known, now)).toBe(
+      `${formatClock(new Date("2026-09-27T18:29:06Z"))} · lost`,
+    );
+  });
+
+  it("counts toward the badge", () => {
+    expect(
+      recoverBadgeCount([
+        unknown("u", "2026-09-27T10:31:00Z"),
+        item("k", "2026-09-27T18:29:06Z"),
+      ]),
+    ).toBe(2);
+  });
+});
+
+describe("defaultConversations", () => {
+  const newer = {
+    id: "conv-newer",
+    last_active: "2026-09-27T18:00:00Z",
+    title: "newer",
+  };
+  const older = {
+    id: "conv-older",
+    last_active: "2026-09-27T12:00:00Z",
+    title: "older",
+  };
+
+  it("gives two shells in one folder different conversations", () => {
+    const rows = [
+      item("s1", "2026-09-27T18:29:06Z", {
+        mode: "plain_shell",
+        folder: "D:\\",
+        candidates: [newer, older],
+      }),
+      item("s2", "2026-09-27T18:29:05Z", {
+        mode: "plain_shell",
+        folder: "d:/",
+        candidates: [newer, older],
+      }),
+    ];
+    const defaults = defaultConversations(rows);
+    expect(defaults.get("s1")).toBe("conv-newer");
+    expect(defaults.get("s2")).toBe("conv-older");
+  });
+
+  it("keeps the newest when every candidate is taken", () => {
+    const rows = ["s1", "s2", "s3"].map((id) =>
+      item(id, "2026-09-27T18:29:06Z", { candidates: [newer, older] }),
+    );
+    expect([...defaultConversations(rows).values()]).toEqual([
+      "conv-newer",
+      "conv-older",
+      "conv-newer",
+    ]);
+  });
+
+  it("leaves a single row on its newest", () => {
+    const rows = [item("s1", "2026-09-27T18:29:06Z", { candidates: [newer, older] })];
+    expect(defaultConversations(rows).get("s1")).toBe("conv-newer");
+  });
+
+  it("does not share across folders", () => {
+    const rows = [
+      item("a", "2026-09-27T18:29:06Z", { folder: "D:\\a", candidates: [newer] }),
+      item("b", "2026-09-27T18:29:05Z", { folder: "D:\\b", candidates: [newer] }),
+    ];
+    const defaults = defaultConversations(rows);
+    expect(defaults.get("a")).toBe("conv-newer");
+    expect(defaults.get("b")).toBe("conv-newer");
+  });
+});
+
+describe("otherToggleLabel", () => {
+  it("names the count and the direction", () => {
+    expect(otherToggleLabel(4, false)).toBe("Show 4 other recent sessions");
+    expect(otherToggleLabel(4, true)).toBe("Hide 4 other recent sessions");
+    expect(otherToggleLabel(1, false)).toBe("Show 1 other recent session");
   });
 });

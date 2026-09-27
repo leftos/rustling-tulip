@@ -15,14 +15,15 @@ import type {
 import { useAutoFocus, useEscape, useFocusReturn } from "../utils/a11y";
 import {
   candidateLabel,
+  defaultConversations,
   disabledReason,
-  endReasonLabel,
-  formatEnded,
+  endedText,
   groupHistory,
   hasRecoverAsChoice,
   historyLabel,
   historyWhere,
   isPreTicked,
+  otherToggleLabel,
   recoverAsOptions,
   type RecoverGroup,
 } from "../utils/recoverModel";
@@ -63,6 +64,7 @@ export default function RecoverDialog({
   // Set after a partial failure: only these rows stay listed, with their error.
   const [failures, setFailures] = useState<Map<string, string> | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [showOther, setShowOther] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
 
   useEscape(onClose);
@@ -80,12 +82,25 @@ export default function RecoverDialog({
       .filter((g) => g.items.length > 0);
   }, [items, failures]);
 
+  // After a partial failure every remaining row is shown, Other included.
+  const otherShown = showOther || failures !== null;
+  const isShown = useCallback(
+    (group: RecoverGroup) => group.key !== "other" || otherShown,
+    [otherShown],
+  );
+
+  const defaults = useMemo(
+    () => defaultConversations(groups.flatMap((g) => g.items)),
+    [groups],
+  );
+
   const selectable = useMemo(
     () =>
       groups
+        .filter(isShown)
         .flatMap((g) => g.items)
         .filter((i) => disabledReason(i) === null),
-    [groups],
+    [groups, isShown],
   );
   const selected = selectable.filter((i) => ticked.has(i.entry.session_id));
 
@@ -106,7 +121,7 @@ export default function RecoverDialog({
     (item: SessionHistoryItem): RecoverItem => {
       const id = item.entry.session_id;
       const conversationId =
-        conversation[id] ?? item.candidates[0]?.id ?? null;
+        conversation[id] ?? defaults.get(id) ?? item.candidates[0]?.id ?? null;
       if (!hasRecoverAsChoice(item)) {
         return { history_id: id, conversation_id: conversationId, how: { type: "claude" } };
       }
@@ -119,7 +134,7 @@ export default function RecoverDialog({
         how: chosen?.how ?? { type: "shell" },
       };
     },
-    [conversation, recoverAs, repos],
+    [conversation, defaults, recoverAs, repos],
   );
 
   const recover = useCallback(async () => {
@@ -186,30 +201,47 @@ export default function RecoverDialog({
           ) : (
             groups.map((group) => (
               <section key={group.key} className="recover-group">
-                <h3 className="recover-group-title">{group.title}</h3>
-                <ul className="recover-list">
-                  {group.items.map((item) => (
-                    <RecoverRow
-                      key={item.entry.session_id}
-                      item={item}
-                      repos={repos}
-                      workspaces={workspaces}
-                      now={now}
-                      busy={busy}
-                      ticked={ticked.has(item.entry.session_id)}
-                      onToggle={toggle}
-                      conversationId={conversation[item.entry.session_id]}
-                      onConversation={(id, value) =>
-                        setConversation((c) => ({ ...c, [id]: value }))
-                      }
-                      recoverAsKey={recoverAs[item.entry.session_id]}
-                      onRecoverAs={(id, value) =>
-                        setRecoverAs((c) => ({ ...c, [id]: value }))
-                      }
-                      failure={failures?.get(item.entry.session_id) ?? null}
-                    />
-                  ))}
-                </ul>
+                {group.key === "other" && failures === null ? (
+                  <button
+                    type="button"
+                    className="link recover-group-title"
+                    onClick={() => setShowOther((shown) => !shown)}
+                    aria-expanded={otherShown}
+                    data-testid="recover-other-toggle"
+                  >
+                    {otherToggleLabel(group.items.length, otherShown)}
+                  </button>
+                ) : (
+                  <h3 className="recover-group-title">{group.title}</h3>
+                )}
+                {isShown(group) && (
+                  <ul className="recover-list">
+                    {group.items.map((item) => (
+                      <RecoverRow
+                        key={item.entry.session_id}
+                        item={item}
+                        repos={repos}
+                        workspaces={workspaces}
+                        now={now}
+                        busy={busy}
+                        ticked={ticked.has(item.entry.session_id)}
+                        onToggle={toggle}
+                        conversationId={
+                          conversation[item.entry.session_id] ??
+                          defaults.get(item.entry.session_id)
+                        }
+                        onConversation={(id, value) =>
+                          setConversation((c) => ({ ...c, [id]: value }))
+                        }
+                        recoverAsKey={recoverAs[item.entry.session_id]}
+                        onRecoverAs={(id, value) =>
+                          setRecoverAs((c) => ({ ...c, [id]: value }))
+                        }
+                        failure={failures?.get(item.entry.session_id) ?? null}
+                      />
+                    ))}
+                  </ul>
+                )}
               </section>
             ))
           )}
@@ -279,7 +311,6 @@ function RecoverRow({
   const reason = disabledReason(item);
   const disabled = reason !== null || busy;
   const options = hasRecoverAsChoice(item) ? recoverAsOptions(item, repos) : [];
-  const ended = formatEnded(new Date(item.entry.ended_at), now);
   return (
     <li
       className={`recover-row${reason !== null ? " recover-row-disabled" : ""}`}
@@ -295,8 +326,7 @@ function RecoverRow({
         />
         <span className="recover-row-label">{historyLabel(item)}</span>
         <span className="muted small recover-row-meta">
-          {historyWhere(item, repos, workspaces)} · {ended} ·{" "}
-          {endReasonLabel(item.entry.end)}
+          {historyWhere(item, repos, workspaces)} · {endedText(item, now)}
         </span>
       </label>
       {reason === null && (

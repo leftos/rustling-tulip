@@ -66,25 +66,44 @@ export function formatClock(date: Date): string {
   return `${hh}:${mm}`;
 }
 
+function sessionCount(n: number): string {
+  return `${n} ${n === 1 ? "session" : "sessions"}`;
+}
+
 function lostGroupTitle(items: SessionHistoryItem[]): string {
   const first = items[0];
   const at = first ? formatClock(new Date(first.entry.ended_at)) : "";
-  const noun = items.length === 1 ? "session" : "sessions";
-  return `${items.length} ${noun} lost at ${at}`;
+  return `${sessionCount(items.length)} lost at ${at}`;
+}
+
+/// An unrecovered lost session whose end time the daemon could not find.
+function isLostAtUnknownTime(item: SessionHistoryItem): boolean {
+  return (
+    isLost(item) &&
+    item.entry.end_time_known === false &&
+    item.entry.recovered_at === null
+  );
 }
 
 /**
- * Group the listed items. Walking newest first, a lost session within
- * BURST_WINDOW_MS of the lost session before it joins that session's group;
- * any other lost session starts a new one. Everything that was not lost goes
- * into one trailing "Other recent sessions" group.
+ * Group the listed items. Unrecovered lost sessions with no known end time
+ * come first, all in one group. Then, walking newest first, a lost session
+ * within BURST_WINDOW_MS of the lost session before it joins that session's
+ * group; any other lost session starts a new one. Everything else (not lost,
+ * or lost at an unknown time and already recovered) goes into one trailing
+ * "Other recent sessions" group.
  */
 export function groupHistory(items: SessionHistoryItem[]): RecoverGroup[] {
+  const unknownTime: SessionHistoryItem[] = [];
   const bursts: SessionHistoryItem[][] = [];
   const others: SessionHistoryItem[] = [];
   let previousLost: SessionHistoryItem | null = null;
   for (const item of listedItems(items)) {
-    if (!isLost(item)) {
+    if (isLostAtUnknownTime(item)) {
+      unknownTime.push(item);
+      continue;
+    }
+    if (!isLost(item) || item.entry.end_time_known === false) {
       others.push(item);
       previousLost = null;
       continue;
@@ -101,11 +120,21 @@ export function groupHistory(items: SessionHistoryItem[]): RecoverGroup[] {
     }
     previousLost = item;
   }
-  const groups: RecoverGroup[] = bursts.map((burst) => ({
-    key: `lost-${burst[0]?.entry.session_id ?? ""}`,
-    title: lostGroupTitle(burst),
-    items: burst,
-  }));
+  const groups: RecoverGroup[] = [];
+  if (unknownTime.length > 0) {
+    groups.push({
+      key: "lost-unknown-time",
+      title: `${sessionCount(unknownTime.length)} lost (time unknown)`,
+      items: unknownTime,
+    });
+  }
+  for (const burst of bursts) {
+    groups.push({
+      key: `lost-${burst[0]?.entry.session_id ?? ""}`,
+      title: lostGroupTitle(burst),
+      items: burst,
+    });
+  }
   if (others.length > 0) {
     groups.push({ key: "other", title: OTHER_GROUP_TITLE, items: others });
   }
@@ -225,6 +254,52 @@ export function endReasonLabel(end: SessionEnd): string {
     default:
       return "ended";
   }
+}
+
+/// The row's "when and how it ended" text: "<ended> · <reason>", or
+/// "lost · time unknown" when the daemon could not find when it was lost.
+export function endedText(item: SessionHistoryItem, now: Date): string {
+  if (isLost(item) && item.entry.end_time_known === false) {
+    return "lost · time unknown";
+  }
+  const ended = formatEnded(new Date(item.entry.ended_at), now);
+  return `${ended} · ${endReasonLabel(item.entry.end)}`;
+}
+
+/// A folder path compared without case, separator style or trailing separators.
+function folderKey(path: string): string {
+  return path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+}
+
+/**
+ * The conversation each row offers by default, keyed by session id. Rows are
+ * taken in `rows` order; each recoverable row with candidates gets its newest
+ * candidate that no earlier row in the same folder has taken, so two sessions
+ * in one folder never default to the same conversation. A row whose every
+ * candidate is taken keeps its newest.
+ */
+export function defaultConversations(
+  rows: SessionHistoryItem[],
+): Map<string, string> {
+  const taken = new Map<string, Set<string>>();
+  const defaults = new Map<string, string>();
+  for (const row of rows) {
+    const newest = row.candidates[0];
+    if (newest === undefined || disabledReason(row) !== null) continue;
+    const key = folderKey(historyFolder(row));
+    const takenHere = taken.get(key) ?? new Set<string>();
+    taken.set(key, takenHere);
+    const free = row.candidates.find((c) => !takenHere.has(c.id)) ?? newest;
+    takenHere.add(free.id);
+    defaults.set(row.entry.session_id, free.id);
+  }
+  return defaults;
+}
+
+/// The Other group's toggle text.
+export function otherToggleLabel(count: number, shown: boolean): string {
+  const noun = count === 1 ? "session" : "sessions";
+  return `${shown ? "Hide" : "Show"} ${count} other recent ${noun}`;
 }
 
 /// "HH:MM" for today, else "<short date> HH:MM".
