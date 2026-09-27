@@ -10,10 +10,12 @@
 //!   ballooning memory.
 //! - Only one daemon attaches at a time. The accept loop is serialized — it
 //!   runs `handle_client` to completion before accepting the next connection —
-//!   so a racing daemon waits (in the OS backlog / connect-retry) until the
-//!   current one drops. A daemon restart drops the old connection (EOF on the
-//!   read half), `handle_client` returns, and the next accept picks up the new
-//!   daemon.
+//!   so a second daemon's connection is accepted but left unserviced until the
+//!   current one drops: on Windows its connect succeeds immediately and its
+//!   Hello waits unread, while on Unix the connect blocks in the OS backlog.
+//!   The daemon side bounds that wait with its own Welcome timeout. A daemon
+//!   restart drops the old connection (EOF on the read half), `handle_client`
+//!   returns, and the next accept picks up the new daemon.
 //! - On reconnect, the freshly-attached daemon receives a single ring-snapshot
 //!   Output frame as the first message after `Welcome` so it can replay what
 //!   it missed during the outage. After the snapshot, live output is forwarded
@@ -581,12 +583,15 @@ async fn accept_loop(cfg: AcceptConfig) {
     };
     info!(pipe = %cfg.pipe_name, "supervisor: local socket bound; awaiting clients");
 
-    // Serialized accept: only one daemon is serviced at a time. A racing daemon
-    // waits in the OS backlog (Unix) or retries the connect (Windows named
-    // pipe) until the current `handle_client` returns. A daemon restart drops
-    // the old connection (EOF on the read half), `handle_client` returns, and
-    // the next iteration accepts the new daemon — preserving the single-attach
-    // + ring-replay contract the named-pipe `max_instances(1)` used to give us.
+    // Serialized accept: only one daemon is serviced at a time. On Windows a
+    // second daemon's connect succeeds immediately and its Hello waits unread
+    // until the current `handle_client` returns — the daemon side bounds that
+    // wait with its own Welcome timeout, so it does not hang. On Unix the
+    // connect instead blocks in the OS backlog until then. A daemon restart
+    // drops the old connection (EOF on the read half), `handle_client` returns,
+    // and the next iteration accepts the new daemon — preserving the
+    // single-attach + ring-replay contract the named-pipe `max_instances(1)`
+    // used to give us.
     let mut iteration: u32 = 0;
     loop {
         iteration = iteration.saturating_add(1);

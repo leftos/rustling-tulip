@@ -13,6 +13,7 @@ mod git_write;
 mod headless;
 mod idle_exit;
 mod inject;
+mod instance_lock;
 mod keep_awake;
 mod lan;
 mod lock_finder;
@@ -43,12 +44,31 @@ use anyhow::Context as _;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+
+/// How long to wait for another daemon's instance lock before concluding one
+/// already serves this config dir. A client that retires an incompatible
+/// daemon and spawns a replacement can have both processes alive for a moment;
+/// the wait covers that handover, where a genuinely stale second launch would
+/// otherwise exit at once.
+const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let dirs = paths::Dirs::ensure()?;
+    // One daemon per config dir. A second launch must exit here, before it
+    // rotates the live daemon's log, sweeps its binary cache, reaps the orphan
+    // tracers its live sessions depend on or overwrites its state.
+    let Some(_instance_lock) = instance_lock::acquire(&dirs.config, INSTANCE_LOCK_WAIT)? else {
+        init_stderr_only_tracing();
+        info!(
+            config_dir = %dirs.config.display(),
+            "another rustling-tulipd holds daemon.lock for this config dir; exiting"
+        );
+        return Ok(());
+    };
     init_tracing(&dirs);
     info!(config_dir = %dirs.config.display(), "starting rustling-tulipd");
     info!(
@@ -291,6 +311,21 @@ fn prune_stale_tabs(
         Ok(_) => {}
         Err(err) => tracing::warn!(?err, "tab prune failed; continuing with stale state"),
     }
+}
+
+/// Logging for a daemon that lost the single-instance race: stderr only, since
+/// the file writer would rotate the live daemon's `daemon.log` out from under
+/// it. The Windows supervisor redirects stderr to NUL, so this line is
+/// normally invisible — it exists for a hand-run second daemon and for any
+/// caller that captures stderr.
+fn init_stderr_only_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(true)
+        .compact()
+        .init();
 }
 
 fn init_tracing(dirs: &paths::Dirs) {
