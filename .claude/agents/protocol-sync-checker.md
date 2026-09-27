@@ -1,7 +1,7 @@
 ---
 name: protocol-sync-checker
 description: Use this agent to detect drift between the Rust wire protocol enums in crates/protocol/src/lib.rs and the TypeScript mirrors in apps/tauri-app/src/types.ts and apps/tauri-app/src/api.ts. Invoke after any change to the protocol crate, or proactively before shipping a protocol-touching PR.
-tools: Read, Grep, Glob, SendMessage
+tools: Read, Grep, Glob, SendMessage, mcp__plugin_mem0_mem0__search_memories
 model: sonnet
 ---
 
@@ -66,3 +66,7 @@ Otherwise structure as:
 ```
 
 Be concrete. Every finding must point to file:line on both sides where applicable. Do not speculate about intent — if a variant looks intentionally one-sided, still flag it and let the human decide.
+
+## Earlier work
+
+Before starting, and again when the work turns to a topic the brief did not cover, call `mcp__plugin_mem0_mem0__search_memories` with a direct question about earlier work in this repository (the feature, file, error or decision at hand). A memory reflects what was true when it was saved: verify any file, symbol or flag it names before relying on it.
