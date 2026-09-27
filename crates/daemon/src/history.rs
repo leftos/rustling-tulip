@@ -19,9 +19,9 @@ use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     Agent, AgentOptions, ConversationCandidate, HistoryEntry, HistorySource, InjectorStartup,
-    InjectorStep, PromptInjector, RecoverAs, RecoverItem, RepoEntry, SessionEnd,
-    SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnRequest, SpawnTarget,
-    WorkspaceEntry,
+    InjectorStep, PinnedMemberWorktree, PromptInjector, RecoverAs, RecoverItem, RepoEntry,
+    SessionEnd, SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnRequest,
+    SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -46,6 +46,9 @@ const SHELL_RESUME_DELAY_MS: u32 = 2000;
 pub const IMPORT_REV: u32 = 1;
 /// Program file stems an imported plain-shell session may have run.
 const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
+/// The branch name a recovered repo or workspace spawn asks for when its
+/// session recorded none. Its folders are pinned, so nothing checks it out.
+const PINNED_BRANCH_FALLBACK: &str = "HEAD";
 
 /// Bumped after every history write, so the server can broadcast the new list.
 static CHANGES: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
@@ -441,9 +444,9 @@ fn end_from_log(end: TracerLogEnd) -> SessionEnd {
 /// The history entry a tracer log describes. Claude sessions are matched to
 /// the workspace (cwd its first member, `--add-dir`s its other members) or
 /// the repo (cwd its path, no `--add-dir`) they ran in, but never get a
-/// `spawn_config`: every in-place target names a branch, and replaying it
-/// would check that branch out if the repo has moved on. Recovery runs
-/// Claude in the same folder with the same `--add-dir`s instead.
+/// `spawn_config`: the log doesn't say how the session was spawned. Recovery
+/// runs Claude in the same folders, under the matched workspace or repo with
+/// each member pinned to its folder, else with the same `--add-dir`s.
 fn entry_from_tracer_log(
     id: &str,
     summary: &TracerLogSummary,
@@ -680,12 +683,80 @@ pub struct RecoveryPlan {
     pub register_repo: Option<String>,
 }
 
-/// Plan how `item` recovers `entry`. `conversation_exists(folder, id)` says
-/// whether Claude Code still holds conversation `id` for `folder`. The error
-/// is the message the client shows for the item.
+impl RecoveryPlan {
+    /// Point a plan that registers its folder as a repo at the id that
+    /// registration gave it: the planner pins the folder in a Single target
+    /// before the repo has an id.
+    pub fn bind_registered_repo(&mut self, registered_id: &str) {
+        if self.register_repo.is_some()
+            && let SpawnTarget::Single { repo_id, .. } = &mut self.request.target
+        {
+            registered_id.clone_into(repo_id);
+        }
+    }
+
+    /// The folder whose checked-out branch should name a pinned repo or
+    /// workspace target that asks for the [`PINNED_BRANCH_FALLBACK`]
+    /// placeholder: its first pinned member's. `None` for any other plan.
+    #[must_use]
+    pub fn placeholder_branch_folder(&self) -> Option<&str> {
+        match &self.request.target {
+            SpawnTarget::Single {
+                branch_name,
+                existing_worktree: Some(path),
+                ..
+            } if branch_name == PINNED_BRANCH_FALLBACK => Some(path),
+            SpawnTarget::Workspace {
+                branch_name,
+                existing_worktrees,
+                ..
+            } if branch_name == PINNED_BRANCH_FALLBACK => {
+                existing_worktrees.first().map(|pin| pin.path.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    /// Name the plan's repo or workspace target's branch `name`.
+    pub fn name_branch(&mut self, name: String) {
+        match &mut self.request.target {
+            SpawnTarget::Single { branch_name, .. }
+            | SpawnTarget::Workspace { branch_name, .. } => {
+                *branch_name = name;
+            }
+            SpawnTarget::Standalone { .. } => {}
+        }
+    }
+}
+
+/// The branch a pinned target is named for, given what reading the pinned
+/// folder's current branch returned: that branch, else
+/// [`PINNED_BRANCH_FALLBACK`] for a detached HEAD or a failed read.
+#[must_use]
+pub fn branch_or_placeholder(current: anyhow::Result<Option<String>>) -> String {
+    match current {
+        Ok(Some(branch)) => branch,
+        Ok(None) => PINNED_BRANCH_FALLBACK.to_owned(),
+        Err(err) => {
+            warn!(
+                ?err,
+                "reading a recovered folder's branch failed; naming it HEAD"
+            );
+            PINNED_BRANCH_FALLBACK.to_owned()
+        }
+    }
+}
+
+/// Plan how `item` recovers `entry`. A Claude session goes back under the
+/// repo or workspace in `registered` it ran in, with every member pinned to
+/// the folder it ran in, so recovery never checks out a branch or creates a
+/// worktree. `conversation_exists(folder, id)` says whether Claude Code still
+/// holds conversation `id` for `folder`. The error is the message the client
+/// shows for the item.
 pub fn plan_recovery(
     entry: &HistoryEntry,
     item: &RecoverItem,
+    registered: &Registered<'_>,
     conversation_exists: impl Fn(&str, &str) -> bool,
 ) -> Result<RecoveryPlan, String> {
     if entry.recovered_at.is_some() {
@@ -702,21 +773,33 @@ pub fn plan_recovery(
     }
     let plan = match &item.how {
         RecoverAs::Claude => RecoveryPlan {
-            request: claude_request(entry, folder, required_conversation(item)?),
+            request: claude_request(entry, folder, required_conversation(item)?, registered),
             register_repo: None,
         },
         RecoverAs::RegisterRepoThenClaude { path } => {
             if normalize_path_key(path) != normalize_path_key(folder) {
                 return Err(format!("{path} is not the session's folder {folder}"));
             }
-            let add_dirs = entry
+            let conversation = required_conversation(item)?;
+            let add_dirs: Vec<String> = entry
                 .members
                 .iter()
                 .skip(1)
                 .map(|m| m.worktree_path.clone())
                 .collect();
+            // A Single target has no `--add-dir`s, so a session that had some
+            // keeps them in the folder instead of joining the new repo.
+            let target = if add_dirs.is_empty() {
+                let branch = recorded_branch(&entry.members);
+                pinned_single(String::new(), path, branch)
+            } else {
+                SpawnTarget::Standalone {
+                    cwd: Some(path.clone()),
+                    add_dirs,
+                }
+            };
             RecoveryPlan {
-                request: standalone_claude(entry, path, add_dirs, required_conversation(item)?),
+                request: folder_claude(entry, target, conversation),
                 register_repo: Some(path.clone()),
             }
         }
@@ -736,17 +819,19 @@ fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
 }
 
 /// Claude resuming `conversation` where the session ran: its own spawn config
-/// when it has one, else its folder with its other members as `--add-dir`s.
-fn claude_request(entry: &HistoryEntry, folder: &str, conversation: &str) -> SpawnRequest {
+/// when it has one, with every repo member pinned to its recorded folder;
+/// else the registered workspace or repo its folders are, pinned the same
+/// way; else its folder with its other members as `--add-dir`s.
+fn claude_request(
+    entry: &HistoryEntry,
+    folder: &str,
+    conversation: &str,
+    registered: &Registered<'_>,
+) -> SpawnRequest {
+    let members = entry_members(entry, folder, registered.repos);
     let Some(config) = &entry.spawn_config else {
-        let (cwd, add_dirs) = match entry.members.split_first() {
-            Some((first, rest)) => (
-                first.worktree_path.as_str(),
-                rest.iter().map(|m| m.worktree_path.clone()).collect(),
-            ),
-            None => (folder, Vec::new()),
-        };
-        return standalone_claude(entry, cwd, add_dirs, conversation);
+        let target = folder_target(entry, &members, registered);
+        return folder_claude(entry, target, conversation);
     };
     let mut request = config.to_clone_request();
     request.mode = SessionMode::Interactive;
@@ -755,24 +840,208 @@ fn claude_request(entry: &HistoryEntry, folder: &str, conversation: &str) -> Spa
             permission_mode: None,
         };
     }
+    request.target = pin_recorded(&config.target, &members, registered)
+        .unwrap_or_else(|| folder_target(entry, &members, registered));
     request.resume_conversation = Some(conversation.to_owned());
     request
 }
 
-/// Claude resuming `conversation` in the folder `cwd`, outside any repo, with
-/// the permission and model flags `entry` recorded.
-fn standalone_claude(
+/// The entry's members, or one for `folder` when it recorded none.
+fn entry_members(entry: &HistoryEntry, folder: &str, repos: &[RepoEntry]) -> Vec<SessionMember> {
+    if entry.members.is_empty() {
+        folder_members(folder, &[], repos)
+    } else {
+        entry.members.clone()
+    }
+}
+
+/// The recorded `target` with every member pinned to the folder it ran in,
+/// or `None` when some member can't be: a Single with other than one member,
+/// or a workspace that is gone or whose members no longer match.
+fn pin_recorded(
+    target: &SpawnTarget,
+    members: &[SessionMember],
+    registered: &Registered<'_>,
+) -> Option<SpawnTarget> {
+    match target {
+        SpawnTarget::Single {
+            repo_id,
+            branch_name,
+            base_branch,
+            worktree_reuse,
+            ..
+        } => {
+            let [only] = members else {
+                return None;
+            };
+            (only.repo_id == *repo_id).then(|| SpawnTarget::Single {
+                repo_id: repo_id.clone(),
+                branch_name: branch_name.clone(),
+                base_branch: base_branch.clone(),
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: *worktree_reuse,
+                existing_worktree: Some(only.worktree_path.clone()),
+            })
+        }
+        SpawnTarget::Workspace {
+            workspace_id,
+            branch_name,
+            base_branch,
+            worktree_reuse,
+            ..
+        } => {
+            let ws = registered
+                .workspaces
+                .iter()
+                .find(|w| &w.id == workspace_id)?;
+            Some(SpawnTarget::Workspace {
+                workspace_id: workspace_id.clone(),
+                branch_name: branch_name.clone(),
+                base_branch: base_branch.clone(),
+                use_worktree: true,
+                worktree_reuse: *worktree_reuse,
+                existing_worktrees: workspace_pins(ws, members, registered.repos)?,
+            })
+        }
+        SpawnTarget::Standalone { .. } => Some(target.clone()),
+    }
+}
+
+/// Where a session with no spawn config goes back to: the registered
+/// workspace its members are, else the registered repo its one member is,
+/// each pinned to the recorded folders; else the first folder with the
+/// others as `--add-dir`s.
+fn folder_target(
     entry: &HistoryEntry,
-    cwd: &str,
-    add_dirs: Vec<String>,
-    conversation: &str,
-) -> SpawnRequest {
+    members: &[SessionMember],
+    registered: &Registered<'_>,
+) -> SpawnTarget {
+    if let Some(target) = workspace_target(entry.workspace_id.as_deref(), members, registered) {
+        return target;
+    }
+    if let [only] = members
+        && let Some(repo) = member_repo(only, registered.repos)
+    {
+        return pinned_single(
+            repo.id.clone(),
+            &only.worktree_path,
+            recorded_branch(members),
+        );
+    }
+    let (cwd, add_dirs) = match members.split_first() {
+        Some((first, rest)) => (
+            first.worktree_path.clone(),
+            rest.iter().map(|m| m.worktree_path.clone()).collect(),
+        ),
+        None => (String::new(), Vec::new()),
+    };
+    SpawnTarget::Standalone {
+        cwd: Some(cwd),
+        add_dirs,
+    }
+}
+
+/// The registered workspace `members` ran as, named by `workspace_id` or
+/// matched from their folders, with every member pinned.
+fn workspace_target(
+    workspace_id: Option<&str>,
+    members: &[SessionMember],
+    registered: &Registered<'_>,
+) -> Option<SpawnTarget> {
+    let (first, rest) = members.split_first()?;
+    let id = if let Some(id) = workspace_id {
+        id.to_owned()
+    } else {
+        let add_dirs: Vec<String> = rest.iter().map(|m| m.worktree_path.clone()).collect();
+        let (SessionKind::Workspace, Some(id)) =
+            match_target(&first.worktree_path, &add_dirs, registered)
+        else {
+            return None;
+        };
+        id
+    };
+    let ws = registered.workspaces.iter().find(|w| w.id == id)?;
+    Some(SpawnTarget::Workspace {
+        workspace_id: ws.id.clone(),
+        branch_name: recorded_branch(members),
+        base_branch: None,
+        use_worktree: true,
+        worktree_reuse: WorktreeReusePolicy::Reuse,
+        existing_worktrees: workspace_pins(ws, members, registered.repos)?,
+    })
+}
+
+/// One pin per member of `ws`, at the folder the matching recorded member ran
+/// in. `None` unless every workspace member has exactly one recorded member
+/// and the session's first folder is the workspace's first member, where a
+/// workspace session runs: an unpinned member would get a new worktree.
+fn workspace_pins(
+    ws: &WorkspaceEntry,
+    members: &[SessionMember],
+    repos: &[RepoEntry],
+) -> Option<Vec<PinnedMemberWorktree>> {
+    if ws.member_repo_ids.len() != members.len() {
+        return None;
+    }
+    let mut pins = Vec::with_capacity(members.len());
+    for (i, repo_id) in ws.member_repo_ids.iter().enumerate() {
+        let at = members
+            .iter()
+            .position(|m| member_repo(m, repos).is_some_and(|r| &r.id == repo_id))?;
+        if (i == 0) != (at == 0) {
+            return None;
+        }
+        pins.push(PinnedMemberWorktree {
+            repo_id: repo_id.clone(),
+            path: members[at].worktree_path.clone(),
+        });
+    }
+    Some(pins)
+}
+
+/// The registered repo a member ran in: the one it recorded, else the one
+/// at its folder.
+fn member_repo<'a>(member: &SessionMember, repos: &'a [RepoEntry]) -> Option<&'a RepoEntry> {
+    repos
+        .iter()
+        .find(|r| !member.repo_id.is_empty() && r.id == member.repo_id)
+        .or_else(|| repo_at(repos, &member.worktree_path))
+}
+
+/// The branch the first member recorded, else [`PINNED_BRANCH_FALLBACK`].
+/// A pinned spawn records the branch the folder has checked out; this name
+/// only labels a workspace session and stands in for a detached HEAD.
+fn recorded_branch(members: &[SessionMember]) -> String {
+    members
+        .first()
+        .map(|m| m.branch.as_str())
+        .filter(|b| !b.is_empty())
+        .unwrap_or(PINNED_BRANCH_FALLBACK)
+        .to_owned()
+}
+
+/// A Single target on `repo_id` that runs in `path` on whatever it has
+/// checked out. The pin needs `use_worktree`, and it skips both the checkout
+/// and the worktree creation.
+fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarget {
+    SpawnTarget::Single {
+        repo_id,
+        branch_name,
+        base_branch: None,
+        use_worktree: true,
+        checkout_strategy: None,
+        worktree_reuse: WorktreeReusePolicy::Reuse,
+        existing_worktree: Some(path.to_owned()),
+    }
+}
+
+/// Claude resuming `conversation` in `target`, with the permission and model
+/// flags `entry` recorded.
+fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) -> SpawnRequest {
     SpawnRequest {
         label: None,
-        target: SpawnTarget::Standalone {
-            cwd: Some(cwd.to_owned()),
-            add_dirs,
-        },
+        target,
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: entry.skip_permissions.unwrap_or(false),
@@ -1564,7 +1833,69 @@ mod recovery_tests {
     }
 
     fn plan(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveryPlan, String> {
-        plan_recovery(entry, item, |_, _| true)
+        plan_in(entry, item, &[], &[])
+    }
+
+    fn plan_in(
+        entry: &HistoryEntry,
+        item: &RecoverItem,
+        repos: &[RepoEntry],
+        workspaces: &[WorkspaceEntry],
+    ) -> Result<RecoveryPlan, String> {
+        let registered = Registered { repos, workspaces };
+        plan_recovery(entry, item, &registered, |_, _| true)
+    }
+
+    fn repo(id: &str, path: &str) -> RepoEntry {
+        serde_json::from_value(json!({"id": id, "name": id, "path": path, "default_branch": null}))
+            .expect("repo fixture")
+    }
+
+    fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
+        serde_json::from_value(json!({"id": id, "name": id, "member_repo_ids": members}))
+            .expect("workspace fixture")
+    }
+
+    /// The yaat workspace: `D:\yaat` first, then `D:\yaat-server`.
+    fn yaat_registry() -> (Vec<RepoEntry>, Vec<WorkspaceEntry>) {
+        let repos = vec![repo("r-yaat", r"D:\yaat"), repo("r-srv", r"D:\yaat-server")];
+        (repos, vec![workspace("ws1", &["r-yaat", "r-srv"])])
+    }
+
+    /// An imported member: a folder, its repo id when it is a registered
+    /// repo's path, and no branch.
+    fn imported(repo_id: &str, path: &str) -> SessionMember {
+        SessionMember {
+            branch: String::new(),
+            ..member(repo_id, path)
+        }
+    }
+
+    /// The recovery invariant: a repo or workspace target runs every member
+    /// in a pinned folder, so the spawn neither checks out nor creates.
+    fn assert_every_member_pinned(target: &SpawnTarget, members: usize) {
+        match target {
+            SpawnTarget::Single {
+                use_worktree,
+                existing_worktree,
+                checkout_strategy,
+                ..
+            } => {
+                assert_eq!(members, 1, "a Single target has one member");
+                assert!(*use_worktree, "a pin needs use_worktree: {target:?}");
+                assert!(existing_worktree.is_some(), "unpinned: {target:?}");
+                assert_eq!(*checkout_strategy, None);
+            }
+            SpawnTarget::Workspace {
+                use_worktree,
+                existing_worktrees,
+                ..
+            } => {
+                assert!(*use_worktree, "a pin needs use_worktree: {target:?}");
+                assert_eq!(existing_worktrees.len(), members, "unpinned: {target:?}");
+            }
+            SpawnTarget::Standalone { .. } => {}
+        }
     }
 
     #[test]
@@ -1586,6 +1917,10 @@ mod recovery_tests {
         let result = plan_recovery(
             &entry,
             &item(RecoverAs::Shell, Some("gone")),
+            &Registered {
+                repos: &[],
+                workspaces: &[],
+            },
             |folder, id| {
                 asked.borrow_mut().push((folder.to_owned(), id.to_owned()));
                 false
@@ -1618,18 +1953,45 @@ mod recovery_tests {
     }
 
     #[test]
-    fn claude_with_a_workspace_config_clones_it_and_resumes() {
+    fn claude_with_a_workspace_config_clones_it_pinned_and_resumes() {
         let mut entry = folder_only(vec![
             member("r-yaat", r"C:\wt\yaat"),
             member("r-srv", r"C:\wt\yaat-server"),
         ]);
         entry.spawn_config = Some(workspace_config());
+        let (repos, workspaces) = yaat_registry();
 
-        let plan = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+        let plan = plan_in(
+            &entry,
+            &item(RecoverAs::Claude, Some(CONV)),
+            &repos,
+            &workspaces,
+        )
+        .expect("plan");
 
         assert_eq!(plan.register_repo, None);
         let req = plan.request;
-        assert_eq!(req.target, workspace_config().target);
+        assert_eq!(
+            req.target,
+            SpawnTarget::Workspace {
+                workspace_id: "ws1".to_owned(),
+                branch_name: "feat/x".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktrees: vec![
+                    PinnedMemberWorktree {
+                        repo_id: "r-yaat".to_owned(),
+                        path: r"C:\wt\yaat".to_owned(),
+                    },
+                    PinnedMemberWorktree {
+                        repo_id: "r-srv".to_owned(),
+                        path: r"C:\wt\yaat-server".to_owned(),
+                    },
+                ],
+            }
+        );
+        assert_every_member_pinned(&req.target, 2);
         assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
         assert_eq!(req.mode, SessionMode::Interactive);
         assert_eq!(req.agent(), Agent::Claude);
@@ -1656,13 +2018,165 @@ mod recovery_tests {
     }
 
     #[test]
+    fn a_recorded_workspace_whose_members_changed_is_not_replayed_unpinned() {
+        let mut entry = folder_only(vec![
+            member("r-yaat", r"C:\wt\yaat"),
+            member("r-srv", r"C:\wt\yaat-server"),
+        ]);
+        entry.spawn_config = Some(workspace_config());
+        let (mut repos, _) = yaat_registry();
+        repos.push(repo("r-new", r"D:\new"));
+        let grown = [workspace("ws1", &["r-yaat", "r-srv", "r-new"])];
+
+        let req = plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &grown)
+            .expect("plan")
+            .request;
+
+        assert_eq!(
+            req.target,
+            SpawnTarget::Standalone {
+                cwd: Some(r"C:\wt\yaat".to_owned()),
+                add_dirs: vec![r"C:\wt\yaat-server".to_owned()],
+            }
+        );
+        assert_eq!(
+            req.model.as_deref(),
+            Some("opus"),
+            "the config's flags stay"
+        );
+    }
+
+    #[test]
+    fn a_recorded_in_place_single_is_pinned_to_its_folder() {
+        let mut entry = folder_only(vec![member("r1", r"D:\repo")]);
+        let mut config = workspace_config();
+        config.target = SpawnTarget::Single {
+            repo_id: "r1".to_owned(),
+            branch_name: "main".to_owned(),
+            base_branch: Some("main".to_owned()),
+            use_worktree: false,
+            checkout_strategy: Some(protocol::CheckoutStrategy::Stash),
+            worktree_reuse: WorktreeReusePolicy::Reuse,
+            existing_worktree: None,
+        };
+        entry.spawn_config = Some(config);
+
+        let req = plan_in(
+            &entry,
+            &item(RecoverAs::Claude, Some(CONV)),
+            &[repo("r1", r"D:\repo")],
+            &[],
+        )
+        .expect("plan")
+        .request;
+
+        assert_eq!(
+            req.target,
+            SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: "main".to_owned(),
+                base_branch: Some("main".to_owned()),
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: Some(r"D:\repo".to_owned()),
+            }
+        );
+        assert_every_member_pinned(&req.target, 1);
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn an_imported_workspace_entry_recovers_into_its_pinned_workspace() {
+        let (repos, workspaces) = yaat_registry();
+        let named = {
+            let mut entry = folder_only(vec![
+                imported("r-yaat", r"D:\yaat"),
+                imported("r-srv", r"D:\yaat-server"),
+            ]);
+            entry.workspace_id = Some("ws1".to_owned());
+            entry
+        };
+        // Matched now, by folder: imported before the workspace existed.
+        let matched = folder_only(vec![
+            imported("", r"d:/YAAT/"),
+            imported("", r"D:\yaat-server"),
+        ]);
+        for entry in [named, matched] {
+            let req = plan_in(
+                &entry,
+                &item(RecoverAs::Claude, Some(CONV)),
+                &repos,
+                &workspaces,
+            )
+            .expect("plan")
+            .request;
+
+            let (workspace_id, pins): (Option<&str>, Vec<(&str, &str)>) = match &req.target {
+                SpawnTarget::Workspace {
+                    workspace_id,
+                    existing_worktrees,
+                    ..
+                } => (
+                    Some(workspace_id.as_str()),
+                    existing_worktrees
+                        .iter()
+                        .map(|p| (p.repo_id.as_str(), p.path.as_str()))
+                        .collect(),
+                ),
+                _ => (None, Vec::new()),
+            };
+            assert_eq!(workspace_id, Some("ws1"), "{:?}", req.target);
+            assert_eq!(
+                pins,
+                [
+                    ("r-yaat", entry.members[0].worktree_path.as_str()),
+                    ("r-srv", r"D:\yaat-server"),
+                ]
+            );
+            assert_every_member_pinned(&req.target, 2);
+            assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+            assert_eq!(req.mode, SessionMode::Interactive);
+        }
+    }
+
+    #[test]
+    fn an_imported_single_repo_entry_recovers_into_its_pinned_repo() {
+        let entry = folder_only(vec![imported("", r"D:\foo")]);
+        let repos = [repo("r-foo", "d:/FOO/")];
+
+        let req = plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &[])
+            .expect("plan")
+            .request;
+
+        assert_eq!(
+            req.target,
+            SpawnTarget::Single {
+                repo_id: "r-foo".to_owned(),
+                branch_name: PINNED_BRANCH_FALLBACK.to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: Some(r"D:\foo".to_owned()),
+            }
+        );
+        assert_every_member_pinned(&req.target, 1);
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
     fn folder_only_claude_replays_its_add_dirs_in_a_standalone_target() {
         let entry = folder_only(vec![
             member("r-yaat", r"D:\yaat"),
             member("", r"D:\yaat-server"),
         ]);
+        // Only one of the two folders is a registered repo, and no workspace
+        // has both.
+        let repos = [repo("r-yaat", r"D:\yaat")];
 
-        let plan = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+        let plan =
+            plan_in(&entry, &item(RecoverAs::Claude, Some(CONV)), &repos, &[]).expect("plan");
 
         assert_eq!(plan.register_repo, None);
         assert_eq!(
@@ -1731,6 +2245,78 @@ mod recovery_tests {
             }
         );
         assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn register_repo_then_claude_runs_pinned_in_the_new_repo() {
+        let entry = folder_only(vec![imported("", r"D:\foo")]);
+        let how = RecoverAs::RegisterRepoThenClaude {
+            path: r"D:\foo".to_owned(),
+        };
+
+        let mut plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
+        plan.bind_registered_repo("r-new");
+
+        assert_eq!(plan.register_repo.as_deref(), Some(r"D:\foo"));
+        assert_eq!(
+            plan.request.target,
+            SpawnTarget::Single {
+                repo_id: "r-new".to_owned(),
+                branch_name: PINNED_BRANCH_FALLBACK.to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: Some(r"D:\foo".to_owned()),
+            }
+        );
+        assert_every_member_pinned(&plan.request.target, 1);
+        assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn a_placeholder_branch_is_named_for_the_first_pinned_folder() {
+        assert_eq!(branch_or_placeholder(Ok(Some("main".to_owned()))), "main");
+        assert_eq!(branch_or_placeholder(Ok(None)), PINNED_BRANCH_FALLBACK);
+        assert_eq!(
+            branch_or_placeholder(Err(anyhow!("not a repo"))),
+            PINNED_BRANCH_FALLBACK
+        );
+
+        let (repos, workspaces) = yaat_registry();
+        let entry = folder_only(vec![
+            imported("", r"D:\yaat"),
+            imported("", r"D:\yaat-server"),
+        ]);
+        let mut named = plan_in(
+            &entry,
+            &item(RecoverAs::Claude, Some(CONV)),
+            &repos,
+            &workspaces,
+        )
+        .expect("plan");
+        assert_eq!(named.placeholder_branch_folder(), Some(r"D:\yaat"));
+        named.name_branch("main".to_owned());
+        assert_eq!(named.placeholder_branch_folder(), None);
+        assert!(
+            matches!(&named.request.target, SpawnTarget::Workspace { branch_name, .. } if branch_name == "main"),
+            "{:?}",
+            named.request.target
+        );
+
+        // A recorded branch is kept, and a standalone plan has no branch.
+        let mut recorded = entry.clone();
+        recorded.members[0].branch = "feat/x".to_owned();
+        let kept = plan_in(
+            &recorded,
+            &item(RecoverAs::Claude, Some(CONV)),
+            &repos,
+            &workspaces,
+        )
+        .expect("plan");
+        assert_eq!(kept.placeholder_branch_folder(), None);
+        let standalone = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+        assert_eq!(standalone.placeholder_branch_folder(), None);
     }
 
     #[test]

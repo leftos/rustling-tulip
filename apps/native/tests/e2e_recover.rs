@@ -21,7 +21,7 @@ use base64::Engine as _;
 use gpui::TestAppContext;
 use protocol::{
     ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult, SessionEnd,
-    SessionHistoryItem, SessionMode, SessionSnapshot,
+    SessionHistoryItem, SessionKind, SessionMode, SessionSnapshot,
 };
 use serde_json::{Value, json};
 use support::Harness;
@@ -47,6 +47,25 @@ const CURSOR_POSITION_QUERY: &str = "\x1b[6n";
 const CURSOR_AT_ORIGIN: &[u8] = b"\x1b[1;1R";
 /// The line the tracer logs with the program and args it spawns.
 const SPAWN_LINE: &str = "about to spawn child";
+/// The branch the fixture repo switches to after its Claude session ends.
+const MOVED_ON: &str = "moved-on";
+
+/// Runs `git -C repo <args>`, asserting it succeeded, and returns its
+/// trimmed stdout.
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
 
 /// Waits until the view's latest state is open on `daemon`'s port with no
 /// connecting overlay.
@@ -393,6 +412,12 @@ fn recover_claude_session(
         "the one known conversation"
     );
 
+    // The repo moves on after the session ended: recovery must run on the
+    // branch it has now, not check the recorded `main` out again.
+    let repo = Path::new(cwd);
+    git_out(repo, &["switch", "-q", "-c", MOVED_ON]);
+    let status_before = git_out(repo, &["status", "--porcelain"]);
+
     let recover_item = RecoverItem {
         history_id: session.id.clone(),
         conversation_id: Some(conversation.clone()),
@@ -400,6 +425,26 @@ fn recover_claude_session(
     };
     let results = recover(h, client, "recover-claude", recover_item.clone());
     let new_id = recovered_session(&results, &session.id);
+    let recovered = wait_snapshot(h, client, "the recovered claude's snapshot", |s| {
+        s.id == new_id
+    });
+    assert_eq!(recovered.kind, SessionKind::Single, "{recovered:?}");
+    let member = recovered
+        .members
+        .first()
+        .expect("a single session has a member");
+    assert_eq!(member.repo_id, repo_id, "recovered under the fixture repo");
+    assert_eq!(
+        member.branch, MOVED_ON,
+        "labelled with the branch it runs on"
+    );
+    assert!(
+        recovered.label.contains(MOVED_ON),
+        "the label names the branch it runs on: {}",
+        recovered.label
+    );
+    assert_eq!(git_out(repo, &["branch", "--show-current"]), MOVED_ON);
+    assert_eq!(git_out(repo, &["status", "--porcelain"]), status_before);
     let line = wait_spawn_line(h, daemon, &new_id);
     assert!(
         line.contains(&format!("\"--resume\", \"{conversation}\"")),
