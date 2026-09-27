@@ -91,6 +91,8 @@ mod tests {
             model,
             has_prompt_injector: has_injector,
             claude_session_id: None,
+            resume_conversation: None,
+            add_dirs: &[],
         }
     }
 

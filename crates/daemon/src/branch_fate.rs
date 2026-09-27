@@ -404,7 +404,10 @@ mod tests {
         );
 
         let standalone = SpawnConfig {
-            target: SpawnTarget::Standalone { cwd: None },
+            target: SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
             ..single
         };
         assert_eq!(session_base(Some(&standalone)), SessionBase::Standalone);

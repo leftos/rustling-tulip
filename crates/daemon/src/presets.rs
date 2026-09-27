@@ -1516,6 +1516,7 @@ async fn spawn_one(
         extra_env: Vec::new(),
         prompt_injector: Some(injector),
         request_id: None,
+        resume_conversation: None,
     };
     let snapshot = spawn_session(hub, req, None).await.map_err(|e| {
         LaunchFailure::new(format!("spawn failed at #{index}: {e}"))

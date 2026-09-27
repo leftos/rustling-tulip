@@ -177,7 +177,13 @@ fn empty_pane_shell_here_fills_the_pane(cx: &mut TestAppContext) {
     );
     assert!(!is_open(&mut h), "no dialog");
     let request = the_spawn(&h.sent());
-    assert_eq!(request.target, SpawnTarget::Standalone { cwd: None });
+    assert_eq!(
+        request.target,
+        SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        }
+    );
     assert_eq!(request.mode, SessionMode::PlainShell);
 
     reply(&mut h, &request);
@@ -417,7 +423,13 @@ fn no_tab_empty_state_offers_spawn_and_shell(cx: &mut TestAppContext) {
 
     h.click_on("empty-open-shell");
     let request = the_spawn(&h.sent());
-    assert_eq!(request.target, SpawnTarget::Standalone { cwd: None });
+    assert_eq!(
+        request.target,
+        SpawnTarget::Standalone {
+            cwd: None,
+            add_dirs: Vec::new(),
+        }
+    );
     reply(&mut h, &request);
     let placed = placements(h.sent());
     assert!(

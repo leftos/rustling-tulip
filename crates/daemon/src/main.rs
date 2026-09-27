@@ -36,15 +36,7 @@ mod sync;
 mod tabs;
 mod termstate;
 mod tracer_client;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into session history in the next step")
-)]
 mod tracer_log;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into session history in the next step")
-)]
 mod transcripts;
 mod vscode;
 mod workspace;
@@ -118,11 +110,33 @@ async fn main() -> anyhow::Result<()> {
     // a Resume swaps the abandoned session out for the freshly-spawned one
     // without the user losing their layout.
     prune_stale_tabs(&state, &live, &dead);
+    import_tracer_logs(&dirs, &state, &live, &dead);
     history::prune(&dirs, chrono::Utc::now(), history::HISTORY_RETENTION);
 
     let result = server::run(state, dirs, live, dead).await;
     info!(?result, "rustling-tulipd main returning");
     result
+}
+
+/// Add the sessions whose tracer logs predate the session history to it,
+/// leaving out the live and abandoned sessions orphan recovery just found.
+fn import_tracer_logs(
+    dirs: &paths::Dirs,
+    state: &state::AppState,
+    live: &[orphan::OrphanMeta],
+    dead: &[orphan::OrphanMeta],
+) {
+    let skip: std::collections::HashSet<String> = live
+        .iter()
+        .chain(dead)
+        .map(|meta| meta.session_id.clone())
+        .collect();
+    let (repos, workspaces) = state.with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let registered = history::Registered {
+        repos: &repos,
+        workspaces: &workspaces,
+    };
+    history::import_tracer_logs(dirs, &registered, &skip, chrono::Utc::now());
 }
 
 /// Prune cached binaries that no live tracer (or this daemon's own exe) is

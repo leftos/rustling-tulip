@@ -9,19 +9,47 @@
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
 use crate::orphan;
-use crate::paths::Dirs;
+use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
+use crate::tracer_log::{self, TracerLogEnd, TracerLogSummary};
+use crate::transcripts;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, TimeDelta, Utc};
-use protocol::{HistoryEntry, HistorySource, SessionEnd, SessionMode, SpawnTarget};
-use std::path::PathBuf;
-use std::sync::Mutex;
+use protocol::{
+    Agent, AgentOptions, ConversationCandidate, HistoryEntry, HistorySource, InjectorStep,
+    PromptInjector, RecoverAs, RecoverItem, RepoEntry, SessionEnd, SessionHistoryItem, SessionKind,
+    SessionMember, SessionMode, SpawnRequest, SpawnTarget, WorkspaceEntry,
+};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 /// How long an ended session stays in the history.
 pub const HISTORY_RETENTION: TimeDelta = TimeDelta::days(7);
+
+/// Most conversations offered for one history entry.
+const CANDIDATE_LIMIT: usize = 5;
+/// How long after a session's end its conversation may still have been written.
+const CANDIDATE_GRACE: TimeDelta = TimeDelta::minutes(2);
+/// How far before its end a session with no known start is searched from.
+const UNKNOWN_START_LOOKBACK: TimeDelta = TimeDelta::days(1);
+/// How long a recovered shell waits before typing `claude --resume <id>`.
+const SHELL_RESUME_DELAY_MS: u32 = 1500;
+/// Program file stems an imported plain-shell session may have run.
+const SHELL_STEMS: [&str; 6] = ["pwsh", "powershell", "cmd", "bash", "zsh", "sh"];
+
+/// Bumped after every history write, so the server can broadcast the new list.
+static CHANGES: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::channel(0).0);
+
+/// A receiver that wakes whenever the history is written.
+#[must_use]
+pub fn subscribe_changes() -> watch::Receiver<u64> {
+    CHANGES.subscribe()
+}
 
 /// Serializes history writes inside this daemon, so the exists-check in
 /// [`write_if_absent`] and the read-modify-write in [`mark_recovered`] are not
@@ -48,7 +76,7 @@ fn primary_cwd(rec: &SessionRecord) -> Option<String> {
         return Some(first.worktree_path.clone());
     }
     match rec.spawn_config.as_ref().map(|cfg| &cfg.target) {
-        Some(SpawnTarget::Standalone { cwd }) => cwd
+        Some(SpawnTarget::Standalone { cwd, .. }) => cwd
             .as_deref()
             .map(str::trim)
             .filter(|cwd| !cwd.is_empty())
@@ -82,6 +110,8 @@ pub fn entry_from_record(
         claude_session_id: rec.claude_session_id.clone(),
         source: HistorySource::Record,
         recovered_at: None,
+        skip_permissions: None,
+        model: None,
     }
 }
 
@@ -101,7 +131,32 @@ fn write_entry(dirs: &Dirs, entry: &HistoryEntry) -> anyhow::Result<()> {
     let dir = dirs.history_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let bytes = serde_json::to_vec_pretty(entry).context("serializing history entry")?;
-    orphan::write_atomic(&entry_path(dirs, &entry.session_id), &bytes)
+    orphan::write_atomic(&entry_path(dirs, &entry.session_id), &bytes)?;
+    CHANGES.send_modify(|n| *n = n.wrapping_add(1));
+    Ok(())
+}
+
+/// A session id that is safe to use as a file stem: never a path.
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The history entry for `session_id`, if it has a readable one.
+#[must_use]
+pub fn read_one(dirs: &Dirs, session_id: &str) -> Option<HistoryEntry> {
+    if !is_plain_id(session_id) {
+        return None;
+    }
+    let path = entry_path(dirs, session_id);
+    if !path.is_file() {
+        return None;
+    }
+    read_entry(&path)
+        .map_err(|err| warn!(?err, %session_id, "unreadable session history entry"))
+        .ok()
 }
 
 /// Record that the session `session_id` ended for `end`, unless it is headless
@@ -166,10 +221,6 @@ fn scan(dirs: &Dirs) -> Vec<(PathBuf, HistoryEntry)> {
 
 /// Every history entry, newest end first.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the history has no reader outside tests yet")
-)]
 pub fn read_all(dirs: &Dirs) -> Vec<HistoryEntry> {
     let mut entries: Vec<HistoryEntry> = scan(dirs).into_iter().map(|(_, e)| e).collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.ended_at));
@@ -177,10 +228,6 @@ pub fn read_all(dirs: &Dirs) -> Vec<HistoryEntry> {
 }
 
 /// Stamp the entry for `session_id` as recovered at `at`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no session is recovered outside tests yet")
-)]
 pub fn mark_recovered(dirs: &Dirs, session_id: &str, at: DateTime<Utc>) -> anyhow::Result<()> {
     let _guard = lock(&WRITE_LOCK);
     let path = entry_path(dirs, session_id);
@@ -212,6 +259,493 @@ pub fn prune(dirs: &Dirs, now: DateTime<Utc>, max_age: TimeDelta) -> usize {
         info!(removed, "pruned old session history entries");
     }
     removed
+}
+
+/// The registered repos and workspaces an imported session is matched against.
+pub struct Registered<'a> {
+    pub repos: &'a [RepoEntry],
+    pub workspaces: &'a [WorkspaceEntry],
+}
+
+/// Import the sessions that ended before the daemon kept a history, from
+/// their `<config>/logs/tracer-<id>.log` files modified within
+/// [`HISTORY_RETENTION`] of `now`. A session in `skip` (a live or abandoned
+/// sidecar) or already in the history is left alone, and so is a log naming
+/// no program or one that is neither Claude nor a known shell. Returns how
+/// many entries were written.
+pub fn import_tracer_logs(
+    dirs: &Dirs,
+    registered: &Registered<'_>,
+    skip: &HashSet<String>,
+    now: DateTime<Utc>,
+) -> usize {
+    let logs_dir = dirs.config.join("logs");
+    let listing = match std::fs::read_dir(&logs_dir) {
+        Ok(listing) => listing,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            warn!(?err, dir = %logs_dir.display(), "failed to list tracer logs");
+            return 0;
+        }
+    };
+    let mut end_times: Option<HashMap<String, DateTime<Utc>>> = None;
+    let mut imported = 0;
+    for path in listing.filter_map(Result::ok).map(|e| e.path()) {
+        let Some(id) = tracer_log_id(&path) else {
+            continue;
+        };
+        if skip.contains(&id) || entry_path(dirs, &id).exists() {
+            continue;
+        }
+        let Some((modified, summary)) = read_recent_tracer_log(&path, now) else {
+            continue;
+        };
+        let ends = end_times.get_or_insert_with(|| daemon_end_times(&logs_dir));
+        let ended_at = ends.get(&id).copied().unwrap_or(modified);
+        let Some(entry) = entry_from_tracer_log(&id, &summary, ended_at, registered) else {
+            continue;
+        };
+        match write_if_absent(dirs, &entry) {
+            Ok(true) => imported += 1,
+            Ok(false) => {}
+            Err(err) => warn!(?err, session_id = %id, "failed to import tracer log"),
+        }
+    }
+    if imported > 0 {
+        info!(imported, "imported ended sessions from tracer logs");
+    }
+    imported
+}
+
+/// `<id>` of a `tracer-<id>.log` file name.
+fn tracer_log_id(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let id = name.strip_prefix("tracer-")?.strip_suffix(".log")?;
+    is_plain_id(id).then(|| id.to_owned())
+}
+
+/// The log's modified time and summary, when it was modified within
+/// [`HISTORY_RETENTION`] of `now` and has a starting line.
+fn read_recent_tracer_log(
+    path: &Path,
+    now: DateTime<Utc>,
+) -> Option<(DateTime<Utc>, TracerLogSummary)> {
+    let modified: DateTime<Utc> = std::fs::metadata(path).ok()?.modified().ok()?.into();
+    if now - modified > HISTORY_RETENTION {
+        return None;
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|err| warn!(?err, path = %path.display(), "failed to read tracer log"))
+        .ok()?;
+    let summary = tracer_log::parse_tracer_log(&String::from_utf8_lossy(&bytes))?;
+    Some((modified, summary))
+}
+
+/// Each session's earliest end time in `daemon.log` and `daemon.log.old`.
+fn daemon_end_times(logs_dir: &Path) -> HashMap<String, DateTime<Utc>> {
+    let mut merged: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for name in ["daemon.log", "daemon.log.old"] {
+        let Ok(bytes) = std::fs::read(logs_dir.join(name)) else {
+            continue;
+        };
+        for (id, at) in tracer_log::session_end_times(&String::from_utf8_lossy(&bytes)) {
+            merged
+                .entry(id)
+                .and_modify(|end| *end = (*end).min(at))
+                .or_insert(at);
+        }
+    }
+    merged
+}
+
+/// The lowercase file stem of `program`, whichever separator its path uses.
+fn program_stem(program: &str) -> Option<String> {
+    let leaf = program.rsplit(['/', '\\']).next()?;
+    let stem = Path::new(leaf).file_stem()?.to_str()?.to_lowercase();
+    (!stem.is_empty()).then_some(stem)
+}
+
+/// Every `--add-dir <path>` value in `args`, in order.
+fn add_dir_args(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--add-dir")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+fn end_from_log(end: TracerLogEnd) -> SessionEnd {
+    match end {
+        TracerLogEnd::StoppedByUser => SessionEnd::StoppedByUser,
+        TracerLogEnd::Exited { code } => SessionEnd::Exited { code },
+        TracerLogEnd::Lost => SessionEnd::TracerLost,
+    }
+}
+
+/// The history entry a tracer log describes. Claude sessions are matched to
+/// the workspace (cwd its first member, `--add-dir`s its other members) or
+/// the repo (cwd its path, no `--add-dir`) they ran in, but never get a
+/// `spawn_config`: every in-place target names a branch, and replaying it
+/// would check that branch out if the repo has moved on. Recovery runs
+/// Claude in the same folder with the same `--add-dir`s instead.
+fn entry_from_tracer_log(
+    id: &str,
+    summary: &TracerLogSummary,
+    ended_at: DateTime<Utc>,
+    registered: &Registered<'_>,
+) -> Option<HistoryEntry> {
+    let stem = program_stem(&summary.program)?;
+    let is_claude = stem.starts_with("claude");
+    if !is_claude && !SHELL_STEMS.contains(&stem.as_str()) {
+        return None;
+    }
+    let cwd = summary.cwd.clone();
+    let (mode, program_name, kind, workspace_id, members) = if is_claude {
+        let add_dirs = add_dir_args(&summary.args);
+        let (kind, workspace_id) = match_target(&cwd, &add_dirs, registered);
+        let members = folder_members(&cwd, &add_dirs, registered.repos);
+        let name = "claude".to_owned();
+        (SessionMode::Interactive, name, kind, workspace_id, members)
+    } else {
+        let kind = SessionKind::Standalone;
+        (SessionMode::PlainShell, stem, kind, None, Vec::new())
+    };
+    Some(HistoryEntry {
+        session_id: id.to_owned(),
+        label: String::new(),
+        kind,
+        mode,
+        agent: Agent::Claude,
+        spawn_config: None,
+        members,
+        workspace_id,
+        primary_cwd: Some(cwd.clone()),
+        current_cwd: (!is_claude).then_some(cwd),
+        program_name: Some(program_name),
+        started_at: Some(summary.started_at),
+        ended_at,
+        end: end_from_log(summary.end),
+        claude_session_id: None,
+        source: HistorySource::TracerLog,
+        recovered_at: None,
+        skip_permissions: is_claude.then(|| {
+            summary
+                .args
+                .iter()
+                .any(|a| a == "--dangerously-skip-permissions")
+        }),
+        model: if is_claude {
+            model_arg(&summary.args)
+        } else {
+            None
+        },
+    })
+}
+
+/// The value of the last `--model <m>` or `--model=<m>` in `args`.
+fn model_arg(args: &[String]) -> Option<String> {
+    let mut model = None;
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_owned());
+        } else if arg == "--model"
+            && let Some(value) = args.get(i + 1)
+        {
+            model = Some(value.clone());
+        }
+    }
+    model.filter(|m| !m.is_empty())
+}
+
+fn repo_at<'a>(repos: &'a [RepoEntry], path: &str) -> Option<&'a RepoEntry> {
+    let key = normalize_path_key(path);
+    repos.iter().find(|r| normalize_path_key(&r.path) == key)
+}
+
+/// The workspace a Claude session in `cwd` with `add_dirs` ran for, else the
+/// repo, else neither.
+fn match_target(
+    cwd: &str,
+    add_dirs: &[String],
+    registered: &Registered<'_>,
+) -> (SessionKind, Option<String>) {
+    let cwd_key = normalize_path_key(cwd);
+    let mut add_keys: Vec<String> = add_dirs.iter().map(|d| normalize_path_key(d)).collect();
+    add_keys.sort();
+    for ws in registered.workspaces {
+        let member_keys: Option<Vec<String>> = ws
+            .member_repo_ids
+            .iter()
+            .map(|id| {
+                registered
+                    .repos
+                    .iter()
+                    .find(|r| &r.id == id)
+                    .map(|r| normalize_path_key(&r.path))
+            })
+            .collect();
+        let Some((first, rest)) = member_keys.as_deref().and_then(<[String]>::split_first) else {
+            continue;
+        };
+        let mut rest = rest.to_vec();
+        rest.sort();
+        if *first == cwd_key && rest == add_keys {
+            return (SessionKind::Workspace, Some(ws.id.clone()));
+        }
+    }
+    if add_dirs.is_empty() && repo_at(registered.repos, cwd).is_some() {
+        return (SessionKind::Single, None);
+    }
+    (SessionKind::Standalone, None)
+}
+
+/// One member per folder, `cwd` first: the registered repo there when there
+/// is one, else just the path.
+fn folder_members(cwd: &str, add_dirs: &[String], repos: &[RepoEntry]) -> Vec<SessionMember> {
+    std::iter::once(cwd)
+        .chain(add_dirs.iter().map(String::as_str))
+        .map(|path| {
+            let repo = repo_at(repos, path);
+            SessionMember {
+                repo_id: repo.map(|r| r.id.clone()).unwrap_or_default(),
+                repo_name: repo.map(|r| r.name.clone()).unwrap_or_default(),
+                branch: String::new(),
+                worktree_path: path.to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// The folder a history entry is about: the shell's last folder, else where
+/// the session started, else its first member's worktree.
+#[must_use]
+pub fn entry_folder(entry: &HistoryEntry) -> Option<&str> {
+    entry
+        .current_cwd
+        .as_deref()
+        .or(entry.primary_cwd.as_deref())
+        .or_else(|| entry.members.first().map(|m| m.worktree_path.as_str()))
+        .filter(|folder| !folder.is_empty())
+}
+
+/// The history as the client lists it: every non-headless entry, newest end
+/// first, with the conversations it may be recovered into and what its folder
+/// is. `claude_home` is `None` when Claude Code's home can't be found, and
+/// then no entry has candidates.
+#[must_use]
+pub fn history_items(
+    dirs: &Dirs,
+    repos: &[RepoEntry],
+    claude_home: Option<&Path>,
+) -> Vec<SessionHistoryItem> {
+    read_all(dirs)
+        .into_iter()
+        .filter(|entry| entry.mode != SessionMode::Headless)
+        .map(|entry| history_item(entry, repos, claude_home))
+        .collect()
+}
+
+fn history_item(
+    entry: HistoryEntry,
+    repos: &[RepoEntry],
+    claude_home: Option<&Path>,
+) -> SessionHistoryItem {
+    let folder = entry_folder(&entry).map(str::to_owned);
+    let candidates = match (claude_home, folder.as_deref()) {
+        (Some(home), Some(folder)) => conversation_candidates(&entry, home, folder),
+        _ => Vec::new(),
+    };
+    let folder_is_git_repo = folder
+        .as_deref()
+        .is_some_and(|folder| Path::new(folder).join(".git").exists());
+    let folder_repo_id = folder
+        .as_deref()
+        .and_then(|folder| repo_at(repos, folder))
+        .map(|repo| repo.id.clone());
+    SessionHistoryItem {
+        entry,
+        candidates,
+        folder_is_git_repo,
+        folder_repo_id,
+    }
+}
+
+/// The entry's own conversation when it knows one and its transcript is
+/// still there; otherwise the transcripts written in `folder` while the
+/// session ran.
+fn conversation_candidates(
+    entry: &HistoryEntry,
+    claude_home: &Path,
+    folder: &str,
+) -> Vec<ConversationCandidate> {
+    let found = if let Some(id) = &entry.claude_session_id {
+        transcripts::known_conversation(claude_home, folder, id)
+            .into_iter()
+            .collect()
+    } else {
+        let start = entry
+            .started_at
+            .unwrap_or(entry.ended_at - UNKNOWN_START_LOOKBACK);
+        let end = entry.ended_at + CANDIDATE_GRACE;
+        transcripts::candidates(claude_home, folder, start, end, CANDIDATE_LIMIT)
+    };
+    found
+        .into_iter()
+        .map(|c| ConversationCandidate {
+            id: c.id,
+            last_active: c.last_active,
+            title: c.title,
+        })
+        .collect()
+}
+
+/// What recovering one history entry does: register `register_repo` first
+/// when set, then spawn `request`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryPlan {
+    pub request: SpawnRequest,
+    pub register_repo: Option<String>,
+}
+
+/// Plan how `item` recovers `entry`. `conversation_exists(folder, id)` says
+/// whether Claude Code still holds conversation `id` for `folder`. The error
+/// is the message the client shows for the item.
+pub fn plan_recovery(
+    entry: &HistoryEntry,
+    item: &RecoverItem,
+    conversation_exists: impl Fn(&str, &str) -> bool,
+) -> Result<RecoveryPlan, String> {
+    if entry.recovered_at.is_some() {
+        return Err("already recovered".to_owned());
+    }
+    if item.how == RecoverAs::Unknown {
+        return Err("unsupported recovery kind".to_owned());
+    }
+    let folder = entry_folder(entry).unwrap_or_default();
+    if let Some(id) = &item.conversation_id
+        && !conversation_exists(folder, id)
+    {
+        return Err(format!("conversation {id} not found for {folder}"));
+    }
+    let plan = match &item.how {
+        RecoverAs::Claude => RecoveryPlan {
+            request: claude_request(entry, folder, required_conversation(item)?),
+            register_repo: None,
+        },
+        RecoverAs::RegisterRepoThenClaude { path } => {
+            if normalize_path_key(path) != normalize_path_key(folder) {
+                return Err(format!("{path} is not the session's folder {folder}"));
+            }
+            let add_dirs = entry
+                .members
+                .iter()
+                .skip(1)
+                .map(|m| m.worktree_path.clone())
+                .collect();
+            RecoveryPlan {
+                request: standalone_claude(entry, path, add_dirs, required_conversation(item)?),
+                register_repo: Some(path.clone()),
+            }
+        }
+        RecoverAs::Shell => RecoveryPlan {
+            request: shell_request(folder, item.conversation_id.as_deref()),
+            register_repo: None,
+        },
+        RecoverAs::Unknown => return Err("unsupported recovery kind".to_owned()),
+    };
+    Ok(plan)
+}
+
+fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
+    item.conversation_id
+        .as_deref()
+        .ok_or_else(|| "no conversation to resume".to_owned())
+}
+
+/// Claude resuming `conversation` where the session ran: its own spawn config
+/// when it has one, else its folder with its other members as `--add-dir`s.
+fn claude_request(entry: &HistoryEntry, folder: &str, conversation: &str) -> SpawnRequest {
+    let Some(config) = &entry.spawn_config else {
+        let (cwd, add_dirs) = match entry.members.split_first() {
+            Some((first, rest)) => (
+                first.worktree_path.as_str(),
+                rest.iter().map(|m| m.worktree_path.clone()).collect(),
+            ),
+            None => (folder, Vec::new()),
+        };
+        return standalone_claude(entry, cwd, add_dirs, conversation);
+    };
+    let mut request = config.to_clone_request();
+    request.mode = SessionMode::Interactive;
+    if request.agent() != Agent::Claude {
+        request.agent_options = AgentOptions::Claude {
+            permission_mode: None,
+        };
+    }
+    request.resume_conversation = Some(conversation.to_owned());
+    request
+}
+
+/// Claude resuming `conversation` in the folder `cwd`, outside any repo, with
+/// the permission and model flags `entry` recorded.
+fn standalone_claude(
+    entry: &HistoryEntry,
+    cwd: &str,
+    add_dirs: Vec<String>,
+    conversation: &str,
+) -> SpawnRequest {
+    SpawnRequest {
+        label: None,
+        target: SpawnTarget::Standalone {
+            cwd: Some(cwd.to_owned()),
+            add_dirs,
+        },
+        mode: SessionMode::Interactive,
+        initial_prompt: None,
+        dangerously_skip_permissions: entry.skip_permissions.unwrap_or(false),
+        agent_options: AgentOptions::Claude {
+            permission_mode: None,
+        },
+        model: entry.model.clone(),
+        extra_env: Vec::new(),
+        prompt_injector: None,
+        request_id: None,
+        resume_conversation: Some(conversation.to_owned()),
+    }
+}
+
+/// A plain shell in `folder` that types `claude --resume <id>` once it is up,
+/// when a conversation was chosen.
+fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
+    let prompt_injector = conversation.map(|id| PromptInjector {
+        steps: vec![
+            InjectorStep::Delay {
+                ms: SHELL_RESUME_DELAY_MS,
+            },
+            InjectorStep::Text {
+                content: format!("claude --resume {id}"),
+                newline: true,
+            },
+        ],
+        verify_mode_marker: None,
+    });
+    SpawnRequest {
+        label: None,
+        target: SpawnTarget::Standalone {
+            cwd: (!folder.is_empty()).then(|| folder.to_owned()),
+            add_dirs: Vec::new(),
+        },
+        mode: SessionMode::PlainShell,
+        initial_prompt: None,
+        dangerously_skip_permissions: false,
+        agent_options: AgentOptions::Claude {
+            permission_mode: None,
+        },
+        model: None,
+        extra_env: Vec::new(),
+        prompt_injector,
+        request_id: None,
+        resume_conversation: None,
+    }
 }
 
 /// Fixtures shared by the history tests here and the end-path tests in
@@ -438,6 +972,827 @@ mod tests {
         record_session_end(&registry, &dirs, "shell", SessionEnd::StoppedByUser);
         let ids: Vec<String> = read_all(&dirs).into_iter().map(|e| e.session_id).collect();
         assert_eq!(ids, vec!["shell"]);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn read_one_finds_an_entry_and_refuses_path_ids() {
+        let dirs = scratch_dirs("read-one");
+        write_if_absent(&dirs, &entry("s1", SessionEnd::TracerLost, Utc::now())).expect("write");
+        assert_eq!(
+            read_one(&dirs, "s1").map(|e| e.session_id).as_deref(),
+            Some("s1")
+        );
+        assert_eq!(read_one(&dirs, "missing"), None);
+        assert_eq!(read_one(&dirs, r"..\history\s1"), None);
+        assert_eq!(read_one(&dirs, ""), None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
+mod import_tests {
+    use super::test_support::scratch_dirs;
+    use super::*;
+    use serde_json::json;
+    use std::fs::File;
+    use std::time::SystemTime;
+
+    const YAAT_ID: &str = "f6216fc2-54b1-497c-a257-7c297f7d9859";
+    const YAAT_LOG: [&str; 3] = [
+        r"2026-09-27T11:09:41.935397Z  INFO rt_tracer: rt-tracer starting session_id=f6216fc2-54b1-497c-a257-7c297f7d9859 cwd=D:\yaat cols=120 rows=32 argc=6",
+        r#"2026-09-27T11:09:41.940609Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\Users\lefto\.local\bin\claude.exe argc=5 args=["--add-dir", "D:\\yaat-server", "--append-system-prompt", "Workspace member paths for this session:\n  yaat         ->  D:\\yaat\n  yaat-server  ->  D:\\yaat-server\n", "--dangerously-skip-permissions"] cwd=D:\yaat"#,
+        r"2026-09-27T11:09:41.982317Z  INFO rt_tracer::supervisor: supervisor: client connected iteration=1 session_id=f6216fc2-54b1-497c-a257-7c297f7d9859",
+    ];
+    const STOP_ID: &str = "22b5a96d-8d81-40e3-a594-498fc639c7cc";
+    const STOP_LOG: [&str; 3] = [
+        r"2026-09-26T03:53:21.116126Z  INFO rt_tracer: rt-tracer starting session_id=22b5a96d-8d81-40e3-a594-498fc639c7cc cwd=D:\rustling-tulip cols=120 rows=32 argc=2",
+        r#"2026-09-26T03:53:21.120000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\Users\lefto\.local\bin\claude.exe argc=1 args=["--dangerously-skip-permissions"] cwd=D:\rustling-tulip"#,
+        r"2026-09-26T05:09:44.845855Z  INFO rt_tracer::supervisor: supervisor: Stop request received",
+    ];
+    const PWSH_ID: &str = "0b8f4c1e-1111-4222-8333-944455556666";
+    const PWSH_LOG: [&str; 3] = [
+        r"2026-09-27T08:00:00.000000Z  INFO rt_tracer: rt-tracer starting session_id=0b8f4c1e-1111-4222-8333-944455556666 cwd=D:\ cols=120 rows=32 argc=4",
+        r#"2026-09-27T08:00:00.010000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=pwsh.exe argc=3 args=["-NoExit", "-Command", "$global:__rt_original_prompt = $function:prompt; function global:prompt { \"PS $($PWD.Path)> \" }"] cwd=D:\"#,
+        r"2026-09-27T08:05:00.000000Z  INFO rt_tracer::supervisor: supervisor: child exited; shutting down exit_code=0",
+    ];
+
+    fn ts(stamp: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(stamp)
+            .expect("valid timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn repo(id: &str, path: &str) -> RepoEntry {
+        serde_json::from_value(json!({"id": id, "name": id, "path": path, "default_branch": null}))
+            .expect("repo fixture")
+    }
+
+    fn workspace(id: &str, members: &[&str]) -> WorkspaceEntry {
+        serde_json::from_value(json!({"id": id, "name": id, "member_repo_ids": members}))
+            .expect("workspace fixture")
+    }
+
+    fn write_log(dirs: &Dirs, name: &str, lines: &[&str]) -> PathBuf {
+        let logs = dirs.config.join("logs");
+        std::fs::create_dir_all(&logs).expect("create logs dir");
+        let path = logs.join(name);
+        std::fs::write(&path, lines.join("\n")).expect("write log");
+        path
+    }
+
+    fn set_mtime(path: &Path, at: DateTime<Utc>) {
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("reopen log")
+            .set_modified(SystemTime::from(at))
+            .expect("set log mtime");
+    }
+
+    fn import(dirs: &Dirs, repos: &[RepoEntry], workspaces: &[WorkspaceEntry]) -> usize {
+        import_skipping(dirs, repos, workspaces, &HashSet::new())
+    }
+
+    fn import_skipping(
+        dirs: &Dirs,
+        repos: &[RepoEntry],
+        workspaces: &[WorkspaceEntry],
+        skip: &HashSet<String>,
+    ) -> usize {
+        let registered = Registered { repos, workspaces };
+        import_tracer_logs(dirs, &registered, skip, Utc::now())
+    }
+
+    fn only(dirs: &Dirs, id: &str) -> HistoryEntry {
+        read_one(dirs, id).expect("imported entry")
+    }
+
+    fn member_ids(entry: &HistoryEntry) -> Vec<(&str, &str)> {
+        entry
+            .members
+            .iter()
+            .map(|m| (m.repo_id.as_str(), m.worktree_path.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn workspace_log_matches_the_registered_workspace() {
+        let dirs = scratch_dirs("import-ws");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        let repos = [
+            repo("r-yaat", r"D:\yaat"),
+            repo("r-srv", r"d:/Yaat-Server/"),
+        ];
+        let workspaces = [workspace("ws1", &["r-yaat", "r-srv"])];
+
+        assert_eq!(import(&dirs, &repos, &workspaces), 1);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.kind, SessionKind::Workspace);
+        assert_eq!(entry.workspace_id.as_deref(), Some("ws1"));
+        assert_eq!(
+            entry.spawn_config, None,
+            "no in-place target avoids a checkout"
+        );
+        assert_eq!(
+            member_ids(&entry),
+            [("r-yaat", r"D:\yaat"), ("r-srv", r"D:\yaat-server")]
+        );
+        assert_eq!(entry.mode, SessionMode::Interactive);
+        assert_eq!(entry.agent, Agent::Claude);
+        assert_eq!(entry.program_name.as_deref(), Some("claude"));
+        assert_eq!(entry.primary_cwd.as_deref(), Some(r"D:\yaat"));
+        assert_eq!(entry.current_cwd, None);
+        assert_eq!(entry.started_at, Some(ts("2026-09-27T11:09:41.935397Z")));
+        assert_eq!(entry.end, SessionEnd::TracerLost);
+        assert_eq!(entry.source, HistorySource::TracerLog);
+        assert_eq!(entry.label, "");
+        assert_eq!(entry.claude_session_id, None);
+        assert_eq!(entry.skip_permissions, Some(true));
+        assert_eq!(entry.model, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    fn claude_log(id: &str, args: &str) -> [String; 2] {
+        [
+            format!(
+                "2026-09-27T08:00:00.000000Z  INFO rt_tracer: rt-tracer starting session_id={id} cwd=D:\\proj cols=120 rows=32 argc=3"
+            ),
+            format!(
+                r"2026-09-27T08:00:00.010000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\bin\claude.exe argc=2 args={args} cwd=D:\proj"
+            ),
+        ]
+    }
+
+    #[test]
+    fn importer_reads_the_permission_and_model_flags() {
+        let dirs = scratch_dirs("import-flags");
+        let cases = [
+            (
+                "aaaaaaaa-0000-4000-8000-000000000001",
+                r#"["--model", "opus"]"#,
+                Some(false),
+                Some("opus"),
+            ),
+            (
+                "aaaaaaaa-0000-4000-8000-000000000002",
+                r#"["--model=sonnet", "--dangerously-skip-permissions"]"#,
+                Some(true),
+                Some("sonnet"),
+            ),
+            (
+                "aaaaaaaa-0000-4000-8000-000000000003",
+                "[]",
+                Some(false),
+                None,
+            ),
+        ];
+        for (id, args, _, _) in &cases {
+            let lines = claude_log(id, args);
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            write_log(&dirs, &format!("tracer-{id}.log"), &lines);
+        }
+
+        assert_eq!(import(&dirs, &[], &[]), 3);
+
+        for (id, _, skip, model) in cases {
+            let entry = only(&dirs, id);
+            assert_eq!(entry.skip_permissions, skip, "{id}");
+            assert_eq!(entry.model.as_deref(), model, "{id}");
+        }
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn workspace_log_without_a_workspace_is_folder_only() {
+        let dirs = scratch_dirs("import-folder");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+
+        assert_eq!(import(&dirs, &[], &[]), 1);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.kind, SessionKind::Standalone);
+        assert_eq!(entry.workspace_id, None);
+        assert_eq!(entry.spawn_config, None);
+        assert_eq!(
+            member_ids(&entry),
+            [("", r"D:\yaat"), ("", r"D:\yaat-server")]
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn workspace_whose_members_differ_from_the_add_dirs_is_not_matched() {
+        let dirs = scratch_dirs("import-ws-mismatch");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        let repos = [repo("r-yaat", r"D:\yaat"), repo("r-other", r"D:\other")];
+        let workspaces = [workspace("ws1", &["r-yaat", "r-other"])];
+
+        import(&dirs, &repos, &workspaces);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.kind, SessionKind::Standalone);
+        assert_eq!(entry.workspace_id, None);
+        assert_eq!(
+            member_ids(&entry),
+            [("r-yaat", r"D:\yaat"), ("", r"D:\yaat-server")]
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn single_repo_log_is_matched_to_its_repo() {
+        let dirs = scratch_dirs("import-single");
+        write_log(&dirs, &format!("tracer-{STOP_ID}.log"), &STOP_LOG);
+        let repos = [repo("r-rt", r"D:\rustling-tulip")];
+
+        import(&dirs, &repos, &[]);
+
+        let entry = only(&dirs, STOP_ID);
+        assert_eq!(entry.kind, SessionKind::Single);
+        assert_eq!(entry.spawn_config, None);
+        assert_eq!(member_ids(&entry), [("r-rt", r"D:\rustling-tulip")]);
+        assert_eq!(entry.end, SessionEnd::StoppedByUser);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn pwsh_log_is_a_folder_only_plain_shell() {
+        let dirs = scratch_dirs("import-pwsh");
+        write_log(&dirs, &format!("tracer-{PWSH_ID}.log"), &PWSH_LOG);
+
+        import(&dirs, &[repo("r-root", r"D:\")], &[]);
+
+        let entry = only(&dirs, PWSH_ID);
+        assert_eq!(entry.mode, SessionMode::PlainShell);
+        assert_eq!(entry.kind, SessionKind::Standalone);
+        assert_eq!(entry.program_name.as_deref(), Some("pwsh"));
+        assert_eq!(entry.current_cwd.as_deref(), Some(r"D:\"));
+        assert_eq!(entry.primary_cwd.as_deref(), Some(r"D:\"));
+        assert!(entry.members.is_empty());
+        assert_eq!(entry.spawn_config, None);
+        assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
+        assert_eq!(entry.skip_permissions, None);
+        assert_eq!(entry.model, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn end_time_comes_from_the_daemon_logs_before_the_mtime() {
+        let dirs = scratch_dirs("import-end-time");
+        let log = write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        set_mtime(&log, Utc::now() - TimeDelta::hours(1));
+        write_log(
+            &dirs,
+            "daemon.log",
+            &[&format!(
+                "2026-09-27T18:40:00.000000Z  INFO rustling_tulipd::server: discard_session: begin session_id={YAAT_ID} cleanup_targets=0"
+            )],
+        );
+        write_log(
+            &dirs,
+            "daemon.log.old",
+            &[&format!(
+                "2026-09-27T18:29:06.000000Z  INFO rustling_tulipd::tracer_client: tracer_client: child exited session_id={YAAT_ID} code=1"
+            )],
+        );
+
+        import(&dirs, &[], &[]);
+
+        assert_eq!(only(&dirs, YAAT_ID).ended_at, ts("2026-09-27T18:29:06Z"));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn end_time_falls_back_to_the_log_mtime() {
+        let dirs = scratch_dirs("import-mtime");
+        let log = write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        let mtime = ts("2026-09-27T12:00:00Z").max(Utc::now() - TimeDelta::days(1));
+        let mtime = DateTime::from_timestamp(mtime.timestamp(), 0).expect("whole seconds");
+        set_mtime(&log, mtime);
+        write_log(&dirs, "daemon.log", &["unrelated line"]);
+
+        import(&dirs, &[], &[]);
+
+        assert_eq!(only(&dirs, YAAT_ID).ended_at, mtime);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn session_already_in_the_history_is_not_imported_again() {
+        let dirs = scratch_dirs("import-existing");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        let mut recorded = entry_from_record(
+            &super::test_support::record(YAAT_ID, SessionMode::Interactive),
+            SessionEnd::StoppedByUser,
+            Utc::now(),
+        );
+        recorded.label = "kept".to_owned();
+        write_if_absent(&dirs, &recorded).expect("write recorded");
+
+        assert_eq!(import(&dirs, &[], &[]), 0);
+
+        let entry = only(&dirs, YAAT_ID);
+        assert_eq!(entry.source, HistorySource::Record);
+        assert_eq!(entry.label, "kept");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn live_or_abandoned_sidecar_session_is_skipped() {
+        let dirs = scratch_dirs("import-live");
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        let skip: HashSet<String> = [YAAT_ID.to_owned()].into();
+
+        assert_eq!(import_skipping(&dirs, &[], &[], &skip), 0);
+        assert_eq!(read_one(&dirs, YAAT_ID), None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn codex_and_programless_logs_are_skipped() {
+        let dirs = scratch_dirs("import-codex");
+        let codex_id = "aaaaaaaa-1111-4222-8333-944455556666";
+        write_log(
+            &dirs,
+            &format!("tracer-{codex_id}.log"),
+            &[
+                &format!(
+                    "2026-09-27T08:00:00.000000Z  INFO rt_tracer: rt-tracer starting session_id={codex_id} cwd=D:\\yaat cols=120 rows=32 argc=1"
+                ),
+                r#"2026-09-27T08:00:00.010000Z  INFO rt_tracer::supervisor: supervisor: about to spawn child program=C:\bin\codex.exe argc=1 args=["--yolo"] cwd=D:\yaat"#,
+            ],
+        );
+        write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG[..1]);
+        write_log(&dirs, "tracer-garbage.log", &["not a tracer log"]);
+
+        assert_eq!(import(&dirs, &[], &[]), 0);
+        assert!(read_all(&dirs).is_empty());
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn log_older_than_the_retention_is_skipped() {
+        let dirs = scratch_dirs("import-old");
+        let log = write_log(&dirs, &format!("tracer-{YAAT_ID}.log"), &YAAT_LOG);
+        set_mtime(&log, Utc::now() - TimeDelta::days(8));
+
+        assert_eq!(import(&dirs, &[], &[]), 0);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn program_stems_and_add_dirs_are_read_from_any_path_form() {
+        assert_eq!(
+            program_stem(r"C:\Users\x\.local\bin\claude.exe").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(program_stem("/usr/bin/bash").as_deref(), Some("bash"));
+        assert_eq!(program_stem("PWSH.EXE").as_deref(), Some("pwsh"));
+        assert_eq!(program_stem(""), None);
+        let args: Vec<String> = ["--add-dir", "a", "-x", "--add-dir", "b", "--add-dir"]
+            .map(str::to_owned)
+            .into();
+        assert_eq!(add_dir_args(&args), ["a", "b"]);
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
+mod recovery_tests {
+    use super::test_support::{record, scratch_dirs};
+    use super::*;
+    use protocol::{SpawnConfig, WorktreeReusePolicy};
+    use serde_json::json;
+    use std::fs::File;
+    use std::time::SystemTime;
+
+    const CONV: &str = "85573bb1-c581-489e-baaa-94d5a384744c";
+
+    fn member(repo_id: &str, path: &str) -> SessionMember {
+        SessionMember {
+            repo_id: repo_id.to_owned(),
+            repo_name: repo_id.to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: path.to_owned(),
+        }
+    }
+
+    fn folder_only(members: Vec<SessionMember>) -> HistoryEntry {
+        let mut entry = entry_from_record(
+            &record("h1", SessionMode::Interactive),
+            SessionEnd::TracerLost,
+            Utc::now(),
+        );
+        entry.primary_cwd = members.first().map(|m| m.worktree_path.clone());
+        entry.members = members;
+        entry
+    }
+
+    fn workspace_config() -> SpawnConfig {
+        SpawnConfig {
+            target: SpawnTarget::Workspace {
+                workspace_id: "ws1".to_owned(),
+                branch_name: "feat/x".to_owned(),
+                base_branch: None,
+                use_worktree: true,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktrees: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: true,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
+            model: Some("opus".to_owned()),
+            extra_env: Vec::new(),
+        }
+    }
+
+    fn item(how: RecoverAs, conversation: Option<&str>) -> RecoverItem {
+        RecoverItem {
+            history_id: "h1".to_owned(),
+            conversation_id: conversation.map(str::to_owned),
+            how,
+        }
+    }
+
+    fn plan(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveryPlan, String> {
+        plan_recovery(entry, item, |_, _| true)
+    }
+
+    #[test]
+    fn recovered_entry_is_refused() {
+        let mut entry = folder_only(vec![member("", r"D:\yaat")]);
+        entry.recovered_at = Some(Utc::now());
+        for how in [RecoverAs::Claude, RecoverAs::Shell] {
+            assert_eq!(
+                plan(&entry, &item(how, Some(CONV))),
+                Err("already recovered".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn missing_conversation_is_refused_with_its_folder() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let result = plan_recovery(
+            &entry,
+            &item(RecoverAs::Shell, Some("gone")),
+            |folder, id| {
+                asked.borrow_mut().push((folder.to_owned(), id.to_owned()));
+                false
+            },
+        );
+        assert_eq!(
+            result,
+            Err(r"conversation gone not found for D:\yaat".to_owned())
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [(r"D:\yaat".to_owned(), "gone".to_owned())]
+        );
+    }
+
+    #[test]
+    fn claude_needs_a_conversation() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+        assert_eq!(
+            plan(&entry, &item(RecoverAs::Claude, None)),
+            Err("no conversation to resume".to_owned())
+        );
+        let register = RecoverAs::RegisterRepoThenClaude {
+            path: r"D:\yaat".to_owned(),
+        };
+        assert_eq!(
+            plan(&entry, &item(register, None)),
+            Err("no conversation to resume".to_owned())
+        );
+    }
+
+    #[test]
+    fn claude_with_a_workspace_config_clones_it_and_resumes() {
+        let mut entry = folder_only(vec![
+            member("r-yaat", r"C:\wt\yaat"),
+            member("r-srv", r"C:\wt\yaat-server"),
+        ]);
+        entry.spawn_config = Some(workspace_config());
+
+        let plan = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+
+        assert_eq!(plan.register_repo, None);
+        let req = plan.request;
+        assert_eq!(req.target, workspace_config().target);
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+        assert_eq!(req.mode, SessionMode::Interactive);
+        assert_eq!(req.agent(), Agent::Claude);
+        assert!(req.dangerously_skip_permissions);
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.initial_prompt, None);
+        assert_eq!(req.prompt_injector, None);
+    }
+
+    #[test]
+    fn claude_from_a_shell_or_codex_config_is_forced_to_interactive_claude() {
+        let mut entry = folder_only(vec![member("r1", r"D:\repo")]);
+        let mut config = workspace_config();
+        config.mode = SessionMode::PlainShell;
+        config.agent_options = AgentOptions::Codex { sandbox: None };
+        entry.spawn_config = Some(config);
+
+        let req = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.mode, SessionMode::Interactive);
+        assert_eq!(req.agent(), Agent::Claude);
+    }
+
+    #[test]
+    fn folder_only_claude_replays_its_add_dirs_in_a_standalone_target() {
+        let entry = folder_only(vec![
+            member("r-yaat", r"D:\yaat"),
+            member("", r"D:\yaat-server"),
+        ]);
+
+        let plan = plan(&entry, &item(RecoverAs::Claude, Some(CONV))).expect("plan");
+
+        assert_eq!(plan.register_repo, None);
+        assert_eq!(
+            plan.request.target,
+            SpawnTarget::Standalone {
+                cwd: Some(r"D:\yaat".to_owned()),
+                add_dirs: vec![r"D:\yaat-server".to_owned()],
+            }
+        );
+        assert_eq!(plan.request.mode, SessionMode::Interactive);
+        assert_eq!(plan.request.agent(), Agent::Claude);
+        assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
+        assert!(!plan.request.dangerously_skip_permissions);
+    }
+
+    #[test]
+    fn folder_only_and_register_paths_replay_the_recorded_flags() {
+        let mut entry = folder_only(vec![member("", r"D:\foo")]);
+        entry.skip_permissions = Some(true);
+        entry.model = Some("opus".to_owned());
+        let register = RecoverAs::RegisterRepoThenClaude {
+            path: r"D:\foo".to_owned(),
+        };
+        for how in [RecoverAs::Claude, register] {
+            let req = plan(&entry, &item(how.clone(), Some(CONV)))
+                .expect("plan")
+                .request;
+            assert!(req.dangerously_skip_permissions, "{how:?}");
+            assert_eq!(req.model.as_deref(), Some("opus"), "{how:?}");
+        }
+    }
+
+    #[test]
+    fn folder_only_claude_without_members_runs_in_the_folder() {
+        let mut entry = folder_only(Vec::new());
+        entry.primary_cwd = Some(r"D:\scratch".to_owned());
+
+        let req = plan(&entry, &item(RecoverAs::Claude, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert_eq!(
+            req.target,
+            SpawnTarget::Standalone {
+                cwd: Some(r"D:\scratch".to_owned()),
+                add_dirs: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn register_repo_then_claude_registers_the_folder_and_resumes_there() {
+        let entry = folder_only(vec![member("", r"D:\foo"), member("", r"D:\bar")]);
+        let how = RecoverAs::RegisterRepoThenClaude {
+            path: "d:/FOO/".to_owned(),
+        };
+
+        let plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
+
+        assert_eq!(plan.register_repo.as_deref(), Some("d:/FOO/"));
+        assert_eq!(
+            plan.request.target,
+            SpawnTarget::Standalone {
+                cwd: Some("d:/FOO/".to_owned()),
+                add_dirs: vec![r"D:\bar".to_owned()],
+            }
+        );
+        assert_eq!(plan.request.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    #[test]
+    fn register_repo_then_claude_refuses_another_folder() {
+        let entry = folder_only(vec![member("", r"D:\foo")]);
+        let how = RecoverAs::RegisterRepoThenClaude {
+            path: r"D:\elsewhere".to_owned(),
+        };
+        assert_eq!(
+            plan(&entry, &item(how, Some(CONV))),
+            Err(r"D:\elsewhere is not the session's folder D:\foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn shell_types_the_resume_command_in_the_last_folder() {
+        let mut entry = folder_only(vec![member("", r"D:\yaat")]);
+        entry.current_cwd = Some(r"D:\yaat\src".to_owned());
+        entry.spawn_config = Some(workspace_config());
+
+        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.mode, SessionMode::PlainShell);
+        assert_eq!(
+            req.target,
+            SpawnTarget::Standalone {
+                cwd: Some(r"D:\yaat\src".to_owned()),
+                add_dirs: Vec::new(),
+            }
+        );
+        assert_eq!(req.resume_conversation, None);
+        assert_eq!(
+            req.prompt_injector.expect("injector").steps,
+            [
+                InjectorStep::Delay { ms: 1500 },
+                InjectorStep::Text {
+                    content: format!("claude --resume {CONV}"),
+                    newline: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_without_a_conversation_is_a_bare_shell() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+        let req = plan(&entry, &item(RecoverAs::Shell, None))
+            .expect("plan")
+            .request;
+        assert_eq!(req.mode, SessionMode::PlainShell);
+        assert_eq!(req.prompt_injector, None);
+    }
+
+    #[test]
+    fn unknown_kind_is_refused() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+        assert_eq!(
+            plan(&entry, &item(RecoverAs::Unknown, Some(CONV))),
+            Err("unsupported recovery kind".to_owned())
+        );
+    }
+
+    fn write_transcript(home: &Path, cwd: &str, id: &str, at: DateTime<Utc>) {
+        let dir = home
+            .join("projects")
+            .join(transcripts::encode_project_dir(cwd));
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let path = dir.join(format!("{id}.jsonl"));
+        let line =
+            json!({"type": "user", "cwd": cwd, "message": {"content": format!("about {id}")}});
+        std::fs::write(&path, format!("{line}\n")).expect("write transcript");
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("reopen transcript")
+            .set_modified(SystemTime::from(at))
+            .expect("set mtime");
+    }
+
+    fn history_entry(
+        id: &str,
+        mode: SessionMode,
+        folder: &str,
+        ended_at: DateTime<Utc>,
+    ) -> HistoryEntry {
+        let mut entry = entry_from_record(&record(id, mode), SessionEnd::TracerLost, ended_at);
+        entry.primary_cwd = Some(folder.to_owned());
+        entry.started_at = Some(ended_at - TimeDelta::hours(1));
+        entry
+    }
+
+    #[test]
+    fn history_items_describe_folders_and_candidates() {
+        let dirs = scratch_dirs("items");
+        let home = dirs.config.join("claude-home");
+        let git_dir = dirs.config.join("git-folder");
+        let git_file = dirs.config.join("git-file-folder");
+        let plain = dirs.config.join("plain-folder");
+        std::fs::create_dir_all(git_dir.join(".git")).expect("git dir");
+        std::fs::create_dir_all(&git_file).expect("git file folder");
+        std::fs::write(git_file.join(".git"), "gitdir: elsewhere").expect("git file");
+        std::fs::create_dir_all(&plain).expect("plain folder");
+        let (git_dir, git_file, plain) = (
+            git_dir.to_string_lossy().into_owned(),
+            git_file.to_string_lossy().into_owned(),
+            plain.to_string_lossy().into_owned(),
+        );
+        let ended = DateTime::from_timestamp(Utc::now().timestamp() - 600, 0).expect("time");
+
+        let mut known = history_entry("known", SessionMode::Interactive, &git_dir, ended);
+        known.claude_session_id = Some("conv-known".to_owned());
+        write_transcript(&home, &git_dir, "conv-known", ended - TimeDelta::days(3));
+        write_transcript(&home, &git_dir, "conv-other", ended);
+        let mut gone = history_entry(
+            "gone",
+            SessionMode::Interactive,
+            &git_dir,
+            ended - TimeDelta::seconds(1),
+        );
+        gone.claude_session_id = Some("conv-missing".to_owned());
+        let mut shell = history_entry(
+            "shell",
+            SessionMode::PlainShell,
+            &plain,
+            ended - TimeDelta::seconds(2),
+        );
+        shell.current_cwd = Some(git_file.clone());
+        write_transcript(
+            &home,
+            &git_file,
+            "conv-in-window",
+            ended - TimeDelta::minutes(5),
+        );
+        write_transcript(
+            &home,
+            &git_file,
+            "conv-after",
+            ended + TimeDelta::minutes(3),
+        );
+        write_transcript(&home, &git_file, "conv-before", ended - TimeDelta::hours(2));
+        let headless = history_entry("headless", SessionMode::Headless, &plain, ended);
+        for e in [&known, &gone, &shell, &headless] {
+            write_if_absent(&dirs, e).expect("write entry");
+        }
+        let repos: Vec<RepoEntry> = vec![
+            serde_json::from_value(json!({"id": "r-git", "name": "git", "path": git_dir.to_uppercase(), "default_branch": null}))
+                .expect("repo"),
+        ];
+
+        let items = history_items(&dirs, &repos, Some(&home));
+
+        let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
+        assert_eq!(ids, ["known", "gone", "shell"], "headless is left out");
+        let cands =
+            |i: usize| -> Vec<&str> { items[i].candidates.iter().map(|c| c.id.as_str()).collect() };
+        assert_eq!(
+            cands(0),
+            ["conv-known"],
+            "a known conversation is the only candidate"
+        );
+        assert_eq!(
+            items[0].candidates[0].last_active,
+            ended - TimeDelta::days(3)
+        );
+        assert_eq!(
+            items[0].candidates[0].title.as_deref(),
+            Some("about conv-known")
+        );
+        assert!(
+            cands(1).is_empty(),
+            "a known conversation whose file is gone"
+        );
+        assert_eq!(
+            cands(2),
+            ["conv-in-window"],
+            "the shell's last folder is searched"
+        );
+        assert!(items[0].folder_is_git_repo);
+        assert_eq!(items[0].folder_repo_id.as_deref(), Some("r-git"));
+        assert!(items[2].folder_is_git_repo, "a .git file counts");
+        assert_eq!(items[2].folder_repo_id, None);
+
+        let no_home = history_items(&dirs, &repos, None);
+        assert!(no_home.iter().all(|i| i.candidates.is_empty()));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn entry_with_no_start_searches_a_day_back() {
+        let dirs = scratch_dirs("items-no-start");
+        let home = dirs.config.join("claude-home");
+        let folder = r"D:\nowhere-real";
+        let ended = DateTime::from_timestamp(Utc::now().timestamp() - 600, 0).expect("time");
+        let mut entry = history_entry("s", SessionMode::Interactive, folder, ended);
+        entry.started_at = None;
+        write_if_absent(&dirs, &entry).expect("write entry");
+        write_transcript(&home, folder, "within-a-day", ended - TimeDelta::hours(20));
+        write_transcript(&home, folder, "too-old", ended - TimeDelta::hours(25));
+
+        let items = history_items(&dirs, &[], Some(&home));
+
+        let ids: Vec<&str> = items[0].candidates.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["within-a-day"]);
+        assert!(!items[0].folder_is_git_repo);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }
