@@ -70,6 +70,10 @@ Replace the Tauri/WebView2 frontend with a native GPUI + `alacritty_terminal` cl
 - [ ] Remote file transfer: fetch a file from the host to the remote client by Ctrl-clicking it or through a "Fetch file…" popup. The daemon and protocol half (FT.1) has landed. The client side lands with Phase 6, and the Ctrl-click trigger also needs Phase 2. See [remote-file-transfer.md](./plans/remote-file-transfer.md)
 - [x] Security fix: `GetFileSnapshot` / `GetFileDiff` now pass the client-supplied `path` through `file_fetch::confine_path` / `check_relative` before using it. `repo_target_or_err` also canonicalizes `worktree_path` before checking it's under the worktrees root.
 
+### Bugs
+- [x] Tracer hangs on shutdown after a Stop (user, 2026-09-27: stale `rt-tracer` processes with no session): `supervisor::run` joins the PTY reader thread while the ConPTY `master` is still alive, so the reader never gets EOF unless the headless conhost closes its pipe on its own (10 of 16 pwsh tracer logs never reached `supervisor: exiting`). The job object that would kill leftovers is only released when the tracer exits. Fix: close the pseudoconsole before the join, and bound the join with a timeout
+- [ ] Investigate a second daemon start that rotated a live daemon's log (2026-09-25 18:46:33Z): pid 5804 started a minute earlier and kept running, a second `rustling-tulipd` rotated `daemon.log` to `daemon.log.old` (which 5804 keeps writing to) and reattached to its 3 tracers. Find what launched it, why single-instance didn't stop it before it touched the log and the tracers, and what became of it
+
 ### Auto-update
 `tauri-plugin-updater` is ~2 hours of in-app work but blocked until a signed release
 pipeline exists (no GH Actions pipeline, no signing cert, no hosted manifest).

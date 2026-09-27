@@ -58,6 +58,11 @@ const PIPE_OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const PACING_CHUNK_BYTES: usize = 1024;
 const PACING_DELAY: Duration = Duration::from_millis(10);
 
+/// Shutdown bound on the PTY reader thread reaching EOF once the master is
+/// released, and how often it is checked.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
+const READER_JOIN_POLL: Duration = Duration::from_millis(20);
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub session_id: String,
@@ -307,7 +312,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // Resize forwarding: pipe input → PTY master.
     let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
     let master_for_resize = Arc::clone(&master);
-    tokio::spawn(async move {
+    let resize_task = tokio::spawn(async move {
         while let Some((cols, rows)) = resize_rx.recv().await {
             let m = Arc::clone(&master_for_resize);
             let _ = tokio::task::spawn_blocking(move || {
@@ -420,11 +425,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Unix mirror of the Windows KILL_ON_JOB_CLOSE job object: take out any
     // surviving descendants in the child's process group (dev servers, node,
-    // etc.) so they don't pin worktree files open and wedge cleanup — and so a
-    // grandchild holding the PTY slave open can't block the reader-thread join
-    // below. macOS has no PR_SET_PDEATHSIG, so this is explicit on the shutdown
-    // path; a tracer killed with SIGKILL still leaks survivors (same gap the
-    // plan notes). Best-effort, mirroring the job-object contract.
+    // etc.) so they don't pin worktree files open and wedge cleanup, and so a
+    // grandchild holding the PTY slave open doesn't keep the reader thread
+    // from reaching EOF. macOS has no PR_SET_PDEATHSIG, so this is explicit on
+    // the shutdown path; a tracer killed with SIGKILL still leaks survivors.
+    // Best-effort, mirroring the job-object contract.
     #[cfg(unix)]
     if let Some(pid) = child_pid {
         kill_process_group(pid);
@@ -435,7 +440,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     #[cfg(unix)]
     remove_stale_socket(&cfg.pipe_name);
 
-    let _ = reader_handle.join();
+    // Release the PTY master before waiting for the reader. On Windows the
+    // output pipe only reaches EOF once the pseudoconsole is closed, and a
+    // grandchild still attached to the console (the job object only kills it
+    // when the tracer exits) keeps it open indefinitely. Dropping the last
+    // master reference closes the pseudoconsole, which disconnects every
+    // client still attached. The resize task holds the other reference;
+    // awaiting the aborted task guarantees its clone has been dropped.
+    resize_task.abort();
+    let _ = resize_task.await;
+    drop(master);
+
+    wait_for_reader(&reader_handle).await;
 
     let ring_bytes = shared.lock().map_or(0, |s| s.ring.len());
     let overflowed = shared.lock().is_ok_and(|s| s.ring.overflowed());
@@ -447,6 +463,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "supervisor: exiting"
     );
     Ok(())
+}
+
+/// Wait for the PTY reader thread to reach EOF, up to
+/// [`READER_JOIN_TIMEOUT`]. A reader that is still blocked after that is left
+/// behind: the process exits anyway, and the OS reclaims the thread and its
+/// handles.
+async fn wait_for_reader(reader_handle: &std::thread::JoinHandle<()>) {
+    let started = Instant::now();
+    while !reader_handle.is_finished() {
+        if started.elapsed() >= READER_JOIN_TIMEOUT {
+            warn!(
+                timeout_ms = u64::try_from(READER_JOIN_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                "supervisor: PTY reader did not reach EOF in time; exiting without it"
+            );
+            return;
+        }
+        tokio::time::sleep(READER_JOIN_POLL).await;
+    }
 }
 
 /// Convert a stored socket-name string into an `interprocess` `Name`. The
