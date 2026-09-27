@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui::{Modifiers, TestAppContext};
-use protocol::{ClientMessage, DaemonHandshake};
+use protocol::{ClientMessage, DaemonHandshake, DaemonMessage};
 use rustling_tulip_native::{
     Connection, NetCommand, NetDeps, NetEvent, RootDeps, RootView, bind_keys, spawn_net,
 };
@@ -81,9 +81,17 @@ impl LiveDaemon {
             .join("native-e2e")
             .join(format!("{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for sub in ["config", "binaries", "worktrees", "ui"] {
+        for sub in [
+            "config",
+            "binaries",
+            "worktrees",
+            "ui",
+            "claude-home",
+            "fake-bin",
+        ] {
             std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
         }
+        write_claude_stub(&root.join("fake-bin"));
         let envs = isolated_envs(&root, test);
         let mut command = Command::new(&daemon);
         command
@@ -139,6 +147,12 @@ impl LiveDaemon {
 
     pub fn config_dir(&self) -> PathBuf {
         self.root.join("config")
+    }
+
+    /// The daemon's `CLAUDE_CONFIG_DIR`: where it looks for Claude Code
+    /// transcripts, in place of the user's `~/.claude`.
+    pub fn claude_config_dir(&self) -> PathBuf {
+        self.root.join("claude-home")
     }
 
     /// The daemon's binary cache: the tracers, and a daemon it respawns,
@@ -232,6 +246,34 @@ impl Drop for LiveDaemon {
     }
 }
 
+/// What the `claude` stub prints before its arguments.
+pub const CLAUDE_STUB_MARKER: &str = "[rt-e2e claude stub]";
+
+/// A `claude` in `dir` that prints [`CLAUDE_STUB_MARKER`] and its arguments,
+/// so a shell the daemon starts never runs the user's real `claude`.
+#[cfg(windows)]
+fn write_claude_stub(dir: &Path) {
+    let script = format!("@echo off\r\necho {CLAUDE_STUB_MARKER} %*\r\n");
+    std::fs::write(dir.join("claude.cmd"), script).expect("write the claude stub");
+}
+
+#[cfg(not(windows))]
+fn write_claude_stub(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("claude");
+    let script = format!("#!/bin/sh\necho '{CLAUDE_STUB_MARKER}' \"$@\"\n");
+    std::fs::write(&path, script).expect("write the claude stub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("make the claude stub executable");
+}
+
+/// `PATH` with the `claude` stub's dir first.
+fn path_with_stub(root: &Path) -> OsString {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::iter::once(root.join("fake-bin")).chain(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs).expect("PATH entries hold no separator")
+}
+
 fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
     let fake_claude = repo_root()
         .join("tools")
@@ -262,6 +304,14 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
         ("RUSTLING_TULIP_SHELL", test_shell()),
         ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
         ("RUSTLING_TULIP_CLAUDE", fake_claude.into_os_string()),
+        // Claude Code's home, for the daemon's transcript lookups and the
+        // sessions it spawns: never the user's `~/.claude`.
+        (
+            "CLAUDE_CONFIG_DIR",
+            root.join("claude-home").into_os_string(),
+        ),
+        // A shell the daemon starts finds the stub before any real `claude`.
+        ("PATH", path_with_stub(root)),
         // The tracer the daemon copies into its binaries dir: the one built
         // beside it, never the installed app's.
         (
@@ -464,9 +514,21 @@ fn all_pids() -> Vec<u32> {
 pub struct LiveClient {
     tx: UnboundedSender<NetCommand>,
     states: Arc<Mutex<Vec<Connection>>>,
+    messages: Arc<Mutex<Vec<DaemonMessage>>>,
 }
 
 impl LiveClient {
+    /// The first answer `pick` gives, asking it of every message the daemon
+    /// sent this client, newest first.
+    pub fn find_message<R>(&self, pick: impl FnMut(&DaemonMessage) -> Option<R>) -> Option<R> {
+        self.messages
+            .lock()
+            .expect("message log lock")
+            .iter()
+            .rev()
+            .find_map(pick)
+    }
+
     /// Sends `msg` to the daemon as the client would.
     pub fn send(&self, msg: ClientMessage) {
         self.tx
@@ -536,7 +598,13 @@ impl<'a> Harness<'a> {
         let (to_view, view_events) = unbounded();
         spawn_net(live_deps(&daemon.config_dir()), net_commands, net_events);
         let states = Arc::new(Mutex::new(Vec::new()));
-        tee_states(from_net, to_view, Arc::clone(&states));
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        tee_states(
+            from_net,
+            to_view,
+            Arc::clone(&states),
+            Arc::clone(&messages),
+        );
         let clock = TestClock::new();
         let quits = std::rc::Rc::new(std::cell::Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
@@ -563,7 +631,14 @@ impl<'a> Harness<'a> {
             quits,
             opener,
         };
-        (harness, LiveClient { tx, states })
+        (
+            harness,
+            LiveClient {
+                tx,
+                states,
+                messages,
+            },
+        )
     }
 
     /// Lets the view settle and asks `done` until it holds, sleeping real
@@ -656,18 +731,26 @@ fn live_deps(config: &Path) -> NetDeps {
     }
 }
 
-/// Forwards every network event to the view, recording each state on the
-/// way.
+/// Forwards every network event to the view, recording each state and each
+/// daemon message on the way.
 fn tee_states(
     mut from_net: futures::channel::mpsc::UnboundedReceiver<NetEvent>,
     to_view: UnboundedSender<NetEvent>,
     states: Arc<Mutex<Vec<Connection>>>,
+    messages: Arc<Mutex<Vec<DaemonMessage>>>,
 ) {
     std::thread::spawn(move || {
         futures::executor::block_on(async move {
             while let Some(event) = from_net.next().await {
-                if let NetEvent::State(conn) = &event {
-                    states.lock().expect("state log lock").push(conn.clone());
+                match &event {
+                    NetEvent::State(conn) => {
+                        states.lock().expect("state log lock").push(conn.clone());
+                    }
+                    NetEvent::Message(msg) => {
+                        let msg = DaemonMessage::clone(msg);
+                        messages.lock().expect("message log lock").push(msg);
+                    }
+                    _ => {}
                 }
                 if to_view.unbounded_send(event).is_err() {
                     break;

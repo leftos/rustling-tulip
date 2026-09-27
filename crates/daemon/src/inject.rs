@@ -12,7 +12,10 @@
 //!    waiting the full ceiling, but only after we've seen enough output to
 //!    be confident the TUI has actually started painting (Claude's banner
 //!    is ~2 KB; sub-1 KB means it hasn't started yet, so quiescence is
-//!    meaningless).
+//!    meaningless). An injector whose `startup` is
+//!    [`InjectorStartup::ShellPrompt`] waits for a shell prompt instead:
+//!    a short quiet period once the shell has printed anything, capped at
+//!    the step's own delay (see [`StartupRule`]).
 //! 2. If the injector declares a `verify_mode_marker`, the runner scans
 //!    PTY output for that marker after the pre-input steps and re-sends
 //!    them up to a few times if the marker doesn't appear. This self-heals
@@ -26,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use protocol::{InjectorStep, PromptInjector};
+use protocol::{InjectorStartup, InjectorStep, PromptInjector};
 use tokio::sync::broadcast;
 use tokio::time::{Instant, sleep, timeout};
 use tracing::{debug, info, warn};
@@ -61,6 +64,14 @@ const STARTUP_MIN_OUTPUT_BYTES: usize = 1024;
 /// (the bundled `smoke-inline` preset historically used 6000 ms, which
 /// is too tight under load).
 const MIN_STARTUP_CAP: Duration = Duration::from_secs(15);
+
+/// How long a shell's output must be silent before its prompt counts as
+/// printed, under [`InjectorStartup::ShellPrompt`].
+const SHELL_PROMPT_QUIET_FOR: Duration = Duration::from_millis(300);
+
+/// Output a shell must print before quiescence counts, under
+/// [`InjectorStartup::ShellPrompt`]: more than a lone terminal query.
+const SHELL_PROMPT_MIN_OUTPUT_BYTES: usize = 32;
 
 /// How long to wait for `verify_mode_marker` to appear in output before
 /// declaring this attempt a miss and re-sending `pre_input`.
@@ -109,11 +120,13 @@ pub fn run(session_id: String, pty: Arc<PtyHandle>, injector: PromptInjector) {
         // gated wait, not a literal sleep.
         let mut cursor = 0;
         if let Some(InjectorStep::Delay { ms }) = steps.first() {
+            let rule = StartupRule::of(injector.startup);
             let provided_cap = Duration::from_millis(u64::from(*ms));
-            let cap = provided_cap.max(MIN_STARTUP_CAP);
-            let waited = wait_until_ready_or_timeout(&mut output_rx, cap).await;
+            let cap = provided_cap.max(rule.min_cap);
+            let waited = wait_until_ready_or_timeout(&mut output_rx, cap, &rule).await;
             info!(
                 session_id = %session_id,
+                startup = ?injector.startup,
                 provided_cap_ms = u64::from(*ms),
                 effective_cap_ms = u64::try_from(cap.as_millis()).unwrap_or(u64::MAX),
                 waited_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
@@ -381,13 +394,52 @@ fn strip_ansi(input: &[u8]) -> String {
     out
 }
 
-/// Wait for the PTY output stream to be quiet for [`STARTUP_QUIET_FOR`]
-/// continuously, with [`STARTUP_MIN_WAIT`] as a floor, at least
-/// [`STARTUP_MIN_OUTPUT_BYTES`] bytes observed, and the caller's `cap` as
-/// a ceiling. Returns the actual time waited.
+/// When a leading `Delay` declares the program ready: after `min_wait`,
+/// once the output has been quiet for `quiet_for` and at least `min_bytes`
+/// have printed; at the latest after the step's cap raised to `min_cap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupRule {
+    min_wait: Duration,
+    quiet_for: Duration,
+    min_bytes: usize,
+    min_cap: Duration,
+}
+
+impl StartupRule {
+    /// An agent's TUI, which paints a banner of about 2 KB in bursts.
+    const AGENT_TUI: Self = Self {
+        min_wait: STARTUP_MIN_WAIT,
+        quiet_for: STARTUP_QUIET_FOR,
+        min_bytes: STARTUP_MIN_OUTPUT_BYTES,
+        min_cap: MIN_STARTUP_CAP,
+    };
+
+    /// A shell, whose prompt prints in one short burst. The byte gate skips
+    /// a lone terminal query (the pseudo console's 4-byte `ESC[6n`), which comes before
+    /// the shell has started.
+    const SHELL_PROMPT: Self = Self {
+        min_wait: Duration::ZERO,
+        quiet_for: SHELL_PROMPT_QUIET_FOR,
+        min_bytes: SHELL_PROMPT_MIN_OUTPUT_BYTES,
+        min_cap: Duration::ZERO,
+    };
+
+    fn of(startup: InjectorStartup) -> Self {
+        match startup {
+            InjectorStartup::ShellPrompt => Self::SHELL_PROMPT,
+            InjectorStartup::AgentTui | InjectorStartup::Unknown => Self::AGENT_TUI,
+        }
+    }
+}
+
+/// Wait for the PTY output stream to be quiet for `rule.quiet_for`
+/// continuously, with `rule.min_wait` as a floor, at least `rule.min_bytes`
+/// bytes observed, and the caller's `cap` as a ceiling. Returns the actual
+/// time waited.
 async fn wait_until_ready_or_timeout(
     output: &mut broadcast::Receiver<Vec<u8>>,
     cap: Duration,
+    rule: &StartupRule,
 ) -> Duration {
     let started = Instant::now();
     let deadline = started + cap;
@@ -400,9 +452,9 @@ async fn wait_until_ready_or_timeout(
         }
         let waited = now.saturating_duration_since(started);
         let quiet_for = now.saturating_duration_since(last_activity);
-        let need_floor = waited < STARTUP_MIN_WAIT;
-        let need_quiet = quiet_for < STARTUP_QUIET_FOR;
-        let need_bytes = total_bytes < STARTUP_MIN_OUTPUT_BYTES;
+        let need_floor = waited < rule.min_wait;
+        let need_quiet = quiet_for < rule.quiet_for;
+        let need_bytes = total_bytes < rule.min_bytes;
         if !need_floor && !need_quiet && !need_bytes {
             return waited;
         }
@@ -412,10 +464,10 @@ async fn wait_until_ready_or_timeout(
         // wait until the cap (avoiding a tight loop with `wait_for == 0`).
         let mut next_wake = deadline;
         if need_floor {
-            next_wake = next_wake.min(started + STARTUP_MIN_WAIT);
+            next_wake = next_wake.min(started + rule.min_wait);
         }
         if need_quiet {
-            next_wake = next_wake.min(last_activity + STARTUP_QUIET_FOR);
+            next_wake = next_wake.min(last_activity + rule.quiet_for);
         }
         let wait_for = next_wake.saturating_duration_since(now);
         match timeout(wait_for, output.recv()).await {
@@ -448,7 +500,7 @@ mod tests {
         assert!(tx.send(vec![b'.'; 1500]).is_ok());
         let cap = Duration::from_secs(20);
         let started = Instant::now();
-        let waited = wait_until_ready_or_timeout(&mut rx, cap).await;
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
         let elapsed = started.elapsed();
         assert!(
             waited >= STARTUP_MIN_WAIT,
@@ -469,7 +521,7 @@ mod tests {
         assert!(tx.send(vec![b'.'; 200]).is_ok());
         let cap = Duration::from_millis(500);
         let started = Instant::now();
-        let waited = wait_until_ready_or_timeout(&mut rx, cap).await;
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
         let elapsed = started.elapsed();
         // With a sub-floor cap and insufficient bytes, we should hit the
         // cap. Tolerate some scheduler jitter on either side.
@@ -490,7 +542,7 @@ mod tests {
         let (_tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let cap = Duration::from_millis(500);
         let started = Instant::now();
-        let waited = wait_until_ready_or_timeout(&mut rx, cap).await;
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
         let elapsed = started.elapsed();
         assert!(
             waited >= cap.saturating_sub(Duration::from_millis(100)),
@@ -517,7 +569,7 @@ mod tests {
             }
         });
         let started = Instant::now();
-        let waited = wait_until_ready_or_timeout(&mut rx, cap).await;
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
         let elapsed_under_test = started.elapsed();
         producer.abort();
         assert!(
@@ -527,6 +579,57 @@ mod tests {
         assert!(
             elapsed_under_test < cap + Duration::from_millis(300),
             "shouldn't overrun cap by much; elapsed {elapsed_under_test:?}"
+        );
+    }
+
+    #[test]
+    fn default_and_unknown_startup_keep_the_agent_tui_rule() {
+        let rule = StartupRule::of(InjectorStartup::default());
+        assert_eq!(
+            rule,
+            StartupRule {
+                min_wait: Duration::from_secs(3),
+                quiet_for: Duration::from_millis(1500),
+                min_bytes: 1024,
+                min_cap: Duration::from_secs(15),
+            }
+        );
+        assert_eq!(StartupRule::of(InjectorStartup::Unknown), rule);
+    }
+
+    #[test]
+    fn shell_prompt_rule_keeps_the_steps_own_cap() {
+        let rule = StartupRule::of(InjectorStartup::ShellPrompt);
+        let cap = Duration::from_millis(2000);
+        assert_eq!(cap.max(rule.min_cap), cap);
+        assert_eq!(rule.min_wait, Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn shell_prompt_is_ready_shortly_after_the_prompt_prints() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
+        assert!(tx.send(b"D:\\proj>".repeat(8)).is_ok());
+        let cap = Duration::from_secs(2);
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::SHELL_PROMPT).await;
+        assert!(
+            waited >= SHELL_PROMPT_QUIET_FOR,
+            "should wait for the quiet period; waited {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(1),
+            "should not wait for the cap once the prompt printed; waited {waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_prompt_is_not_ready_on_a_lone_terminal_query() {
+        let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
+        assert!(tx.send(b"\x1b[6n".to_vec()).is_ok());
+        let cap = Duration::from_millis(800);
+        let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::SHELL_PROMPT).await;
+        assert!(
+            waited >= cap.saturating_sub(Duration::from_millis(100)),
+            "a cursor query alone is not a prompt; waited {waited:?}"
         );
     }
 
