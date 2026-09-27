@@ -1,0 +1,37 @@
+/* Recover-sessions dialog. Frame, header, body and footer come from the shared
+ * .modal classes in styles.css; this only lays out the grouped rows. */
+.recover-dialog { width: 760px; outline: none; }
+.recover-body { overflow-y: auto; }
+.recover-group + .recover-group { margin-top: 14px; }
+.recover-group-title {
+  margin: 0 0 6px;
+  font-size: var(--text-small);
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+.recover-list { list-style: none; margin: 0; padding: 0; }
+.recover-row {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.recover-row + .recover-row { margin-top: 4px; }
+.recover-row-disabled { opacity: 0.6; }
+.recover-row-main {
+  display: flex; align-items: baseline; gap: 8px;
+  min-width: 0; cursor: pointer;
+}
+.recover-row-label {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+.recover-row-meta { margin-left: auto; white-space: nowrap; }
+.recover-row-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding-left: 22px;
+}
+.recover-row-controls select { max-width: 320px; }
+.recover-row-as { display: inline-flex; align-items: center; gap: 4px; }
+.recover-row-reason,
+.recover-row .error-text { padding-left: 22px; }

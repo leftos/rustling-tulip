@@ -56,6 +56,7 @@ function session(
     has_per_session_worktree: true,
     is_inactive: false,
     worktree_paths: ["C:/wt/brave-otter"],
+    claude_session_id: null,
     ...overrides,
   };
 }

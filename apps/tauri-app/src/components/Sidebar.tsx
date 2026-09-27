@@ -28,6 +28,7 @@ import {
 } from "../utils/sessionLabel";
 import { sessionAccentStyle } from "../utils/sessionColor";
 import { copyToClipboard } from "../utils/clipboard";
+import { badgeLabel } from "../utils/recoverModel";
 import {
   notifyRemoteUnavailable,
   useIsRemote,
@@ -178,6 +179,9 @@ interface Props {
   standaloneShellDefaultDir: string | null;
   onLaunchStandaloneShellDefault: () => void;
   onOpenStandaloneShellDialog: () => void;
+  /// Lost sessions nobody has recovered yet; drives the Recover button's badge.
+  recoverableCount: number;
+  onOpenRecoverDialog: () => void;
   onRevealInExplorer: (path: string) => void;
   onLaunchPreset: (preset: PresetEntry, target: PresetTarget) => void;
   /// Open the Settings modal. The sidebar header button and Ctrl/Cmd+,
@@ -318,6 +322,7 @@ export default function Sidebar(props: Props) {
     () => props.sessions.filter((s) => s.is_abandoned).length,
     [props.sessions],
   );
+  const recoverBadge = badgeLabel(props.recoverableCount);
 
   // Containers default to expanded. Local UI state; not persisted.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -683,6 +688,23 @@ export default function Sidebar(props: Props) {
             Resume all ({abandonedCount})
           </button>
         )}
+        <button
+          type="button"
+          className="link"
+          onClick={props.onOpenRecoverDialog}
+          title="Recover ended sessions"
+          data-testid="sidebar-recover-sessions"
+        >
+          Recover sessions
+          {recoverBadge !== null && (
+            <span
+              className="badge badge-warn small inline-note"
+              data-testid="sidebar-recover-badge"
+            >
+              {recoverBadge}
+            </span>
+          )}
+        </button>
       </div>
 
       {containers.length === 0 ? (

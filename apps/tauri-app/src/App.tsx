@@ -28,6 +28,7 @@ import {
   type DaemonHandshake,
   type DiscoveredHost,
   type RemoteProfile,
+  listSessionHistory,
 } from "./api";
 import {
   DEFAULT_CLAUDE_OPTIONS,
@@ -44,6 +45,7 @@ import {
   type PresetTarget,
   type RepoEntry,
   type RootWorktreeEntry,
+  type SessionHistoryItem,
   type SessionSnapshot,
   type SpawnConfig,
   type SpawnTarget,
@@ -80,6 +82,8 @@ import WorktreeCleanupFailedDialog from "./components/WorktreeCleanupFailedDialo
 import ActionFailedModal from "./components/ActionFailedModal";
 import ErrorToast, { type ToastEntry } from "./components/ErrorToast";
 import RepoRemoveDialog from "./components/RepoRemoveDialog";
+import RecoverDialog from "./components/RecoverDialog";
+import { recoverBadgeCount } from "./utils/recoverModel";
 import DeleteWorktreeDialog from "./components/DeleteWorktreeDialog";
 import type { RepoRemoveIntent } from "./components/Sidebar";
 import ResizableSplit from "./components/ResizableSplit";
@@ -344,6 +348,12 @@ interface AppState {
   /// True while the worktrees-management modal is open. Triggered from
   /// SettingsModal's "Manage worktrees…" button.
   worktreesManagerOpen: boolean;
+  /// The daemon's history of ended sessions, replaced whole on every
+  /// `session_history` message (the reply to `list_session_history` after
+  /// Welcome, then a broadcast on every change).
+  sessionHistory: SessionHistoryItem[];
+  /// True while the Recover sessions dialog is open.
+  recoverOpen: boolean;
   /// Worktree group the spawn dialog is pinned to, set by "Launch session
   /// here" in the worktrees manager. Kept separate from `spawnPrefill`:
   /// prefill replays a past config's agent/mode/model, whereas a pin only
@@ -485,6 +495,8 @@ export default function App() {
     layoutChooser: null,
     importArrangement: null,
     worktreesManagerOpen: false,
+    sessionHistory: [],
+    recoverOpen: false,
     spawnPin: undefined,
     hasEverConnected: false,
     worktreeCleanupQueue: [],
@@ -1788,6 +1800,14 @@ export default function App() {
       settingsRef.current.spawn.standalone_shell_default_dir,
     );
   }, [launchStandaloneShell]);
+
+  const onOpenRecoverDialog = useCallback(() => {
+    setState((s) => ({ ...s, recoverOpen: true }));
+  }, []);
+
+  const onCloseRecoverDialog = useCallback(() => {
+    setState((s) => ({ ...s, recoverOpen: false }));
+  }, []);
 
   const onOpenStandaloneShellDialog = useCallback(() => {
     spawnTargetPaneRef.current = null;
@@ -3223,6 +3243,8 @@ export default function App() {
             }
             onLaunchStandaloneShellDefault={onLaunchStandaloneShellDefault}
             onOpenStandaloneShellDialog={onOpenStandaloneShellDialog}
+            recoverableCount={recoverBadgeCount(state.sessionHistory)}
+            onOpenRecoverDialog={onOpenRecoverDialog}
             onRevealInExplorer={onRevealInExplorer}
             onLaunchPreset={onLaunchPreset}
             onOpenSettings={onOpenSettings}
@@ -3465,6 +3487,15 @@ export default function App() {
           onStopAndRemove={onRepoStopAndRemove}
         />
       )}
+      {state.recoverOpen && state.client && (
+        <RecoverDialog
+          items={state.sessionHistory}
+          repos={state.repos}
+          workspaces={state.workspaces}
+          client={state.client}
+          onClose={onCloseRecoverDialog}
+        />
+      )}
     </div>
     </RemoteModeContext.Provider>
   );
@@ -3693,6 +3724,16 @@ function handleMessage(
   switch (msg.type) {
     case "welcome":
       awaitingInitialSessionsRef.current = true;
+      // The history is not part of the initial-state push; ask once per
+      // connection. Later changes arrive as unsolicited `session_history`.
+      if (clientRef.current) listSessionHistory(clientRef.current);
+      return;
+    case "session_history":
+      setState((s) => ({ ...s, sessionHistory: msg.items }));
+      return;
+    case "recover_result":
+      // Resolves the Recover dialog's pending `recoverSessions` call.
+      window.dispatchEvent(new CustomEvent(`rt:${msg.type}`, { detail: msg }));
       return;
     case "auth_failed":
       setState((s) => ({
