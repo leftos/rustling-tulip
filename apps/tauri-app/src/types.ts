@@ -281,7 +281,12 @@ export interface PromptInjector {
   // re-sends the pre-input portion. Copied from
   // InjectorTemplate.verify_mode_marker by the preset launcher.
   verify_mode_marker?: string | null;
+  // How long the daemon waits for the program to start before typing; absent
+  // means agent_tui. The Tauri app never sets it.
+  startup?: InjectorStartup;
 }
+
+export type InjectorStartup = "agent_tui" | "shell_prompt" | "unknown";
 
 export interface InjectorTemplate {
   startup_delay_ms: number;
@@ -793,7 +798,7 @@ export function tabGrid(tab: TabEntry): GridNode | null {
 
 // How a recorded session ended. Mirrors the daemon's history end reason; the
 // catch-all keeps a newer daemon's reason from breaking the dialog.
-export type SessionEndReason =
+export type SessionEnd =
   | { type: "exited"; code: number }
   | { type: "stopped_by_user" }
   | { type: "tracer_lost" }
@@ -802,7 +807,7 @@ export type SessionEndReason =
 
 // Where a history entry came from: the daemon's own end-of-session record, or
 // reconstructed from a tracer log after the daemon lost the session.
-export type SessionHistorySource = "record" | "tracer_log" | "unknown";
+export type HistorySource = "record" | "tracer_log" | "unknown";
 
 // One ended session. Shapes shared with live sessions reuse their types.
 export interface SessionHistoryEntry {
@@ -820,9 +825,9 @@ export interface SessionHistoryEntry {
   program_name: string | null;
   started_at: string | null;
   ended_at: string;
-  end: SessionEndReason;
+  end: SessionEnd;
   claude_session_id: string | null;
-  source: SessionHistorySource;
+  source: HistorySource;
   // Set once the session has been recovered; null until then.
   recovered_at: string | null;
   // Flags read from a tracer log's command line; absent on recorded entries,
@@ -849,7 +854,7 @@ export interface SessionHistoryItem {
 
 // How to bring a history entry back. Client-to-daemon only, so it carries no
 // catch-all: the UI must never be able to send a variant the daemon lacks.
-export type RecoverHow =
+export type RecoverAs =
   | { type: "claude" }
   | { type: "register_repo_then_claude"; path: string }
   | { type: "shell" };
@@ -857,7 +862,7 @@ export type RecoverHow =
 export interface RecoverItem {
   history_id: string;
   conversation_id: string | null;
-  how: RecoverHow;
+  how: RecoverAs;
 }
 
 export interface RecoverResultEntry {

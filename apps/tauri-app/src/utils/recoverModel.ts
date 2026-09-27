@@ -3,9 +3,9 @@
 
 import type {
   ConversationCandidate,
-  RecoverHow,
+  RecoverAs,
   RepoEntry,
-  SessionEndReason,
+  SessionEnd,
   SessionHistoryItem,
   WorkspaceEntry,
 } from "../types";
@@ -25,7 +25,7 @@ export interface RecoverGroup {
 export interface RecoverAsOption {
   key: string;
   label: string;
-  how: RecoverHow;
+  how: RecoverAs;
 }
 
 function endedMs(item: SessionHistoryItem): number {
@@ -212,7 +212,7 @@ export function historyWhere(
   return historyFolder(item);
 }
 
-export function endReasonLabel(end: SessionEndReason): string {
+export function endReasonLabel(end: SessionEnd): string {
   switch (end.type) {
     case "tracer_lost":
       return "lost";
