@@ -91,7 +91,13 @@ The end reason:
 - otherwise `TracerLost` (the log just stops)
 
 Map the log to a target:
-- **Claude program:** a cwd equal to a registered repo's path or known worktree path gives `Single`. A cwd plus `--add-dir` paths matching a workspace's members gives `Workspace`. Anything else gives a folder-only entry.
+- **As built:** imported entries never get a `spawn_config`, because every in-place `SpawnTarget` names a branch and checks it out if the repo has moved off it.
+- **Claude program:**
+  - A cwd equal to a registered repo's path fills `kind`, the repo id and name in `members`.
+  - A cwd plus `--add-dir` set matching a workspace's members fills `kind`, `workspace_id` and the member ids.
+  - Otherwise `members` holds bare paths.
+  - Recovery runs claude in `members[0]` with the others as `--add-dir` (`SpawnTarget::Standalone { cwd, add_dirs }`).
+  - `--dangerously-skip-permissions` and `--model` are read from the command line into `skip_permissions` and `model`.
 - **Shell program:** a folder-only entry with `current_cwd = cwd`.
 
 Imported entries have `source: tracer_log`, no label (the UI shows the folder), and no `claude_session_id`, so transcript matching fills it in. The parser is tested against real log lines copied from this machine's logs.
@@ -166,7 +172,7 @@ After every item has run, the daemon replies to the requester only:
 
 Per item:
 - **`Claude`:** `spawn_config.to_clone_request()` (`protocol/src/lib.rs:832`, which keeps the branch and reuses the worktree, so the cwd, and with it claude's project key, matches), with `resume_conversation = conversation_id`, then `spawn_session`. Workspace targets rebuild `--add-dir` and the prelude through the existing `spawn_workspace`. Folder-only Claude entries go to a new `SpawnTarget::Standalone { cwd }` path for the Claude agent (today it is shell-only), running claude in that folder with `--resume`.
-- **`RegisterRepoThenClaude { path }`:** run the existing `AddRepo` handling (`ClientMessage::AddRepo`, `:1744`), then `Claude` with a `Single` target on the new repo, in-place (no worktree).
+- **`RegisterRepoThenClaude { path }`:** register the folder through `register_repo()`, the same function `AddRepo` uses. As built, recovery then runs claude standalone in that folder with the entry's other members as `--add-dir`. It doesn't use an in-place `Single` target, because that could check out a branch.
 - **`Shell`:** a plain-shell spawn in `current_cwd` (or `primary_cwd`), with a `prompt_injector` (`InjectorStep::Text { content: "claude --resume <id>", newline: true }` after a short startup `Delay`, `lib.rs:1213`) when a conversation id is chosen. Without one, a bare shell.
 - **After each successful spawn:** set `recovered_at` on the entry and broadcast the updated `SessionHistory`.
 - **Failures:** a missing worktree that cannot be recreated, or a conversation file that no longer exists, come back as `ActionFailed` for that item only. The other items still run.
