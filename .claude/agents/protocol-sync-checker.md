@@ -1,7 +1,7 @@
 ---
 name: protocol-sync-checker
 description: Use this agent to detect drift between the Rust wire protocol enums in crates/protocol/src/lib.rs and the TypeScript mirrors in apps/tauri-app/src/types.ts and apps/tauri-app/src/api.ts. Invoke after any change to the protocol crate, or proactively before shipping a protocol-touching PR.
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, SendMessage
 model: sonnet
 ---
 
