@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "rt-tracer.exe: per-session PTY supervisor that owns the claude child and survives daemon restarts. Phase C skeleton — not yet wired into the daemon."
+description = "rt-tracer.exe: per-session PTY supervisor that owns the session's child process and survives daemon restarts."
 publish = false
 
 [[bin]]

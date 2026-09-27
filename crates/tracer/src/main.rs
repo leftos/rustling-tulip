@@ -1,16 +1,12 @@
-//! `rt-tracer` — Phase C.2 skeleton.
+//! `rt-tracer` — per-session PTY supervisor.
 //!
-//! The intent is that the daemon spawns one of these per session instead of
-//! spawning `claude` directly. The tracer owns the `ConPTY` master handle
-//! and the `claude` child process. When the daemon dies, the tracer keeps
+//! The daemon spawns one of these for every interactive and plain-shell
+//! session. The tracer owns the PTY master and the session's child process
+//! (`claude`, `codex`, a shell). When the daemon dies, the tracer keeps
 //! running and buffers child output to a ring; when a new daemon starts, it
-//! reconnects to the same named pipe and the tracer replays the buffer.
-//!
-//! Status: skeleton only — implementation is intentionally stubbed because
-//! the design doc lists five empirical questions (see `docs/tracer-abi.md`)
-//! that must be answered before the architecture is locked in. The pieces
-//! here exist so the daemon integration in C.3 has a stable surface to
-//! target, not as a working binary.
+//! reconnects over the same local socket and the tracer replays the buffer.
+//! The daemon/tracer wire contract lives in `tracer-protocol` (see
+//! `docs/tracer-abi.md`).
 
 use anyhow::Context as _;
 use clap::Parser;
