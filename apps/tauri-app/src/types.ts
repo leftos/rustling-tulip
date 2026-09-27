@@ -163,6 +163,9 @@ export interface SessionSnapshot {
   // has_per_session_worktree is false. Used by the spawn dialog's "use
   // existing worktree" picker to mark which worktrees are in active use.
   worktree_paths: string[];
+  // The Claude conversation this session runs (`--session-id` / `--resume`);
+  // null for shells, other agents and sessions started before it was tracked.
+  claude_session_id: string | null;
 }
 
 // How to resolve a dirty working tree on an in-place checkout. Mirrors the Rust
@@ -786,6 +789,84 @@ export function tabGrid(tab: TabEntry): GridNode | null {
   return tab.content.kind === "grid" ? tab.content.grid : null;
 }
 
+// ------- Session history & recovery -------
+
+// How a recorded session ended. Mirrors the daemon's history end reason; the
+// catch-all keeps a newer daemon's reason from breaking the dialog.
+export type SessionEndReason =
+  | { type: "exited"; code: number }
+  | { type: "stopped_by_user" }
+  | { type: "tracer_lost" }
+  | { type: "daemon_shutdown" }
+  | { type: "unknown" };
+
+// Where a history entry came from: the daemon's own end-of-session record, or
+// reconstructed from a tracer log after the daemon lost the session.
+export type SessionHistorySource = "record" | "tracer_log" | "unknown";
+
+// One ended session. Shapes shared with live sessions reuse their types.
+export interface SessionHistoryEntry {
+  session_id: string;
+  // Empty for tracer_log entries; the UI shows the folder instead.
+  label: string;
+  kind: SessionKind;
+  mode: SessionMode;
+  agent: Agent;
+  spawn_config: SpawnConfig | null;
+  members: SessionMember[];
+  workspace_id: string | null;
+  primary_cwd: string | null;
+  current_cwd: string | null;
+  program_name: string | null;
+  started_at: string | null;
+  ended_at: string;
+  end: SessionEndReason;
+  claude_session_id: string | null;
+  source: SessionHistorySource;
+  // Set once the session has been recovered; null until then.
+  recovered_at: string | null;
+  // Flags read from a tracer log's command line; absent on recorded entries,
+  // whose spawn_config carries them.
+  skip_permissions?: boolean;
+  model?: string;
+}
+
+// A claude conversation the session may have been running.
+export interface ConversationCandidate {
+  id: string;
+  last_active: string;
+  title: string | null;
+}
+
+export interface SessionHistoryItem {
+  entry: SessionHistoryEntry;
+  // Newest first; exactly one when `entry.claude_session_id` is known.
+  candidates: ConversationCandidate[];
+  // Describe the entry's folder (`current_cwd`, else `primary_cwd`).
+  folder_is_git_repo: boolean;
+  folder_repo_id: string | null;
+}
+
+// How to bring a history entry back. Client-to-daemon only, so it carries no
+// catch-all: the UI must never be able to send a variant the daemon lacks.
+export type RecoverHow =
+  | { type: "claude" }
+  | { type: "register_repo_then_claude"; path: string }
+  | { type: "shell" };
+
+export interface RecoverItem {
+  history_id: string;
+  conversation_id: string | null;
+  how: RecoverHow;
+}
+
+export interface RecoverResultEntry {
+  history_id: string;
+  // The new session's id on success; null on failure.
+  session_id: string | null;
+  error: string | null;
+}
+
 // ------- Wire envelopes -------
 
 // Why a pairing window ended (mirrors the daemon `PairingEndReason`). The
@@ -856,6 +937,8 @@ export type ClientMessage =
   // member list rather than an error.
   | { type: "preview_discard"; session_id: string }
   | { type: "resume_all_abandoned" }
+  | { type: "list_session_history"; request_id?: string }
+  | { type: "recover_sessions"; request_id?: string; items: RecoverItem[] }
   | { type: "list_branches"; repo_id: string }
   | { type: "list_worktrees"; repo_id: string }
   // Ask for a `wt/<adjective>-<noun>` branch name that exists in no member
@@ -1237,6 +1320,18 @@ export type DaemonMessage =
   // broadcast.
   | { type: "session_updated"; session: SessionSnapshot; request_id?: string }
   | { type: "session_removed"; session_id: string }
+  // The whole session history. Replies to `list_session_history` carry its
+  // request_id; the unsolicited broadcast on every change carries null.
+  | {
+      type: "session_history";
+      request_id?: string | null;
+      items: SessionHistoryItem[];
+    }
+  | {
+      type: "recover_result";
+      request_id?: string | null;
+      results: RecoverResultEntry[];
+    }
   // An in-place spawn would switch a dirty tree to a different branch; the
   // daemon declined and asks how to proceed. The client resends the same spawn
   // with a `checkout_strategy` of "carry" or "stash".

@@ -9,6 +9,8 @@ import {
   type LaunchPresetSource,
   type PresetEntry,
   type PresetTarget,
+  type RecoverItem,
+  type RecoverResultEntry,
   type ScriptCommandPreview,
   type SpawnConfig,
 } from "./types";
@@ -617,6 +619,58 @@ export function getRemoteUrl(
     };
     window.addEventListener("rt:remote_url", handler);
     client.send({ type: "get_remote_url", repo_id: repoId });
+  });
+}
+
+/**
+ * Ask the daemon for the session history. The reply (and every later change)
+ * arrives as a `session_history` message that App.tsx stores in app state, so
+ * nothing here waits for it.
+ */
+export function listSessionHistory(client: DaemonClient): void {
+  client.send({
+    type: "list_session_history",
+    request_id: `history-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  });
+}
+
+/// Recovery respawns worktrees and processes, so it can take far longer than a
+/// read; the timeout only stops a dropped connection leaving the dialog busy.
+const RECOVER_TIMEOUT_MS = 120_000;
+
+export type RecoverSessionsResult =
+  | { ok: true; results: RecoverResultEntry[] }
+  | { ok: false; reason: string };
+
+/**
+ * Send one `recover_sessions` request and resolve with the daemon's
+ * `recover_result` for it, matched by request id on the `rt:recover_result`
+ * window event App.tsx re-dispatches.
+ */
+export function recoverSessions(
+  client: DaemonClient,
+  items: RecoverItem[],
+): Promise<RecoverSessionsResult> {
+  return new Promise((resolve) => {
+    const reqId = `recover-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<DaemonMessage>).detail;
+      if (detail.type !== "recover_result" || detail.request_id !== reqId) {
+        return;
+      }
+      cleanup();
+      resolve({ ok: true, results: detail.results });
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve({ ok: false, reason: "timed out (daemon not responding)" });
+    }, RECOVER_TIMEOUT_MS);
+    const cleanup = () => {
+      window.removeEventListener("rt:recover_result", handler);
+      window.clearTimeout(timer);
+    };
+    window.addEventListener("rt:recover_result", handler);
+    client.send({ type: "recover_sessions", request_id: reqId, items });
   });
 }
 
