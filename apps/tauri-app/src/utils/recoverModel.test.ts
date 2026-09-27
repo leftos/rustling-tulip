@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   RepoEntry,
-  SessionEndReason,
+  SessionEnd,
   SessionHistoryItem,
   SpawnConfig,
 } from "../types";
@@ -42,7 +42,7 @@ function item(
   id: string,
   endedAt: string,
   overrides: {
-    end?: SessionEndReason;
+    end?: SessionEnd;
     mode?: SessionHistoryItem["entry"]["mode"];
     spawnConfig?: SpawnConfig | null;
     recoveredAt?: string | null;
@@ -295,7 +295,7 @@ describe("endReasonLabel", () => {
     expect(endReasonLabel({ type: "stopped_by_user" })).toBe("stopped");
     expect(endReasonLabel({ type: "daemon_shutdown" })).toBe("daemon shut down");
     expect(
-      endReasonLabel({ type: "from_the_future" } as unknown as SessionEndReason),
+      endReasonLabel({ type: "from_the_future" } as unknown as SessionEnd),
     ).toBe("ended");
   });
 });

@@ -63,6 +63,10 @@ CATCH_ALL_EXEMPT = {
         "DaemonMessage::BranchNameSuggestion): the daemon only ever sends back "
         "the variant the client sent it, so a client cannot receive Unknown"
     ),
+    "RecoverAs": (
+        "client -> daemon only (RecoverItem.how on RecoverSessions); the Rust "
+        "Unknown lets an older daemon refuse a newer client's recovery kind"
+    ),
 }
 
 
