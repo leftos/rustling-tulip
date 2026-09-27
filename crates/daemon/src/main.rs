@@ -36,6 +36,16 @@ mod sync;
 mod tabs;
 mod termstate;
 mod tracer_client;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into session history in the next step")
+)]
+mod tracer_log;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into session history in the next step")
+)]
+mod transcripts;
 mod vscode;
 mod workspace;
 mod worktree_cleanup;
