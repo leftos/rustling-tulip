@@ -127,6 +127,8 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings (`worktrees_root_override`, `keep_awake`) that must apply with no window open (see `crates/daemon/src/state.rs`).
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
+- `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its Claude conversation id), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them with `claude --resume`.
+- `daemon.lock` — the single-instance lock; a second daemon on the same config dir exits without touching anything.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
 - `logs/app.log` — Tauri side log file, written via the `log_message` invoke command (see `apps/tauri-app/src-tauri/src/lib.rs`). Frontend code calls it through `apps/tauri-app/src/utils/logger.ts`. Rotated on each app boot: the previous launch survives as `app.log.old`.
 - `logs/native.log` — native client (`apps/native`) tracing output, also mirrored to stderr. Rotated on each launch to `native.log.old`.
