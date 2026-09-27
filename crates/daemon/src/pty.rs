@@ -14,6 +14,28 @@ use tracing::{debug, warn};
 
 const MAX_PTY_INPUT_CHUNK_BYTES: usize = 2048;
 
+/// How a PTY session's process ended, as its tracer connection saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyExit {
+    /// The tracer reported that the child exited with this code.
+    Code(i32),
+    /// The tracer pipe closed or failed before the tracer reported an exit:
+    /// the tracer was killed or crashed, and the child's fate is unknown.
+    TracerLost,
+}
+
+impl PtyExit {
+    /// The exit code surfaced on the session: the child's own, or `-1` when
+    /// the tracer was lost.
+    #[must_use]
+    pub fn code(self) -> i32 {
+        match self {
+            Self::Code(code) => code,
+            Self::TracerLost => -1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PtySpawnSpec {
     /// Session id used to derive the tracer pipe name and the orphan sidecar
@@ -35,7 +57,7 @@ pub struct PtyHandleParts {
     pub output: broadcast::Sender<Vec<u8>>,
     pub input_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub resize_tx: mpsc::UnboundedSender<(u16, u16)>,
-    pub exit_rx: oneshot::Receiver<i32>,
+    pub exit_rx: oneshot::Receiver<PtyExit>,
     pub killer: Box<dyn ChildKiller + Send + Sync>,
     /// Process id of the PTY child (claude / codex / shell). `None` when the
     /// tracer hasn't yet reported one back. The orphan sidecar's `pid` field
@@ -50,7 +72,7 @@ pub struct PtyHandle {
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16)>,
     /// Receives the child's exit status once.
-    exit_rx: Mutex<Option<oneshot::Receiver<i32>>>,
+    exit_rx: Mutex<Option<oneshot::Receiver<PtyExit>>>,
     /// Master kill switch. Dropping closes input/resize channels and the
     /// reader task observes EOF.
     killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
@@ -105,7 +127,7 @@ impl PtyHandle {
         let _ = self.resize_tx.send((cols, rows));
     }
 
-    pub fn take_exit(&self) -> Option<oneshot::Receiver<i32>> {
+    pub fn take_exit(&self) -> Option<oneshot::Receiver<PtyExit>> {
         self.exit_rx.lock().ok().and_then(|mut g| g.take())
     }
 

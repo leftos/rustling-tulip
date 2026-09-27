@@ -333,6 +333,7 @@ mod tests {
             input_notifier: None,
             scrollback_snapshot_req: None,
             spawn_origin: None,
+            claude_session_id: None,
         }
     }
 
