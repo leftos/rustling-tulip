@@ -5272,15 +5272,27 @@ async fn recover_one(
     let entry = history::read_one(&hub.dirs, &item.history_id)
         .ok_or_else(|| format!("no history entry {}", item.history_id))?;
     let claude_home = crate::transcripts::claude_home();
-    let plan = history::plan_recovery(&entry, item, |folder, id| {
+    let (repos, workspaces) = hub
+        .state
+        .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
+    let registered = history::Registered {
+        repos: &repos,
+        workspaces: &workspaces,
+    };
+    let mut plan = history::plan_recovery(&entry, item, &registered, |folder, id| {
         claude_home
             .as_deref()
             .is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
     })?;
-    if let Some(path) = &plan.register_repo {
-        register_repo(hub, path, None, out_tx)
+    if let Some(path) = plan.register_repo.clone() {
+        let repo = register_repo(hub, &path, None, out_tx)
             .await
             .map_err(|err| format!("registering {path}: {err:#}"))?;
+        plan.bind_registered_repo(&repo.id);
+    }
+    if let Some(folder) = plan.placeholder_branch_folder() {
+        let current = git::current_branch(Path::new(folder)).await;
+        plan.name_branch(history::branch_or_placeholder(current));
     }
     let snapshot = spawn_session(hub, plan.request, None)
         .await
