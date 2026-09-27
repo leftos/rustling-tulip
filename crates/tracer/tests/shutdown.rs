@@ -33,6 +33,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_MARKER: &str = "RT_TRACER_READY";
+const CDB_PATH: &str = r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe";
+const CDB_TIMEOUT: Duration = Duration::from_secs(30);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Kills the tracer when the test ends, so a failing run leaves no stray
 /// process behind. Its kill-on-close job object takes the child tree with it.
@@ -178,10 +181,71 @@ async fn tracer_exits_after_stop_while_a_grandchild_holds_the_console() -> anyho
     write_line(&mut write_half, &TracerRequest::Stop).await?;
 
     let exited = wait_for_exit(&mut tracer).await?;
-    ensure!(
-        exited.is_some(),
-        "tracer did not exit within {EXIT_TIMEOUT:?} after Stop (log: {})",
-        dir.join("tracer.log").display()
-    );
+    if exited.is_none() {
+        let stacks = capture_stacks(&tracer, &dir).await;
+        bail!(
+            "tracer did not exit within {EXIT_TIMEOUT:?} after Stop (log: {}, {stacks})",
+            dir.join("tracer.log").display()
+        );
+    }
+    drop(tracer);
+    remove_test_dir(&dir).await
+}
+
+/// Dump every thread's stack of the hung tracer with cdb, non-invasively, into
+/// `stacks.txt` in the test dir. Returns the phrase naming the result for the
+/// failure message.
+async fn capture_stacks(tracer: &TracerProcess, dir: &Path) -> String {
+    let cdb = Path::new(CDB_PATH);
+    if !cdb.exists() {
+        return "no cdb; no stacks captured".to_owned();
+    }
+    let stacks = dir.join("stacks.txt");
+    match run_cdb(cdb, tracer.0.id(), &stacks).await {
+        Ok(()) => format!("stacks: {}", stacks.display()),
+        Err(err) => format!("stacks: {} (cdb failed: {err:#})", stacks.display()),
+    }
+}
+
+async fn run_cdb(cdb: &Path, pid: u32, stacks: &Path) -> anyhow::Result<()> {
+    let out = std::fs::File::create(stacks).context("creating stacks.txt")?;
+    let err = out.try_clone().context("cloning the stacks.txt handle")?;
+    let mut child = Command::new(cdb)
+        .arg("-pv")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-c")
+        .arg("~*k; q")
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("spawning cdb")?;
+    let started = Instant::now();
+    while child.try_wait()?.is_none() {
+        if started.elapsed() >= CDB_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("cdb did not finish within {CDB_TIMEOUT:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     Ok(())
+}
+
+/// Remove the test dir after a passing run. The job object takes the
+/// background `ping` (whose cwd is this dir) down as the tracer exits, which
+/// can lag the tracer's own exit by a moment, so removal is retried briefly.
+async fn remove_test_dir(dir: &Path) -> anyhow::Result<()> {
+    let started = Instant::now();
+    loop {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(err) if started.elapsed() >= CLEANUP_TIMEOUT => {
+                return Err(err).with_context(|| format!("removing {}", dir.display()));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
