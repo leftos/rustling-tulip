@@ -2,7 +2,7 @@
 
 A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell + React/xterm.js frontend) plus a parallel checklist of behaviours that need a human at the keyboard to validate. The findings only cover UX-visible issues; architecture/refactor concerns and items called out as deferred in `CLAUDE.md` are out of scope.
 
-**Tracking convention.** Each finding is a `- [ ]` / `- [x]` checkbox. Resolved items keep an `(iter N)` annotation only — the original "Suggested direction:" prose stays for context, but the long "Resolved" paragraphs that used to live here got compressed in 2026-05-11 to keep the doc scannable. The full design reasoning for any closed finding lives in the matching commit message + the iter entry in `docs/plan.md` (iters 14–48 verbose; iters 49+ one-liners).
+**Tracking convention.** Each finding is a `- [ ]` / `- [x]` checkbox. Resolved items keep an `(iter N)` annotation only — the original "Suggested direction:" prose stays for context, but long "Resolved" paragraphs are left out to keep the doc scannable. The full design reasoning for any closed finding lives in the matching commit message + the iter entry in `docs/plan.md` (iters 14–48 verbose; iters 49+ one-liners).
 
 ## Table of contents
 

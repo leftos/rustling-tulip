@@ -12,7 +12,7 @@ Blocked on two native-client phases (see [native-client.md](./native-client.md))
 
 The daemon and protocol half (FT.1) has landed.
 
-## Rulings (user, 2026-09-24)
+## Rulings
 
 - **Client:** native client only. The frozen Tauri app does not get this feature, and there it keeps showing its "not available remotely" toast.
 - **Viewing:** the remote client saves the file to a per-host download folder, then opens it the way a local Ctrl-click does: `code -g path:line:col` when the link has a line, otherwise the OS default handler.

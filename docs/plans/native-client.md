@@ -1,13 +1,13 @@
 # Native client (replace the Tauri/WebView2 frontend)
 
-Decision (user, 2026-09-23): move the desktop client off the web stack. The daemon, tracer and `crates/protocol` stay as they are; only `apps/tauri-app` is replaced. Chosen stack: GPUI (Zed's UI framework) + `alacritty_terminal`, with Iced as the fallback if GPUI's API churn becomes a problem. The native client can run side by side with the Tauri app against the same daemon (it accepts multiple clients), so parity is reached feature by feature before Tauri is retired.
+Decision: move the desktop client off the web stack. The daemon, tracer and `crates/protocol` stay as they are; only `apps/tauri-app` is replaced. Chosen stack: GPUI (Zed's UI framework) + `alacritty_terminal`, with Iced as the fallback if GPUI's API churn becomes a problem. The native client can run side by side with the Tauri app against the same daemon (it accepts multiple clients), so parity is reached feature by feature before Tauri is retired.
 
-Rulings (user, 2026-09-23):
+Rulings:
 
 - **Crate:** the client is a main-workspace member at `apps/native`, under the workspace lints, prek clippy/test and `cargo deny check`.
 - **Tauri freeze:** `apps/tauri-app` takes bug fixes only. Every new feature goes to the native client, so the parity checklist stops growing. Tauri is deleted at cutover (Phase 6).
-- **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished item group or phase), not after every item (user, 2026-09-25).
-- **Autonomy (user, 2026-09-25):** drive the native client to done without stopping between slices or phases. Technical decisions are settled in the session and recorded here as rulings. Only questions about behaviour the user will see go to the user. Later phases are split into items the same way.
+- **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished item group or phase), not after every item.
+- **Autonomy:** drive the native client to done without stopping between slices or phases. Technical decisions are settled in the session and recorded here as rulings. Only questions about behaviour the user will see go to the user. Later phases are split into items the same way.
 
 What each feature must do is in [native-client-parity.md](./native-client-parity.md): tick its lines there as native items land.
 

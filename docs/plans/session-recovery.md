@@ -10,7 +10,7 @@ On 2026-09-27, a dev daemon's startup tracer reap killed all 7 of the user's liv
 
 The goal: a native-client "Recover sessions" flow. It lists sessions that ended in the last 7 days and recovers one or several at once. Each comes back in the same repo, workspace or folder, running `claude --resume <conversation id>`.
 
-## Decisions (user, 2026-09-27)
+## Decisions
 
 - **Source:** the daemon keeps a history of ended sessions. New Claude spawns get `--session-id <uuid>`, so their conversation is known exactly. For shells, and for Claude sessions that predate this feature, the conversation is found by matching Claude transcripts on folder and time.
 - **Shells that ran claude:** each row offers:
@@ -21,7 +21,7 @@ The goal: a native-client "Recover sessions" flow. It lists sessions that ended 
 - **Scope:** everything that ended in the last 7 days, newest first. Unexpected ends (tracer lost, daemon lost it) are grouped by when they happened and pre-ticked. User-closed sessions are listed unticked.
 - **Backfill:** import older ends from `logs/tracer-<id>.log`, so today's 7 show up too.
 - **Other rules:**
-  - Both clients: the Tauri app first, then the native client (user, 2026-09-27, overriding "Native client only").
+  - Both clients: the Tauri app first, then the native client.
   - Headless sessions are not recoverable (claude `--print` runs) and are left out of the list.
   - Codex and Cursor sessions are out of scope.
 
@@ -110,7 +110,7 @@ Imported entries have `source: tracer_log`, no label (the UI shows the folder), 
 - The new nested enums get `#[serde(other)] Unknown` from day one.
 - The Tauri TS mirror is not extended (frozen). Its default arm drops the unknown broadcast with a log line; this is checked in the protocol round-trip tests.
 
-#### Wire contract (pinned 2026-09-27, so the Tauri UI and the daemon can be built in parallel)
+#### Wire contract (pinned so the Tauri UI and the daemon can be built in parallel)
 
 All messages are snake_case tagged, as elsewhere in the protocol.
 
@@ -201,7 +201,7 @@ Per item:
 1. **History, part 1 (daemon + protocol types):** `history.rs` storage, end-reason capture on every end path, retention, and `--session-id` on Claude spawns.
 2. **History, part 2:** `transcripts.rs` matching, the tracer-log importer, `ListSessionHistory` / `SessionHistory`.
 3. **Recovery:** `RecoverSessions` with the three `RecoverAs` paths, `resume_conversation` plumbing, Standalone Claude target.
-4. **Tauri app first** (user, 2026-09-27: an exception to the Tauri freeze, so recovery is usable during the native buildout):
+4. **Tauri app first** (an exception to the Tauri freeze, so recovery is usable during the native buildout):
    - TS mirror of the new messages and types in `apps/tauri-app/src/types.ts` and `api.ts`.
    - A "Recover sessions" button with the unexpected-end badge in the sidebar header, near the existing "Resume all".
    - The same dialog as Design 6, in React.

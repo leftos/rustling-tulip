@@ -102,7 +102,7 @@ $env:RT_E2E_WORKERS = "1"; pnpm test
 ```
 
 The build happens once in `onPrepare`; `beforeSession` only asserts the
-binaries exist. Re-running cargo per spec file used to cost a second each
+binaries exist. Re-running cargo per spec file would cost a second each
 *and* serialize workers behind cargo's target-directory lock.
 
 `tsconfig.json` includes the `DOM` lib because `browser.execute` callbacks are
