@@ -54,6 +54,7 @@ impl RootView {
             if let Some(id) = session_id {
                 tracing::warn!(session = %id, "closing a pane whose session is unknown");
             }
+            self.record_pane_close(tab_id, pane_id, None, cx);
             self.send(ClientMessage::ClosePane {
                 tab_id: tab_id.to_owned(),
                 pane_id: pane_id.to_owned(),
@@ -102,6 +103,12 @@ impl RootView {
         match control {
             Control::Cancel | Control::Dismiss => {}
             Control::PaneOnly => {
+                self.record_pane_close(
+                    dialog.tab_id(),
+                    dialog.pane_id(),
+                    Some(dialog.session_label()),
+                    cx,
+                );
                 tracing::info!(pane = %dialog.pane_id(), "closing the pane, keeping its session");
                 self.send(dialog.close_pane_message());
             }

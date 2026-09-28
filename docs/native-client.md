@@ -52,6 +52,8 @@ OS toasts go through `tauri-winrt-notification` with no registered app id, so th
 
 The window's restore rect, maximized flag and monitor are saved in native-ui.json and restored on that monitor (the primary when it is gone); fullscreen is not restored. The title reads `(M/N) Tab — rustling-tulip`, set 350 ms after its last change. Closing the window runs the quit flow (keep running, stop keeping worktrees, stop removing them with per-session branch fate, or abandon), waiting for `shutdown_ack`.
 
+Closing a tab, closing a pane but keeping its session, and moving a pane to an existing tab each leave an entry on the undo shelf (bottom centre, 8 s, at most 3, newest on top). An entry holds a whole-tab snapshot of every tab it touched, and Undo sends `RestoreTabSnapshot` for a tab that still exists or `RestoreTab` at its old index for one that is gone, bringing back splits and ratios exactly; a pane whose session has since gone comes back empty. The shelf clears when the connection drops or a new `Welcome` arrives.
+
 ## Tests
 
 Three tiers, all Rust tests:

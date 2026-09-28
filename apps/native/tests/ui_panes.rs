@@ -492,3 +492,248 @@ fn pane_close_dropped_when_pane_rebinds(cx: &mut TestAppContext) {
         .count();
     assert_eq!(closes, 0, "nothing closed or stopped");
 }
+
+/// The undo entries on screen, as `(id, message)`, newest first.
+fn undo_entries(h: &mut Harness) -> Vec<(u64, String)> {
+    h.root(|root, _| {
+        root.undo_entries()
+            .iter()
+            .map(|entry| (entry.id, entry.message.clone()))
+            .collect()
+    })
+}
+
+/// The first snapshot of the newest entry, as
+/// `(tab id, index, was active, focus pane)`.
+fn newest_snapshot(h: &mut Harness) -> Option<(String, usize, bool, Option<String>)> {
+    h.root(|root, _| {
+        let snapshot = root.undo_entries().first()?.snapshots.first()?;
+        Some((
+            snapshot.tab.id.clone(),
+            snapshot.index,
+            snapshot.restore_active,
+            snapshot.focus_pane.clone(),
+        ))
+    })
+}
+
+/// The panes of `tab`, left to right, as `(pane id, session)`.
+fn panes_of(tab: &TabEntry) -> Vec<(String, Option<String>)> {
+    fn walk(node: &serde_json::Value, out: &mut Vec<(String, Option<String>)>) {
+        match node["kind"].as_str() {
+            Some("pane") => out.push((
+                node["pane_id"].as_str().unwrap_or_default().to_owned(),
+                node["session_id"].as_str().map(str::to_owned),
+            )),
+            Some("split") => {
+                walk(&node["first"], out);
+                walk(&node["second"], out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &serde_json::to_value(&tab.content).expect("a tab serializes")["grid"],
+        &mut out,
+    );
+    out
+}
+
+/// The tab each restore message carries, in the order they went out.
+fn restored(sent: &[ClientMessage]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RestoreTab { tab, .. } | ClientMessage::RestoreTabSnapshot { tab } => {
+                Some(tab.id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn pane_only_close_offers_undo_with_session_label(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").label("work").build()));
+    h.sent();
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ClosePane { tab_id, pane_id }] if tab_id == "t1" && pane_id == "p1"),
+        "sent {sent:?}"
+    );
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Closed pane \"work\"");
+    assert_eq!(
+        newest_snapshot(&mut h),
+        Some(("t1".to_owned(), 0, true, Some("p1".to_owned()))),
+        "the pane to focus again"
+    );
+
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTabSnapshot { tab }]
+        if tab.id == "t1" && panes_of(tab) == [
+            ("p1".to_owned(), Some("s1".to_owned())),
+            ("p2".to_owned(), None),
+        ]),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn empty_pane_close_says_closed_empty_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").build()));
+    h.sent();
+    h.click_on("close-pane-p2");
+    assert_eq!(kinds(&h.sent()), ["close_pane"]);
+
+    assert_eq!(
+        undo_entries(&mut h),
+        [(1, "Closed empty pane".to_owned())],
+        "an empty pane has no label to name"
+    );
+    assert_eq!(
+        newest_snapshot(&mut h),
+        Some(("t1".to_owned(), 0, true, Some("p2".to_owned())))
+    );
+}
+
+#[gpui::test]
+fn undo_of_last_pane_close_sends_restore_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    h.sent();
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    h.sent();
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Closed pane \"s1\"");
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "the tab went with its last pane, so it comes back: {sent:?}"
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1"))),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "the restored tab shows again"
+    );
+}
+
+#[gpui::test]
+fn discard_offers_no_undo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").in_repo("r1").build()));
+    h.sent();
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-discard");
+    h.sent();
+    assert!(
+        undo_entries(&mut h).is_empty(),
+        "discarding a session cannot be taken back"
+    );
+}
+
+#[gpui::test]
+fn move_to_tab_undo_restores_both_tab_snapshots(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = with_empty(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    fixture.tabs.push(tab(
+        "t2",
+        &split(
+            SplitDirection::Vertical,
+            pane("p3", Some("s2")),
+            pane("p4", None),
+        ),
+    ));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.right_click_on("pane-header-p2");
+    h.click_on("empty-pane-menu-move");
+    h.click_on("empty-pane-move-t2");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_pane_id, dst_tab_id, .. }]
+            if src_pane_id == "p2" && dst_tab_id == "t2"),
+        "sent {sent:?}"
+    );
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Moved pane");
+    let snapshots = h.root(|root, _| {
+        root.undo_entries()
+            .first()
+            .map(|entry| {
+                entry
+                    .snapshots
+                    .iter()
+                    .map(|snapshot| {
+                        (
+                            snapshot.tab.id.clone(),
+                            snapshot.index,
+                            snapshot.restore_active,
+                            snapshot.focus_pane.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    assert_eq!(
+        snapshots,
+        [
+            ("t1".to_owned(), 0, true, Some("p2".to_owned())),
+            ("t2".to_owned(), 1, false, Some("p2".to_owned())),
+        ],
+        "the tab it left and the tab it went to"
+    );
+
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert_eq!(restored(&sent), ["t1", "t2"], "both go back: {sent:?}");
+    assert!(
+        matches!(&sent[0], ClientMessage::RestoreTabSnapshot { tab }
+            if tab.id == "t1" && panes_of(tab).iter().any(|(pane, session)| pane == "p2" && session.is_none())),
+        "the moved pane is back in the tab it left: {sent:?}"
+    );
+    assert_eq!(active(&mut h).as_deref(), Some("t1"), "the tab shown stays");
+}
+
+#[gpui::test]
+fn move_to_new_tab_offers_no_undo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &with_empty(session("s1").build()));
+    h.sent();
+    h.click_on("pane-move-new-tab-p1");
+    assert_eq!(kinds(&h.sent()), ["extract_to_new_tab"]);
+    assert!(
+        undo_entries(&mut h).is_empty(),
+        "a move into a new tab cannot be taken back"
+    );
+}

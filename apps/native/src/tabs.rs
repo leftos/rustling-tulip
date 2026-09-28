@@ -150,6 +150,10 @@ pub struct TabsModel {
     focused: HashMap<String, String>,
     /// New tabs this client asked for that become active when they arrive.
     pending_create: u32,
+    /// Tabs a restore named, by id, with the pane each focuses when it
+    /// arrives. Unlike [`TabsModel::pending_create`], only the named id
+    /// consumes one, so a restore the daemon refuses activates nothing.
+    pending_restore: HashMap<String, Option<String>>,
     /// A pane the view should give the keyboard to.
     focus_request: Option<String>,
     pub close_confirm: CloseConfirm,
@@ -858,6 +862,8 @@ impl TabsModel {
         tabs.clone_into(&mut self.tabs);
         self.loaded = true;
         let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        self.pending_restore
+            .retain(|id, _| live.contains(id.as_str()));
         self.focused
             .retain(|tab_id, _| live.contains(tab_id.as_str()));
         self.selection.prune(&live);
@@ -870,12 +876,13 @@ impl TabsModel {
         self.activate_id(active);
     }
 
-    /// A tab created or changed. A new tab this client asked for, or the
-    /// first tab of all, becomes active.
+    /// A tab created or changed. A new tab this client asked for, the first
+    /// tab of all, or one a pending restore named, becomes active.
     fn upsert(&mut self, tab: &TabEntry) {
         if let Some(slot) = self.tabs.iter_mut().find(|t| t.id == tab.id) {
             let old = std::mem::replace(slot, tab.clone());
             self.focus_after_update(&old, tab);
+            self.settle_restore(tab);
             return;
         }
         self.tabs.push(tab.clone());
@@ -883,6 +890,19 @@ impl TabsModel {
             self.pending_create = self.pending_create.saturating_sub(1);
             self.activate_id(Some(tab.id.clone()));
         }
+        self.settle_restore(tab);
+    }
+
+    /// A tab a pending restore named arrived: it shows, and the pane the
+    /// snapshot focused takes the keyboard.
+    fn settle_restore(&mut self, tab: &TabEntry) {
+        let Some(focus) = self.pending_restore.remove(&tab.id) else {
+            return;
+        };
+        if let Some(pane) = focus {
+            self.set_focused(&tab.id, &pane);
+        }
+        self.activate_id(Some(tab.id.clone()));
     }
 
     /// A pane the update added takes its tab's focus. When the update takes
@@ -1005,6 +1025,20 @@ impl TabsModel {
     /// The next new tab to arrive is one this client asked for.
     pub fn arm_create(&mut self) {
         self.pending_create = self.pending_create.saturating_add(1);
+    }
+
+    /// The next arrival of `tab_id` shows it and gives `pane_id` the
+    /// keyboard. Only that exact id consumes it, so a restore the daemon
+    /// refuses leaves nothing armed for the next tab to arrive.
+    pub fn activate_on_arrival(&mut self, tab_id: &str, focus_pane: Option<&str>) {
+        self.pending_restore
+            .insert(tab_id.to_owned(), focus_pane.map(str::to_owned));
+    }
+
+    /// Forgets every pending arrival: a fresh connection's list decides what
+    /// shows.
+    pub fn clear_pending_restore(&mut self) {
+        self.pending_restore.clear();
     }
 
     /// Where `session` goes: into the active tab by
@@ -1975,6 +2009,56 @@ pub(crate) mod tests {
             pick_balanced_drop_target(&stacked),
             Some(("bottom".to_owned(), PaneDropEdge::Right)),
             "a wide pane splits along its width"
+        );
+    }
+
+    #[test]
+    fn restored_tab_is_activated_when_its_id_arrives() {
+        let mut model = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        assert_eq!(model.active_id(), Some("t1"));
+        model.activate_on_arrival("t9", Some("p9"));
+
+        model.apply(&updated(&tab("t2", &pane("p2", None))));
+        assert_eq!(model.active_id(), Some("t1"), "another tab changes nothing");
+
+        model.apply(&updated(&tab("t9", &pane("p9", Some("s2")))));
+        assert_eq!(model.active_id(), Some("t9"), "the named id activates it");
+        assert_eq!(
+            model.focused_pane("t9").as_deref(),
+            Some("p9"),
+            "and the pane it was to focus"
+        );
+    }
+
+    #[test]
+    fn other_tab_arriving_is_not_activated_by_a_pending_restore() {
+        let mut model = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        model.activate_on_arrival("t9", None);
+
+        model.apply(&updated(&tab("t2", &pane("p2", None))));
+        assert_eq!(model.active_id(), Some("t1"), "the tab shown is unchanged");
+        assert!(
+            model.pending_restore.contains_key("t9"),
+            "and the restore still waits for its own id"
+        );
+    }
+
+    #[test]
+    fn pending_restore_dropped_when_tab_list_lacks_it() {
+        let mut model = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        model.activate_on_arrival("t9", Some("p9"));
+
+        model.apply(&tabs_msg(&[tab("t1", &pane("p1", Some("s1")))]));
+        assert!(
+            !model.pending_restore.contains_key("t9"),
+            "the list has no t9, so nothing is coming for it"
+        );
+
+        model.apply(&updated(&tab("t9", &pane("p9", Some("s2")))));
+        assert_eq!(
+            model.active_id(),
+            Some("t1"),
+            "a tab of that id later shows nothing new"
         );
     }
 }

@@ -12,6 +12,7 @@ use crate::move_panes_view::MovePanesDialog;
 use crate::pane_close::PaneClose;
 use crate::session_menu::{menu_frame, menu_item, menu_separator};
 use crate::tabs::{collect_panes, pick_balanced_drop_target};
+use crate::undo;
 use crate::{RootView, tooltip};
 
 /// The pane dialogs and the empty pane's menu, while open, and the focus
@@ -217,19 +218,29 @@ impl RootView {
                     .and_then(|tab| tab.grid())
                     .and_then(pick_balanced_drop_target);
                 match target {
-                    Some((dst_pane_id, edge)) => self.send(ClientMessage::MovePane {
-                        src_tab_id: tab_id,
-                        src_pane_id: pane_id,
-                        dst_tab_id: dst_tab_id.clone(),
-                        dst_pane_id,
-                        edge,
-                    }),
+                    Some((dst_pane_id, edge)) => {
+                        let snapshots = [&tab_id, dst_tab_id]
+                            .into_iter()
+                            .filter_map(|id| self.tab_snapshot(id, Some(&pane_id)))
+                            .collect();
+                        self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
+                        self.send(ClientMessage::MovePane {
+                            src_tab_id: tab_id,
+                            src_pane_id: pane_id,
+                            dst_tab_id: dst_tab_id.clone(),
+                            dst_pane_id,
+                            edge,
+                        });
+                    }
                     None => {
                         tracing::warn!(tab = %dst_tab_id, "move pane: the tab has no pane to drop on");
                     }
                 }
             }
-            MenuAction::Close => self.send(ClientMessage::ClosePane { tab_id, pane_id }),
+            MenuAction::Close => {
+                self.record_pane_close(&tab_id, &pane_id, None, cx);
+                self.send(ClientMessage::ClosePane { tab_id, pane_id });
+            }
         }
         self.close_empty_pane_menu(window, cx);
     }

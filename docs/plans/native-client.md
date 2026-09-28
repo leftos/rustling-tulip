@@ -34,9 +34,6 @@ The session menu's Duplicate ▸ (Shift opens the prefilled dialog), Move to ▸
 - Settled (orchestrator): Duplicate into an existing tab places by `pane_target_for_session`; Duplicate and Move to list grid tabs only; submenus swap rows with ‹ Back; member chips get a second header row only for sessions with members; the orphan banner names the session's runtime instead of Tauri's fixed "claude"; auto-discard also skips abandoned sessions; the rename field keeps native's seed; a Shift-duplicate with no stored config opens the dialog with defaults on the source's repo.
 - P4.12c: `SpawnForm::open` seeds the Spawn defaults (trusted, approval mode, Codex sandbox) and has no prefill of those three fields yet; the duplicate prefill must beat the defaults.
 
-## P4.13c Undo shelf
-
-Settled from Tauri (orchestrator): undo covers tab close (not Close others or merge), close pane only, and move to an existing tab; the shelf is its own bottom-centre layer, 8 s, at most 3 entries, buttons only. Parity: "Undo shelf".
 
 ## P4.15 Preset wizard
 

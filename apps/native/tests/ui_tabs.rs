@@ -15,6 +15,7 @@ use protocol::{
     TabEntry,
 };
 use serde_json::json;
+use std::time::Duration;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 fn two_tabs() -> Fixture {
@@ -622,4 +623,271 @@ fn close_others_disarms_after_another_row(cx: &mut TestAppContext) {
     );
     h.click_on("tab-menu-close-others");
     assert_eq!(closes(&h.sent()), 0);
+}
+
+/// The undo entries on screen, as `(id, message)`, newest first.
+fn undo_entries(h: &mut Harness) -> Vec<(u64, String)> {
+    h.root(|root, _| {
+        root.undo_entries()
+            .iter()
+            .map(|entry| (entry.id, entry.message.clone()))
+            .collect()
+    })
+}
+
+/// The first snapshot of the newest entry, as
+/// `(tab id, index, was active, focus pane)`.
+fn newest_snapshot(h: &mut Harness) -> Option<(String, usize, bool, Option<String>)> {
+    h.root(|root, _| {
+        let snapshot = root.undo_entries().first()?.snapshots.first()?;
+        Some((
+            snapshot.tab.id.clone(),
+            snapshot.index,
+            snapshot.restore_active,
+            snapshot.focus_pane.clone(),
+        ))
+    })
+}
+
+#[gpui::test]
+fn closing_a_tab_offers_undo_that_sends_restore_tab_at_its_index(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t2");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CloseTab { tab_id }] if tab_id == "t2"),
+        "sent {sent:?}"
+    );
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Closed tab \"t2\"");
+    assert_eq!(
+        newest_snapshot(&mut h),
+        Some(("t2".to_owned(), 1, false, None)),
+        "its place in the strip, and no pane to focus"
+    );
+    assert!(
+        h.bounds("undo-shelf").origin.x >= px(0.0),
+        "the shelf's column is drawn"
+    );
+    assert!(h.in_model("undo-shelf"), "and it shows the entry");
+    assert!(h.in_model(&format!("undo-entry-{id}")));
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t2".to_owned(),
+    });
+    h.sent();
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t2" && *index == 1),
+        "sent {sent:?}"
+    );
+    assert!(undo_entries(&mut h).is_empty(), "the entry is spent");
+    assert!(!h.in_model("undo-shelf"), "and the shelf goes with it");
+}
+
+#[gpui::test]
+fn close_others_offers_no_undo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-close-others");
+    h.click_on("tab-menu-close-others");
+    let closed = h
+        .sent()
+        .iter()
+        .filter(|msg| matches!(msg, ClientMessage::CloseTab { .. }))
+        .count();
+    assert_eq!(closed, 2, "the other tabs close");
+    assert!(
+        undo_entries(&mut h).is_empty(),
+        "Close other tabs cannot be taken back"
+    );
+}
+
+#[gpui::test]
+fn undo_entry_expires_after_8_seconds(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t2");
+    assert_eq!(undo_entries(&mut h).len(), 1);
+
+    h.advance(Duration::from_millis(7_999));
+    assert_eq!(undo_entries(&mut h).len(), 1, "still there just before");
+    h.advance(Duration::from_millis(1));
+    assert!(undo_entries(&mut h).is_empty(), "eight seconds is up");
+}
+
+#[gpui::test]
+fn shelf_keeps_three_newest(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = two_tabs();
+    for id in ["t3", "t4", "t5"] {
+        fixture.tabs.push(tab(id, &pane(&format!("p{id}"), None)));
+    }
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    for id in ["t2", "t3", "t4", "t5"] {
+        h.click_on(&format!("tab-close-{id}"));
+    }
+
+    let messages: Vec<String> = undo_entries(&mut h)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Closed tab \"t5\"",
+            "Closed tab \"t4\"",
+            "Closed tab \"t3\""
+        ],
+        "the newest three, newest first"
+    );
+}
+
+#[gpui::test]
+fn dismiss_removes_entry_without_sending(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t2");
+    let (id, _) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    h.sent();
+
+    h.click_on(&format!("undo-dismiss-{id}"));
+    assert!(h.sent().is_empty(), "the ✕ sends nothing");
+    assert!(undo_entries(&mut h).is_empty(), "the entry is gone");
+    assert!(!h.in_model(&format!("undo-entry-{id}")), "and off screen");
+    assert!(!h.in_model("undo-shelf"));
+}
+
+#[gpui::test]
+fn restored_active_tab_becomes_active(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    h.click_on("tab-close-t1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CloseTab { tab_id }] if tab_id == "t1"),
+        "the second click closes the tab holding s1: {sent:?}"
+    );
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Closed tab \"t1\"");
+    assert_eq!(
+        newest_snapshot(&mut h),
+        Some(("t1".to_owned(), 0, true, None)),
+        "it was the tab shown"
+    );
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    h.sent();
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "sent {sent:?}"
+    );
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1"))),
+    });
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned()),
+        "the restored tab shows again"
+    );
+}
+
+#[gpui::test]
+fn shelf_clears_on_welcome(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t2");
+    assert_eq!(undo_entries(&mut h).len(), 1, "the close offers an undo");
+
+    h.send(DaemonMessage::Welcome {
+        protocol_version: 1,
+        supported_versions: vec![1],
+    });
+    assert!(
+        undo_entries(&mut h).is_empty(),
+        "a reconnect forgets what the ids stood for"
+    );
+}
+
+#[gpui::test]
+fn shelf_clears_when_connection_drops(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t2");
+    assert_eq!(undo_entries(&mut h).len(), 1, "the close offers an undo");
+
+    h.lose_connection();
+    assert!(
+        undo_entries(&mut h).is_empty(),
+        "a dropped connection forgets what the ids stood for"
+    );
+    assert!(!h.in_model("undo-shelf"));
+}
+
+#[gpui::test]
+fn refused_restore_does_not_activate_the_next_new_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.click_on("tab-close-t1");
+    h.click_on("tab-close-t1");
+    h.sent();
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t2".to_owned()),
+        "the tab that held s1 is gone"
+    );
+
+    let (id, _) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    h.click_on(&format!("undo-action-{id}"));
+    h.sent();
+
+    // The daemon refuses it: its own list still holds that tab id.
+    h.send(DaemonMessage::Error {
+        message: "tab already exists: t1".to_owned(),
+        request_id: None,
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &pane("p9", None)),
+    });
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t2".to_owned()),
+        "a refused restore arms nothing for the next tab to arrive"
+    );
 }

@@ -97,6 +97,16 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
             .any(|row| row == selector)
     } else if let Some(pane) = selector.strip_prefix("pane-move-new-tab-") {
         root.active_pane_ids().iter().any(|p| p == pane) && root.pane_session(pane).is_some()
+    } else if selector == "undo-shelf" {
+        !root.undo_entries().is_empty()
+    } else if let Some(id) = selector
+        .strip_prefix("undo-entry-")
+        .or_else(|| selector.strip_prefix("undo-action-"))
+        .or_else(|| selector.strip_prefix("undo-dismiss-"))
+    {
+        root.undo_entries()
+            .iter()
+            .any(|entry| entry.id.to_string() == id)
     } else if selector == "exit-confirm-dialog" {
         root.exit_dialog_open()
     } else if selector.starts_with("exit-") {
@@ -921,10 +931,20 @@ impl<'a> Harness<'a> {
     /// present; their bounds alone cannot prove it.
     pub fn in_model(&mut self, selector: &str) -> bool {
         let selector = selector.to_owned();
+        // The shelf's model is the entries it shows; the column they are
+        // drawn into carries the selector, so this needs both.
+        let shelf_drawn = selector != "undo-shelf" || {
+            self.cx.run_until_parked();
+            self.cx
+                .debug_bounds("undo-shelf")
+                .is_some_and(|bounds| bounds.origin.x >= px(0.0))
+        };
         self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
             let sessions_shown = !root.sidebar_collapsed() && root.activity() == Activity::Sessions;
-            if let Some(shown) = modal_part_shown(root, &selector) {
+            if selector == "undo-shelf" {
+                shelf_drawn && !root.undo_entries().is_empty()
+            } else if let Some(shown) = modal_part_shown(root, &selector) {
                 shown
             } else if selector == "tab-menu" {
                 root.tab_menu().is_some()

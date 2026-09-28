@@ -85,6 +85,11 @@ impl PaneClose {
         &self.pane_id
     }
 
+    /// The name the session showed under when the dialog opened.
+    pub(crate) fn session_label(&self) -> &str {
+        &self.label
+    }
+
     fn stopped(&self) -> bool {
         self.status == SessionStatus::Stopped
     }

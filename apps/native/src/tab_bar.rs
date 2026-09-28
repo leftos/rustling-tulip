@@ -14,6 +14,7 @@ use crate::session_menu::{menu_frame, menu_item, menu_separator, muted_row};
 use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::undo;
 use crate::{
     BAR_BG, BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
     tooltip,
@@ -373,7 +374,7 @@ impl RootView {
                 self.close_tab_menu(window, cx);
             }
             TabAction::Close => {
-                if self.close_tab_click(tab_id) {
+                if self.close_tab_click(tab_id, cx) {
                     self.close_tab_menu(window, cx);
                 }
                 cx.notify();
@@ -563,7 +564,7 @@ impl RootView {
             this.click_tab(&click_id, event, window, cx);
         });
         let on_middle = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-            this.close_tab_click(&middle_id);
+            this.close_tab_click(&middle_id, cx);
             cx.stop_propagation();
             cx.notify();
         });
@@ -748,12 +749,15 @@ impl RootView {
 
     /// A close click: closes the tab, or arms the close when the tab holds
     /// a session or a split. Returns whether it asked to close the tab.
-    fn close_tab_click(&mut self, tab_id: &str) -> bool {
+    fn close_tab_click(&mut self, tab_id: &str, cx: &mut Context<Self>) -> bool {
         let Some(tab) = self.tabs.tab(tab_id).cloned() else {
             return false;
         };
         let close = self.tabs.close_confirm.click(&tab);
         if close {
+            if let Some(snapshot) = self.tab_snapshot(&tab.id, None) {
+                self.record_undo(undo::closed_tab_message(&tab.name), vec![snapshot], cx);
+            }
             self.send(ClientMessage::CloseTab { tab_id: tab.id });
         }
         close
@@ -891,7 +895,7 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                this.close_tab_click(&id);
+                this.close_tab_click(&id, cx);
                 cx.stop_propagation();
                 cx.notify();
             }),

@@ -75,6 +75,8 @@ mod term_input;
 mod term_view;
 mod text_input;
 mod theme;
+mod undo;
+mod undo_view;
 mod window_state;
 mod window_title;
 
@@ -122,6 +124,7 @@ use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session, tab_pills};
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
+use crate::undo::UndoShelf;
 use crate::window_state::{RestoreRect, WindowState};
 
 pub use crate::assets::Assets;
@@ -161,6 +164,7 @@ pub use crate::stash_view::{
 };
 pub use crate::tabs::TabPill;
 pub use crate::text_input::bind_keys;
+pub use crate::undo::{TabSnapshot, UndoEntry};
 
 const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
@@ -424,6 +428,10 @@ pub struct RootView {
     toast_timer: Option<Task<()>>,
     /// The modal notices' keyboard focus.
     notice_focus: FocusHandle,
+    /// What a close or a move can be taken back with, newest first.
+    undo: UndoShelf,
+    /// Wakes the view when the next undo entry's time is up.
+    undo_timer: Option<Task<()>>,
     /// Spawns waiting for the daemon's reply.
     spawns: PendingSpawns,
     /// The spawn dialog, while open.
@@ -580,6 +588,11 @@ impl RootView {
     /// A view over `deps`: it sends through `deps.tx` and handles every
     /// event `deps.events` delivers. A request to close the window goes
     /// through the quit flow.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One line per RootView field, newest last: the list is the struct, \
+                  and a split constructor would hide a field's default among helpers."
+    )]
     pub fn with_transport(deps: RootDeps, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let RootDeps {
             tx,
@@ -649,6 +662,8 @@ impl RootView {
             notices: Notices::default(),
             toast_timer: None,
             notice_focus: cx.focus_handle(),
+            undo: UndoShelf::default(),
+            undo_timer: None,
             spawns: PendingSpawns::default(),
             spawn_dialog: None,
             spawn_focus: cx.focus_handle(),
@@ -1325,6 +1340,7 @@ impl RootView {
             self.close_stash_drop_confirm(window, cx);
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
+            self.reset_undo(cx);
         }
         if exit_relevant {
             self.after_exit_event(window, cx);
@@ -1499,6 +1515,8 @@ impl RootView {
         self.close_stash_drop_confirm(window, cx);
         self.reset_session_ui(window, cx);
         self.reset_notices(window, cx);
+        self.reset_undo(cx);
+        self.tabs.clear_pending_restore();
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);
@@ -1956,6 +1974,7 @@ impl Render for RootView {
             .children(self.stash_drop_layer(cx))
             .children(self.notice_layers(cx))
             .children(self.toast_layer(cx))
+            .children(self.undo_layer(window, cx))
             .children(self.run_confirm_layer(cx))
             .children(self.layout_chooser_layer(cx))
             .children(self.exit_layer(cx))
