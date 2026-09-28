@@ -104,6 +104,10 @@ Features from two open-source agent managers, reviewed 2026-09-28 (user: keep de
 - [ ] Resume the sessions a reboot killed, on the next start
 - [ ] Share the workspace design on Orca issue #1099 (the user confirms the text first)
 
+### Mobile app
+An iOS and Android app for the user's own use, after native client Phase 6 (user, 2026-09-28). Rulings (user, 2026-09-28): all three modes, phased (monitor and respond, then a full terminal, then the conversation view); reachable anywhere through a Rust relay on a small VPS, with the LAN's pinned TLS run end to end through it; Flutter over a shared Rust core; the user only (sideload and TestFlight); push sent by the daemon with the user's own keys; iOS built on cloud macOS CI. Phases MA1–MA9 and open questions: [mobile-app.md](./plans/mobile-app.md)
+- [ ] **Next:** MA1, the shared client core, together with native client Phase 6
+
 ### Tooling cleanups (singles)
 
 Pre-existing warnings and traps noticed during the 2026-09-24 native-client session.
@@ -128,6 +132,5 @@ Pre-existing warnings and traps noticed during the 2026-09-24 native-client sess
 
 - Sub-agent / Task-tool interception or isolation
 - Auto-discovery of repos (registry is manual only)
-- Attach beyond the LAN — internet exposure, cloud relay, SSH tunneling (LAN-scoped remote access shipped; see Shipped)
+- Attach beyond the LAN by internet exposure or SSH tunneling (LAN-scoped remote access shipped; see Shipped). The mobile app's relay is the one way in from outside; see [mobile-app.md](./plans/mobile-app.md)
 - Cloud sync of registry or sessions
-- Mobile companion app

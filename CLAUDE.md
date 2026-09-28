@@ -155,4 +155,4 @@ Don't go looking for these — they're explicitly out of scope until the corresp
 
 - **Auto-update** for the native client — deferred until its installer (Phase 6) and a signed release pipeline exist.
 - **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
-- **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync**, **mobile app** — explicit non-goals.
+- **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync** — explicit non-goals. The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
