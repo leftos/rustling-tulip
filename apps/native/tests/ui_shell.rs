@@ -417,6 +417,22 @@ fn shell_dialog_escape_closes_and_backdrop_does_not(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn shell_browse_uses_the_picker_seam(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.click_on("sidebar-shell-dialog");
+    h.set_picked_folder(None);
+    h.click_on("shell-browse");
+    assert_eq!(h.folder_asks(), 1, "Browse asks the picker");
+    let before = folder(&mut h);
+    assert!(before.is_some(), "a cancel leaves the field as it was");
+    h.set_picked_folder(Some("C:/picked"));
+    h.click_on("shell-browse");
+    assert_eq!(h.folder_asks(), 2);
+    assert_eq!(folder(&mut h).as_deref(), Some("C:/picked"));
+}
+
+#[gpui::test]
 fn shell_dialog_closes_on_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());

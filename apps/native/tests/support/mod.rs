@@ -22,9 +22,9 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, ContainerKind, HandshakeInfo, NetCommand, NetDeps, NetEvent,
-    Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel, bind_keys,
-    spawn_net,
+    Activity, Clock, Connection, ContainerKind, FolderPicker, HandshakeInfo, NetCommand, NetDeps,
+    NetEvent, Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel,
+    bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -107,6 +107,12 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         root.undo_entries()
             .iter()
             .any(|entry| entry.id.to_string() == id)
+    } else if selector == "worktrees-manager" {
+        root.worktrees_manager_open()
+    } else if selector.starts_with("worktrees-manager-") {
+        root.worktrees_manager_buttons()
+            .iter()
+            .any(|button| button.selector == selector)
     } else if selector == "exit-confirm-dialog" {
         root.exit_dialog_open()
     } else if selector.starts_with("exit-") {
@@ -464,6 +470,27 @@ pub struct Harness<'a> {
     opener: Arc<OpenRecorder>,
     /// The notifications attention events showed.
     notifier: Arc<NotifyRecorder>,
+    /// What the folder picker answers, and how often it was asked.
+    picker: Rc<PickRecorder>,
+}
+
+/// A folder picker that answers with the folder a spec set, as the test
+/// platform cannot prompt, and counts the times it was asked.
+#[derive(Default)]
+pub struct PickRecorder {
+    next: std::cell::RefCell<Option<PathBuf>>,
+    asks: Cell<usize>,
+}
+
+impl PickRecorder {
+    fn picker(recorder: &Rc<Self>) -> FolderPicker {
+        let recorder = Rc::clone(recorder);
+        Rc::new(move |_: &mut App| {
+            recorder.asks.set(recorder.asks.get() + 1);
+            let picked = recorder.next.borrow().clone();
+            Box::pin(async move { picked })
+        })
+    }
 }
 
 /// What a Ctrl+click on a terminal link opened.
@@ -615,6 +642,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let picker = Rc::new(PickRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -625,6 +653,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            pick_folder: PickRecorder::picker(&picker),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -639,6 +668,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            picker,
         };
         harness.connect();
         harness
@@ -656,6 +686,7 @@ impl<'a> Harness<'a> {
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
         let notifier = Arc::new(NotifyRecorder::default());
+        let picker = Rc::new(PickRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -666,6 +697,7 @@ impl<'a> Harness<'a> {
             quit: quit_recorder(&quits),
             open: opener.clone(),
             notify: notifier.clone(),
+            pick_folder: PickRecorder::picker(&picker),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -680,6 +712,7 @@ impl<'a> Harness<'a> {
             quits,
             opener,
             notifier,
+            picker,
         }
     }
 
@@ -697,6 +730,16 @@ impl<'a> Harness<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Makes the folder picker answer `folder` (a cancel when `None`).
+    pub fn set_picked_folder(&self, folder: Option<&str>) {
+        *self.picker.next.borrow_mut() = folder.map(PathBuf::from);
+    }
+
+    /// How many times the folder picker was asked.
+    pub fn folder_asks(&self) -> usize {
+        self.picker.asks.get()
     }
 
     /// Reports `host` as behind a mapped network drive from now on.

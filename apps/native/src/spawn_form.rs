@@ -535,6 +535,91 @@ impl ExistingOption {
     }
 }
 
+/// A dialog held on one target, optionally pinned to one of its existing
+/// worktrees: the target cannot be changed while the dialog is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lock {
+    target: Target,
+    pin: Option<ExistingOption>,
+    /// The worktrees manager's own share confirm already answered for the
+    /// pin.
+    share_confirmed: bool,
+}
+
+impl Lock {
+    /// The lock a worktrees-root group's launch asks for: its repo or
+    /// workspace, pinned to its worktree or its members' worktrees. `None`
+    /// when the group maps onto nothing this build can spawn.
+    pub(crate) fn from_group(entry: &RootWorktreeEntry) -> Option<Self> {
+        match entry.launch.as_ref()? {
+            WorktreeLaunchTarget::Single {
+                repo_id,
+                branch,
+                worktree_path,
+            } => {
+                let name = branch.clone().unwrap_or_else(|| entry.branch_slug.clone());
+                let pin = ExistingOption {
+                    key: worktree_path.clone(),
+                    name: name.clone(),
+                    status: entry.status,
+                    stale_shown: true,
+                    size_bytes: entry.size_bytes,
+                    modified_unix: entry.last_modified_unix,
+                    branch_name: name,
+                    pin: Pin::Worktree(worktree_path.clone()),
+                };
+                Some(Self {
+                    target: Target::Repo(repo_id.clone()),
+                    pin: Some(pin),
+                    share_confirmed: false,
+                })
+            }
+            WorktreeLaunchTarget::Workspace { workspace_id, .. } => Some(Self {
+                target: Target::Workspace(workspace_id.clone()),
+                pin: ExistingOption::from_group(entry, workspace_id),
+                share_confirmed: false,
+            }),
+            WorktreeLaunchTarget::Unknown => None,
+        }
+    }
+
+    /// The same lock, marked as one the worktrees manager's share confirm
+    /// already answered for.
+    pub(crate) fn share_confirmed(mut self) -> Self {
+        self.share_confirmed = true;
+        self
+    }
+
+    /// Why the lock's target can no longer take a spawn dialog, if it
+    /// cannot: the repo or workspace it names left the registry.
+    pub(crate) fn unregistered(
+        &self,
+        repos: &[RepoEntry],
+        workspaces: &[WorkspaceEntry],
+    ) -> Option<&'static str> {
+        match &self.target {
+            Target::Repo(id) if !repos.iter().any(|repo| &repo.id == id) => {
+                Some("the repo is no longer registered")
+            }
+            Target::Workspace(id) if !workspaces.iter().any(|workspace| &workspace.id == id) => {
+                Some("the workspace is no longer registered")
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether two worktree keys name the same place: on Windows, paths compare
+/// without regard to case or slash direction.
+fn same_key(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        let normal = |key: &str| key.replace('\\', "/").to_lowercase();
+        normal(a) == normal(b)
+    } else {
+        a == b
+    }
+}
+
 /// The runtime, the run mode, and whether the user has chosen them.
 #[derive(Debug, Clone, Copy)]
 struct RuntimeChoice {
@@ -597,14 +682,25 @@ struct Existing {
     options: Vec<ExistingOption>,
     loaded: bool,
     selected: Option<String>,
+    /// The worktree the dialog was opened pinned to, kept on offer when the
+    /// list lacks it (git may have pruned it from its own list).
+    pinned: Option<ExistingOption>,
 }
 
 /// The spawn dialog's state.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the dialog's flags are independent — a locked target, a trusted launch, \
+              the worktree toggle, the manager's share confirm and submitted — and each \
+              reads on its own rather than as one lifecycle state"
+)]
 pub(crate) struct SpawnForm {
     repos: Vec<RepoEntry>,
     workspaces: Vec<WorkspaceEntry>,
     target: Target,
+    /// The target cannot be changed.
+    locked: bool,
     runtime: RuntimeChoice,
     tabs: TabChoices,
     open_in: OpenChoice,
@@ -625,6 +721,9 @@ pub(crate) struct SpawnForm {
     advanced: Advanced,
     focus: Control,
     share: Option<ShareButton>,
+    /// The manager's share confirm already answered for the pin, so a submit
+    /// on it does not ask again.
+    share_confirmed: bool,
     submitted: bool,
 }
 
@@ -637,17 +736,37 @@ pub(crate) struct FormInputs<'a> {
     pub tabs: TabChoices,
     /// The saved Spawn defaults every field is seeded from.
     pub spawn_defaults: SpawnDefaults,
+    /// The target the dialog is held on, and the worktree it is pinned to.
+    pub lock: Option<Lock>,
 }
 
 impl SpawnForm {
     /// The form over `inputs` and the requests its target needs, or `None`
-    /// when there is nothing to spawn into.
+    /// when there is nothing to spawn into or the locked target is not
+    /// registered.
     pub(crate) fn open(
         inputs: FormInputs<'_>,
         cache: &mut BranchCache,
         now: Instant,
     ) -> Option<(Self, Vec<ClientMessage>)> {
-        let target = initial_target(inputs.focused, inputs.repos, inputs.workspaces)?;
+        let (target, pin, share_confirmed) = match inputs.lock {
+            Some(Lock {
+                target,
+                pin,
+                share_confirmed,
+            }) => {
+                let registered = match &target {
+                    Target::Repo(id) => inputs.repos.iter().any(|r| &r.id == id),
+                    Target::Workspace(id) => inputs.workspaces.iter().any(|w| &w.id == id),
+                };
+                (registered.then_some(target)?, Some(pin), share_confirmed)
+            }
+            None => (
+                initial_target(inputs.focused, inputs.repos, inputs.workspaces)?,
+                None,
+                false,
+            ),
+        };
         let open_in = if inputs.tabs.current.is_some() {
             OpenChoice::CurrentTab
         } else {
@@ -658,6 +777,7 @@ impl SpawnForm {
             repos: inputs.repos.to_vec(),
             workspaces: inputs.workspaces.to_vec(),
             target: target.clone(),
+            locked: pin.is_some(),
             runtime: RuntimeChoice {
                 agent: Agent::Claude,
                 plain_shell: false,
@@ -684,15 +804,35 @@ impl SpawnForm {
             },
             focus: Control::Branch,
             share: None,
+            share_confirmed,
             submitted: false,
         };
-        let messages = form.load_target(target, cache, now);
+        let mut messages = form.load_target(target, cache, now);
         form.focus = if form.controls().contains(&Control::Branch) {
             Control::Branch
         } else {
             Control::Target(form.target.clone())
         };
+        if let Some(Some(option)) = pin {
+            messages.extend(form.pin(option));
+        }
         Some((form, messages))
+    }
+
+    /// Opens on the existing worktree `option`, picked and focused, and asks
+    /// for the list it belongs to.
+    fn pin(&mut self, option: ExistingOption) -> Vec<ClientMessage> {
+        self.use_worktree = true;
+        self.mode = WorktreeMode::Existing;
+        self.existing.selected = Some(option.key.clone());
+        self.focus = Control::Existing(option.key.clone());
+        self.existing.pinned = Some(option);
+        self.list_existing()
+    }
+
+    /// Whether the target cannot be changed.
+    pub(crate) fn target_locked(&self) -> bool {
+        self.locked
     }
 
     /// Picks `target` and resets everything that belongs to the one before.
@@ -1065,8 +1205,28 @@ impl SpawnForm {
         self.use_worktree && self.mode == WorktreeMode::Existing
     }
 
-    fn set_existing(&mut self, options: Vec<ExistingOption>) {
-        let selected = self.existing.selected.take();
+    /// The list arrived. A pinned worktree it holds is picked in the list's
+    /// spelling; one it lacks stays on offer, first.
+    fn set_existing(&mut self, mut options: Vec<ExistingOption>) {
+        let mut selected = self.existing.selected.take();
+        if let Some(pinned) = &self.existing.pinned {
+            match options.iter().find(|o| same_key(&o.key, &pinned.key)) {
+                Some(listed) => {
+                    if selected
+                        .as_deref()
+                        .is_some_and(|k| same_key(k, &listed.key))
+                    {
+                        selected = Some(listed.key.clone());
+                    }
+                    if let Control::Existing(key) = &self.focus
+                        && same_key(key, &listed.key)
+                    {
+                        self.focus = Control::Existing(listed.key.clone());
+                    }
+                }
+                None => options.insert(0, pinned.clone()),
+            }
+        }
         self.existing.selected = selected.filter(|key| options.iter().any(|o| &o.key == key));
         self.existing.options = options;
         self.existing.loaded = true;
@@ -1266,6 +1426,9 @@ impl SpawnForm {
         if targets.contains(&self.target) {
             return Some(Vec::new());
         }
+        if self.locked {
+            return None;
+        }
         let first = targets.into_iter().next()?;
         Some(self.load_target(first, cache, now))
     }
@@ -1296,6 +1459,15 @@ impl SpawnForm {
             .iter()
             .map(|w| Target::Workspace(w.id.clone()));
         repos.chain(workspaces).collect()
+    }
+
+    /// The targets the picker shows: only the current one while locked.
+    pub(crate) fn shown_targets(&self) -> Vec<Target> {
+        if self.locked {
+            vec![self.target.clone()]
+        } else {
+            self.targets()
+        }
     }
 
     pub(crate) fn target(&self) -> &Target {
@@ -1545,7 +1717,7 @@ impl SpawnForm {
 
     /// Asks for the existing worktrees afresh.
     fn list_existing(&mut self) -> Vec<ClientMessage> {
-        self.existing.options.clear();
+        self.existing.options = self.existing.pinned.iter().cloned().collect();
         self.existing.loaded = false;
         match &self.target {
             Target::Repo(id) => vec![ClientMessage::ListWorktrees {
@@ -1656,7 +1828,9 @@ impl SpawnForm {
     /// The focusable controls, in the order they are drawn.
     pub(crate) fn controls(&self) -> Vec<Control> {
         let mut ring = vec![Control::Close];
-        ring.extend(self.targets().into_iter().map(Control::Target));
+        if !self.locked {
+            ring.extend(self.targets().into_iter().map(Control::Target));
+        }
         ring.extend(Runtime::ALL.into_iter().map(Control::Runtime));
         if self.tabs.current.is_some() {
             ring.push(Control::OpenIn(OpenChoice::CurrentTab));
@@ -1822,7 +1996,7 @@ impl SpawnForm {
         let messages = match control {
             Control::Close | Control::Cancel => return Outcome::Close,
             Control::Submit => return self.submit(cache),
-            Control::Target(target) if *target != self.target => {
+            Control::Target(target) if *target != self.target && !self.locked => {
                 self.load_target(target.clone(), cache, now)
             }
             Control::Runtime(runtime) => {
@@ -1908,12 +2082,14 @@ impl SpawnForm {
         self.request_suggestion(true, now).into_iter().collect()
     }
 
-    /// Spawn, once: a picked worktree a session is running in asks first.
+    /// Spawn, once: a picked worktree a session is running in asks first,
+    /// unless the manager's share confirm already answered for it.
     pub(crate) fn submit(&mut self, cache: &mut BranchCache) -> Outcome {
         if self.submitted || !self.can_submit() {
             return Outcome::Stay(Vec::new());
         }
         if self.pinning()
+            && !self.share_already_confirmed()
             && self
                 .selected_option()
                 .is_some_and(ExistingOption::is_active)
@@ -1922,6 +2098,18 @@ impl SpawnForm {
             return Outcome::ConfirmShare;
         }
         self.send(cache)
+    }
+
+    /// Whether the manager's share confirm already answered for the picked
+    /// worktree: only the pin it launched into, not one picked here.
+    fn share_already_confirmed(&self) -> bool {
+        self.share_confirmed
+            && self
+                .existing
+                .selected
+                .as_deref()
+                .zip(self.existing.pinned.as_ref())
+                .is_some_and(|(key, pin)| same_key(key, &pin.key))
     }
 
     fn send(&mut self, cache: &mut BranchCache) -> Outcome {
@@ -2082,6 +2270,10 @@ impl SpawnForm {
 
     fn worktree_default_change(&self) -> Option<ClientMessage> {
         let value = self.use_worktree;
+        // A pin turned the worktree on; the user did not choose it.
+        if value && self.existing.pinned.is_some() {
+            return None;
+        }
         match &self.target {
             Target::Repo(id) => self
                 .repo(id)
@@ -2192,7 +2384,7 @@ fn branch_from_group_path(group_path: &str) -> String {
     clippy::cast_precision_loss,
     reason = "a size shown to one decimal place"
 )]
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
     }
@@ -2207,7 +2399,7 @@ fn human_size(bytes: u64) -> String {
     format!("{:.2} GB", mb / 1024.0)
 }
 
-fn human_relative_time(now_unix: i64, then_unix: i64) -> String {
+pub(crate) fn human_relative_time(now_unix: i64, then_unix: i64) -> String {
     let delta = now_unix - then_unix;
     if delta < 60 {
         "just now".to_owned()
@@ -2295,6 +2487,7 @@ mod tests {
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
         spawn_defaults: SpawnDefaults,
+        lock: Option<Lock>,
     }
 
     impl Setup {
@@ -2305,6 +2498,7 @@ mod tests {
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
                 spawn_defaults: SpawnDefaults::default(),
+                lock: None,
             }
         }
 
@@ -2322,6 +2516,7 @@ mod tests {
                     focused: self.focused.as_ref(),
                     tabs: self.tabs.clone(),
                     spawn_defaults: self.spawn_defaults,
+                    lock: self.lock.clone(),
                 },
                 cache,
                 Instant::now(),
@@ -2715,6 +2910,7 @@ mod tests {
                 focused: None,
                 tabs: TabChoices::default(),
                 spawn_defaults: SpawnDefaults::default(),
+                lock: None,
             },
             &mut BranchCache::default(),
             start,
@@ -2840,6 +3036,7 @@ mod tests {
             focused: None,
             tabs: tabs(Some("t1"), &[]),
             spawn_defaults: SpawnDefaults::default(),
+            lock: None,
         };
         let (mut form, sent) = setup.open(&mut BranchCache::default());
         assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
@@ -2879,6 +3076,7 @@ mod tests {
             focused: None,
             tabs: tabs(None, &[]),
             spawn_defaults: SpawnDefaults::default(),
+            lock: None,
         };
         let mut form = setup.open(&mut BranchCache::default()).0;
         let Outcome::Stay(sent) = press(&mut form, &Control::Mode(WorktreeMode::Existing)) else {
@@ -3507,6 +3705,7 @@ mod tests {
             focused: None,
             tabs: TabChoices::default(),
             spawn_defaults: SpawnDefaults::default(),
+            lock: None,
         }
         .open(&mut BranchCache::default())
         .0;
@@ -3518,5 +3717,167 @@ mod tests {
             form.target_label(&Target::Workspace("w1".to_owned())),
             "[WS]    w1 (2 repos)"
         );
+    }
+
+    /// A group under the worktrees root that launches into `r1` at `path`.
+    fn single_group(path: &str, status: &str) -> RootWorktreeEntry {
+        serde_json::from_value(json!({
+            "path": "C:/wt/wt.feat/r1", "anchor": "r1", "branch_slug": "feat",
+            "members": [], "status": { "kind": status }, "session_id": null,
+            "size_bytes": null, "last_modified_unix": null,
+            "launch": { "kind": "single", "repo_id": "r1", "branch": "feat/x",
+                "worktree_path": path },
+        }))
+        .expect("root entry fixture")
+    }
+
+    fn locked_setup(lock: Lock) -> Setup {
+        let mut plain = repo("r1");
+        plain.default_use_worktree = false;
+        let mut setup = Setup::repos(vec![plain, repo("r2")]);
+        setup.lock = Some(lock);
+        setup
+    }
+
+    #[test]
+    fn locked_target_shows_alone_and_ignores_target_presses() {
+        let setup = locked_setup(Lock {
+            target: Target::Repo("r2".to_owned()),
+            pin: None,
+            share_confirmed: false,
+        });
+        let mut form = setup.open(&mut BranchCache::default()).0;
+        assert!(form.target_locked());
+        assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
+        assert!(
+            !form
+                .controls()
+                .iter()
+                .any(|c| matches!(c, Control::Target(_))),
+            "the locked chip is out of the ring"
+        );
+        press(&mut form, &Control::Target(Target::Repo("r1".to_owned())));
+        assert_eq!(form.target(), &Target::Repo("r2".to_owned()));
+        let mut unknown = setup;
+        unknown.lock = Some(Lock {
+            target: Target::Repo("gone".to_owned()),
+            pin: None,
+            share_confirmed: false,
+        });
+        assert!(
+            SpawnForm::open(
+                FormInputs {
+                    repos: &unknown.repos,
+                    workspaces: &[],
+                    focused: None,
+                    tabs: TabChoices::default(),
+                    spawn_defaults: SpawnDefaults::default(),
+                    lock: unknown.lock.clone(),
+                },
+                &mut BranchCache::default(),
+                Instant::now(),
+            )
+            .is_none(),
+            "an unregistered locked target opens nothing"
+        );
+    }
+
+    #[test]
+    fn pin_opens_existing_mode_on_the_pinned_worktree() {
+        let lock = Lock::from_group(&single_group("C:/wt/wt.feat/r1", "stale")).expect("a lock");
+        let (mut form, sent) = locked_setup(lock).open(&mut BranchCache::default());
+        assert!(has(
+            &sent,
+            &ClientMessage::ListWorktrees {
+                repo_id: "r1".to_owned()
+            }
+        ));
+        assert_eq!(form.target(), &Target::Repo("r1".to_owned()));
+        assert!(form.target_locked());
+        assert!(form.use_worktree(), "on, though r1 defaults to in place");
+        assert_eq!(form.mode(), WorktreeMode::Existing);
+        assert_eq!(form.existing_selected(), Some("C:/wt/wt.feat/r1"));
+        assert_eq!(
+            form.focused(),
+            Control::Existing("C:/wt/wt.feat/r1".to_owned())
+        );
+        assert!(form.can_submit(), "the pin is on offer before the list");
+        form.on_message(&DaemonMessage::Worktrees {
+            repo_id: "r1".to_owned(),
+            worktrees: vec![worktree("C:/wt/other", "o", RootWorktreeStatus::Stale)],
+        });
+        let keys: Vec<&str> = form
+            .existing_options()
+            .iter()
+            .map(|o| o.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            ["C:/wt/wt.feat/r1", "C:/wt/other"],
+            "a pin the list lacks stays, first"
+        );
+        let spawn = submission(form.submit(&mut BranchCache::default()));
+        let SpawnTarget::Single {
+            existing_worktree,
+            branch_name,
+            ..
+        } = spawn.request.target
+        else {
+            panic!("a single-repo spawn");
+        };
+        assert_eq!(existing_worktree.as_deref(), Some("C:/wt/wt.feat/r1"));
+        assert_eq!(branch_name, "feat/x");
+        assert!(
+            spawn.default_change.is_none(),
+            "the pin's worktree does not become r1's default"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pin_adopts_the_lists_spelling_of_its_path() {
+        let lock = Lock::from_group(&single_group("C:/wt/wt.feat/r1", "active")).expect("a lock");
+        let mut form = locked_setup(lock).open(&mut BranchCache::default()).0;
+        form.on_message(&DaemonMessage::Worktrees {
+            repo_id: "r1".to_owned(),
+            worktrees: vec![worktree(
+                r"c:\WT\wt.feat\r1",
+                "feat/x",
+                RootWorktreeStatus::Active,
+            )],
+        });
+        assert_eq!(form.existing_options().len(), 1, "no synthetic twin");
+        assert_eq!(form.existing_selected(), Some(r"c:\WT\wt.feat\r1"));
+        assert_eq!(
+            form.focused(),
+            Control::Existing(r"c:\WT\wt.feat\r1".to_owned())
+        );
+        assert!(same_key("C:/A/b", r"c:\a\B"));
+        assert!(!same_key("C:/a/b", "C:/a/c"));
+    }
+
+    #[test]
+    fn workspace_pin_binds_the_groups_members() {
+        let entry: RootWorktreeEntry = serde_json::from_value(json!({
+            "path": "C:/wt/wt.feat/w1", "anchor": "w1", "branch_slug": "feat",
+            "members": [], "status": { "kind": "detached" }, "session_id": "s1",
+            "size_bytes": null, "last_modified_unix": null,
+            "launch": { "kind": "workspace", "workspace_id": "w1", "branch": null,
+                "members": [{ "repo_id": "r1", "path": "C:/wt/wt.feat/w1/r1" }] },
+        }))
+        .expect("root entry fixture");
+        let mut setup = Setup::repos(vec![repo("r1"), repo("r2")]);
+        setup.workspaces = vec![workspace("w1", &["r1", "r2"])];
+        setup.lock = Lock::from_group(&entry);
+        let (form, sent) = setup.open(&mut BranchCache::default());
+        assert!(has(&sent, &ClientMessage::InspectWorktreesRoot));
+        assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
+        assert_eq!(
+            form.existing_note().as_deref(),
+            Some("1 member bound; 1 to be created")
+        );
+        let mut unknown = entry;
+        unknown.launch = Some(WorktreeLaunchTarget::Unknown);
+        assert!(Lock::from_group(&unknown).is_none());
     }
 }

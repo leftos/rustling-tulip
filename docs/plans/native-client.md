@@ -6,16 +6,7 @@ The rulings the native client's open items need before they are briefed. Each it
 
 - **Landing:** each item is committed to `main` as soon as it is green, and pushed at checkpoints (a finished wave), not after every item.
 - **Autonomy:** drive the native client to done without stopping between items or waves. Technical decisions are settled in the session and recorded here as rulings; only questions about behaviour the user will see go to the user. Phases 5 and 6 are split into brief-sized items from their parity sections when their wave comes up, and the split goes to the user before anything is dispatched.
-- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11 → P4.15b (the launch path); P4.4b → P4.12c (the target lock). P4.16 changes the counts P4.2, P4.3 and P4.13a built, all landed.
-
-## P4.4b Worktrees tab and Manage worktrees
-
-The Worktrees settings tab (root path, Browse, Save, Reset, override indicator) and the Manage worktrees modal. Parity: "Worktrees".
-
-- Settled from Tauri (orchestrator): the manager opens only from the Settings button and closes Settings when it launches a session; daemon errors stay toasts (no `request_id` added); Refresh is disabled while a snapshot is pending; Delete all stale sends one `DeleteWorktreeAt` per path; confirms focus Cancel; "Launch session here" opens the spawn dialog with the target locked and the existing worktree pinned.
-- Rulings (user): a row's title is the group's `.rt-group` name, with status, path, branch, size and age under it; an older-layout folder with no marker shows its path as the title.
-- Settled (orchestrator): the folder picker gets a seam in `RootDeps` so Browse is specced (GPUI's test platform can't prompt), and Shell… uses it too; a bulk delete clears pending once every delete has answered (any `Error` counts); `Saved` shows only after `WorktreesRootChanged` echoes the saved path; one shared age/size format (the spawn form's); the members list is a `N members ▸` toggle in the focus ring; a pinned worktree missing from the list stays as a synthetic option; the locked target shows as its disabled chip; closing the manager without launching returns focus to Settings' `Manage worktrees…`.
-- This item builds the spawn form's target lock and worktree pin, which P4.12c reuses.
+- **Phase 4 scope:** its named features plus every parity line not claimed by Phase 5 (drag-and-drop, pop-outs) or Phase 6 (remote). Every item mounts into `RootView` (`lib.rs`), so concurrent items rebase onto `main` before landing. Concurrency ceiling 3. Dependencies: P4.11 → P4.15b (the launch path). P4.12c builds on the spawn form's target lock (`spawn_form.rs` `Lock`: a locked target plus an optional pinned worktree and `share_confirmed`), which P4.4b added for "Launch session here". P4.16 changes the counts P4.2, P4.3 and P4.13a built, all landed.
 
 ## P4.10 Repos and workspaces
 

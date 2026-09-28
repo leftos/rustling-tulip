@@ -17,7 +17,7 @@ use crate::combobox::{ComboRow, list_placement};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
-    ListField, MODEL_ALIASES, OpenChoice, Outcome, RunMode, Runtime, ShareButton, SpawnForm,
+    ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, RunMode, Runtime, ShareButton, SpawnForm,
     TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label, cursor_sandbox_label,
 };
 use crate::spawn_preview::{
@@ -71,6 +71,9 @@ pub(crate) enum SpawnEntry {
         aim: PaneAim,
         preselect: Option<String>,
     },
+    /// Held on one target, pinned to an existing worktree when the lock
+    /// names one: "Launch session here" in Manage worktrees.
+    Locked(Lock),
 }
 
 /// The open spawn dialog: its form and its text fields.
@@ -334,19 +337,23 @@ impl RootView {
             .then(|| form.list_rows(field).iter().map(ComboRow::label).collect())
     }
 
-    /// Opens the dialog from `entry`, unless there is no repo, the
-    /// connection is down or another dialog or menu is open. It starts on
-    /// the preselected session's repo or workspace, else the focused one's.
-    pub(crate) fn open_spawn_dialog(
-        &mut self,
-        entry: SpawnEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let blocked = self.spawn_dialog.is_some()
+    /// Why a spawn dialog cannot open for `lock` right now, if it cannot:
+    /// another overlay is up, there is nothing to spawn into, or the locked
+    /// target left the registry.
+    ///
+    /// `handoff` says the caller is the worktrees manager's launch, which
+    /// closes the manager and Settings as part of the hand-off, so neither
+    /// of those two counts against it.
+    pub(crate) fn spawn_dialog_blocker(
+        &self,
+        lock: Option<&Lock>,
+        handoff: bool,
+    ) -> Option<&'static str> {
+        if self.spawn_dialog.is_some()
             || self.exit.is_some()
             || self.shell_dialog.is_some()
-            || self.appearance_editor.is_some()
+            || (self.appearance_editor.is_some() && !handoff)
+            || (self.worktrees_manager.is_some() && !handoff)
             || self.delete_dialog.is_some()
             || self.menu.is_some()
             || self.container_menu.is_some()
@@ -356,14 +363,33 @@ impl RootView {
             || self.changes.discard.is_some()
             || self.stash.drop.is_some()
             || self.notices.has_modal()
-            || self.conn.overlay().is_some();
-        if blocked || !self.has_repos() {
+            || self.conn.overlay().is_some()
+        {
+            return Some("another dialog is open");
+        }
+        match lock {
+            Some(lock) => lock.unregistered(self.sidebar.repos(), self.sidebar.workspaces()),
+            None => (!self.has_repos()).then_some("no repos are registered"),
+        }
+    }
+
+    /// Opens the dialog from `entry`, unless there is no repo, the
+    /// connection is down or another dialog or menu is open. It starts on
+    /// the preselected session's repo or workspace, else the focused one's.
+    pub(crate) fn open_spawn_dialog(
+        &mut self,
+        entry: SpawnEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (aim, preselect, lock) = match entry {
+            SpawnEntry::Toolbar => (None, None, None),
+            SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None),
+            SpawnEntry::Locked(lock) => (None, None, Some(lock)),
+        };
+        if self.spawn_dialog_blocker(lock.as_ref(), false).is_some() {
             return;
         }
-        let (aim, preselect) = match entry {
-            SpawnEntry::Toolbar => (None, None),
-            SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect),
-        };
         let focused = preselect.or_else(|| self.focused_session());
         let inputs = FormInputs {
             repos: self.sidebar.repos(),
@@ -371,6 +397,7 @@ impl RootView {
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
+            lock,
         };
         let now = (self.now)();
         let Some((form, messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now) else {
@@ -1021,7 +1048,8 @@ fn sync_field(
     });
 }
 
-fn now_unix() -> i64 {
+/// Seconds since the Unix epoch, for anything that reads an age.
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -1185,12 +1213,18 @@ fn choice(
 
 fn target_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
     let buttons = form
-        .targets()
+        .shown_targets()
         .into_iter()
         .map(|target| {
             let label = form.target_label(&target);
             let selected = &target == form.target();
-            choice(&Control::Target(target), label, selected, focus, cx)
+            let control = Control::Target(target);
+            let look = Look {
+                selected,
+                focused: focus == &control,
+                enabled: !form.target_locked(),
+            };
+            option_button(&control, label, look, cx).into_any_element()
         })
         .collect();
     field("Target").child(segmented(buttons))

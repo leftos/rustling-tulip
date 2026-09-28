@@ -155,8 +155,8 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Worktrees
 
-- [ ] Worktrees root setting: path, Browse, Save, Reset to default, override indicator — `SettingsModal.tsx` `WorktreesPanel`
-- [ ] Manage worktrees modal: group status (Active / Detached / Stale / Unknown), path, branch, size, age, session and members; Refresh; Delete (size in confirm); Delete all stale; Launch session here (confirm if one is running) — `WorktreesManagerModal.tsx`
+- [x] Worktrees root setting: path, Browse, Save, Reset to default, override indicator — `SettingsModal.tsx` `WorktreesPanel` (native: P4.4b; `Saved` shows once the daemon echoes the last save)
+- [x] Manage worktrees modal: group status (Active / Detached / Stale / Unknown), path, branch, size, age, session and members; Refresh; Delete (size in confirm); Delete all stale; Launch session here (confirm if one is running) — `WorktreesManagerModal.tsx` (native: P4.4b; rows are titled by the group's name, the share confirm is asked once, and a launch that can't open keeps the manager open with a warning)
 
 ## Settings & appearance
 

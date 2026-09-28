@@ -25,6 +25,8 @@ The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed'
 
 Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as keep-awake and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
 
+Settings → Worktrees edits the daemon's worktrees-root override, and shows `Saved` only once the daemon has echoed the last save. Manage worktrees (opened from that tab) lists the root's groups titled by their `.rt-group` name, deletes one group or every stale one, and "Launch session here" opens the spawn dialog with the target locked and that worktree pinned (the spawn form's `Lock`, which a duplicate prefill reuses). Folder pickers go through `RootDeps.pick_folder`, so specs inject a fake: GPUI's test platform cannot prompt.
+
 ## Terminal
 
 - **Scrollback-first attach**: `LoadScrollback` with live output buffered meanwhile; an 8 s request timeout with retries after 2 s and 4 s, each with its own `request_id`, and a reply to an older id dropped. When the daemon restarts the forwarder (`forwarder_restarted: true`) the held-back output is discarded, since it is already in the history. The logical scrollback cap is 5000 lines.

@@ -27,7 +27,6 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native` (the Browse seam makes the folder picker specced); hand-test Browse's real picker and a launch from the manager.
 
-- [ ] **P4.4b Worktrees tab and Manage worktrees**: root path, Browse, Save, Reset and override indicator; the manager with `.rt-group` titles, stale deletes and "Launch session here" with the target locked and the worktree pinned; a folder-picker seam in `RootDeps` that Shell… uses too. See [native-client.md](./native-client.md#p44b-worktrees-tab-and-manage-worktrees).
 - [ ] **P4.12c Shift-duplicate prefill**: Shift on Duplicate ▸ opens the spawn dialog prefilled from the source session, on P4.4b's target lock, the prefill beating the Spawn defaults. `spawn_form.rs`, `session_menu.rs`. See [native-client.md](./native-client.md#p412-sessions).
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)

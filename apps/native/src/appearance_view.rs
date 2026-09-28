@@ -374,6 +374,9 @@ impl RootView {
     /// Closes the editor and hands the keyboard back to the active pane.
     pub(crate) fn close_appearance_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.appearance_editor.take().is_some() {
+            // The Worktrees tab lives with Settings: dropping it here means
+            // a picker answer arriving later finds nothing to fill.
+            self.worktrees_tab = None;
             self.focus_active_pane(window, cx);
             cx.notify();
         }

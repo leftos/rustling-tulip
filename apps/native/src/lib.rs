@@ -79,22 +79,26 @@ mod undo;
 mod undo_view;
 mod window_state;
 mod window_title;
+mod worktrees_manager;
+mod worktrees_manager_view;
 
 use alacritty_terminal::vte::ansi::CursorShape;
-use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::future::LocalBoxFuture;
+use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
     CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
     InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Task, Window,
-    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, SharedString, Stateful, Task,
+    Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, TabEntry,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -167,6 +171,7 @@ pub use crate::stash_view::{
 pub use crate::tabs::TabPill;
 pub use crate::text_input::bind_keys;
 pub use crate::undo::{TabSnapshot, UndoEntry};
+pub use crate::worktrees_manager_view::{WorktreesButton, WorktreesRow};
 
 const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
@@ -182,6 +187,34 @@ pub const LOG_FILE: &str = "native.log";
 
 /// Where the terminals read the time, for their scrollback timeouts.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Asks the user for one folder; resolves to `None` when they cancel or the
+/// picker fails.
+pub type FolderPicker = Rc<dyn Fn(&mut App) -> LocalBoxFuture<'static, Option<PathBuf>>>;
+
+/// The OS folder picker.
+fn system_folder_picker() -> FolderPicker {
+    Rc::new(|cx: &mut App| {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: None,
+        });
+        async move {
+            match picked.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Err(err)) => {
+                    tracing::warn!("the folder picker failed: {err:#}");
+                    None
+                }
+                // Cancelled, or the picker's sender went before it answered.
+                Ok(Ok(None)) | Err(_) => None,
+            }
+        }
+        .boxed_local()
+    })
+}
 
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
@@ -205,6 +238,9 @@ pub struct RootDeps {
     /// Shows the OS notifications attention events fire, on background
     /// threads.
     pub notify: Arc<dyn Notifier>,
+    /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
+    /// Browse.
+    pub pick_folder: FolderPicker,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -504,6 +540,17 @@ pub struct RootView {
     /// The session a terminal tab focused last, so the source-control
     /// panel keeps its sections while a diff tab is active.
     last_focused_session: Option<String>,
+    /// Asks for a folder.
+    pick_folder: FolderPicker,
+    /// The worktrees root and whether the user set it, as this connection
+    /// last heard.
+    worktrees_root: Option<(String, bool)>,
+    /// The Settings Worktrees tab's path field and its save in flight.
+    worktrees_tab: Option<settings_view::WorktreesTab>,
+    /// The Manage worktrees modal, while open.
+    worktrees_manager: Option<worktrees_manager::WorktreesManager>,
+    /// The Manage worktrees modal's keyboard focus.
+    worktrees_focus: FocusHandle,
 }
 
 impl RootView {
@@ -541,6 +588,7 @@ impl RootView {
             } else {
                 Arc::new(SystemNotifier)
             },
+            pick_folder: system_folder_picker(),
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.
@@ -609,6 +657,7 @@ impl RootView {
             quit,
             open,
             notify,
+            pick_folder,
         } = deps;
         Self::watch_window(window, cx);
         Self::watch_close_request(window, cx);
@@ -700,6 +749,11 @@ impl RootView {
             diff_opens: diff_tab::DiffOpens::default(),
             last_active_tab: None,
             last_focused_session: None,
+            pick_folder,
+            worktrees_root: None,
+            worktrees_tab: None,
+            worktrees_manager: None,
+            worktrees_focus: cx.focus_handle(),
         }
     }
 
@@ -1142,6 +1196,7 @@ impl RootView {
         let keyboard_free = self.spawn_dialog.is_none()
             && self.shell_dialog.is_none()
             && self.appearance_editor.is_none()
+            && self.worktrees_manager.is_none()
             && self.delete_dialog.is_none()
             && self.changes.discard.is_none()
             && self.changes.file_menu.is_none()
@@ -1416,6 +1471,7 @@ impl RootView {
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
         self.on_cleanup_failed_message(&msg, window, cx);
+        self.on_worktrees_message(&msg, cx);
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
@@ -1526,6 +1582,7 @@ impl RootView {
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);
+        self.reset_worktrees(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the
@@ -1691,8 +1748,16 @@ impl RootView {
             }
             return;
         }
+        if self.worktrees_manager.is_some() {
+            self.on_worktrees_manager_key(ks, window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.appearance_editor.is_some() {
-            if self.on_settings_key(ks, window, cx) || self.on_appearance_key(ks, window, cx) {
+            let typing = self.worktrees_path_focused(window);
+            if self.on_settings_key(ks, window, cx)
+                || (!typing && self.on_appearance_key(ks, window, cx))
+            {
                 cx.stop_propagation();
             }
             return;
@@ -2011,6 +2076,7 @@ impl Render for RootView {
             .children(self.shell_dialog_layer(cx))
             .children(self.appearance_editor_layer(cx))
             .children(self.settings_layer(window, cx))
+            .children(self.worktrees_manager_layer(window, cx))
             .children(self.pane_close_layer(cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)

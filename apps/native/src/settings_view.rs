@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, Keystroke, Stateful, Window, div, prelude::*,
-    px,
+    AnyElement, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
+    prelude::*, px,
 };
 use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
 
@@ -25,6 +26,7 @@ use crate::spawn_form::{
 };
 use crate::spawn_view::{CLAUDE_LOCKED, CODEX_LOCKED, Look, choice_button, field, segmented};
 use crate::tabs::tab_session_counts;
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
 
@@ -35,8 +37,8 @@ const CONTENT_WIDTH: f32 = 656.0;
 /// How long the window title waits for its inputs to settle, so a session
 /// flickering between working and idle does not flicker the taskbar.
 const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
-/// What the tabs no item fills yet show.
-const COMING_SOON: &str = "Coming soon.";
+const NOT_CONNECTED: &str = "(daemon not connected)";
+const WORKTREES_HINT: &str = "Per-session git worktrees land under this directory. Changes take effect for new sessions only — sessions already spawned keep their existing worktree paths.";
 
 /// A tab of the Settings modal, in the order the list shows them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -112,6 +114,11 @@ pub(crate) enum SettingsControl {
     SpawnTrusted,
     SpawnApproval(Option<PermissionMode>),
     SpawnCodexSandbox(Option<CodexSandbox>),
+    WorktreesPath,
+    WorktreesBrowse,
+    WorktreesSave,
+    WorktreesReset,
+    WorktreesManage,
 }
 
 impl SettingsControl {
@@ -147,8 +154,27 @@ impl SettingsControl {
                     "settings-spawn-codex-sandbox-danger-full-access"
                 }
             },
+            Self::WorktreesPath => "settings-worktrees-root-input",
+            Self::WorktreesBrowse => "settings-worktrees-root-browse",
+            Self::WorktreesSave => "settings-worktrees-root-save",
+            Self::WorktreesReset => "settings-worktrees-root-reset",
+            Self::WorktreesManage => "settings-worktrees-open-manager",
         }
     }
+}
+
+/// The Worktrees tab's path field, which holds the user's override only,
+/// and the save it waits to hear back.
+pub(crate) struct WorktreesTab {
+    input: Entity<TextInput>,
+    focus: FocusHandle,
+    /// The field's text, kept as it changes.
+    draft: String,
+    /// How many Save or Reset sends still owe the daemon's echo.
+    awaiting: u32,
+    /// The daemon echoed the last save.
+    saved: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 /// The daemon's keep-awake setting and whether it holds the machine awake
@@ -267,7 +293,21 @@ impl RootView {
                 SettingsControl::NotifyError,
             ],
             SettingsTab::SpawnDefaults => self.spawn_default_controls(),
-            SettingsTab::Worktrees | SettingsTab::Appearance => Vec::new(),
+            SettingsTab::Worktrees => {
+                let mut controls = vec![
+                    SettingsControl::WorktreesPath,
+                    SettingsControl::WorktreesBrowse,
+                ];
+                if self.worktrees_save_enabled() {
+                    controls.push(SettingsControl::WorktreesSave);
+                }
+                if self.worktrees_override().is_some() {
+                    controls.push(SettingsControl::WorktreesReset);
+                }
+                controls.push(SettingsControl::WorktreesManage);
+                controls
+            }
+            SettingsTab::Appearance => Vec::new(),
         }
     }
 
@@ -285,8 +325,33 @@ impl RootView {
     /// The control holding the keyboard, if one does.
     fn focused_settings_control(&self, window: &Window) -> Option<SettingsControl> {
         self.settings_control.filter(|control| {
-            self.appearance_focus.is_focused(window) && self.settings_controls().contains(control)
+            let has_keyboard = if *control == SettingsControl::WorktreesPath {
+                self.worktrees_path_focused(window)
+            } else {
+                self.appearance_focus.is_focused(window)
+            };
+            has_keyboard && self.settings_controls().contains(control)
         })
+    }
+
+    /// Gives the keyboard to `control`: the path field takes it itself,
+    /// every other control through the modal's focus.
+    pub(crate) fn focus_settings_control(&mut self, control: SettingsControl, window: &mut Window) {
+        self.settings_control = Some(control);
+        match (&self.worktrees_tab, control) {
+            (Some(tab), SettingsControl::WorktreesPath) => tab.focus.focus(window),
+            _ => self.appearance_focus.focus(window),
+        }
+    }
+
+    /// Whether the Worktrees tab's path field has the keyboard.
+    pub(crate) fn worktrees_path_focused(&self, window: &Window) -> bool {
+        self.settings_open()
+            && self.settings_tab == SettingsTab::Worktrees
+            && self
+                .worktrees_tab
+                .as_ref()
+                .is_some_and(|tab| tab.focus.is_focused(window))
     }
 
     /// Moves the keyboard one step along the ring the tab list and the
@@ -311,8 +376,7 @@ impl RootView {
             self.settings_control = None;
             self.settings_tabs_focus.focus(window);
         } else {
-            self.settings_control = Some(controls[next - 1]);
-            self.appearance_focus.focus(window);
+            self.focus_settings_control(controls[next - 1], window);
         }
         cx.notify();
     }
@@ -323,8 +387,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.settings_control = Some(control);
-        self.appearance_focus.focus(window);
+        self.focus_settings_control(control, window);
         match control {
             SettingsControl::KeepAwake => self.toggle_keep_awake(),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
@@ -344,8 +407,204 @@ impl RootView {
             SettingsControl::SpawnCodexSandbox(sandbox) => {
                 self.set_spawn_codex_sandbox(sandbox, cx);
             }
+            SettingsControl::WorktreesPath => {}
+            SettingsControl::WorktreesBrowse => self.browse_worktrees_root(cx),
+            SettingsControl::WorktreesSave => self.save_worktrees_root(),
+            SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
+            SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
         }
         cx.notify();
+    }
+
+    /// The worktrees root the user set, if they set one.
+    fn worktrees_override(&self) -> Option<&str> {
+        match &self.worktrees_root {
+            Some((root, true)) => Some(root),
+            _ => None,
+        }
+    }
+
+    /// Whether the path field differs from the override (empty when none).
+    fn worktrees_save_enabled(&self) -> bool {
+        self.worktrees_tab
+            .as_ref()
+            .is_some_and(|tab| tab.draft.trim() != self.worktrees_override().unwrap_or(""))
+    }
+
+    /// The Worktrees tab's line on the root in use.
+    #[must_use]
+    pub fn worktrees_active_line(&self) -> String {
+        match &self.worktrees_root {
+            Some((root, true)) => format!("Active: {root} — user override"),
+            Some((root, false)) => format!("Active: {root} — default (env or platform fallback)"),
+            None => format!("Active: {NOT_CONNECTED} — default (env or platform fallback)"),
+        }
+    }
+
+    /// The Save button's label and whether it can be pressed.
+    #[must_use]
+    pub fn worktrees_save_button(&self) -> (&'static str, bool) {
+        let enabled = self.worktrees_save_enabled();
+        let saved = self.worktrees_tab.as_ref().is_some_and(|tab| tab.saved);
+        (if saved && !enabled { "Saved" } else { "Save" }, enabled)
+    }
+
+    /// Whether Reset to default can be pressed.
+    #[must_use]
+    pub fn worktrees_reset_enabled(&self) -> bool {
+        self.worktrees_override().is_some()
+    }
+
+    /// The Worktrees tab's path field, while the tab has been shown.
+    #[must_use]
+    pub fn worktrees_path(&self) -> Option<String> {
+        self.worktrees_tab.as_ref().map(|tab| tab.draft.clone())
+    }
+
+    /// The path field afresh, holding the override.
+    fn new_worktrees_tab(&self, window: &mut Window, cx: &mut Context<Self>) -> WorktreesTab {
+        let draft = self.worktrees_override().unwrap_or("").to_owned();
+        let placeholder = self
+            .worktrees_root
+            .as_ref()
+            .map_or(NOT_CONNECTED, |(root, _)| root.as_str())
+            .to_owned();
+        let input = cx.new(|cx| TextInput::new(draft.clone(), placeholder, cx));
+        let focus = input.read(cx).focus_handle(cx);
+        let keys = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => {
+                    this.press_settings_control(SettingsControl::WorktreesSave, window, cx);
+                }
+                TextInputEvent::Cancel => this.close_appearance_editor(window, cx),
+            },
+        );
+        let edits = cx.subscribe_in(&input, window, |this, input, _: &TextChanged, _, cx| {
+            let text = input.read(cx).text().to_owned();
+            if let Some(tab) = &mut this.worktrees_tab {
+                tab.draft = text;
+            }
+            cx.notify();
+        });
+        WorktreesTab {
+            input,
+            focus,
+            draft,
+            awaiting: 0,
+            saved: false,
+            _subscriptions: vec![keys, edits],
+        }
+    }
+
+    /// Save: the field as the override, or none when it is empty.
+    fn save_worktrees_root(&mut self) {
+        if !self.worktrees_save_enabled() {
+            return;
+        }
+        let Some(tab) = &mut self.worktrees_tab else {
+            return;
+        };
+        let trimmed = tab.draft.trim();
+        let path = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        tab.awaiting += 1;
+        tab.saved = false;
+        tracing::info!(?path, "settings: saving the worktrees root");
+        self.send(ClientMessage::SetWorktreesRoot { path });
+    }
+
+    fn reset_worktrees_root(&mut self, cx: &mut Context<Self>) {
+        if self.worktrees_override().is_none() {
+            return;
+        }
+        if let Some(tab) = &mut self.worktrees_tab {
+            tab.awaiting += 1;
+            tab.saved = false;
+            tab.draft.clear();
+            tab.input.update(cx, |input, cx| input.set_text("", cx));
+        }
+        tracing::info!("settings: resetting the worktrees root");
+        self.send(ClientMessage::SetWorktreesRoot { path: None });
+    }
+
+    /// Browse: the folder picked fills the path field, if the field is
+    /// still the one that asked.
+    fn browse_worktrees_root(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = &self.worktrees_tab else {
+            return;
+        };
+        let asked = tab.input.entity_id();
+        let picked = (self.pick_folder)(cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            // Fails only when the view is gone, and its window with it.
+            this.update(cx, |this, cx| this.finish_worktrees_browse(asked, path, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn finish_worktrees_browse(&mut self, asked: EntityId, path: String, cx: &mut Context<Self>) {
+        let Some(tab) = &mut self.worktrees_tab else {
+            return;
+        };
+        if tab.input.entity_id() != asked {
+            return;
+        }
+        tab.draft.clone_from(&path);
+        tab.input.update(cx, |input, cx| input.set_text(path, cx));
+        cx.notify();
+    }
+
+    /// The daemon's worktrees root. Each echo answers one of this tab's
+    /// sends, and the one answering the last shows `Saved` and puts the
+    /// override the daemon settled on in the field. An echo answering none
+    /// is another client's change: it fills the field only while the field
+    /// still reads as the daemon left it.
+    pub(crate) fn on_worktrees_root_changed(
+        &mut self,
+        root: &str,
+        is_override: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self
+            .worktrees_root
+            .as_ref()
+            .filter(|(_, was_overridden)| *was_overridden)
+            .map_or_else(String::new, |(root, _)| root.clone());
+        self.worktrees_root = Some((root.to_owned(), is_override));
+        if let Some(tab) = &mut self.worktrees_tab {
+            let placeholder = root.to_owned();
+            tab.input
+                .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
+            let mine = tab.awaiting > 0;
+            tab.awaiting = tab.awaiting.saturating_sub(1);
+            let settles = mine && tab.awaiting == 0;
+            let untouched = !mine && tab.draft == previous;
+            if settles || untouched {
+                if settles {
+                    tab.saved = true;
+                }
+                tab.draft = if is_override {
+                    root.to_owned()
+                } else {
+                    String::new()
+                };
+                let text = tab.draft.clone();
+                tab.input.update(cx, |input, cx| input.set_text(text, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Forgets the root and the tab's field, as a new connection does.
+    pub(crate) fn reset_worktrees_tab(&mut self) {
+        self.worktrees_root = None;
+        self.worktrees_tab = None;
     }
 
     /// The title last set on the window; empty until the first is.
@@ -375,6 +634,9 @@ impl RootView {
         self.settings_control = None;
         if tab == SettingsTab::Notifications {
             self.read_notify_state(window, cx);
+        }
+        if tab == SettingsTab::Worktrees {
+            self.worktrees_tab = Some(self.new_worktrees_tab(window, cx));
         }
         self.settings_tabs_focus.focus(window);
         cx.notify();
@@ -467,11 +729,13 @@ impl RootView {
         if self.settings_tab == SettingsTab::Appearance && !on_list {
             return false;
         }
+        let typing = self.worktrees_path_focused(window);
         match (keystroke.key.as_str(), mods.shift) {
             ("tab", back) => {
                 self.step_settings_focus(back, window, cx);
                 true
             }
+            _ if typing => false,
             ("up" | "down", false) if on_list => {
                 let tab = self.settings_tab.step(keystroke.key == "down");
                 self.select_settings_tab(tab, window, cx);
@@ -674,8 +938,85 @@ impl RootView {
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
             SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
-            SettingsTab::Worktrees => vec![hint(COMING_SOON).into_any_element()],
+            SettingsTab::Worktrees => self.worktrees_tab_content(focused, cx),
         }
+    }
+
+    /// The Worktrees tab: the path field and Browse, the root in use, and
+    /// Save, Reset to default and Manage worktrees….
+    fn worktrees_tab_content(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(tab) = &self.worktrees_tab else {
+            return Vec::new();
+        };
+        let path = SettingsControl::WorktreesPath;
+        let field = div()
+            .debug_selector(|| path.selector().to_owned())
+            .flex_1()
+            .px(px(6.0))
+            .py(px(2.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(gpui::rgb(if focused == Some(path) { TEXT } else { BORDER }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.press_settings_control(path, window, cx);
+                }),
+            )
+            .child(tab.input.clone());
+        let browse = settings_button(
+            SettingsControl::WorktreesBrowse,
+            "Browse…",
+            true,
+            focused,
+            cx,
+        );
+        let path_row = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child("Path")
+            .child(field)
+            .child(browse);
+        let active = div()
+            .debug_selector(|| "settings-worktrees-active".to_owned())
+            .text_color(gpui::rgb(MUTED))
+            .child(self.worktrees_active_line());
+        let (save_label, save_enabled) = self.worktrees_save_button();
+        let buttons = div()
+            .flex()
+            .gap(px(8.0))
+            .child(settings_button(
+                SettingsControl::WorktreesSave,
+                save_label,
+                save_enabled,
+                focused,
+                cx,
+            ))
+            .child(settings_button(
+                SettingsControl::WorktreesReset,
+                "Reset to default",
+                self.worktrees_reset_enabled(),
+                focused,
+                cx,
+            ))
+            .child(settings_button(
+                SettingsControl::WorktreesManage,
+                "Manage worktrees…",
+                true,
+                focused,
+                cx,
+            ));
+        let section = section("Worktrees root")
+            .child(hint(WORKTREES_HINT))
+            .child(path_row)
+            .child(active)
+            .child(buttons);
+        vec![section.into_any_element()]
     }
 
     /// The Spawn defaults tab: trusted launch, and the two agent options it
@@ -923,6 +1264,28 @@ fn press(
     cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_settings_control(control, window, cx);
     })
+}
+
+/// `control`'s button, outlined when it has the keyboard; a disabled one is
+/// dimmed and inert.
+fn settings_button(
+    control: SettingsControl,
+    label: &'static str,
+    enabled: bool,
+    focused: Option<SettingsControl>,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let button = dialog_button(
+        control.selector(),
+        label.to_owned(),
+        false,
+        focused == Some(control),
+    );
+    if enabled {
+        button.on_click(press(control, cx))
+    } else {
+        button.opacity(0.5).cursor_default()
+    }
 }
 
 /// `control`'s checkbox row, ticked when `checked` and outlined when it

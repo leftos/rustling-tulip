@@ -5,7 +5,7 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, Focusable as _, FontWeight, Keystroke,
-    PathPromptOptions, Stateful, Subscription, Window, div, prelude::*, px,
+    Stateful, Subscription, Window, div, prelude::*, px,
 };
 
 use crate::session_menu::{backdrop, dialog_button};
@@ -290,25 +290,10 @@ impl RootView {
         let generation = dialog.form.generation();
         let folder = shell_folder(dialog, cx).to_owned();
         dialog.form.begin_browse(&folder);
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: None,
-        });
+        let picked = (self.pick_folder)(cx);
         cx.spawn(async move |this, cx| {
-            let picked = match picked.await {
-                Ok(Ok(Some(paths))) => paths
-                    .into_iter()
-                    .next()
-                    .map(|path| path.to_string_lossy().into_owned()),
-                Ok(Err(err)) => {
-                    tracing::warn!("the folder picker failed: {err:#}");
-                    None
-                }
-                // Cancelled, or the picker's sender went before it answered.
-                Ok(Ok(None)) | Err(_) => None,
-            };
+            let picked = picked.await.map(|path| path.to_string_lossy().into_owned());
+            // Fails only when the view is gone, and its window with it.
             this.update(cx, |this, cx| {
                 this.finish_browse(generation, picked.as_deref(), cx);
             })
