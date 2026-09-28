@@ -25,7 +25,7 @@ use protocol::{ClientMessage, SessionMode, SessionSnapshot};
 use crate::Clock;
 use crate::fonts::{self, FontSettings};
 use crate::links::TerminalLink;
-use crate::mouse::{self, COPY_ON_SELECT, CellSize, Gesture, Tracker, ViewportCell};
+use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
@@ -1278,7 +1278,8 @@ impl TerminalPane {
         }
         if !self.term.has_selection() {
             self.term.clear_selection();
-        } else if let Some(text) = mouse::copy_on_select(COPY_ON_SELECT, self.term.selection_text())
+        } else if let Some(text) =
+            mouse::copy_on_select(CopyOnSelect::get(cx), self.term.selection_text())
         {
             cx.emit(PaneEvent::Copied { text });
         }

@@ -7,8 +7,20 @@ use alacritty_terminal::term::{TermMode, viewport_to_point};
 
 use crate::term::GridSize;
 
-/// Copy a mouse selection to the clipboard as soon as the button is released.
-pub const COPY_ON_SELECT: bool = true;
+/// Whether a mouse selection goes to the clipboard as soon as the button is
+/// released: the General setting, which the root view keeps here for every
+/// pane to read.
+#[derive(Debug, Clone, Copy)]
+pub struct CopyOnSelect(pub bool);
+
+impl gpui::Global for CopyOnSelect {}
+
+impl CopyOnSelect {
+    /// The setting as the app holds it; on when nothing set it.
+    pub fn get(cx: &gpui::App) -> bool {
+        cx.try_global::<Self>().is_none_or(|setting| setting.0)
+    }
+}
 
 /// X10 encodes a coordinate as one byte offset by 32, so it cannot go past 223.
 const X10_MAX_COORD: usize = 223;

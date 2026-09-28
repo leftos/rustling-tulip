@@ -63,6 +63,7 @@ mod term_view;
 mod text_input;
 mod theme;
 mod window_state;
+mod window_title;
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use futures::StreamExt as _;
@@ -350,6 +351,21 @@ pub struct RootView {
     appearance_editor: Option<AppearanceEditor>,
     /// The editor's keyboard focus when none of its fields holds it.
     appearance_focus: FocusHandle,
+    /// The Settings modal's shown tab.
+    settings_tab: settings_view::SettingsTab,
+    /// The Settings tab list's keyboard focus, where Up and Down move.
+    settings_tabs_focus: FocusHandle,
+    /// The Settings control Tab or a click last moved to; it has the
+    /// keyboard while the modal's own focus does.
+    settings_control: Option<settings_view::SettingsControl>,
+    /// The daemon's keep-awake state as this connection last heard it.
+    keep_awake: Option<settings_view::KeepAwake>,
+    /// The title last set on the window.
+    window_title: String,
+    /// The title waiting out its debounce, if it differs from the one set.
+    title_pending: Option<String>,
+    /// Sets the pending title once its debounce is up.
+    title_timer: Option<Task<()>>,
     /// Each repo's or workspace's last appearance sent, until the daemon's
     /// list echoes it: the daemon answers with the whole list and no
     /// request id, so the next change builds on this, not on what is
@@ -550,6 +566,7 @@ impl RootView {
         let ui = ui_dir
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
+        cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
         Self {
             tx,
             now,
@@ -578,6 +595,13 @@ impl RootView {
             container_menu: None,
             appearance_editor: None,
             appearance_focus: cx.focus_handle(),
+            settings_tab: settings_view::SettingsTab::default(),
+            settings_tabs_focus: cx.focus_handle(),
+            settings_control: None,
+            keep_awake: None,
+            window_title: String::new(),
+            title_pending: None,
+            title_timer: None,
             container_sends: HashMap::new(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
@@ -1173,7 +1197,12 @@ impl RootView {
             NetEvent::Handshake(_) | NetEvent::ShutdownSent | NetEvent::ShutdownFailed => false,
         };
         match event {
-            NetEvent::State(conn) => self.conn = conn,
+            NetEvent::State(conn) => {
+                if !conn.is_open() {
+                    self.set_keep_awake(None);
+                }
+                self.conn = conn;
+            }
             NetEvent::Handshake(info) => self.handshake = Some(info),
             NetEvent::Message(msg) => {
                 let reseed = moves_source_control_inputs(&msg);
@@ -1347,6 +1376,9 @@ impl RootView {
                 self.on_containers_changed(cx);
             }
             DaemonMessage::Workspaces { .. } => self.on_containers_changed(cx),
+            DaemonMessage::KeepAwakeStatus { enabled, active } => {
+                self.set_keep_awake(Some(settings_view::KeepAwake { enabled, active }));
+            }
             _ => {}
         }
     }
@@ -1354,6 +1386,7 @@ impl RootView {
     /// A new connection: fresh panes, nothing in flight, and every dialog,
     /// menu and notice of the old one closed.
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_keep_awake(None);
         self.reset_panes(cx);
         self.pending_appearance.clear();
         self.container_sends.clear();
@@ -1480,7 +1513,7 @@ impl RootView {
             return;
         }
         if self.appearance_editor.is_some() {
-            if self.on_appearance_key(ks, window, cx) {
+            if self.on_settings_key(ks, window, cx) || self.on_appearance_key(ks, window, cx) {
                 cx.stop_propagation();
             }
             return;
@@ -1753,6 +1786,9 @@ fn font_size_to_u16(size: f32) -> u16 {
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Tab switches and renames made here change the title without a
+        // daemon message.
+        self.refresh_window_title(window, cx);
         let footer = self.conn.footer(self.sidebar.sessions().len());
         let flyout = self
             .flyout_open
@@ -1795,7 +1831,7 @@ impl Render for RootView {
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
             .children(self.appearance_editor_layer(cx))
-            .children(self.settings_layer(cx))
+            .children(self.settings_layer(window, cx))
             .children(delete_under)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))

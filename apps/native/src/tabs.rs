@@ -5,7 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SessionStatus, SplitDirection,
+    SplitPlace, TabEntry,
 };
 
 /// The divider ratios the daemon accepts; it clamps to the same range.
@@ -494,6 +495,42 @@ pub fn session_changes(
         }
     }
     changes
+}
+
+/// Whether `session` is doing something worth surfacing: working, waiting
+/// for an answer, or still starting.
+fn is_busy(session: &SessionSnapshot) -> bool {
+    matches!(
+        session.status,
+        SessionStatus::Working | SessionStatus::AwaitingInput | SessionStatus::Spawning
+    )
+}
+
+/// The busy and total live terminals of `tab`, as `(busy, total)`: every
+/// pane holding a session the daemon lists and has not marked inactive
+/// counts, so a session shown in two panes counts twice. `None` for a tab
+/// that is not a pane grid (a diff tab).
+#[must_use]
+pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Option<(usize, usize)> {
+    let grid = tab.grid()?;
+    let mut busy = 0;
+    let mut total = 0;
+    for pane in collect_panes(grid) {
+        let Some(id) = pane.session else {
+            continue;
+        };
+        let Some(session) = sessions.iter().find(|s| s.id == id) else {
+            continue;
+        };
+        if session.is_inactive {
+            continue;
+        }
+        total += 1;
+        if is_busy(session) {
+            busy += 1;
+        }
+    }
+    Some((busy, total))
 }
 
 /// Whether closing `tab` loses something worth a second click: a bound
@@ -1485,5 +1522,63 @@ pub(crate) mod tests {
         .expect("a file from before the active tab was saved");
         assert_eq!(older.active_tab_id, None);
         assert!(older.sidebar_collapsed);
+    }
+
+    fn with_status(id: &str, status: SessionStatus) -> SessionSnapshot {
+        let mut s = session(id, None, None);
+        s.status = status;
+        s
+    }
+
+    #[test]
+    fn tab_counts_busy_among_live_panes() {
+        let grid = split(
+            H,
+            0.5,
+            pane("a", Some("work")),
+            split(V, 0.5, pane("b", Some("idle")), pane("c", Some("ask"))),
+        );
+        let sessions = [
+            with_status("work", SessionStatus::Working),
+            with_status("idle", SessionStatus::Idle),
+            with_status("ask", SessionStatus::AwaitingInput),
+        ];
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((2, 3))
+        );
+    }
+
+    #[test]
+    fn tab_counts_skip_inactive_unknown_and_empty_panes() {
+        let grid = split(
+            H,
+            0.5,
+            split(V, 0.5, pane("a", Some("gone")), pane("b", None)),
+            split(V, 0.5, pane("c", Some("spawn")), pane("d", Some("lost"))),
+        );
+        let mut gone = with_status("gone", SessionStatus::Working);
+        gone.is_inactive = true;
+        let sessions = [gone, with_status("spawn", SessionStatus::Spawning)];
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((1, 1)),
+            "an inactive session, an empty pane and an unlisted session do not count"
+        );
+    }
+
+    #[test]
+    fn tab_counts_a_session_in_two_panes_once_per_pane() {
+        let grid = split(H, 0.5, pane("a", Some("s")), pane("b", Some("s")));
+        let sessions = [with_status("s", SessionStatus::Working)];
+        assert_eq!(
+            tab_session_counts(&tab("t", &grid), &sessions),
+            Some((2, 2))
+        );
+    }
+
+    #[test]
+    fn a_diff_tab_has_no_counts() {
+        assert_eq!(tab_session_counts(&diff_tab("d"), &[]), None);
     }
 }

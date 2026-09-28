@@ -598,6 +598,7 @@ fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_mes
 
     h.keys("ctrl-,");
     assert!(h.root(|root, _| root.settings_open()));
+    h.click_on("settings-tab-appearance");
     assert_eq!(editor_title(&mut h).as_deref(), Some("Settings"));
     assert_eq!(
         h.root(|root, _| root.appearance_reset_label()),

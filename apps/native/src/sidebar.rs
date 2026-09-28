@@ -144,6 +144,47 @@ pub struct UiState {
     /// The main window's place when it last moved; `None` until it has.
     #[serde(default)]
     pub window: Option<WindowState>,
+    /// The Settings modal's General tab.
+    #[serde(default)]
+    pub general: GeneralSettings,
+    /// The Settings modal's App title tab.
+    #[serde(default)]
+    pub title: TitleSettings,
+}
+
+/// The General settings saved on this machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralSettings {
+    /// Whether a mouse selection in a terminal is copied on release.
+    pub copy_on_select: bool,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        Self {
+            copy_on_select: true,
+        }
+    }
+}
+
+/// What the main window's title shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TitleSettings {
+    /// The active tab's busy/total terminal count before its name.
+    pub show_count: bool,
+    /// ` — rustling-tulip` after it.
+    pub suffix: bool,
+}
+
+impl Default for TitleSettings {
+    fn default() -> Self {
+        Self {
+            show_count: true,
+            suffix: true,
+        }
+    }
 }
 
 /// A layout saved before the diff tabs' whitespace toggle existed shows
@@ -175,6 +216,8 @@ impl Default for UiState {
             diff_include_whitespace: true,
             diff_highlight: true,
             window: None,
+            general: GeneralSettings::default(),
+            title: TitleSettings::default(),
         }
     }
 }
@@ -391,6 +434,21 @@ impl SidebarModel {
     /// Whether the diff tabs colour code by the file's language.
     pub fn set_diff_highlight(&mut self, highlight: bool) {
         self.ui.diff_highlight = highlight;
+    }
+
+    /// Whether a terminal selection is copied on release.
+    pub fn set_copy_on_select(&mut self, on: bool) {
+        self.ui.general.copy_on_select = on;
+    }
+
+    /// Whether the window title shows the active tab's busy/total count.
+    pub fn set_title_show_count(&mut self, on: bool) {
+        self.ui.title.show_count = on;
+    }
+
+    /// Whether the window title ends with the product name.
+    pub fn set_title_suffix(&mut self, on: bool) {
+        self.ui.title.suffix = on;
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -1670,11 +1728,33 @@ mod tests {
             diff_include_whitespace: false,
             diff_highlight: false,
             window: None,
+            general: GeneralSettings {
+                copy_on_select: false,
+            },
+            title: TitleSettings {
+                show_count: false,
+                suffix: false,
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn settings_groups_missing_from_an_older_file_default_on() {
+        let dir = TestDir::new("settings-groups");
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.general.copy_on_select);
+        assert!(loaded.title.show_count);
+        assert!(loaded.title.suffix);
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "title": { "suffix": false } }"#).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.title.show_count, "a group missing a field fills it");
+        assert!(!loaded.title.suffix);
     }
 
     #[test]

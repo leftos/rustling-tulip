@@ -113,7 +113,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Smart placement: next to the same repo → an empty pane → split the largest pane along its longer side — `App.tsx` `paneTargetForSession`
 - [ ] "Import remote sessions" modal when the remote session count changes — `ImportArrangementModal.tsx`
 - [x] Active tab remembered across reloads — `App.tsx`
-- [ ] Window title "(M/N) Tab — rustling-tulip", debounced 350ms — `utils/windowTitle.ts`
+- [x] Window title "(M/N) Tab — rustling-tulip", debounced 350ms — `utils/windowTitle.ts`
 
 ## Terminal
 
@@ -126,7 +126,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] **(hard)** Shift+Enter newline: `\` + CR for claude and shells, `\n` for codex/cursor — `Terminal.tsx`
 - [x] Ctrl/Cmd+C copies with a selection, else sends ^C; Ctrl+Shift+C always copies — `Terminal.tsx`
 - [x] **(hard)** Paste via the native clipboard read (WebView2 can truncate), bracketed when the program asks, every paste logged — `Terminal.tsx`, `lib.rs` `read_clipboard_text` (native: GPUI clipboard, bracketed and sanitised, in P1.6; paste logging in P2.1)
-- [x] Copy on select (setting, on by default) — `Terminal.tsx` (native: on, a constant in `mouse.rs`; the setting is P4.2)
+- [x] Copy on select (setting, on by default) — `Terminal.tsx` (native: a saved General setting since P4.2a)
 - [x] **(hard)** OSC 52: program clipboard writes reach the system clipboard and show the "copied" chip; reads answered empty — `components/clipboardProvider.ts`
 - [x] **(hard)** Links: URLs and paths (absolute, UNC, relative, `./`, `../`) with `:line:col`; trims trailing punctuation; stitches wrapped rows including TUI box borders (up to 4 joins within ±64 rows); shorter fallbacks if the path doesn't exist — `utils/terminalLinks.ts`
 - [x] **(hard)** Links underline only while Ctrl/Cmd is held; Ctrl/Cmd-click opens URLs in the browser, paths via cwd/worktree resolution in VS Code `-g` at the line or the default app / file manager; disabled on remote with a toast — `Terminal.tsx`, `lib.rs` `open_terminal_path`
@@ -160,10 +160,10 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Settings & appearance
 
-- [ ] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the modal and its Appearance tab landed in P2.10)
-- [ ] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx`
+- [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which comes with Phase 6; Tab walks the tab list and the shown tab's controls)
+- [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
 - [ ] Spawn defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx`
-- [ ] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
+- [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
 - [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
 - [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`
 
