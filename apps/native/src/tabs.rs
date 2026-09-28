@@ -406,6 +406,67 @@ pub fn find_tab_containing_session(
     })
 }
 
+/// Which tabs show a session, as its sidebar leaf's pill tells it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabPill {
+    /// No pane of any tab shows it.
+    Unbound,
+    /// One pane shows it.
+    One { tab_id: String, name: String },
+    /// Several panes show it: the name of each one's tab, in tab and pane
+    /// order.
+    Many(Vec<String>),
+}
+
+impl TabPill {
+    /// The pill's hover text: the tab it opens in, or how many panes show
+    /// the session and in which tabs, each named once.
+    #[must_use]
+    pub fn hover(&self) -> String {
+        match self {
+            Self::Unbound => {
+                "No tab references this session — click to open it in a new tab".to_owned()
+            }
+            Self::One { name, .. } => format!("Open in tab \"{name}\""),
+            Self::Many(names) => {
+                let mut tabs: Vec<&str> = Vec::new();
+                for name in names {
+                    if !tabs.contains(&name.as_str()) {
+                        tabs.push(name);
+                    }
+                }
+                format!("Open in {} panes: {}", names.len(), tabs.join(", "))
+            }
+        }
+    }
+}
+
+/// Every session a pane shows, with its pill, counting every pane that
+/// shows it; a session missing from the map is unbound.
+pub fn tab_pills(tabs: &[TabEntry]) -> HashMap<String, TabPill> {
+    let mut shown: HashMap<&str, Vec<&TabEntry>> = HashMap::new();
+    for tab in tabs {
+        for pane in tab.grid().map(collect_panes).unwrap_or_default() {
+            if let Some(session) = pane.session {
+                shown.entry(session).or_default().push(tab);
+            }
+        }
+    }
+    shown
+        .into_iter()
+        .map(|(session, tabs)| {
+            let pill = match tabs.as_slice() {
+                [tab] => TabPill::One {
+                    tab_id: tab.id.clone(),
+                    name: tab.name.clone(),
+                },
+                many => TabPill::Many(many.iter().map(|tab| tab.name.clone()).collect()),
+            };
+            (session.to_owned(), pill)
+        })
+        .collect()
+}
+
 /// The pane to focus in `tab`: the remembered one while it still exists,
 /// else the first. None for a tab without panes.
 pub fn resolve_tab_focus(tab: Option<&TabEntry>, remembered: Option<&str>) -> Option<String> {
@@ -1824,5 +1885,55 @@ pub(crate) mod tests {
     fn bound_pane_count_skips_empty() {
         assert_eq!(bound_pane_count(&three()), 2);
         assert_eq!(bound_pane_count(&pane("p", None)), 0);
+    }
+
+    #[test]
+    fn tab_pill_is_unbound_one_or_many_panes() {
+        let mut work = tab("t1", &pane("p1", Some("s1")));
+        "work".clone_into(&mut work.name);
+        let other = tab(
+            "t2",
+            &split(H, 0.5, pane("p2", Some("s2")), pane("p3", None)),
+        );
+        let also = tab("t3", &pane("p4", Some("s2")));
+        let tabs = [work, other, also, diff_tab("d")];
+        let pills = tab_pills(&tabs);
+        assert_eq!(pills.get("s9"), None, "unbound");
+        assert_eq!(
+            pills.get("s1"),
+            Some(&TabPill::One {
+                tab_id: "t1".to_owned(),
+                name: "work".to_owned(),
+            })
+        );
+        assert_eq!(
+            pills.get("s2"),
+            Some(&TabPill::Many(vec!["t2".to_owned(), "t3".to_owned()]))
+        );
+        assert_eq!(pills.len(), 2, "empty panes add nothing");
+    }
+
+    #[test]
+    fn tab_pill_counts_two_panes_of_one_tab_as_two() {
+        let grid = split(H, 0.5, pane("a", Some("s")), pane("b", Some("s")));
+        assert_eq!(
+            tab_pills(&[tab("t", &grid)]).get("s"),
+            Some(&TabPill::Many(vec!["t".to_owned(), "t".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn tab_pill_hover_counts_panes_and_names_each_tab_once() {
+        let many = TabPill::Many(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()]);
+        assert_eq!(many.hover(), "Open in 3 panes: a, b");
+        let one = TabPill::One {
+            tab_id: "t1".to_owned(),
+            name: "work".to_owned(),
+        };
+        assert_eq!(one.hover(), "Open in tab \"work\"");
+        assert_eq!(
+            TabPill::Unbound.hover(),
+            "No tab references this session — click to open it in a new tab"
+        );
     }
 }

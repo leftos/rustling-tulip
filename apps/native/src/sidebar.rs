@@ -4,7 +4,7 @@
 
 use protocol::{
     AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
-    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus,
+    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
     WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use std::path::Path;
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::{Part, ScKey, ScUiState};
+use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
 /// The sidebar layout file, in the client's config dir.
@@ -33,6 +34,10 @@ pub enum ContainerKind {
     Dir,
     /// Sessions whose repo or workspace is no longer registered.
     Detached,
+    /// The sessions a daemon tab's panes show, in the tabs view.
+    Tab,
+    /// Live sessions no tab's pane shows, in the tabs view.
+    Unbound,
 }
 
 impl ContainerKind {
@@ -44,8 +49,27 @@ impl ContainerKind {
             Self::Shell => "SH",
             Self::Dir => "DIR",
             Self::Detached => "Detached",
+            Self::Tab => "TAB",
+            Self::Unbound => "UNB",
         }
     }
+}
+
+/// The Unbound container's hover text.
+pub const UNBOUND_HOVER: &str = "Sessions alive but not referenced by any tab. \
+     Click the unbound pill on a session to open it in a new tab.";
+
+/// How the sessions panel groups its sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarView {
+    /// By daemon tab, then the sessions no tab shows.
+    Tabs,
+    /// By workspace, repo, shell and folder; also what a value this build
+    /// does not know loads as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    Repos,
 }
 
 /// One session row.
@@ -67,6 +91,8 @@ pub struct Container {
     pub id: String,
     pub kind: ContainerKind,
     pub name: String,
+    /// The row's hover text, when it has one.
+    pub hover: Option<String>,
     pub leaves: Vec<Leaf>,
     /// Any leaf has attention.
     pub attention: bool,
@@ -112,6 +138,9 @@ pub struct UiState {
     /// The panel the rail last showed.
     #[serde(default)]
     pub activity: Activity,
+    /// How the sessions panel groups its sessions.
+    #[serde(default)]
+    pub sidebar_view: SidebarView,
     pub collapsed_containers: BTreeSet<String>,
     /// The tab shown when the client last ran, restored when the daemon
     /// sends the tab list.
@@ -266,6 +295,7 @@ impl Default for UiState {
             sidebar_width: DEFAULT_WIDTH,
             sidebar_collapsed: false,
             activity: Activity::Sessions,
+            sidebar_view: SidebarView::Repos,
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
             quick_shell_dir: None,
@@ -393,6 +423,40 @@ impl SidebarModel {
             attention: &self.attention,
             collapsed: &self.ui.collapsed_containers,
         })
+    }
+
+    /// The tabs view's containers for `tabs`, in the daemon's tab order.
+    pub fn tab_containers(&self, tabs: &[TabEntry]) -> Vec<Container> {
+        build_tab_containers(
+            tabs,
+            &self.sessions,
+            &self.attention,
+            &self.ui.collapsed_containers,
+        )
+    }
+
+    /// How the sessions panel groups its sessions.
+    pub fn sidebar_view(&self) -> SidebarView {
+        self.ui.sidebar_view
+    }
+
+    /// Records how the sessions panel groups its sessions; returns whether
+    /// it changed.
+    pub fn set_sidebar_view(&mut self, view: SidebarView) -> bool {
+        if self.ui.sidebar_view == view {
+            return false;
+        }
+        self.ui.sidebar_view = view;
+        true
+    }
+
+    /// Drops the folds of the tabs that are not in `live`; returns whether
+    /// any went.
+    pub fn prune_tab_folds(&mut self, live: &HashSet<&str>) -> bool {
+        let collapsed = &mut self.ui.collapsed_containers;
+        let before = collapsed.len();
+        collapsed.retain(|key| key.strip_prefix("tab:").is_none_or(|id| live.contains(id)));
+        collapsed.len() != before
     }
 
     pub fn clear_attention(&mut self, id: &str) {
@@ -858,21 +922,9 @@ fn container(
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
-        .map(|s| Leaf {
-            id: s.id.clone(),
-            status: s.status,
-            label: display_label(s),
-            runtime: runtime_label(s),
-            attention: inputs.attention.contains(&s.id),
-        })
+        .map(|s| leaf(s, inputs.attention))
         .collect();
-    let key = match kind {
-        ContainerKind::Workspace => format!("ws:{id}"),
-        ContainerKind::Repo => format!("repo:{id}"),
-        ContainerKind::Shell => format!("standalone:{id}"),
-        ContainerKind::Dir => format!("cwd:{id}"),
-        ContainerKind::Detached => "detached".to_owned(),
-    };
+    let key = container_key(kind, id);
     Container {
         collapsed: inputs.collapsed.contains(&key),
         attention: leaves.iter().any(|l| l.attention),
@@ -880,6 +932,109 @@ fn container(
         id: id.to_owned(),
         kind,
         name,
+        hover: None,
+        leaves,
+    }
+}
+
+fn leaf(s: &SessionSnapshot, attention: &HashSet<String>) -> Leaf {
+    Leaf {
+        id: s.id.clone(),
+        status: s.status,
+        label: display_label(s),
+        runtime: runtime_label(s),
+        attention: attention.contains(&s.id),
+    }
+}
+
+/// The key a container folds by.
+fn container_key(kind: ContainerKind, id: &str) -> String {
+    match kind {
+        ContainerKind::Workspace => format!("ws:{id}"),
+        ContainerKind::Repo => format!("repo:{id}"),
+        ContainerKind::Shell => format!("standalone:{id}"),
+        ContainerKind::Dir => format!("cwd:{id}"),
+        ContainerKind::Detached => "detached".to_owned(),
+        ContainerKind::Tab => format!("tab:{id}"),
+        ContainerKind::Unbound => "unbound".to_owned(),
+    }
+}
+
+/// The tabs view: one container per tab in the daemon's order, holding the
+/// listed sessions its panes show, each once, in pane order (a diff tab's is
+/// empty); then Unbound, the sessions no pane shows sorted by label, when
+/// there are any.
+pub fn build_tab_containers(
+    tabs: &[TabEntry],
+    sessions: &[SessionSnapshot],
+    attention: &HashSet<String>,
+    collapsed: &BTreeSet<String>,
+) -> Vec<Container> {
+    let by_id: HashMap<&str, &SessionSnapshot> =
+        sessions.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut shown: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for tab in tabs {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let leaves: Vec<Leaf> = tab
+            .grid()
+            .map(collect_panes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pane| pane.session)
+            .filter(|id| seen.insert(id))
+            .filter_map(|id| by_id.get(id).copied())
+            .map(|s| {
+                shown.insert(s.id.as_str());
+                leaf(s, attention)
+            })
+            .collect();
+        out.push(tab_view_container(
+            ContainerKind::Tab,
+            &tab.id,
+            tab.name.clone(),
+            leaves,
+            collapsed,
+        ));
+    }
+    let mut unbound: Vec<&SessionSnapshot> = sessions
+        .iter()
+        .filter(|s| !shown.contains(s.id.as_str()))
+        .collect();
+    if !unbound.is_empty() {
+        unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
+        let leaves = unbound.into_iter().map(|s| leaf(s, attention)).collect();
+        out.push(tab_view_container(
+            ContainerKind::Unbound,
+            "",
+            "Unbound".to_owned(),
+            leaves,
+            collapsed,
+        ));
+    }
+    out
+}
+
+fn tab_view_container(
+    kind: ContainerKind,
+    id: &str,
+    name: String,
+    leaves: Vec<Leaf>,
+    collapsed: &BTreeSet<String>,
+) -> Container {
+    let key = container_key(kind, id);
+    let hover = match kind {
+        ContainerKind::Unbound => UNBOUND_HOVER.to_owned(),
+        _ => format!("Tab \"{name}\""),
+    };
+    Container {
+        collapsed: collapsed.contains(&key),
+        attention: leaves.iter().any(|l| l.attention),
+        key,
+        id: id.to_owned(),
+        kind,
+        name,
+        hover: Some(hover),
         leaves,
     }
 }
@@ -1178,7 +1333,8 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::*;
-    use protocol::{CodexSandbox, PermissionMode, SessionMember};
+    use crate::tabs::tests::{pane, tab};
+    use protocol::{CodexSandbox, GridNode, PermissionMode, SessionMember, SplitDirection};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1789,6 +1945,7 @@ mod tests {
             sidebar_width: 333.0,
             sidebar_collapsed: true,
             activity: Activity::SourceControl,
+            sidebar_view: SidebarView::Tabs,
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),
@@ -1960,5 +2117,215 @@ mod tests {
         assert!(model.clear_tab_font_size("t2"));
         assert_eq!(model.tab_font_size("t2"), None);
         assert!(!model.clear_tab_font_size("t2"), "already clear");
+    }
+
+    fn split2(first: GridNode, second: GridNode) -> GridNode {
+        GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    fn named_tab(id: &str, name: &str, grid: &GridNode) -> TabEntry {
+        let mut entry = tab(id, grid);
+        name.clone_into(&mut entry.name);
+        entry
+    }
+
+    fn diff_tab(id: &str) -> TabEntry {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "content": { "kind": "diff", "repo_id": "r", "path": "a.rs", "against": null },
+            "created_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("diff tab fixture")
+    }
+
+    fn tab_view(tabs: &[TabEntry], sessions: &[SessionSnapshot]) -> Vec<Container> {
+        build_tab_containers(tabs, sessions, &HashSet::new(), &BTreeSet::new())
+    }
+
+    #[test]
+    fn tab_view_lists_one_container_per_tab_in_daemon_order() {
+        let tabs = [
+            named_tab("t2", "zeta", &pane("p1", Some("s1"))),
+            named_tab("t1", "alpha", &pane("p2", Some("s2"))),
+        ];
+        let tree = tab_view(&tabs, &[session("s1"), session("s2")]);
+        assert_eq!(keys(&tree), ["tab:t2", "tab:t1"], "not sorted by name");
+        let first = &tree[0];
+        assert_eq!(
+            (first.kind, first.id.as_str(), first.name.as_str()),
+            (ContainerKind::Tab, "t2", "zeta")
+        );
+        assert_eq!(first.kind.tag(), "TAB");
+        assert_eq!(first.hover.as_deref(), Some("Tab \"zeta\""));
+    }
+
+    #[test]
+    fn tab_container_lists_its_sessions_once_in_pane_order() {
+        let grid = split2(
+            pane("p1", Some("s2")),
+            split2(pane("p2", Some("s1")), pane("p3", Some("s2"))),
+        );
+        let tree = tab_view(&[tab("t1", &grid)], &[session("s1"), session("s2")]);
+        assert_eq!(leaf_ids(&tree, "tab:t1"), ["s2", "s1"]);
+    }
+
+    #[test]
+    fn tab_view_skips_pane_sessions_the_daemon_does_not_list() {
+        let grid = split2(
+            pane("p1", Some("gone")),
+            split2(pane("p2", None), pane("p3", Some("s1"))),
+        );
+        let tree = tab_view(&[tab("t1", &grid)], &[session("s1")]);
+        assert_eq!(leaf_ids(&tree, "tab:t1"), ["s1"]);
+        assert_eq!(keys(&tree), ["tab:t1"], "s1 is bound, so no Unbound");
+    }
+
+    #[test]
+    fn diff_tab_gets_an_empty_container() {
+        let tabs = [diff_tab("d1"), tab("t1", &pane("p1", Some("s1")))];
+        let tree = tab_view(&tabs, &[session("s1")]);
+        assert_eq!(keys(&tree), ["tab:d1", "tab:t1"]);
+        assert!(tree[0].leaves.is_empty());
+        assert_eq!(tree[0].kind, ContainerKind::Tab);
+    }
+
+    #[test]
+    fn unbound_bucket_holds_unreferenced_sessions_sorted_by_label() {
+        let mut beta = session("s-b");
+        "Beta".clone_into(&mut beta.label);
+        let mut alpha = session("s-a");
+        "alpha".clone_into(&mut alpha.label);
+        let tabs = [tab("t1", &pane("p1", Some("s1")))];
+        let tree = tab_view(&tabs, &[beta, session("s1"), alpha]);
+        assert_eq!(keys(&tree), ["tab:t1", "unbound"]);
+        let unbound = &tree[1];
+        assert_eq!(
+            (unbound.kind, unbound.kind.tag(), unbound.name.as_str()),
+            (ContainerKind::Unbound, "UNB", "Unbound")
+        );
+        assert_eq!(unbound.hover.as_deref(), Some(UNBOUND_HOVER));
+        assert_eq!(
+            leaf_ids(&tree, "unbound"),
+            ["s-a", "s-b"],
+            "by label, ignoring case"
+        );
+    }
+
+    #[test]
+    fn unbound_bucket_is_omitted_when_empty() {
+        let tree = tab_view(&[tab("t1", &pane("p1", Some("s1")))], &[session("s1")]);
+        assert_eq!(keys(&tree), ["tab:t1"]);
+        assert!(tab_view(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn tab_and_unbound_containers_fold_by_their_own_keys() {
+        let mut model = SidebarModel::default();
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![session("s1"), session("s2")],
+        });
+        let tabs = [tab("t1", &pane("p1", Some("s1")))];
+        let folds = |model: &SidebarModel| -> Vec<(String, bool)> {
+            model
+                .tab_containers(&tabs)
+                .into_iter()
+                .map(|c| (c.key, c.collapsed))
+                .collect()
+        };
+        model.toggle_container("tab:t1");
+        assert_eq!(
+            folds(&model),
+            [("tab:t1".to_owned(), true), ("unbound".to_owned(), false)]
+        );
+        model.toggle_container("tab:t1");
+        model.toggle_container("unbound");
+        assert_eq!(
+            folds(&model),
+            [("tab:t1".to_owned(), false), ("unbound".to_owned(), true)]
+        );
+    }
+
+    #[test]
+    fn tab_container_rolls_up_attention() {
+        let tabs = [
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ];
+        let attention: HashSet<String> = ["s1".to_owned()].into();
+        let tree = build_tab_containers(
+            &tabs,
+            &[session("s1"), session("s2")],
+            &attention,
+            &BTreeSet::new(),
+        );
+        let marks: Vec<(bool, bool)> = tree
+            .iter()
+            .map(|c| (c.attention, c.leaves.iter().any(|l| l.attention)))
+            .collect();
+        assert_eq!(marks, [(true, true), (false, false)]);
+    }
+
+    #[test]
+    fn sidebar_view_defaults_to_repos_and_round_trips() {
+        assert_eq!(UiState::default().sidebar_view, SidebarView::Repos);
+        let dir = TestDir::new("sidebar-view");
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).sidebar_view,
+            SidebarView::Repos,
+            "an older file shows repos"
+        );
+
+        let mut model = SidebarModel::default();
+        assert!(model.set_sidebar_view(SidebarView::Tabs));
+        assert!(!model.set_sidebar_view(SidebarView::Tabs), "unchanged");
+        assert_eq!(model.sidebar_view(), SidebarView::Tabs);
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["sidebar_view"], "tabs");
+        assert_eq!(load_ui_state(&dir.0).sidebar_view, SidebarView::Tabs);
+    }
+
+    #[test]
+    fn closed_tab_fold_key_is_pruned() {
+        let mut model = SidebarModel::default();
+        for key in ["tab:t1", "tab:t2", "repo:r1", "unbound"] {
+            model.toggle_container(key);
+        }
+        let live: HashSet<&str> = ["t2"].into_iter().collect();
+        assert!(model.prune_tab_folds(&live), "t1's fold went");
+        let kept: Vec<&str> = model
+            .ui_state()
+            .collapsed_containers
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(kept, ["repo:r1", "tab:t2", "unbound"]);
+        assert!(!model.prune_tab_folds(&live), "nothing left to prune");
+    }
+
+    #[test]
+    fn unknown_sidebar_view_loads_as_repos() {
+        let dir = TestDir::new("unknown-view");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_view": "timeline", "sidebar_collapsed": true }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.sidebar_view, SidebarView::Repos);
+        assert!(loaded.sidebar_collapsed, "the rest of the file still loads");
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_view": "repos" }"#).expect("write");
+        assert_eq!(load_ui_state(&dir.0).sidebar_view, SidebarView::Repos);
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_view": "tabs" }"#).expect("write");
+        assert_eq!(load_ui_state(&dir.0).sidebar_view, SidebarView::Tabs);
     }
 }

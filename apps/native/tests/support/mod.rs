@@ -22,8 +22,9 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier,
-    NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
+    Activity, Clock, Connection, ContainerKind, HandshakeInfo, NetCommand, NetDeps, NetEvent,
+    Notifier, NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel, bind_keys,
+    spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -85,6 +86,29 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         return None;
     };
     Some(shown)
+}
+
+/// Whether the sessions panel's model still shows what a sidebar selector
+/// tags, assuming the panel itself is shown: a leaf while an expanded
+/// container lists the session, its pill too once the tab list is in, the
+/// Unbound banner while Unbound is expanded, and the view toggle. `None`
+/// for any other selector.
+fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let containers = || {
+        root.sidebar_containers()
+            .into_iter()
+            .filter(|c| !c.collapsed)
+    };
+    let listed = |id: &str| containers().any(|c| c.leaves.iter().any(|leaf| leaf.id == id));
+    if selector == "unbound-banner" {
+        Some(containers().any(|c| c.kind == ContainerKind::Unbound))
+    } else if selector.starts_with("sidebar-view-") {
+        Some(true)
+    } else if let Some(id) = selector.strip_prefix("leaf-pill-") {
+        Some(root.leaf_tab_pill(id).is_some() && listed(id))
+    } else {
+        Some(listed(selector.strip_prefix("leaf-")?))
+    }
 }
 
 /// Whether the model still shows what a `headless-` selector tags: the
@@ -889,12 +913,8 @@ impl<'a> Harness<'a> {
                 root.tab_ids().iter().any(|t| t == id)
             } else if let Some(id) = selector.strip_prefix("tab-") {
                 root.tab_ids().iter().any(|t| t == id)
-            } else if let Some(id) = selector.strip_prefix("leaf-") {
-                sessions_shown
-                    && root
-                        .sidebar_containers()
-                        .iter()
-                        .any(|c| !c.collapsed && c.leaves.iter().any(|leaf| leaf.id == id))
+            } else if let Some(shown) = sidebar_part_shown(root, &selector) {
+                sessions_shown && shown
             } else if let Some(id) = selector.strip_prefix("pane-grid-") {
                 pane(id)
             } else if selector == "session-menu-accent" || selector.starts_with("accent-") {

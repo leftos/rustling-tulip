@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use gpui::{Modifiers, Point, TestAppContext, point, px};
 use protocol::{ClientMessage, DaemonMessage, SplitDirection, TabEntry};
+use rustling_tulip_native::SidebarView;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 const TAB_SELECTORS: [&str; 6] = [
@@ -376,10 +377,11 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "Space presses the keep-awake button"
     );
 
-    h.keys("tab");
+    h.keys("tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-terminal-copy-on-selection")
+        Some("settings-terminal-copy-on-selection"),
+        "past the two Default view choices"
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["copy_on_select"], false);
@@ -398,7 +400,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys("shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
@@ -415,6 +417,69 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     );
     h.keys("tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
+}
+
+#[gpui::test]
+fn general_default_view_row_switches_the_open_sidebar_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let tags = |h: &mut Harness<'_>| -> Vec<&'static str> {
+        h.root(|root, _| {
+            root.sidebar_containers()
+                .iter()
+                .map(|c| c.kind.tag())
+                .collect()
+        })
+    };
+    h.keys("ctrl-,");
+    assert!(h.bounds("settings-sidebar-view-repos").origin.x >= px(0.0));
+
+    h.click_on("settings-sidebar-view-tabs");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs", "saved at once");
+    assert_eq!(
+        h.root(|root, _| root.sidebar_view()),
+        SidebarView::Tabs,
+        "the open sidebar follows"
+    );
+    assert_eq!(tags(&mut h), ["TAB", "TAB"]);
+
+    h.click_on("settings-sidebar-view-repos");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "repos");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Repos);
+    assert!(!tags(&mut h).contains(&"TAB"));
+}
+
+#[gpui::test]
+fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.send(DaemonMessage::KeepAwakeStatus {
+        enabled: false,
+        active: false,
+    });
+    h.keys("ctrl-,");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-keep-awake-toggle"));
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-sidebar-view-repos"));
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-sidebar-view-tabs"));
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-terminal-copy-on-selection")
+    );
+    h.keys("shift-tab shift-tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-sidebar-view-repos"),
+        "Shift+Tab walks back"
+    );
+    h.keys("enter");
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "repos");
 }
 
 #[gpui::test]

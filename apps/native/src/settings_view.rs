@@ -19,6 +19,7 @@ use crate::appearance_view::{Level, close_footer};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::session_menu::{backdrop, dialog_button};
+use crate::sidebar::SidebarView;
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
 };
@@ -93,10 +94,14 @@ impl SettingsTab {
     }
 }
 
+/// The General tab's Default view choices, in the order they show.
+const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView::Tabs];
+
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
     KeepAwake,
+    SidebarView(SidebarView),
     CopyOnSelect,
     TitleCount,
     TitleSuffix,
@@ -113,6 +118,8 @@ impl SettingsControl {
     const fn selector(self) -> &'static str {
         match self {
             Self::KeepAwake => "settings-keep-awake-toggle",
+            Self::SidebarView(SidebarView::Repos) => "settings-sidebar-view-repos",
+            Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
             Self::TitleSuffix => "settings-title-product-suffix",
@@ -242,10 +249,14 @@ impl RootView {
     /// left out.
     fn settings_controls(&self) -> Vec<SettingsControl> {
         match self.settings_tab {
-            SettingsTab::General if self.keep_awake.is_some() => {
-                vec![SettingsControl::KeepAwake, SettingsControl::CopyOnSelect]
+            SettingsTab::General => {
+                let keep_awake = self.keep_awake.map(|_| SettingsControl::KeepAwake);
+                keep_awake
+                    .into_iter()
+                    .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
+                    .chain([SettingsControl::CopyOnSelect])
+                    .collect()
             }
-            SettingsTab::General => vec![SettingsControl::CopyOnSelect],
             SettingsTab::AppTitle => {
                 vec![SettingsControl::TitleCount, SettingsControl::TitleSuffix]
             }
@@ -316,6 +327,7 @@ impl RootView {
         self.appearance_focus.focus(window);
         match control {
             SettingsControl::KeepAwake => self.toggle_keep_awake(),
+            SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
@@ -812,6 +824,16 @@ impl RootView {
                 .child(button)
                 .child(status),
         );
+        let view = self.sidebar.sidebar_view();
+        let choices = SIDEBAR_VIEW_CHOICES.map(|choice| {
+            let text = match choice {
+                SidebarView::Repos => "Repos",
+                SidebarView::Tabs => "Tabs",
+            };
+            (SettingsControl::SidebarView(choice), text, choice == view)
+        });
+        let sidebar =
+            section("Sidebar").child(choice_row("Default view", &choices, None, focused, cx));
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             self.sidebar.ui_state().general.copy_on_select,
@@ -823,7 +845,11 @@ impl RootView {
             "Off: select to highlight, copy explicitly with Ctrl+C \
              (when there's a selection) or Ctrl+Shift+C.",
         ));
-        vec![power.into_any_element(), terminal.into_any_element()]
+        vec![
+            power.into_any_element(),
+            sidebar.into_any_element(),
+            terminal.into_any_element(),
+        ]
     }
 
     fn app_title_tab(

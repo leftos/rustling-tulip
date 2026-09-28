@@ -10,9 +10,24 @@
 mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
-use protocol::{AttentionReason, DaemonMessage};
-use rustling_tulip_native::LeafHighlight;
-use support::{Fixture, Harness, TestDir, pane, repo, session, tab, workspace};
+use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection};
+use rustling_tulip_native::{LeafHighlight, SidebarView, TabPill};
+use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
+
+/// The keys of the sidebar's containers, in the order it shows them.
+fn tree_keys(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .map(|c| c.key)
+            .collect()
+    })
+}
+
+fn saved_ui(dir: &TestDir) -> serde_json::Value {
+    let text = std::fs::read_to_string(dir.path().join("native-ui.json")).expect("a saved layout");
+    serde_json::from_str(&text).expect("native-ui.json is JSON")
+}
 
 /// The tag and name of the container holding leaf `id`, and the leaf's and
 /// the container's attention marks.
@@ -231,4 +246,197 @@ fn headless_leaf_click_only_clears_attention(cx: &mut TestAppContext) {
     let sent = h.sent();
     assert!(sent.is_empty(), "sent {sent:?}");
     assert_eq!(home_of(&mut h, "hl").map(|home| home.2), Some(false));
+}
+
+#[gpui::test]
+fn view_toggle_switches_to_tabs_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    fixture.sessions.push(session("s2").in_repo("r1").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Repos);
+    assert_eq!(tree_keys(&mut h), ["repo:r1"]);
+
+    h.click_on("sidebar-view-tabs");
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert_eq!(tree_keys(&mut h), ["tab:t1", "unbound"]);
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "tabs", "saved at once");
+    assert!(h.in_model("leaf-s1") && h.in_model("leaf-s2"));
+
+    h.click_on("sidebar-view-repos");
+    assert_eq!(tree_keys(&mut h), ["repo:r1"]);
+    assert_eq!(saved_ui(&dir)["sidebar_view"], "repos");
+}
+
+#[gpui::test]
+fn saved_tabs_view_is_restored_on_launch(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "sidebar_view": "tabs" }"#,
+    )
+    .expect("write the layout");
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    assert_eq!(h.root(|root, _| root.sidebar_view()), SidebarView::Tabs);
+    assert_eq!(tree_keys(&mut h), ["tab:t1"]);
+    assert!(h.in_model("leaf-s1"));
+}
+
+#[gpui::test]
+fn unbound_container_shows_its_banner(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    assert!(
+        !h.in_model("unbound-banner"),
+        "the repos view has no Unbound"
+    );
+
+    h.click_on("sidebar-view-tabs");
+    assert!(h.in_model("unbound-banner"));
+    let banner = h.bounds("unbound-banner");
+    assert!(banner.origin.x >= px(0.0), "painted");
+    assert!(
+        h.bounds("container-unbound").bottom() <= banner.top(),
+        "under its container"
+    );
+
+    h.click_on("container-unbound");
+    assert!(!h.in_model("unbound-banner"), "folded with its container");
+    assert!(!h.in_model("leaf-s2"));
+}
+
+#[gpui::test]
+fn leaf_shows_its_tab_pill_in_both_views(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2").build(),
+            session("s3").build(),
+        ],
+        tabs: vec![tab("t1", &grid), tab("t2", &pane("p3", Some("s2")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    let pill = |h: &mut Harness<'_>, id: &str| h.root(|root, _| root.leaf_tab_pill(id));
+
+    for view in ["repos", "tabs"] {
+        h.click_on(&format!("sidebar-view-{view}"));
+        assert_eq!(
+            pill(&mut h, "s1"),
+            Some(TabPill::One {
+                tab_id: "t1".to_owned(),
+                name: "t1".to_owned(),
+            }),
+            "{view}"
+        );
+        assert_eq!(
+            pill(&mut h, "s2"),
+            Some(TabPill::Many(vec!["t1".to_owned(), "t2".to_owned()])),
+            "{view}"
+        );
+        assert_eq!(pill(&mut h, "s3"), Some(TabPill::Unbound), "{view}");
+        for id in ["s1", "s2", "s3"] {
+            let selector = format!("leaf-pill-{id}");
+            assert!(h.in_model(&selector), "{view}: {selector} is shown");
+            assert!(
+                h.bounds(&selector).origin.x >= px(0.0),
+                "{view}: {selector} is painted"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn unbound_pill_click_creates_a_tab_with_the_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+
+    h.click_on("leaf-pill-s2");
+
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::CreateTab {
+                name: None,
+                initial_session_id: Some(id),
+            }] if id == "s2"
+        ),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn headless_unbound_pill_is_inert(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("hl").headless().build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.leaf_tab_pill("hl")),
+        Some(TabPill::Unbound)
+    );
+
+    h.click_on("leaf-pill-hl");
+
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
+    assert_eq!(
+        h.root(|root, _| root.tab_ids().len()),
+        1,
+        "no tab was asked for"
+    );
+}
+
+#[gpui::test]
+fn no_pills_before_tabs_load(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::open(cx, &dir);
+    h.send(DaemonMessage::Repos { repos: Vec::new() });
+    h.send(DaemonMessage::Sessions {
+        sessions: vec![session("s1").build()],
+    });
+    assert!(h.in_model("leaf-s1"), "the leaf is listed");
+    assert_eq!(h.root(|root, _| root.leaf_tab_pill("s1")), None);
+    assert!(!h.in_model("leaf-pill-s1"), "no pill yet");
+
+    h.click_on("sidebar-view-tabs");
+    assert!(
+        tree_keys(&mut h).is_empty(),
+        "the tabs view waits for the tab list"
+    );
+
+    h.send(DaemonMessage::Tabs {
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+    });
+    assert_eq!(tree_keys(&mut h), ["tab:t1"]);
+    assert!(h.in_model("leaf-pill-s1"));
+}
+
+#[gpui::test]
+fn bound_pill_click_sends_nothing(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.answer_scrollback("s1", b"");
+    h.sent();
+
+    h.click_on("leaf-pill-s1");
+
+    let sent = h.sent();
+    assert!(sent.is_empty(), "sent {sent:?}");
 }

@@ -114,7 +114,7 @@ use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
 use crate::tab_bar::{Rename, TabMenu};
-use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session};
+use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session, tab_pills};
 use crate::term::ShellCommand;
 use crate::term_view::ScrollbackReply;
 use crate::window_state::{RestoreRect, WindowState};
@@ -145,7 +145,7 @@ pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
-    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf,
+    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, SidebarView,
 };
 pub use crate::sidebar_view::LeafHighlight;
 pub use crate::source_control::{Bucket, ScKey};
@@ -154,6 +154,7 @@ pub use crate::spawns::{OpenIn, PaneAim};
 pub use crate::stash_view::{
     ScStashPush, ScStashRow, ScStashes, StashAction, StashButton, StashDropView,
 };
+pub use crate::tabs::TabPill;
 pub use crate::text_input::bind_keys;
 
 const PADDING: f32 = 6.0;
@@ -702,10 +703,53 @@ impl RootView {
         .detach();
     }
 
-    /// The sidebar's containers, in the order it shows them.
+    /// The sidebar's containers for the view it shows, in the order it
+    /// shows them.
     #[must_use]
     pub fn sidebar_containers(&self) -> Vec<Container> {
-        self.sidebar.containers()
+        match self.sidebar.sidebar_view() {
+            SidebarView::Repos => self.sidebar.containers(),
+            SidebarView::Tabs if self.tabs.is_loaded() => {
+                self.sidebar.tab_containers(self.tabs.tabs())
+            }
+            SidebarView::Tabs => Vec::new(),
+        }
+    }
+
+    /// How the sessions panel groups its sessions.
+    #[must_use]
+    pub fn sidebar_view(&self) -> SidebarView {
+        self.sidebar.sidebar_view()
+    }
+
+    /// Which tabs show session `id`, as its leaf's pill tells it; `None`
+    /// until the daemon's tab list is in, when leaves show no pill.
+    #[must_use]
+    pub fn leaf_tab_pill(&self, id: &str) -> Option<TabPill> {
+        if !self.tabs.is_loaded() {
+            return None;
+        }
+        let pill = tab_pills(self.tabs.tabs()).remove(id);
+        Some(pill.unwrap_or(TabPill::Unbound))
+    }
+
+    /// Groups the sessions panel by `view`, saving the choice when it
+    /// changed.
+    pub(crate) fn set_sidebar_view(&mut self, view: SidebarView, cx: &mut Context<Self>) {
+        if self.sidebar.set_sidebar_view(view) {
+            self.save_ui();
+        }
+        cx.notify();
+    }
+
+    /// The unbound pill: opens session `id` in a new tab, when it can be
+    /// shown in a pane.
+    pub(crate) fn open_in_new_tab(&mut self, id: &str) {
+        if !self.sidebar.session(id).is_some_and(can_attach) {
+            return;
+        }
+        self.tabs.arm_create();
+        self.send(Placement::NewTab.message(id));
     }
 
     /// Whether the sidebar is hidden.
@@ -814,15 +858,17 @@ impl RootView {
         cx.notify();
     }
 
-    /// Drops the font overrides of tabs the daemon no longer lists, once it
-    /// has listed any: before the first full list nothing is known to be
-    /// gone, so an update for one tab prunes nothing.
+    /// Drops the font overrides and the sidebar folds of tabs the daemon no
+    /// longer lists, once it has listed any: before the first full list
+    /// nothing is known to be gone, so an update for one tab prunes nothing.
     fn prune_tab_font_sizes(&mut self) {
         if !self.tabs.is_loaded() {
             return;
         }
         let live: HashSet<&str> = self.tabs.tabs().iter().map(|tab| tab.id.as_str()).collect();
-        if self.sidebar.prune_tab_font_sizes(&live) {
+        let fonts = self.sidebar.prune_tab_font_sizes(&live);
+        let folds = self.sidebar.prune_tab_folds(&live);
+        if fonts || folds {
             self.save_ui();
         }
     }
