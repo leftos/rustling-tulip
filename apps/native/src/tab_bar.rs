@@ -7,18 +7,22 @@ use gpui::{
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window,
     anchored, deferred, div, prelude::*, px,
 };
-use protocol::{ClientMessage, RearrangeLayout, TabContent, TabEntry};
+use protocol::{ClientMessage, MergeLayout, RearrangeLayout, TabContent, TabEntry};
 
 use crate::fonts;
-use crate::session_menu::{menu_frame, menu_item, muted_row};
-use crate::tabs::collect_panes;
+use crate::session_menu::{menu_frame, menu_item, menu_separator, muted_row};
+use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
+use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    BAR_BG, BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip,
+    BAR_BG, BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
+    tooltip,
 };
 
 const TAB_BAR_HEIGHT: f32 = 26.0;
 const RENAME_WIDTH: f32 = 140.0;
+/// The alpha of the accent wash on a selected pill, about 14%.
+const SELECTED_WASH_ALPHA: u32 = 0x24;
 
 /// A tab shortcut, before the check whether it has anything to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -56,12 +60,17 @@ fn tab_key(ks: &Keystroke) -> Option<TabKey> {
     }
 }
 
-/// The open tab context menu: the tab's font size.
+/// The open tab context menu: rename, rearrange, font size, close and
+/// merge.
 pub(crate) struct TabMenu {
     /// The tab it acts on.
     tab_id: String,
     /// Where the right-click was, in window coordinates.
     at: Point<Pixels>,
+    /// Whether the Grid submenu replaces the rows.
+    grid_open: bool,
+    /// Whether Close other tabs waits for its second press.
+    close_others_armed: bool,
 }
 
 impl RootView {
@@ -81,13 +90,121 @@ impl RootView {
     /// The selectors of the open menu's rows.
     #[must_use]
     pub fn tab_menu_rows(&self) -> Vec<String> {
-        if self.tab_menu.is_none() {
+        self.tab_menu
+            .as_ref()
+            .map(|menu| {
+                self.tab_menu_lines(menu)
+                    .iter()
+                    .filter_map(MenuLine::selector)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The text of the open menu's labels and rows, in order.
+    #[must_use]
+    pub fn tab_menu_text(&self) -> Vec<String> {
+        let Some(menu) = &self.tab_menu else {
             return Vec::new();
-        }
-        ["tab-menu-increase", "tab-menu-decrease", "tab-menu-reset"]
+        };
+        self.tab_menu_lines(menu)
             .into_iter()
-            .map(str::to_owned)
+            .filter_map(|line| match line {
+                MenuLine::Label(text) | MenuLine::Row { label: text, .. } => Some(text),
+                MenuLine::Separator => None,
+            })
             .collect()
+    }
+
+    /// The selected tabs, in strip order.
+    #[must_use]
+    pub fn selected_tabs(&self) -> Vec<String> {
+        self.tabs
+            .selection
+            .in_order(self.tabs.tabs())
+            .into_iter()
+            .map(|tab| tab.id.clone())
+            .collect()
+    }
+
+    /// The `(busy, total)` badge `tab_id`'s pill shows; `None` when it
+    /// shows none: a diff tab, or no live session in its panes.
+    #[must_use]
+    pub fn tab_badge(&self, tab_id: &str) -> Option<(usize, usize)> {
+        let tab = self.tabs.tab(tab_id)?;
+        tab_session_counts(tab, self.sidebar.sessions()).filter(|(_, total)| *total > 0)
+    }
+
+    /// Every line of `menu`: the Grid submenu alone while it is open, else
+    /// rename, the rearrange section, the font section, the close rows and
+    /// the merge section.
+    fn tab_menu_lines(&self, menu: &TabMenu) -> Vec<MenuLine> {
+        let tabs = self.tabs.tabs();
+        let Some(tab) = self.tabs.tab(&menu.tab_id) else {
+            return Vec::new();
+        };
+        let bound = tab.grid().map_or(0, bound_pane_count);
+        let rearrange = rearrange_lines(bound, self.pane_area_aspect(), menu.grid_open);
+        let submenu = rearrange
+            .iter()
+            .any(|line| line.selector() == Some("tab-menu-grid-back"));
+        if menu.grid_open && submenu {
+            return rearrange;
+        }
+        let mut lines = vec![MenuLine::row(
+            "tab-menu-rename",
+            "Rename tab",
+            TabAction::Rename,
+        )];
+        if !rearrange.is_empty() {
+            lines.push(MenuLine::Separator);
+            lines.extend(rearrange);
+        }
+        lines.push(MenuLine::Separator);
+        lines.extend(self.font_lines(&menu.tab_id));
+        lines.push(MenuLine::Separator);
+        let close_armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
+        lines.push(close_line(close_armed));
+        if tabs.len() >= 2 {
+            lines.push(close_others_line(tabs.len() - 1, menu.close_others_armed));
+        }
+        let merge = merge_lines(tabs, &self.tabs.selection, &menu.tab_id);
+        if !merge.is_empty() {
+            lines.push(MenuLine::Separator);
+            lines.extend(merge);
+        }
+        lines
+    }
+
+    /// The font section: the size, then Increase, Decrease and Reset, each
+    /// inert when it would change nothing.
+    fn font_lines(&self, tab_id: &str) -> Vec<MenuLine> {
+        let size = self.resolved_tab_font_size(tab_id);
+        let overridden = self.sidebar.tab_font_size(tab_id).is_some();
+        let row = |selector: &str, label: &str, action: TabAction, enabled: bool| {
+            if enabled {
+                MenuLine::row(selector, label, action)
+            } else {
+                MenuLine::inert(selector, label)
+            }
+        };
+        vec![
+            MenuLine::Label(format!("Font size: {size}")),
+            row(
+                "tab-menu-increase",
+                "Increase",
+                TabAction::FontUp,
+                fonts::stepped(size, 1.0).is_some(),
+            ),
+            row(
+                "tab-menu-decrease",
+                "Decrease",
+                TabAction::FontDown,
+                fonts::stepped(size, -1.0).is_some(),
+            ),
+            row("tab-menu-reset", "Reset", TabAction::FontReset, overridden),
+        ]
     }
 
     /// The size stored as `tab_id`'s override, if the tab has one.
@@ -124,6 +241,8 @@ impl RootView {
         self.tab_menu = Some(TabMenu {
             tab_id: tab_id.to_owned(),
             at,
+            grid_open: false,
+            close_others_armed: false,
         });
         self.tab_menu_focus.focus(window);
         cx.notify();
@@ -191,15 +310,11 @@ impl RootView {
     }
 
     fn tab_menu_panel(&self, menu: &TabMenu, cx: &mut Context<Self>) -> Stateful<Div> {
-        let size = self.resolved_tab_font_size(&menu.tab_id);
-        let overridden = self.sidebar.tab_font_size(&menu.tab_id).is_some();
-        let can_grow = fonts::stepped(size, 1.0).is_some();
-        let can_shrink = fonts::stepped(size, -1.0).is_some();
-        let (grow, shrink, reset) = (
-            menu.tab_id.clone(),
-            menu.tab_id.clone(),
-            menu.tab_id.clone(),
-        );
+        let lines: Vec<AnyElement> = self
+            .tab_menu_lines(menu)
+            .into_iter()
+            .map(|line| tab_menu_line(line, &menu.tab_id, cx))
+            .collect();
         menu_frame(
             "tab-menu",
             &self.tab_menu_focus,
@@ -208,41 +323,169 @@ impl RootView {
                 cx.stop_propagation();
             }),
         )
-        .child(muted_row(format!("Font size: {size}")))
-        .child(
-            tab_menu_row("tab-menu-increase", "Increase", can_grow).when(can_grow, |row| {
-                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.bump_tab_font(&grow, 1.0, cx);
-                }))
-            }),
-        )
-        .child(
-            tab_menu_row("tab-menu-decrease", "Decrease", can_shrink).when(can_shrink, |row| {
-                row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.bump_tab_font(&shrink, -1.0, cx);
-                }))
-            }),
-        )
-        .child(
-            tab_menu_row("tab-menu-reset", "Reset", overridden).when(overridden, |row| {
-                row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.reset_tab_font(&reset, cx);
-                    this.close_tab_menu(window, cx);
-                }))
-            }),
-        )
+        .children(lines)
+    }
+
+    /// Runs a press on a row of `tab_id`'s menu.
+    fn run_tab_action(
+        &mut self,
+        tab_id: &str,
+        action: TabAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if action != TabAction::CloseOthers
+            && let Some(menu) = &mut self.tab_menu
+        {
+            menu.close_others_armed = false;
+        }
+        match action {
+            TabAction::Rename => {
+                self.tab_menu = None;
+                self.start_rename(tab_id, window, cx);
+            }
+            TabAction::OpenGrid | TabAction::CloseGrid => {
+                self.show_grid_menu(action == TabAction::OpenGrid, window, cx);
+            }
+            TabAction::Rearrange(layout) => {
+                self.send(ClientMessage::RearrangeTab {
+                    tab_id: tab_id.to_owned(),
+                    layout,
+                });
+                self.close_tab_menu(window, cx);
+            }
+            TabAction::FontUp => self.bump_tab_font(tab_id, 1.0, cx),
+            TabAction::FontDown => self.bump_tab_font(tab_id, -1.0, cx),
+            TabAction::FontReset => {
+                self.reset_tab_font(tab_id, cx);
+                self.close_tab_menu(window, cx);
+            }
+            TabAction::Close => {
+                if self.close_tab_click(tab_id) {
+                    self.close_tab_menu(window, cx);
+                }
+                cx.notify();
+            }
+            TabAction::CloseOthers => self.close_other_tabs(tab_id, window, cx),
+            TabAction::Merge(layout) => self.merge_selected(layout, window, cx),
+        }
+    }
+
+    /// Swaps the menu's rows for the Grid submenu (`open`), or back.
+    fn show_grid_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.tab_menu {
+            menu.grid_open = open;
+            self.tab_menu_focus.focus(window);
+            cx.notify();
+        }
+    }
+
+    /// The first press arms Close other tabs; the second closes every tab
+    /// but `tab_id`.
+    fn close_other_tabs(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = &mut self.tab_menu else {
+            return;
+        };
+        if !menu.close_others_armed {
+            menu.close_others_armed = true;
+            cx.notify();
+            return;
+        }
+        let others: Vec<String> = self
+            .tabs
+            .tabs()
+            .iter()
+            .filter(|tab| tab.id != tab_id)
+            .map(|tab| tab.id.clone())
+            .collect();
+        for other in others {
+            self.send(ClientMessage::CloseTab { tab_id: other });
+        }
+        self.close_tab_menu(window, cx);
+    }
+
+    /// Merges the selected tabs, in strip order, into a new tab that shows
+    /// once it arrives, and clears the selection.
+    fn merge_selected(&mut self, layout: MergeLayout, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_ids = self.selected_tabs();
+        self.tabs.arm_create();
+        self.send(ClientMessage::MergeTabs {
+            tab_ids,
+            name: None,
+            layout,
+        });
+        self.tabs.selection.clear();
+        self.close_tab_menu(window, cx);
     }
 }
 
-/// A row of the tab menu; a disabled one is inert, as an action still on the
-/// way is in the session menu.
-fn tab_menu_row(selector: &str, label: &'static str, enabled: bool) -> Stateful<Div> {
-    let row = menu_item(selector, label, false);
-    if enabled {
-        row
+/// `Close tab`, or its confirm while the tab's close waits for a second
+/// press.
+fn close_line(armed: bool) -> MenuLine {
+    let label = if armed {
+        "Confirm closing this tab"
     } else {
-        row.opacity(0.6).cursor_default()
+        "Close tab"
+    };
+    MenuLine::Row {
+        selector: "tab-menu-close".to_owned(),
+        label: label.to_owned(),
+        action: Some(TabAction::Close),
+        danger: armed,
     }
+}
+
+/// `Close other tabs` for `others` tabs, or its confirm once armed.
+fn close_others_line(others: usize, armed: bool) -> MenuLine {
+    let label = if armed {
+        let s = if others == 1 { "" } else { "s" };
+        format!("Confirm closing {others} other tab{s}")
+    } else {
+        "Close other tabs".to_owned()
+    };
+    MenuLine::Row {
+        selector: "tab-menu-close-others".to_owned(),
+        label,
+        action: Some(TabAction::CloseOthers),
+        danger: armed,
+    }
+}
+
+/// One line of `tab_id`'s menu. A row with no action is inert, as an
+/// action still on the way is in the session menu. Close acts on the press,
+/// as the pill's × does, so the root's click-elsewhere reset never disarms
+/// it.
+fn tab_menu_line(line: MenuLine, tab_id: &str, cx: &mut Context<RootView>) -> AnyElement {
+    let (selector, label, action, danger) = match line {
+        MenuLine::Label(text) => return muted_row(text).into_any_element(),
+        MenuLine::Separator => return menu_separator().into_any_element(),
+        MenuLine::Row {
+            selector,
+            label,
+            action,
+            danger,
+        } => (selector, label, action, danger),
+    };
+    let row = menu_item(&selector, label, danger);
+    let Some(action) = action else {
+        return row.opacity(0.6).cursor_default().into_any_element();
+    };
+    let tab_id = tab_id.to_owned();
+    if action == TabAction::Close {
+        return row
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    this.run_tab_action(&tab_id, action, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element();
+    }
+    row.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.run_tab_action(&tab_id, action, window, cx);
+    }))
+    .into_any_element()
 }
 
 /// A tab name being edited in place.
@@ -269,11 +512,12 @@ enum RenameEnd {
 
 impl RootView {
     pub(crate) fn tab_bar(&self, cx: &mut Context<Self>) -> Div {
+        let accent = self.sidebar.appearance(None).accent.value;
         let pills: Vec<AnyElement> = self
             .tabs
             .tabs()
             .iter()
-            .map(|tab| self.tab_pill(tab, cx))
+            .map(|tab| self.tab_pill(tab, accent, cx))
             .collect();
         div()
             .flex()
@@ -289,9 +533,14 @@ impl RootView {
             .child(new_tab_button(cx))
     }
 
-    fn tab_pill(&self, tab: &TabEntry, cx: &mut Context<Self>) -> AnyElement {
+    /// `tab`'s pill; selection shows in `accent`, `0xRRGGBB`.
+    fn tab_pill(&self, tab: &TabEntry, accent: u32, cx: &mut Context<Self>) -> AnyElement {
         let active = self.tabs.active_id() == Some(tab.id.as_str());
+        let look = PillLook::of(active, self.tabs.selection.contains(&tab.id));
         let armed = self.tabs.close_confirm.armed() == Some(tab.id.as_str());
+        let badge = self
+            .tab_badge(&tab.id)
+            .map(|(busy, total)| busy_badge(&tab.id, busy, total));
         let rename = self.renaming.as_ref().filter(|r| r.tab_id == tab.id);
         let label = match rename {
             Some(rename) => div().w(px(RENAME_WIDTH)).child(rename.input.clone()),
@@ -299,7 +548,7 @@ impl RootView {
         };
         let (click_id, middle_id, menu_id) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
         let on_click = cx.listener(move |this, event: &ClickEvent, window, cx| {
-            this.click_tab(&click_id, event.click_count(), window, cx);
+            this.click_tab(&click_id, event, window, cx);
         });
         let on_middle = cx.listener(move |this, _: &MouseDownEvent, _, cx| {
             this.close_tab_click(&middle_id);
@@ -325,33 +574,58 @@ impl RootView {
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .cursor_pointer()
-            .when(active, |pill| {
-                pill.bg(gpui::rgb(PANEL_BG)).text_color(gpui::rgb(TEXT))
-            })
+            .when(active, |pill| pill.text_color(gpui::rgb(TEXT)))
             .when(!active, |pill| {
                 pill.hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            })
+            .when_some(look.background(accent), |pill, bg| pill.bg(gpui::rgba(bg)))
+            .when_some(look.outline(accent), |pill, outline| {
+                pill.border_1().border_color(gpui::rgb(outline))
             })
             .when(rename.is_none(), move |pill| {
                 pill.on_click(on_click)
                     .on_mouse_down(MouseButton::Middle, on_middle)
             })
+            .children(badge)
             .child(label)
             .child(close_button(&tab.id, armed, cx))
             .into_any_element()
     }
 
+    /// A click on `tab_id`'s pill. Ctrl toggles the tab in the selection
+    /// and Shift selects a range, neither showing it; a plain click shows
+    /// it, and a plain double-click renames it.
     fn click_tab(
         &mut self,
         tab_id: &str,
-        click_count: usize,
+        event: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if click_count >= 2 {
-            self.start_rename(tab_id, window, cx);
+        let mods = event.modifiers();
+        let kind = if mods.control {
+            PillClick::Toggle
+        } else if mods.shift {
+            PillClick::Range
         } else {
+            PillClick::Plain
+        };
+        if kind == PillClick::Plain && event.click_count() >= 2 {
+            self.start_rename(tab_id, window, cx);
+            return;
+        }
+        let ids = self.tab_ids();
+        let order: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let active = self.tabs.active_id().map(str::to_owned);
+        if self
+            .tabs
+            .selection
+            .click(&order, active.as_deref(), tab_id, kind)
+        {
             self.tabs.activate(tab_id);
             self.after_tabs_change(window, cx);
+        } else {
+            cx.notify();
         }
     }
 
@@ -460,14 +734,16 @@ impl RootView {
     }
 
     /// A close click: closes the tab, or arms the close when the tab holds
-    /// a session or a split.
-    fn close_tab_click(&mut self, tab_id: &str) {
+    /// a session or a split. Returns whether it asked to close the tab.
+    fn close_tab_click(&mut self, tab_id: &str) -> bool {
         let Some(tab) = self.tabs.tab(tab_id).cloned() else {
-            return;
+            return false;
         };
-        if self.tabs.close_confirm.click(&tab) {
+        let close = self.tabs.close_confirm.click(&tab);
+        if close {
             self.send(ClientMessage::CloseTab { tab_id: tab.id });
         }
+        close
     }
 
     fn start_rename(&mut self, tab_id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -523,12 +799,61 @@ impl RootView {
     }
 }
 
+/// How a pill shows whether it is active and selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PillLook {
+    Plain,
+    /// The tab shown: the panel's background.
+    Active,
+    /// Selected, not shown: a light accent wash.
+    Washed,
+    /// Shown and selected: the panel's background in an accent outline.
+    ActiveOutlined,
+}
+
+impl PillLook {
+    fn of(active: bool, selected: bool) -> Self {
+        match (active, selected) {
+            (false, false) => Self::Plain,
+            (true, false) => Self::Active,
+            (false, true) => Self::Washed,
+            (true, true) => Self::ActiveOutlined,
+        }
+    }
+
+    /// The background, `0xRRGGBBAA`, for an `accent` of `0xRRGGBB`.
+    fn background(self, accent: u32) -> Option<u32> {
+        match self {
+            Self::Plain => None,
+            Self::Active | Self::ActiveOutlined => Some((PANEL_BG << 8) | 0xff),
+            Self::Washed => Some((accent << 8) | SELECTED_WASH_ALPHA),
+        }
+    }
+
+    /// The outline's colour, `0xRRGGBB`, if it has one.
+    fn outline(self, accent: u32) -> Option<u32> {
+        (self == Self::ActiveOutlined).then_some(accent)
+    }
+}
+
 /// A tab's name; a diff tab's is marked Δ.
 fn pill_label(tab: &TabEntry) -> String {
     match tab.content {
         TabContent::Diff { .. } => format!("Δ {}", tab.name),
         TabContent::Grid { .. } => tab.name.clone(),
     }
+}
+
+/// `{busy}/{total}` before a grid tab's name: amber while a pane is busy.
+fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
+    let name = format!("tab-badge-{tab_id}");
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex_none()
+        .text_color(gpui::rgb(if busy > 0 { WARNING } else { MUTED }))
+        .tooltip(tooltip(format!("{busy} of {total} panes busy")))
+        .child(format!("{busy}/{total}"))
 }
 
 /// The ×, or ✓ while a close waits for its second click. It acts on the
@@ -576,4 +901,27 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
             this.new_tab();
             cx.notify();
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ACCENT: u32 = 0x005b_9bff;
+
+    #[test]
+    fn active_selected_tab_keeps_active_background() {
+        let active = PillLook::of(true, false);
+        let both = PillLook::of(true, true);
+        assert_eq!(both, PillLook::ActiveOutlined);
+        assert_eq!(both.background(ACCENT), active.background(ACCENT));
+        assert_eq!(both.background(ACCENT), Some((PANEL_BG << 8) | 0xff));
+        assert_eq!(both.outline(ACCENT), Some(ACCENT));
+        assert_eq!(active.outline(ACCENT), None);
+
+        let washed = PillLook::of(false, true);
+        assert_eq!(washed.background(ACCENT), Some((ACCENT << 8) | 0x24));
+        assert_eq!(washed.outline(ACCENT), None);
+        assert_eq!(PillLook::of(false, false).background(ACCENT), None);
+    }
 }

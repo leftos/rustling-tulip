@@ -63,6 +63,7 @@ mod stash_view;
 mod stashes;
 pub mod syntax;
 mod tab_bar;
+mod tab_menu;
 mod tabs;
 mod term;
 mod term_input;

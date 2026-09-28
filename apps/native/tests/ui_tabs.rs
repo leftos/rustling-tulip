@@ -9,8 +9,12 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
-use gpui::{Modifiers, MouseButton, TestAppContext, point, px};
-use protocol::{ClientMessage, DaemonMessage, SplitDirection, SplitPlace};
+use gpui::{Modifiers, MouseButton, TestAppContext, point, px, size};
+use protocol::{
+    ClientMessage, DaemonMessage, MergeLayout, RearrangeLayout, SplitDirection, SplitPlace,
+    TabEntry,
+};
+use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
 fn two_tabs() -> Fixture {
@@ -260,4 +264,362 @@ fn sidebar_click_on_an_unbound_session_fills_the_empty_pane(cx: &mut TestAppCont
             if tab_id == "t1" && pane_id == "p1" && session_id.as_deref() == Some("s1")),
         "sent {sent:?}"
     );
+}
+
+/// Tabs `t1`–`t3`; `t1` holds `s1` and the others an empty pane.
+fn three_tabs() -> Fixture {
+    let mut fixture = two_tabs();
+    fixture.tabs.push(tab("t3", &pane("p3", None)));
+    fixture
+}
+
+/// Tab `t1` with a pane for each of `sessions`, side by side.
+fn grid_of(sessions: &[&str]) -> Fixture {
+    let mut panes = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| pane(&format!("p{}", i + 1), Some(s)));
+    let first = panes.next().expect("a session at least");
+    let grid = panes.fold(first, |grid, next| {
+        split(SplitDirection::Horizontal, grid, next)
+    });
+    Fixture {
+        sessions: sessions.iter().map(|s| session(s).build()).collect(),
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    }
+}
+
+fn diff_tab(id: &str) -> TabEntry {
+    serde_json::from_value(json!({
+        "id": id,
+        "name": "a.rs",
+        "content": { "kind": "diff", "repo_id": "r1", "path": "a.rs", "against": null },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("diff tab fixture")
+}
+
+fn ctrl_click(h: &mut Harness, selector: &str) {
+    let at = h.center(selector);
+    h.click(at, Modifiers::control());
+}
+
+fn selected(h: &mut Harness) -> Vec<String> {
+    h.root(|root, _| root.selected_tabs())
+}
+
+fn menu_text(h: &mut Harness) -> Vec<String> {
+    h.root(|root, _| root.tab_menu_text())
+}
+
+#[gpui::test]
+fn badge_shows_busy_over_total_and_hides_at_zero(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", Some("s2")),
+    );
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").status("working").build(),
+            session("s2").build(),
+        ],
+        tabs: vec![tab("t1", &grid), tab("t2", &pane("p3", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(h.root(|root, _| root.tab_badge("t1")), Some((1, 2)));
+    assert!(h.bounds("tab-badge-t1").origin.x >= px(0.0), "drawn");
+    assert_eq!(h.root(|root, _| root.tab_badge("t2")), None, "no session");
+    assert!(h.bounds("tab-badge-t2").origin.x < px(0.0), "not drawn");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: diff_tab("t2"),
+    });
+    assert_eq!(h.root(|root, _| root.tab_badge("t2")), None, "a diff tab");
+}
+
+#[gpui::test]
+fn ctrl_and_shift_click_select_without_activating(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    let active = |h: &mut Harness| h.root(|root, _| root.active_tab_id().map(str::to_owned));
+    assert_eq!(active(&mut h).as_deref(), Some("t1"));
+
+    ctrl_click(&mut h, "tab-t2");
+    assert_eq!(selected(&mut h), ["t2"]);
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "Ctrl+click only selects"
+    );
+
+    let at = h.center("tab-t3");
+    h.click(at, Modifiers::shift());
+    assert_eq!(
+        selected(&mut h),
+        ["t2", "t3"],
+        "Shift ranges from the anchor"
+    );
+    assert_eq!(active(&mut h).as_deref(), Some("t1"));
+
+    h.click_on("tab-t3");
+    assert!(selected(&mut h).is_empty(), "a plain click clears it");
+    assert_eq!(active(&mut h).as_deref(), Some("t3"));
+}
+
+#[gpui::test]
+fn menu_rename_starts_inline_rename(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.sent();
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-rename");
+    assert!(!h.in_model("tab-menu"), "the menu closes");
+    assert_eq!(
+        h.root(|root, _| root.renaming_tab().map(str::to_owned)),
+        Some("t2".to_owned())
+    );
+    h.cx.simulate_input("x");
+    h.keys("enter");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RenameTab { tab_id, name }] if tab_id == "t2" && name == "x"),
+        "sent {sent:?}"
+    );
+}
+
+fn rearranged(sent: &[ClientMessage]) -> Vec<RearrangeLayout> {
+    sent.iter()
+        .filter_map(|m| match m {
+            ClientMessage::RearrangeTab { tab_id, layout } if tab_id == "t1" => Some(*layout),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn menu_rearrange_sends_rearrange_tab_with_aspect_cols(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &grid_of(&["s1", "s2"]));
+    h.sent();
+
+    h.right_click_on("tab-t1");
+    assert!(
+        !h.in_model("tab-menu-grid"),
+        "two panes have no shape to pick"
+    );
+    h.click_on("tab-menu-grid-auto");
+    assert_eq!(
+        rearranged(&h.sent()),
+        [RearrangeLayout::Grid { cols: 2 }],
+        "a wide area fits two across"
+    );
+    assert!(!h.in_model("tab-menu"), "the menu closes");
+
+    h.cx.simulate_resize(size(px(420.0), px(1400.0)));
+    h.cx.run_until_parked();
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-grid-auto");
+    assert_eq!(
+        rearranged(&h.sent()),
+        [RearrangeLayout::Grid { cols: 1 }],
+        "a tall area stacks them"
+    );
+
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-side-by-side");
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-stacked");
+    assert_eq!(
+        rearranged(&h.sent()),
+        [RearrangeLayout::Horizontal, RearrangeLayout::Vertical]
+    );
+}
+
+#[gpui::test]
+fn menu_grid_shape_sends_its_cols(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &grid_of(&["s1", "s2", "s3", "s4"]));
+    h.sent();
+
+    h.right_click_on("tab-t1");
+    h.click_on("tab-menu-grid");
+    assert!(h.in_model("tab-menu"), "the submenu keeps the menu open");
+    assert!(
+        !h.in_model("tab-menu-rename"),
+        "its rows replace the menu's"
+    );
+    assert!(
+        menu_text(&mut h).contains(&"Auto (2 cols × 2 rows)".to_owned()),
+        "rows {:?}",
+        menu_text(&mut h)
+    );
+    h.click_on("tab-menu-grid-back");
+    assert!(h.in_model("tab-menu-rename"), "Back restores the rows");
+    h.click_on("tab-menu-grid");
+    h.click_on("tab-menu-grid-3");
+    assert_eq!(rearranged(&h.sent()), [RearrangeLayout::Grid { cols: 3 }]);
+    assert!(!h.in_model("tab-menu"));
+}
+
+#[gpui::test]
+fn menu_hides_rearrange_under_two_panes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("s1")),
+        pane("p2", None),
+    );
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.right_click_on("tab-t1");
+    let rows = h.root(|root, _| root.tab_menu_rows());
+    assert_eq!(
+        rows,
+        [
+            "tab-menu-rename",
+            "tab-menu-increase",
+            "tab-menu-decrease",
+            "tab-menu-reset",
+            "tab-menu-close",
+        ],
+        "one bound pane: no rearrange rows, and one tab: no Close other tabs"
+    );
+    assert!(!menu_text(&mut h).contains(&"Rearrange panes".to_owned()));
+}
+
+#[gpui::test]
+fn close_others_arms_then_sends_close_for_each_other(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    h.right_click_on("tab-t2");
+    assert!(menu_text(&mut h).contains(&"Close other tabs".to_owned()));
+
+    h.click_on("tab-menu-close-others");
+    assert!(h.sent().is_empty(), "the first press only arms");
+    assert!(h.in_model("tab-menu"), "and keeps the menu open");
+    assert!(
+        menu_text(&mut h).contains(&"Confirm closing 2 other tabs".to_owned()),
+        "rows {:?}",
+        menu_text(&mut h)
+    );
+
+    h.click_on("tab-menu-close-others");
+    let closed: Vec<String> = h
+        .sent()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMessage::CloseTab { tab_id } => Some(tab_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closed, ["t1", "t3"]);
+    assert!(!h.in_model("tab-menu"));
+}
+
+#[gpui::test]
+fn merge_selected_sends_merge_tabs_in_strip_order_and_activates_new_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    ctrl_click(&mut h, "tab-t3");
+    ctrl_click(&mut h, "tab-t1");
+
+    h.right_click_on("tab-t2");
+    assert!(
+        !h.in_model("tab-menu-merge-vertical"),
+        "t2 is not selected, so its menu has no merge"
+    );
+    h.keys("escape");
+
+    h.right_click_on("tab-t3");
+    assert!(menu_text(&mut h).contains(&"Merge 2 selected into new tab".to_owned()));
+    h.click_on("tab-menu-merge-vertical");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MergeTabs { tab_ids, name: None, layout: MergeLayout::TileVertical }]
+            if tab_ids == &["t1".to_owned(), "t3".to_owned()]),
+        "sent {sent:?}"
+    );
+    assert!(selected(&mut h).is_empty(), "the selection clears");
+    assert!(!h.in_model("tab-menu"));
+
+    for id in ["t1", "t3"] {
+        h.send(DaemonMessage::TabRemoved {
+            tab_id: id.to_owned(),
+        });
+    }
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t4", &pane("p4", None)),
+    });
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t4".to_owned())
+    );
+}
+
+#[gpui::test]
+fn merge_disabled_when_a_diff_tab_is_selected(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.tabs.push(diff_tab("d1"));
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    ctrl_click(&mut h, "tab-t1");
+    ctrl_click(&mut h, "tab-d1");
+
+    h.right_click_on("tab-t1");
+    assert!(menu_text(&mut h).contains(&"Diff tabs can't be merged".to_owned()));
+    h.click_on("tab-menu-merge-horizontal");
+    assert!(
+        !h.sent()
+            .iter()
+            .any(|m| matches!(m, ClientMessage::MergeTabs { .. })),
+        "the rows are inert"
+    );
+    assert!(h.in_model("tab-menu"), "and the menu stays");
+    assert_eq!(selected(&mut h), ["t1", "d1"]);
+}
+
+#[gpui::test]
+fn close_others_disarms_after_another_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &three_tabs());
+    h.sent();
+    let closes = |sent: &[ClientMessage]| {
+        sent.iter()
+            .filter(|m| matches!(m, ClientMessage::CloseTab { .. }))
+            .count()
+    };
+
+    h.right_click_on("tab-t2");
+    h.click_on("tab-menu-close-others");
+    assert!(menu_text(&mut h).contains(&"Confirm closing 2 other tabs".to_owned()));
+    h.click_on("tab-menu-increase");
+    assert!(h.in_model("tab-menu"), "Increase keeps the menu open");
+    assert!(
+        menu_text(&mut h).contains(&"Close other tabs".to_owned()),
+        "another row disarms it: rows {:?}",
+        menu_text(&mut h)
+    );
+    h.click_on("tab-menu-close-others");
+    assert_eq!(closes(&h.sent()), 0, "so this press only arms again");
+
+    h.keys("escape");
+    h.right_click_on("tab-t2");
+    assert!(
+        menu_text(&mut h).contains(&"Close other tabs".to_owned()),
+        "a closed menu forgets the arm"
+    );
+    h.click_on("tab-menu-close-others");
+    assert_eq!(closes(&h.sent()), 0);
 }

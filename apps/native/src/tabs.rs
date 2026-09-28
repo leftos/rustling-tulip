@@ -117,6 +117,28 @@ pub struct CloseConfirm {
     armed: Option<String>,
 }
 
+/// How a click on a tab's pill was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PillClick {
+    /// No modifier: shows the tab.
+    Plain,
+    /// Ctrl: adds the tab to the selection or takes it out.
+    Toggle,
+    /// Shift: selects the tabs from the anchor to this one.
+    Range,
+}
+
+/// The tabs picked for an action on several at once, and the anchor a
+/// Shift+click ranges from. The active tab is not selected by being shown.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TabSelection {
+    selected: Vec<String>,
+    anchor: Option<String>,
+    /// The tab shown when the anchor was set; once another is shown, the
+    /// shown tab is the anchor.
+    anchor_active: Option<String>,
+}
+
 /// The tab list, the active tab and each tab's focused pane.
 #[derive(Debug, Default)]
 pub struct TabsModel {
@@ -131,6 +153,7 @@ pub struct TabsModel {
     /// A pane the view should give the keyboard to.
     focus_request: Option<String>,
     pub close_confirm: CloseConfirm,
+    pub selection: TabSelection,
 }
 
 /// `ratio` inside the daemon's range; a ratio that is not a number becomes
@@ -533,6 +556,15 @@ pub fn tab_session_counts(tab: &TabEntry, sessions: &[SessionSnapshot]) -> Optio
     Some((busy, total))
 }
 
+/// How many of `grid`'s panes hold a session.
+#[must_use]
+pub fn bound_pane_count(grid: &GridNode) -> usize {
+    collect_panes(grid)
+        .iter()
+        .filter(|pane| pane.session.is_some())
+        .count()
+}
+
 /// Whether closing `tab` loses something worth a second click: a bound
 /// session, or a layout of two panes or more.
 pub fn needs_confirm(tab: &TabEntry) -> bool {
@@ -621,6 +653,108 @@ impl CloseConfirm {
     }
 }
 
+impl TabSelection {
+    /// A `kind` click on `tab_id` in a strip ordered as `order`; returns
+    /// whether the click shows the tab. A plain click clears the selection
+    /// and anchors there; Ctrl toggles the tab and anchors there; Shift
+    /// selects the anchor's range, or acts as a plain click with no anchor
+    /// in the strip. `active` is the tab shown now: when it is not the one
+    /// shown as the anchor was set (a shortcut, a spawn or a merge showed
+    /// another since), Shift ranges from it instead.
+    pub fn click(
+        &mut self,
+        order: &[&str],
+        active: Option<&str>,
+        tab_id: &str,
+        kind: PillClick,
+    ) -> bool {
+        match kind {
+            PillClick::Toggle => {
+                if let Some(at) = self.selected.iter().position(|id| id == tab_id) {
+                    self.selected.remove(at);
+                } else {
+                    self.selected.push(tab_id.to_owned());
+                }
+                self.set_anchor(tab_id, active);
+                false
+            }
+            PillClick::Range => {
+                if let Some(active) = active
+                    && self.anchor_active.as_deref() != Some(active)
+                {
+                    self.set_anchor(active, Some(active));
+                }
+                let from = self
+                    .anchor
+                    .as_deref()
+                    .and_then(|anchor| order.iter().position(|id| *id == anchor));
+                let to = order.iter().position(|id| *id == tab_id);
+                let (Some(from), Some(to)) = (from, to) else {
+                    return self.click(order, active, tab_id, PillClick::Plain);
+                };
+                let (low, high) = (from.min(to), from.max(to));
+                self.selected = order[low..=high]
+                    .iter()
+                    .map(|id| (*id).to_owned())
+                    .collect();
+                false
+            }
+            PillClick::Plain => {
+                self.selected.clear();
+                self.set_anchor(tab_id, Some(tab_id));
+                true
+            }
+        }
+    }
+
+    fn set_anchor(&mut self, tab_id: &str, active: Option<&str>) {
+        self.anchor = Some(tab_id.to_owned());
+        self.anchor_active = active.map(str::to_owned);
+    }
+
+    /// Whether `tab_id` is selected.
+    pub fn contains(&self, tab_id: &str) -> bool {
+        self.selected.iter().any(|id| id == tab_id)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.selected.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.selected.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn anchor(&self) -> Option<&str> {
+        self.anchor.as_deref()
+    }
+
+    /// The selected tabs of `tabs`, in its order.
+    pub fn in_order<'a>(&self, tabs: &'a [TabEntry]) -> Vec<&'a TabEntry> {
+        tabs.iter().filter(|tab| self.contains(&tab.id)).collect()
+    }
+
+    /// Drops the selection; the anchor stays.
+    pub fn clear(&mut self) {
+        self.selected.clear();
+    }
+
+    /// Forgets every tab `live` no longer holds, the anchor included.
+    fn prune(&mut self, live: &HashSet<&str>) {
+        self.selected.retain(|id| live.contains(id.as_str()));
+        if self
+            .anchor
+            .as_deref()
+            .is_some_and(|anchor| !live.contains(anchor))
+        {
+            self.anchor = None;
+        }
+    }
+}
+
 impl TabsModel {
     pub fn new(restored_active: Option<String>) -> Self {
         Self {
@@ -649,6 +783,7 @@ impl TabsModel {
         let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
         self.focused
             .retain(|tab_id, _| live.contains(tab_id.as_str()));
+        self.selection.prune(&live);
         let active = self
             .active
             .take()
@@ -702,6 +837,7 @@ impl TabsModel {
     fn remove(&mut self, tab_id: &str) {
         self.tabs.retain(|t| t.id != tab_id);
         self.focused.remove(tab_id);
+        self.prune_selection();
         if self.close_confirm.armed() == Some(tab_id) {
             self.close_confirm.disarm();
         }
@@ -720,6 +856,13 @@ impl TabsModel {
             .iter()
             .filter_map(|id| by_id.remove(id))
             .collect();
+        self.prune_selection();
+    }
+
+    /// Forgets selected tabs the list no longer holds.
+    fn prune_selection(&mut self) {
+        let live: HashSet<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        self.selection.prune(&live);
     }
 
     fn activate_id(&mut self, tab_id: Option<String>) {
@@ -1580,5 +1723,106 @@ pub(crate) mod tests {
     #[test]
     fn a_diff_tab_has_no_counts() {
         assert_eq!(tab_session_counts(&diff_tab("d"), &[]), None);
+    }
+
+    const STRIP: [&str; 4] = ["a", "b", "c", "d"];
+
+    #[test]
+    fn selection_ctrl_toggles_without_activating() {
+        let mut selection = TabSelection::default();
+        assert!(!selection.click(&STRIP, None, "b", PillClick::Toggle));
+        assert!(!selection.click(&STRIP, None, "d", PillClick::Toggle));
+        assert!(selection.contains("b") && selection.contains("d"));
+        assert_eq!(selection.anchor(), Some("d"));
+        assert!(!selection.click(&STRIP, None, "b", PillClick::Toggle));
+        assert!(!selection.contains("b"), "a second Ctrl+click deselects");
+        assert_eq!(selection.len(), 1);
+        assert_eq!(selection.anchor(), Some("b"));
+    }
+
+    #[test]
+    fn shift_selects_range_from_anchor() {
+        let mut selection = TabSelection::default();
+        selection.click(&STRIP, None, "c", PillClick::Plain);
+        assert!(!selection.click(&STRIP, None, "a", PillClick::Range));
+        let picked: Vec<&str> = STRIP
+            .into_iter()
+            .filter(|id| selection.contains(id))
+            .collect();
+        assert_eq!(picked, ["a", "b", "c"]);
+        assert_eq!(selection.anchor(), Some("c"), "the anchor stays");
+        selection.click(&STRIP, None, "d", PillClick::Range);
+        assert!(!selection.contains("a") && selection.contains("c") && selection.contains("d"));
+    }
+
+    #[test]
+    fn shift_without_anchor_is_plain_click() {
+        let mut selection = TabSelection::default();
+        assert!(selection.click(&STRIP, None, "b", PillClick::Range));
+        assert!(selection.is_empty());
+        assert_eq!(selection.anchor(), Some("b"));
+    }
+
+    #[test]
+    fn shift_ranges_from_active_after_keyboard_switch() {
+        let mut selection = TabSelection::default();
+        assert!(selection.click(&STRIP, Some("a"), "a", PillClick::Plain));
+        assert!(!selection.click(&STRIP, Some("c"), "d", PillClick::Range));
+        let picked: Vec<&str> = STRIP
+            .into_iter()
+            .filter(|id| selection.contains(id))
+            .collect();
+        assert_eq!(
+            picked,
+            ["c", "d"],
+            "a shortcut showed c after the click on a"
+        );
+        assert_eq!(selection.anchor(), Some("c"));
+
+        selection.click(&STRIP, Some("c"), "b", PillClick::Toggle);
+        selection.click(&STRIP, Some("c"), "a", PillClick::Range);
+        let picked: Vec<&str> = STRIP
+            .into_iter()
+            .filter(|id| selection.contains(id))
+            .collect();
+        assert_eq!(
+            picked,
+            ["a", "b"],
+            "a Ctrl+click anchor holds while c stays shown"
+        );
+    }
+
+    #[test]
+    fn plain_click_clears_selection() {
+        let mut selection = TabSelection::default();
+        selection.click(&STRIP, None, "a", PillClick::Toggle);
+        selection.click(&STRIP, None, "b", PillClick::Toggle);
+        assert!(selection.click(&STRIP, None, "c", PillClick::Plain));
+        assert!(selection.is_empty());
+        assert_eq!(selection.anchor(), Some("c"));
+    }
+
+    #[test]
+    fn selection_prunes_removed_tabs() {
+        let tabs: Vec<TabEntry> = STRIP.iter().map(|id| tab(id, &pane(id, None))).collect();
+        let mut model = model_with(&tabs);
+        model.selection.click(&STRIP, None, "a", PillClick::Toggle);
+        model.selection.click(&STRIP, None, "b", PillClick::Toggle);
+        model.selection.click(&STRIP, None, "c", PillClick::Toggle);
+        assert!(model.apply(&DaemonMessage::TabRemoved {
+            tab_id: "c".to_owned()
+        }));
+        assert!(!model.selection.contains("c"));
+        assert_eq!(model.selection.anchor(), None, "the anchor went with it");
+        assert!(model.apply(&tabs_msg(&[tabs[0].clone(), tabs[3].clone()])));
+        assert!(model.selection.contains("a"));
+        assert!(!model.selection.contains("b"), "a list without b drops it");
+        assert_eq!(model.selection.len(), 1);
+    }
+
+    #[test]
+    fn bound_pane_count_skips_empty() {
+        assert_eq!(bound_pane_count(&three()), 2);
+        assert_eq!(bound_pane_count(&pane("p", None)), 0);
     }
 }

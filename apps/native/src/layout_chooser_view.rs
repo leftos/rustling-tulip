@@ -154,7 +154,7 @@ impl RootView {
 
     /// The pane area's width over its height, or 16:10 before it has been
     /// laid out.
-    fn pane_area_aspect(&self) -> f32 {
+    pub(crate) fn pane_area_aspect(&self) -> f32 {
         self.grid_bounds
             .map(|bounds| bounds.size.width / bounds.size.height)
             .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
