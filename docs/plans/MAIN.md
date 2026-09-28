@@ -17,7 +17,6 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 Bugs, and the user's request to recover killed sessions.
 
 - [ ] **Recover dialog in the native client** (user; session recovery step 5): the rail button, its badge of unrecovered unexpected ends and the Recover dialog, as in [session-recovery.md](./session-recovery.md) Design 6. `apps/native/src/activity_bar.rs`, new `recover.rs` / `recover_view.rs`, `lib.rs`, `spawns.rs`, `tests/ui_recover.rs`. Gates: `-p rustling-tulip-native`, then the live tier (`e2e_recover.rs`); hand-test the badge against the real history.
-- [ ] **Uninstalling leaves the daemon's login entry behind** (user), on the `tauri` branch: `apps/tauri-app/src-tauri/installer.nsi.template` (~line 842) deletes the HKCU `Run` value `${PRODUCTNAME}`, but `autostart.rs` writes `rustling-tulip-daemon`, so Windows keeps launching a missing exe at login. Delete `rustling-tulip-daemon` too (on non-update uninstalls only). The native installer's half is in Wave 12.
 
 ## Waves
 
