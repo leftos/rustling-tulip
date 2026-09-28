@@ -93,6 +93,17 @@ M0–M3 are code-complete (2026-05-30, `667739d`): tracer IPC over `interprocess
 - [ ] **Blocked on a Mac:** verify M0–M3 on real macOS hardware: `cargo build` and `cargo clippy` there, tracer reattach across a daemon restart, `killpg` cleanup of the child tree, and the LaunchAgent plist written and removed by the autostart toggle
 - [ ] M4 packaging, signing and notarization: deferred while distribution is local dev builds only
 
+### Ideas borrowed from Orca and VelaTerm
+Features from two open-source agent managers, reviewed 2026-09-28 (user: keep developing rustling-tulip and borrow ideas rather than switch or contribute workspaces upstream). Each item needs a design pass first. Details, sources and open questions: [borrowed-ideas.md](./plans/borrowed-ideas.md)
+- [ ] Hook-reported agent status (Claude Code hooks through an inline `--settings`), with the `pty_state.rs` heuristic as the fallback
+- [ ] Conversation view (GUI mode): a Claude session as a chat with tool cards and permission buttons, switchable with the terminal view (user, 2026-09-28: likes VelaTerm's). Billing spike done: it runs on the Max subscription's usage windows today; personal use only ([gui-mode-billing.md](./spikes/gui-mode-billing.md))
+- [ ] "Needs You" view: every session waiting on the user in one place
+- [ ] Link a worktree to a GitHub issue or PR at spawn
+- [ ] Agents that drive rustling-tulip: a CLI to spawn, message and read other sessions
+- [ ] Plan, then execute in parallel across worktrees
+- [ ] Resume the sessions a reboot killed, on the next start
+- [ ] Share the workspace design on Orca issue #1099 (the user confirms the text first)
+
 ### Tooling cleanups (singles)
 
 Pre-existing warnings and traps noticed during the 2026-09-24 native-client session.
