@@ -413,9 +413,12 @@ fn dialog_closes_when_its_session_is_removed(cx: &mut TestAppContext) {
         session_id: "s1".to_owned(),
     });
     assert_eq!(dialog_of(&mut h), None);
+    let sent = h.sent();
     assert!(
-        h.sent().is_empty(),
-        "nothing is discarded for a gone session"
+        !sent
+            .iter()
+            .any(|m| matches!(m, ClientMessage::DiscardSession { .. })),
+        "nothing is discarded for a gone session: sent {sent:?}"
     );
 }
 

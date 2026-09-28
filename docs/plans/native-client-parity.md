@@ -50,7 +50,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx`
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`
 - [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10)
-- [ ] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9)
+- [ ] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; still missing: the dot's pulse while working and hollow while spawning)
 - [x] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession` (native: a single click places an unbound leaf in the active tab, by the user's ruling, so there is no double-click action)
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
 - [ ] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx`
@@ -62,12 +62,12 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10)
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
-- [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx`
+- [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out, which comes with Phase 5, landed in P4.12a; member chips sit on a second row)
 - [x] Stopped-pane overlay: Restart in place, New session… into this pane, remove pane keep worktree, remove pane (± worktree) — `SessionPane.tsx`
-- [ ] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx`
+- [x] Abandoned overlay (shows the last prompt) with Resume / Dismiss; orphan banner — `SessionPane.tsx` (native: P4.12a; the banner names the session's runtime)
 - [x] Headless view: status, tokens in/out, cost, recent-actions log (last 200, "Show all") — `SessionPane.tsx` `HeadlessView` (native: P4.6; the daemon keeps 200 actions, the same as the tail, so "Show all" appears only if one side's cap changes)
-- [ ] Display label order: user label → shell cwd name → terminal title (skipping bare shell names) → daemon label → runtime — `utils/sessionLabel.ts`
-- [ ] Sessions without a worktree that exit on their own are discarded automatically — `App.tsx`
+- [x] Display label order: user label → shell cwd name → terminal title (skipping bare shell names) → daemon label → runtime — `utils/sessionLabel.ts` (native: P4.12a, everywhere a session is named)
+- [x] Sessions without a worktree that exit on their own are discarded automatically — `App.tsx` (native: P4.12a; headless and abandoned sessions are kept, and after a reconnect nothing is discarded until the fresh session list arrives)
 - [x] Delete-worktree confirm (the only path to deleting one): per-branch fate from the daemon, delete all / keep vs delete (commits lost) / worktree only, 10s fallback, safe option focused — `DeleteWorktreeDialog.tsx`, `utils/branchFate.ts`
 - [x] Worktree cleanup failed: path, reason, locking processes (name, pid, cmdline) as checkboxes, open folder, "Kill N & retry" / Retry / Ignore — `WorktreeCleanupFailedDialog.tsx` (native: P4.4a; lockers are one list below the folders rather than nested under each)
 - [x] Blocking "action failed" modal (title, detail, hint) — `ActionFailedModal.tsx`

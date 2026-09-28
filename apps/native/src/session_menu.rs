@@ -14,14 +14,15 @@ use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::notices::ToastKind;
 use crate::session_actions::{
-    ActionState, MenuEntry, MenuMode, SessionAction, Step, action_state, exit_code_label,
-    exited_message, header_shows_exit_code, menu_entries, overlay_actions, pane_shows_exit, plan,
-    rename_message,
+    ABANDONED_ACTIONS, ActionState, MenuEntry, MenuMode, SessionAction, Step, abandoned_lines,
+    action_state, exit_code_label, exited_message, header_shows_exit_code, menu_entries,
+    orphan_banner_text, overlay_actions, pane_shows_exit, plan, rename_message,
 };
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{
-    BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip,
+    BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
+    tooltip,
 };
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
@@ -456,7 +457,7 @@ impl RootView {
     /// Carries out `action` on `session_id`, disarming the header Stop. A
     /// worktree delete opens the delete-worktree confirm in the menu's
     /// place. A restart already on the way does nothing.
-    fn choose_action(
+    pub(crate) fn choose_action(
         &mut self,
         session_id: &str,
         action: SessionAction,
@@ -932,36 +933,146 @@ impl RootView {
             1,
             self.overlay_new_session(tab_id, pane_id, &session.id, cx),
         );
-        let name = format!("exited-{pane_id}");
         Some(
-            div()
-                .id(ElementId::Name(SharedString::from(name.clone())))
-                .debug_selector(|| name)
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(10.0))
-                .bg(gpui::rgba(OVERLAY_TINT))
-                .occlude()
-                .text_size(px(UI_TEXT_SIZE))
-                .text_color(gpui::rgb(TEXT))
+            overlay_layer(format!("exited-{pane_id}"))
                 .child(exited_message(session))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .children(buttons),
-                )
+                .child(overlay_buttons(buttons))
                 .into_any_element(),
         )
     }
+
+    /// The layer over an abandoned session's pane: what happened, the
+    /// prompt it was running, and Resume and Dismiss.
+    pub(crate) fn abandoned_overlay(
+        &self,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let session = session_id
+            .and_then(|id| self.sidebar.session(id))
+            .filter(|session| action_state(session) == ActionState::Abandoned)?;
+        let buttons: Vec<AnyElement> = ABANDONED_ACTIONS
+            .iter()
+            .map(|inline| {
+                let selector = format!("abandoned-{}-{pane_id}", inline.key);
+                let label = self.action_label(session, inline.action, true);
+                self.action_button(&session.id, inline.action, &selector, label, cx)
+                    .border_1()
+                    .border_color(gpui::rgb(BORDER))
+                    .tooltip(tooltip(inline.tip))
+                    .into_any_element()
+            })
+            .collect();
+        let mut lines = abandoned_lines(session).into_iter();
+        Some(
+            overlay_layer(format!("abandoned-{pane_id}"))
+                .children(lines.next())
+                .children(lines.map(|line| {
+                    div()
+                        .max_w(px(DIALOG_WIDTH))
+                        .text_color(gpui::rgb(MUTED))
+                        .child(line)
+                }))
+                .child(overlay_buttons(buttons))
+                .into_any_element(),
+        )
+    }
+
+    /// The banner atop an orphan's pane: its live stream is gone though its
+    /// process still runs.
+    pub(crate) fn orphan_banner(&self, pane_id: &str, session_id: Option<&str>) -> Option<Div> {
+        let session = session_id
+            .and_then(|id| self.sidebar.session(id))
+            .filter(|session| session.is_orphan)?;
+        let name = format!("orphan-banner-{pane_id}");
+        Some(
+            div()
+                .debug_selector(|| name)
+                .flex_none()
+                .px(px(8.0))
+                .py(px(4.0))
+                .bg(gpui::rgba((WARNING << 8) | 0x24))
+                .text_size(px(UI_TEXT_SIZE))
+                .text_color(gpui::rgb(TEXT))
+                .child(orphan_banner_text(session)),
+        )
+    }
+
+    /// The selectors of the abandoned overlays and orphan banners of the
+    /// tab on screen, as [`Self::abandoned_overlay`] and
+    /// [`Self::orphan_banner`] draw them.
+    #[must_use]
+    pub fn pane_notice_selectors(&self) -> Vec<String> {
+        let Some(grid) = self.tabs.active_tab().and_then(TabEntry::grid) else {
+            return Vec::new();
+        };
+        let mut selectors = Vec::new();
+        for pane in collect_panes(grid) {
+            let Some(session) = pane.session.and_then(|id| self.sidebar.session(id)) else {
+                continue;
+            };
+            if action_state(session) == ActionState::Abandoned {
+                selectors.push(format!("abandoned-{}", pane.id));
+                selectors.extend(
+                    ABANDONED_ACTIONS
+                        .iter()
+                        .map(|inline| format!("abandoned-{}-{}", inline.key, pane.id)),
+                );
+            }
+            if session.is_orphan {
+                selectors.push(format!("orphan-banner-{}", pane.id));
+            }
+        }
+        selectors
+    }
+
+    /// The text of pane `pane_id`'s abandoned overlay or orphan banner in
+    /// the tab on screen; empty when it shows neither.
+    #[must_use]
+    pub fn pane_notice(&self, pane_id: &str) -> Vec<String> {
+        let Some(session) = self.active_pane_session(pane_id) else {
+            return Vec::new();
+        };
+        let mut text = Vec::new();
+        if session.is_orphan {
+            text.push(orphan_banner_text(session));
+        }
+        if action_state(session) == ActionState::Abandoned {
+            text.extend(abandoned_lines(session));
+        }
+        text
+    }
+}
+
+/// A tinted layer over a whole pane, its content centred, that takes the
+/// pointer from the terminal under it.
+fn overlay_layer(name: String) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.0))
+        .bg(gpui::rgba(OVERLAY_TINT))
+        .occlude()
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+}
+
+fn overlay_buttons(buttons: Vec<AnyElement>) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .justify_center()
+        .gap(px(6.0))
+        .children(buttons)
 }
 
 impl RootView {

@@ -80,6 +80,95 @@ pub struct Leaf {
     pub label: String,
     pub runtime: Option<String>,
     pub attention: bool,
+    pub state: LeafState,
+    /// Launched with approval prompts bypassed.
+    pub trusted: bool,
+    /// The label's hover text.
+    pub tooltip: String,
+}
+
+/// What a leaf tags its session as besides its runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeafState {
+    Live,
+    /// Reattached after a daemon restart with its PTY lost.
+    Orphan,
+    /// Left behind by a daemon crash, with the prompt it was running.
+    Abandoned {
+        last_prompt: Option<String>,
+    },
+    /// Parked, with the worktrees it kept.
+    Inactive {
+        worktree_paths: Vec<String>,
+    },
+}
+
+impl LeafState {
+    /// A parked session is parked whatever else it is; an abandoned one
+    /// is not also an orphan.
+    fn of(s: &SessionSnapshot) -> Self {
+        if s.is_inactive {
+            Self::Inactive {
+                worktree_paths: s.worktree_paths.clone(),
+            }
+        } else if s.is_abandoned {
+            Self::Abandoned {
+                last_prompt: non_empty(s.last_prompt.as_deref()).map(str::to_owned),
+            }
+        } else if s.is_orphan {
+            Self::Orphan
+        } else {
+            Self::Live
+        }
+    }
+
+    /// The state's tag and its hover text; `None` for a live session.
+    fn tag(&self) -> Option<(String, String)> {
+        let (tag, tip) = match self {
+            Self::Live => return None,
+            Self::Orphan => (
+                "orphan",
+                "Reattached after daemon restart; PTY detached".to_owned(),
+            ),
+            Self::Abandoned { last_prompt } => (
+                "abandoned",
+                last_prompt.as_ref().map_or_else(
+                    || "Daemon crashed mid-run".to_owned(),
+                    |prompt| format!("Daemon crashed mid-run. Last prompt:\n{prompt}"),
+                ),
+            ),
+            Self::Inactive { worktree_paths } if worktree_paths.is_empty() => {
+                ("inactive", "Parked".to_owned())
+            }
+            Self::Inactive { worktree_paths } => (
+                "inactive",
+                format!(
+                    "Parked. Worktree kept on disk:\n{}",
+                    worktree_paths.join("\n")
+                ),
+            ),
+        };
+        Some((tag.to_owned(), tip))
+    }
+}
+
+impl Leaf {
+    /// The row's tags as text and hover text: the runtime, then the
+    /// orphan, abandoned or parked state.
+    #[must_use]
+    pub fn tags(&self) -> Vec<(String, String)> {
+        let mut tags = Vec::new();
+        if let Some(runtime) = &self.runtime {
+            let tip = if self.trusted {
+                format!("Running {runtime}; approval prompts were bypassed")
+            } else {
+                format!("Running {runtime}")
+            };
+            tags.push((runtime.clone(), tip));
+        }
+        tags.extend(self.state.tag());
+        tags
+    }
 }
 
 /// One container row and its sessions.
@@ -944,6 +1033,9 @@ fn leaf(s: &SessionSnapshot, attention: &HashSet<String>) -> Leaf {
         label: display_label(s),
         runtime: runtime_label(s),
         attention: attention.contains(&s.id),
+        state: LeafState::of(s),
+        trusted: s.elevated_authority,
+        tooltip: label_tooltip(s),
     }
 }
 
@@ -1177,6 +1269,23 @@ pub fn display_label(s: &SessionSnapshot) -> String {
         .or_else(|| non_empty(Some(&s.label)).map(str::to_owned))
         .or_else(|| runtime_label(s))
         .unwrap_or_else(|| s.id.clone())
+}
+
+/// A session name's hover text: the name, then the daemon's label and the
+/// terminal title where they say something else, then the working directory.
+pub fn label_tooltip(s: &SessionSnapshot) -> String {
+    let display = display_label(s);
+    let mut lines = vec![display.clone()];
+    if let Some(label) = non_empty(Some(&s.label)).filter(|l| *l != display) {
+        lines.push(format!("Session: {label}"));
+    }
+    if let Some(title) = non_empty(s.terminal_title.as_deref()).filter(|t| *t != display) {
+        lines.push(format!("Terminal title: {title}"));
+    }
+    if let Some(cwd) = non_empty(s.current_cwd.as_deref()) {
+        lines.push(format!("Cwd: {cwd}"));
+    }
+    lines.join("\n")
 }
 
 /// The runtime tag: the agent for agent sessions, the program for plain
@@ -1721,6 +1830,43 @@ mod tests {
         assert_eq!(display_label(&s), "pwsh");
         s.program_name = None;
         assert_eq!(display_label(&s), "id");
+    }
+
+    #[test]
+    fn tooltip_is_the_label_alone_when_nothing_differs() {
+        assert_eq!(label_tooltip(&session("id")), "id");
+    }
+
+    #[test]
+    fn tooltip_names_the_session_label_when_it_differs() {
+        let mut s = session("id");
+        s.user_label = Some("mine".to_owned());
+        s.label = "repo · main".to_owned();
+        assert_eq!(label_tooltip(&s), "mine\nSession: repo · main");
+    }
+
+    #[test]
+    fn tooltip_names_the_terminal_title_when_it_differs() {
+        let mut s = session("id");
+        s.label = "repo · main".to_owned();
+        s.terminal_title = Some("pwsh".to_owned());
+        assert_eq!(label_tooltip(&s), "repo · main\nTerminal title: pwsh");
+        s.terminal_title = Some("Building".to_owned());
+        assert_eq!(
+            label_tooltip(&s),
+            "Building\nSession: repo · main",
+            "a title that is the label is not repeated"
+        );
+    }
+
+    #[test]
+    fn tooltip_ends_with_the_cwd() {
+        let mut s = shell("id", Some("D:/src/app"), SessionKind::Standalone);
+        s.terminal_title = Some("vim".to_owned());
+        assert_eq!(
+            label_tooltip(&s),
+            "app\nSession: id\nTerminal title: vim\nCwd: D:/src/app"
+        );
     }
 
     #[test]

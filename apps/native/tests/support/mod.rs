@@ -137,6 +137,12 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         Some(true)
     } else if let Some(id) = selector.strip_prefix("leaf-pill-") {
         Some(root.leaf_tab_pill(id).is_some() && listed(id))
+    } else if let Some(id) = selector
+        .strip_prefix("leaf-resume-")
+        .or_else(|| selector.strip_prefix("leaf-dismiss-"))
+    {
+        let offered = root.leaf_buttons(id).iter().any(|(s, _)| s == selector);
+        Some(offered && listed(id))
     } else {
         Some(listed(selector.strip_prefix("leaf-")?))
     }
@@ -358,6 +364,28 @@ impl SessionBuilder {
     /// With `label` as the daemon's label.
     pub fn label(self, label: &str) -> Self {
         self.set("label", json!(label))
+    }
+
+    /// Launched with approval prompts bypassed.
+    pub fn trusted(self) -> Self {
+        self.set("elevated_authority", json!(true))
+    }
+
+    pub fn terminal_title(self, title: &str) -> Self {
+        self.set("terminal_title", json!(title))
+    }
+
+    pub fn program_name(self, program: &str) -> Self {
+        self.set("program_name", json!(program))
+    }
+
+    /// The prompt it was running when the daemon went down.
+    pub fn last_prompt(self, prompt: &str) -> Self {
+        self.set("last_prompt", json!(prompt))
+    }
+
+    pub fn cwd(self, cwd: &str) -> Self {
+        self.set("current_cwd", json!(cwd))
     }
 
     pub fn build(self) -> SessionSnapshot {
@@ -1016,6 +1044,8 @@ impl<'a> Harness<'a> {
                 root.empty_pane_ids().iter().any(|p| p == id)
             } else if selector.starts_with("exited-") {
                 root.exited_overlay_selectors().contains(&selector)
+            } else if selector.starts_with("abandoned-") || selector.starts_with("orphan-banner-") {
+                root.pane_notice_selectors().contains(&selector)
             } else if let Some(shown) = headless_part_shown(root, &selector) {
                 shown
             } else if selector == "empty-spawn-session" || selector == "empty-open-shell" {

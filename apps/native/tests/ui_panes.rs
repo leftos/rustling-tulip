@@ -14,6 +14,7 @@ use protocol::{
     ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
     SplitDirection, TabEntry,
 };
+use rustling_tulip_native::PaneHeaderParts;
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
@@ -221,6 +222,118 @@ fn pane_close_esc_cancels(cx: &mut TestAppContext) {
     h.keys("enter");
     assert!(!h.in_model("pane-close"), "Enter presses Cancel");
     assert!(h.sent().is_empty());
+}
+
+fn chip(text: &str, tip: &str) -> (String, String) {
+    (text.to_owned(), tip.to_owned())
+}
+
+fn header_of(h: &mut Harness<'_>, pane_id: &str) -> PaneHeaderParts {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_header_parts(&pane_id))
+        .expect("the pane shows a session")
+}
+
+/// Tab `t1`: `s1` in pane `p1` beside `s2` in pane `p2`.
+fn side_by_side(s1: SessionSnapshot, s2: SessionSnapshot) -> Fixture {
+    Fixture {
+        sessions: vec![s1, s2],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+        ..Fixture::default()
+    }
+}
+
+#[gpui::test]
+fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(
+        session("s1")
+            .trusted()
+            .status("awaiting_input")
+            .label("repo · main")
+            .cwd("D:/src/repo")
+            .build(),
+        session("s2").headless().agent("codex").build(),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    let header = header_of(&mut h, "p1");
+    assert_eq!(header.status_tip, "status: awaiting input");
+    assert_eq!(header.title, "repo · main");
+    assert_eq!(header.title_tip, "repo · main\nCwd: D:/src/repo");
+    assert_eq!(
+        header.chips,
+        [
+            chip("claude", "Running claude"),
+            chip(
+                "trusted",
+                "Trusted launch: permission prompts were bypassed"
+            ),
+        ]
+    );
+    assert!(!header.headless);
+
+    let header = header_of(&mut h, "p2");
+    assert_eq!(header.chips, [chip("codex", "Running codex")]);
+    assert!(header.headless, "a headless session says so");
+}
+
+#[gpui::test]
+fn pane_header_member_chips_for_workspace_session(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(
+        session("s1")
+            .in_workspace("ws1")
+            .members(&[("r1", "wt/a", "C:/wt/a/r1"), ("r2", "wt/a", "C:/wt/a/r2")])
+            .build(),
+        session("s2").build(),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        header_of(&mut h, "p1").members,
+        [
+            chip("r1: wt/a", "r1: wt/a\nC:/wt/a/r1"),
+            chip("r2: wt/a", "r2: wt/a\nC:/wt/a/r2"),
+        ]
+    );
+    let two_rows = h.bounds("pane-header-p1").size.height;
+    let one_row = h.bounds("pane-header-p2").size.height;
+    assert!(
+        two_rows > one_row,
+        "the member chips take a second row: {two_rows:?} against {one_row:?}"
+    );
+}
+
+#[gpui::test]
+fn plain_shell_header_has_one_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(
+        session("s1")
+            .shell("D:/scratch")
+            .program_name("pwsh")
+            .build(),
+        session("s2").in_repo("r1").build(),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    let header = header_of(&mut h, "p1");
+    assert!(header.members.is_empty());
+    assert_eq!(header.title, "scratch");
+    assert_eq!(header.chips, [chip("pwsh", "Running pwsh")]);
+    let shell = h.bounds("pane-header-p1").size.height;
+    let repo = h.bounds("pane-header-p2").size.height;
+    assert!(
+        shell < repo,
+        "a shell's header is one row, a repo session's two: {shell:?} against {repo:?}"
+    );
 }
 
 #[gpui::test]

@@ -14,6 +14,7 @@ use crate::appearance;
 use crate::appearance_view::Level;
 use crate::connection::DotKind;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
+use crate::session_actions::inline_actions;
 use crate::sidebar::{Activity, Container, ContainerKind, Leaf, SidebarView, can_attach};
 use crate::spawn_view::SpawnEntry;
 use crate::tabs::{TabPill, tab_pills};
@@ -557,7 +558,8 @@ fn leaf_row(
         .when_some(background, |row, fill| row.bg(gpui::rgba(fill)))
         .border_1()
         .border_color(gpui::rgba(border))
-        .child(session_dot(leaf.status, &leaf.id))
+        .tooltip(tooltip(leaf.tooltip.clone()))
+        .child(session_dot(leaf.status, format!("leaf-dot-{}", leaf.id)))
         .child(
             div()
                 .flex_1()
@@ -565,15 +567,8 @@ fn leaf_row(
                 .truncate()
                 .child(leaf.label.clone()),
         )
-        .when_some(leaf.runtime.clone(), |row, runtime| {
-            row.child(
-                div()
-                    .flex_none()
-                    .text_size(px(TAG_TEXT_SIZE))
-                    .text_color(gpui::rgb(MUTED))
-                    .child(runtime),
-            )
-        })
+        .children(leaf_tags(leaf))
+        .children(inline_buttons(leaf, cx))
         .when(leaf.attention, |row| row.child(attention_mark()))
         .children(pill)
         .child(
@@ -597,10 +592,92 @@ fn leaf_row(
         }))
 }
 
+/// The leaf's runtime and state tags, each with its hover text.
+fn leaf_tags(leaf: &Leaf) -> Vec<AnyElement> {
+    leaf.tags()
+        .into_iter()
+        .enumerate()
+        .map(|(i, (text, tip))| {
+            div()
+                .id(SharedString::from(format!("leaf-tag-{}-{i}", leaf.id)))
+                .flex_none()
+                .text_size(px(TAG_TEXT_SIZE))
+                .text_color(gpui::rgb(MUTED))
+                .child(text)
+                .tooltip(tooltip(tip))
+                .into_any_element()
+        })
+        .collect()
+}
+
+/// The leaf's Resume and Dismiss. They act on the press and keep it from
+/// the row, so the row's click never shows the session.
+fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+    inline_actions(&leaf.state)
+        .into_iter()
+        .map(|inline| {
+            let selector = format!("leaf-{}-{}", inline.key, leaf.id);
+            let id = leaf.id.clone();
+            div()
+                .id(SharedString::from(selector.clone()))
+                .debug_selector(|| selector)
+                .flex_none()
+                .px(px(4.0))
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(gpui::rgb(BORDER))
+                .text_size(px(TAG_TEXT_SIZE))
+                .text_color(gpui::rgb(TEXT))
+                .cursor_pointer()
+                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+                .child(inline.action.label(false, false))
+                .tooltip(tooltip(inline.tip))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.choose_action(&id, inline.action, window, cx);
+                    }),
+                )
+                .into_any_element()
+        })
+        .collect()
+}
+
+impl RootView {
+    fn listed_leaf(&self, id: &str) -> Option<Leaf> {
+        self.sidebar
+            .containers()
+            .into_iter()
+            .flat_map(|container| container.leaves)
+            .find(|leaf| leaf.id == id)
+    }
+
+    /// Leaf `id`'s tags as text and hover text: its runtime, then its
+    /// orphan, abandoned or parked state. Empty when it is not listed.
+    #[must_use]
+    pub fn leaf_tags(&self, id: &str) -> Vec<(String, String)> {
+        self.listed_leaf(id)
+            .map(|leaf| leaf.tags())
+            .unwrap_or_default()
+    }
+
+    /// Leaf `id`'s inline buttons: selector and hover text.
+    #[must_use]
+    pub fn leaf_buttons(&self, id: &str) -> Vec<(String, String)> {
+        self.listed_leaf(id).map_or_else(Vec::new, |leaf| {
+            inline_actions(&leaf.state)
+                .into_iter()
+                .map(|inline| (format!("leaf-{}-{id}", inline.key), inline.tip.to_owned()))
+                .collect()
+        })
+    }
+}
+
 /// A session's status dot: pulsing while working, hollow while spawning,
 /// amber while awaiting input.
-fn session_dot(status: SessionStatus, session_id: &str) -> AnyElement {
-    let id = SharedString::from(format!("leaf-dot-{session_id}"));
+pub(crate) fn session_dot(status: SessionStatus, id: impl Into<SharedString>) -> AnyElement {
+    let id = id.into();
     match status {
         SessionStatus::Working => status_dot(DotKind::Pending, id),
         SessionStatus::Idle => status_dot(DotKind::Ok, id),

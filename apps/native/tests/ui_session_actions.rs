@@ -481,6 +481,12 @@ fn abandoned_session_pane_has_no_exit_overlay(cx: &mut TestAppContext) {
 
     assert!(!painted(&mut h, "exited-p1"), "abandoned is not exited");
     assert!(!painted(&mut h, "exited-restart-p1"));
+    assert!(painted(&mut h, "abandoned-p1"), "its own overlay covers it");
+    assert_eq!(
+        notice_of(&mut h, "p1"),
+        ["Session abandoned during daemon restart."],
+        "no prompt line without a prompt"
+    );
 
     h.right_click_on("pane-header-p1");
     assert_eq!(rows(&mut h), ["menu-resume-abandoned", "menu-dismiss"]);
@@ -490,6 +496,149 @@ fn abandoned_session_pane_has_no_exit_overlay(cx: &mut TestAppContext) {
         matches!(sent.as_slice(), [ClientMessage::ResumeAbandoned { session_id }] if session_id == "s1"),
         "sent {sent:?}"
     );
+}
+
+fn notice_of(h: &mut Harness<'_>, pane_id: &str) -> Vec<String> {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_notice(&pane_id))
+}
+
+#[gpui::test]
+fn abandoned_pane_shows_overlay_with_last_prompt(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(
+        cx,
+        &dir,
+        session("s1")
+            .abandoned()
+            .last_prompt("fix the build")
+            .build(),
+    );
+
+    assert!(painted(&mut h, "abandoned-p1"));
+    assert_eq!(
+        notice_of(&mut h, "p1"),
+        [
+            "Session abandoned during daemon restart.",
+            "Last prompt: fix the build",
+        ]
+    );
+    assert!(painted(&mut h, "abandoned-resume-p1"));
+    assert!(painted(&mut h, "abandoned-dismiss-p1"));
+    h.click_on("abandoned-dismiss-p1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DiscardAbandoned { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn abandoned_overlay_resume_sends_resume_abandoned(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").abandoned().build());
+
+    h.click_on("abandoned-resume-p1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ResumeAbandoned { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn orphan_pane_shows_banner_naming_runtime(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").orphan().agent("codex").build());
+
+    assert!(painted(&mut h, "orphan-banner-p1"));
+    assert_eq!(
+        notice_of(&mut h, "p1"),
+        [
+            "PTY stream lost across daemon restart. The underlying codex process is still running, \
+             but live input/output is not available. Use Stop to kill the recorded PID and clean up, \
+             then spawn a new session."
+        ]
+    );
+    assert!(!h.in_model("abandoned-p1"), "an orphan is not abandoned");
+}
+
+/// The discards among the messages sent since the last look.
+fn discards(h: &mut Harness<'_>) -> Vec<ClientMessage> {
+    h.sent()
+        .into_iter()
+        .filter(|m| matches!(m, ClientMessage::DiscardSession { .. }))
+        .collect()
+}
+
+#[gpui::test]
+fn worktreeless_session_that_exits_by_itself_is_discarded(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").status("working").build());
+
+    h.send(updated(session("s1").exited(0).build(), None));
+
+    let sent = discards(&mut h);
+    assert!(
+        matches!(sent.as_slice(), [m] if is_discard(m, "s1", &[])),
+        "sent {sent:?}"
+    );
+    h.send(updated(session("s1").exited(0).build(), None));
+    assert!(
+        discards(&mut h).is_empty(),
+        "a repeat snapshot is no new exit"
+    );
+}
+
+#[gpui::test]
+fn exit_update_between_welcome_and_sessions_list_is_not_discarded(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").status("working").build());
+
+    h.send(DaemonMessage::Welcome {
+        protocol_version: 1,
+        supported_versions: vec![1],
+    });
+    h.send(updated(session("s1").exited(0).build(), None));
+
+    assert!(
+        discards(&mut h).is_empty(),
+        "the working status is from before the reconnect"
+    );
+}
+
+#[gpui::test]
+fn stopped_by_user_is_not_auto_discarded(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").status("working").build());
+
+    h.send(updated(session("s1").status("stopped").build(), None));
+    h.send(updated(session("s1").exited(1).build(), None));
+
+    assert!(discards(&mut h).is_empty());
+}
+
+#[gpui::test]
+fn worktree_session_that_exits_is_kept(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").worktree("r1").build());
+
+    h.send(updated(
+        session("s1").worktree("r1").exited(0).build(),
+        None,
+    ));
+
+    assert!(discards(&mut h).is_empty());
+}
+
+#[gpui::test]
+fn headless_session_that_finishes_is_kept(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").headless().status("working").build());
+
+    h.send(updated(session("s1").headless().exited(0).build(), None));
+
+    assert!(discards(&mut h).is_empty(), "its stats stay to be read");
 }
 
 #[gpui::test]

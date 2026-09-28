@@ -110,7 +110,7 @@ use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
-use crate::session_actions::{Duplicates, HeaderStopConfirm};
+use crate::session_actions::{Duplicates, HeaderStopConfirm, self_exited};
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
@@ -137,6 +137,7 @@ pub use crate::diff_tab::{
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
 };
 pub use crate::footer::LogPaths;
+pub use crate::grid_view::PaneHeaderParts;
 pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
     MoreRow,
@@ -153,7 +154,8 @@ pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
-    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, SidebarView,
+    Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, LeafState,
+    SidebarView,
 };
 pub use crate::sidebar_view::LeafHighlight;
 pub use crate::source_control::{Bucket, ScKey};
@@ -410,6 +412,9 @@ pub struct RootView {
     /// last press left off and one change does not undo another still on
     /// its way.
     pending_appearance: appearance::InFlightAppearance,
+    /// The sessions this connection has had a snapshot of. A status the
+    /// sidebar kept from before a reconnect says nothing about an exit.
+    seen_sessions: HashSet<String>,
     /// When the pending layout save is due, if one is.
     ui_save_deadline: Option<Instant>,
     /// Wakes the view when the layout save is due.
@@ -653,6 +658,7 @@ impl RootView {
             tab_menu_focus: cx.focus_handle(),
             pane_ui: pane_menu::PaneUi::new(cx.focus_handle(), cx.focus_handle()),
             pending_appearance: appearance::InFlightAppearance::default(),
+            seen_sessions: HashSet::new(),
             ui_save_deadline: None,
             ui_save_timer: None,
             confirm: HeaderStopConfirm::default(),
@@ -1396,13 +1402,13 @@ impl RootView {
     }
 
     fn on_message(&mut self, msg: DaemonMessage, window: &mut Window, cx: &mut Context<Self>) {
-        // The sidebar takes the message before the panes do, so whether a
-        // snapshot moved a session's appearance is read from the old one.
-        let moved = match &msg {
-            DaemonMessage::SessionUpdated { session, .. } => Some(self.appearance_moved(session)),
-            _ => None,
-        };
+        // The sidebar takes the message before the panes do, so what a
+        // snapshot changed is read from the old one.
+        let (moved, exit_discard) = self.before_fold(&msg);
         self.fold_sidebar(&msg);
+        if let Some(discard) = exit_discard {
+            self.send(discard);
+        }
         self.notify_on(&msg, cx);
         if self.on_panel_message(&msg, window, cx) {
             return;
@@ -1529,6 +1535,45 @@ impl RootView {
             .session(&session.id)
             .map(|before| before.appearance.clone())
             != Some(session.appearance.clone())
+    }
+
+    /// What a session snapshot changes against the copy the sidebar still
+    /// holds: whether it moved the session's appearance, and the discard
+    /// its exit calls for.
+    fn before_fold(&mut self, msg: &DaemonMessage) -> (Option<bool>, Option<ClientMessage>) {
+        match msg {
+            DaemonMessage::Welcome { .. } => self.seen_sessions.clear(),
+            DaemonMessage::SessionRemoved { session_id } => {
+                self.seen_sessions.remove(session_id);
+            }
+            DaemonMessage::Sessions { sessions } => {
+                self.seen_sessions = sessions.iter().map(|s| s.id.clone()).collect();
+            }
+            DaemonMessage::SessionUpdated { session, .. } => {
+                let discard = self.exit_discard(session);
+                self.seen_sessions.insert(session.id.clone());
+                return (Some(self.appearance_moved(session)), discard);
+            }
+            _ => {}
+        }
+        (None, None)
+    }
+
+    /// The discard of a session with no worktree of its own that `session`
+    /// shows just exited by itself, read against the status the sidebar
+    /// holds from this connection: there is nothing left to keep.
+    fn exit_discard(&self, session: &SessionSnapshot) -> Option<ClientMessage> {
+        let prev = self
+            .sidebar
+            .session(&session.id)
+            .filter(|_| self.seen_sessions.contains(&session.id))
+            .map(|before| before.status);
+        (self_exited(prev, session) && !session.has_per_session_worktree).then(|| {
+            ClientMessage::DiscardSession {
+                session_id: session.id.clone(),
+                cleanup: Vec::new(),
+            }
+        })
     }
 
     /// A session's snapshot: every pane showing it refreshes, the size it
@@ -1854,10 +1899,9 @@ impl RootView {
 
     /// The name the sidebar shows for a session, or its id when unknown.
     fn session_label(&self, id: &str) -> String {
-        self.sidebar.session(id).map_or_else(
-            || id.to_owned(),
-            |s| s.user_label.clone().unwrap_or_else(|| s.label.clone()),
-        )
+        self.sidebar
+            .session(id)
+            .map_or_else(|| id.to_owned(), crate::sidebar::display_label)
     }
 }
 

@@ -9,14 +9,18 @@ use gpui::{
     MouseDownEvent, Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*,
     px, relative,
 };
-use protocol::{ClientMessage, GridNode, SplitDirection, SplitPlace, TabContent, TabEntry};
+use protocol::{
+    ClientMessage, GridNode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
+    TabContent, TabEntry,
+};
 
 use crate::appearance::{self, PaneFrame, Resolved};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
 use crate::headless;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
-use crate::sidebar::can_attach;
+use crate::sidebar::{can_attach, display_label, label_tooltip, runtime_label};
+use crate::sidebar_view::session_dot;
 use crate::spawn_view::SpawnEntry;
 use crate::spawns::{OpenIn, PaneAim};
 use crate::tabs::{self, PaneBinding, TabsModel};
@@ -36,6 +40,8 @@ pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
 const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
 const PANE_HEADER_HEIGHT: f32 = 20.0;
+const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
+const HEADLESS_NOTE: &str = " · headless";
 /// The accent line down a pane's left edge.
 const ACCENT_LINE_WIDTH: f32 = 3.0;
 
@@ -904,8 +910,10 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .children(self.orphan_banner(pane_id, session_id))
             .child(body)
-            .children(self.exited_overlay(tab_id, pane_id, session_id, cx));
+            .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
+            .children(self.abandoned_overlay(pane_id, session_id, cx));
         let colors = self.frame_colors(pane_id, session_id, focused);
         div()
             .relative()
@@ -928,9 +936,10 @@ impl RootView {
             .into_any_element()
     }
 
-    /// The session's name, its Stop or exit code, split right and down
-    /// (Shift: left and up), and close. A right-click opens the session's
-    /// menu.
+    /// The session's status dot, name, runtime, trusted and headless marks,
+    /// its Stop or exit code, split right and down (Shift: left and up),
+    /// move and close; a session with members lists their branches on a
+    /// second row. A right-click opens the session's menu.
     fn pane_header(
         &self,
         tab_id: &str,
@@ -938,12 +947,24 @@ impl RootView {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Div {
-        let label = session_id.map_or_else(|| "Empty pane".to_owned(), |id| self.session_label(id));
-        let ids = (tab_id.to_owned(), pane_id.to_owned());
-        let (right, down, close, menu_ids) = (ids.clone(), ids.clone(), ids.clone(), ids);
+        let parts = session_id
+            .and_then(|id| self.sidebar.session(id))
+            .map(header_parts);
+        let members = parts
+            .as_ref()
+            .filter(|parts| !parts.members.is_empty())
+            .map(|parts| member_row(pane_id, &parts.members));
+        let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
-        let close_session = menu_session.clone();
         let name = format!("pane-header-{pane_id}");
+        let top = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .h(px(PANE_HEADER_HEIGHT))
+            .children(header_title(pane_id, parts.as_ref()))
+            .children(self.header_stop(pane_id, session_id, cx))
+            .children(Self::header_buttons(tab_id, pane_id, session_id, cx));
         div()
             .debug_selector(|| name)
             .on_mouse_down(
@@ -959,51 +980,49 @@ impl RootView {
                 }),
             )
             .flex()
+            .flex_col()
             .flex_none()
-            .items_center()
-            .gap(px(2.0))
-            .h(px(PANE_HEADER_HEIGHT))
             .px(px(6.0))
             .bg(gpui::rgb(BAR_BG))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(MUTED))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(label),
-            )
-            .children(self.header_stop(pane_id, session_id, cx))
-            .child(
-                header_button(pane_id, "split-right", "│", "Split right (Shift: left)").on_click(
-                    cx.listener(move |this, event: &ClickEvent, _, _| {
-                        let (tab, pane) = &right;
-                        this.split_pane(
-                            tab,
-                            pane,
-                            SplitDirection::Horizontal,
-                            event.modifiers().shift,
-                        );
-                    }),
-                ),
-            )
-            .child(
-                header_button(pane_id, "split-down", "─", "Split down (Shift: up)").on_click(
-                    cx.listener(move |this, event: &ClickEvent, _, _| {
-                        let (tab, pane) = &down;
-                        this.split_pane(
-                            tab,
-                            pane,
-                            SplitDirection::Vertical,
-                            event.modifiers().shift,
-                        );
-                    }),
-                ),
-            )
-            .children(session_id.map(|_| {
-                let (tab, pane) = (tab_id.to_owned(), pane_id.to_owned());
+            .child(top)
+            .children(members)
+    }
+
+    /// Split right and down (Shift: left and up), move to a new tab when
+    /// the pane shows a session, and close.
+    fn header_buttons(
+        tab_id: &str,
+        pane_id: &str,
+        session_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let ids = (tab_id.to_owned(), pane_id.to_owned());
+        let (right, down, close) = (ids.clone(), ids.clone(), ids);
+        let close_session = session_id.map(str::to_owned);
+        let mut buttons = vec![
+            header_button(pane_id, "split-right", "│", "Split right (Shift: left)")
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
+                    let (tab, pane) = &right;
+                    this.split_pane(
+                        tab,
+                        pane,
+                        SplitDirection::Horizontal,
+                        event.modifiers().shift,
+                    );
+                }))
+                .into_any_element(),
+            header_button(pane_id, "split-down", "─", "Split down (Shift: up)")
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
+                    let (tab, pane) = &down;
+                    this.split_pane(tab, pane, SplitDirection::Vertical, event.modifiers().shift);
+                }))
+                .into_any_element(),
+        ];
+        if session_id.is_some() {
+            let (tab, pane) = (tab_id.to_owned(), pane_id.to_owned());
+            buttons.push(
                 header_button(
                     pane_id,
                     "pane-move-new-tab",
@@ -1013,22 +1032,156 @@ impl RootView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
                     this.move_pane_to_new_tab(&tab, &pane);
                 }))
-            }))
-            .child(
-                header_button(pane_id, "close-pane", "×", "Close pane").on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| {
-                        let (tab_id, pane_id) = &close;
-                        this.close_pane_clicked(
-                            tab_id,
-                            pane_id,
-                            close_session.as_deref(),
-                            window,
-                            cx,
-                        );
-                    },
-                )),
-            )
+                .into_any_element(),
+            );
+        }
+        buttons.push(
+            header_button(pane_id, "close-pane", "×", "Close pane")
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    let (tab_id, pane_id) = &close;
+                    this.close_pane_clicked(tab_id, pane_id, close_session.as_deref(), window, cx);
+                }))
+                .into_any_element(),
+        );
+        buttons
     }
+
+    /// The session shown by pane `pane_id` of the tab on screen.
+    pub(crate) fn active_pane_session(&self, pane_id: &str) -> Option<&SessionSnapshot> {
+        let grid = self.tabs.active_tab()?.grid()?;
+        let session = tabs::collect_panes(grid)
+            .into_iter()
+            .find(|pane| pane.id == pane_id)?
+            .session?;
+        self.sidebar.session(session)
+    }
+
+    /// What the header of pane `pane_id` in the tab on screen shows of its
+    /// session; `None` for an empty pane.
+    #[must_use]
+    pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
+        self.active_pane_session(pane_id).map(header_parts)
+    }
+}
+
+/// What a pane header shows of its session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneHeaderParts {
+    pub status: SessionStatus,
+    /// The status dot's hover text.
+    pub status_tip: String,
+    pub title: String,
+    pub title_tip: String,
+    /// The runtime and trusted chips: text and hover text.
+    pub chips: Vec<(String, String)>,
+    /// A headless session's note after the chips.
+    pub headless: bool,
+    /// One `repo: branch` chip per member, with its worktree path.
+    pub members: Vec<(String, String)>,
+}
+
+fn header_parts(session: &SessionSnapshot) -> PaneHeaderParts {
+    let mut chips: Vec<(String, String)> = runtime_label(session)
+        .map(|runtime| {
+            let tip = format!("Running {runtime}");
+            (runtime, tip)
+        })
+        .into_iter()
+        .collect();
+    if session.elevated_authority {
+        chips.push(("trusted".to_owned(), TRUSTED_TIP.to_owned()));
+    }
+    let members = session
+        .members
+        .iter()
+        .map(|member| {
+            let text = format!("{}: {}", member.repo_name, member.branch);
+            let tip = format!("{text}\n{}", member.worktree_path);
+            (text, tip)
+        })
+        .collect();
+    PaneHeaderParts {
+        status: session.status,
+        status_tip: format!("status: {}", headless::status_label(session.status)),
+        title: display_label(session),
+        title_tip: label_tooltip(session),
+        chips,
+        headless: headless::is_headless(session),
+        members,
+    }
+}
+
+/// The header's left side: the status dot, the name and the chips, or
+/// "Empty pane".
+fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElement> {
+    let title = div()
+        .id(SharedString::from(format!("pane-title-{pane_id}")))
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap();
+    let Some(parts) = parts else {
+        return vec![title.child("Empty pane").into_any_element()];
+    };
+    let mut out = vec![
+        div()
+            .id(SharedString::from(format!("pane-status-{pane_id}")))
+            .flex_none()
+            .pr(px(4.0))
+            .child(session_dot(parts.status, format!("pane-dot-{pane_id}")))
+            .tooltip(tooltip(parts.status_tip.clone()))
+            .into_any_element(),
+        title
+            .child(parts.title.clone())
+            .tooltip(tooltip(parts.title_tip.clone()))
+            .into_any_element(),
+    ];
+    out.extend(
+        parts
+            .chips
+            .iter()
+            .enumerate()
+            .map(|(i, (text, tip))| header_chip(format!("pane-chip-{pane_id}-{i}"), text, tip)),
+    );
+    if parts.headless {
+        out.push(
+            div()
+                .flex_none()
+                .pr(px(4.0))
+                .child(HEADLESS_NOTE)
+                .into_any_element(),
+        );
+    }
+    out
+}
+
+/// The second header row: one chip per member.
+fn member_row(pane_id: &str, members: &[(String, String)]) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(4.0))
+        .pb(px(3.0))
+        .children(
+            members.iter().enumerate().map(|(i, (text, tip))| {
+                header_chip(format!("pane-member-{pane_id}-{i}"), text, tip)
+            }),
+        )
+}
+
+fn header_chip(id: String, text: &str, tip: &str) -> AnyElement {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .px(px(4.0))
+        .rounded(px(3.0))
+        .border_1()
+        .border_color(gpui::rgb(BORDER))
+        .whitespace_nowrap()
+        .child(text.to_owned())
+        .tooltip(tooltip(tip.to_owned()))
+        .into_any_element()
 }
 
 /// A split's two children around their divider, the first sized by `ratio`.

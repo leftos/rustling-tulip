@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use protocol::{ClientMessage, SessionSnapshot, SessionStatus};
 
 use crate::headless;
+use crate::sidebar::{LeafState, runtime_label};
 use crate::tabs::PaneBinding;
 
 /// Which set of actions a session offers. Parked, stopped and running
@@ -124,6 +125,83 @@ pub(crate) fn header_shows_exit_code(session: &SessionSnapshot) -> bool {
 /// actions.
 pub(crate) fn pane_shows_exit(session: &SessionSnapshot) -> bool {
     header_shows_exit_code(session) && !session.is_abandoned && !headless::is_headless(session)
+}
+
+/// A button a sidebar leaf or the abandoned-pane overlay draws beside the
+/// session's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InlineAction {
+    pub action: SessionAction,
+    /// The button's part of its debug selector.
+    pub key: &'static str,
+    pub tip: &'static str,
+}
+
+const RESUME_ABANDONED: InlineAction = InlineAction {
+    action: SessionAction::ResumeAbandoned,
+    key: "resume",
+    tip: "Spawn a fresh session from the captured config and replay the prompt",
+};
+const DISMISS_ABANDONED: InlineAction = InlineAction {
+    action: SessionAction::DismissAbandoned,
+    key: "dismiss",
+    tip: "Dismiss this abandoned session without resuming",
+};
+const RESUME_PARKED: InlineAction = InlineAction {
+    action: SessionAction::Resume,
+    key: "resume",
+    tip: "Spawn a fresh session that reuses this worktree",
+};
+
+/// The abandoned session's Resume and Dismiss.
+pub(crate) const ABANDONED_ACTIONS: [InlineAction; 2] = [RESUME_ABANDONED, DISMISS_ABANDONED];
+
+/// The buttons a leaf offers by the session's state, as the menu ranks it:
+/// Resume for a parked session, Resume and Dismiss for an abandoned one.
+pub(crate) fn inline_actions(state: &LeafState) -> Vec<InlineAction> {
+    match state {
+        LeafState::Inactive { .. } => vec![RESUME_PARKED],
+        LeafState::Abandoned { .. } => ABANDONED_ACTIONS.to_vec(),
+        LeafState::Live | LeafState::Orphan => Vec::new(),
+    }
+}
+
+/// The abandoned-pane overlay's text: what happened, then the prompt it was
+/// running when there was one.
+pub(crate) fn abandoned_lines(session: &SessionSnapshot) -> Vec<String> {
+    let mut lines = vec!["Session abandoned during daemon restart.".to_owned()];
+    if let Some(prompt) = session
+        .last_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        lines.push(format!("Last prompt: {prompt}"));
+    }
+    lines
+}
+
+/// The banner over an orphan's pane, naming what still runs under it.
+pub(crate) fn orphan_banner_text(session: &SessionSnapshot) -> String {
+    let runtime = runtime_label(session).unwrap_or_else(|| "shell".to_owned());
+    format!(
+        "PTY stream lost across daemon restart. The underlying {runtime} process is still \
+         running, but live input/output is not available. Use Stop to kill the recorded PID and \
+         clean up, then spawn a new session."
+    )
+}
+
+/// Whether `session` just exited on its own: it stopped with its child's
+/// exit code straight from a live status. A Stop reports stopped without a
+/// code first, so the code that follows it compares against stopped.
+/// Parked, abandoned and headless sessions are kept whatever their exit.
+pub(crate) fn self_exited(prev: Option<SessionStatus>, session: &SessionSnapshot) -> bool {
+    prev.is_some_and(|prev| !matches!(prev, SessionStatus::Stopped | SessionStatus::Error))
+        && session.status == SessionStatus::Stopped
+        && session.exit_code.is_some()
+        && !session.is_inactive
+        && !session.is_abandoned
+        && !headless::is_headless(session)
 }
 
 fn exit_code(session: &SessionSnapshot) -> String {
@@ -444,10 +522,10 @@ mod tests {
     use super::{
         ActionState, Duplicates, HeaderStopConfirm, MenuEntry, MenuMode, SessionAction, Step,
         action_state, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
-        menu_entries, overlay_actions, pane_shows_exit, plan, rename_message,
+        menu_entries, overlay_actions, pane_shows_exit, plan, rename_message, self_exited,
     };
     use crate::tabs::PaneBinding;
-    use protocol::{CleanupAction, ClientMessage, SessionSnapshot};
+    use protocol::{CleanupAction, ClientMessage, SessionMode, SessionSnapshot, SessionStatus};
     use serde_json::json;
 
     use SessionAction as A;
@@ -486,6 +564,57 @@ mod tests {
         let mut s = session("stopped");
         s.is_abandoned = true;
         s
+    }
+
+    fn exited_by_itself() -> SessionSnapshot {
+        let mut s = session("stopped");
+        s.exit_code = Some(0);
+        s
+    }
+
+    #[test]
+    fn exit_from_a_running_state_with_a_code_is_a_self_exit() {
+        for prev in [
+            SessionStatus::Idle,
+            SessionStatus::Working,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Spawning,
+        ] {
+            assert!(
+                self_exited(Some(prev), &exited_by_itself()),
+                "from {prev:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_after_a_stop_or_an_error_is_not_a_self_exit() {
+        let s = exited_by_itself();
+        assert!(!self_exited(Some(SessionStatus::Stopped), &s));
+        assert!(!self_exited(Some(SessionStatus::Error), &s));
+        assert!(!self_exited(None, &s), "a session first seen stopped");
+    }
+
+    #[test]
+    fn stop_without_an_exit_code_is_not_a_self_exit() {
+        let mut s = exited_by_itself();
+        s.exit_code = None;
+        assert!(!self_exited(Some(SessionStatus::Working), &s));
+        let mut s = exited_by_itself();
+        s.status = SessionStatus::Error;
+        assert!(!self_exited(Some(SessionStatus::Working), &s));
+    }
+
+    #[test]
+    fn parked_abandoned_and_headless_exits_are_not_self_exits() {
+        let prev = Some(SessionStatus::Working);
+        assert!(!self_exited(prev, &inactive(exited_by_itself())));
+        let mut s = exited_by_itself();
+        s.is_abandoned = true;
+        assert!(!self_exited(prev, &s));
+        let mut s = exited_by_itself();
+        s.mode = SessionMode::Headless;
+        assert!(!self_exited(prev, &s));
     }
 
     fn sent(step: Step) -> Vec<ClientMessage> {

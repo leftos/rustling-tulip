@@ -10,7 +10,7 @@
 mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
-use protocol::{AttentionReason, ClientMessage, DaemonMessage, SplitDirection};
+use protocol::{AttentionReason, ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
 use rustling_tulip_native::{LeafHighlight, SidebarView, TabPill};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
@@ -439,4 +439,188 @@ fn bound_pill_click_sends_nothing(cx: &mut TestAppContext) {
 
     let sent = h.sent();
     assert!(sent.is_empty(), "sent {sent:?}");
+}
+
+/// `s1` listed in the sidebar and shown by no pane, and nothing sent yet.
+fn listed<'a>(cx: &'a mut TestAppContext, dir: &TestDir, s1: SessionSnapshot) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![s1],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.sent();
+    h
+}
+
+fn tags(h: &mut Harness<'_>, id: &str) -> Vec<(String, String)> {
+    let id = id.to_owned();
+    h.root(move |root, _| root.leaf_tags(&id))
+}
+
+fn tag(text: &str, tip: &str) -> (String, String) {
+    (text.to_owned(), tip.to_owned())
+}
+
+#[gpui::test]
+fn orphan_leaf_shows_its_tag(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir, session("s1").orphan().build());
+
+    assert_eq!(
+        tags(&mut h, "s1"),
+        [
+            tag("claude", "Running claude"),
+            tag("orphan", "Reattached after daemon restart; PTY detached"),
+        ]
+    );
+    assert!(
+        !h.in_model("leaf-resume-s1"),
+        "an orphan has no inline Resume"
+    );
+}
+
+#[gpui::test]
+fn abandoned_leaf_resume_sends_resume_abandoned(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(
+        cx,
+        &dir,
+        session("s1").abandoned().last_prompt("fix it").build(),
+    );
+
+    assert_eq!(
+        tags(&mut h, "s1"),
+        [
+            tag("claude", "Running claude"),
+            tag("abandoned", "Daemon crashed mid-run. Last prompt:\nfix it"),
+        ]
+    );
+    assert_eq!(
+        h.root(|root, _| root.leaf_buttons("s1")),
+        [
+            tag(
+                "leaf-resume-s1",
+                "Spawn a fresh session from the captured config and replay the prompt"
+            ),
+            tag(
+                "leaf-dismiss-s1",
+                "Dismiss this abandoned session without resuming"
+            ),
+        ]
+    );
+    h.click_on("leaf-resume-s1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ResumeAbandoned { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn abandoned_leaf_dismiss_sends_discard_abandoned(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir, session("s1").abandoned().build());
+
+    assert_eq!(
+        tags(&mut h, "s1")[1],
+        tag("abandoned", "Daemon crashed mid-run")
+    );
+    h.click_on("leaf-dismiss-s1");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DiscardAbandoned { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn inactive_leaf_resume_duplicates(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir, session("s1").worktree("r1").inactive().build());
+
+    assert_eq!(
+        tags(&mut h, "s1")[1],
+        tag("inactive", "Parked. Worktree kept on disk:\nC:/wt/x")
+    );
+    assert_eq!(
+        h.root(|root, _| root.leaf_buttons("s1")),
+        [tag(
+            "leaf-resume-s1",
+            "Spawn a fresh session that reuses this worktree"
+        )]
+    );
+    h.click_on("leaf-resume-s1");
+    let sent = h.sent();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [ClientMessage::DuplicateSession { session_id, request_id: Some(_) }] if session_id == "s1"
+        ),
+        "sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn inline_button_does_not_focus_the_leaf(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(cx, &dir, session("s1").abandoned().build());
+
+    h.click_on("leaf-dismiss-s1");
+
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::DiscardAbandoned { .. }]),
+        "the leaf click placed nothing in the empty pane: {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn trusted_runtime_tag_tooltip(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").trusted().agent("codex").build(),
+            session("s2").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    assert_eq!(
+        tags(&mut h, "s1"),
+        [tag(
+            "codex",
+            "Running codex; approval prompts were bypassed"
+        )]
+    );
+    assert_eq!(tags(&mut h, "s2"), [tag("claude", "Running claude")]);
+}
+
+#[gpui::test]
+fn leaf_tooltip_lists_title_and_cwd(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = listed(
+        cx,
+        &dir,
+        session("s1")
+            .shell("D:/src/app")
+            .terminal_title("vim")
+            .program_name("pwsh")
+            .build(),
+    );
+
+    let tooltip = h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|leaf| leaf.id == "s1")
+            .map(|leaf| leaf.tooltip)
+    });
+    assert_eq!(
+        tooltip.as_deref(),
+        Some("app\nSession: s1\nTerminal title: vim\nCwd: D:/src/app")
+    );
+    assert_eq!(tags(&mut h, "s1"), [tag("pwsh", "Running pwsh")]);
 }

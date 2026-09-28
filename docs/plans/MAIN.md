@@ -34,7 +34,8 @@ Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-t
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`, plus `-p protocol -p daemon` for P4.16's field; hand-test the chips, tags and overlay colours.
 
-- [ ] **P4.12a Labels, tags, chips and overlays**: `display_label` everywhere, the label tooltip, leaf tags with inline Resume / Dismiss, pane header chips, the abandoned overlay, the orphan banner, auto-discard of worktree-less sessions that exit on their own. See [native-client.md](./native-client.md#p412-sessions).
+- [ ] **Leaf status dot: pulse while working, hollow while spawning** (parity "Session leaf", left after P4.12a). `sidebar_view.rs`.
+- [ ] **A second `DiscardSession` for a gone session writes a history end** (found in P4.12a): every client auto-discards a self-exited session, so with two windows open the daemon gets two discards, and the second may record a `StoppedByUser` history end for an id already removed. Probe `discard_session` → `record_end` for an unknown id (`crates/daemon/src/server.rs`, `history.rs`) and make it a no-op if it writes.
 - [ ] **P4.12b Session menu rows**: Duplicate ▸, Move to ▸, Add to current / new tab, Reveal worktree. See [native-client.md](./native-client.md#p412-sessions).
 - [ ] **P4.16 Exclude a session from busy tracking** (user): a daemon-side per-session flag toggled by "Don't count as busy", leaving the title count, the tab badge and the attention highlight. `crates/protocol/src/lib.rs`, `crates/daemon/src/session.rs`, `apps/native/src/tabs.rs`, `window_title.rs`, `session_menu.rs`, `sidebar_view.rs`. See [native-client.md](./native-client.md#p416-exclude-a-session-from-busy-tracking).
 
