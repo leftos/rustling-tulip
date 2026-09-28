@@ -44,8 +44,8 @@ Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 
 ## Open questions
 
-- **Relay authentication:** how the relay itself keeps strangers from using it, for example a relay secret the daemon and the phone both present, separate from the end-to-end TLS.
-- **Recent output for MA6:** render the session's screen to text on the daemon, or send raw scrollback bytes and render them in the app.
+- **Relay authentication:** settled (user, 2026-09-28): a shared relay secret, set up at pairing, that the daemon and each paired phone present; the relay drops anything else. It is separate from the end-to-end TLS.
+- **Recent output for MA6:** settled (user, 2026-09-28): the daemon renders the session's screen to text (the visible screen and the last lines) and sends that, not raw scrollback.
 - **Size:** settled (user, 2026-09-28): when the phone and the desktop show the same session (MA8), the PTY takes the size of the client that last sent input to it; Claude's terminal UI redraws on each switch.
-- **Terminal renderer for MA8:** a Flutter terminal package such as `xterm` on pub.dev, or render in Rust (`alacritty_terminal`, as the native client does) and draw the grid in Flutter.
+- **Terminal renderer for MA8:** settled (user, 2026-09-28): `alacritty_terminal` in the shared Rust core, as the native client does, with the cell grid drawn in Flutter.
 - **Cost and upkeep of the VPS:** provider, region, and how it gets updates.
