@@ -103,6 +103,7 @@ Features from two open-source agent managers, reviewed 2026-09-28 (user: keep de
 - [ ] Agents that drive rustling-tulip: a CLI to spawn, message and read other sessions
 - [ ] Plan, then execute in parallel across worktrees
 - [ ] Resume the sessions a reboot killed, on the next start
+- [ ] View subagent streams as clickable sessions (user, 2026-09-28): Orca lists a session's subagents but shows their output only by switching the agent's own TUI feed to one of them. Show each subagent of a Claude session as a read-only, clickable entry whose view follows that subagent's own transcript. Rulings (user, 2026-09-28): viewing is read-only (no interception or control, which stay out of scope); a Claude session's running subagents are listed as a foldable set of rows under its leaf (agent type and description), each opening a read-only transcript view in a pane; a subagent's row goes when it finishes. Where Claude Code writes subagent transcripts, and how a running one is told from a finished one, is not yet verified: find out before the design doc
 - [ ] Follow DeepSeek dispatches (user, 2026-09-28): a brief the user-level `dispatch` skill sends runs as a background `claude -p --agent implementer --output-format stream-json` shell writing `<worktree>/.tmp/dispatch/<stamp>-<backend>/stream.jsonl`, so agentic IDEs can't show it the way they show a subagent. Show a running dispatch live in the native client, reusing the headless view's stream-json parsing (`crates/daemon/src/headless.rs`, `apps/native/src/headless_view.rs`). Rulings (user, 2026-09-28): the dispatch tool registers each run by writing a small live-run file (run dir, worktree, pid, brief title) into a folder the daemon watches, and removes it when the run ends; a crashed run's entry is dropped once its pid is gone, and the tool never depends on the daemon running. The native client shows a live run as a read-only leaf (tag `DS`, the brief's title) in the repo or workspace container its worktree belongs to, and a click opens a headless-style view of its stream; the user can watch and Stop it (killing the run's process tree), not message it. Needs a design doc before briefs: the watched folder's path, the live-run file's fields, the additive protocol messages, and the change to `~/.claude/skills/dispatch` (outside this repo)
 - [x] Share the workspace design on Orca issue #1099: posted with the user's approval, describing the anchor-free layout of the worktree-path item under Bugs (https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045)
 
@@ -133,7 +134,7 @@ Pre-existing warnings and traps noticed during the 2026-09-24 native-client sess
 
 ## Out of scope
 
-- Sub-agent / Task-tool interception or isolation
+- Sub-agent / Task-tool interception or isolation (viewing a subagent's transcript read-only is in scope; see "View subagent streams" above)
 - Auto-discovery of repos (registry is manual only)
 - Attach beyond the LAN by internet exposure or SSH tunneling (LAN-scoped remote access shipped; see Shipped). The mobile app's relay is the one way in from outside; see [mobile-app.md](./plans/mobile-app.md)
 - Cloud sync of registry or sessions
