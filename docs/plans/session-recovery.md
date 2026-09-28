@@ -190,6 +190,11 @@ Per item:
   - Buttons: "Recover N", "Select all", "Cancel". Keyboard: arrows move, space toggles, Enter recovers, Esc closes.
   - "Is this folder a git repo?" (needed for `RegisterRepoThenClaude`) is answered by the daemon as a `folder_is_git_repo` flag on the entry. The client never touches the filesystem, so remote clients work too.
 - **After recovery:** new sessions are placed as normal spawns (`spawns.rs` placement), and the dialog closes when every item has answered. Failures stay listed with their messages.
+- **Rulings for step 5 (user):**
+  - Abandoned sessions are listed too: a session whose tracer died sits in the sidebar's Abandoned bucket and in the history (pre-ticked, counted); recovering it from the dialog removes it from Abandoned, and the sidebar's Resume marks its entry recovered.
+  - The badge counts an unexpected end until it is recovered (dialog or sidebar Resume) or pruned after 7 days; Dismiss does not clear it.
+  - Each recovered session goes where a normal spawn would, placed one after another so several never pick the same pane.
+- **Details settled from the Tauri dialog:** unknown-time losses first, then bursts, then "Show N other recent sessions" collapsed; ended text "HH:MM · lost" / "exited (code N)" / "stopped" / "daemon shut down", dated when not today; Recover as offered for plain-shell rows and rows with no spawn config; disabled reasons "recovered HH:MM" and "no conversation found"; "Recovering…" while busy, "Recovery did not answer" after 120 s; after a partial failure only the failed rows stay, re-ticked; empty state "No ended sessions to recover."
 
 ### 7. Docs
 

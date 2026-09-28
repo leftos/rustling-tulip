@@ -8,7 +8,7 @@ Entry point for anyone, human or agent, continuing this project. **Open work onl
 - **A review finding the item does not fix** becomes a new line in the wave that shares its files, never a sub-item under landed work.
 - **Only open waves stand here**: the commit that lands a wave's last line deletes the wave's heading and renumbers the rest from 1; a new item joins the wave whose files or subject it shares, or opens a new wave before [Backlog and singles](#backlog-and-singles).
 
-Reference: [architecture.md](../architecture.md) (components, what the product does, the task index of files per kind of change) · [native-client.md](../native-client.md) (the client's settled design) · [native-client-parity.md](./native-client-parity.md) (every feature the native client must have) · [completed/](./completed/) (finished designs kept for their rationale) · the README glossary. Subplans: [native-client.md](./native-client.md) (rulings for the open Phase 4–6 items), [session-recovery.md](./session-recovery.md), [remote-file-transfer.md](./remote-file-transfer.md), [hook-status.md](./hook-status.md), [spoken-alerts.md](./spoken-alerts.md), [subagent-streams.md](./subagent-streams.md), [dispatch-follow.md](./dispatch-follow.md), [borrowed-ideas.md](./borrowed-ideas.md), [mobile-app.md](./mobile-app.md), [macos-compat.md](./macos-compat.md).
+Reference: [architecture.md](../architecture.md) (components, what the product does, the task index of files per kind of change) · [native-client.md](../native-client.md) (the client's settled design) · [native-client-parity.md](./native-client-parity.md) (every feature the native client must have) · [completed/](./completed/) (finished designs kept for their rationale) · the README glossary. Subplans: [native-client.md](./native-client.md) (rulings for the open Phase 4–6 items), [session-recovery.md](./session-recovery.md), [remote-file-transfer.md](./remote-file-transfer.md), [hook-status.md](./hook-status.md), [spoken-alerts.md](./spoken-alerts.md), [subagent-streams.md](./subagent-streams.md), [dispatch-follow.md](./dispatch-follow.md), [borrowed-ideas.md](./borrowed-ideas.md), [petal.md](./petal.md), [needs-you.md](./needs-you.md), [conversation-view.md](./conversation-view.md), [mobile-app.md](./mobile-app.md), [macos-compat.md](./macos-compat.md).
 
 **Gates.** Every build and test runs through the repo's gate from the worktree root: `pwsh tools/gate.ps1 -Log .tmp/<name>.log -TimeoutSeconds <n> -Slot <heavy|light> -- <command>`. The standard set, named by a wave as "the gates": `-- cargo fmt --all --check` (light), `-- cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy), `-- cargo test -p <crate>` for each crate the wave names (heavy; `-p protocol` includes `v22_compat`), and `-- cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light). The live tier is `-- pwsh ./rt.ps1 native-e2e` (heavy) and the OS tier `-- pwsh ./rt.ps1 native-smoke` (light). Every item gets a `code-review`; a visible result no test can prove lands on green gates and is listed for a hand-test.
 
@@ -20,21 +20,22 @@ Bugs, and the user's request to recover killed sessions.
 
 ## Waves
 
-A wave is one release-sized bundle of items sharing owning files, so one implementer reads them once and one review covers the bundle. Waves 1–5 finish native client Phase 4 (rulings: [native-client.md](./native-client.md)).
+A wave is one release-sized bundle of items sharing owning files, so one implementer reads them once and one review covers the bundle. Wave 1 is the Petal look, which the user ruled lands before the rest of Phase 4; Waves 2–5 finish native client Phase 4 (rulings: [native-client.md](./native-client.md)).
 
-### Wave 1 — Worktrees settings and the spawn form's lock (`settings_view.rs`, `spawn_form.rs`, `spawn_view.rs`, `shell_view.rs`, new manager modules)
+### Wave 1 — The "Petal" look (new `palette.rs`, `theme.rs`, `fonts.rs`, `assets/fonts/`, `lib.rs` colours, `activity_bar.rs`, `tab_bar.rs`, `sidebar_view.rs`, `grid_view.rs`, the menus and dialogs)
 
-Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native` (the Browse seam makes the folder picker specced); hand-test Browse's real picker and a launch from the manager.
+Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-- [ ] **P4.12c Shift-duplicate prefill**: Shift on Duplicate ▸ opens the spawn dialog prefilled from the source session, on P4.4b's target lock, the prefill beating the Spawn defaults. `spawn_form.rs`, `session_menu.rs`. See [native-client.md](./native-client.md#p412-sessions).
+- [ ] **Build the approved "Petal" look** (user; canvas https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S): graphite ground, tulip-coral accent, Schibsted Grotesk beside Geist Mono, status shapes, refined pane headers and chips; steps PT.1–PT.10, each a line here once the split's open questions are answered. Boards for features not built yet are assigned to their waves there. Split, rulings and open questions: [petal.md](./petal.md).
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`, plus `-p protocol -p daemon` for P4.16's field; hand-test the chips, tags and overlay colours.
 
-- [ ] **Leaf status dot: pulse while working, hollow while spawning** (parity "Session leaf", left after P4.12a). `sidebar_view.rs`.
+- [ ] **Leaf status dot: pulse while working, hollow while spawning** (parity "Session leaf", left after P4.12a). `sidebar_view.rs`. Petal's PT.4 status glyphs absorb it; delete this line when PT.4 lands.
 - [ ] **A second `DiscardSession` for a gone session writes a history end** (found in P4.12a): every client auto-discards a self-exited session, so with two windows open the daemon gets two discards, and the second may record a `StoppedByUser` history end for an id already removed. Probe `discard_session` → `record_end` for an unknown id (`crates/daemon/src/server.rs`, `history.rs`) and make it a no-op if it writes.
 - [ ] **P4.12b Session menu rows**: Duplicate ▸, Move to ▸, Add to current / new tab, Reveal worktree. See [native-client.md](./native-client.md#p412-sessions).
+- [ ] **P4.12c Shift-duplicate prefill**: Shift on Duplicate ▸ opens the spawn dialog prefilled from the source session, on P4.4b's target lock, the prefill beating the Spawn defaults; needs P4.12b, which adds the Duplicate ▸ row. `spawn_form.rs`, `spawn_view.rs`, `session_menu.rs`, `session_actions.rs`. See [native-client.md](./native-client.md#p412-sessions).
 - [ ] **P4.16 Exclude a session from busy tracking** (user): a daemon-side per-session flag toggled by "Don't count as busy", leaving the title count, the tab badge and the attention highlight. `crates/protocol/src/lib.rs`, `crates/daemon/src/session.rs`, `apps/native/src/tabs.rs`, `window_title.rs`, `session_menu.rs`, `sidebar_view.rs`. See [native-client.md](./native-client.md#p416-exclude-a-session-from-busy-tracking).
 
 ### Wave 3 — Tabs, panes and tab state (`tabs.rs`, `tab_bar.rs`, `tab_menu.rs`, `pane_menu.rs`, `spawns.rs`, daemon `tabs.rs` and `state.rs`)
@@ -61,45 +62,39 @@ Review: `code-review`; UI hand-test of each converted form. Verification: the ga
 - [ ] **One shared checkbox-row helper**: five near-identical copies exist (`settings_view.rs` `toggle`, `appearance_view.rs` bold row, `diff_tab_view.rs`, `shell_view.rs`, `spawn_view.rs` `checkbox`), and `section` exists three times with different styling (`settings_view.rs`, `appearance_view.rs`, `lib.rs`).
 - [ ] **Keyboard focus ring through the Settings Appearance tab's body** (swatches, font list, size steppers), which only the mouse reaches (found in P4.2a). `appearance_view.rs`, `settings_view.rs`.
 
-### Wave 6 — The "Petal" look (`theme.rs`, `fonts.rs`, `assets/fonts/`, `lib.rs` colours, `sidebar_view.rs`, `grid_view.rs`, `activity_bar.rs`)
-
-Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
-
-- [ ] **Build the approved "Petal" look** (user; canvas https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S, seven boards: main window, Dashboard, conversation view, spawn dialog, source control beside a diff, Settings → Alerts, phone dashboard): graphite ground `#111013`, tulip-coral accent `#F07A62`, Schibsted Grotesk as the UI face beside Geist Mono, status shapes as well as colours (working ring, asking diamond, waiting hollow ring, idle dot), refined pane headers and chips. First a design pass that splits it into items, and a ruling from the user on whether it lands before or after the rest of Phase 4. The boards for features not built yet are the visual target for those waves.
-
-### Wave 7 — Hook-reported agent status (`crates/daemon/src/hook_status.rs`, `pty_state.rs`, `server.rs`, `agents/claude.rs`, `crates/tracer/src/hook.rs`)
+### Wave 6 — Hook-reported agent status (`crates/daemon/src/hook_status.rs`, `pty_state.rs`, `server.rs`, `agents/claude.rs`, `crates/tracer/src/hook.rs`)
 
 Review: `code-review`. Verification: the gates with `-p protocol -p daemon -p tracer`, then the live tier (fake-claude runs the injected hooks, HS.9); HS.0 is a spike with a real `claude`, recorded by hand.
 
 - [ ] **Hook-reported agent status** (borrowed from VelaTerm): Claude Code hooks injected through `--settings` report working / asking / waiting / idle, with the `pty_state.rs` heuristic as the fallback; steps HS.0 (a spike of the CLI behaviour it relies on) through HS.11. Design, answered questions and steps: [hook-status.md](./hook-status.md).
 
-### Wave 8 — Alerts, Dashboard and Needs You (`crates/daemon/src/summarizer/`, `apps/native/src/alerts.rs`, `speech.rs`, `dashboard.rs`, `dashboard_view.rs`, `settings_view.rs`, `activity_bar.rs`)
+### Wave 7 — Alerts, Dashboard and Needs You (`crates/daemon/src/summarizer/`, `apps/native/src/alerts.rs`, `speech.rs`, `dashboard.rs`, `dashboard_view.rs`, `settings_view.rs`, `activity_bar.rs`)
 
-Review: `code-review`; a person listens to the voices and looks at the Dashboard. Verification: the gates with `-p protocol -p daemon -p rustling-tulip-native`, plus `cargo deny check` for the key-store crates; hand-test a spoken alert and its toast against a real waiting session. Needs Wave 7.
+Review: `code-review`; a person listens to the voices and looks at the Dashboard. Verification: the gates with `-p protocol -p daemon -p rustling-tulip-native`, plus `cargo deny check` for the key-store crates; hand-test a spoken alert and its toast against a real waiting session. Needs Wave 6.
 
 - [ ] **Spoken alerts when an agent waits** (user): a cheap-model summary (DeepSeek Flash by default, providers and keys chosen in Settings, the daemon calling the provider's Messages API directly: an exception to CLAUDE.md's no-direct-API rule that changes with SA.6) classified `needs_answer` / `working_update` / `done_waiting`, prefixed with the repo's spoken name and spoken with Windows' built-in voices; steps SA.1–SA.11. Phone alerts wait for the mobile app's MA7 push. Design and rulings: [spoken-alerts.md](./spoken-alerts.md).
 - [ ] **Dashboard view** (user): a tab of cards across all live sessions, fed by the alerts' summarizer, grouped Needs you / Working / Done / Idle, with files changed and an activity timeline; steps DB.1–DB.4 (DB.5 rides the mobile app's MA6). Design: [spoken-alerts.md](./spoken-alerts.md#dashboard-view).
-- [ ] **"Needs You" view**: every session waiting on the user in one place, as an activity-rail view beside Sessions and Source control (ruled; kept beside the Dashboard's needs-you group). Needs a design pass: [borrowed-ideas.md](./borrowed-ideas.md).
+- [ ] **"Needs You" view**: every session waiting on the user in one place, as an activity-rail view beside Sessions and Source control (ruled; kept beside the Dashboard's needs-you group); steps NY.1–NY.6. Design and open questions: [needs-you.md](./needs-you.md).
 
-### Wave 9 — Subagent streams (`crates/daemon/src/subagents.rs`, `server.rs`, `apps/native/src/sidebar.rs`, `sidebar_view.rs`, new `subagent_view.rs`)
+### Wave 8 — Subagent streams (`crates/daemon/src/subagents.rs`, `server.rs`, `apps/native/src/sidebar.rs`, `sidebar_view.rs`, new `subagent_view.rs`)
 
 Review: `code-review`; UI hand-test with a real Claude session running subagents. Verification: the gates with `-p protocol -p daemon -p rustling-tulip-native`, then the live tier (SS.9).
 
 - [ ] **View subagent streams as clickable sessions** (user): a Claude session's running subagents as foldable read-only rows under its leaf, each opening its transcript in a pane, gone when it finishes; steps SS.1–SS.10 (SS.10 also corrects CLAUDE.md's claim that the daemon tails the session jsonl for tokens and cost). Design: [subagent-streams.md](./subagent-streams.md).
 
-### Wave 10 — Follow dispatch runs (`crates/daemon/src/dispatch_runs.rs`, `agents/claude.rs`, `paths.rs`, `apps/native/src/headless.rs`, `headless_view.rs`, `sidebar.rs`)
+### Wave 9 — Follow dispatch runs (`crates/daemon/src/dispatch_runs.rs`, `agents/claude.rs`, `paths.rs`, `apps/native/src/headless.rs`, `headless_view.rs`, `sidebar.rs`)
 
 Review: `code-review`; UI hand-test with a real dispatch. Verification: the gates with `-p protocol -p daemon -p rustling-tulip-native`, then the live tier (DF.8); DF.9 lands in `~/.claude/skills/dispatch` with that skill's own tests.
 
 - [ ] **Follow DeepSeek dispatches** (user): a run the user-level `dispatch` skill starts registers a live-run file the daemon watches; the client shows it as a read-only `DS` leaf in its worktree's container, opening a headless-style view of its stream, with Stop; steps DF.1–DF.10. Design: [dispatch-follow.md](./dispatch-follow.md).
 
-### Wave 11 — Native client Phase 5: windows and drag-and-drop (`lib.rs`, `grid_view.rs`, `tab_bar.rs`, `sidebar_view.rs`, `tabs.rs`)
+### Wave 10 — Native client Phase 5: windows and drag-and-drop (`lib.rs`, `grid_view.rs`, `tab_bar.rs`, `sidebar_view.rs`, `tabs.rs`)
 
 Review: `code-review`; UI hand-test (multi-window and drag can't be fully specced). Verification: the gates with `-p rustling-tulip-native`, the OS tier.
 
 - [ ] **Phase 5 — windows and drag-and-drop**: pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. First split into items from the parity checklist and put to the user. See [native-client.md](./native-client.md#phase-5--windows-and-drag-and-drop).
 
-### Wave 12 — Remote, cutover and the shared client core (new client-core crate, `apps/native/src/net.rs`, `connection.rs`, `links.rs`, `open.rs`, the installer)
+### Wave 11 — Remote, cutover and the shared client core (new client-core crate, `apps/native/src/net.rs`, `connection.rs`, `links.rs`, `open.rs`, the installer)
 
 Review: `code-review`, and a security read of the pinned-TLS and pairing code. Verification: the gates with `-p rustling-tulip-native -p daemon-client` and the new crate, the live tier; hand-test pairing and a fetch against a second machine, and an install and uninstall.
 
@@ -109,11 +104,11 @@ Review: `code-review`, and a security read of the pinned-TLS and pairing code. V
 - [ ] **FT.3 Ctrl-click trigger**: in remote mode, terminal links send `FetchFile` with candidate readings. Needs FT.2. See [remote-file-transfer.md](./remote-file-transfer.md).
 - [ ] **FT.4 "Fetch file…" popup**: a path input scoped to the focused session's repo or worktree, with progress, cancel and inline errors. Needs FT.2. See [remote-file-transfer.md](./remote-file-transfer.md).
 
-### Wave 13 — Mobile app (`crates/relay`, the Flutter app, the client core)
+### Wave 12 — Mobile app (`crates/relay`, the Flutter app, the client core)
 
 Review: `code-review`, and a security read of the relay and per-device credentials. Verification: the gates for the Rust crates; the phone builds and a session answered from the phone by hand.
 
-- [ ] **Mobile app MA2–MA9** (user; after Wave 12): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
+- [ ] **Mobile app MA2–MA9** (user; after Wave 11): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
 
 ## Backlog and singles
 
@@ -136,14 +131,14 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Open questions and blocked items
 
-- [ ] **`--add-dir` hook and settings propagation**: does `claude --add-dir` load hooks and `settings.json` from each additional root, or only from the primary cwd? Not yet verified; it matters for workspace members with their own `CLAUDE.md` or hooks, and Wave 7's HS.0 spike is the natural place to check it.
-- [ ] **Auto-update for the native client**: blocked until its installer (Wave 12) and a signed release pipeline exist (no Actions pipeline, no signing cert, no hosted manifest).
+- [ ] **`--add-dir` hook and settings propagation**: does `claude --add-dir` load hooks and `settings.json` from each additional root, or only from the primary cwd? Not yet verified; it matters for workspace members with their own `CLAUDE.md` or hooks, and Wave 6's HS.0 spike is the natural place to check it.
+- [ ] **Auto-update for the native client**: blocked until its installer (Wave 11) and a signed release pipeline exist (no Actions pipeline, no signing cert, no hosted manifest).
 
 ### Ideas needing a design pass
 
 Borrowed from Orca and VelaTerm; details, sources, rulings and open questions in [borrowed-ideas.md](./borrowed-ideas.md).
 
-- [ ] **Conversation view (GUI mode)** (user: likes VelaTerm's): a Claude session as a chat with tool cards and permission buttons, switchable with the terminal view; a session remembers its last view. Billing spike: runs on the subscription's usage windows today, personal use only ([gui-mode-billing.md](../spikes/gui-mode-billing.md)). The mobile app's MA9 depends on it.
+- [ ] **Conversation view (GUI mode)** (user: likes VelaTerm's): a Claude session as a chat with tool cards and permission buttons, switchable with the terminal view; a session remembers its last view. Billing spike: runs on the subscription's usage windows today, personal use only ([gui-mode-billing.md](../spikes/gui-mode-billing.md)). The mobile app's MA9 depends on it. Design drafted, steps CV.0 (spike) to CV.11, open questions pending: [conversation-view.md](./conversation-view.md).
 - [ ] **Link a worktree to a GitHub issue or PR at spawn**, through `gh` only.
 - [ ] **Agents that drive rustling-tulip**: a CLI run inside a session to spawn, message and read other sessions, authenticated by a per-session token.
 - [ ] **Plan, then execute in parallel across worktrees**: a planner session splits a task, the user approves, one executor per part; builds on the item above.

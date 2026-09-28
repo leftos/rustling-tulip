@@ -1,0 +1,148 @@
+# Conversation view (GUI mode)
+
+Show a Claude session as a chat instead of the terminal UI: the user's messages, the agent's answers and reasoning, one card per tool call, and permission requests and questions answered with buttons. A session switches between terminal and conversation view and keeps its conversation across the switch. Index line: [MAIN.md](./MAIN.md), "Ideas needing a design pass". Origin and VelaTerm's prior art: [borrowed-ideas.md](./borrowed-ideas.md), second item. Billing: [gui-mode-billing.md](../spikes/gui-mode-billing.md). The mobile app's MA9 ([mobile-app.md](./mobile-app.md)) is built on this.
+
+## Rulings
+
+- A session remembers its last view, kept on the daemon's session; a new Claude session starts in the terminal view (user).
+- GUI mode runs through the user's own logged-in `claude` binary, for personal use only, and the terminal view stays the fallback (billing spike).
+- Claude only. Codex's app-server and Cursor stay terminal-only; the toggle is not offered for them.
+
+## Terms
+
+- **Terminal view**: today's interactive session, `claude` in a ConPTY under `rt-tracer.exe`.
+- **Conversation view**: the same session driven by a **stream peer**, a `claude --print --input-format stream-json --output-format stream-json` child the daemon writes JSON lines to and reads JSON lines from.
+- **Control request / response**: the out-of-band JSON lines on the stream peer's stdio that carry permission prompts, interrupts and setting changes, matched by `request_id`.
+- **Entry**: one item of the chat (a user message, an answer, a tool card, a prompt, a notice), carried on the wire and upserted by id.
+- **View switch**: stopping one kind of child and starting the other on the same conversation with `--resume`.
+
+## Sources
+
+Documented (Claude Code 2.1.x docs, fetched as Markdown):
+
+- `--input-format` takes `text` or `stream-json` "for print mode"; `--replay-user-messages` re-emits stdin user messages on stdout "for acknowledgment" and needs both stream-json formats; `--include-partial-messages` needs `--print` and stream-json output; `--effort` takes `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`; `--permission-mode` takes `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`; `--session-id` must be a UUID; `--resume` takes an id, a name or a transcript path; `--fork-session` is what makes a resume take a new id. https://code.claude.com/docs/en/cli-reference
+- `--permission-prompt-tool` names "an MCP tool to handle permission prompts in non-interactive mode"; `--permission-prompts host` (the default, v2.1.259+) "sends them to the Agent SDK host or the `--permission-prompt-tool` tool"; `none` denies them. https://code.claude.com/docs/en/cli-reference, https://code.claude.com/docs/en/headless#turn-off-permission-prompts-in-unattended-runs
+- `--max-turns`: "With `--input-format stream-json`, a message still queued when the limit ends a turn stays queued and starts a new turn", so the CLI queues messages written mid-turn. https://code.claude.com/docs/en/cli-reference
+- In `-p`, `/model`, `/effort`, `/fast` take the value as an argument (v2.1.205+). `system/init` carries a `capabilities` array (v2.1.205+, e.g. `interrupt_receipt_v1`, `interrupt_cancel_queued_v1`); `system/api_retry` reports retries; SIGINT ends a turn, SIGTERM leaves it unfinished and exits 143. https://code.claude.com/docs/en/headless
+- The SDK talks to the CLI over stdio with `control_request` (CLI → host, e.g. a permission check, carrying `request_id` and a `request` object) and `control_response` (host → CLI, echoing `request_id`). The `Query` methods `interrupt()`, `setPermissionMode()`, `setModel()`, `applyFlagSettings({effortLevel})` work "in streaming input mode only". `SDKUserMessage` is `{type: "user", message, parent_tool_use_id, shouldQuery?, …}`; `SDKResultMessage` carries `total_cost_usd`, `usage`, `modelUsage`, `permission_denials`, `queued_turn_count`. https://code.claude.com/docs/en/agent-sdk/typescript
+- A permission callback gets the tool name, its input and `suggestions` (`PermissionUpdate` entries; echoing one with the `localSettings` destination back in `updatedPermissions` is "allow always"); it answers `{behavior: "allow", updatedInput}` or `{behavior: "deny", message}` and "can stay pending indefinitely". `AskUserQuestion` reaches the same callback; the answer is `updatedInput: {questions, answers: {<question text>: <label or labels>}}`, with an optional free-text `response`. 1–4 questions of 2–4 options each; not available in subagents. https://code.claude.com/docs/en/agent-sdk/user-input
+- Subagent messages carry `parent_tool_use_id`; `--forward-subagent-text` adds their text and thinking. https://code.claude.com/docs/en/headless#follow-subagent-messages
+
+Not documented, so CV.0 verifies them: the exact JSON of `control_request` / `control_response` and their subtypes (`can_use_tool`, `interrupt`, `set_permission_mode`, `set_model`, the effort change); how a bare CLI is told a stdio host answers permissions (the SDK is believed to pass `--permission-prompt-tool stdio`); whether `ExitPlanMode` reaches the permission path; whether `--resume` of a conversation an interactive TUI started works in `-p` with the id kept; what `--resume` does for an id with no transcript yet; whether a resumed stream peer replays earlier messages; and how a stream peer exits when stdin closes.
+
+## The daemon today
+
+- `SessionMode` is `Interactive | Headless | PlainShell` with no `#[serde(other)]` (`crates/protocol/src/lib.rs:388-397`), and `SessionStatus` has none either, so neither can gain a variant while protocol 22 must decode. `protocol-version.json` is 23 with `[23, 22]`.
+- Headless (`crates/daemon/src/headless.rs`) spawns `--print --output-format stream-json --verbose -p <prompt>` with `stdin` null, appends each stdout line to `scrollback.bin`, and hands it to `ClaudeBackend::handle_headless_line` (`agents/claude.rs:117-167`), which maps `result` to `Stopped` (line 162). It is one-shot and outside the tracer, so it dies with the daemon.
+- The tracer's ABI (`crates/tracer-protocol/src/lib.rs`) is byte-level: `Input { data_b64 }`, `Resize`, `Status`, `Stop` down, `Output { data_b64 }`, `Status`, `Exited`, `Error` up, with `Unknown` wrappers on both sides.
+- The native client picks a pane body per session at `apps/native/src/grid_view.rs:892` (headless → `headless_body`); `text_input.rs` already has a multi-line input (Ctrl+Enter submits), `combobox.rs` a dropdown, `syntax.rs` syntect highlighting.
+- Hook-reported status ([hook-status.md](./hook-status.md), HS.2) adds `SessionSnapshot.pending_input: Option<PendingInput>` (`Question`, `Permission`, `PlanApproval`, `Other`, `Unknown`). Subagent streams ([subagent-streams.md](./subagent-streams.md), SS.3) adds a `TranscriptEntry` enum and a transcript-shaped reply/append pair.
+
+## Design
+
+### One session, two kinds of child
+
+The view is a property of the session, not a new mode. `SessionRecord` gains `view: SessionView` (`Terminal`, `Conversation`), and the snapshot keeps `mode: Interactive`, so a v22 client decodes every session unchanged. At any moment the session runs one child: the PTY `claude` under the tracer in the terminal view, the stream peer in the conversation view. Both use the session's `claude_session_id`, worktrees, `--add-dir` list and workspace prelude, so the conversation is the same one Claude Code keeps in `~/.claude/projects/<encoded cwd>/<id>.jsonl`.
+
+The stream peer's argv comes from a new `AgentBackend::build_conversation_args` (default: unsupported; `ClaudeBackend` implements it): `--print --verbose --input-format stream-json --output-format stream-json --include-partial-messages --replay-user-messages`, the permission-host flag CV.0 settles, the members' `--add-dir`s, the prelude on `--append-system-prompt`, `--model` / `--effort` / `--permission-mode` from the session's spawn config, then `--resume <claude_session_id>`, or `--session-id <id>` when no transcript exists yet (a terminal session that never got a prompt). No prompt on the command line: every message goes through stdin. It gets no hook settings: the stream reports status itself, as headless does (HS.5).
+
+The stream peer runs under the tracer in a new **pipe mode** (open question 1): the tracer is started with an extra `--stdio` argument, gives the child piped stdin/stdout instead of a ConPTY, forwards `Input` bytes to stdin and stdout bytes as `Output`, ignores `Resize`, and keeps its ring as today. The frames don't change, so the tracer ABI gains only the launch argument (recorded in `docs/tracer-abi.md`). A daemon restart then reattaches the stream peer like any PTY session, and a turn or a pending permission prompt survives it.
+
+### The stream driver
+
+A new `crates/daemon/src/conversation.rs` owns the stream peer's protocol and is generic over `AsyncRead + AsyncWrite`, so its tests run against `tokio::io::duplex` with no process. It splits stdout into lines (a partial first line after a ring replay is dropped), parses each tolerantly, and keeps per session: the entries (upserted by id), the turn state, the pending prompts by `request_id`, the queue, and the settings `system/init` reported (model, permission mode, capabilities). It writes user messages, control responses and control requests.
+
+Status mapping, through the shared transition path so `Attention` fires once on entry to `AwaitingInput`:
+
+| Stream event | Status | Other effect |
+| - | - | - |
+| `system/init` | `Idle` | record model, permission mode, capabilities, the conversation id |
+| user message written (acknowledged by its replay) | `Working` | queued entry becomes sent |
+| `control_request` for a permission or question | `AwaitingInput` | a `Prompt` entry; `pending_input` set |
+| `control_response` sent | `Working` | prompt entry marked answered; `pending_input` cleared |
+| `assistant` / `user` / `stream_event` | unchanged | answer, thinking and tool entries upserted; tool results attach to their card by `tool_use_id` |
+| `system/api_retry`, `permission_denied`, compact boundary | unchanged | a `Notice` entry |
+| `result` | `Idle` | metrics from `total_cost_usd` / `usage`; a `TurnEnd` entry; the queue's next message is sent |
+| child exit (not a view switch) | `Stopped` | as for an interactive session |
+
+Partial-message deltas are coalesced per entry and broadcast at most every 50 ms. Subagent messages (`parent_tool_use_id` set) nest under their `Agent` tool card; `--forward-subagent-text` is not passed, so a card shows the subagent's tool calls, and its full transcript is the subagent-streams view.
+
+### Permission prompts and questions
+
+Through the stdio control protocol (open question 2): the CLI sends a `control_request` for each prompt; the driver turns it into a `Prompt` entry and sets `pending_input` (`Permission { tool_name, summary }`, `Question { questions }`, `PlanApproval { plan }` from HS.2), so the Needs You view, spoken alerts and MA6 see conversation sessions exactly as hook-driven terminal sessions. The client answers with `AnswerConversationPrompt`; the driver writes the `control_response`: allow with the unchanged input, allow always with the `localSettings` suggestions echoed in `updatedPermissions`, deny with the user's message, or for a question the `answers` map (and `response` for a free-text reply). An unanswered prompt stays pending with no timeout, across client disconnects and (with pipe mode) daemon restarts.
+
+### Messages typed mid-turn
+
+The daemon holds the queue (open question 3). `SendConversationMessage` while a turn runs appends a `User { queued: true }` entry; the client can edit or cancel it (`CancelQueuedMessage`) until it is sent. On `result` the driver sends the oldest queued message; with several queued, they are joined into one message separated by blank lines, as one follow-up. "Send now" is an interrupt followed by the send.
+
+### Model, effort and permission mode
+
+`SetConversationSettings { model?, effort?, permission_mode? }` becomes a control request on the running peer (set model, set permission mode, the effort change) when CV.0 confirms each one; where a control request is missing, the fallback is the documented `-p` slash command as a user message with `shouldQuery: false` (`/model <x>`, `/effort <x>`), and for the permission mode a restart of the peer with `--resume --permission-mode <x>` between turns. Each change is also written into the session's stored spawn config, so a later switch to the terminal view starts `claude` with the same model, effort and mode. `InterruptConversation` sends the interrupt control request (SIGINT is not an option for a `CREATE_NO_WINDOW` child on Windows without a shared console).
+
+### The view switch
+
+`SetSessionView { session_id, view, interrupt_running, request_id }`:
+
+1. If a turn is running (`Working` or `AwaitingInput`) and `interrupt_running` is false, the daemon answers `ActionFailed` naming the running turn; the client asks the user ("A turn is running. Stop it and switch?") and resends with `true`.
+2. The daemon stops the current child: a stream peer gets the interrupt then stdin closed, a PTY child the tracer's `Stop`. It waits for the exit (5 s, then kills), with the session marked `Spawning` and the end not written to history.
+3. It starts the other child on the same session id with `--resume <claude_session_id>`, sets `view`, persists it, and sends `SessionUpdated` (the requester's copy carrying `request_id`).
+
+A switch to the terminal view needs a fresh `LoadScrollback` from the client, since the PTY is new; the old `scrollback.bin` is kept and the new output appends to it after a divider line.
+
+### Chat history
+
+On `LoadConversation`, the daemon builds the entries from Claude's own transcript `<id>.jsonl` (open question 4) through the same block mapping the driver uses, then streams live entries on top. The transcript already holds the turns taken in the terminal view, so a switch shows the whole conversation. The reply carries the newest entries up to a cap (500), with `hidden` counting the older ones, as `SubagentTranscript` does. Path resolution reuses `transcripts.rs` (`project_dir`, `CLAUDE_CONFIG_DIR`). Entry text is capped per entry (tool inputs 4 KiB, tool results 8 KiB, answers uncapped).
+
+### Persistence
+
+- `SessionRecord.view` → `meta.json` (`#[serde(default)]`, so older sidecars read as `Terminal`) → the snapshot's `view`.
+- The history entry (`history.rs`) records `view`, so Recover respawns a conversation-view session as a stream peer with `--resume`.
+- Settings changed in conversation view update the record's spawn config (above); the queue lives in memory only and is lost with the daemon.
+
+### Wire protocol
+
+Additive only; protocol 22 keeps decoding and `supported` stays `[23, 22]`.
+
+- `SessionSnapshot` gains `#[serde(default)] view: SessionView` (`Terminal` default, `Conversation`, `#[serde(other)] Unknown`) and `#[serde(default)] conversation: Option<ConversationState>` (`model`, `effort`, `permission_mode` as reported, `turn_running`, `queued: u32`). It uses HS.2's `pending_input` for the open prompt, adding a `#[serde(default)] request_id: Option<String>` to its variants when HS.2 has landed first, or defining it here when this lands first.
+- Client → daemon: `SetSessionView`, `LoadConversation { session_id, request_id }`, `UnloadConversation { session_id }`, `SendConversationMessage { session_id, text, request_id }`, `CancelQueuedMessage { session_id, entry_id }`, `AnswerConversationPrompt { session_id, prompt_id, answer: PromptAnswer }`, `SetConversationSettings`, `InterruptConversation { session_id }`.
+- Daemon → client: `Conversation { session_id, entries, hidden, request_id }` (the reply), then `ConversationAppend { session_id, entries }` to connections that loaded it (an entry whose id is known replaces it). Broadcast state stays on `SessionUpdated`.
+- `ConversationEntry` (tag `kind`, `#[serde(other)] Unknown`): `User { id, text, queued }`, `Answer { id, text, streaming }`, `Thinking { id, text }`, `Tool { id, name, summary, input, result: Option<ToolOutcome>, parent_id }`, `Prompt { id, prompt: PendingInput, suggestions: bool, answered: Option<String> }`, `Notice { id, text }`, `TurnEnd { id, subtype, duration_ms, cost_usd }`. `PromptAnswer` (tag `kind`, `Unknown`): `Allow`, `AllowAlways`, `Deny { message }`, `Answers { answers: BTreeMap<String, Vec<String>>, response: Option<String> }`.
+- A v22 client (the installed Tauri app) sees a conversation-view session as an interactive one whose terminal shows the last scrollback and no live output; the new messages are unknown top-level types to it.
+- `cargo test -p protocol v22_compat` gains cases: a snapshot with `view` and `conversation` decodes as v22, and a v22 snapshot decodes with `Terminal` / `None`.
+
+## Native client
+
+- **Pure model**, new `apps/native/src/conversation.rs`, no GPUI: entries by id with upsert and the display cap, which cards are expanded, the one-line summaries for tool cards (a path, a command, a pattern), the answer builders for prompts (option toggles, multi-select, the "Other" text), and a small Markdown block splitter (headings, paragraphs, lists, fenced code with its language, inline code and bold) (open question 6). It depends only on `protocol`, so the mobile client core can take it over.
+- **View**, new `apps/native/src/conversation_view.rs`, drawn by `grid_view.rs` next to the headless branch when `view == Conversation`: a scrolling chat that follows the bottom until the user scrolls up; user messages right-aligned; answers as Markdown with code blocks through `syntax.rs`; thinking collapsed to one muted line; tool cards with the tool name, the summary and a status mark (running, done, error), expanding to input and result; subagent tool calls nested in their `Agent` card; notices as muted lines; the turn's cost and duration under its last answer.
+- **Prompt cards**: permissions show the tool and summary with Allow once, Allow always (when the CLI offered suggestions) and Deny, where Deny opens a one-line reason; questions show each question's header and options as buttons (toggles when multi-select) plus an "Other" field and Submit; plan approval shows the plan as Markdown with Approve and Keep planning. An answered card collapses to its answer.
+- **Composer**: `TextInput::multi_line`, Ctrl+Enter sends; while a turn runs the button reads Queue, queued messages sit above the composer with Edit and Cancel, and a Stop button interrupts. A toolbar over the chat holds the model, effort and permission-mode dropdowns (`combobox.rs`).
+- **Switching**: a Terminal / Conversation toggle in the pane header for Claude sessions, the same item in the pane menu, and a keybinding in `keys.rs`; on `ActionFailed` for a running turn it shows the confirm and resends. `net.rs` sends `LoadConversation` when a pane starts showing a conversation-view session and after a reconnect, `UnloadConversation` when the last such pane goes, and handles `Conversation` / `ConversationAppend`.
+
+## What MA9 reuses
+
+Everything on the daemon and the wire: the stream driver, the view switch, the entries, prompt answering and the queue, so the phone is one more client of the same messages and a prompt answered on the phone clears on the desktop. It also takes over the pure `conversation.rs` model (moved into MA1's client core crate when MA9 starts) and draws its own Flutter widgets over it. `pending_input` on the snapshot already lets MA6 answer a conversation-view prompt before MA9 exists, through `AnswerConversationPrompt`.
+
+## Steps
+
+- [ ] **CV.0 Spike: the stream peer.** With a real `claude` on Windows, record in `docs/spikes/conversation-view.md`, each answer quoted from a run: two turns over stdin; a message written mid-turn (queued or injected, and what `--replay-user-messages` echoes); the permission-host flag and the exact `control_request` / `control_response` JSON for a Bash prompt, allow-always with suggestions, `AskUserQuestion` and `ExitPlanMode`; the interrupt, set-model, set-permission-mode and effort control requests, and the `/model` / `/effort` text fallback; `--resume` of a TUI-started conversation (id kept, earlier messages replayed or not, `system/init.session_id`); `--resume` of an id with no transcript; exit on stdin close; the billing fields per [gui-mode-billing.md](../spikes/gui-mode-billing.md). Save redacted runs as fixtures under `crates/daemon/tests/fixtures/conversation/`. Proof: the spike note and the fixtures. Depends on nothing; every later step reads it.
+- [ ] **CV.1 Protocol.** `crates/protocol/src/lib.rs`: `SessionView`, `ConversationState`, the two snapshot fields, the eight client and two daemon messages, `ConversationEntry`, `ToolOutcome`, `PromptAnswer`, and `request_id` on `PendingInput` (or `PendingInput` itself if HS.2 has not landed). Proof: round-trip tests, `Unknown` tests for each new tagged enum, and `cargo test -p protocol v22_compat` with the new cases. Depends on CV.0.
+- [ ] **CV.2 Stream driver.** New `crates/daemon/src/conversation.rs`, generic over the child's stdio: line splitting, tolerant parsing, entry upserts, the status table, prompt bookkeeping, the queue, delta coalescing, and the writers for user messages, control responses and control requests. Proof: unit tests over `tokio::io::duplex` replaying the CV.0 fixtures (a two-turn run, a permission allowed, allowed always and denied, a question answered, a queued message sent on `result`, an interrupt), plus a malformed line and an unknown event ignored. Depends on CV.1.
+- [ ] **CV.3 Transcript seeding.** `crates/daemon/src/transcripts.rs` (`project_dir` to `pub(crate)`) and `conversation.rs`: build entries from `<id>.jsonl` with the driver's block mapping, newest 500 with `hidden`. Proof: unit tests on a temp Claude home: a TUI-written transcript yields user, answer and tool entries with results attached; a missing file yields none. Depends on CV.2.
+- [ ] **CV.4 Tracer pipe mode.** `crates/tracer/src/main.rs` (the `--stdio` argument; piped child instead of ConPTY; `Resize` ignored), `crates/daemon/src/tracer_client.rs` (a spawn option), `docs/tracer-abi.md`. Proof: a tracer test that `Input` bytes reach a child's stdin and its stdout returns as `Output`, and that a reconnect replays the ring; the existing tracer tests unchanged. Depends on CV.0 (open question 1 settled).
+- [ ] **CV.5 Backend argv.** `crates/daemon/src/agents/mod.rs` (`supports_conversation`, `build_conversation_args`), `agents/claude.rs`. Proof: argv unit tests: resumed, fresh with `--session-id`, a workspace with `--add-dir`s and the prelude, model, effort and permission mode, `--dangerously-skip-permissions` winning over the mode; Codex and Cursor unsupported. Depends on CV.0.
+- [ ] **CV.6 Session wiring and the view switch.** `crates/daemon/src/server.rs` (`SetSessionView`, the stop-then-resume flow, spawning the peer through the tracer, reattach at startup), `session.rs` (`view`, conversation state, snapshot fields), `orphan.rs` (`view` in `meta.json`), `history.rs` (`view` in the entry, Recover respawning a peer). Proof: `server.rs` tests with a scripted peer: a switch with no turn running flips `view` and echoes `request_id`; a running turn without `interrupt_running` answers `ActionFailed`; a switch writes no history end; a sidecar without `view` reads as `Terminal`; Recover of a conversation-view entry builds conversation argv. Depends on CV.2, CV.4, CV.5.
+- [ ] **CV.7 Conversation handlers.** `crates/daemon/src/server.rs`: `LoadConversation` / `UnloadConversation`, `SendConversationMessage`, `CancelQueuedMessage`, `AnswerConversationPrompt`, `SetConversationSettings` (control request or fallback, and the spawn config updated), `InterruptConversation`. Proof: handler tests: the reply caps with `hidden` and echoes `request_id`; appends reach only loaders; an answer to an unknown prompt answers `Error`; a settings change lands in the stored spawn config; `Attention` fires once per prompt. Depends on CV.3, CV.6.
+- [ ] **CV.8 Native model.** New `apps/native/src/conversation.rs`: entry store, card expansion, tool summaries, prompt answer builders, the Markdown block splitter. Proof: unit tests for upsert and cap, each prompt kind's `PromptAnswer`, multi-select and "Other", and the splitter on headings, lists, nested fences and inline code. Depends on CV.1.
+- [ ] **CV.9 Native view.** New `apps/native/src/conversation_view.rs`; `grid_view.rs` (the pane branch), `net.rs` (the messages, load on show and reconnect), the pane header toggle, `pane_menu.rs`, `keys.rs`, the confirm. Proof: a new `apps/native/tests/ui_conversation.rs` against the fake daemon: the toggle sends `SetSessionView` and the confirm resends with `interrupt_running`; a `Conversation` reply renders its entries and an append updates a tool card; Allow always and a question's options send the right `PromptAnswer`; Ctrl+Enter during a turn shows a queued message and Cancel sends `CancelQueuedMessage`. Depends on CV.7, CV.8.
+- [ ] **CV.10 Live e2e.** `tools/e2e/fake-claude/index.mjs`: with `--input-format stream-json`, act as a stream peer: `system/init`, a scripted answer, a tool call that raises a permission `control_request` on a cue word, `result`; honour `--resume`. `apps/native/tests/e2e_live.rs`: switch a session to conversation view, send a message, allow the prompt, see the turn end, switch back to the terminal. Proof: `.\rt.ps1 native-e2e` green. Depends on CV.9.
+- [ ] **CV.11 Docs.** `CLAUDE.md` (the stream peer and tracer pipe mode under the architecture invariants; `view` in the `meta.json` line), `docs/native-client.md`, the glossary entries for "stream peer", "control request" and "view switch" in the docs start page; tick the parity lines in `docs/plans/native-client-parity.md`; delete the MAIN.md line and the borrowed-ideas item; promote the lasting decisions into `docs/architecture.md` and delete this doc. Proof: the diff.
+
+## Open questions
+
+1. **Keeping the stream peer across a daemon restart.** (a) Recommended: tracer pipe mode (CV.4); the peer outlives the daemon like a PTY session and the new daemon reattaches. Worst case: a stdout line longer than the ring's drop point is cut on replay, and that entry is missing until the transcript seeding on the next load fills it. (b) The peer dies with the daemon, which restarts it with `--resume` at startup. Worst case: a daemon upgrade kills every running turn and any unanswered prompt, and the turn is left unfinished. (c) The peer dies and the session shows Resume. Worst case: as (b), and the user must restart each session by hand.
+2. **How permission prompts reach the daemon.** (a) Recommended: the stdio control protocol the SDK uses, answered by the driver. Worst case: the wire shape is undocumented and a Claude Code update changes it; CV.0's fixtures and the `Unknown` paths make that a visible failure (prompts denied), not a hang. (b) An MCP server shim (a subcommand of `rt-tracer.exe`) named by `--permission-prompt-tool`, calling the daemon. Worst case: an MCP server per session, the 30 s startup wait, and no approval for tools that require user interaction. (c) A blocking `PermissionRequest` hook through HS's shim. Worst case: a hook blocks Claude up to its timeout and cannot carry `AskUserQuestion` answers.
+3. **Messages typed mid-turn.** (a) Recommended: the daemon holds the queue and sends at `result`; queued messages stay editable and cancellable. Worst case: the user cannot steer a long turn without Stop. (b) Write through to the CLI's own queue. Worst case: the message's timing inside the turn is up to Claude Code and it cannot be edited or withdrawn once written.
+4. **Where the chat history comes from.** (a) Recommended: Claude's transcript `<id>.jsonl` on load, live stream on top. Worst case: a Claude Code transcript format change blanks the history before the switch while live turns still render. (b) The daemon's own log of the peer's stream. Worst case: turns taken in the terminal view never appear in the chat. (c) Both, merged by message uuid. Worst case: two parsers and a merge to keep right.
+5. **One entry type with subagent streams.** (a) Recommended: `ConversationEntry` as designed, and SS.3 uses it in place of its `TranscriptEntry` (whichever lands first defines it). Worst case: the subagent view carries fields it never fills. (b) Two types. Worst case: two parsers of the same Claude message shape drifting apart.
+6. **Markdown in answers.** (a) Recommended: the in-house block splitter with syntect for code. Worst case: tables and nested lists render as plain text. (b) `pulldown-cmark` as a new dependency. Worst case: one more dependency and a full renderer to map onto GPUI elements. (c) Plain text in a monospace block. Worst case: answers read like the terminal, which is most of what the view is meant to replace.
+7. **Streaming partial answers.** (a) Recommended: `--include-partial-messages`, coalesced to one broadcast per 50 ms. Worst case: more WS traffic during long answers, most visible over the mobile relay. (b) Whole messages only. Worst case: a long answer appears all at once after tens of seconds of nothing.

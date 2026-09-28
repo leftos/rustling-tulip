@@ -1,6 +1,6 @@
 # Follow DeepSeek dispatches
 
-Status: design, no step started. Index line: "Follow DeepSeek dispatches" in `docs/plans/MAIN.md` (Wave 10). Terms this doc adds (**dispatch run**, **live-run file**, **live-run folder**, **stop marker**) go into the README glossary in DF.10.
+Status: design, no step started. Index line: "Follow DeepSeek dispatches" in `docs/plans/MAIN.md` (Wave 9). Terms this doc adds (**dispatch run**, **live-run file**, **live-run folder**, **stop marker**) go into the README glossary in DF.10.
 
 ## Problem
 
