@@ -45,8 +45,8 @@ const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
 const HEADLESS_DISABLED: &str = "headless mode is not yet supported for cursor";
 const PROMPT_ROWS: (usize, usize) = (3, 8);
 const MODEL_PLACEHOLDER: &str = "CLI default";
-const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
-const CODEX_LOCKED: &str = "Ignored while trusted launch is on. Codex will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
+pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
+pub(crate) const CODEX_LOCKED: &str = "Ignored while trusted launch is on. Codex will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
 const CURSOR_LOCKED: &str = "Ignored while trusted launch is on. Cursor will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
 const CURSOR_PLAN_LABEL: &str = "Plan mode (read-only / planning)";
 const CURSOR_PLAN_TIP: &str = "Start cursor in --plan mode (read-only / planning)";
@@ -170,10 +170,10 @@ impl Field {
 
 /// How a button looks.
 #[derive(Debug, Clone, Copy)]
-struct Look {
-    selected: bool,
-    focused: bool,
-    enabled: bool,
+pub(crate) struct Look {
+    pub(crate) selected: bool,
+    pub(crate) focused: bool,
+    pub(crate) enabled: bool,
 }
 
 impl RootView {
@@ -370,6 +370,7 @@ impl RootView {
             workspaces: self.sidebar.workspaces(),
             focused: focused.as_deref().and_then(|id| self.sidebar.session(id)),
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
+            spawn_defaults: self.sidebar.ui_state().spawn,
         };
         let now = (self.now)();
         let Some((form, messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now) else {
@@ -1058,7 +1059,7 @@ fn dialog_header(close_focused: bool, cx: &mut Context<RootView>) -> Div {
 }
 
 /// A labelled field.
-fn field(label: impl Into<SharedString>) -> Div {
+pub(crate) fn field(label: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1067,7 +1068,7 @@ fn field(label: impl Into<SharedString>) -> Div {
 }
 
 /// A row of choices that wraps.
-fn segmented(buttons: Vec<AnyElement>) -> Div {
+pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
     div().flex().flex_wrap().gap(px(4.0)).children(buttons)
 }
 
@@ -1076,18 +1077,17 @@ fn muted(text: impl Into<SharedString>) -> Div {
 }
 
 /// A choice or a plain button: filled when chosen, outlined when focused,
-/// dimmed and inert when disabled.
-fn option_button(
-    control: &Control,
+/// dimmed and inert when disabled. The Settings modal's Spawn defaults rows
+/// are built from it too, so both places look the same.
+pub(crate) fn choice_button(
+    name: String,
     label: impl IntoElement,
     look: Look,
-    cx: &mut Context<RootView>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Stateful<Div> {
-    let name = control.selector();
-    let pressed = control.clone();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+        .debug_selector(move || name)
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -1101,15 +1101,34 @@ fn option_button(
             button
                 .cursor_pointer()
                 .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.press_spawn_control(&pressed, window, cx);
-                }))
+                .on_click(on_click)
         })
         .when(!look.enabled, |button| button.opacity(0.5))
         .child(label)
-        .when(look.focused && in_body(control), |button| {
-            button.child(reveal_marker(cx))
-        })
+}
+
+/// A dialog control's choice button, revealed into view when focused.
+fn option_button(
+    control: &Control,
+    label: impl IntoElement,
+    look: Look,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let name = control.selector();
+    let pressed = control.clone();
+    let button = choice_button(
+        name,
+        label,
+        look,
+        cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_spawn_control(&pressed, window, cx);
+        }),
+    );
+    if look.focused && in_body(control) {
+        button.child(reveal_marker(cx))
+    } else {
+        button
+    }
 }
 
 /// Whether a control sits in the scrolling body, not the header or footer.

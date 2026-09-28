@@ -17,6 +17,7 @@ use protocol::{
 };
 
 use crate::combobox::{ComboRow, Combobox};
+use crate::sidebar::SpawnDefaults;
 use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
 
@@ -631,6 +632,8 @@ pub(crate) struct FormInputs<'a> {
     /// The session in the focused pane.
     pub focused: Option<&'a SessionSnapshot>,
     pub tabs: TabChoices,
+    /// The saved Spawn defaults every field is seeded from.
+    pub spawn_defaults: SpawnDefaults,
 }
 
 impl SpawnForm {
@@ -647,6 +650,7 @@ impl SpawnForm {
         } else {
             OpenChoice::NewTab
         };
+        let defaults = inputs.spawn_defaults;
         let mut form = Self {
             repos: inputs.repos.to_vec(),
             workspaces: inputs.workspaces.to_vec(),
@@ -659,7 +663,7 @@ impl SpawnForm {
             },
             tabs: inputs.tabs,
             open_in,
-            trusted: false,
+            trusted: defaults.trusted,
             use_worktree: true,
             mode: WorktreeMode::New,
             branch: BranchField::default(),
@@ -670,7 +674,11 @@ impl SpawnForm {
             existing: Existing::default(),
             preview: Preview::default(),
             prompt: String::new(),
-            advanced: Advanced::default(),
+            advanced: Advanced {
+                permission_mode: defaults.permission_mode,
+                codex_sandbox: defaults.codex_sandbox,
+                ..Advanced::default()
+            },
             focus: Control::Branch,
             share: None,
             submitted: false,
@@ -2270,6 +2278,7 @@ mod tests {
         workspaces: Vec<WorkspaceEntry>,
         focused: Option<SessionSnapshot>,
         tabs: TabChoices,
+        spawn_defaults: SpawnDefaults,
     }
 
     impl Setup {
@@ -2279,7 +2288,14 @@ mod tests {
                 workspaces: Vec::new(),
                 focused: None,
                 tabs: tabs(Some("t1"), &[]),
+                spawn_defaults: SpawnDefaults::default(),
             }
+        }
+
+        /// The saved Spawn defaults the dialog opens over.
+        fn defaults(mut self, defaults: SpawnDefaults) -> Self {
+            self.spawn_defaults = defaults;
+            self
         }
 
         fn open(&self, cache: &mut BranchCache) -> (SpawnForm, Vec<ClientMessage>) {
@@ -2289,6 +2305,7 @@ mod tests {
                     workspaces: &self.workspaces,
                     focused: self.focused.as_ref(),
                     tabs: self.tabs.clone(),
+                    spawn_defaults: self.spawn_defaults,
                 },
                 cache,
                 Instant::now(),
@@ -2299,6 +2316,15 @@ mod tests {
 
     fn open_repo(repo: RepoEntry) -> SpawnForm {
         Setup::repos(vec![repo]).open(&mut BranchCache::default()).0
+    }
+
+    /// Both agent slots on, so a case can tell which one the dialog read.
+    fn all_defaults() -> SpawnDefaults {
+        SpawnDefaults {
+            trusted: true,
+            permission_mode: Some(PermissionMode::Plan),
+            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+        }
     }
 
     fn press(form: &mut SpawnForm, control: &Control) -> Outcome {
@@ -2440,6 +2466,71 @@ mod tests {
         assert!(!form.trusted(), "cleared, not just hidden");
         press(&mut form, &Control::Trusted);
         press(&mut form, &Control::Runtime(Runtime::PlainShell));
+        form.branch.value = "b".to_owned();
+        let (request, _, _) = form.build_request();
+        assert!(!request.dangerously_skip_permissions);
+        assert_eq!(request.mode, SessionMode::PlainShell);
+    }
+
+    #[test]
+    fn open_prefills_trusted_approval_and_sandbox_from_defaults() {
+        let mut cache = BranchCache::default();
+        let (form, _) = Setup::repos(vec![repo("r1")])
+            .defaults(all_defaults())
+            .open(&mut cache);
+        assert!(form.trusted(), "trusted launch pre-filled");
+        assert_eq!(form.permission_mode(), Some(PermissionMode::Plan));
+        assert_eq!(form.codex_sandbox(), Some(CodexSandbox::WorkspaceWrite));
+
+        let (plain, _) = Setup::repos(vec![repo("r2")]).open(&mut cache);
+        assert!(!plain.trusted(), "off when no default is saved");
+        assert_eq!(plain.permission_mode(), None);
+        assert_eq!(plain.codex_sandbox(), None);
+    }
+
+    #[test]
+    fn target_switch_keeps_user_choice_over_defaults() {
+        let (mut form, _) = Setup::repos(vec![repo("r1"), repo("r2")])
+            .defaults(all_defaults())
+            .open(&mut BranchCache::default());
+        press(&mut form, &Control::Trusted);
+        press(
+            &mut form,
+            &Control::Approval(Some(PermissionMode::AcceptEdits)),
+        );
+        press(
+            &mut form,
+            &Control::CodexSandbox(Some(CodexSandbox::DangerFullAccess)),
+        );
+        assert_eq!(form.permission_mode(), Some(PermissionMode::AcceptEdits));
+
+        press(&mut form, &Control::Target(Target::Repo("r2".to_owned())));
+        assert_eq!(
+            form.permission_mode(),
+            Some(PermissionMode::AcceptEdits),
+            "the user's approval choice survives the switch"
+        );
+        assert_eq!(
+            form.codex_sandbox(),
+            Some(CodexSandbox::DangerFullAccess),
+            "and the sandbox choice"
+        );
+        assert!(!form.trusted(), "trusted stays as the user left it");
+    }
+
+    #[test]
+    fn prefill_overrides_spawn_defaults() {
+        let mut shell = repo("r1");
+        shell.last_spawn_config = Some(config("claude", "plain_shell"));
+        let (mut form, _) = Setup::repos(vec![shell])
+            .defaults(all_defaults())
+            .open(&mut BranchCache::default());
+        assert_eq!(
+            form.runtime(),
+            Runtime::PlainShell,
+            "the launch-last plain shell wins"
+        );
+        assert!(!form.trusted(), "the saved trusted default does not show");
         form.branch.value = "b".to_owned();
         let (request, _, _) = form.build_request();
         assert!(!request.dangerously_skip_permissions);
@@ -2607,6 +2698,7 @@ mod tests {
                 workspaces: &[],
                 focused: None,
                 tabs: TabChoices::default(),
+                spawn_defaults: SpawnDefaults::default(),
             },
             &mut BranchCache::default(),
             start,
@@ -2731,6 +2823,7 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: tabs(Some("t1"), &[]),
+            spawn_defaults: SpawnDefaults::default(),
         };
         let (mut form, sent) = setup.open(&mut BranchCache::default());
         assert_eq!(form.target(), &Target::Workspace("w1".to_owned()));
@@ -2769,6 +2862,7 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: tabs(None, &[]),
+            spawn_defaults: SpawnDefaults::default(),
         };
         let mut form = setup.open(&mut BranchCache::default()).0;
         let Outcome::Stay(sent) = press(&mut form, &Control::Mode(WorktreeMode::Existing)) else {
@@ -3364,6 +3458,7 @@ mod tests {
             workspaces: vec![workspace("w1", &["r1", "r2"])],
             focused: None,
             tabs: TabChoices::default(),
+            spawn_defaults: SpawnDefaults::default(),
         }
         .open(&mut BranchCache::default())
         .0;

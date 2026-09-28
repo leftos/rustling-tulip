@@ -162,7 +162,7 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 - [x] Settings tabs: General / Notifications / Spawn defaults / Worktrees / Remote access / Appearance / App Title; changes save immediately — `SettingsModal.tsx`, `utils/settings.ts` (native: the frame landed in P4.2a with every tab but Remote access, which comes with Phase 6; Tab walks the tab list and the shown tab's controls)
 - [x] General: keep the machine awake (with status), default sidebar view, copy on select — `SettingsModal.tsx` (native: keep awake and copy on select in P4.2a; the default sidebar view comes with P4.9)
-- [ ] Spawn defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx`
+- [x] Spawn defaults: trusted default, Claude approval mode, Codex sandbox — `SettingsModal.tsx` (native: P4.2b; the trusted hint also names Cursor, which the default reaches)
 - [x] App title: busy count and product suffix toggles, live preview — `SettingsModal.tsx`
 - [x] Appearance editor at app / repo-workspace / session level: accent colour, shell background (presets, 12 recent, custom), font family, size, bold, each showing its resolved value and source — `AppearanceEditor.tsx`, `utils/appearance.ts`
 - [x] Session accent drives the sidebar stripe, pane frame and focus colour — `SessionPane.tsx`, `utils/sessionColor.ts`

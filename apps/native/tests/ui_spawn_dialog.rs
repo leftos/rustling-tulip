@@ -361,6 +361,48 @@ fn dialog_closes_on_reconnect(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn dialog_opens_with_saved_spawn_defaults(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        serde_json::json!({
+            "spawn": {
+                "trusted": true,
+                "permission_mode": "plan",
+                "codex_sandbox": "read-only",
+            }
+        })
+        .to_string(),
+    )
+    .expect("seed native-ui.json");
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    let chosen = selected(&mut h);
+    assert!(
+        chosen.contains(&"spawn-skip-perms".to_owned()),
+        "trusted launch pre-filled: {chosen:?}"
+    );
+    assert!(
+        chosen.contains(&"spawn-approval-plan".to_owned()),
+        "Claude approval pre-filled: {chosen:?}"
+    );
+    h.click_on("spawn-agent-codex");
+    let chosen = selected(&mut h);
+    assert!(
+        chosen.contains(&"spawn-codex-sandbox-read-only".to_owned()),
+        "Codex sandbox pre-filled: {chosen:?}"
+    );
+
+    suggest(&mut h, "r1", "wt/brave-fox");
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert!(
+        request.dangerously_skip_permissions,
+        "the saved trusted default reaches the daemon"
+    );
+}
+
+#[gpui::test]
 fn tab_cycles_controls(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());

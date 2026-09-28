@@ -3,8 +3,9 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AppearanceOverrides, AttentionReason, ContainerRef, DaemonMessage, RepoEntry, SessionKind,
-    SessionMode, SessionSnapshot, SessionStatus, WorkspaceEntry,
+    AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
+    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus,
+    WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -153,6 +154,23 @@ pub struct UiState {
     /// Which attention reasons fire an OS notification.
     #[serde(default)]
     pub notifications: NotificationSettings,
+    /// The Settings modal's Spawn defaults tab.
+    #[serde(default)]
+    pub spawn: SpawnDefaults,
+}
+
+/// What the spawn dialog pre-fills from the Spawn defaults tab; every
+/// field off is the `claude` / `codex` CLI's own default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpawnDefaults {
+    /// New Claude, Codex and Cursor sessions bypass approval prompts; Codex
+    /// and Cursor also bypass sandboxing.
+    pub trusted: bool,
+    /// Claude's `--permission-mode` pre-fill.
+    pub permission_mode: Option<PermissionMode>,
+    /// Codex's `--sandbox` pre-fill.
+    pub codex_sandbox: Option<CodexSandbox>,
 }
 
 /// Which attention reasons fire an OS notification; each is on unless
@@ -262,6 +280,7 @@ impl Default for UiState {
             general: GeneralSettings::default(),
             title: TitleSettings::default(),
             notifications: NotificationSettings::default(),
+            spawn: SpawnDefaults::default(),
         }
     }
 }
@@ -498,6 +517,21 @@ impl SidebarModel {
     /// Whether `reason` fires an OS notification.
     pub fn set_notification(&mut self, reason: AttentionReason, on: bool) {
         self.ui.notifications.set(reason, on);
+    }
+
+    /// Whether a spawn dialog opens with trusted launch on.
+    pub fn set_spawn_trusted(&mut self, on: bool) {
+        self.ui.spawn.trusted = on;
+    }
+
+    /// The approval mode a spawn dialog opens with for Claude.
+    pub fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>) {
+        self.ui.spawn.permission_mode = mode;
+    }
+
+    /// The sandbox mode a spawn dialog opens with for Codex.
+    pub fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>) {
+        self.ui.spawn.codex_sandbox = sandbox;
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -1144,7 +1178,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::*;
-    use protocol::SessionMember;
+    use protocol::{CodexSandbox, PermissionMode, SessionMember};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1789,11 +1823,60 @@ mod tests {
                 stopped: false,
                 error: false,
             },
+            spawn: SpawnDefaults {
+                trusted: true,
+                permission_mode: Some(PermissionMode::Plan),
+                codex_sandbox: Some(CodexSandbox::DangerFullAccess),
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
         assert_eq!(load_ui_state(&dir.0), state);
         assert!(!dir.0.join(format!("{UI_FILE}.tmp")).exists());
+    }
+
+    #[test]
+    fn spawn_defaults_round_trip_and_default_off() {
+        let dir = TestDir::new("spawn-defaults");
+        let defaults = SpawnDefaults {
+            trusted: true,
+            permission_mode: Some(PermissionMode::AcceptEdits),
+            codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+        };
+        let state = UiState {
+            spawn: defaults,
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &state).expect("save");
+        assert_eq!(load_ui_state(&dir.0).spawn, defaults, "round trips");
+
+        let off = SpawnDefaults::default();
+        assert!(!off.trusted);
+        assert_eq!(off.permission_mode, None);
+        assert_eq!(off.codex_sandbox, None);
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn,
+            off,
+            "a file saved before the tab existed loads the defaults"
+        );
+    }
+
+    #[test]
+    fn spawn_defaults_setters_write_each_field() {
+        let mut model = SidebarModel::new(UiState::default());
+        model.set_spawn_trusted(true);
+        model.set_spawn_permission_mode(Some(PermissionMode::Plan));
+        model.set_spawn_codex_sandbox(Some(CodexSandbox::ReadOnly));
+        assert_eq!(
+            model.ui_state().spawn,
+            SpawnDefaults {
+                trusted: true,
+                permission_mode: Some(PermissionMode::Plan),
+                codex_sandbox: Some(CodexSandbox::ReadOnly),
+            }
+        );
     }
 
     #[test]

@@ -418,6 +418,145 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn spawn_defaults_tab_shows_choices_and_saves(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    assert_eq!(shown_tab(&mut h), "Spawn defaults");
+    for selector in [
+        "settings-spawn-trusted",
+        "settings-spawn-approval-cli-default",
+        "settings-spawn-approval-accept-edits",
+        "settings-spawn-codex-sandbox-cli-default",
+        "settings-spawn-codex-sandbox-workspace-write",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} is painted"
+        );
+    }
+
+    h.click_on("settings-spawn-approval-accept-edits");
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["permission_mode"],
+        "accept_edits",
+        "saved at once"
+    );
+    h.click_on("settings-spawn-codex-sandbox-workspace-write");
+    assert_eq!(saved_ui(&dir)["spawn"]["codex_sandbox"], "workspace-write");
+    h.click_on("settings-spawn-trusted");
+    assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
+    assert_eq!(
+        saved_ui(&dir)["spawn"]["permission_mode"],
+        "accept_edits",
+        "the values stay saved while trusted locks the rows"
+    );
+}
+
+#[gpui::test]
+fn spawn_defaults_trusted_disables_choices_and_leaves_ring(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    assert!(
+        h.bounds("settings-spawn-approval-locked").origin.x < px(0.0),
+        "no locked note while trusted is off"
+    );
+
+    h.click_on("settings-spawn-trusted");
+    assert_eq!(saved_ui(&dir)["spawn"]["trusted"], true);
+    for selector in [
+        "settings-spawn-approval-locked",
+        "settings-spawn-codex-sandbox-locked",
+    ] {
+        assert!(
+            h.bounds(selector).origin.x >= px(0.0),
+            "{selector} shows why the choices are dead"
+        );
+    }
+
+    h.click_on("settings-spawn-approval-accept-edits");
+    assert!(
+        h.bounds("settings-spawn-approval-accept-edits").origin.x >= px(0.0),
+        "the disabled choice is still painted"
+    );
+    assert!(
+        saved_ui(&dir)["spawn"]["permission_mode"].is_null(),
+        "a click on it saves nothing"
+    );
+
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("list"),
+        "the locked choices left the ring"
+    );
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+}
+
+#[gpui::test]
+fn tab_walks_spawn_default_choices(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-spawn-defaults");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-spawn-trusted"));
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-approval-cli-default")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-approval-default")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-approval-accept-edits")
+    );
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["spawn"]["permission_mode"], "accept_edits");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-approval-bypass-permissions")
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("settings-spawn-approval-plan"));
+    h.keys("tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-read-only")
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-workspace-write")
+    );
+    h.keys("enter");
+    assert_eq!(saved_ui(&dir)["spawn"]["codex_sandbox"], "workspace-write");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-danger-full-access")
+    );
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("list"), "back to the tab list");
+    h.keys("shift-tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-spawn-codex-sandbox-danger-full-access"),
+        "Shift+Tab walks back"
+    );
+}
+
+#[gpui::test]
 fn tab_in_appearance_hex_field_stays_in_appearance(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

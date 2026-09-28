@@ -12,13 +12,17 @@ use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, Keystroke, Stateful, Window, div, prelude::*,
     px,
 };
-use protocol::{AttentionReason, ClientMessage};
+use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
 
 use crate::appearance;
 use crate::appearance_view::{Level, close_footer};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::session_menu::{backdrop, dialog_button};
+use crate::spawn_form::{
+    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
+};
+use crate::spawn_view::{CLAUDE_LOCKED, CODEX_LOCKED, Look, choice_button, field, segmented};
 use crate::tabs::tab_session_counts;
 use crate::window_title::compute_title;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
@@ -100,6 +104,9 @@ pub(crate) enum SettingsControl {
     NotifyAwaitingInput,
     NotifyStopped,
     NotifyError,
+    SpawnTrusted,
+    SpawnApproval(Option<PermissionMode>),
+    SpawnCodexSandbox(Option<CodexSandbox>),
 }
 
 impl SettingsControl {
@@ -113,6 +120,26 @@ impl SettingsControl {
             Self::NotifyAwaitingInput => "settings-notify-awaiting-input",
             Self::NotifyStopped => "settings-notify-stopped",
             Self::NotifyError => "settings-notify-error",
+            Self::SpawnTrusted => "settings-spawn-trusted",
+            Self::SpawnApproval(mode) => match mode {
+                None => "settings-spawn-approval-cli-default",
+                Some(PermissionMode::Default) => "settings-spawn-approval-default",
+                Some(PermissionMode::AcceptEdits) => "settings-spawn-approval-accept-edits",
+                Some(PermissionMode::BypassPermissions) => {
+                    "settings-spawn-approval-bypass-permissions"
+                }
+                Some(PermissionMode::Plan) => "settings-spawn-approval-plan",
+            },
+            Self::SpawnCodexSandbox(sandbox) => match sandbox {
+                None => "settings-spawn-codex-sandbox-cli-default",
+                Some(CodexSandbox::ReadOnly) => "settings-spawn-codex-sandbox-read-only",
+                Some(CodexSandbox::WorkspaceWrite) => {
+                    "settings-spawn-codex-sandbox-workspace-write"
+                }
+                Some(CodexSandbox::DangerFullAccess) => {
+                    "settings-spawn-codex-sandbox-danger-full-access"
+                }
+            },
         }
     }
 }
@@ -228,10 +255,20 @@ impl RootView {
                 SettingsControl::NotifyStopped,
                 SettingsControl::NotifyError,
             ],
-            SettingsTab::SpawnDefaults | SettingsTab::Worktrees | SettingsTab::Appearance => {
-                Vec::new()
-            }
+            SettingsTab::SpawnDefaults => self.spawn_default_controls(),
+            SettingsTab::Worktrees | SettingsTab::Appearance => Vec::new(),
         }
+    }
+
+    /// The Spawn defaults tab's controls: the toggle, then the two choice
+    /// rows while trusted launch has not locked them.
+    fn spawn_default_controls(&self) -> Vec<SettingsControl> {
+        let mut controls = vec![SettingsControl::SpawnTrusted];
+        if !self.sidebar.ui_state().spawn.trusted {
+            controls.extend(APPROVAL_CHOICES.map(SettingsControl::SpawnApproval));
+            controls.extend(CODEX_SANDBOX_CHOICES.map(SettingsControl::SpawnCodexSandbox));
+        }
+        controls
     }
 
     /// The control holding the keyboard, if one does.
@@ -290,6 +327,11 @@ impl RootView {
                 self.toggle_notification(AttentionReason::Stopped, cx);
             }
             SettingsControl::NotifyError => self.toggle_notification(AttentionReason::Error, cx),
+            SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
+            SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode, cx),
+            SettingsControl::SpawnCodexSandbox(sandbox) => {
+                self.set_spawn_codex_sandbox(sandbox, cx);
+            }
         }
         cx.notify();
     }
@@ -358,6 +400,25 @@ impl RootView {
     fn toggle_notification(&mut self, reason: AttentionReason, cx: &mut Context<Self>) {
         let on = !self.sidebar.ui_state().notifications.fires(reason);
         self.sidebar.set_notification(reason, on);
+        self.save_ui();
+        cx.notify();
+    }
+
+    fn toggle_spawn_trusted(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().spawn.trusted;
+        self.sidebar.set_spawn_trusted(on);
+        self.save_ui();
+        cx.notify();
+    }
+
+    fn set_spawn_permission_mode(&mut self, mode: Option<PermissionMode>, cx: &mut Context<Self>) {
+        self.sidebar.set_spawn_permission_mode(mode);
+        self.save_ui();
+        cx.notify();
+    }
+
+    fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>, cx: &mut Context<Self>) {
+        self.sidebar.set_spawn_codex_sandbox(sandbox);
         self.save_ui();
         cx.notify();
     }
@@ -600,10 +661,65 @@ impl RootView {
                 .collect(),
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
             SettingsTab::Notifications => self.notifications_tab(focused, cx),
-            SettingsTab::SpawnDefaults | SettingsTab::Worktrees => {
-                vec![hint(COMING_SOON).into_any_element()]
-            }
+            SettingsTab::SpawnDefaults => self.spawn_defaults_tab(focused, cx),
+            SettingsTab::Worktrees => vec![hint(COMING_SOON).into_any_element()],
         }
+    }
+
+    /// The Spawn defaults tab: trusted launch, and the two agent options it
+    /// locks while it is on.
+    fn spawn_defaults_tab(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let spawn = self.sidebar.ui_state().spawn;
+        let locked = spawn.trusted;
+        let trusted = toggle(
+            SettingsControl::SpawnTrusted,
+            spawn.trusted,
+            "Trusted launch by default",
+            focused,
+            cx,
+        );
+        let approval = choice_row(
+            "Claude approval mode",
+            &APPROVAL_CHOICES.map(|mode| {
+                (
+                    SettingsControl::SpawnApproval(mode),
+                    approval_label(mode),
+                    mode == spawn.permission_mode,
+                )
+            }),
+            locked.then_some((CLAUDE_LOCKED, "settings-spawn-approval-locked")),
+            focused,
+            cx,
+        );
+        let sandbox = choice_row(
+            "Codex sandbox mode",
+            &CODEX_SANDBOX_CHOICES.map(|sandbox| {
+                (
+                    SettingsControl::SpawnCodexSandbox(sandbox),
+                    codex_sandbox_label(sandbox),
+                    sandbox == spawn.codex_sandbox,
+                )
+            }),
+            locked.then_some((CODEX_LOCKED, "settings-spawn-codex-sandbox-locked")),
+            focused,
+            cx,
+        );
+        let section = section("Spawn defaults")
+            .child(hint(
+                "Pre-fill these in the spawn dialog. You can override on every spawn.",
+            ))
+            .child(trusted)
+            .child(hint(
+                "When enabled, new Claude, Codex and Cursor sessions bypass approval prompts. \
+                 Codex and Cursor also bypass sandboxing.",
+            ))
+            .child(approval)
+            .child(sandbox);
+        vec![section.into_any_element()]
     }
 
     fn notifications_tab(
@@ -813,4 +929,39 @@ fn toggle(
         .on_click(press(control, cx))
         .child(if checked { "☑" } else { "☐" })
         .child(label)
+}
+
+/// A labelled row of segmented choices, laid out as the spawn dialog's;
+/// with a locked note the choices are dimmed, inert and out of the ring,
+/// and the note and its selector say why.
+fn choice_row(
+    label: &'static str,
+    choices: &[(SettingsControl, &'static str, bool)],
+    locked_note: Option<(&'static str, &'static str)>,
+    focused: Option<SettingsControl>,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let buttons = choices
+        .iter()
+        .map(|(control, text, selected)| {
+            let look = Look {
+                selected: *selected,
+                focused: focused == Some(*control),
+                enabled: locked_note.is_none(),
+            };
+            choice_button(
+                control.selector().to_owned(),
+                *text,
+                look,
+                press(*control, cx),
+            )
+            .into_any_element()
+        })
+        .collect();
+    let note =
+        locked_note.map(|(text, selector)| hint(text).debug_selector(move || selector.to_owned()));
+    field(label)
+        .child(segmented(buttons))
+        .children(note)
+        .into_any_element()
 }
