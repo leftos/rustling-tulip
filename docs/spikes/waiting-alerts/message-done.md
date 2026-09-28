@@ -1,0 +1,1 @@
+Fixed the flaky `reattach_orphans` test: the tracer Welcome read now has a 5 s timeout, and the test waits on the handshake instead of sleeping. `cargo test -p daemon` passes (412 tests), clippy is clean, and the fix is committed as `a1b2c3d` on `main`. Nothing else is running.
