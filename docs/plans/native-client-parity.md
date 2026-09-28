@@ -101,7 +101,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Close with × (two-click when the tab has sessions or ≥2 panes; Esc / outside click resets); middle-click closes — `TabBar.tsx`
 - [x] Double-click to rename inline — `TabBar.tsx`
 - [ ] Drag to reorder; a pane dragged over a pill activates that tab; dropping on a pill places the pane automatically — `TabBar.tsx`
-- [ ] Tab menu: Rename, Pop out, Rearrange ▸ grid (auto / N×M) / side by side / stacked, Move panes to new tab… (≥3 panes), font +/−/reset, Close, Close others, Merge selected (horizontal / vertical) — `TabBar.tsx` (native: P4.13a has all but Pop out (Phase 5) and Move panes to new tab… (P4.13b); a selection holding a diff tab shows Merge disabled)
+- [ ] Tab menu: Rename, Pop out, Rearrange ▸ grid (auto / N×M) / side by side / stacked, Move panes to new tab… (≥3 panes), font +/−/reset, Close, Close others, Merge selected (horizontal / vertical) — `TabBar.tsx` (native: P4.13a has all but Pop out (Phase 5), and Move panes to new tab… landed in P4.13b; a selection holding a diff tab shows Merge disabled)
 - [x] Move panes dialog: pick panes, layout, grid shape, name — `MovePanesDialog.tsx` (native: P4.13b)
 - [ ] Undo shelf for closed tab / closed pane / move / swap (8s, at most 3) — `UndoShelf.tsx`
 - [x] Split tree with draggable dividers (5–95%), ratio saved on release — `GridRenderer.tsx` `SplitRenderer`
