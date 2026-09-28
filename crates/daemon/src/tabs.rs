@@ -1174,6 +1174,27 @@ mod tests {
         }
     }
 
+    /// An `AppState` over a throwaway config dir, with its `Dirs` so the test
+    /// can clean the directory up at the end.
+    fn scratch_state(tag: &str) -> (crate::state::AppState, crate::paths::Dirs) {
+        let root = std::env::temp_dir().join(format!("rt-tabs-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch dir");
+        let dirs = crate::paths::Dirs {
+            config: root.clone(),
+            state_file: root.join("state.json"),
+            handshake_file: root.join("daemon.json"),
+            lan_config_file: root.join("lan.json"),
+            lan_cert_file: root.join("lan-cert.pem"),
+            lan_key_file: root.join("lan-key.pem"),
+            sessions_dir: root.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        };
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        (state, dirs)
+    }
+
     #[test]
     fn panes_for_session_collects_matching_pane_ids() {
         let grid = split(
@@ -1664,6 +1685,41 @@ mod tests {
         assert!(source_empty);
         assert_eq!(tabs.len(), 1);
         assert_ne!(tabs[0].id, "t1");
+    }
+
+    /// The extract pulls panes out of the source grid one at a time, so a pane
+    /// id that names nothing fails once the earlier ones are already gone.
+    /// Through the state the server mutates, that failure has to roll the whole
+    /// layout back instead of persisting a half-drained tab.
+    #[test]
+    fn failed_extract_to_new_tab_leaves_layout_unchanged() {
+        let (state, dirs) = scratch_state("rollback-extract");
+        let grid = split(Horizontal, 0.5, pane("p1", None), pane("p2", None));
+        state
+            .mutate_client_layout("c1", |tabs| tabs.push(grid_tab("t1", grid)))
+            .expect("seed the client layout");
+        let before = state.client_layout("c1");
+
+        let err = state
+            .try_mutate_client_layout("c1", |tabs| {
+                extract_to_new_tab(
+                    tabs,
+                    "t1",
+                    &["p1".to_string(), "ghost".to_string()],
+                    None,
+                    None,
+                )
+            })
+            .expect_err("the second pane id names no pane");
+        assert!(err.to_string().contains("ghost"), "unexpected error: {err}");
+
+        assert_eq!(
+            state.client_layout("c1"),
+            before,
+            "a failed extract leaves the tab list exactly as it was"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
     #[test]

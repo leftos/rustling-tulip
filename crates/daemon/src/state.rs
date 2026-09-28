@@ -38,7 +38,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedState {
     pub repos: Vec<RepoEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
@@ -141,20 +141,35 @@ impl AppState {
 
     fn write_to_disk(&self) -> anyhow::Result<()> {
         let guard = crate::sync::lock(&self.inner);
-        let bytes = serde_json::to_vec_pretty(&*guard).context("serializing state")?;
-        let tmp = self.dirs.state_file.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).context("writing state tmp")?;
-        std::fs::rename(&tmp, &self.dirs.state_file).context("renaming state.json")?;
-        Ok(())
+        persist(&self.dirs, &guard)
     }
 
+    /// Run `f` on the live state and persist the result. Use this for closures
+    /// that cannot fail; a closure that can fail halfway belongs on
+    /// [`AppState::try_mutate`].
     pub fn mutate<R>(&self, f: impl FnOnce(&mut PersistedState) -> R) -> anyhow::Result<R> {
         let mut guard = crate::sync::lock(&self.inner);
         let result = f(&mut guard);
-        let bytes = serde_json::to_vec_pretty(&*guard).context("serializing state")?;
-        let tmp = self.dirs.state_file.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).context("writing state tmp")?;
-        std::fs::rename(&tmp, &self.dirs.state_file).context("renaming state.json")?;
+        persist(&self.dirs, &guard)?;
+        Ok(result)
+    }
+
+    /// Fallible [`AppState::mutate`]: `f` runs against a clone, and the live
+    /// state is replaced and `state.json` rewritten only once it returns `Ok`.
+    /// A closure that fails after changing something — a pane pulled out of a
+    /// tab before an unknown second pane id is reached, an extract whose insert
+    /// target turns out to be missing — leaves both the in-memory state and the
+    /// file exactly as they were, so the error a handler replies with never
+    /// describes a half-applied layout.
+    pub fn try_mutate<T>(
+        &self,
+        f: impl FnOnce(&mut PersistedState) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut guard = crate::sync::lock(&self.inner);
+        let mut candidate = PersistedState::clone(&guard);
+        let result = f(&mut candidate)?;
+        persist(&self.dirs, &candidate)?;
+        *guard = candidate;
         Ok(result)
     }
 
@@ -246,6 +261,20 @@ impl AppState {
         })
     }
 
+    /// Fallible [`AppState::mutate_client_layout`]: a closure that returns
+    /// `Err` leaves the client's layout as it was, and a client that had no
+    /// layout entry keeps none instead of gaining an empty one.
+    pub fn try_mutate_client_layout<T>(
+        &self,
+        client_id: &str,
+        f: impl FnOnce(&mut Vec<TabEntry>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        self.try_mutate(|s| {
+            let layout = s.layouts.entry(client_id.to_string()).or_default();
+            f(&mut layout.tabs)
+        })
+    }
+
     /// Create or replace a client's layout outright (first-connect init /
     /// chooser). Records the display name so other clients can clone it.
     pub fn set_client_layout(
@@ -306,6 +335,16 @@ impl AppState {
     ) -> anyhow::Result<R> {
         self.mutate(|s| f(&mut s.layouts))
     }
+}
+
+/// Serialize `state` and swap it in as `state.json` via a temporary file, so a
+/// reader never observes a partially-written file.
+fn persist(dirs: &Dirs, state: &PersistedState) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(state).context("serializing state")?;
+    let tmp = dirs.state_file.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes).context("writing state tmp")?;
+    std::fs::rename(&tmp, &dirs.state_file).context("renaming state.json")?;
+    Ok(())
 }
 
 /// Walk through every stored path and rewrite it to the simplified form (no
@@ -478,6 +517,65 @@ mod tests {
         let reloaded = AppState::load_or_default(&dirs).expect("reload state");
         assert_eq!(reloaded.client_layout("desktop").len(), 1);
         assert_eq!(reloaded.client_layout("desktop")[0].id, "t");
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn try_mutate_ok_commits_and_writes() {
+        let dirs = scratch_dirs("try-ok");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state.set_keep_awake(false).expect("seed state.json");
+
+        state
+            .try_mutate(|s| {
+                s.keep_awake = true;
+                s.legacy_tabs.push(sample_tab("committed"));
+                Ok(())
+            })
+            .expect("a closure that returns Ok commits");
+
+        assert!(state.keep_awake(), "the clone's change is live");
+        assert_eq!(state.legacy_tabs().len(), 1, "and so is its tab");
+
+        let reloaded = AppState::load_or_default(&dirs).expect("reload state");
+        assert!(reloaded.keep_awake(), "the change reached state.json");
+        assert_eq!(
+            reloaded.legacy_tabs().len(),
+            1,
+            "the whole commit reached state.json"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn try_mutate_err_leaves_state_and_disk_unchanged() {
+        let dirs = scratch_dirs("try-err");
+        let state = AppState::load_or_default(&dirs).expect("load state");
+        state.set_keep_awake(false).expect("seed state.json");
+        let before_bytes = std::fs::read(&dirs.state_file).expect("read state.json");
+        assert!(before_bytes.len() > 2, "the seeded state.json has content");
+
+        let err = state
+            .try_mutate(|s| -> anyhow::Result<()> {
+                s.keep_awake = true;
+                s.legacy_tabs.push(sample_tab("rolled-back"));
+                anyhow::bail!("closure failed after mutating");
+            })
+            .expect_err("the closure's error propagates");
+        assert_eq!(err.to_string(), "closure failed after mutating");
+
+        assert!(!state.keep_awake(), "the in-memory change was rolled back");
+        assert!(
+            state.legacy_tabs().is_empty(),
+            "the in-memory tab was rolled back"
+        );
+        let after_bytes = std::fs::read(&dirs.state_file).expect("read state.json");
+        assert_eq!(
+            after_bytes, before_bytes,
+            "state.json on disk is byte-for-byte unchanged"
+        );
 
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

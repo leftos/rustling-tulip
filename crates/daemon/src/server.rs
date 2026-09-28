@@ -2318,18 +2318,19 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             }
         }
         ClientMessage::RestoreTab { tab, index } => {
-            let (restored, ordered_ids) = hub.state.mutate_client_layout(client_id, |tabs| {
-                let restored = tabs::restore_tab(tabs, tab, index)?;
-                let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
-                Ok::<_, anyhow::Error>((restored, ordered_ids))
-            })??;
+            let (restored, ordered_ids) =
+                hub.state.try_mutate_client_layout(client_id, |tabs| {
+                    let restored = tabs::restore_tab(tabs, tab, index)?;
+                    let ordered_ids = tabs.iter().map(|t| t.id.clone()).collect();
+                    Ok::<_, anyhow::Error>((restored, ordered_ids))
+                })?;
             hub.emit_tab(client_id, TabEvent::Updated(restored));
             hub.emit_tab(client_id, TabEvent::Reordered(ordered_ids));
         }
         ClientMessage::RestoreTabSnapshot { tab } => {
-            let restored = hub
-                .state
-                .mutate_client_layout(client_id, |tabs| tabs::restore_tab_snapshot(tabs, tab))??;
+            let restored = hub.state.try_mutate_client_layout(client_id, |tabs| {
+                tabs::restore_tab_snapshot(tabs, tab)
+            })?;
             hub.emit_tab(client_id, TabEvent::Updated(restored));
         }
         ClientMessage::RenameTab { tab_id, name } => {
@@ -2395,16 +2396,16 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             place,
             new_session_id,
         } => {
-            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+            let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 tabs::split_pane(grid, &pane_id, direction, place, new_session_id)?;
                 Ok::<_, anyhow::Error>(tab.clone())
-            })??;
+            })?;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::ClosePane { tab_id, pane_id } => {
-            let outcome = hub.state.mutate_client_layout(client_id, |tabs| {
+            let outcome = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let empty = tabs::close_pane(grid, &pane_id)?;
@@ -2414,7 +2415,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 } else {
                     Ok(CloseOutcome::TabUpdated(tab.clone()))
                 }
-            })??;
+            })?;
             match outcome {
                 CloseOutcome::TabRemoved(id) => {
                     hub.emit_tab(client_id, TabEvent::Removed(id));
@@ -2475,13 +2476,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             }
         }
         ClientMessage::RearrangeTab { tab_id, layout } => {
-            let updated = hub.state.mutate_client_layout(client_id, |tabs| {
+            let updated = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 let tab = tabs::find_tab_mut(tabs, &tab_id)?;
                 let grid = tabs::grid_or_err_mut(tab)?;
                 let new_grid = tabs::rearrange_grid(grid, layout)?;
                 *grid = new_grid;
                 Ok::<_, anyhow::Error>(tab.clone())
-            })??;
+            })?;
             hub.emit_tab(client_id, TabEvent::Updated(updated));
         }
         ClientMessage::MergeTabs {
@@ -2489,9 +2490,9 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             name,
             layout,
         } => {
-            let new_tab = hub.state.mutate_client_layout(client_id, |tabs| {
+            let new_tab = hub.state.try_mutate_client_layout(client_id, |tabs| {
                 tabs::merge_tabs(tabs, &tab_ids, name, layout)
-            })??;
+            })?;
             for id in &tab_ids {
                 hub.emit_tab(client_id, TabEvent::Removed(id.clone()));
             }
@@ -2504,7 +2505,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             layout,
         } => {
             let (new_tab, source_empty, source_survivor) =
-                hub.state.mutate_client_layout(client_id, |tabs| {
+                hub.state.try_mutate_client_layout(client_id, |tabs| {
                     let (new_tab, source_empty) =
                         tabs::extract_to_new_tab(tabs, &source_tab_id, &pane_ids, name, layout)?;
                     let source_survivor = if source_empty {
@@ -2513,7 +2514,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                         tabs.iter().find(|t| t.id == source_tab_id).cloned()
                     };
                     Ok::<_, anyhow::Error>((new_tab, source_empty, source_survivor))
-                })??;
+                })?;
             if source_empty {
                 hub.emit_tab(client_id, TabEvent::Removed(source_tab_id));
             } else if let Some(survivor) = source_survivor {
@@ -2643,8 +2644,10 @@ enum CloseOutcome {
 }
 
 /// Move a pane between (possibly same) tabs and produce the broadcast events
-/// to fire afterwards. Performs both extract + insert under a single
-/// `state.mutate` so the persisted snapshot is never half-applied.
+/// to fire afterwards. Performs extract + insert under a single fallible
+/// mutation so an extract that is never followed by its insert — a missing
+/// destination tab, an insert edge the grid can't take — rolls the layout back
+/// instead of persisting a pane that vanished from both tabs.
 fn move_pane(
     hub: &Hub,
     client_id: &str,
@@ -2654,7 +2657,7 @@ fn move_pane(
     dst_pane_id: &str,
     edge: PaneDropEdge,
 ) -> anyhow::Result<Vec<TabEvent>> {
-    hub.state.mutate_client_layout(client_id, |tabs| {
+    hub.state.try_mutate_client_layout(client_id, |tabs| {
         if src_tab_id == dst_tab_id {
             let tab = tabs::find_tab_mut(tabs, src_tab_id)?;
             let grid = tabs::grid_or_err_mut(tab)?;
@@ -2692,7 +2695,7 @@ fn move_pane(
             events.push(TabEvent::Updated(dst_tab.clone()));
             Ok(events)
         }
-    })?
+    })
 }
 
 /// Stop every active session (kill PTY / headless child, drop orphan sidecar)
@@ -8603,5 +8606,63 @@ mod tests {
                 .with_persisted(|s| s.workspaces.iter().map(|w| w.name.clone()).collect());
             assert_eq!(names, vec!["shop!".to_string()]);
         }
+    }
+
+    /// Seed `client_id` with one tab whose grid is two empty panes side by
+    /// side, so a move has a source and a destination pane to aim at.
+    fn seed_two_pane_layout(hub: &Hub, client_id: &str) {
+        let grid = tabs::build_balanced(
+            &[("p1".to_string(), None), ("p2".to_string(), None)],
+            protocol::SplitDirection::Horizontal,
+        )
+        .expect("two panes build a grid");
+        hub.state
+            .mutate_client_layout(client_id, |tabs| {
+                tabs.push(TabEntry {
+                    id: "t1".to_string(),
+                    name: "Tab".to_string(),
+                    content: TabContent::Grid { grid },
+                    created_at: Utc::now(),
+                });
+            })
+            .expect("seed the client layout");
+    }
+
+    /// A cross-tab move extracts from the source before it discovers the
+    /// destination is unknown — and, within one tab, before it discovers the
+    /// insert target is gone; both roll the layout back.
+    #[test]
+    fn failed_cross_tab_move_leaves_layout_unchanged() {
+        let (hub, _scratch) = test_hub("rollback-move");
+        seed_two_pane_layout(&hub, "c1");
+        let before = hub.state.client_layout("c1");
+
+        let err = move_pane(
+            &hub,
+            "c1",
+            "t1",
+            "p1",
+            "ghost-tab",
+            "p2",
+            PaneDropEdge::Right,
+        )
+        .expect_err("the destination tab is unknown");
+        assert!(
+            err.to_string().contains("ghost-tab"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            hub.state.client_layout("c1"),
+            before,
+            "the extracted pane is back in its source tab"
+        );
+
+        move_pane(&hub, "c1", "t1", "p1", "t1", "p1", PaneDropEdge::Right)
+            .expect_err("the pane cannot be inserted next to itself");
+        assert_eq!(
+            hub.state.client_layout("c1"),
+            before,
+            "a failed same-tab move is rolled back too"
+        );
     }
 }
