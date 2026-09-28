@@ -1,5 +1,7 @@
 # Recover ended sessions with `claude --resume`
 
+Status: steps 0–4 of "Order of work" have landed (daemon history, transcript matching, tracer-log importer, `RecoverSessions`, the Tauri dialog), with the glossary entries, the CLAUDE.md `history/` line and `apps/native/tests/e2e_recover.rs`. Open: step 5, the native client's rail button, badge and dialog (Design 6), and its `tests/ui_recover.rs` specs.
+
 ## Context
 
 On 2026-09-27, a dev daemon's startup tracer reap killed all 7 of the user's live RT sessions: 5 Claude sessions, plus 2 pwsh shells that each had `claude` running inside them. Nothing was left to bring them back.
