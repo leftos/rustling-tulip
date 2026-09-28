@@ -48,4 +48,4 @@ Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 - **Recent output for MA6:** settled (user, 2026-09-28): the daemon renders the session's screen to text (the visible screen and the last lines) and sends that, not raw scrollback.
 - **Size:** settled (user, 2026-09-28): when the phone and the desktop show the same session (MA8), the PTY takes the size of the client that last sent input to it; Claude's terminal UI redraws on each switch.
 - **Terminal renderer for MA8:** settled (user, 2026-09-28): `alacritty_terminal` in the shared Rust core, as the native client does, with the cell grid drawn in Flutter.
-- **Cost and upkeep of the VPS:** provider, region, and how it gets updates.
+- **Cost and upkeep of the VPS:** provider, region, and how it gets updates. Deferred to MA2 (user, 2026-09-28).
