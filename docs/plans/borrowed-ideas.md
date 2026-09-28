@@ -28,7 +28,7 @@ Items are in priority order. Each needs a design pass (the questions listed) bef
 - [ ] **Resume agents after a reboot.** A reboot kills the tracers too. On the next start, offer to resume the sessions that were live at shutdown, not only through the Recover dialog. Orca records each live agent's conversation id at quit and injects `--resume <id>` into the restored pane on a cold start (stablyai/orca PR #5240). The session history and Recover already hold what's needed; this is the automatic prompt.
   - Ruling (user, 2026-09-28): prompt on start ("Resume all", "Choose…", "Dismiss"); a dismissed prompt leaves the sessions in Recover. Never resume without asking.
   - How to tell a reboot from a user Stop: the sessions whose tracers were lost with no end recorded.
-- [x] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Posted with the user's approval: https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045. It describes the anchor-free layout of the worktree-path item in [plan.md](../plan.md) Bugs, which the daemon doesn't build yet. The text as posted:
+- [x] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Posted with the user's approval: https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045. It describes the anchor-free worktree layout the daemon builds (CLAUDE.md, "Where things live on disk"). The text as posted:
 
   > 🤖 Posted by Claude Code on behalf of @leftos.
   >

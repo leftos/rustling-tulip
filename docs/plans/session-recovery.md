@@ -195,7 +195,7 @@ Per item:
 
 - Glossary entries for "session history", "recovery", "unexpected end", in the start-here doc the glossary rule names.
 - A CLAUDE.md line for `<config>/history/`, under "Where things live on disk".
-- Tick the plan item in `docs/plan.md`.
+- Delete the plan item's line in `docs/plans/MAIN.md`, promote the design's lasting decisions into `docs/architecture.md`, and delete this doc.
 
 ## Order of work (briefs)
 

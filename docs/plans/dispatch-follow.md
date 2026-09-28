@@ -1,6 +1,6 @@
 # Follow DeepSeek dispatches
 
-Status: design, no step started. Index line: "Follow DeepSeek dispatches" in `docs/plan.md`. Terms this doc adds (**dispatch run**, **live-run file**, **live-run folder**, **stop marker**) go into the README glossary in DF.10.
+Status: design, no step started. Index line: "Follow DeepSeek dispatches" in `docs/plans/MAIN.md` (Wave 10). Terms this doc adds (**dispatch run**, **live-run file**, **live-run folder**, **stop marker**) go into the README glossary in DF.10.
 
 ## Problem
 
@@ -129,4 +129,4 @@ Answered (user): Q1 (2) a pane in a daemon tab, so a run can be split and placed
 - [ ] **DF.7 Native dispatch viewer and Stop.** `apps/native/src/headless.rs`, `headless_view.rs` (`HeadlessSource`), the viewer tab per Q1, Stop per Q3/Q4. Proof: new `apps/native/tests/ui_dispatch.rs` (click opens the viewer with the stats and log, Stop arms then sends `StopDispatchRun`, removal keeps the viewer on its last state per Q2) and the existing headless specs.
 - [ ] **DF.8 Live e2e.** `apps/native/tests/e2e_dispatch.rs`, `tools/e2e/fake-claude/index.mjs` (a mode that streams stream-json lines slowly): the test registers a live-run file for a fake-claude child in the isolated folder. Proof: `.\rt.ps1 native-e2e` shows the leaf with streamed actions, Stop kills the child, and the leaf goes.
 - [ ] **DF.9 The `dispatch` skill change** (user-level, outside this repo, landed separately): `live.py`, `executor.py`, `run.py`, `SKILL.md`, tests as in "Change to the `dispatch` skill". Proof: the skill's gate green, then one real `deepseek-flash` tier-1 run watched and stopped from the native client.
-- [ ] **DF.10 Docs.** `CLAUDE.md` (env var row for `RUSTLING_TULIP_DISPATCH_DIR`, the live-run folder under "Where things live on disk", the dispatch messages under the wire-protocol notes), README glossary (dispatch run, live-run file, live-run folder, stop marker), tick the index line in `docs/plan.md` and move this doc to `docs/plans/completed/`. Proof: `prek run` clean.
+- [ ] **DF.10 Docs.** `CLAUDE.md` (env var row for `RUSTLING_TULIP_DISPATCH_DIR`, the live-run folder under "Where things live on disk", the dispatch messages under the wire-protocol notes), README glossary (dispatch run, live-run file, live-run folder, stop marker), delete the index line in `docs/plans/MAIN.md`, promote the design's lasting decisions into `docs/architecture.md`, and delete this doc. Proof: `prek run` clean.

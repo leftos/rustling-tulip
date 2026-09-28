@@ -14,7 +14,10 @@ apps/
 tools/
   e2e/fake-claude/ - fake `claude` CLI shim for the native e2e tier
 docs/
-  plans/        - design docs and milestone plans
+  architecture.md - components, what the product does, task index
+  native-client.md - the native client's design decisions
+  plans/MAIN.md - the main plan: open work in waves
+  plans/        - subplans for open items (completed/ holds older finished designs)
 ```
 
 ## Build
@@ -33,32 +36,25 @@ docs/
 
 The native client auto-starts the daemon if it isn't already running. Daemon listens on a random loopback port; connection details are written to `%APPDATA%\leftos\rustling-tulip\config\daemon.json` (override the directory with `RUSTLING_TULIP_CONFIG_DIR`).
 
-## Phase status
+## Docs
 
-- [x] Phase 0: standalone `claude-ws.ps1` launchers in workspace member repos
-- [x] Phase 1: daemon spine + single-repo PTY sessions
-- [x] Phase 2: multi-repo workspace sessions (incl. VS Code `.code-workspace` auto-detect)
-- [x] Phase 3: headless mode + structured state
-- [x] Phase 4: notifications + attention model
-- [x] Phase 5: polish — resizable persistent panes, per-session config
-       (model / permission mode / env), orphan-session reattach, scrollback
-       persistence, pop-out windows. Auto-update is **deferred** until a
-       distribution channel (signing + release pipeline) exists.
-- [x] Phase 6: git tracking layer (per-session diff viewer, commit history,
-       "open in forge" links)
-
-See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
+Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit and what the product does, and [docs/plans/MAIN.md](docs/plans/MAIN.md) for the open work.
 
 ## Glossary
 
-- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/plans/native-client.md`.
+- **Main plan**: `docs/plans/MAIN.md`, the one index of open work, one line an item in working order; a landed line is deleted.
+- **Wave**: a release-sized bundle of main-plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave names its files, review and verification.
+- **Subplan**: a `docs/plans/*.md` file holding the design and rulings for open items, linked from the main plan and deleted once its last item lands and its durable text is promoted into `docs/`.
+- **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), built in the main plan's Petal wave.
+- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
 - **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
 - **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
-- **P1.1, P1.2, …**: item ids in `docs/plans/native-client.md`, as phase number and item number.
+- **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
+- **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md` and `remote-file-transfer.md` under `docs/plans/`.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/plans/session-recovery.md`.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Recovery**: respawning a session from its history entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command.

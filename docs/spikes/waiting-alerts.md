@@ -1,6 +1,6 @@
 # Spike: alerts for waiting agents, summarized by Haiku
 
-2026-09-28. For the "Spoken and phone alerts when an agent waits" item in [plan.md](../plan.md). Question: what does a cheap model produce from an agent's last message, and what does each alert cost and take?
+2026-09-28. For the "Spoken and phone alerts when an agent waits" item in [MAIN.md](../plans/MAIN.md). Question: what does a cheap model produce from an agent's last message, and what does each alert cost and take?
 
 Files in [waiting-alerts/](./waiting-alerts/): the prompts (`prompt-v1.md`, `prompt-v2.md`), three test messages, and `run.py` (`python run.py <prompt> <message> <session name> [lean]`), which fills the template and pipes it to `claude -p --model haiku`.
 

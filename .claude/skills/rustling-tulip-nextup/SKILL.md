@@ -9,13 +9,13 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 
 ## Plan and tracker
 
-- Index: `docs/plan.md`, section `## Open`. **Current focus: native client** outranks everything; the sections below it follow top to bottom. The focus section's single line points into `docs/plans/native-client.md`: the queue is that file's first phase with unchecked items (Phase 1 is `P1.1`–`P1.8`, in dependency order). Feature scope for each item: the parity sections it names in `docs/plans/native-client-parity.md`.
-- A later phase in `native-client.md` is one coarse line until it becomes current. When the current phase's items are all ticked, the next phase is a *design* item: split it into brief-sized `P<n>.<m>` items from its parity sections, and put the split to the user in the decision round before anything is dispatched.
+- Index: `docs/plans/MAIN.md`. Order: High priority, then the waves top to bottom (the first wave is the one in flight), then Backlog and singles; the next item is the first line from the top. Each line links the subplan holding its rulings (native client items: `docs/plans/native-client.md`; feature scope: the parity sections it names in `docs/plans/native-client-parity.md`). Each wave names its shared files, review and verification split.
+- A coarse line (Phase 5, Phase 6, the mobile app's phases, a design that still needs a pass) is a *design* item when its wave comes up: split it into brief-sized items (`P<n>.<m>` for the native client), put the split to the user in the decision round before anything is dispatched, and replace the coarse line with one line per item.
 - Siblings: none.
 - Pre-loop hooks: none.
-- Finished-item convention: **tick the line** (`- [x]`), never delete it. Tick the parity lines the item delivered in `native-client-parity.md` in the same commit. A finished subplan is `git mv`'d to `docs/plans/completed/` in the shipping commit; follow-ups left over from it go into a new plan, never back into the moved one.
+- Finished-item convention: **delete the line** from `MAIN.md` in the landing commit (`git log` is the record), and delete or tick its entry in the subplan it links. Tick the parity lines the item delivered in `native-client-parity.md` in the same commit. The commit that lands a wave's last line deletes the wave's heading and renumbers the rest. A review finding the item doesn't fix becomes a new line in the wave sharing its files. When a subplan's last item lands, promote its durable decisions into `docs/` (`architecture.md`, `native-client.md`, or a doc of their own) and delete the subplan in that commit; nothing new moves to `docs/plans/completed/`.
 - Tracker: `gh issue list --repo leftos/rustling-tulip --state open --json number,title`. No triage skill; place issues by the step-0 rule. A bug in the Tauri app is fixed on the `tauri` branch, not `main`; a daemon fix lands on `main` first and is cherry-picked there.
-- Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client its root view and app-state module (whatever P1.1 names them; P1.4–P1.8 all mount into them).
+- Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
 
 ## Rulings every brief carries
 
@@ -44,21 +44,21 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 ## Concurrency
 
 - Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> main` from the main checkout.
-- Ceiling: **two** implementers while Phase 1 is current, because P1.4–P1.8 all mount into the same root view and app state, and most pairs wait on each other anyway. Raise it to three from Phase 2, whose items separate by subsystem.
-- Depends on, where file lists hide it: P1.2 → P1.3 (the crate the connection code calls); P1.1 → every native item; a protocol message one item adds and another item's view consumes.
+- Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
+- Depends on, where file lists hide it: the dependencies a line or its subplan names (P4.4b → P4.12c, P4.11 → P4.15b, Wave 7 → Wave 8); a protocol message one item adds and another item's view consumes.
 - Context: read the status bar's figure at every landing (`jq .context_window.used_percentage <scratchpad>/statusline.json`); past 40% the loop stops refilling, per the user-level `nextup`.
 
 ## Docs map
 
 | What changed | Owning docs |
 |---|---|
-| Native feature delivered | tick the item in `docs/plans/native-client.md` and the parity lines it covered in `docs/plans/native-client-parity.md` |
+| Native feature delivered | delete its `docs/plans/MAIN.md` line and its section in `docs/plans/native-client.md`, tick the parity lines it covered in `docs/plans/native-client-parity.md`, and record any lasting design decision in `docs/native-client.md` |
+| A file, module or flow a task-index row names added, moved or removed | `docs/architecture.md` (Components, Task index) |
 | A crate, binary, `rt.ps1` verb, env var or on-disk path added, moved or removed | `CLAUDE.md` (Project shape, Common commands, Environment variables, Where things live), `README.md` Layout / Build |
 | Wire protocol | `crates/protocol/src/lib.rs` doc comments, CLAUDE.md "Wire-protocol gotchas" when a rule changes |
 | Tracer ABI | `docs/tracer-abi.md` |
 | A term used in a project-specific sense (a new plan word, a phase name) | `README.md` Glossary |
-| A plan finished | `git mv` to `docs/plans/completed/`, one-line entry under "Shipped" in `docs/plan.md` |
-
+| A subplan finished | durable decisions promoted into `docs/` (and the feature summary in `docs/architecture.md` "What it does"), then the subplan deleted and its `MAIN.md` link removed |
 The repo keeps no CHANGELOG.
 
 ## Landing

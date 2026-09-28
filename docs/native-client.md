@@ -1,0 +1,63 @@
+# Native client
+
+The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed's UI framework) with `alacritty_terminal` for the terminal grid. It replaced the Tauri/WebView2 app, which lives on the `tauri` maintenance branch (tag `tauri-last`). The daemon, tracer and `crates/protocol` are shared and unchanged by the client. This doc records the decisions a change to the client needs to know; what each feature must do is in the [parity checklist](./plans/native-client-parity.md), and open work is in [plans/MAIN.md](./plans/MAIN.md). How the pieces fit together: [architecture.md](./architecture.md).
+
+## Stack
+
+- **GPUI 0.2.2 + `alacritty_terminal` 0.26.** The client moved off the web stack; GPUI draws natively and `alacritty_terminal` supplies a mature VT parser and grid. Iced is the fallback if GPUI's API churn becomes a problem.
+- The native client can run side by side with the Tauri app against one daemon, since the daemon accepts several clients.
+- **Crate rules.** `apps/native` is a main-workspace member under the workspace lints, prek clippy and test, and `cargo deny check`. `main.rs` is a thin binary over the library `rustling_tulip_native`, so specs link the library.
+- **Testable core, thin view.** State a feature adds (sidebar tree, split tree, tab list, key mapping, span building, forms, dialogs' focus rings) lives in plain-Rust modules with unit tests; the GPUI `*_view.rs` renders it and forwards events. Every feature mounts into `RootView` (`lib.rs`), the hotspot concurrent items rebase over.
+- **Clipboard** goes through GPUI's own API (no `arboard`).
+
+## Daemon connection and protocol
+
+- The client ensures the daemon through `crates/daemon-client` (`ensure_running`, passing `NATIVE_PROTOCOL_VERSIONS` from `net.rs`). A running daemon is reused when its supported versions intersect the client's, even from another build, so the client never fights another client over a stale binary; a daemon sharing none is retired through `/shutdown` and replaced, and its tracer sessions reattach.
+- daemon.json carries `supported_versions` (`#[serde(default)]`; an older file reads as its scalar `protocol_version`).
+- The native client speaks only the current protocol version (23). The daemon's `supported` keeps 22 for the installed Tauri app, and `main` keeps 22 decodable by discipline, proved by `cargo test -p protocol v22_compat`; there is no TypeScript mirror on `main`.
+- **Client identity**: the native client keeps its own id file, `client-id-native`, so its tab layout stays separate from the Tauri app's (`client-id`).
+- **Reconnect**: backoff 0.5 s → 10 s, a standby-resume watchdog, a connecting overlay with "Restart daemon", and a footer pill with a troubleshooting flyout. After a user-chosen shutdown the client never reconnects or respawns the daemon.
+- **Request ids**: a client that must match a reply to its request sets the optional `request_id` (spawn, duplicate, scrollback, appearance, git reads, spawn previews, checkout prompts); the daemon echoes it only to the requester (CLAUDE.md, "Wire-protocol gotchas"). Adding one is additive; a reply without one (an older daemon) falls back to matching by content.
+- Unknown daemon message types are logged with their tag and skipped; a frame that fails to decode is logged as an error.
+- The client logs to `logs/native.log`, rotated on each launch.
+
+## Persistence
+
+Machine-local UI state lives in native-ui.json in the config dir (`UiState` in `sidebar.rs`; the field list is in CLAUDE.md, "Where things live on disk"). Tab layouts, session appearance overrides and host settings such as keep-awake and the worktrees root live on the daemon, so every client sees them. Saves are debounced (layout and tab font sizes 500 ms) and flushed on quit.
+
+## Terminal
+
+- **Scrollback-first attach**: `LoadScrollback` with live output buffered meanwhile; an 8 s request timeout with retries after 2 s and 4 s, each with its own `request_id`, and a reply to an older id dropped. When the daemon restarts the forwarder (`forwarder_restarted: true`) the held-back output is discarded, since it is already in the history. The logical scrollback cap is 5000 lines.
+- **Size and replies**: only one pane per session (its size driver) answers terminal queries, so a session shown in two panes gets each reply once. A query that ends the loaded history is answered unless live output follows it, which keeps a fresh ConPTY shell from sitting blank.
+- **Copy and paste**: Ctrl+C copies with a selection, else sends ^C; Ctrl+Shift+C copies; copy on select is a saved setting (default on); paste on Ctrl+V and Ctrl+Shift+V, bracketed when the child asks. Shift+drag selects even under mouse reporting. OSC 52 `c` stores reach the system clipboard; reads are answered empty and stores in replayed history are dropped.
+- **Keys and text input**: Shift+Enter sends `\` + CR for Claude and shells, `\n` for Codex and Cursor. GPUI gives Space no `key_char`, so `keys.rs` maps Space and Shift+Space itself; Alt+Space stays unmapped so Windows opens the system menu. Text arrives through an `EntityInputHandler` on the pane, so dead keys, AltGr and IME composition work: a composition is drawn underlined at the cursor even when the program hides it, and dropped on blur or stop; a dead key is not reported to GPUI as a composition, because GPUI would then hide Enter, Backspace, Esc and arrows from the pane. Ctrl+Alt with a non-alphanumeric character types it (AltGr on layouts GPUI doesn't know); Ctrl+Alt+letter or digit sends ESC+char.
+- **Links**: `links.rs` ports the Tauri detector (URLs, absolute, UNC and relative paths with `:line:col`, stitched across soft and hard wraps and TUI borders within ±64 rows). Links underline only while Ctrl is held; Ctrl+click wins over mouse reporting. A path with `:line` opens in VS Code with `-g`, otherwise in the OS default handler. A path Windows flags as dangerous, or with a script or executable extension, asks "Run <name>?" first. A UNC path opens only for a host behind a mapped drive or listed in `unc_hosts` in native-ui.json, which the client reads on each click and never writes.
+- **Shell integration**: OSC 133 and 633 marks drive per-command gutter dots (ok / fail / unknown) anchored to absolute rows through scroll, reflow and trim, with a menu to copy the command, the output or both, and to re-run (typed without Enter).
+- **Theme and fonts**: a fixed palette with ANSI colours contrast-adjusted against the background (`theme.rs`); a program's OSC 11 background and OSC 12 caret colour win. Geist Mono, Fira Code, JetBrains Mono and Cascadia Code are bundled (OFL, `assets/fonts/`); a family resolves against the installed list, falling back to Geist Mono, Cascadia Mono, Consolas, then Courier New.
+- **Appearance levels**: accent, shell background, font family, size and bold resolve session → repo/workspace → app → built-in, each shown with its source. Font size also has a per-tab override (Ctrl+Shift+= / −) above the session level (Ctrl+= / −); Ctrl+0 clears both.
+
+## Source control and diffs
+
+- Status, badge counts and diffs are keyed by (repo, worktree path), so worktree and main-tree counts never overwrite each other. Stashes are one list per repo.
+- Git reads carry a `request_id`, so a failed read shows in its own section rather than as a toast; a write whose status refresh fails is answered with `GitWriteError`, so pending state always clears.
+- **Diff engine**: `similar` computes line and inline word diffs on the client from the full texts `FileSnapshot` sends (Patience under a 2 s deadline; word spans skipped for a side over 1000 bytes). The daemon refuses a side that is binary or over 2 MiB, with the reason in `FileSnapshot.unavailable`.
+- **Diff view**: a custom GPUI element, side-by-side only, rendering aligned rows in one `uniform_list` (synced scroll for free; hunk navigation is `scroll_to_item`; F7 / Shift+F7). Measured in release on 5k lines and 500 hunks: model build 2.6 ms, first drawn rows 58 ms, worst scroll draw 7.2 ms.
+- **Syntax highlighting**: syntect 5.3 plus two-face 0.5 with fancy-regex (no C dependency), six token classes coloured from the terminal's ANSI palette lifted to 4.5:1 contrast. It runs on the background executor after the uncoloured diff shows, stops past 20,000 lines, a line over 10,000 bytes or 2 s, and is a saved toggle. Cost measured in release: +1.29 MB on the exe (+5.6%), 570 ms for 5k lines of Rust. PowerShell is not coloured: two-face drops that grammar without onig.
+
+## Notifications
+
+OS toasts go through `tauri-winrt-notification` with no registered app id, so they show under a generic sender until the native installer exists. A stop this client sent does not notify this client. The daemon fans out `Attention { Error }` when a session enters Error, so every client agrees. The Notifications tab shows Windows' read-only toast state with a link to Windows' settings.
+
+## Window
+
+The window's restore rect, maximized flag and monitor are saved in native-ui.json and restored on that monitor (the primary when it is gone); fullscreen is not restored. The title reads `(M/N) Tab — rustling-tulip`, set 350 ms after its last change. Closing the window runs the quit flow (keep running, stop keeping worktrees, stop removing them with per-session branch fate, or abandon), waiting for `shutdown_ack`.
+
+## Tests
+
+Three tiers, all Rust tests:
+
+- **UI specs** (`apps/native/tests/ui_*.rs`): in-process, headless GPUI through the `test-support` feature (`VisualTestContext`), never touching the user's mouse or keyboard. `RootView::with_transport` takes the `NetCommand` / `NetEvent` channel pair, so specs script a fake daemon (`tests/support/mod.rs`), inject `DaemonMessage`s and assert on the `ClientMessage`s sent, grid text, selection and clipboard. `ui_dir` and the clock are injected, so specs never write the real native-ui.json. The test platform shapes text as fixed 0.6 em glyphs, so specs assert on cells, never on font pixels. Specs that rely on focus events call `window.activate_window()` first.
+- **Live e2e** (`tests/e2e_live.rs`, `tests/e2e_recover.rs`, `.\rt.ps1 native-e2e`): the same harness against a real daemon whose config, binaries and worktrees dirs are all under `.tmp/`, set on the child with `Command::envs`, never process-wide. Specs create sessions through a clone of the client's `NetCommand` sender. A fake-claude spec with no `node` on PATH fails, never skips.
+- **OS smoke** (`tests/smoke_window.rs`, `.\rt.ps1 native-smoke`): launches the real exe with `RUSTLING_TULIP_OFFSCREEN_WINDOW`, which opens it cloaked and never activated, so it never takes focus or covers the user's work. Input is posted to the HWND, keys 100 ms apart (closer spacing reordered letters under load). Pixels are read with `PrintWindow(PW_RENDERFULLCONTENT)` from the threaded show and probed for known UI colours and for a change in the pane after typing; the spec checks the window is still cloaked and not foreground after each capture.
+
+The e2e and smoke tiers are `#[ignore]`d in `cargo test` and run only through their `rt.ps1` verbs. A probe or dev daemon never runs with default dirs, where its client attaches to the user's real sessions and resizes their PTYs: it sets all of `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to `.tmp/` dirs, as `native-e2e` does.

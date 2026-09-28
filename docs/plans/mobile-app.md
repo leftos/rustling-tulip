@@ -5,7 +5,7 @@ A phone client for the daemon, for the user's own use: check on sessions, answer
 ## Rulings
 
 - **Scope, in phases:** monitor and respond first, then a full terminal, then the conversation view.
-- **Reach: anywhere, through a relay.** This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [plan.md](../plan.md).
+- **Reach: anywhere, through a relay.** This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals).
 - **Relay:** a Rust binary in this workspace (`crates/relay`) on a small VPS (Fly.io or Hetzner). It pairs a daemon with a phone and forwards bytes it cannot read.
 - **Encryption:** the pinned TLS of the LAN listener, run end to end through the relay. The phone does the same TLS handshake it would do on the LAN, pinned to the daemon's certificate fingerprint, inside the relay's WebSocket. The relay never holds a key, and one crypto path serves both the LAN and the relay.
 - **Stack:** Flutter UI over a shared Rust core (protocol types, pinned-TLS connect, pairing profiles) through `flutter_rust_bridge`. No hand-kept protocol mirror.

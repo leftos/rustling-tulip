@@ -1,6 +1,6 @@
 # Spoken alerts, session summaries and the Dashboard
 
-Design for the "Spoken and phone alerts when an agent waits" item in [plan.md](../plan.md), widened to a shared summarizer service that also feeds a Dashboard view. Evidence: [spikes/waiting-alerts.md](../spikes/waiting-alerts.md). Status source: [hook-status.md](./hook-status.md) (hook-reported agent status), which this design consumes and does not redesign.
+Design for the "Spoken and phone alerts when an agent waits" item in [MAIN.md](./MAIN.md) (Wave 8), widened to a shared summarizer service that also feeds a Dashboard view. Evidence: [spikes/waiting-alerts.md](../spikes/waiting-alerts.md). Status source: [hook-status.md](./hook-status.md) (hook-reported agent status), which this design consumes and does not redesign.
 
 ## Problem
 
