@@ -62,6 +62,26 @@ fn sc_picker_shown(root: &RootView) -> bool {
     root.sc_picker_open() && root.source_control_panel().picker.is_some()
 }
 
+/// Whether the model still shows what a `headless-` selector tags: the
+/// show-all button only while the cap hides earlier entries, every other
+/// part of the body whenever the pane draws it. `None` for any other
+/// selector.
+fn headless_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let rest = selector.strip_prefix("headless-")?;
+    let bodies = root.headless_bodies();
+    if let Some(pane) = rest.strip_prefix("show-all-") {
+        return Some(
+            bodies
+                .iter()
+                .any(|body| body.pane_id == pane && body.show_all.is_some()),
+        );
+    }
+    // `headless-{pane}` is the body itself; the log, a stat, a row and the
+    // empty note all end in the pane's id.
+    let pane = rest.rsplit_once('-').map_or(rest, |(_, pane)| pane);
+    Some(bodies.iter().any(|body| body.pane_id == pane))
+}
+
 /// Whether the shown source-control panel draws what `selector` tags.
 fn sc_part_shown(panel: &ScPanel, selector: &str) -> bool {
     let section = |id: &str| panel.sections.iter().any(|row| row.id == id);
@@ -169,6 +189,24 @@ impl SessionBuilder {
 
     pub fn headless(self) -> Self {
         self.set("mode", json!("headless"))
+    }
+
+    /// Token counts and cost, as the daemon's metrics report them.
+    pub fn metrics(self, input: u64, output: u64, cost: f64) -> Self {
+        self.set(
+            "metrics",
+            json!({
+                "input_tokens": input,
+                "output_tokens": output,
+                "cost_usd": cost,
+                "last_activity_at": null,
+            }),
+        )
+    }
+
+    /// The session's recent actions, oldest first.
+    pub fn recent_actions(self, actions: &[String]) -> Self {
+        self.set("recent_actions", json!(actions))
     }
 
     pub fn status(self, status: &str) -> Self {
@@ -834,6 +872,8 @@ impl<'a> Harness<'a> {
                 root.empty_pane_ids().iter().any(|p| p == id)
             } else if selector.starts_with("exited-") {
                 root.exited_overlay_selectors().contains(&selector)
+            } else if let Some(shown) = headless_part_shown(root, &selector) {
+                shown
             } else if selector == "empty-spawn-session" || selector == "empty-open-shell" {
                 root.no_tab_choices_shown()
             } else if selector == "empty-repo-hint" {

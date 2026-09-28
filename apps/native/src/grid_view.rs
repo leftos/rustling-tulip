@@ -9,12 +9,11 @@ use gpui::{
     MouseDownEvent, Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*,
     px, relative,
 };
-use protocol::{
-    ClientMessage, GridNode, SessionSnapshot, SplitDirection, SplitPlace, TabContent, TabEntry,
-};
+use protocol::{ClientMessage, GridNode, SplitDirection, SplitPlace, TabContent, TabEntry};
 
 use crate::appearance::{self, PaneFrame, Resolved};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
+use crate::headless;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::can_attach;
@@ -116,13 +115,8 @@ impl RetryGate {
     }
 }
 
-/// What a pane shows while its session has no terminal attached.
-fn unattached_note(session: Option<&SessionSnapshot>) -> &'static str {
-    match session {
-        Some(session) if !can_attach(session) => "Headless session (no terminal)",
-        _ => "Waiting for session…",
-    }
-}
+/// What a pane shows while its session has no terminal attached yet.
+const WAITING_NOTE: &str = "Waiting for session…";
 
 /// The ratio the split at `split_path` of `tab_id` takes with the pointer
 /// at `at`, when the tab has been laid out in `bounds`.
@@ -200,6 +194,8 @@ impl RootView {
             }
             keep
         });
+        self.headless_show_all
+            .retain(|pane_id| live.contains(pane_id.as_str()));
     }
 
     /// Gives every pane a terminal and records its session; returns the
@@ -225,6 +221,7 @@ impl RootView {
                 slot.attached = false;
                 slot.session = binding.session_id;
                 shown.extend(slot.session.clone());
+                self.headless_show_all.remove(&binding.pane_id);
             }
         }
         shown
@@ -521,11 +518,20 @@ impl RootView {
         }
     }
 
-    /// Whether a pane showing a session has the keyboard.
+    /// Whether a pane showing a session has the keyboard. A headless pane
+    /// holds the keyboard through its body rather than a terminal, so the
+    /// app's shortcuts stay live after a click in it.
     pub(crate) fn terminal_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
-        self.panes
-            .values()
-            .any(|slot| slot.session.is_some() && slot.view.read(cx).is_focused(window))
+        self.panes.values().any(|slot| {
+            let Some(session) = slot
+                .session
+                .as_deref()
+                .and_then(|id| self.sidebar.session(id))
+            else {
+                return false;
+            };
+            !headless::is_headless(session) && slot.view.read(cx).is_focused(window)
+        })
     }
 
     pub(crate) fn focus_pane_view(&self, pane_id: &str, window: &mut Window, cx: &Context<Self>) {
@@ -869,9 +875,16 @@ impl RootView {
                 .debug_selector(|| format!("pane-grid-{pane_id}"))
                 .child(slot.view.clone())
                 .into_any_element(),
-            (Some(id), _) => {
-                muted_note(unattached_note(self.sidebar.session(id))).into_any_element()
-            }
+            (Some(id), _) => match self.sidebar.session(id) {
+                Some(session) if headless::is_headless(session) => {
+                    let focus = self
+                        .panes
+                        .get(pane_id)
+                        .map(|slot| slot.view.read(cx).focus_handle());
+                    self.headless_body(pane_id, session, focus, cx)
+                }
+                _ => muted_note(WAITING_NOTE).into_any_element(),
+            },
             (None, Some(slot)) => {
                 let handle = slot.view.read(cx).focus_handle();
                 self.empty_pane(tab_id, pane_id, Some(handle), cx)
@@ -1076,28 +1089,7 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{RetryGate, unattached_note};
-    use protocol::{SessionMode, SessionSnapshot};
-    use serde_json::json;
-
-    fn session(mode: SessionMode) -> SessionSnapshot {
-        let mut s: SessionSnapshot = serde_json::from_value(json!({
-            "id": "s1",
-            "label": "s1",
-            "kind": "single",
-            "members": [],
-            "status": "idle",
-            "mode": "interactive",
-            "started_at": "2026-01-01T00:00:00Z",
-            "exit_code": null,
-            "metrics": { "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "last_activity_at": null },
-            "recent_actions": [],
-            "agent": "claude",
-        }))
-        .expect("session fixture");
-        s.mode = mode;
-        s
-    }
+    use super::RetryGate;
 
     #[test]
     fn grid_retry_goes_out_once_per_session_and_attempt() {
@@ -1144,19 +1136,6 @@ mod tests {
         assert!(
             gate.claim("s1", Some(&current), 2).is_some(),
             "the ignored retry left the expected id alone"
-        );
-    }
-
-    #[test]
-    fn grid_unattached_pane_says_why() {
-        assert_eq!(
-            unattached_note(Some(&session(SessionMode::Headless))),
-            "Headless session (no terminal)"
-        );
-        assert_eq!(unattached_note(None), "Waiting for session…");
-        assert_eq!(
-            unattached_note(Some(&session(SessionMode::Interactive))),
-            "Waiting for session…"
         );
     }
 }

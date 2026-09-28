@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use protocol::{ClientMessage, SessionSnapshot, SessionStatus};
 
+use crate::headless;
 use crate::tabs::PaneBinding;
 
 /// Which set of actions a session offers. Parked, stopped and running
@@ -118,9 +119,11 @@ pub(crate) fn header_shows_exit_code(session: &SessionSnapshot) -> bool {
 }
 
 /// Whether the stopped-pane overlay covers the terminal: a stopped session
-/// that was not abandoned.
+/// that was not abandoned, and that had a terminal to cover — a headless
+/// pane keeps its stats and log, and the session's menu still offers the
+/// actions.
 pub(crate) fn pane_shows_exit(session: &SessionSnapshot) -> bool {
-    header_shows_exit_code(session) && !session.is_abandoned
+    header_shows_exit_code(session) && !session.is_abandoned && !headless::is_headless(session)
 }
 
 fn exit_code(session: &SessionSnapshot) -> String {

@@ -21,6 +21,8 @@ mod discard_confirm;
 pub mod fonts;
 mod footer;
 mod grid_view;
+mod headless;
+mod headless_view;
 mod history;
 mod history_view;
 mod keys;
@@ -307,6 +309,9 @@ pub struct RootView {
     tabs: TabsModel,
     /// A terminal for every pane of every tab, by pane id.
     panes: HashMap<String, PaneSlot>,
+    /// The panes whose headless log shows every action rather than the tail,
+    /// by pane id.
+    headless_show_all: HashSet<String>,
     /// Scrollback retries already sent, so each goes out once per session.
     retries: RetryGate,
     /// Where the active tab's split tree was last laid out; divider drags
@@ -575,6 +580,7 @@ impl RootView {
             tabs: TabsModel::new(ui.active_tab_id.clone()),
             sidebar: SidebarModel::new(ui),
             panes: HashMap::new(),
+            headless_show_all: HashSet::new(),
             retries: RetryGate::default(),
             grid_bounds: None,
             renaming: None,

@@ -19,7 +19,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::warn;
 use uuid::Uuid;
 
-const RECENT_ACTIONS_CAP: usize = 32;
+/// In-memory cap on a session's `recent_actions`, matching the tail the
+/// clients' headless log draws before it offers the rest.
+const RECENT_ACTIONS_CAP: usize = 200;
 
 /// On-disk cap for the persisted `recent_actions` tail. Smaller than the
 /// in-memory cap because the sidecar is read on every daemon startup and
@@ -791,6 +793,63 @@ mod tests {
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
         }
+    }
+
+    /// A headless record with an empty history.
+    fn record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.to_string(),
+            label: id.to_string(),
+            default_label: id.to_string(),
+            user_label: None,
+            kind: SessionKind::Standalone,
+            members: Vec::new(),
+            mode: SessionMode::Headless,
+            started_at: Utc::now(),
+            status: SessionStatus::Idle,
+            exit_code: None,
+            metrics: SessionMetrics::default(),
+            recent_actions: Vec::new(),
+            pty: None,
+            headless: None,
+            workspace_id: None,
+            agent: Agent::default(),
+            terminal_title: None,
+            program_name: None,
+            current_cwd: None,
+            appearance: AppearanceOverrides::default(),
+            spawn_config: None,
+            is_abandoned: false,
+            is_inactive: false,
+            worktree_paths: Vec::new(),
+            last_prompt: None,
+            input_notifier: None,
+            scrollback_snapshot_req: None,
+            spawn_origin: None,
+            claude_session_id: None,
+        }
+    }
+
+    #[test]
+    fn push_recent_action_keeps_the_cap_and_drops_the_oldest() {
+        let mut rec = record("s1");
+        for i in 0..=RECENT_ACTIONS_CAP {
+            push_recent_action(&mut rec, format!("action {i}"));
+        }
+        assert_eq!(
+            RECENT_ACTIONS_CAP, 200,
+            "the clients' headless log draws 200 rows"
+        );
+        assert_eq!(rec.recent_actions.len(), RECENT_ACTIONS_CAP);
+        assert_eq!(
+            rec.recent_actions.first().map(String::as_str),
+            Some("action 1"),
+            "the oldest went"
+        );
+        assert_eq!(
+            rec.recent_actions.last().map(String::as_str),
+            Some("action 200")
+        );
     }
 
     #[test]
