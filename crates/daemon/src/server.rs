@@ -4541,13 +4541,7 @@ async fn preview_single_spawn(
     let effective_base = (!branch_exists).then(|| resolved_base.clone());
 
     let worktree_path = if use_worktree {
-        git::workspace_worktree_paths(
-            &hub.state.worktrees_dir(),
-            &[repo_path.as_path()],
-            branch_name,
-        )
-        .pop()
-        .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?
+        single_worktree_target(&hub.state.worktrees_dir(), &repo, branch_name).await?
     } else {
         repo_path.clone()
     };
@@ -4581,6 +4575,23 @@ async fn preview_single_spawn(
         existing_branch_head: fork.existing_branch_head,
         existing_branch_behind_base: fork.existing_branch_behind_base,
     })
+}
+
+/// Where a single-repo session of `repo` on `branch_name` puts its worktree:
+/// the worktree under `worktrees_root` that already holds the branch, else
+/// the repo's group folder `wt.<branch>/<repo-name>`. Errors when that folder
+/// exists but belongs to something other than this repo.
+async fn single_worktree_target(
+    worktrees_root: &Path,
+    repo: &protocol::RepoEntry,
+    branch_name: &str,
+) -> anyhow::Result<PathBuf> {
+    let repo_path = Path::new(&repo.path);
+    let derived = git::single_worktree_path(worktrees_root, branch_name, &repo.name);
+    let target =
+        git::existing_or_derived_worktree(repo_path, worktrees_root, branch_name, derived).await;
+    git::refuse_foreign_worktree_folder(repo_path, &repo.name, &target).await?;
+    Ok(target)
 }
 
 /// Run a fetch for `repo_id` and report the outcome.
@@ -4920,14 +4931,8 @@ async fn spawn_single(
         let branch = pinned_branch(&worktree_path, branch_name).await;
         (worktree_path, branch)
     } else if use_worktree {
-        let mut paths = git::workspace_worktree_paths(
-            &hub.state.worktrees_dir(),
-            &[repo_path.as_path()],
-            branch_name,
-        );
-        let worktree_path = paths
-            .pop()
-            .ok_or_else(|| anyhow!("workspace_worktree_paths returned empty for single repo"))?;
+        let worktree_path =
+            single_worktree_target(&hub.state.worktrees_dir(), &repo, branch_name).await?;
         // Refuse to bind a worktree that's already driving a live session.
         // Without this the reuse path below would silently share one worktree
         // across two sessions.
@@ -4944,6 +4949,12 @@ async fn spawn_single(
             worktree_reuse,
         )
         .await?;
+        crate::worktrees_admin::mark_group(
+            &git::group_dir(&hub.state.worktrees_dir(), branch_name, &repo.name),
+            git::GroupKind::Repo,
+            &repo.name,
+            &[worktree_path.as_path()],
+        );
         log_fork_point(&repo_path, branch_name, &base_for_create, &worktree_path).await;
         (worktree_path, branch_name.to_string())
     } else {
@@ -5064,6 +5075,17 @@ async fn spawn_workspace(
         .await
         .map_err(|e| anyhow::Error::new(classify_worktree_error(&e, branch_name)))?;
     if use_worktree {
+        let created: Vec<&Path> = resolved
+            .iter()
+            .filter(|m| !m.pinned)
+            .map(|m| m.working_path.as_path())
+            .collect();
+        crate::worktrees_admin::mark_group(
+            &git::group_dir(&hub.state.worktrees_dir(), branch_name, &workspace.name),
+            git::GroupKind::Workspace,
+            &workspace.name,
+            &created,
+        );
         for member in &resolved {
             if member.pinned {
                 continue;
@@ -8180,6 +8202,406 @@ mod tests {
             let shim = scratch.path().join("randomtool.cmd");
             touch(&shim);
             assert!(npm_shim_to_native_program(&shim).is_none());
+        }
+    }
+
+    mod worktree_layout {
+        use super::*;
+        use std::process::Command;
+
+        fn git(cwd: &Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("spawn git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        /// A repo at `dir` with one commit on `main`.
+        fn seed_repo(dir: &Path) {
+            std::fs::create_dir_all(dir).expect("create repo dir");
+            git(dir, &["init", "-b", "main"]);
+            git(dir, &["config", "user.email", "t@example.com"]);
+            git(dir, &["config", "user.name", "Test"]);
+            git(dir, &["config", "commit.gpgsign", "false"]);
+            std::fs::write(dir.join("seed.txt"), "x\n").expect("write seed file");
+            git(dir, &["add", "."]);
+            git(dir, &["commit", "-m", "seed"]);
+        }
+
+        fn repo_entry(id: &str, name: &str, path: &Path) -> protocol::RepoEntry {
+            protocol::RepoEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                default_branch: None,
+                default_use_worktree: true,
+                appearance: AppearanceOverrides::default(),
+                last_agent: None,
+                last_spawn_config: None,
+            }
+        }
+
+        fn workspace_entry(id: &str, name: &str, members: &[&str]) -> protocol::WorkspaceEntry {
+            protocol::WorkspaceEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                member_repo_ids: members.iter().map(|m| (*m).to_string()).collect(),
+                linked_vscode_workspace: None,
+                default_use_worktree: true,
+                appearance: AppearanceOverrides::default(),
+                last_spawn_config: None,
+            }
+        }
+
+        fn key(path: &str) -> String {
+            crate::paths::normalize_path_key(path)
+        }
+
+        fn single_preview(msg: DaemonMessage) -> Option<protocol::MemberSpawnPreview> {
+            match msg {
+                DaemonMessage::SpawnPreview { preview, .. } => Some(preview),
+                _ => None,
+            }
+        }
+
+        fn workspace_previews(msg: DaemonMessage) -> Option<Vec<protocol::MemberSpawnPreview>> {
+            match msg {
+                DaemonMessage::WorkspaceSpawnPreview { per_member, .. } => Some(per_member),
+                _ => None,
+            }
+        }
+
+        async fn preview_single(hub: &Hub, branch: &str) -> protocol::MemberSpawnPreview {
+            let msg = dispatch_one(
+                hub,
+                ClientMessage::PreviewSpawn {
+                    repo_id: "r1".to_string(),
+                    branch_name: branch.to_string(),
+                    base_branch: None,
+                    use_worktree: true,
+                    request_id: None,
+                },
+            )
+            .await;
+            single_preview(msg).expect("a spawn preview")
+        }
+
+        /// A branch already checked out in a worktree under the root (here
+        /// at the older anchor layout) is reused where it is; a branch nobody
+        /// holds gets the new `wt.<branch>/<repo>` folder.
+        #[tokio::test]
+        async fn single_spawn_reuses_an_old_layout_worktree_holding_the_branch() {
+            let (hub, scratch) = test_hub("reuse-single");
+            let repo = scratch.path().join("src").join("app");
+            seed_repo(&repo);
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry("r1", "App", &repo)))
+                .expect("register repo");
+            let root = hub.state.worktrees_dir();
+            let old = root.join("wt.feat").join("X").join("src").join("app");
+            git(
+                &repo,
+                &["worktree", "add", "-b", "feat", &old.to_string_lossy()],
+            );
+
+            let held = preview_single(&hub, "feat").await;
+            assert_eq!(key(&held.worktree_path), key(&old.to_string_lossy()));
+            assert!(
+                held.worktree_exists,
+                "the held worktree is reported as existing"
+            );
+
+            let fresh = preview_single(&hub, "fresh").await;
+            assert_eq!(
+                key(&fresh.worktree_path),
+                key(&root.join("wt.fresh").join("app").to_string_lossy())
+            );
+            assert!(!fresh.worktree_exists);
+        }
+
+        /// A workspace member whose branch sits in an old-layout worktree
+        /// keeps it; a member with no worktree for the branch goes to the new
+        /// `wt.<branch>/<workspace>/<offset>` path.
+        #[tokio::test]
+        async fn workspace_reuses_old_layout_member_worktrees() {
+            let (hub, scratch) = test_hub("reuse-ws");
+            let web = scratch.path().join("src").join("apps").join("web");
+            let core = scratch.path().join("src").join("libs").join("core");
+            seed_repo(&web);
+            seed_repo(&core);
+            hub.state
+                .mutate(|s| {
+                    s.repos.push(repo_entry("web", "web", &web));
+                    s.repos.push(repo_entry("core", "core", &core));
+                    s.workspaces
+                        .push(workspace_entry("w1", "Shop", &["web", "core"]));
+                })
+                .expect("register workspace");
+            let root = hub.state.worktrees_dir();
+            let old_web = root
+                .join("wt.feat")
+                .join("D")
+                .join("src")
+                .join("apps")
+                .join("web");
+            git(
+                &web,
+                &["worktree", "add", "-b", "feat", &old_web.to_string_lossy()],
+            );
+
+            let msg = dispatch_one(
+                &hub,
+                ClientMessage::PreviewWorkspaceSpawn {
+                    workspace_id: "w1".to_string(),
+                    branch_name: "feat".to_string(),
+                    base_branch: None,
+                    request_id: None,
+                },
+            )
+            .await;
+            let rows = workspace_previews(msg).expect("a workspace spawn preview");
+            assert_eq!(rows.len(), 2);
+            assert_eq!(key(&rows[0].worktree_path), key(&old_web.to_string_lossy()));
+            assert!(rows[0].worktree_exists);
+            let new_core = root.join("wt.feat").join("shop").join("libs").join("core");
+            assert_eq!(
+                key(&rows[1].worktree_path),
+                key(&new_core.to_string_lossy())
+            );
+            assert!(!rows[1].worktree_exists);
+        }
+
+        /// Dispatch `msg` and return the error the client would be sent.
+        async fn dispatch_err(hub: &Hub, msg: ClientMessage) -> Option<String> {
+            let (out_tx, _out_rx) = mpsc::unbounded_channel();
+            let (file_tx, _file_rx) = mpsc::channel(1);
+            let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+            let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+            let ctx = ConnCtx {
+                out_tx: &out_tx,
+                file_tx: &file_tx,
+                pty_forwarders: &pty_forwarders,
+                fetches: &fetches,
+                client_id: "c1",
+                client_name: None,
+                connection: 1,
+            };
+            dispatch(hub, msg, &ctx).await.err().map(|e| e.to_string())
+        }
+
+        fn foreign_folder_message(path: &Path, repo_name: &str) -> String {
+            format!(
+                "Can't use the worktree folder {}: it exists but isn't a worktree of {repo_name}. Remove it from Manage worktrees, or rename the repo or workspace.",
+                path.display()
+            )
+        }
+
+        /// A registered repo `App` plus another repo whose worktree already
+        /// sits at App's derived `wt.feat/app` folder.
+        fn seed_foreign_single(hub: &Hub, scratch: &Path) -> PathBuf {
+            let repo = scratch.join("src").join("app");
+            let other = scratch.join("elsewhere").join("app");
+            seed_repo(&repo);
+            seed_repo(&other);
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry("r1", "App", &repo)))
+                .expect("register repo");
+            let derived = hub.state.worktrees_dir().join("wt.feat").join("app");
+            git(
+                &other,
+                &["worktree", "add", "-b", "feat", &derived.to_string_lossy()],
+            );
+            derived
+        }
+
+        #[tokio::test]
+        async fn spawn_refuses_a_derived_folder_that_is_not_this_repos_worktree() {
+            let (hub, scratch) = test_hub("foreign-spawn");
+            let derived = seed_foreign_single(&hub, scratch.path());
+
+            let err = spawn_single(
+                &hub,
+                "r1",
+                SinglePlan {
+                    branch_name: "feat",
+                    base_branch: None,
+                    use_worktree: true,
+                    checkout_strategy: None,
+                    worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+                    existing_worktree: None,
+                },
+            )
+            .await
+            .expect_err("the spawn is refused");
+
+            assert_eq!(err.to_string(), foreign_folder_message(&derived, "App"));
+            assert!(
+                derived.join("seed.txt").is_file(),
+                "the other repo's worktree is left alone"
+            );
+        }
+
+        #[tokio::test]
+        async fn preview_reports_a_foreign_folder_as_an_error() {
+            let (hub, scratch) = test_hub("foreign-preview");
+            let derived = seed_foreign_single(&hub, scratch.path());
+
+            let msg = dispatch_one(
+                &hub,
+                ClientMessage::PreviewSpawn {
+                    repo_id: "r1".to_string(),
+                    branch_name: "feat".to_string(),
+                    base_branch: None,
+                    use_worktree: true,
+                    request_id: Some("p1".to_string()),
+                },
+            )
+            .await;
+
+            let expected = foreign_folder_message(&derived, "App");
+            assert!(
+                matches!(
+                    &msg,
+                    DaemonMessage::Error { message, request_id: Some(id) }
+                        if id == "p1" && *message == expected
+                ),
+                "{msg:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn workspace_member_refuses_a_foreign_folder() {
+            let (hub, scratch) = test_hub("foreign-ws");
+            let web = scratch.path().join("src").join("apps").join("web");
+            let core = scratch.path().join("src").join("libs").join("core");
+            seed_repo(&web);
+            seed_repo(&core);
+            hub.state
+                .mutate(|s| {
+                    s.repos.push(repo_entry("web", "web", &web));
+                    s.repos.push(repo_entry("core", "core", &core));
+                    s.workspaces
+                        .push(workspace_entry("w1", "Shop", &["web", "core"]));
+                })
+                .expect("register workspace");
+            let foreign = hub
+                .state
+                .worktrees_dir()
+                .join("wt.feat")
+                .join("shop")
+                .join("libs")
+                .join("core");
+            std::fs::create_dir_all(&foreign).expect("create foreign folder");
+            std::fs::write(foreign.join("keep.txt"), "x\n").expect("write foreign file");
+
+            let msg = dispatch_one(
+                &hub,
+                ClientMessage::PreviewWorkspaceSpawn {
+                    workspace_id: "w1".to_string(),
+                    branch_name: "feat".to_string(),
+                    base_branch: None,
+                    request_id: Some("p2".to_string()),
+                },
+            )
+            .await;
+
+            let expected = foreign_folder_message(&foreign, "core");
+            assert!(
+                matches!(
+                    &msg,
+                    DaemonMessage::Error { message, request_id: Some(id) }
+                        if id == "p2" && *message == expected
+                ),
+                "{msg:?}"
+            );
+            assert!(foreign.join("keep.txt").is_file());
+        }
+
+        #[tokio::test]
+        async fn add_repo_refuses_a_name_whose_slug_is_taken_by_a_workspace() {
+            let (hub, scratch) = test_hub("slug-repo");
+            hub.state
+                .mutate(|s| s.workspaces.push(workspace_entry("w1", "shop", &[])))
+                .expect("register workspace");
+            let dir = scratch.path().join("shop-repo");
+            std::fs::create_dir_all(&dir).expect("create repo dir");
+
+            let err = dispatch_err(
+                &hub,
+                ClientMessage::AddRepo {
+                    path: dir.to_string_lossy().into_owned(),
+                    name: Some("Shop!".to_string()),
+                },
+            )
+            .await;
+
+            assert_eq!(
+                err.as_deref(),
+                Some(
+                    "Can't save \"Shop!\": its worktree folder name \"shop\" is already used by workspace \"shop\". Rename one of them."
+                )
+            );
+            assert!(hub.state.with_persisted(|s| s.repos.is_empty()));
+        }
+
+        #[tokio::test]
+        async fn upsert_workspace_refuses_a_slug_taken_by_a_repo() {
+            let (hub, scratch) = test_hub("slug-ws");
+            let dir = scratch.path().join("app");
+            hub.state
+                .mutate(|s| s.repos.push(repo_entry("r1", "My App", &dir)))
+                .expect("register repo");
+
+            let err = dispatch_err(
+                &hub,
+                ClientMessage::UpsertWorkspace {
+                    id: None,
+                    name: "my app".to_string(),
+                    member_repo_ids: vec!["r1".to_string()],
+                    linked_vscode_workspace: None,
+                },
+            )
+            .await;
+
+            assert_eq!(
+                err.as_deref(),
+                Some(
+                    "Can't save \"my app\": its worktree folder name \"my-app\" is already used by repo \"My App\". Rename one of them."
+                )
+            );
+            assert!(hub.state.with_persisted(|s| s.workspaces.is_empty()));
+        }
+
+        #[tokio::test]
+        async fn renaming_a_workspace_to_its_own_slug_is_allowed() {
+            let (hub, _scratch) = test_hub("slug-rename");
+            hub.state
+                .mutate(|s| s.workspaces.push(workspace_entry("w1", "Shop", &[])))
+                .expect("register workspace");
+
+            let err = dispatch_err(
+                &hub,
+                ClientMessage::UpsertWorkspace {
+                    id: Some("w1".to_string()),
+                    name: "shop!".to_string(),
+                    member_repo_ids: Vec::new(),
+                    linked_vscode_workspace: None,
+                },
+            )
+            .await;
+
+            assert_eq!(err, None);
+            let names: Vec<String> = hub
+                .state
+                .with_persisted(|s| s.workspaces.iter().map(|w| w.name.clone()).collect());
+            assert_eq!(names, vec!["shop!".to_string()]);
         }
     }
 }

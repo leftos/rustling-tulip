@@ -1,19 +1,21 @@
 //! Disk-scan + cross-reference + delete for the worktrees root, behind
 //! `ClientMessage::InspectWorktreesRoot` and `ClientMessage::DeleteWorktreeAt`.
 //!
-//! Layout assumption (see `crates/daemon/src/git.rs::workspace_worktree_paths`
-//! and CLAUDE.md "Where things live on disk"): every per-session worktree
-//! lives at `<root>/wt.<branch-slug>/<sanitized-anchor>/<rel-to-anchor>`.
-//! `wt.<branch-slug>/` is a direct child of the worktrees root, and members
-//! sit nested under the sanitized anchor inside it. Each `wt.<branch-slug>/`
-//! directory is one *group* — one row in the management modal — and may
-//! contain one member (single-repo session) or several (workspace session).
+//! Layout (see `crates/daemon/src/git.rs::workspace_worktree_paths` and
+//! CLAUDE.md "Where things live on disk"): a single repo's worktree is the
+//! group folder `<root>/wt.<branch-slug>/<repo-slug>` itself; a workspace's
+//! members sit at `<root>/wt.<branch-slug>/<workspace-slug>/<offset>`. A
+//! group folder is recognised by the marker file beside it,
+//! `<root>/wt.<branch-slug>/<slug>.rt-group`, and each one is a *group* —
+//! one row in the management modal.
 //!
-//! For backward compatibility, the scanner also detects pre-rename leftovers
-//! laid out as `<root>/<sanitized-anchor>/wt.<branch-slug>/<member>` (wt dir
-//! buried under an anchor prefix) so the modal can still manage them after
-//! the layout change. Old-layout groups disappear naturally as their
-//! originating sessions stop and clean up via their persisted paths.
+//! Folders from older layouts still list and delete. Unmarked content of a
+//! `wt.<branch-slug>/` folder (the anchor layout,
+//! `<root>/wt.<branch-slug>/<sanitized-anchor>/<rel-to-anchor>`) forms one
+//! group for that `wt.` folder, and the earlier buried layout
+//! `<root>/<sanitized-anchor>/wt.<branch-slug>/<member>` one group per buried
+//! `wt.` folder. Existing worktrees keep their paths and are reused by
+//! spawns, so these groups disappear only as they are deleted.
 
 use anyhow::{Context as _, anyhow};
 use protocol::{
@@ -56,7 +58,7 @@ impl LaunchIndex {
 }
 
 /// Walk the worktrees root and return one [`RootWorktreeEntry`] per
-/// `wt.<branch>/` group found, cross-referenced against the live and
+/// group found (see [`walk_for_wt_dirs`]), cross-referenced against the live and
 /// abandoned session registries and resolved to a launch target where the
 /// originating repos are still registered. Best-effort: I/O failures inside
 /// the walk are logged and skipped, never propagated.
@@ -95,14 +97,17 @@ const MAX_SCAN_DEPTH: usize = 8;
 
 /// Recursive descent looking for `wt.<branch-slug>/` directories.
 ///
-/// Two layouts are supported:
-/// - **New layout** (current): `wt.<branch-slug>/` sits at depth 0 of the
-///   worktrees root, with members nested under the sanitized anchor inside
-///   it. When the walker matches `wt.<slug>` at depth 0 it descends INSIDE
-///   to discover the member dirs (any directory containing a `.git` file
-///   or subdir) and derives the displayed anchor from the longest common
-///   path-prefix of those members' parents relative to the wt dir.
-/// - **Old layout** (pre-rename leftovers): `wt.<branch-slug>/` was buried
+/// Layouts read:
+/// - **Group layout** (current): `wt.<branch-slug>/` sits at depth 0 of the
+///   worktrees root and holds one folder per repo or workspace, each marked
+///   by a `<name>.rt-group` file beside it. Each marked folder is its own
+///   entry, labelled with the marker's name (see [`scan_wt_dir`]).
+/// - **Anchor layout** (older): also at depth 0, with members nested under
+///   the sanitized anchor. Unmarked children of the `wt.<slug>` folder are
+///   searched for member dirs (any directory containing a `.git` file or
+///   subdir) and form one entry for the `wt.` folder, its displayed anchor
+///   the longest common path-prefix of those members' parents.
+/// - **Buried layout** (oldest): `wt.<branch-slug>/` was buried
 ///   under the sanitized anchor (e.g., `<root>/X/dev/wt.foo/repo`). When
 ///   the walker matches `wt.<slug>` at depth ≥1 it treats the wt dir's
 ///   direct children as members and derives the anchor from the path
@@ -134,15 +139,10 @@ fn walk_for_wt_dirs(
         let path = ent.path();
         let name = ent.file_name().to_string_lossy().into_owned();
         if let Some(branch_slug) = name.strip_prefix("wt.") {
-            let (anchor_rel, member_paths) = if depth == 0 {
-                // New layout: walk inside to discover members; anchor is
-                // the longest common parent prefix of those members
-                // relative to the wt dir.
-                let members = find_member_dirs(&path);
-                let anchor = anchor_from_member_parents(&members, &path);
-                (anchor, members)
+            if depth == 0 {
+                scan_wt_dir(&path, branch_slug, xref, index, entries);
             } else {
-                // Old layout: anchor is path between root and wt's parent;
+                // Buried layout: anchor is path between root and wt's parent;
                 // members are direct children of the wt dir.
                 let anchor = path
                     .parent()
@@ -150,16 +150,15 @@ fn walk_for_wt_dirs(
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 let members = direct_child_dirs(&path);
-                (anchor, members)
-            };
-            entries.push(build_entry(
-                &path,
-                &anchor_rel,
-                branch_slug,
-                &member_paths,
-                xref,
-                index,
-            ));
+                entries.push(build_entry(
+                    &path,
+                    &anchor,
+                    branch_slug,
+                    &members,
+                    xref,
+                    index,
+                ));
+            }
             // Don't descend INTO a wt dir — its children are member
             // worktrees, not nested groups.
             continue;
@@ -168,7 +167,193 @@ fn walk_for_wt_dirs(
     }
 }
 
-/// Walk inside a new-layout `wt.<slug>/` directory and return every
+/// List one depth-0 `wt.<slug>/` folder: each child that is a marked group
+/// folder is an entry of its own, labelled with the marker's name; any
+/// other children (the anchor layout) form one entry for the `wt.<slug>/`
+/// folder itself, as does a folder with no marked groups at all.
+fn scan_wt_dir(
+    wt_path: &Path,
+    branch_slug: &str,
+    xref: &HashMap<PathBuf, (String, bool)>,
+    index: &LaunchIndex,
+    entries: &mut Vec<RootWorktreeEntry>,
+) {
+    let (groups, rest): (Vec<PathBuf>, Vec<PathBuf>) = direct_child_dirs(wt_path)
+        .into_iter()
+        .partition(|child| is_group_dir(child));
+    for group in &groups {
+        let members = group_member_dirs(group);
+        entries.push(build_entry(
+            group,
+            &group_label(group),
+            branch_slug,
+            &members,
+            xref,
+            index,
+        ));
+    }
+    if groups.is_empty() || !rest.is_empty() {
+        let members = members_under(&rest);
+        let anchor = anchor_from_member_parents(&members, wt_path);
+        entries.push(build_entry(
+            wt_path,
+            &anchor,
+            branch_slug,
+            &members,
+            xref,
+            index,
+        ));
+    }
+}
+
+/// Suffix of the marker file written beside a group folder:
+/// `wt.<slug>/<name>.rt-group` marks `wt.<slug>/<name>/` as a group.
+const GROUP_MARKER_SUFFIX: &str = ".rt-group";
+
+/// What a group folder is named after, as recorded in its marker.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupMarker {
+    pub kind: crate::git::GroupKind,
+    pub name: String,
+}
+
+/// The marker path beside `group_dir`. It sits beside rather than inside
+/// because a single repo's group folder is the git working tree itself.
+fn marker_path(group_dir: &Path) -> Option<PathBuf> {
+    let mut name = group_dir.file_name()?.to_os_string();
+    name.push(GROUP_MARKER_SUFFIX);
+    Some(group_dir.with_file_name(name))
+}
+
+/// Whether `dir` is a group folder: a child of a `wt.*` folder with a marker
+/// beside it.
+fn is_group_dir(dir: &Path) -> bool {
+    let under_wt = dir
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("wt."));
+    under_wt && marker_path(dir).is_some_and(|m| m.is_file())
+}
+
+/// The name a group folder's marker records, or the folder's own name when
+/// the marker can't be read.
+fn group_label(group_dir: &Path) -> String {
+    let folder_name = || {
+        group_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let Some(marker) = marker_path(group_dir) else {
+        return folder_name();
+    };
+    let parsed = std::fs::read_to_string(&marker)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| serde_json::from_str::<GroupMarker>(&text).map_err(anyhow::Error::from));
+    match parsed {
+        Ok(m) => m.name,
+        Err(err) => {
+            warn!(?err, marker = %marker.display(), "unreadable group marker; labelling by folder name");
+            folder_name()
+        }
+    }
+}
+
+/// Write the marker beside `group_dir`, unless one recording the same kind
+/// and name is already there. A marker that differs (the group was renamed,
+/// or the folder now belongs to the other kind) is rewritten.
+pub fn write_group_marker(
+    group_dir: &Path,
+    kind: crate::git::GroupKind,
+    name: &str,
+) -> anyhow::Result<()> {
+    let marker = marker_path(group_dir)
+        .ok_or_else(|| anyhow!("group folder has no name: {}", group_dir.display()))?;
+    let wanted = GroupMarker {
+        kind,
+        name: name.to_string(),
+    };
+    let current = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|text| serde_json::from_str::<GroupMarker>(&text).ok());
+    if current.as_ref() == Some(&wanted) {
+        return Ok(());
+    }
+    let body = serde_json::to_string(&wanted)?;
+    std::fs::write(&marker, body)
+        .with_context(|| format!("writing group marker {}", marker.display()))
+}
+
+/// Mark `group_dir` as a group when any of `worktrees` sits in it, so the
+/// scanner lists it on its own. A failure is logged rather than raised:
+/// unmarked, the group still lists under its `wt.<branch>` folder.
+pub fn mark_group(group_dir: &Path, kind: crate::git::GroupKind, name: &str, worktrees: &[&Path]) {
+    if !worktrees.iter().any(|w| w.starts_with(group_dir)) {
+        return;
+    }
+    if let Err(err) = write_group_marker(group_dir, kind, name) {
+        warn!(?err, group = %group_dir.display(), "could not write the worktree group marker");
+    }
+}
+
+/// In a `wt.*` folder, remove each group marker whose group folder is gone.
+/// Anything else, `dir` included, is left alone. Best-effort: a failure is
+/// logged.
+pub fn remove_orphan_group_markers(dir: &Path) {
+    let is_wt = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("wt."));
+    if !is_wt {
+        return;
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                warn!(?err, dir = %dir.display(), "could not list the wt folder for stale markers");
+            }
+            return;
+        }
+    };
+    for ent in rd.flatten() {
+        if !ent.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = ent.path();
+        let Some(group_name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(GROUP_MARKER_SUFFIX))
+        else {
+            continue;
+        };
+        if dir.join(group_name).exists() {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(&path) {
+            warn!(?err, marker = %path.display(), "could not remove a stale group marker");
+        }
+    }
+}
+
+/// Member worktrees of a group folder: the folder itself when it is a
+/// worktree (a single repo's group), else every worktree found inside it.
+fn group_member_dirs(group_dir: &Path) -> Vec<PathBuf> {
+    if group_dir.join(".git").exists() {
+        vec![group_dir.to_path_buf()]
+    } else {
+        find_member_dirs(group_dir)
+    }
+}
+
+/// Member worktrees at or below each of `dirs`.
+fn members_under(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter().flat_map(|d| group_member_dirs(d)).collect()
+}
+
+/// Walk inside a group or anchor-layout directory and return every
 /// `.git`-bearing subdirectory found. Stops descending once a dir is
 /// identified as a member (its inner structure is the member's own
 /// content, not nested groups). Best-effort — I/O failures inside the
@@ -241,7 +426,8 @@ fn anchor_from_member_parents(members: &[PathBuf], wt_path: &Path) -> String {
     prefix.join("/")
 }
 
-/// Delete a `wt.<branch>/` group from disk. Refuses if any member is
+/// Delete a group from disk: a marked group folder (with its marker), or a
+/// `wt.<branch>/` folder's unmarked content. Refuses if any member is
 /// referenced by a non-stopped, non-abandoned session (the user must
 /// stop the session first). Each member is run through
 /// [`crate::worktree_cleanup::remove_member`] which tries
@@ -255,10 +441,44 @@ pub async fn delete_group(
     sessions: &SessionRegistry,
 ) -> anyhow::Result<()> {
     let target = validate_target(root, target)?;
-    assert_no_live_session(&target, sessions)?;
-    delete_members(&target).await?;
-    finalize_group_dir(&target)?;
+    if is_group_dir(&target) {
+        assert_no_live_session(&target, &[], sessions)?;
+        delete_members(&group_member_dirs(&target)).await?;
+        finalize_group_dir(&target)?;
+        remove_group_marker_and_empty_parent(&target);
+        return Ok(());
+    }
+    // A `wt.<slug>/` folder: its marked groups are entries of their own and
+    // stay; only the rest of its content is this entry's to delete.
+    let (groups, rest): (Vec<PathBuf>, Vec<PathBuf>) = direct_child_dirs(&target)
+        .into_iter()
+        .partition(|child| is_group_dir(child));
+    assert_no_live_session(&target, &groups, sessions)?;
+    delete_members(&members_under(&rest)).await?;
+    if groups.is_empty() {
+        return finalize_group_dir(&target);
+    }
+    for leftover in &rest {
+        finalize_group_dir(leftover)?;
+    }
     Ok(())
+}
+
+/// Remove the marker beside a deleted group folder, then its `wt.<slug>/`
+/// parent if nothing else is left in it. Best-effort: a failure is logged.
+fn remove_group_marker_and_empty_parent(group_dir: &Path) {
+    if let Some(marker) = marker_path(group_dir)
+        && let Err(err) = std::fs::remove_file(&marker)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(?err, marker = %marker.display(), "could not remove the group marker");
+    }
+    if let Some(parent) = group_dir.parent()
+        && std::fs::read_dir(parent).is_ok_and(|mut rd| rd.next().is_none())
+        && let Err(err) = std::fs::remove_dir(parent)
+    {
+        warn!(?err, dir = %parent.display(), "could not remove the empty wt folder");
+    }
 }
 
 /// Canonicalize the target, verify it's under the worktrees root and
@@ -287,9 +507,9 @@ fn validate_target(root: &Path, target: &Path) -> anyhow::Result<PathBuf> {
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("target path has no file name: {}", target.display()))?;
-    if !wt_name.starts_with("wt.") {
+    if !wt_name.starts_with("wt.") && !is_group_dir(&target) {
         return Err(anyhow!(
-            "refusing to delete {}: not a wt.<branch> directory",
+            "refusing to delete {}: not a wt.<branch> directory or a worktree group folder",
             target.display()
         ));
     }
@@ -301,7 +521,13 @@ fn validate_target(root: &Path, target: &Path) -> anyhow::Result<PathBuf> {
 /// Uses `starts_with` rather than `parent ==` so it catches both new-layout
 /// members (nested under an anchor inside the wt dir) and old-layout
 /// members (direct children of the wt dir).
-fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::Result<()> {
+/// Paths under any of `kept` (group folders the delete leaves alone) don't
+/// count.
+fn assert_no_live_session(
+    target: &Path,
+    kept: &[PathBuf],
+    sessions: &SessionRegistry,
+) -> anyhow::Result<()> {
     let snapshots = sessions.snapshots();
     for snap in &snapshots {
         if !is_session_live(snap) {
@@ -312,7 +538,7 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
             let mp_canon = mp
                 .canonicalize()
                 .map_or_else(|_| mp.to_path_buf(), |p| simplify_path(&p));
-            if mp_canon.starts_with(target) {
+            if mp_canon.starts_with(target) && !kept.iter().any(|k| mp_canon.starts_with(k)) {
                 return Err(anyhow!(
                     "refusing to delete {}: live session {} ({}) is using it",
                     target.display(),
@@ -329,15 +555,14 @@ fn assert_no_live_session(target: &Path, sessions: &SessionRegistry) -> anyhow::
 /// robust cleanup helper. The originating repo (read from the member's
 /// `.git` gitfile) is looked up per member so that members from
 /// different repos in a workspace session each get their own
-/// `git worktree prune` after deletion. Uses `find_member_dirs` so it
-/// works for both new-layout (members nested under anchor inside the wt
-/// dir) and old-layout (members as direct children) groups.
-async fn delete_members(target: &Path) -> anyhow::Result<()> {
-    let member_paths = find_member_dirs(target);
+/// `git worktree prune` after deletion. The caller lists the members, so a
+/// group folder that is itself a worktree and members nested under an
+/// anchor are handled alike.
+async fn delete_members(member_paths: &[PathBuf]) -> anyhow::Result<()> {
     for member_path in member_paths {
-        let repo_path = repo_path_for_worktree(&member_path);
+        let repo_path = repo_path_for_worktree(member_path);
         if let Some(repo) = repo_path.as_deref() {
-            match crate::worktree_cleanup::remove_member(repo, &member_path).await {
+            match crate::worktree_cleanup::remove_member(repo, member_path).await {
                 crate::worktree_cleanup::CleanupOutcome::Removed => {}
                 crate::worktree_cleanup::CleanupOutcome::StillOnDisk { reason } => {
                     return Err(anyhow!(
@@ -352,7 +577,7 @@ async fn delete_members(target: &Path) -> anyhow::Result<()> {
             // to the filesystem delete. This is the "stale wt entry left
             // over from a deleted repo" case the management modal exists
             // to clean up.
-            std::fs::remove_dir_all(&member_path)
+            std::fs::remove_dir_all(member_path)
                 .or_else(|err| match err.kind() {
                     std::io::ErrorKind::NotFound => Ok(()),
                     _ => Err(err),
@@ -408,22 +633,24 @@ fn build_session_xref(snapshots: &[SessionSnapshot]) -> HashMap<PathBuf, (String
     map
 }
 
-/// Walk up from `member_path` to the nearest ancestor directory whose
-/// file name starts with `wt.`. Returns `None` if no such ancestor
-/// exists. Works for both layouts because the wt dir is always somewhere
-/// above the member in the on-disk tree.
+/// The group entry `member_path` belongs to: the nearest marked group
+/// folder at or above it (a single repo's group folder is the member
+/// itself), else the nearest ancestor whose name starts with `wt.` (the
+/// anchor layouts). `None` when neither exists.
 fn wt_dir_for_member(member_path: &Path) -> Option<PathBuf> {
-    let mut cur = member_path.parent()?;
-    loop {
-        if cur
+    for dir in member_path.ancestors() {
+        if is_group_dir(dir) {
+            return Some(dir.to_path_buf());
+        }
+        let is_wt = dir
             .file_name()
             .and_then(|s| s.to_str())
-            .is_some_and(|n| n.starts_with("wt."))
-        {
-            return Some(cur.to_path_buf());
+            .is_some_and(|n| n.starts_with("wt."));
+        if is_wt && dir != member_path {
+            return Some(dir.to_path_buf());
         }
-        cur = cur.parent()?;
     }
+    None
 }
 
 /// Branch checked out in a member worktree, read straight from the worktree's
@@ -1124,6 +1351,248 @@ mod tests {
         assert_eq!(pairs, vec![("X/dev", "alpha"), ("Y/dev", "beta")]);
     }
 
+    /// Seed `<wt>/<folder>` as a marked group whose members are the given
+    /// relative paths (an empty relative path makes the folder itself the
+    /// worktree, as for a single repo).
+    fn seed_group(
+        wt: &std::path::Path,
+        folder: &str,
+        kind: crate::git::GroupKind,
+        name: &str,
+        members: &[&str],
+    ) -> PathBuf {
+        let group = wt.join(folder);
+        for member in members {
+            touch(&group.join(member).join(".git"));
+        }
+        write_group_marker(&group, kind, name).unwrap();
+        group
+    }
+
+    fn entry_for<'a>(
+        entries: &'a [RootWorktreeEntry],
+        path: &std::path::Path,
+    ) -> &'a RootWorktreeEntry {
+        let key = normalize_path_key(&path.to_string_lossy());
+        entries
+            .iter()
+            .find(|e| normalize_path_key(&e.path) == key)
+            .unwrap_or_else(|| panic!("no entry for {}: {entries:?}", path.display()))
+    }
+
+    #[test]
+    fn stale_marker_is_rewritten() {
+        let tmp = Scratch::new();
+        let group = tmp.path().join("wt.feat").join("shop");
+        std::fs::create_dir_all(&group).unwrap();
+        write_group_marker(&group, crate::git::GroupKind::Repo, "Shop").unwrap();
+
+        write_group_marker(&group, crate::git::GroupKind::Workspace, "SHOP").unwrap();
+
+        let marker = tmp.path().join("wt.feat").join("shop.rt-group");
+        let parsed: GroupMarker =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(
+            parsed,
+            GroupMarker {
+                kind: crate::git::GroupKind::Workspace,
+                name: "SHOP".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn orphan_marker_sweep_skips_directories() {
+        let tmp = Scratch::new();
+        let wt = tmp.path().join("wt.feat");
+        // A folder whose name ends like a marker, with no group beside it.
+        let dir = wt.join("odd.rt-group");
+        touch(&dir.join("keep.txt"));
+        let stale = wt.join("gone.rt-group");
+        std::fs::write(&stale, "{}").unwrap();
+
+        remove_orphan_group_markers(&wt);
+
+        assert!(dir.join("keep.txt").is_file(), "a directory is left alone");
+        assert!(!stale.exists(), "a stale marker file is removed");
+    }
+
+    #[test]
+    fn marker_is_written_beside_the_group_folder() {
+        let tmp = Scratch::new();
+        let wt = tmp.path().join("wt.feat");
+        let group = wt.join("app");
+        std::fs::create_dir_all(&group).unwrap();
+
+        mark_group(
+            &group,
+            crate::git::GroupKind::Repo,
+            "App",
+            &[group.as_path()],
+        );
+
+        let marker = wt.join("app.rt-group");
+        let parsed: GroupMarker =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(
+            parsed,
+            GroupMarker {
+                kind: crate::git::GroupKind::Repo,
+                name: "App".to_string(),
+            }
+        );
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker).unwrap()).unwrap();
+        assert_eq!(raw, serde_json::json!({"kind": "repo", "name": "App"}));
+        assert_eq!(
+            std::fs::read_dir(&group).unwrap().count(),
+            0,
+            "nothing is written inside the group folder"
+        );
+
+        // A worktree reused from elsewhere doesn't mark a group it isn't in.
+        let other = wt.join("shop");
+        let elsewhere = tmp.path().join("elsewhere");
+        mark_group(
+            &other,
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &[elsewhere.as_path()],
+        );
+        assert!(!wt.join("shop.rt-group").exists());
+    }
+
+    #[test]
+    fn scanner_lists_each_new_layout_group_separately() {
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let app = seed_group(&wt, "app", crate::git::GroupKind::Repo, "App", &[""]);
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["apps/web", "libs/core"],
+        );
+
+        let cfg_tmp = Scratch::new();
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let app_entry = entry_for(&entries, &app);
+        assert_eq!(app_entry.anchor, "App");
+        assert_eq!(app_entry.branch_slug, "feat");
+        assert_eq!(app_entry.members.len(), 1);
+        assert_eq!(
+            normalize_path_key(&app_entry.members[0].worktree_path),
+            normalize_path_key(&app.to_string_lossy())
+        );
+        let shop_entry = entry_for(&entries, &shop);
+        assert_eq!(shop_entry.anchor, "Shop");
+        assert_eq!(shop_entry.members.len(), 2);
+    }
+
+    #[test]
+    fn scanner_keeps_old_layout_group_under_wt_folder() {
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        touch(&wt.join("X").join("dev").join("repo").join(".git"));
+        let app = seed_group(&wt, "app", crate::git::GroupKind::Repo, "App", &[""]);
+
+        let cfg_tmp = Scratch::new();
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let old = entry_for(&entries, &wt);
+        assert_eq!(old.anchor, "X/dev");
+        assert_eq!(
+            old.members.len(),
+            1,
+            "the marked group is not an old-layout member"
+        );
+        assert_eq!(entry_for(&entries, &app).anchor, "App");
+    }
+
+    #[tokio::test]
+    async fn delete_accepts_a_new_layout_group_and_removes_its_marker() {
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let app = seed_group(&wt, "app", crate::git::GroupKind::Repo, "App", &[""]);
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["apps/web"],
+        );
+        std::fs::create_dir_all(wt.join("unmarked")).unwrap();
+        let cfg_tmp = Scratch::new();
+        let sessions = empty_registry(cfg_tmp.path());
+
+        assert!(
+            validate_target(&root, &wt.join("unmarked")).is_err(),
+            "an unmarked child of a wt folder is not a group"
+        );
+
+        delete_group(&root, &app, &sessions).await.unwrap();
+        assert!(!app.exists());
+        assert!(!wt.join("app.rt-group").exists());
+        assert!(shop.exists() && wt.join("shop.rt-group").exists());
+
+        std::fs::remove_dir(wt.join("unmarked")).unwrap();
+        delete_group(&root, &shop, &sessions).await.unwrap();
+        assert!(!shop.exists());
+        assert!(!wt.join("shop.rt-group").exists());
+        assert!(
+            !wt.exists(),
+            "the emptied wt folder goes with its last group"
+        );
+    }
+
+    #[test]
+    fn status_is_per_new_layout_group() {
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let app = seed_group(&wt, "app", crate::git::GroupKind::Repo, "App", &[""]);
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["apps/web"],
+        );
+        // A session's worktree maps to its own group folder: the single
+        // repo's folder is the member itself; a workspace member's is the
+        // marked folder above it, not the shared `wt.feat`.
+        assert_eq!(wt_dir_for_member(&app).as_deref(), Some(app.as_path()));
+        assert_eq!(
+            wt_dir_for_member(&shop.join("apps").join("web")).as_deref(),
+            Some(shop.as_path())
+        );
+        let live_key = simplify_path(&std::fs::canonicalize(&app).unwrap());
+        let xref = HashMap::from([(live_key, ("s1".to_string(), true))]);
+
+        let mut entries = Vec::new();
+        walk_for_wt_dirs(&root, &root, &xref, &index(&[], &[]), &mut entries, 0);
+
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        let app_entry = entry_for(&entries, &app);
+        assert_eq!(app_entry.status, RootWorktreeStatus::Active);
+        assert_eq!(app_entry.session_id.as_deref(), Some("s1"));
+        assert_eq!(entry_for(&entries, &shop).status, RootWorktreeStatus::Stale);
+    }
     /// Probe-style test that scans whatever directory `RT_SCAN_PATH`
     /// points at and prints every entry's anchor + slug + status + size.
     /// Skipped by default (no env var set); run with

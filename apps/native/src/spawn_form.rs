@@ -474,7 +474,10 @@ impl ExistingOption {
             branch_name: if named {
                 info.branch.clone()
             } else {
-                branch_from_worktree_path(info.group_path.as_deref().unwrap_or(&info.path))
+                info.group_path.as_deref().map_or_else(
+                    || branch_from_worktree_path(&info.path),
+                    branch_from_group_path,
+                )
             },
             pin: Pin::Worktree(info.path.clone()),
         }
@@ -2172,6 +2175,19 @@ fn branch_from_worktree_path(path: &str) -> String {
     }
 }
 
+/// Branch label for an unnamed worktree in one of the daemon's groups: the
+/// nearest `wt.<branch>` folder at or above `group_path` (a group folder is
+/// `wt.<branch>/<name>`, or `wt.<branch>` itself in older layouts), else
+/// the same label as [`branch_from_worktree_path`].
+fn branch_from_group_path(group_path: &str) -> String {
+    group_path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .rev()
+        .find_map(|part| part.strip_prefix("wt."))
+        .map_or_else(|| branch_from_worktree_path(group_path), str::to_owned)
+}
+
 #[expect(
     clippy::cast_precision_loss,
     reason = "a size shown to one decimal place"
@@ -3439,6 +3455,38 @@ mod tests {
         press(&mut form, &Control::AdvancedToggle);
         assert!(!form.controls().contains(&Control::EnvKey(0)));
         assert_eq!(form.env_rows().len(), 1, "collapsing keeps the rows");
+    }
+
+    #[test]
+    fn branch_label_from_new_layout_group_path() {
+        assert_eq!(
+            branch_from_group_path("C:\\wt\\wt.brave-fox\\shop"),
+            "brave-fox"
+        );
+        assert_eq!(
+            branch_from_group_path("/wt/wt.feature-login/app/"),
+            "feature-login"
+        );
+        assert_eq!(branch_from_group_path("C:\\wt\\wt.old\\"), "old");
+        assert_eq!(branch_from_group_path("C:\\elsewhere\\repo"), "repo");
+
+        let mut form = open_repo(repo("r1"));
+        press(&mut form, &Control::Mode(WorktreeMode::Existing));
+        let mut grouped = worktree("C:/wt/wt.feat/r1", "", RootWorktreeStatus::Detached);
+        grouped.group_path = Some("C:/wt/wt.feat/r1".to_owned());
+        form.on_message(&DaemonMessage::Worktrees {
+            repo_id: "r1".to_owned(),
+            worktrees: vec![grouped],
+        });
+        press(&mut form, &Control::Existing("C:/wt/wt.feat/r1".to_owned()));
+        let spawn = submission(form.submit(&mut BranchCache::default()));
+        let SpawnTarget::Single { branch_name, .. } = spawn.request.target else {
+            panic!("a single-repo spawn");
+        };
+        assert_eq!(
+            branch_name, "feat",
+            "an unnamed worktree in a group folder takes its wt.<branch> folder's name"
+        );
     }
 
     #[test]

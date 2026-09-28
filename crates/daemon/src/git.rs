@@ -2,14 +2,13 @@
 
 use anyhow::{Context as _, anyhow};
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// On Windows, suppresses the brief console window flash that would otherwise
 /// appear for each git child. No-op on other platforms.
@@ -356,6 +355,45 @@ pub async fn worktree_holding_branch(repo: &Path, branch: &str) -> Option<PathBu
         .map(|(_, path)| path)
 }
 
+/// Whether `path` is one of `repo`'s worktrees (main worktree included),
+/// compared the way session records compare paths. `false` when git fails,
+/// so a caller never binds to a folder it could not vouch for.
+pub async fn is_worktree_of(repo: &Path, path: &Path) -> bool {
+    let stdout = match run_git(repo, &["worktree", "list", "--porcelain"]).await {
+        Ok(stdout) => stdout,
+        Err(err) => {
+            warn!(?err, repo = %repo.display(), "is_worktree_of: listing worktrees failed");
+            return false;
+        }
+    };
+    let want = crate::paths::normalize_path_key(&path.to_string_lossy());
+    parse_worktree_list(&stdout)
+        .iter()
+        .any(|(_, p)| crate::paths::normalize_path_key(&p.to_string_lossy()) == want)
+}
+
+/// Refuse a worktree folder that exists but isn't one of `repo`'s worktrees:
+/// binding a session to it would run in another repo's checkout, and ending
+/// that session would delete the folder.
+pub async fn refuse_foreign_worktree_folder(
+    repo: &Path,
+    repo_name: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    if !path.exists() || is_worktree_of(repo, path).await {
+        return Ok(());
+    }
+    warn!(
+        repo = %repo.display(),
+        folder = %path.display(),
+        "refusing a worktree folder that isn't a worktree of this repo"
+    );
+    Err(anyhow!(
+        "Can't use the worktree folder {}: it exists but isn't a worktree of {repo_name}. Remove it from Manage worktrees, or rename the repo or workspace.",
+        path.display()
+    ))
+}
+
 /// Error when `branch` names an existing remote-tracking ref (`origin/main`).
 ///
 /// Creating a *local* branch by that name materializes `refs/heads/origin/main`
@@ -631,8 +669,33 @@ fn branch_slug(branch: &str) -> String {
         .collect()
 }
 
-/// Longest common path-component prefix of `paths`. Empty if there's no
-/// shared prefix (e.g. cross-drive on Windows: `X:\…` vs `Y:\…`).
+/// Comparison key of one path component: case-folded on Windows, where
+/// `\\Srv\Share` and `\\srv\share` name the same place.
+fn component_key(component: &Component) -> String {
+    let text = component.as_os_str().to_string_lossy();
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.into_owned()
+    }
+}
+
+/// `path` with the leading components that match `prefix` (compared with
+/// [`component_key`]) removed, or `None` when `prefix` isn't a prefix of it.
+fn strip_path_prefix(path: &Path, prefix: &Path) -> Option<PathBuf> {
+    let mut rest = path.components();
+    for want in prefix.components() {
+        let got = rest.next()?;
+        if component_key(&got) != component_key(&want) {
+            return None;
+        }
+    }
+    Some(rest.as_path().to_path_buf())
+}
+
+/// Longest common path-component prefix of `paths`, compared with
+/// [`component_key`]. Empty if there's no shared prefix (e.g. cross-drive on
+/// Windows: `X:\…` vs `Y:\…`).
 fn common_path_prefix(paths: &[PathBuf]) -> PathBuf {
     let Some((first, rest)) = paths.split_first() else {
         return PathBuf::new();
@@ -643,7 +706,7 @@ fn common_path_prefix(paths: &[PathBuf]) -> PathBuf {
         let common_len = prefix
             .iter()
             .zip(other.iter())
-            .take_while(|(a, b)| a == b)
+            .take_while(|(a, b)| component_key(a) == component_key(b))
             .count();
         prefix.truncate(common_len);
         if prefix.is_empty() {
@@ -670,94 +733,235 @@ fn sanitize_anchor(anchor: &Path) -> PathBuf {
     out
 }
 
-/// Build worktree paths under `worktrees_root` aligned with `member_repos`.
+/// Windows device names a file or folder may not take, even with an
+/// extension (`con.txt` is as reserved as `con`).
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Folder-safe slug of a repo or workspace name, used as the worktree group's
+/// folder name (`wt.<branch>/<slug>`).
 ///
-/// Anchor = common path-component prefix of each member's *parent* directory
-/// (using parents — not the repos themselves — so a member that's an
-/// ancestor of another member doesn't collide with the shared `wt.<slug>/`
-/// folder). Each member's worktree is at
-/// `<worktrees_root>/wt.<slug>/<sanitized-anchor>/<rel-to-anchor>`, where
-/// `rel-to-anchor` mirrors the member's offset from the anchor in source
-/// space — preserving inter-member relative paths (`../repo2` etc.).
+/// Lowercases, keeps letters and digits (any script) and `.`, `_`, `-`,
+/// turns everything else (spaces, characters Windows forbids in a file name,
+/// control characters) into `-`, collapses runs of `-`, and trims `-`, `.`
+/// and spaces from both ends. A leading `wt.` becomes `wt-`, so a group
+/// folder never looks like a `wt.<branch>` folder. A Windows device name
+/// (`con`, `aux.txt`, …) gets `_` after its base name so the folder can be
+/// created; an empty result is `unnamed`. Repos and workspaces share this
+/// namespace, so two entries never map to one folder.
+pub fn name_slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    for c in name.chars().flat_map(char::to_lowercase) {
+        let mapped = if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            c
+        } else {
+            '-'
+        };
+        if mapped == '-' && slug.ends_with('-') {
+            continue;
+        }
+        slug.push(mapped);
+    }
+    let trimmed = slug.trim_matches(['-', '.', ' ']);
+    if trimmed.is_empty() {
+        return "unnamed".to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("wt.") {
+        return format!("wt-{rest}");
+    }
+    let (base, rest) = trimmed.split_at(trimmed.find('.').unwrap_or(trimmed.len()));
+    if RESERVED_DEVICE_NAMES.contains(&base) {
+        return format!("{base}_{rest}");
+    }
+    trimmed.to_string()
+}
+
+/// The group folder a repo's or workspace's worktrees for `branch` live in:
+/// `<worktrees_root>/wt.<branch-slug>/<name-slug>`.
+pub fn group_dir(worktrees_root: &Path, branch: &str, name: &str) -> PathBuf {
+    worktrees_root
+        .join(format!("wt.{}", branch_slug(branch)))
+        .join(name_slug(name))
+}
+
+/// Worktree path of a single-repo session on `branch`: the group folder
+/// itself, `<worktrees_root>/wt.<branch-slug>/<repo-name-slug>`.
+pub fn single_worktree_path(worktrees_root: &Path, branch: &str, repo_name: &str) -> PathBuf {
+    group_dir(worktrees_root, branch, repo_name)
+}
+
+/// What a worktree group folder is named after: a single repo or a
+/// workspace. Serialized lowercase into the group's marker file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupKind {
+    Repo,
+    Workspace,
+}
+
+/// Worktree paths for `members` of the group `name` on `branch`: the group
+/// folder itself for a repo, [`workspace_worktree_paths`] for a workspace.
+pub fn group_worktree_paths(
+    worktrees_root: &Path,
+    kind: GroupKind,
+    name: &str,
+    members: &[&Path],
+    branch: &str,
+) -> Vec<PathBuf> {
+    match kind {
+        GroupKind::Repo => members
+            .iter()
+            .map(|_| single_worktree_path(worktrees_root, branch, name))
+            .collect(),
+        GroupKind::Workspace => workspace_worktree_paths(worktrees_root, members, branch, name),
+    }
+}
+
+/// Case-folded drive of `path` (`x:`, `\\server\share`), or `None` for a
+/// path with no prefix (every Unix path). Members sharing a key share a drive.
+fn drive_key(path: &Path) -> Option<String> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            Some(prefix.as_os_str().to_string_lossy().to_lowercase())
+        }
+        _ => None,
+    }
+}
+
+/// Build workspace worktree paths under `worktrees_root` aligned with
+/// `member_repos`.
 ///
-/// Cross-drive members (no common ancestor with the first member, e.g. one
-/// on `X:\` and another on `Y:\` on Windows) cannot preserve relativity.
-/// They fall back to leaf-name placement under `wt.<slug>/<sanitized-anchor>/`,
-/// with `-2`, `-3`, … suffixes appended to avoid leaf collisions.
+/// Every member goes under the workspace's group folder
+/// `<worktrees_root>/wt.<branch-slug>/<workspace-name-slug>/`. Members on the
+/// drive of `member_repos[0]` sit at their offset from the anchor: the common
+/// path-component prefix of those members' *parent* directories (parents, so
+/// a member that is an ancestor of another still gets a folder of its own).
+/// The offsets mirror source space, so inter-member relative paths
+/// (`../repo2`) still resolve between worktrees.
 ///
-/// Single-member callers (e.g. non-workspace sessions) pass a one-element
-/// slice and get a single-element `Vec` back.
+/// Members on another drive are anchored the same way among themselves and
+/// go under `<group>/<sanitized-anchor-of-that-drive>/<offset>`; relative
+/// paths across drives cannot be preserved anyway.
 pub fn workspace_worktree_paths(
     worktrees_root: &Path,
     member_repos: &[&Path],
     branch: &str,
+    workspace_name: &str,
 ) -> Vec<PathBuf> {
-    if member_repos.is_empty() {
+    let Some(first) = member_repos.first() else {
         return Vec::new();
-    }
-    let slug = branch_slug(branch);
+    };
+    let group = group_dir(worktrees_root, branch, workspace_name);
+    let primary = drive_key(first);
 
-    let parents: Vec<PathBuf> = member_repos
-        .iter()
-        .map(|p| {
-            p.parent()
-                .map_or_else(|| (*p).to_path_buf(), Path::to_path_buf)
-        })
-        .collect();
-
-    let mut anchor = common_path_prefix(&parents);
-    if anchor.as_os_str().is_empty() {
-        // Cross-drive fallback: anchor under the first member's parent.
-        anchor.clone_from(&parents[0]);
-    }
-
-    let sanitized = sanitize_anchor(&anchor);
-    let wt_root = worktrees_root.join(format!("wt.{slug}")).join(sanitized);
-
-    // Names taken at the first level under `wt_root` so cross-drive members
-    // can avoid collisions with anchor-matching member subtrees.
-    let mut used_first_level: HashSet<String> = HashSet::new();
-    let mut out: Vec<PathBuf> = Vec::with_capacity(member_repos.len());
-
+    let parent_of = |p: &Path| {
+        p.parent()
+            .map_or_else(|| p.to_path_buf(), Path::to_path_buf)
+    };
+    let mut anchors: HashMap<Option<String>, PathBuf> = HashMap::new();
     for member in member_repos {
-        let path = if let Ok(rel) = member.strip_prefix(&anchor) {
-            let rel_buf = if rel.as_os_str().is_empty() {
-                // Anchor equals the member itself (rare edge case at fs roots);
-                // fall back to the member's file name.
-                PathBuf::from(
-                    member
-                        .file_name()
-                        .map_or_else(|| OsString::from("repo"), std::ffi::OsStr::to_os_string),
-                )
-            } else {
-                rel.to_path_buf()
-            };
-            if let Some(first) = rel_buf
-                .components()
-                .next()
-                .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            {
-                used_first_level.insert(first);
-            }
-            wt_root.join(rel_buf)
+        let key = drive_key(member);
+        if anchors.contains_key(&key) {
+            continue;
+        }
+        let parents: Vec<PathBuf> = member_repos
+            .iter()
+            .filter(|m| drive_key(m) == key)
+            .map(|m| parent_of(m))
+            .collect();
+        let mut anchor = common_path_prefix(&parents);
+        if anchor.as_os_str().is_empty() {
+            anchor = parent_of(member);
+        }
+        anchors.insert(key, anchor);
+    }
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(member_repos.len());
+    for member in member_repos {
+        let key = drive_key(member);
+        let anchor = anchors.get(&key).map_or_else(PathBuf::new, Clone::clone);
+        let base = if key == primary {
+            group.clone()
         } else {
-            // Cross-drive member: leaf-name placement with collision suffix.
-            let leaf = member
-                .file_name()
-                .map_or_else(|| "repo".to_string(), |n| n.to_string_lossy().into_owned());
-            let mut candidate = leaf.clone();
-            let mut suffix = 1u32;
-            while used_first_level.contains(&candidate) {
-                suffix += 1;
-                candidate = format!("{leaf}-{suffix}");
-            }
-            used_first_level.insert(candidate.clone());
-            wt_root.join(candidate)
+            group.join(sanitize_anchor(&anchor))
         };
+        let path = match strip_path_prefix(member, &anchor) {
+            Some(rel) if !rel.as_os_str().is_empty() => base.join(rel),
+            // The member is its own anchor (a filesystem root): name it after
+            // its leaf, suffixed when another member already took that name.
+            _ => unused_leaf_path(&base, &leaf_name(member), &used),
+        };
+        used.insert(crate::paths::normalize_path_key(&path.to_string_lossy()));
         out.push(path);
     }
-
     out
+}
+
+/// The folder name a member falls back to when it has no offset: its leaf,
+/// or `repo` for a filesystem root.
+fn leaf_name(member: &Path) -> String {
+    member
+        .file_name()
+        .map_or_else(|| "repo".to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// `base/<leaf>`, or `base/<leaf>-2`, `-3`, … when that path is in `used`.
+fn unused_leaf_path(base: &Path, leaf: &str, used: &HashSet<String>) -> PathBuf {
+    let taken = |p: &Path| used.contains(&crate::paths::normalize_path_key(&p.to_string_lossy()));
+    let mut path = base.join(leaf);
+    let mut n = 2;
+    while taken(&path) {
+        path = base.join(format!("{leaf}-{n}"));
+        n += 1;
+    }
+    path
+}
+
+/// Where a spawn of `repo` onto `branch` puts its worktree: the worktree that
+/// already holds `branch`, when it is a directory under `worktrees_root`
+/// (whatever layout created it: an older one, or a workspace since renamed),
+/// otherwise `derived`.
+///
+/// The existing worktree is returned in the normalized form session records
+/// use, so in-use checks match it.
+pub async fn existing_or_derived_worktree(
+    repo: &Path,
+    worktrees_root: &Path,
+    branch: &str,
+    derived: PathBuf,
+) -> PathBuf {
+    let Some(held) = worktree_holding_branch(repo, branch).await else {
+        return derived;
+    };
+    if !path_is_under(&held, worktrees_root) {
+        return derived;
+    }
+    match crate::paths::resolve_existing_dir(&held.to_string_lossy()) {
+        Ok(existing) => {
+            debug!(
+                branch,
+                worktree = %existing.display(),
+                "reusing the worktree that already holds the branch"
+            );
+            existing
+        }
+        Err(err) => {
+            debug!(?err, branch, held = %held.display(), "branch holder is gone; deriving a new path");
+            derived
+        }
+    }
+}
+
+/// Whether `path` lies strictly below `root`, compared the way session
+/// records compare paths (case- and separator-insensitive on Windows).
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = crate::paths::normalize_path_key(&path.to_string_lossy());
+    let root = crate::paths::normalize_path_key(&root.to_string_lossy());
+    path.strip_prefix(&root)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -815,13 +1019,115 @@ mod tests {
         );
     }
 
+    #[test]
+    fn name_slug_lowercases_and_dashes() {
+        assert_eq!(name_slug("My Shop"), "my-shop");
+        assert_eq!(name_slug("API_v2.core"), "api_v2.core");
+        assert_eq!(name_slug("a  /  b"), "a-b");
+        assert_eq!(name_slug("Café Bar"), "café-bar");
+    }
+
+    #[test]
+    fn name_slug_keeps_unicode_letters() {
+        assert_eq!(name_slug("数据 工具"), "数据-工具");
+        assert_eq!(name_slug("ÉCOLE"), "école");
+        assert_eq!(name_slug("Ünï\u{7}cödé"), "ünï-cödé");
+    }
+
+    #[test]
+    fn name_slug_never_starts_with_wt_dot() {
+        assert_eq!(name_slug("wt.tools"), "wt-tools");
+        assert_eq!(name_slug("WT.Main"), "wt-main");
+        assert_eq!(name_slug("wt"), "wt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unc_share_case_differences_share_an_anchor() {
+        let root = PathBuf::from(r"C:\wt");
+        let members = paths(&[r"\\Srv\Share\src\apps\web", r"\\srv\share\src\libs\core"]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from(r"C:\wt\wt.main\ws\apps\web"),
+                PathBuf::from(r"C:\wt\wt.main\ws\libs\core"),
+            ]
+        );
+    }
+
+    #[test]
+    fn leaf_fallback_members_with_one_name_get_distinct_paths() {
+        // A filesystem root is its own anchor, so it falls back to a leaf
+        // name; the same root listed three times must not share one folder.
+        let root_dir = if cfg!(windows) { r"C:\" } else { "/" };
+        let root = PathBuf::from(if cfg!(windows) { r"C:\wt" } else { "/wt" });
+        let members = paths(&[root_dir, root_dir, root_dir]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
+        let group = root.join("wt.main").join("ws");
+        assert_eq!(
+            got,
+            vec![
+                group.join("repo"),
+                group.join("repo-2"),
+                group.join("repo-3"),
+            ]
+        );
+    }
+
+    #[test]
+    fn name_slug_strips_illegal_and_trailing_dots() {
+        assert_eq!(name_slug(r#"a<b>c:d"e|f?g*h\i"#), "a-b-c-d-e-f-g-h-i");
+        assert_eq!(name_slug("name..."), "name");
+        assert_eq!(name_slug("  .lead"), "lead");
+        assert_eq!(name_slug("tab\there\u{1}"), "tab-here");
+        assert_eq!(name_slug("--x--"), "x");
+    }
+
+    #[test]
+    fn name_slug_suffixes_reserved_names() {
+        assert_eq!(name_slug("CON"), "con_");
+        assert_eq!(name_slug("nul"), "nul_");
+        assert_eq!(name_slug("Com1"), "com1_");
+        assert_eq!(name_slug("lpt9"), "lpt9_");
+        assert_eq!(name_slug("aux.txt"), "aux_.txt");
+        assert_eq!(name_slug("console"), "console");
+        assert_eq!(name_slug("com10"), "com10");
+    }
+
+    #[test]
+    fn name_slug_empty_is_unnamed() {
+        assert_eq!(name_slug(""), "unnamed");
+        assert_eq!(name_slug("..."), "unnamed");
+        assert_eq!(name_slug("???"), "unnamed");
+    }
+
+    #[test]
+    fn single_repo_worktree_path_is_the_name_slot() {
+        let root = PathBuf::from("wt-root");
+        assert_eq!(
+            single_worktree_path(&root, "feature/x", "My Repo"),
+            root.join("wt.feature-x").join("my-repo")
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn workspace_worktree_paths_single_member_windows() {
         let root = PathBuf::from(r"C:\wt");
+        assert_eq!(
+            single_worktree_path(&root, "main", "foo"),
+            PathBuf::from(r"C:\wt\wt.main\foo")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_worktree_paths_one_member_workspace_windows() {
+        let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\dev\foo"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
-        assert_eq!(got, vec![PathBuf::from(r"C:\wt\wt.main\X\dev\foo")]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
+        assert_eq!(got, vec![PathBuf::from(r"C:\wt\wt.main\ws\foo")]);
     }
 
     #[cfg(windows)]
@@ -829,12 +1135,12 @@ mod tests {
     fn workspace_worktree_paths_sibling_members_windows() {
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\dev\repo1", r"X:\dev\repo2"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "feature/x");
+        let got = workspace_worktree_paths(&root, &refs(&members), "feature/x", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\wt.feature-x\X\dev\repo1"),
-                PathBuf::from(r"C:\wt\wt.feature-x\X\dev\repo2"),
+                PathBuf::from(r"C:\wt\wt.feature-x\ws\repo1"),
+                PathBuf::from(r"C:\wt\wt.feature-x\ws\repo2"),
             ]
         );
     }
@@ -844,12 +1150,12 @@ mod tests {
     fn workspace_worktree_paths_nested_parents_windows() {
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\dev\a\repo1", r"X:\dev\b\repo2"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\wt.main\X\dev\a\repo1"),
-                PathBuf::from(r"C:\wt\wt.main\X\dev\b\repo2"),
+                PathBuf::from(r"C:\wt\wt.main\ws\a\repo1"),
+                PathBuf::from(r"C:\wt\wt.main\ws\b\repo2"),
             ]
         );
     }
@@ -858,16 +1164,16 @@ mod tests {
     #[test]
     fn workspace_worktree_paths_ancestor_of_other_windows() {
         // Member-1 is an ancestor of member-2's parent. Anchor is the common
-        // prefix of the *parents* (`X:\dev`), which keeps `wt.main\` from
-        // overlapping with `repo1` itself.
+        // prefix of the *parents* (`X:\dev`), which keeps the group folder
+        // from overlapping with `repo1` itself.
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\dev\repo1", r"X:\dev\repo1\sub"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\wt.main\X\dev\repo1"),
-                PathBuf::from(r"C:\wt\wt.main\X\dev\repo1\sub"),
+                PathBuf::from(r"C:\wt\wt.main\ws\repo1"),
+                PathBuf::from(r"C:\wt\wt.main\ws\repo1\sub"),
             ]
         );
     }
@@ -877,12 +1183,12 @@ mod tests {
     fn workspace_worktree_paths_cross_drive_fallback_windows() {
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\foo", r"Y:\bar"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\wt.main\X\foo"),
-                PathBuf::from(r"C:\wt\wt.main\X\bar"),
+                PathBuf::from(r"C:\wt\wt.main\ws\foo"),
+                PathBuf::from(r"C:\wt\wt.main\ws\Y\bar"),
             ]
         );
     }
@@ -890,15 +1196,46 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn workspace_worktree_paths_cross_drive_collision_windows() {
-        // Both members named `api`; the cross-drive one gets `-2`.
+        // Both members named `api`; the other drive's member sits under its
+        // own anchor, so the leaves never meet.
         let root = PathBuf::from(r"C:\wt");
         let members = paths(&[r"X:\team-a\api", r"Y:\team-b\api"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from(r"C:\wt\wt.main\X\team-a\api"),
-                PathBuf::from(r"C:\wt\wt.main\X\team-a\api-2"),
+                PathBuf::from(r"C:\wt\wt.main\ws\api"),
+                PathBuf::from(r"C:\wt\wt.main\ws\Y\team-b\api"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn borrowed_ideas_example_layout() {
+        let root = PathBuf::from(r"C:\wt");
+        let members = paths(&[r"D:\src\apps\web", r"D:\src\libs\core"]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "feature/login", "shop");
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from(r"C:\wt\wt.feature-login\shop\apps\web"),
+                PathBuf::from(r"C:\wt\wt.feature-login\shop\libs\core"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn borrowed_ideas_example_layout() {
+        let root = PathBuf::from("/wt");
+        let members = paths(&["/src/apps/web", "/src/libs/core"]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "feature/login", "shop");
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/wt/wt.feature-login/shop/apps/web"),
+                PathBuf::from("/wt/wt.feature-login/shop/libs/core"),
             ]
         );
     }
@@ -908,12 +1245,12 @@ mod tests {
     fn workspace_worktree_paths_unix_sibling_members() {
         let root = PathBuf::from("/wt");
         let members = paths(&["/home/u/r1", "/home/u/r2"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "main");
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
         assert_eq!(
             got,
             vec![
-                PathBuf::from("/wt/wt.main/home/u/r1"),
-                PathBuf::from("/wt/wt.main/home/u/r2"),
+                PathBuf::from("/wt/wt.main/ws/r1"),
+                PathBuf::from("/wt/wt.main/ws/r2"),
             ]
         );
     }
@@ -922,9 +1259,10 @@ mod tests {
     #[test]
     fn workspace_worktree_paths_unix_single_member() {
         let root = PathBuf::from("/wt");
-        let members = paths(&["/home/u/foo"]);
-        let got = workspace_worktree_paths(&root, &refs(&members), "feature/x");
-        assert_eq!(got, vec![PathBuf::from("/wt/wt.feature-x/home/u/foo")]);
+        assert_eq!(
+            single_worktree_path(&root, "feature/x", "foo"),
+            PathBuf::from("/wt/wt.feature-x/foo")
+        );
     }
 
     // --- In-place checkout integration tests (shell real git) ---------------

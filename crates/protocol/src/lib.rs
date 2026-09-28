@@ -625,7 +625,7 @@ pub struct PinnedMemberWorktree {
 ///
 /// **Pinning.** `Single::existing_worktree` and `Workspace::existing_worktrees`
 /// address a worktree by path instead of deriving one from the branch name.
-/// Derivation (`<root>/wt.<branch-slug>/<anchor>/<rel>`) stops matching reality
+/// Derivation (`<root>/wt.<branch-slug>/<name-slug>[/<offset>]`) stops matching reality
 /// as soon as the worktree's checked-out branch no longer slugs back to its own
 /// directory name — a branch switched inside the worktree, or a detached HEAD,
 /// derives a *different* path and silently creates a second worktree. A pinned
@@ -648,8 +648,9 @@ pub enum SpawnTarget {
         branch_name: String,
         /// Base for branch creation. `None` means "use the repo's default".
         base_branch: Option<String>,
-        /// When `true`, the daemon adds a worktree under
-        /// `<repo>.wt/<branch>` and runs claude there. When `false`, the
+        /// When `true`, the daemon runs claude in a worktree under its
+        /// worktrees root: the one already holding the branch there, else a
+        /// new `wt.<branch-slug>/<repo-slug>`. When `false`, the
         /// branch is checked out in the repo's primary directory and claude
         /// runs there directly.
         use_worktree: bool,
@@ -686,7 +687,8 @@ pub enum SpawnTarget {
         worktree_reuse: WorktreeReusePolicy,
         /// Members pinned to an existing worktree directory. Members absent
         /// from this list derive their path from `branch_name` and are created
-        /// as usual, which lands them in the same `wt.<slug>/` group — so a
+        /// as usual, which lands them in the same `wt.<slug>/<workspace-slug>/`
+        /// group (unless their branch already has a worktree) — so a
         /// workspace that gained a repo since the group was made still
         /// launches. Entries naming a repo that isn't a current member are
         /// ignored. Requires `use_worktree = true`.
@@ -2676,7 +2678,8 @@ pub struct WorktreeInfo {
     /// running. `Active` entries are still launchable — a second agent in a
     /// live tree is allowed behind a confirm — but the picker flags them.
     pub status: RootWorktreeStatus,
-    /// Absolute path of the `wt.<slug>/` group this worktree belongs to, when
+    /// Absolute path of the group folder this worktree belongs to (a marked
+    /// `wt.<slug>/<name>/` folder, or `wt.<slug>/` in older layouts), when
     /// it lives under the RT worktrees root. `None` for worktrees created
     /// outside RT, which are listed and launchable but carry no group metadata.
     #[serde(default)]
@@ -2774,15 +2777,17 @@ pub enum WorktreeLaunchTarget {
 /// One `wt.<branch>/` group under the worktrees root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RootWorktreeEntry {
-    /// Absolute path of the `wt.<branch>/` directory itself. This is
-    /// the address `DeleteWorktreeAt` operates on.
+    /// Absolute path of the group directory itself: a marked
+    /// `wt.<branch>/<name>/` folder, or the `wt.<branch>/` directory for
+    /// older layouts. This is the address `DeleteWorktreeAt` operates on.
     pub path: String,
-    /// Parent directory name (the "anchor" — common-ancestor prefix of
-    /// member repo parents, sanitized). Pure display field.
+    /// Display label: the repo or workspace name a marked group folder was
+    /// created for, or for older layouts the "anchor" (common-ancestor
+    /// prefix of member repo parents, sanitized). Pure display field.
     pub anchor: String,
     /// Branch slug (`<wt.>` prefix already stripped).
     pub branch_slug: String,
-    /// One entry per child member directory under `wt.<branch>/`.
+    /// One entry per member worktree in the group.
     /// A single-repo session has one member; a workspace session has
     /// one per workspace member.
     pub members: Vec<RootWorktreeMember>,

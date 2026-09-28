@@ -8,6 +8,40 @@ use protocol::{Agent, AppearanceOverrides, ContainerRef, RepoEntry, SpawnConfig,
 use std::path::Path;
 use uuid::Uuid;
 
+/// Refuse `name` when its worktree folder name ([`git::name_slug`]) is
+/// already another registered repo's or workspace's. Repos and workspaces
+/// share one namespace because both name their group folder under
+/// `wt.<branch>/`. `own_id` is the entry being saved, which may keep its own
+/// slug. State loaded from disk is never checked, only saves.
+fn ensure_group_slug_free(
+    state: &AppState,
+    name: &str,
+    own_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let slug = git::name_slug(name);
+    let clash = state.with_persisted(|s| {
+        let repo = s
+            .repos
+            .iter()
+            .filter(|r| Some(r.id.as_str()) != own_id)
+            .find(|r| git::name_slug(&r.name) == slug)
+            .map(|r| ("repo", r.name.clone()));
+        repo.or_else(|| {
+            s.workspaces
+                .iter()
+                .filter(|w| Some(w.id.as_str()) != own_id)
+                .find(|w| git::name_slug(&w.name) == slug)
+                .map(|w| ("workspace", w.name.clone()))
+        })
+    });
+    match clash {
+        Some((kind, other)) => Err(anyhow!(
+            "Can't save \"{name}\": its worktree folder name \"{slug}\" is already used by {kind} \"{other}\". Rename one of them."
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Append `ContainerRef::Repo(id)` to the manual order iff the order
 /// list is non-empty (meaning the user has actually customized it).
 /// If the order is empty, leave it alone — that signals "fall back to
@@ -58,6 +92,7 @@ pub async fn add_repo(
             |n| n.to_string_lossy().into_owned(),
         )
     });
+    ensure_group_slug_free(state, &name, None)?;
     let default_branch = git::default_branch(&canonical).await;
     let entry = RepoEntry {
         id: Uuid::new_v4().to_string(),
@@ -230,6 +265,7 @@ pub fn upsert_workspace(
             "another workspace already uses the name {trimmed_name:?}"
         ));
     }
+    ensure_group_slug_free(state, &trimmed_name, Some(id.as_str()))?;
     // Preserve the existing worktree-default and the last-spawn-config when
     // updating an existing workspace; only first-time upserts start fresh.
     let (prior_default_use_worktree, prior_appearance, prior_last_spawn_config) = state

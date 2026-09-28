@@ -92,12 +92,16 @@ pub async fn remove_member(repo: &Path, member: &Path) -> CleanupOutcome {
 /// Prune the now-empty ancestor directories a removed member leaves
 /// behind. Run after every member of a group has been cleaned up.
 ///
-/// A member lives at `<root>/wt.<slug>/<sanitized-anchor>/<member>`, so
-/// removing it strands the anchor skeleton (`X/dev`, `X`) and the
-/// `wt.<slug>` wrapper itself — a long-lived worktrees root otherwise
-/// accumulates dozens of empty `wt.*` trees over time. Passing the
-/// member's immediate parent (the anchor leaf) as `start`, this walks up
-/// removing each directory until it removes the `wt.<slug>` wrapper.
+/// A member lives at `<root>/wt.<slug>/<group>/<offset>` (a single repo's
+/// member is the group folder `<root>/wt.<slug>/<group>` itself), or in an
+/// older layout at `<root>/wt.<slug>/<sanitized-anchor>/<member>`, so
+/// removing it strands the skeleton above it (`<group>/apps`, `<group>`, or
+/// `X/dev`, `X`) and the `wt.<slug>` wrapper itself — a long-lived
+/// worktrees root otherwise accumulates dozens of empty `wt.*` trees over
+/// time. Passing the member's immediate parent as `start`, this walks up
+/// removing each directory until it removes the `wt.<slug>` wrapper. In a
+/// `wt.<slug>` wrapper, the marker of each group folder no longer there is
+/// removed first, so a removed group doesn't keep its wrapper alive.
 ///
 /// Uses the non-recursive [`std::fs::remove_dir`], which refuses a
 /// non-empty directory — so a sibling member whose cleanup failed (or an
@@ -110,6 +114,7 @@ pub async fn remove_member(repo: &Path, member: &Path) -> CleanupOutcome {
 pub fn prune_empty_ancestors(start: &Path, root: &Path) {
     let mut cur = start;
     while cur != root && cur.starts_with(root) {
+        crate::worktrees_admin::remove_orphan_group_markers(cur);
         match std::fs::remove_dir(cur) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

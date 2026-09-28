@@ -23,8 +23,9 @@ pub struct ResolvedMember {
     /// the branch is already there.
     pub resolved_base: String,
     /// Path where claude will run for this member. When `use_worktree` is
-    /// `true` this is the worktree dir under
-    /// `<worktrees_root>/<sanitized-anchor>/wt.<slug>/<rel-to-anchor>`; when
+    /// `true` this is the worktree already holding the branch under the
+    /// worktrees root, or else the new dir
+    /// `<worktrees_root>/wt.<branch-slug>/<workspace-slug>/<offset>`; when
     /// `false` it is the repo's primary directory (an in-place checkout).
     pub working_path: PathBuf,
     pub use_worktree: bool,
@@ -41,7 +42,8 @@ pub struct ResolveRequest<'a> {
     pub use_worktree: bool,
     /// Members bound to an existing worktree directory. Members not named here
     /// derive their path from `branch_name` as usual — which puts them in the
-    /// same `wt.<slug>/` group as the pins, so a workspace that gained a repo
+    /// same `wt.<slug>/<workspace>/` group as the pins (unless the branch
+    /// already has a worktree of its own), so a workspace that gained a repo
     /// after the group was created still launches. Pins naming a repo that
     /// isn't a member of this workspace are ignored.
     pub pins: &'a [PinnedMemberWorktree],
@@ -90,12 +92,9 @@ pub async fn resolve_workspace(
         ));
     }
 
-    // Compute worktree paths for *all* members in one call so they share a
-    // common `wt.<slug>/` root and preserve inter-repo relative offsets.
     let member_paths: Vec<PathBuf> = repos.iter().map(|r| PathBuf::from(&r.path)).collect();
     let worktrees: Vec<PathBuf> = if use_worktree {
-        let refs: Vec<&Path> = member_paths.iter().map(PathBuf::as_path).collect();
-        git::workspace_worktree_paths(worktrees_root, &refs, branch_name)
+        member_worktree_paths(worktrees_root, &workspace.name, &repos, branch_name).await?
     } else {
         member_paths.clone()
     };
@@ -134,6 +133,33 @@ pub async fn resolve_workspace(
         });
     }
     Ok((workspace, resolved))
+}
+
+/// Worktree path of each member for a workspace session on `branch_name`.
+///
+/// Computed for *all* members in one call so they share the workspace's
+/// `wt.<branch>/<workspace>/` group folder and keep their relative offsets.
+/// A member whose branch already sits in a worktree under the root (an older
+/// layout, or a workspace since renamed) keeps that worktree instead. Errors,
+/// naming the member, when a member's folder exists but isn't one of its
+/// worktrees.
+async fn member_worktree_paths(
+    worktrees_root: &Path,
+    workspace_name: &str,
+    members: &[RepoEntry],
+    branch_name: &str,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let member_paths: Vec<&Path> = members.iter().map(|m| Path::new(&m.path)).collect();
+    let derived =
+        git::workspace_worktree_paths(worktrees_root, &member_paths, branch_name, workspace_name);
+    let mut out = Vec::with_capacity(derived.len());
+    for ((member, repo), path) in members.iter().zip(&member_paths).zip(derived) {
+        let target =
+            git::existing_or_derived_worktree(repo, worktrees_root, branch_name, path).await;
+        git::refuse_foreign_worktree_folder(repo, &member.name, &target).await?;
+        out.push(target);
+    }
+    Ok(out)
 }
 
 /// Build one preview row per member, including the fork-point measurements

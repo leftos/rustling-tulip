@@ -26,8 +26,9 @@ pub struct Dirs {
     /// Worktree root: `<data_local>/leftos/rustling-tulip/data/worktrees/` on
     /// Windows (`%LOCALAPPDATA%\…`), equivalent on Linux/macOS. All session
     /// worktrees live under this base so the daemon doesn't need write access
-    /// next to source repos; per-session worktree paths are
-    /// `<worktrees_dir>/<sanitized-anchor>/wt.<branch-slug>/<rel-to-anchor>`
+    /// next to source repos; a single repo's worktree is
+    /// `<worktrees_dir>/wt.<branch-slug>/<repo-slug>` and a workspace
+    /// member's `<worktrees_dir>/wt.<branch-slug>/<workspace-slug>/<offset>`
     /// (see `git::workspace_worktree_paths`).
     pub worktrees_dir: PathBuf,
     /// Cached-binary root: `<data_local>/leftos/rustling-tulip/data/binaries/`

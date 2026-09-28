@@ -145,60 +145,75 @@ pub async fn suggest(
     worktrees_root: &Path,
     target: &SuggestTarget,
 ) -> anyhow::Result<String> {
-    let repo_paths = target_repo_paths(state, target)?;
-    let taken = taken_names(&repo_paths).await;
-    let repo_refs: Vec<&Path> = repo_paths.iter().map(PathBuf::as_path).collect();
+    let group = target_group(state, target)?;
+    let taken = taken_names(&group.repo_paths).await;
     Ok(pick_free_name(
         &taken,
         &mut rand::thread_rng(),
-        |candidate| !worktree_dir_exists(worktrees_root, &repo_refs, candidate),
+        |candidate| !worktree_dir_exists(worktrees_root, &group, candidate),
     ))
+}
+
+/// The repos a suggestion has to clear, and the group their worktrees are
+/// named after.
+struct TargetGroup {
+    kind: git::GroupKind,
+    name: String,
+    repo_paths: Vec<PathBuf>,
 }
 
 /// Whether any member's worktree directory for `branch` already exists.
 ///
-/// Derived through [`git::workspace_worktree_paths`] — the same function the
-/// spawn uses — so the check can't disagree with the path the spawn would
-/// pick.
-fn worktree_dir_exists(worktrees_root: &Path, repo_paths: &[&Path], branch: &str) -> bool {
-    git::workspace_worktree_paths(worktrees_root, repo_paths, branch)
+/// Derived through [`git::group_worktree_paths`] — the same layout the spawn
+/// uses — so the check can't disagree with the path the spawn would pick.
+fn worktree_dir_exists(worktrees_root: &Path, group: &TargetGroup, branch: &str) -> bool {
+    let refs: Vec<&Path> = group.repo_paths.iter().map(PathBuf::as_path).collect();
+    git::group_worktree_paths(worktrees_root, group.kind, &group.name, &refs, branch)
         .iter()
         .any(|path| path.exists())
 }
 
 /// Repo directories a suggestion has to clear: the one repo, or every
-/// registered member of the workspace.
-fn target_repo_paths(state: &AppState, target: &SuggestTarget) -> anyhow::Result<Vec<PathBuf>> {
+/// registered member of the workspace, with the name their group folder
+/// takes.
+fn target_group(state: &AppState, target: &SuggestTarget) -> anyhow::Result<TargetGroup> {
     match target {
         SuggestTarget::Repo { repo_id } => state
             .with_persisted(|s| {
                 s.repos
                     .iter()
                     .find(|r| &r.id == repo_id)
-                    .map(|r| vec![PathBuf::from(&r.path)])
+                    .map(|r| TargetGroup {
+                        kind: git::GroupKind::Repo,
+                        name: r.name.clone(),
+                        repo_paths: vec![PathBuf::from(&r.path)],
+                    })
             })
             .ok_or_else(|| anyhow!("unknown repo: {repo_id}")),
         SuggestTarget::Workspace { workspace_id } => {
-            let paths = state
+            let group = state
                 .with_persisted(|s| {
                     s.workspaces
                         .iter()
                         .find(|w| &w.id == workspace_id)
-                        .map(|ws| {
-                            ws.member_repo_ids
+                        .map(|ws| TargetGroup {
+                            kind: git::GroupKind::Workspace,
+                            name: ws.name.clone(),
+                            repo_paths: ws
+                                .member_repo_ids
                                 .iter()
                                 .filter_map(|id| s.repos.iter().find(|r| &r.id == id))
                                 .map(|r| PathBuf::from(&r.path))
-                                .collect::<Vec<_>>()
+                                .collect(),
                         })
                 })
                 .ok_or_else(|| anyhow!("unknown workspace: {workspace_id}"))?;
-            if paths.is_empty() {
+            if group.repo_paths.is_empty() {
                 return Err(anyhow!(
                     "workspace {workspace_id} has no registered member repos"
                 ));
             }
-            Ok(paths)
+            Ok(group)
         }
         SuggestTarget::Unknown => Err(anyhow!("unsupported branch-name suggestion target")),
     }
@@ -465,13 +480,13 @@ mod tests {
             .mutate(|s| s.repos.push(repo_entry("r1", &repo)))
             .expect("seed state");
         let worktrees_root = state.worktrees_dir();
-        for path in git::workspace_worktree_paths(&worktrees_root, &[repo.as_path()], &blocked) {
-            std::fs::create_dir_all(&path).expect("seed leftover worktree dir");
-        }
+        std::fs::create_dir_all(git::single_worktree_path(&worktrees_root, &blocked, "r1"))
+            .expect("seed leftover worktree dir");
 
         let target = SuggestTarget::Repo {
             repo_id: "r1".to_string(),
         };
+        let group = target_group(&state, &target).expect("target group");
         let name = suggest(&state, &worktrees_root, &target)
             .await
             .expect("suggestion");
@@ -481,7 +496,7 @@ mod tests {
             "a name whose worktree directory is on disk must not be suggested"
         );
         assert!(
-            !worktree_dir_exists(&worktrees_root, &[repo.as_path()], &name),
+            !worktree_dir_exists(&worktrees_root, &group, &name),
             "the suggested name must have no worktree directory: {name}"
         );
 
