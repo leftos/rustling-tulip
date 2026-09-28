@@ -69,7 +69,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] Display label order: user label → shell cwd name → terminal title (skipping bare shell names) → daemon label → runtime — `utils/sessionLabel.ts`
 - [ ] Sessions without a worktree that exit on their own are discarded automatically — `App.tsx`
 - [x] Delete-worktree confirm (the only path to deleting one): per-branch fate from the daemon, delete all / keep vs delete (commits lost) / worktree only, 10s fallback, safe option focused — `DeleteWorktreeDialog.tsx`, `utils/branchFate.ts`
-- [ ] Worktree cleanup failed: path, reason, locking processes (name, pid, cmdline) as checkboxes, open folder, "Kill N & retry" / Retry / Ignore — `WorktreeCleanupFailedDialog.tsx`
+- [x] Worktree cleanup failed: path, reason, locking processes (name, pid, cmdline) as checkboxes, open folder, "Kill N & retry" / Retry / Ignore — `WorktreeCleanupFailedDialog.tsx` (native: P4.4a; lockers are one list below the folders rather than nested under each)
 - [x] Blocking "action failed" modal (title, detail, hint) — `ActionFailedModal.tsx`
 
 ## Spawn dialog & launch flows

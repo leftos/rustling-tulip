@@ -11,6 +11,8 @@ mod appearance_view;
 mod assets;
 mod branch_fate;
 mod changes_view;
+mod cleanup_failed;
+mod cleanup_failed_view;
 mod combobox;
 mod connection;
 mod copied;
@@ -443,6 +445,10 @@ pub struct RootView {
     /// The arrangement the chooser picked, applied to the daemon's next tab
     /// list.
     pending_arrangement: Option<layout_chooser::Arrangement>,
+    /// Worktree cleanups that failed, one per session; the head is shown.
+    cleanup_failed: cleanup_failed::CleanupQueue,
+    /// The cleanup-failed dialog's keyboard focus.
+    cleanup_focus: FocusHandle,
     /// Opens the terminals' links, on background threads.
     opener: Arc<dyn Opener>,
     /// The OS notifications attention events fire.
@@ -578,12 +584,7 @@ impl RootView {
             notify,
         } = deps;
         Self::watch_window(window, cx);
-        let view = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            // A view that is gone has nothing to ask; let the window close.
-            view.update(cx, |root, cx| root.on_close_requested(window, cx))
-                .unwrap_or(true)
-        });
+        Self::watch_close_request(window, cx);
         Self::forward_net_events(events, window, cx);
         let ui = ui_dir
             .as_deref()
@@ -652,6 +653,8 @@ impl RootView {
             layout_chooser: None,
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
+            cleanup_failed: cleanup_failed::CleanupQueue::default(),
+            cleanup_focus: cx.focus_handle(),
             opener: open,
             notifications: notify::Notifications::new(notify),
             run_confirm: None,
@@ -667,6 +670,16 @@ impl RootView {
             last_active_tab: None,
             last_focused_session: None,
         }
+    }
+
+    /// Sends a request to close the window through the quit flow.
+    fn watch_close_request(window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            // A view that is gone has nothing to ask; let the window close.
+            view.update(cx, |root, cx| root.on_close_requested(window, cx))
+                .unwrap_or(true)
+        });
     }
 
     /// Handles every event `events` delivers, until the view is gone.
@@ -1060,6 +1073,7 @@ impl RootView {
             && self.run_confirm.is_none()
             && !self.notices.has_modal()
             && self.layout_chooser.is_none()
+            && self.cleanup_failed.is_empty()
             && self.exit.is_none();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && keyboard_free
@@ -1320,6 +1334,7 @@ impl RootView {
         }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
+        self.on_cleanup_failed_message(&msg, window, cx);
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
@@ -1427,6 +1442,7 @@ impl RootView {
         self.reset_notices(window, cx);
         self.pending_arrangement = None;
         self.close_layout_chooser(window, cx);
+        self.reset_cleanup_failed(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the
@@ -1481,7 +1497,8 @@ impl RootView {
         self.try_wanted_session(window, cx);
     }
 
-    /// Keys the root takes before the panes see them. The exit dialog, else
+    /// Keys the root takes before the panes see them. The worktree
+    /// cleanup-failed dialog, else the exit dialog, else
     /// the first-connect layout chooser, else the run confirm, else a modal
     /// notice, else the delete-worktree confirm, else the spawn
     /// dialog, else the Shell… dialog, while open, holds the focus and takes
@@ -1497,6 +1514,10 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let ks = &event.keystroke;
+        if self.on_cleanup_failed_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.on_exit_key(ks, window, cx) {
             cx.stop_propagation();
             return;
@@ -1867,6 +1888,7 @@ impl Render for RootView {
             .children(self.layout_chooser_layer(cx))
             .children(self.exit_layer(cx))
             .children(delete_over)
+            .children(self.cleanup_failed_layer(window, cx))
             .children(overlay)
     }
 }

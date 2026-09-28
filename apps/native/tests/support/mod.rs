@@ -62,6 +62,31 @@ fn sc_picker_shown(root: &RootView) -> bool {
     root.sc_picker_open() && root.source_control_panel().picker.is_some()
 }
 
+/// Whether the layout chooser, the worktree cleanup-failed dialog or the
+/// exit dialog shows `selector`: the dialog while it is open, a control
+/// while the open dialog has it. `None` for any other selector.
+fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let has = |controls: Vec<(String, String)>| controls.iter().any(|(c, _)| c == selector);
+    let shown = if selector == "layout-chooser" {
+        root.layout_chooser_open()
+    } else if selector.starts_with("layout-choose-") || selector.starts_with("chooser-") {
+        has(root.layout_chooser_controls())
+    } else if selector == "cleanup-failed" {
+        root.cleanup_failed_open()
+    } else if selector.starts_with("cleanup-") {
+        has(root.cleanup_failed_controls())
+    } else if selector == "exit-confirm-dialog" {
+        root.exit_dialog_open()
+    } else if selector.starts_with("exit-") {
+        root.exit_dialog_buttons()
+            .iter()
+            .any(|(button, _, _)| button == selector)
+    } else {
+        return None;
+    };
+    Some(shown)
+}
+
 /// Whether the model still shows what a `headless-` selector tags: the
 /// show-all button only while the cap hides earlier entries, every other
 /// part of the body whenever the pane draws it. `None` for any other
@@ -854,18 +879,8 @@ impl<'a> Harness<'a> {
         self.root(move |root, cx| {
             let pane = |id: &str| root.active_pane_ids().iter().any(|p| p == id);
             let sessions_shown = !root.sidebar_collapsed() && root.activity() == Activity::Sessions;
-            if selector == "layout-chooser" {
-                root.layout_chooser_open()
-            } else if selector.starts_with("layout-choose-") || selector.starts_with("chooser-") {
-                root.layout_chooser_controls()
-                    .iter()
-                    .any(|(control, _)| *control == selector)
-            } else if selector == "exit-confirm-dialog" {
-                root.exit_dialog_open()
-            } else if selector.starts_with("exit-") {
-                root.exit_dialog_buttons()
-                    .iter()
-                    .any(|(button, _, _)| *button == selector)
+            if let Some(shown) = modal_part_shown(root, &selector) {
+                shown
             } else if selector == "tab-menu" {
                 root.tab_menu().is_some()
             } else if selector.starts_with("tab-menu-") {
