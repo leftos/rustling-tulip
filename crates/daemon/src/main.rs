@@ -1,9 +1,16 @@
 //! rustling-tulipd: long-lived daemon that owns Claude Code sessions.
 
+// A login launch (the HKCU `Run` entry) must not flash a console window, so on
+// Windows the daemon is a GUI-subsystem exe. Every child it spawns sets
+// `CREATE_NO_WINDOW`, so nothing downstream needs a console either. Tests keep
+// the console so a failing test still prints.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod agents;
 mod binary_cache;
 mod branch_fate;
 mod branch_names;
+mod detach;
 mod discovery;
 mod file_fetch;
 mod git;
@@ -61,6 +68,13 @@ const INSTANCE_LOCK_WAIT: Duration = Duration::from_secs(5);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let dirs = paths::Dirs::ensure()?;
+    // The login `Run` entry runs the installed exe with `--detach`: hand over
+    // to a cached copy and exit, without taking the instance lock, the log or
+    // the binary-cache sweep from a daemon that may already serve this config
+    // dir.
+    if detach::requested(std::env::args_os().skip(1)) {
+        return detach::relaunch_from_cache(&dirs);
+    }
     // One daemon per config dir. A second launch must exit here, before it
     // rotates the live daemon's log, sweeps its binary cache, reaps the orphan
     // tracers its live sessions depend on or overwrites its state.

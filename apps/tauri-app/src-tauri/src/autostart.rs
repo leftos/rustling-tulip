@@ -29,16 +29,30 @@ mod imp {
         run.get_value::<String, _>(VALUE_NAME).is_ok()
     }
 
+    /// The `Run` command for `daemon_path`: quoted, so spaces (e.g. Program
+    /// Files) survive the shell parse Windows does when it runs the value, and
+    /// with `--detach`, so the login launch copies itself into the binaries
+    /// cache and starts the cached copy instead of running the installed exe
+    /// (which the next installer or rebuild would have to replace).
+    pub fn run_value(daemon_path: &str) -> String {
+        format!("\"{daemon_path}\" --detach")
+    }
+
+    /// The `Run` value as it stands on this machine, or `None` when the daemon
+    /// is not registered.
+    pub fn stored_value() -> Option<String> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu.open_subkey(RUN_PATH).ok()?;
+        run.get_value::<String, _>(VALUE_NAME).ok()
+    }
+
     pub fn set(enabled: bool, daemon_path: &str) -> Result<(), String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let (run, _) = hkcu
             .create_subkey(RUN_PATH)
             .map_err(|e| format!("opening HKCU Run key: {e}"))?;
         if enabled {
-            // Quote the path so spaces (e.g. Program Files) survive the
-            // shell parse Windows does when it executes the Run value.
-            let quoted = format!("\"{daemon_path}\"");
-            run.set_value(VALUE_NAME, &quoted)
+            run.set_value(VALUE_NAME, &run_value(daemon_path))
                 .map_err(|e| format!("writing autostart value: {e}"))?;
         } else {
             match run.delete_value(VALUE_NAME) {
@@ -153,5 +167,52 @@ pub async fn set_autostart(enabled: bool) -> Result<(), String> {
     {
         let _ = enabled;
         Err("starting the daemon on login is only supported on Windows and macOS".to_string())
+    }
+}
+
+/// Bring an existing Windows `Run` entry up to date: rewrite it when its path
+/// no longer matches the installed daemon, or when it predates `--detach`.
+/// Does nothing when autostart is off, and on platforms that don't use the
+/// `Run` key (the macOS `LaunchAgent` is written in its final form). Failures
+/// are logged and swallowed — a stale entry is not worth failing app startup
+/// over.
+#[cfg(windows)]
+pub fn refresh_registration() {
+    if !imp::get() {
+        return;
+    }
+    let path = match daemon_client::locate_daemon_binary() {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!("autostart: cannot locate the daemon binary: {err:#}");
+            return;
+        }
+    };
+    let daemon_path = path.to_string_lossy();
+    let desired = imp::run_value(&daemon_path);
+    if imp::stored_value().as_deref() == Some(desired.as_str()) {
+        return;
+    }
+    if let Err(err) = imp::set(true, &daemon_path) {
+        tracing::warn!("autostart: could not update the Run value: {err}");
+    } else {
+        tracing::info!("autostart: rewrote the Run value as {desired}");
+    }
+}
+
+/// No-op on platforms whose login registration is not the Windows `Run` key.
+#[cfg(not(windows))]
+pub fn refresh_registration() {}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::imp;
+
+    #[test]
+    fn run_value_quotes_the_path_and_detaches() {
+        assert_eq!(
+            imp::run_value(r"C:\Program Files\rustling-tulip\rustling-tulipd.exe"),
+            "\"C:\\Program Files\\rustling-tulip\\rustling-tulipd.exe\" --detach"
+        );
     }
 }

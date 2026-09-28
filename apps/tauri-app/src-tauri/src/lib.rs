@@ -920,6 +920,9 @@ pub fn run() {
             ) {
                 tracing::warn!(err, "failed to write env status to app.log");
             }
+            // An entry written by an older build runs the installed exe
+            // directly; upgrade it to the current path and `--detach` form.
+            autostart::refresh_registration();
             Ok(())
         })
         .run(context)
