@@ -106,8 +106,9 @@ async fn main() -> anyhow::Result<()> {
         abandoned = dead.len(),
         "orphan recovery scan complete"
     );
-    sweep_binary_cache(&dirs, &live, &dead);
-    reap_orphan_tracers(&dirs, &live, &dead);
+    let processes = running_processes();
+    sweep_binary_cache(&dirs, &live, &dead, &processes);
+    reap_orphan_tracers(&dirs, &live, &dead, &processes);
     // Pre-B.2: dead sidecars were unconditionally deleted, losing recovery
     // context. Now we keep them — they become "abandoned" sessions the user
     // can Resume (replay spawn config + last_prompt against a fresh process)
@@ -153,7 +154,21 @@ fn import_tracer_logs(
     history::import_tracer_logs(dirs, &registered, &skip, chrono::Utc::now());
 }
 
-/// Prune cached binaries that no live tracer (or this daemon's own exe) is
+/// One snapshot of every running process with its exe path and environment,
+/// shared by the cache GC and the tracer reap.
+fn running_processes() -> sysinfo::System {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+
+    let refresh = ProcessRefreshKind::new()
+        .with_exe(UpdateKind::Always)
+        .with_environ(UpdateKind::Always);
+    let mut sys = System::new_with_specifics(RefreshKind::new().with_processes(refresh));
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    sys
+}
+
+/// Prune cached binaries that no live tracer, no running process (another
+/// daemon sharing the cache included) and not this daemon's own exe is
 /// using. Called once at startup after orphan recovery so we don't grow the
 /// cache without bound across rebuilds. Failures are logged and swallowed —
 /// a stale cache entry never blocks startup.
@@ -161,6 +176,7 @@ fn sweep_binary_cache(
     dirs: &paths::Dirs,
     live: &[orphan::OrphanMeta],
     dead: &[orphan::OrphanMeta],
+    processes: &sysinfo::System,
 ) {
     let mut in_use: HashSet<PathBuf> = HashSet::new();
 
@@ -190,6 +206,16 @@ fn sweep_binary_cache(
         }
     }
 
+    // Plus every binary a running process uses from the cache: a daemon on
+    // another config dir sharing it, and that daemon's tracers.
+    in_use.extend(pinned_cache_paths(
+        processes
+            .processes()
+            .values()
+            .filter_map(sysinfo::Process::exe),
+        &dirs.binaries_dir,
+    ));
+
     match binary_cache::gc(&dirs.binaries_dir, &in_use) {
         Ok(report) => info!(
             kept = report.kept,
@@ -202,9 +228,24 @@ fn sweep_binary_cache(
     }
 }
 
-/// Find every `rt-tracer.exe` running from this daemon's binary cache that no
-/// sidecar references and force-kill it. Tracers from a different launcher or
-/// e2e run live in a different binary cache and are left alone.
+/// The cache entry path for every exe in `exes` that runs from under
+/// `binaries_dir`, re-joined onto `binaries_dir` so it names the entry the
+/// way cache GC reads it, whatever form the process reported its path in.
+fn pinned_cache_paths<'a>(
+    exes: impl IntoIterator<Item = &'a Path>,
+    binaries_dir: &Path,
+) -> HashSet<PathBuf> {
+    exes.into_iter()
+        .filter(|exe| path_is_under(exe, binaries_dir))
+        .filter_map(Path::file_name)
+        .map(|name| binaries_dir.join(name))
+        .collect()
+}
+
+/// Find every `rt-tracer.exe` running from the binary cache that this config
+/// dir owns and no sidecar references, and force-kill it. The cache is
+/// machine-wide, so a tracer another config dir's daemon spawned is left
+/// alone, and so is one that names no owner.
 ///
 /// Sidecars in BOTH the live and abandoned buckets count as "referenced" —
 /// abandoned sessions can still be Resumed by the user, and we don't want
@@ -214,57 +255,172 @@ fn reap_orphan_tracers(
     dirs: &paths::Dirs,
     live: &[orphan::OrphanMeta],
     dead: &[orphan::OrphanMeta],
+    processes: &sysinfo::System,
 ) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
-
-    let mut referenced: HashSet<u32> = HashSet::new();
-    for meta in live.iter().chain(dead.iter()) {
-        if let Some(pid) = meta.tracer_pid {
-            referenced.insert(pid);
-        }
-    }
-
-    let process_refresh = ProcessRefreshKind::new().with_exe(UpdateKind::Always);
-    let mut sys = System::new_with_specifics(RefreshKind::new().with_processes(process_refresh));
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
-
-    // Cached tracers are spawned from `<binaries>/rt-tracer-<hash>.exe`, so
-    // matching by exact filename misses every cached copy. Prefix-match the
-    // executable stem instead — both the template (`rt-tracer.exe`) and any
-    // cached copy (`rt-tracer-aaaaaaaaaaaaaaaa.exe`) start with `rt-tracer`.
-    let our_pid = std::process::id();
+    let referenced: HashSet<u32> = live
+        .iter()
+        .chain(dead.iter())
+        .filter_map(|meta| meta.tracer_pid)
+        .collect();
+    let scope = ReapScope {
+        config: &dirs.config,
+        binaries_dir: &dirs.binaries_dir,
+        referenced: &referenced,
+        our_pid: std::process::id(),
+    };
 
     let mut killed = 0_usize;
     let mut failed = 0_usize;
-    let mut spared = 0_usize;
-    for (pid, proc_) in sys.processes() {
-        if !is_tracer_image(&proc_.name().to_string_lossy()) {
-            continue;
+    let mut spared_foreign = 0_usize;
+    let mut spared_unmarked = 0_usize;
+    let mut spared_referenced = 0_usize;
+    let mut spared_conflicting = 0_usize;
+    for (pid, proc_) in processes.processes() {
+        let name = proc_.name().to_string_lossy();
+        let view = ProcessView {
+            pid: pid.as_u32(),
+            name: &name,
+            exe: proc_.exe(),
+            environ: proc_.environ(),
+        };
+        match reap_verdict(&view, &scope) {
+            ReapVerdict::NotConsidered => {}
+            ReapVerdict::Spare(SpareReason::Foreign) => spared_foreign += 1,
+            ReapVerdict::Spare(SpareReason::Unmarked) => spared_unmarked += 1,
+            ReapVerdict::Spare(SpareReason::Referenced) => spared_referenced += 1,
+            ReapVerdict::Spare(SpareReason::ConflictingOwner) => spared_conflicting += 1,
+            ReapVerdict::Kill if proc_.kill() => killed += 1,
+            ReapVerdict::Kill => {
+                failed += 1;
+                tracing::warn!(pid = view.pid, "could not kill orphan tracer");
+            }
         }
-        if !proc_
-            .exe()
-            .is_some_and(|exe| path_is_under(exe, &dirs.binaries_dir))
+    }
+    let spared = spared_foreign + spared_unmarked + spared_referenced + spared_conflicting;
+    if killed + failed + spared > 0 {
+        info!(
+            killed,
+            spared_foreign,
+            spared_unmarked,
+            spared_referenced,
+            spared_conflicting,
+            failed,
+            "orphan tracer reap complete"
+        );
+    }
+}
+
+/// Why the startup reap left a tracer from the binary cache running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpareReason {
+    /// Another config dir's daemon spawned it.
+    Foreign,
+    /// It names no owner, or its environment could not be read.
+    Unmarked,
+    /// A sidecar of this config dir references it.
+    Referenced,
+    /// Its owner marker and its log path name different config dirs.
+    ConflictingOwner,
+}
+
+/// What the startup reap does with one running process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReapVerdict {
+    /// Not a tracer running from the binary cache, or this process itself.
+    NotConsidered,
+    Kill,
+    Spare(SpareReason),
+}
+
+/// One running process as the reap sees it.
+struct ProcessView<'a> {
+    pid: u32,
+    name: &'a str,
+    exe: Option<&'a Path>,
+    /// `KEY=VALUE` entries; empty when the environment could not be read.
+    environ: &'a [std::ffi::OsString],
+}
+
+/// Whose tracers the reap may kill.
+struct ReapScope<'a> {
+    config: &'a Path,
+    binaries_dir: &'a Path,
+    /// Tracer pids this config dir's sidecars reference.
+    referenced: &'a HashSet<u32>,
+    our_pid: u32,
+}
+
+/// Kill a tracer running from the binary cache only when this config dir
+/// owns it and no sidecar references it.
+///
+/// Cached tracers are spawned from `<binaries>/rt-tracer-<hash>.exe`, so the
+/// image is matched by stem prefix (see [`is_tracer_image`]), not exact name.
+fn reap_verdict(process: &ProcessView<'_>, scope: &ReapScope<'_>) -> ReapVerdict {
+    let from_cache = process
+        .exe
+        .is_some_and(|exe| path_is_under(exe, scope.binaries_dir));
+    if !is_tracer_image(process.name) || !from_cache || process.pid == scope.our_pid {
+        return ReapVerdict::NotConsidered;
+    }
+    let owner = match tracer_owner(process.environ) {
+        TracerOwner::Known(owner) => owner,
+        TracerOwner::Conflicting => return ReapVerdict::Spare(SpareReason::ConflictingOwner),
+        TracerOwner::Unknown => return ReapVerdict::Spare(SpareReason::Unmarked),
+    };
+    if normalize_process_path(&owner) != normalize_process_path(scope.config) {
+        return ReapVerdict::Spare(SpareReason::Foreign);
+    }
+    if scope.referenced.contains(&process.pid) {
+        return ReapVerdict::Spare(SpareReason::Referenced);
+    }
+    ReapVerdict::Kill
+}
+
+/// The config dir whose daemon spawned a tracer, read from its environment:
+/// the owner marker, else the config dir its per-session log lies under
+/// (`<config>/logs/tracer-<id>.log`).
+///
+/// The two can disagree: a tracer passes its environment down to its child,
+/// so a daemon started from inside a session shell inherits the outer owner
+/// marker and hands it to its own tracers, whose log path names the inner
+/// config dir. No owner can be trusted then.
+fn tracer_owner(environ: &[std::ffi::OsString]) -> TracerOwner {
+    let marker = env_value(environ, tracer_client::TRACER_OWNER_ENV).map(PathBuf::from);
+    let from_log = env_value(environ, tracer_client::TRACER_LOG_ENV)
+        .and_then(|log| Path::new(&log).parent()?.parent().map(Path::to_path_buf));
+    match (marker, from_log) {
+        (Some(marker), Some(from_log))
+            if normalize_process_path(&marker) != normalize_process_path(&from_log) =>
         {
-            continue;
+            TracerOwner::Conflicting
         }
-        let pid_u32 = pid.as_u32();
-        if pid_u32 == our_pid {
-            continue;
-        }
-        if referenced.contains(&pid_u32) {
-            spared += 1;
-            continue;
-        }
-        if proc_.kill() {
-            killed += 1;
+        (Some(owner), _) | (None, Some(owner)) => TracerOwner::Known(owner),
+        (None, None) => TracerOwner::Unknown,
+    }
+}
+
+/// A tracer's owner as its environment names it.
+enum TracerOwner {
+    Known(PathBuf),
+    /// The owner marker and the log path name different config dirs.
+    Conflicting,
+    /// Neither is set, or the environment could not be read.
+    Unknown,
+}
+
+/// The non-empty value of `key` in `KEY=VALUE` entries; the key matches
+/// case-insensitively on Windows, as its environment does.
+fn env_value(environ: &[std::ffi::OsString], key: &str) -> Option<String> {
+    environ.iter().find_map(|entry| {
+        let entry = entry.to_string_lossy();
+        let (name, value) = entry.split_once('=')?;
+        let matches = if cfg!(windows) {
+            name.eq_ignore_ascii_case(key)
         } else {
-            failed += 1;
-            tracing::warn!(pid = pid_u32, "could not kill orphan tracer");
-        }
-    }
-    if killed > 0 || failed > 0 || spared > 0 {
-        info!(killed, failed, spared, "orphan tracer reap complete");
-    }
+            name == key
+        };
+        (matches && !value.is_empty()).then(|| value.to_string())
+    })
 }
 
 /// Match `rt-tracer.exe`, `rt-tracer`, or any cached copy named
@@ -444,8 +600,172 @@ fn rotate_log(path: &Path) -> std::io::Result<()> {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::{is_tracer_image, path_is_under, rotate_log};
-    use std::path::Path;
+    use super::{
+        ProcessView, ReapScope, ReapVerdict, SpareReason, is_tracer_image, path_is_under,
+        pinned_cache_paths, reap_verdict, rotate_log,
+    };
+    use crate::tracer_client::{TRACER_LOG_ENV, TRACER_OWNER_ENV};
+    use std::collections::HashSet;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    /// A scratch root for reap scopes; nothing is read from or written to it.
+    fn reap_root() -> PathBuf {
+        std::env::temp_dir().join("rt-reap-fixture")
+    }
+
+    fn env_entry(key: &str, value: &Path) -> OsString {
+        OsString::from(format!("{key}={}", value.display()))
+    }
+
+    /// The verdict for pid 42, a cached tracer under `binaries`, whose
+    /// environment is `environ`, for a daemon on `config`.
+    fn verdict(
+        config: &Path,
+        binaries: &Path,
+        environ: &[OsString],
+        referenced: &[u32],
+    ) -> ReapVerdict {
+        let exe = binaries.join("rt-tracer-aaaaaaaaaaaaaaaa.exe");
+        let referenced: HashSet<u32> = referenced.iter().copied().collect();
+        reap_verdict(
+            &ProcessView {
+                pid: 42,
+                name: "rt-tracer-aaaaaaaaaaaaaaaa.exe",
+                exe: Some(&exe),
+                environ,
+            },
+            &ReapScope {
+                config,
+                binaries_dir: binaries,
+                referenced: &referenced,
+                our_pid: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn reap_kills_unreferenced_tracer_owned_by_this_config_dir() {
+        let root = reap_root();
+        let config = root.join("config");
+        let environ = [env_entry(TRACER_OWNER_ENV, &config)];
+        assert_eq!(
+            verdict(&config, &root.join("binaries"), &environ, &[]),
+            ReapVerdict::Kill
+        );
+    }
+
+    #[test]
+    fn reap_spares_tracer_owned_by_another_config_dir() {
+        let root = reap_root();
+        let environ = [env_entry(TRACER_OWNER_ENV, &root.join("other-config"))];
+        assert_eq!(
+            verdict(&root.join("config"), &root.join("binaries"), &environ, &[]),
+            ReapVerdict::Spare(SpareReason::Foreign)
+        );
+    }
+
+    #[test]
+    fn reap_uses_tracer_log_path_when_owner_marker_missing() {
+        let root = reap_root();
+        let config = root.join("config");
+        let binaries = root.join("binaries");
+        let ours = [env_entry(
+            TRACER_LOG_ENV,
+            &config.join("logs").join("tracer-abc.log"),
+        )];
+        assert_eq!(verdict(&config, &binaries, &ours, &[]), ReapVerdict::Kill);
+        let theirs = [env_entry(
+            TRACER_LOG_ENV,
+            &root
+                .join("other-config")
+                .join("logs")
+                .join("tracer-abc.log"),
+        )];
+        assert_eq!(
+            verdict(&config, &binaries, &theirs, &[]),
+            ReapVerdict::Spare(SpareReason::Foreign)
+        );
+    }
+
+    #[test]
+    fn reap_spares_tracer_without_any_owner_hint() {
+        let root = reap_root();
+        let config = root.join("config");
+        let binaries = root.join("binaries");
+        let unrelated = [OsString::from("PATH=somewhere")];
+        assert_eq!(
+            verdict(&config, &binaries, &unrelated, &[]),
+            ReapVerdict::Spare(SpareReason::Unmarked)
+        );
+        assert_eq!(
+            verdict(&config, &binaries, &[], &[]),
+            ReapVerdict::Spare(SpareReason::Unmarked),
+            "an unreadable environment reads as empty"
+        );
+    }
+
+    #[test]
+    fn reap_spares_tracer_whose_owner_hints_disagree() {
+        let root = reap_root();
+        let config = root.join("config");
+        let binaries = root.join("binaries");
+        let inner = root.join("inner-config");
+        let inherited = [
+            env_entry(TRACER_OWNER_ENV, &config),
+            env_entry(TRACER_LOG_ENV, &inner.join("logs").join("tracer-abc.log")),
+        ];
+        assert_eq!(
+            verdict(&config, &binaries, &inherited, &[]),
+            ReapVerdict::Spare(SpareReason::ConflictingOwner)
+        );
+        let agreeing = [
+            env_entry(TRACER_OWNER_ENV, &config),
+            env_entry(TRACER_LOG_ENV, &config.join("logs").join("tracer-abc.log")),
+        ];
+        assert_eq!(
+            verdict(&config, &binaries, &agreeing, &[]),
+            ReapVerdict::Kill
+        );
+    }
+
+    #[test]
+    fn reap_spares_referenced_tracer() {
+        let root = reap_root();
+        let config = root.join("config");
+        let environ = [env_entry(TRACER_OWNER_ENV, &config)];
+        assert_eq!(
+            verdict(&config, &root.join("binaries"), &environ, &[42]),
+            ReapVerdict::Spare(SpareReason::Referenced)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owner_compare_ignores_case_and_verbatim_prefix() {
+        let config = Path::new(r"C:\Users\Someone\AppData\Config");
+        let binaries = Path::new(r"C:\Users\Someone\AppData\binaries");
+        let environ = [OsString::from(format!(
+            r"{}=\\?\c:\users\someone\appdata\CONFIG",
+            TRACER_OWNER_ENV.to_ascii_lowercase()
+        ))];
+        assert_eq!(verdict(config, binaries, &environ, &[]), ReapVerdict::Kill);
+    }
+
+    #[test]
+    fn pinned_cache_paths_keeps_running_exes_under_the_cache() {
+        let root = reap_root();
+        let binaries = root.join("binaries");
+        let tracer = binaries.join("rt-tracer-aaaaaaaaaaaaaaaa.exe");
+        let daemon = binaries.join("rustling-tulipd-bbbbbbbbbbbbbbbb.exe");
+        let elsewhere = root.join("target").join("rt-tracer.exe");
+        let pinned = pinned_cache_paths(
+            [tracer.as_path(), daemon.as_path(), elsewhere.as_path()],
+            &binaries,
+        );
+        let expected: HashSet<PathBuf> = [tracer, daemon].into_iter().collect();
+        assert_eq!(pinned, expected);
+    }
 
     #[test]
     fn rotate_log_moves_previous_generation_aside() {

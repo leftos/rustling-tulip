@@ -102,10 +102,15 @@ pub fn ensure_cached(
     Ok(cached)
 }
 
-/// Delete every cached binary that is not present in `in_use`. Failures on
-/// individual entries are logged and skipped — a stale lock or missing perm
-/// must not crash the daemon at startup.
+/// Delete every cached binary that is not present in `in_use`. Paths match
+/// the way process paths do (on Windows ignoring case and a `\\?\` prefix).
+/// Failures on individual entries are logged and skipped — a stale lock or
+/// missing perm must not crash the daemon at startup.
 pub fn gc(cache_dir: &Path, in_use: &HashSet<PathBuf>) -> anyhow::Result<GcReport> {
+    let in_use: HashSet<String> = in_use
+        .iter()
+        .map(|p| crate::normalize_process_path(p))
+        .collect();
     let mut report = GcReport::default();
     let entries = match fs::read_dir(cache_dir) {
         Ok(it) => it,
@@ -138,7 +143,7 @@ pub fn gc(cache_dir: &Path, in_use: &HashSet<PathBuf>) -> anyhow::Result<GcRepor
             }
             continue;
         }
-        if in_use.contains(&path) {
+        if in_use.contains(&crate::normalize_process_path(&path)) {
             report.kept += 1;
             continue;
         }
@@ -321,6 +326,25 @@ mod tests {
         assert!(alive.exists(), "in-use entry kept");
         assert!(!dead.exists(), "orphan entry removed");
         assert!(!stale_tmp.exists(), "stale tmp removed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gc_keeps_in_use_path_given_in_verbatim_or_other_case() {
+        let scratch = Scratch::new("gc-verbatim");
+        let cache = scratch.path().to_path_buf();
+        let verbatim = write_template(&cache, "rt-tracer-aaaaaaaaaaaaaaaa.exe", b"a");
+        let upper = write_template(&cache, "rustling-tulipd-bbbbbbbbbbbbbbbb.exe", b"b");
+
+        let mut in_use = HashSet::new();
+        in_use.insert(PathBuf::from(format!(r"\\?\{}", verbatim.display())));
+        in_use.insert(PathBuf::from(upper.to_string_lossy().to_uppercase()));
+
+        let report = gc(&cache, &in_use).expect("gc");
+        assert_eq!(report.kept, 2);
+        assert_eq!(report.removed, 0);
+        assert!(verbatim.exists(), "verbatim-prefixed in-use path kept");
+        assert!(upper.exists(), "differently-cased in-use path kept");
     }
 
     #[test]

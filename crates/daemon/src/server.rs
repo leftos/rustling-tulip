@@ -5222,12 +5222,23 @@ async fn register_repo(
 }
 
 /// The session history as the client lists it, read off the async runtime.
+/// A session still in the Abandoned group is left out: it is resumed from
+/// there, not recovered.
 async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let dirs = hub.dirs.clone();
     let repos = hub.state.with_persisted(|s| s.repos.clone());
+    let abandoned: std::collections::HashSet<String> = hub
+        .sessions
+        .snapshots()
+        .into_iter()
+        .filter(|snap| snap.is_abandoned)
+        .map(|snap| snap.id)
+        .collect();
     tokio::task::spawn_blocking(move || {
         let claude_home = crate::transcripts::claude_home();
-        history::history_items(&dirs, &repos, claude_home.as_deref())
+        let mut items = history::history_items(&dirs, &repos, claude_home.as_deref());
+        items.retain(|item| !abandoned.contains(&item.entry.session_id));
+        items
     })
     .await
     .unwrap_or_else(|err| {
@@ -5350,26 +5361,22 @@ fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender
 /// true` in the registry so the sidebar shows it as parked. The session
 /// record stays in the registry — the user can Resume it later.
 async fn park_session(hub: &Hub, session_id: &str) {
-    let Some(rec) = hub.sessions.get(session_id) else {
+    if hub.sessions.get(session_id).is_none() {
         return;
-    };
-    let (pty, headless_handle) = {
-        let guard = crate::sync::lock(&rec);
-        (guard.pty.clone(), guard.headless.clone())
-    };
+    }
     // Recorded before the kill, so this wins over the exit watcher's later
     // `Exited` for the same session.
     record_end(hub, session_id, SessionEnd::StoppedByUser);
-    if let Some(pty) = pty {
-        pty.kill();
-    }
-    if let Some(h) = headless_handle {
-        h.kill().await;
-    }
+    // The handles are taken in the same update that marks the session
+    // parked, before the kill, as `stop_session` does: the exit watcher then
+    // either ran first (and took the pty itself) or finds it released, and
+    // never reads a tracer lost during the kill as an unexpected loss.
+    let mut pty = None;
+    let mut headless_handle = None;
     hub.sessions.update(session_id, |r| {
         r.is_inactive = true;
-        r.pty = None;
-        r.headless = None;
+        pty = r.pty.take();
+        headless_handle = r.headless.take();
         r.input_notifier = None;
         if !matches!(
             r.status,
@@ -5379,6 +5386,12 @@ async fn park_session(hub: &Hub, session_id: &str) {
         }
         push_recent_action(r, "parked — worktree retained".to_string());
     });
+    if let Some(pty) = pty {
+        pty.kill();
+    }
+    if let Some(h) = headless_handle {
+        h.kill().await;
+    }
     // Auto-close panes bound to this session in every client's layout; the
     // session record itself lives on in the registry for the Resume button.
     close_session_panes(hub, session_id);
@@ -5812,14 +5825,9 @@ async fn retry_worktree_cleanup(
 }
 
 async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
-    let Some(rec) = hub.sessions.get(session_id) else {
+    if hub.sessions.get(session_id).is_none() {
         return Err(anyhow!("unknown session: {session_id}"));
-    };
-    let (pty, headless_handle) = {
-        let guard = crate::sync::lock(&rec);
-        (guard.pty.clone(), guard.headless.clone())
-    };
-    let had_live_handle = pty.is_some() || headless_handle.is_some();
+    }
     // Recorded before the kill, so this wins over the exit watcher's later
     // `Exited` for the same session.
     record_end(hub, session_id, SessionEnd::StoppedByUser);
@@ -5835,16 +5843,20 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
     // user only asked to stop. Claiming the transition here closes it: the
     // watcher's later update finds the status already stopped.
     //
-    // The handles were cloned above, so clearing them here doesn't affect the
-    // kills below.
+    // The handles are taken in this same update, so the exit watcher either
+    // ran first (and took the pty itself) or finds it released: a tracer lost
+    // during the kill never reads as an unexpected loss.
+    let mut pty = None;
+    let mut headless_handle = None;
     hub.sessions.update(session_id, |r| {
         r.status = protocol::SessionStatus::Stopped;
-        r.pty = None;
-        r.headless = None;
+        pty = r.pty.take();
+        headless_handle = r.headless.take();
         r.input_notifier = None;
         r.is_inactive = false;
         push_recent_action(r, "stopped by user".to_string());
     });
+    let had_live_handle = pty.is_some() || headless_handle.is_some();
     if let Some(pty) = pty {
         pty.kill();
     }
@@ -7176,6 +7188,107 @@ mod tests {
         let entries = history::read_all(&hub.dirs);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    /// Wait up to five seconds for `cond` to hold; return whether it did.
+    async fn wait_until(cond: impl Fn() -> bool) -> bool {
+        for _ in 0..500 {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        cond()
+    }
+
+    #[tokio::test]
+    async fn tracer_lost_after_user_stop_does_not_abandon() {
+        use crate::history::test_support::{fake_pty, insert_live, record, write_meta_for};
+        use crate::pty::PtyExit;
+        let (hub, _scratch) = test_hub("stop-then-lost");
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&hub.dirs, "s1");
+        stop_session(&hub, "s1").await.expect("stop");
+        exit_tx.send(PtyExit::TracerLost).expect("report the loss");
+        // Only the exit watcher's non-abandoned path sets an exit code, so
+        // this waits for the watcher to have run.
+        let watcher_ran = || {
+            hub.sessions
+                .get("s1")
+                .is_some_and(|rec| crate::sync::lock(&rec).exit_code == Some(-1))
+        };
+        assert!(
+            wait_until(watcher_ran).await,
+            "the exit watcher ends a stopped session like any exit"
+        );
+        let rec = hub.sessions.get("s1").expect("still listed");
+        assert!(!crate::sync::lock(&rec).is_abandoned);
+        assert!(
+            orphan::load_meta(&hub.dirs, "s1").is_err(),
+            "a stopped session's sidecar is deleted"
+        );
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    #[tokio::test]
+    async fn dismiss_after_tracer_loss_keeps_tracer_lost_history() {
+        use crate::history::test_support::{fake_pty, insert_live, record, write_meta_for};
+        use crate::pty::PtyExit;
+        let (hub, _scratch) = test_hub("lost-then-dismiss");
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &hub.sessions,
+            &hub.dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        write_meta_for(&hub.dirs, "s1");
+        exit_tx.send(PtyExit::TracerLost).expect("report the loss");
+        let abandoned = || {
+            hub.sessions
+                .get("s1")
+                .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned)
+        };
+        assert!(wait_until(abandoned).await, "the session is abandoned");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        discard_abandoned(&hub, "s1", &out_tx);
+        assert!(hub.sessions.get("s1").is_none(), "dismissed");
+        let entries = history::read_all(&hub.dirs);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].end, SessionEnd::TracerLost);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn session_history_omits_sessions_still_abandoned() {
+        use crate::history::test_support::record;
+        let (hub, _scratch) = spawnless_test_hub("history-abandoned");
+        write_history(&hub, "gone", SessionMode::PlainShell, false);
+        write_history(&hub, "abandoned", SessionMode::PlainShell, false);
+        write_history(&hub, "stopped", SessionMode::PlainShell, false);
+        let mut abandoned = record("abandoned", SessionMode::PlainShell);
+        abandoned.is_abandoned = true;
+        abandoned.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(abandoned);
+        let mut stopped = record("stopped", SessionMode::PlainShell);
+        stopped.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(stopped);
+        let reply =
+            dispatch_one(&hub, ClientMessage::ListSessionHistory { request_id: None }).await;
+        let DaemonMessage::SessionHistory { items, .. } = reply else {
+            panic!("expected session_history, got {reply:?}");
+        };
+        let mut ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["gone", "stopped"]);
     }
 
     /// A test hub whose spawns fail before any process starts: its binaries

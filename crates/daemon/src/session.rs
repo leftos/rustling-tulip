@@ -590,6 +590,11 @@ pub fn attach_lifecycle(
 
 /// Exit watcher: mark the session stopped once its PTY exit arrives, record
 /// how it ended in the history, then drop its sidecar.
+///
+/// A tracer lost while the session still holds its pty leaves the session
+/// abandoned instead: no exit code, sidecar kept for Resume, and an `Error`
+/// attention. A session the user already stopped or parked has released its
+/// pty, so its lost tracer ends it like any exit.
 async fn watch_exit(
     registry: Arc<SessionRegistry>,
     session_id: String,
@@ -600,14 +605,29 @@ async fn watch_exit(
     // which is a lost tracer as far as anyone can tell.
     let exit = rx.await.unwrap_or(PtyExit::TracerLost);
     let code = exit.code();
+    let mut abandoned = false;
     registry.update(&session_id, |rec| {
+        abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
         rec.status = SessionStatus::Stopped;
-        rec.exit_code = Some(code);
         rec.pty = None;
         rec.input_notifier = None;
         rec.scrollback_snapshot_req = None;
-        push_recent_action(rec, format!("exited with code {code}"));
+        if abandoned {
+            rec.exit_code = None;
+            rec.is_abandoned = true;
+            push_recent_action(rec, "abandoned: tracer lost".to_string());
+        } else {
+            rec.exit_code = Some(code);
+            push_recent_action(rec, format!("exited with code {code}"));
+        }
     });
+    if abandoned {
+        registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Error);
+        if let Some(dirs) = dirs {
+            history::record_session_end(&registry, &dirs, &session_id, history::end_for_exit(exit));
+        }
+        return;
+    }
     registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
     if let Some(dirs) = dirs {
         history::record_session_end(&registry, &dirs, &session_id, history::end_for_exit(exit));

@@ -177,6 +177,21 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::expect_used, reason = "a failed resolve fails the test loudly")]
+    fn relative_config_dir_override_is_made_absolute() {
+        let out = config_dir_override(r"rel\config").expect("resolve override");
+        assert!(out.is_absolute(), "{out:?}");
+        assert_eq!(
+            out,
+            std::env::current_dir()
+                .expect("current dir")
+                .join(r"rel\config")
+        );
+        let absolute = config_dir_override(r"C:\abs\config").expect("resolve override");
+        assert_eq!(absolute, PathBuf::from(r"C:\abs\config"));
+    }
+
+    #[test]
     fn leaves_volume_guid_alone() {
         let p = r"\\?\Volume{12345678-1234-1234-1234-123456789012}\dir";
         assert_eq!(simplify_path(Path::new(p)), PathBuf::from(p));
@@ -227,11 +242,19 @@ fn resolve_config_dir() -> anyhow::Result<PathBuf> {
     if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
         && !value.is_empty()
     {
-        return Ok(PathBuf::from(value));
+        return config_dir_override(&value);
     }
     let pd = ProjectDirs::from("dev", "leftos", "rustling-tulip")
         .ok_or_else(|| anyhow!("could not resolve config directory"))?;
     Ok(pd.config_dir().to_path_buf())
+}
+
+/// The config dir a `RUSTLING_TULIP_CONFIG_DIR` value names, made absolute
+/// against the current directory: tracers carry the config dir as their
+/// owner, and a relative one would name a different dir from their cwd.
+fn config_dir_override(value: &str) -> anyhow::Result<PathBuf> {
+    std::path::absolute(value)
+        .with_context(|| format!("resolving RUSTLING_TULIP_CONFIG_DIR={value} to an absolute path"))
 }
 
 /// Resolve the worktrees root, honoring `RUSTLING_TULIP_WORKTREES_DIR` when

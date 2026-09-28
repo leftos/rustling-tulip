@@ -1213,6 +1213,31 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Write a minimal `meta.json` sidecar for `id`, as a spawn does.
+    pub fn write_meta_for(dirs: &Dirs, id: &str) {
+        let meta = crate::orphan::meta_from_record(
+            id.to_string(),
+            1,
+            id.to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        crate::orphan::write_meta(dirs, &meta).expect("write meta");
+    }
+
     /// Wait up to five seconds for `session_id`'s history entry to appear.
     pub async fn wait_for_entry(dirs: &Dirs, session_id: &str) -> HistoryEntry {
         for _ in 0..500 {

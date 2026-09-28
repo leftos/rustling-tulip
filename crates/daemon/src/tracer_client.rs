@@ -85,7 +85,13 @@ pub async fn spawn(
     );
 
     let log_path = tracer_log_path(dirs, &spec.session_id);
-    let tracer_pid = spawn_tracer_process(&tracer_path, &spec, &pipe, log_path.as_deref())?;
+    let tracer_pid = spawn_tracer_process(&TracerLaunch {
+        tracer: &tracer_path,
+        spec: &spec,
+        pipe_name: &pipe,
+        log_path: log_path.as_deref(),
+        owner: &dirs.config,
+    })?;
     info!(tracer_pid, pipe = %pipe, "tracer_client: tracer process started");
 
     let client = connect_with_retry(&pipe).await?;
@@ -263,25 +269,32 @@ const fn tracer_exe_name() -> &'static str {
     "rt-tracer"
 }
 
-#[cfg(windows)]
-fn spawn_tracer_process(
-    tracer: &Path,
-    spec: &PtySpawnSpec,
-    pipe_name: &str,
-    log_path: Option<&Path>,
-) -> anyhow::Result<u32> {
-    use std::os::windows::process::CommandExt;
-    /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
-    /// flash for the tracer process. The tracer's tracing output goes to
-    /// stderr; with `RUSTLING_TULIP_TRACER_LOG` set the tracer routes its
-    /// `tracing_subscriber` output to a file instead.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Env var naming the config dir whose daemon spawned a tracer. The startup
+/// reap reads it back so a daemon only kills tracers its own config dir owns.
+pub const TRACER_OWNER_ENV: &str = "RUSTLING_TULIP_TRACER_OWNER";
 
-    let mut cmd = std::process::Command::new(tracer);
+/// Env var naming the tracer's per-session log file (see [`tracer_log_path`]).
+pub const TRACER_LOG_ENV: &str = "RUSTLING_TULIP_TRACER_LOG";
+
+/// What a spawned tracer runs from and is told at spawn.
+struct TracerLaunch<'a> {
+    tracer: &'a Path,
+    spec: &'a PtySpawnSpec,
+    pipe_name: &'a str,
+    log_path: Option<&'a Path>,
+    /// The spawning daemon's config dir, passed as [`TRACER_OWNER_ENV`].
+    owner: &'a Path,
+}
+
+/// The tracer command for `launch`, with its args, env and null stdio, not
+/// yet spawned.
+fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
+    let spec = launch.spec;
+    let mut cmd = std::process::Command::new(launch.tracer);
     cmd.arg("--session-id")
         .arg(&spec.session_id)
         .arg("--pipe-name")
-        .arg(pipe_name)
+        .arg(launch.pipe_name)
         .arg("--cwd")
         .arg(&spec.cwd)
         .arg("--cols")
@@ -291,12 +304,13 @@ fn spawn_tracer_process(
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+    cmd.env(TRACER_OWNER_ENV, launch.owner);
     // Per-session tracer log so we can debug spawn issues for things like
     // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
     // Best-effort: if the log dir can't be created we skip the log — losing
     // logs is not a reason to fail a session spawn.
-    if let Some(log_path) = log_path {
-        cmd.env("RUSTLING_TULIP_TRACER_LOG", log_path);
+    if let Some(log_path) = launch.log_path {
+        cmd.env(TRACER_LOG_ENV, log_path);
     }
     // Trailing program-and-args: program first, then its args. portable-pty
     // expects this shape on the tracer side.
@@ -306,12 +320,32 @@ fn spawn_tracer_process(
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW);
+        .stderr(Stdio::null());
+    cmd
+}
 
+#[cfg(windows)]
+fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<u32> {
+    use std::os::windows::process::CommandExt;
+    /// `CREATE_NO_WINDOW` — suppresses the console window that would otherwise
+    /// flash for the tracer process. The tracer's tracing output goes to
+    /// stderr; with `RUSTLING_TULIP_TRACER_LOG` set the tracer routes its
+    /// `tracing_subscriber` output to a file instead.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let mut cmd = tracer_command(launch);
+    cmd.creation_flags(CREATE_NO_WINDOW);
     let child = cmd
         .spawn()
-        .with_context(|| format!("spawning tracer process {}", tracer.display()))?;
+        .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
+    Ok(child.id())
+}
+
+#[cfg(not(windows))]
+fn spawn_tracer_process(launch: &TracerLaunch<'_>) -> anyhow::Result<u32> {
+    let child = tracer_command(launch)
+        .spawn()
+        .with_context(|| format!("spawning tracer process {}", launch.tracer.display()))?;
     Ok(child.id())
 }
 
@@ -325,43 +359,6 @@ fn tracer_log_path(dirs: &Dirs, session_id: &str) -> Option<PathBuf> {
         return None;
     }
     Some(dir.join(format!("tracer-{session_id}.log")))
-}
-
-#[cfg(not(windows))]
-fn spawn_tracer_process(
-    tracer: &Path,
-    spec: &PtySpawnSpec,
-    pipe_name: &str,
-    log_path: Option<&Path>,
-) -> anyhow::Result<u32> {
-    let mut cmd = std::process::Command::new(tracer);
-    cmd.arg("--session-id")
-        .arg(&spec.session_id)
-        .arg("--pipe-name")
-        .arg(pipe_name)
-        .arg("--cwd")
-        .arg(&spec.cwd)
-        .arg("--cols")
-        .arg(spec.cols.to_string())
-        .arg("--rows")
-        .arg(spec.rows.to_string());
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
-    }
-    if let Some(log_path) = log_path {
-        cmd.env("RUSTLING_TULIP_TRACER_LOG", log_path);
-    }
-    cmd.arg(&spec.program);
-    for arg in &spec.args {
-        cmd.arg(arg);
-    }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawning tracer process {}", tracer.display()))?;
-    Ok(child.id())
 }
 
 /// Convert a stored socket-name string into an `interprocess` `Name`. Mirrors
@@ -848,11 +845,30 @@ mod tests {
         );
     }
 
+    /// A session whose tracer sent its frames and closed its pipe, once its
+    /// exit watcher has written the history entry.
+    struct TracerRun {
+        registry: std::sync::Arc<crate::session::SessionRegistry>,
+        dirs: crate::paths::Dirs,
+        events: tokio::sync::broadcast::Receiver<crate::session::SessionEvent>,
+        entry: protocol::HistoryEntry,
+    }
+
     /// Run a session whose tracer sends `frames` and then closes its pipe,
     /// and return the history entry its exit watcher writes.
     async fn history_after_tracer_frames(tag: &str, frames: String) -> protocol::HistoryEntry {
+        let run = run_tracer_frames(tag, frames).await;
+        let _ = fs::remove_dir_all(&run.dirs.config);
+        run.entry
+    }
+
+    /// Run a session with a `meta.json` sidecar whose tracer sends `frames`
+    /// and then closes its pipe; return once its history entry is written.
+    async fn run_tracer_frames(tag: &str, frames: String) -> TracerRun {
         use super::{TracerKiller, read_loop};
-        use crate::history::test_support::{insert_live, record, scratch_dirs, wait_for_entry};
+        use crate::history::test_support::{
+            insert_live, record, scratch_dirs, wait_for_entry, write_meta_for,
+        };
         use crate::pty::{PtyHandle, PtyHandleParts};
         use crate::session::SessionRegistry;
         use protocol::SessionMode;
@@ -860,7 +876,9 @@ mod tests {
         use tokio::sync::{broadcast, mpsc, oneshot};
 
         let dirs = scratch_dirs(tag);
+        write_meta_for(&dirs, tag);
         let registry = SessionRegistry::new(dirs.clone());
+        let events = registry.subscribe();
         let (output, _) = broadcast::channel(16);
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let (resize_tx, _resize_rx) = mpsc::unbounded_channel();
@@ -887,14 +905,116 @@ mod tests {
             let _ = exit_tx.send(exit);
         });
         let entry = wait_for_entry(&dirs, tag).await;
-        let _ = fs::remove_dir_all(&dirs.config);
-        entry
+        TracerRun {
+            registry,
+            dirs,
+            events,
+            entry,
+        }
+    }
+
+    /// Wait up to five seconds for `id`'s `meta.json` to be gone.
+    async fn wait_for_meta_gone(dirs: &crate::paths::Dirs, id: &str) {
+        for _ in 0..500 {
+            if crate::orphan::load_meta(dirs, id).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tracer_eof_leaves_session_abandoned_and_keeps_sidecar() {
+        let output = frame(&tracer_protocol::TracerResponse::Output {
+            data_b64: "aGk=".to_string(),
+        });
+        let mut run = run_tracer_frames("tracer-eof-abandoned", output).await;
+        assert_eq!(run.entry.end, protocol::SessionEnd::TracerLost);
+        let rec = run
+            .registry
+            .get("tracer-eof-abandoned")
+            .expect("the session is still listed");
+        let (abandoned, exit_code, status, has_pty) = {
+            let guard = crate::sync::lock(&rec);
+            (
+                guard.is_abandoned,
+                guard.exit_code,
+                guard.status,
+                guard.pty.is_some(),
+            )
+        };
+        assert!(abandoned, "a lost tracer leaves the session abandoned");
+        assert_eq!(exit_code, None, "a lost tracer reports no exit code");
+        assert_eq!(status, protocol::SessionStatus::Stopped);
+        assert!(!has_pty, "the pty is released");
+        assert!(
+            crate::orphan::load_meta(&run.dirs, "tracer-eof-abandoned").is_ok(),
+            "meta.json is kept for Resume"
+        );
+        let mut reasons = Vec::new();
+        while let Ok(event) = run.events.try_recv() {
+            if let crate::session::SessionEvent::Attention { reason, .. } = event {
+                reasons.push(reason);
+            }
+        }
+        assert_eq!(reasons, [protocol::AttentionReason::Error]);
+        let _ = fs::remove_dir_all(&run.dirs.config);
+    }
+
+    #[tokio::test]
+    async fn child_exit_still_deletes_sidecar() {
+        let exited = frame(&tracer_protocol::TracerResponse::Exited { code: 3 });
+        let run = run_tracer_frames("child-exit-sidecar", exited).await;
+        wait_for_meta_gone(&run.dirs, "child-exit-sidecar").await;
+        assert!(
+            crate::orphan::load_meta(&run.dirs, "child-exit-sidecar").is_err(),
+            "a child exit deletes meta.json"
+        );
+        let rec = run
+            .registry
+            .get("child-exit-sidecar")
+            .expect("the session is still listed");
+        let (abandoned, exit_code) = {
+            let guard = crate::sync::lock(&rec);
+            (guard.is_abandoned, guard.exit_code)
+        };
+        assert!(!abandoned);
+        assert_eq!(exit_code, Some(3));
+        let _ = fs::remove_dir_all(&run.dirs.config);
     }
 
     fn frame(response: &tracer_protocol::TracerResponse) -> String {
         let mut line = serde_json::to_string(response).expect("encode tracer frame");
         line.push('\n');
         line
+    }
+
+    #[test]
+    fn tracer_command_sets_owner_env() {
+        use std::ffi::OsStr;
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+        let owner = PathBuf::from("owner-config");
+        let log = PathBuf::from("owner-config")
+            .join("logs")
+            .join("tracer-abc.log");
+        let cmd = super::tracer_command(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: Some(&log),
+            owner: &owner,
+        });
+        let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
+        assert!(env.contains(&(OsStr::new(super::TRACER_OWNER_ENV), Some(owner.as_os_str()))));
+        assert!(env.contains(&(OsStr::new(super::TRACER_LOG_ENV), Some(log.as_os_str()))));
     }
 
     #[test]
