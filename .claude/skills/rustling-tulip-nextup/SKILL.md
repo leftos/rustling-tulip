@@ -64,6 +64,6 @@ The repo keeps no CHANGELOG.
 ## Landing
 
 - Commit in the worktree (fast-forward it onto `main` first if `main` moved; rerun the gates if that brought in new commits). Commit messages: ≤4-char type tag, imperative, ≤72-char subject, the session's attribution trailers.
-- From the main checkout: `git merge --ff-only <slug>`, then `git push origin main`. Pushing straight to `main` is the user's standing rule for this solo repo.
+- From the main checkout: `git merge --ff-only <slug>`, then `git push origin main`. Pushing straight to `main` is the user's standing rule for this solo repo. A session running from a worktree offers `/ship` at each push point instead of pushing (user-level `nextup`, "A worktree session offers a ship instead of a push").
 - Then `git merge-base --is-ancestor <slug> main` && `git worktree remove ../rustling-tulip.wt/<slug>` && `git branch -d <slug>`.
 - The main checkout hosts at most one implementer, and none while a gate runs there.
