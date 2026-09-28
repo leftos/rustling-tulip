@@ -27,11 +27,11 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 
 - Explore: `Explore`. Rust design second opinion: `oracle`.
 - Reviewers: `code-review` for every item.
-- Gates, each wrapped as `cmd > .tmp/<name>.log 2>&1; rc=$?; tail -n 20 .tmp/<name>.log; (exit $rc)` from the worktree root:
-  - `cargo fmt --all --check`
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (what `.\rt.ps1 clippy` and prek run)
-  - `cargo test -p <crate>` for each touched crate (for `crates/protocol` this includes `v22_compat`)
-  - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed
+- Gates, each run through the repo's gate from the worktree root as `pwsh tools/gate.ps1 -Log .tmp/<name>.log -TimeoutSeconds <n> -Slot <heavy|light> -- <command>` (no `nice` of its own; the gate lowers priority, takes a machine-wide slot, logs the whole output and prints the tail):
+  - `cargo fmt --all --check` (light)
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy; what `.\rt.ps1 clippy` and prek run)
+  - `cargo test -p <crate>` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`)
+  - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).
 - Parent-side gate: `git -C <wt> status --short` in the worktree and in the main checkout.
 
