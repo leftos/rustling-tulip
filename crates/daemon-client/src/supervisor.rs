@@ -616,13 +616,6 @@ pub(crate) fn dev_workspace_root() -> anyhow::Result<PathBuf> {
         .ok_or_else(|| anyhow!("could not resolve workspace root from CARGO_MANIFEST_DIR"))
 }
 
-/// Copy the daemon template into the content-addressed cache and return the
-/// cached path. Spawning from the cached copy means the shipped template can
-/// be replaced (rebuild, NSIS reinstall) without colliding with a running
-/// daemon — the running process retains a handle on the cached file, the
-/// shipped one is unlocked. The cache is shared with the daemon's
-/// `binary_cache` module (resolved by the same `directories::ProjectDirs`
-/// call) and pruned by the daemon at startup.
 /// The content-addressed cache file name for `template`, whose contents are
 /// `bytes`: `<stem>-<hash prefix>[.<ext>]`.
 fn cached_file_name(template: &Path, bytes: &[u8]) -> String {
@@ -658,6 +651,13 @@ fn expected_daemon_path() -> Option<PathBuf> {
         .ok()
 }
 
+/// Copy the daemon template into the content-addressed cache and return the
+/// cached path. Spawning from the cached copy means the shipped template can
+/// be replaced (rebuild, NSIS reinstall) without colliding with a running
+/// daemon — the running process retains a handle on the cached file, the
+/// shipped one is unlocked. The cache is shared with the daemon's
+/// `binary_cache` module (resolved by the same `directories::ProjectDirs`
+/// call) and pruned by the daemon at startup.
 fn cache_daemon_binary(template: &Path) -> anyhow::Result<PathBuf> {
     let cache_dir = resolve_binaries_dir()?;
     fs::create_dir_all(&cache_dir)
