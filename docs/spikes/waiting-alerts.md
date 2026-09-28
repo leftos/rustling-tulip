@@ -36,6 +36,18 @@ All three kinds were right. The speech still leaks identifiers a voice reads bad
   | `message-question.md` | `needs_answer` | 1.44 s | 437 / 67 | $0.00077 |
 
   About $0.08 at 100 alerts a day, and 15–30 times faster than the CLI. The kinds matched the CLI runs; the speech dropped one identifier ("reattach orphans") but kept "P4.13b".
+- **DeepSeek Flash** (`deepseek-flash` through `https://api.deepseek.com/anthropic`, key `DEEPSEEK_API_KEY`, $0.30 / $1.20 per million tokens at peak, half off-peak; `api.py deepseek <effort>`), one run per message:
+
+  | Message | effort | kind | wall | tokens in / out | cost (peak) |
+  |---|---|---|---|---|---|
+  | `message-update.md` | low | `working_update` | 1.48 s | 582 / 193 | $0.00041 |
+  | `message-done.md` | low | `done_waiting` | 2.70 s | 319 / 504 | $0.00070 |
+  | `message-question.md` | low | `needs_answer` | 3.15 s | 307 / 691 | $0.00092 |
+  | `message-update.md` | default | `working_update` | 1.46 s | 582 / 205 | $0.00042 |
+  | `message-done.md` | default | `done_waiting` | 1.84 s | 319 / 333 | $0.00050 |
+  | `message-question.md` | default | `needs_answer` | 1.86 s | 307 / 273 | $0.00042 |
+
+  Every reply carried a thinking block, and `low` effort did not shorten it (two of three low runs thought longer than the default runs: noise at one run each). The kinds all matched. DeepSeek obeyed "no code fence", and its speech read better aloud than Haiku's: no plan numbers or function names, and "thirty-seven" spelled out in one run. But the low-effort `needs_answer` speech dropped the three options that the default run and Haiku both kept. Cost is about half of Haiku's per alert at peak and a quarter off-peak; latency is 1.5–3.2 s against Haiku's 1.0–1.4 s.
 - `--bare` would trim the CLI's startup, but it reads only `ANTHROPIC_API_KEY`, so it needs a key too.
 
 ## Next
