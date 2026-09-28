@@ -36,8 +36,8 @@ use crate::state::AppState;
 /// repo belongs to.
 struct LaunchIndex {
     repo_by_path: HashMap<String, String>,
-    /// `(workspace_id, member_repo_ids)`, in registry order.
-    workspaces: Vec<(String, Vec<String>)>,
+    /// `(workspace_id, name, member_repo_ids)`, in registry order.
+    workspaces: Vec<(String, String, Vec<String>)>,
 }
 
 impl LaunchIndex {
@@ -51,7 +51,7 @@ impl LaunchIndex {
             workspaces: s
                 .workspaces
                 .iter()
-                .map(|w| (w.id.clone(), w.member_repo_ids.clone()))
+                .map(|w| (w.id.clone(), w.name.clone(), w.member_repo_ids.clone()))
                 .collect(),
         })
     }
@@ -155,6 +155,7 @@ fn walk_for_wt_dirs(
                     &anchor,
                     branch_slug,
                     &members,
+                    None,
                     xref,
                     index,
                 ));
@@ -183,11 +184,13 @@ fn scan_wt_dir(
         .partition(|child| is_group_dir(child));
     for group in &groups {
         let members = group_member_dirs(group);
+        let marker = read_group_marker(group);
         entries.push(build_entry(
             group,
-            &group_label(group),
+            &group_label(group, marker.as_ref()),
             branch_slug,
             &members,
+            marker.as_ref(),
             xref,
             index,
         ));
@@ -200,6 +203,7 @@ fn scan_wt_dir(
             &anchor,
             branch_slug,
             &members,
+            None,
             xref,
             index,
         ));
@@ -236,28 +240,34 @@ fn is_group_dir(dir: &Path) -> bool {
     under_wt && marker_path(dir).is_some_and(|m| m.is_file())
 }
 
-/// The name a group folder's marker records, or the folder's own name when
-/// the marker can't be read.
-fn group_label(group_dir: &Path) -> String {
-    let folder_name = || {
-        group_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let Some(marker) = marker_path(group_dir) else {
-        return folder_name();
-    };
+/// The marker beside `group_dir`, when one is there and parses. An
+/// unreadable marker is logged and reads as absent.
+fn read_group_marker(group_dir: &Path) -> Option<GroupMarker> {
+    let marker = marker_path(group_dir)?;
     let parsed = std::fs::read_to_string(&marker)
         .map_err(anyhow::Error::from)
         .and_then(|text| serde_json::from_str::<GroupMarker>(&text).map_err(anyhow::Error::from));
     match parsed {
-        Ok(m) => m.name,
+        Ok(m) => Some(m),
         Err(err) => {
             warn!(?err, marker = %marker.display(), "unreadable group marker; labelling by folder name");
-            folder_name()
+            None
         }
     }
+}
+
+/// The name a group folder's marker records, or the folder's own name when
+/// the marker is missing or unreadable.
+fn group_label(group_dir: &Path, marker: Option<&GroupMarker>) -> String {
+    marker.map_or_else(
+        || {
+            group_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        },
+        |m| m.name.clone(),
+    )
 }
 
 /// Write the marker beside `group_dir`, unless one recording the same kind
@@ -338,14 +348,48 @@ pub fn remove_orphan_group_markers(dir: &Path) {
     }
 }
 
-/// Member worktrees of a group folder: the folder itself when it is a
-/// worktree (a single repo's group), else every worktree found inside it.
+/// Member worktrees of a group folder: the folder itself when it holds a
+/// `.git` of any kind (a single repo's group, or a folder a clone was made
+/// in), plus every linked worktree found inside it — a member nested in
+/// another member counts as one of its own.
 fn group_member_dirs(group_dir: &Path) -> Vec<PathBuf> {
+    let mut members: Vec<PathBuf> = Vec::new();
     if group_dir.join(".git").exists() {
-        vec![group_dir.to_path_buf()]
-    } else {
-        find_member_dirs(group_dir)
+        members.push(group_dir.to_path_buf());
     }
+    members.extend(find_member_dirs(group_dir));
+    members
+}
+
+/// Whether `dir` is a linked worktree: its `.git` is a *file* naming a
+/// `<repo>/.git/worktrees/<name>` admin directory, the shape `git worktree
+/// add` leaves. A `.git` directory (a plain clone) and a gitfile pointing
+/// into `<repo>/.git/modules/…` (a submodule, a worktree's own
+/// `…/worktrees/<wt>/modules/…` included) are not linked worktrees.
+fn is_linked_worktree(dir: &Path) -> bool {
+    if !dir.join(".git").is_file() {
+        return false;
+    }
+    let Some(gitdir) = gitdir_for_worktree(dir) else {
+        return false;
+    };
+    let mut components = gitdir.components().rev();
+    components.next().is_some()
+        && component_is(components.next(), "worktrees")
+        && component_is(components.next(), ".git")
+}
+
+/// Whether a path component spells `want`, compared without case on Windows
+/// (git may write `.GIT` or `Worktrees` into a gitfile there).
+fn component_is(component: Option<std::path::Component<'_>>, want: &str) -> bool {
+    component.is_some_and(|c| {
+        let text = c.as_os_str().to_string_lossy();
+        if cfg!(windows) {
+            text.eq_ignore_ascii_case(want)
+        } else {
+            text.as_ref() == want
+        }
+    })
 }
 
 /// Member worktrees at or below each of `dirs`.
@@ -353,11 +397,13 @@ fn members_under(dirs: &[PathBuf]) -> Vec<PathBuf> {
     dirs.iter().flat_map(|d| group_member_dirs(d)).collect()
 }
 
-/// Walk inside a group or anchor-layout directory and return every
-/// `.git`-bearing subdirectory found. Stops descending once a dir is
-/// identified as a member (its inner structure is the member's own
-/// content, not nested groups). Best-effort — I/O failures inside the
-/// walk are silently skipped.
+/// Walk inside a group or anchor-layout directory and return every linked
+/// worktree found, a member nested inside another included. Only a linked
+/// worktree counts (see [`is_linked_worktree`]), so a submodule or a vendored
+/// clone inside a member is not listed — descent still continues through it,
+/// so a real member deeper down is found either way. Descent never enters a
+/// `.git` entry. Best-effort — I/O failures inside the walk are silently
+/// skipped.
 fn find_member_dirs(wt_path: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut stack: Vec<(PathBuf, usize)> = vec![(wt_path.to_path_buf(), 0)];
@@ -373,11 +419,13 @@ fn find_member_dirs(wt_path: &Path) -> Vec<PathBuf> {
                 continue;
             }
             let path = ent.path();
-            if path.join(".git").exists() {
-                out.push(path);
-            } else {
-                stack.push((path, depth + 1));
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
             }
+            if is_linked_worktree(&path) {
+                out.push(path.clone());
+            }
+            stack.push((path, depth + 1));
         }
     }
     out
@@ -559,7 +607,7 @@ fn assert_no_live_session(
 /// group folder that is itself a worktree and members nested under an
 /// anchor are handled alike.
 async fn delete_members(member_paths: &[PathBuf]) -> anyhow::Result<()> {
-    for member_path in member_paths {
+    for member_path in &members_deepest_first(member_paths) {
         let repo_path = repo_path_for_worktree(member_path);
         if let Some(repo) = repo_path.as_deref() {
             match crate::worktree_cleanup::remove_member(repo, member_path).await {
@@ -586,6 +634,15 @@ async fn delete_members(member_paths: &[PathBuf]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The members in removal order: deepest first, so a member nested inside
+/// another gets its own `git worktree remove`/prune before the folder
+/// holding it is removed wholesale.
+fn members_deepest_first(member_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut ordered: Vec<PathBuf> = member_paths.to_vec();
+    ordered.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    ordered
 }
 
 /// Drop the `wt.*` dir itself. If it's not empty (foreign content left
@@ -675,16 +732,21 @@ fn gitdir_for_worktree(worktree: &Path) -> Option<PathBuf> {
 }
 
 /// Map a group's members onto something spawnable: a registered repo for a
-/// single member, or the workspace containing them all for several. Returns
-/// the target, or the reason a "launch here" button should stay disabled.
+/// single member, or the workspace containing them all. Returns the target,
+/// or the reason a "launch here" button should stay disabled.
 ///
 /// Member directories whose originating repo isn't registered are dropped
 /// rather than blocking the whole group — a workspace whose other members
 /// still resolve stays launchable, and the dropped member gets a fresh
 /// worktree in the same group at spawn time.
+///
+/// A group whose marker says it is a workspace launches as that workspace
+/// even with one pinned member, so the workspace's other members get fresh
+/// worktrees at spawn time instead of quietly spawning a lone repo.
 fn resolve_launch(
     members: &[RootWorktreeMember],
     index: &LaunchIndex,
+    marker: Option<&GroupMarker>,
 ) -> (Option<WorktreeLaunchTarget>, Option<String>) {
     if members.is_empty() {
         return (
@@ -719,7 +781,8 @@ fn resolve_launch(
     };
 
     let branch = head_branch_for_worktree(Path::new(&first.path));
-    if pins.len() == 1 {
+    let workspace_marker = marker.filter(|m| m.kind == crate::git::GroupKind::Workspace);
+    if workspace_marker.is_none() && pins.len() == 1 {
         return (
             Some(WorktreeLaunchTarget::Single {
                 repo_id: first.repo_id.clone(),
@@ -730,20 +793,40 @@ fn resolve_launch(
         );
     }
 
-    // Several members: the group is only spawnable as a workspace, and only
-    // through a workspace that has every one of them. Ties go to the tightest
-    // fit so a broad "everything" workspace doesn't shadow the specific one.
-    let workspace = index
-        .workspaces
-        .iter()
-        .filter(|(_, member_ids)| pins.iter().all(|p| member_ids.contains(&p.repo_id)))
-        .min_by_key(|(_, member_ids)| member_ids.len());
+    // The workspace to launch: the one the group folder is named after, else
+    // the tightest fit that holds every pin, so a broad "everything"
+    // workspace doesn't shadow the specific one. Either way the workspace
+    // must have every pin.
+    let covers = |member_ids: &[String]| pins.iter().all(|p| member_ids.contains(&p.repo_id));
+    let named = workspace_marker.and_then(|m| {
+        let wanted = crate::git::name_slug(&m.name);
+        index.workspaces.iter().find(|(_, name, member_ids)| {
+            crate::git::name_slug(name) == wanted && covers(member_ids)
+        })
+    });
+    let workspace = named.or_else(|| {
+        index
+            .workspaces
+            .iter()
+            .filter(|(_, _, member_ids)| covers(member_ids))
+            .min_by_key(|(_, _, member_ids)| member_ids.len())
+    });
     match workspace {
-        Some((workspace_id, _)) => (
+        Some((workspace_id, _, _)) => (
             Some(WorktreeLaunchTarget::Workspace {
                 workspace_id: workspace_id.clone(),
                 branch,
                 members: pins,
+            }),
+            None,
+        ),
+        // The workspace this group was made for is gone from the registry:
+        // with a single pin the group still spawns the repo it holds.
+        None if workspace_marker.is_some() && pins.len() == 1 => (
+            Some(WorktreeLaunchTarget::Single {
+                repo_id: first.repo_id.clone(),
+                branch,
+                worktree_path: first.path.clone(),
             }),
             None,
         ),
@@ -759,6 +842,7 @@ fn build_entry(
     anchor_name: &str,
     branch_slug: &str,
     member_paths: &[PathBuf],
+    marker: Option<&GroupMarker>,
     xref: &HashMap<PathBuf, (String, bool)>,
     index: &LaunchIndex,
 ) -> RootWorktreeEntry {
@@ -788,7 +872,7 @@ fn build_entry(
     members.sort_by(|a, b| a.repo_name_hint.cmp(&b.repo_name_hint));
 
     let (size_bytes, last_modified_unix) = group_size_and_mtime(wt_path);
-    let (launch, launch_blocked_reason) = resolve_launch(&members, index);
+    let (launch, launch_blocked_reason) = resolve_launch(&members, index, marker);
 
     RootWorktreeEntry {
         path: wt_path.to_string_lossy().into_owned(),
@@ -960,7 +1044,7 @@ mod tests {
         }
     }
 
-    fn index(repos: &[(&str, &str)], workspaces: &[(&str, &[&str])]) -> LaunchIndex {
+    fn index(repos: &[(&str, &str)], workspaces: &[(&str, &str, &[&str])]) -> LaunchIndex {
         LaunchIndex {
             repo_by_path: repos
                 .iter()
@@ -968,9 +1052,10 @@ mod tests {
                 .collect(),
             workspaces: workspaces
                 .iter()
-                .map(|(id, members)| {
+                .map(|(id, name, members)| {
                     (
                         (*id).to_string(),
+                        (*name).to_string(),
                         members.iter().map(|m| (*m).to_string()).collect(),
                     )
                 })
@@ -981,7 +1066,8 @@ mod tests {
     #[test]
     fn resolve_launch_maps_a_lone_member_to_its_repo() {
         let members = vec![member("X:/wt/wt.foo/X/dev/repo1", Some("X:/dev/repo1"))];
-        let (target, blocked) = resolve_launch(&members, &index(&[("X:/dev/repo1", "r1")], &[]));
+        let (target, blocked) =
+            resolve_launch(&members, &index(&[("X:/dev/repo1", "r1")], &[]), None);
         assert!(blocked.is_none(), "unexpected block: {blocked:?}");
         match target.expect("a registered single member must resolve") {
             WorktreeLaunchTarget::Single {
@@ -1002,7 +1088,7 @@ mod tests {
         // repo_id to build a spawn target from, so the button stays disabled
         // with a reason rather than silently registering anything.
         let members = vec![member("X:/wt/wt.foo/X/dev/repo1", Some("X:/dev/repo1"))];
-        let (target, blocked) = resolve_launch(&members, &index(&[], &[]));
+        let (target, blocked) = resolve_launch(&members, &index(&[], &[]), None);
         assert!(target.is_none());
         let reason = blocked.expect("an unregistered repo must explain itself");
         assert!(reason.contains("not registered"), "unexpected: {reason}");
@@ -1011,7 +1097,7 @@ mod tests {
     #[test]
     fn resolve_launch_blocks_when_the_repo_is_gone_from_disk() {
         let members = vec![member("X:/wt/wt.foo/X/dev/repo1", None)];
-        let (target, blocked) = resolve_launch(&members, &index(&[], &[]));
+        let (target, blocked) = resolve_launch(&members, &index(&[], &[]), None);
         assert!(target.is_none());
         let reason = blocked.expect("an unreachable repo must explain itself");
         assert!(reason.contains("no longer on disk"), "unexpected: {reason}");
@@ -1025,9 +1111,9 @@ mod tests {
         ];
         let idx = index(
             &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
-            &[("ws1", &["r-api", "r-web"])],
+            &[("ws1", "Shop", &["r-api", "r-web"])],
         );
-        let (target, blocked) = resolve_launch(&members, &idx);
+        let (target, blocked) = resolve_launch(&members, &idx, None);
         assert!(blocked.is_none(), "unexpected block: {blocked:?}");
         match target.expect("a multi-member group must resolve to a workspace") {
             WorktreeLaunchTarget::Workspace {
@@ -1053,11 +1139,11 @@ mod tests {
         let idx = index(
             &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
             &[
-                ("everything", &["r-api", "r-web", "r-docs"]),
-                ("ws-pair", &["r-api", "r-web"]),
+                ("everything", "Everything", &["r-api", "r-web", "r-docs"]),
+                ("ws-pair", "Pair", &["r-api", "r-web"]),
             ],
         );
-        let (target, _) = resolve_launch(&members, &idx);
+        let (target, _) = resolve_launch(&members, &idx, None);
         match target.expect("must resolve") {
             WorktreeLaunchTarget::Workspace { workspace_id, .. } => {
                 assert_eq!(workspace_id, "ws-pair");
@@ -1074,9 +1160,9 @@ mod tests {
         ];
         let idx = index(
             &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
-            &[("ws1", &["r-api"])],
+            &[("ws1", "Shop", &["r-api"])],
         );
-        let (target, blocked) = resolve_launch(&members, &idx);
+        let (target, blocked) = resolve_launch(&members, &idx, None);
         assert!(target.is_none());
         assert!(
             blocked
@@ -1097,9 +1183,9 @@ mod tests {
         ];
         let idx = index(
             &[("X:/dev/api", "r-api"), ("X:/dev/web", "r-web")],
-            &[("ws1", &["r-api", "r-web", "r-docs"])],
+            &[("ws1", "Shop", &["r-api", "r-web", "r-docs"])],
         );
-        let (target, blocked) = resolve_launch(&members, &idx);
+        let (target, blocked) = resolve_launch(&members, &idx, None);
         assert!(blocked.is_none(), "unexpected block: {blocked:?}");
         match target.expect("must resolve from the surviving members") {
             WorktreeLaunchTarget::Workspace { members, .. } => assert_eq!(members.len(), 2),
@@ -1109,9 +1195,96 @@ mod tests {
 
     #[test]
     fn resolve_launch_blocks_an_empty_group() {
-        let (target, blocked) = resolve_launch(&[], &index(&[], &[]));
+        let (target, blocked) = resolve_launch(&[], &index(&[], &[]), None);
         assert!(target.is_none());
         assert!(blocked.expect("must explain itself").contains("no member"));
+    }
+
+    #[test]
+    fn resolve_launch_keeps_a_repo_marker_single_with_one_pin() {
+        // A repo-kind marker (like no marker at all) keeps today's behaviour:
+        // one pinned member spawns its repo, never a workspace.
+        let members = vec![member("X:/wt/wt.foo/X/dev/repo1", Some("X:/dev/repo1"))];
+        let idx = index(&[("X:/dev/repo1", "r1")], &[("ws1", "Shop", &["r1"])]);
+        let marker = GroupMarker {
+            kind: crate::git::GroupKind::Repo,
+            name: "Shop".to_string(),
+        };
+
+        let (target, blocked) = resolve_launch(&members, &idx, Some(&marker));
+
+        assert!(blocked.is_none(), "unexpected block: {blocked:?}");
+        assert!(
+            matches!(target, Some(WorktreeLaunchTarget::Single { .. })),
+            "expected a single target, got {target:?}"
+        );
+    }
+
+    #[test]
+    fn one_member_workspace_group_launches_as_workspace() {
+        // A workspace group holding one member's worktree still launches as
+        // the workspace, so its other members get fresh worktrees.
+        let cfg_tmp = Scratch::new();
+        let web = cfg_tmp.path().join("web");
+        let admin = web.join(".git").join("worktrees").join("w1");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(admin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let state = serde_json::json!({
+            "repos": [{
+                "id": "r-web",
+                "name": "web",
+                "path": web.to_string_lossy(),
+                "default_branch": null,
+            }],
+            "workspaces": [{
+                "id": "ws",
+                "name": "Shop",
+                "member_repo_ids": ["r-web", "r-api"],
+            }],
+        });
+        std::fs::write(
+            cfg_tmp.path().join("state.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["web"],
+        );
+        std::fs::write(
+            shop.join("web").join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        let launch = entry_for(&entries, &shop)
+            .launch
+            .clone()
+            .expect("a registered member must resolve");
+        match launch {
+            WorktreeLaunchTarget::Workspace {
+                workspace_id,
+                members,
+                ..
+            } => {
+                assert_eq!(workspace_id, "ws");
+                assert_eq!(members.len(), 1);
+            }
+            other => panic!("expected a workspace target, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1258,7 +1431,7 @@ mod tests {
         let root = tmp.path().join("worktrees");
         let wt_dir = root.join("wt.feature-foo");
         let member = wt_dir.join("X").join("dev").join("repo1");
-        touch(&member.join(".git"));
+        linked_worktree(&member);
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
@@ -1283,14 +1456,8 @@ mod tests {
         let tmp = Scratch::new();
         let root = tmp.path().join("worktrees");
         let wt_dir = root.join("wt.main");
-        touch(&wt_dir.join("X").join("dev").join("yaat").join(".git"));
-        touch(
-            &wt_dir
-                .join("X")
-                .join("dev")
-                .join("yaat-server")
-                .join(".git"),
-        );
+        linked_worktree(&wt_dir.join("X").join("dev").join("yaat"));
+        linked_worktree(&wt_dir.join("X").join("dev").join("yaat-server"));
 
         let cfg_tmp = Scratch::new();
         let sessions = empty_registry(cfg_tmp.path());
@@ -1319,14 +1486,7 @@ mod tests {
         let tmp = Scratch::new();
         let root = tmp.path().join("worktrees");
         // New layout: wt at depth 0
-        touch(
-            &root
-                .join("wt.alpha")
-                .join("X")
-                .join("dev")
-                .join("repo")
-                .join(".git"),
-        );
+        linked_worktree(&root.join("wt.alpha").join("X").join("dev").join("repo"));
         // Old layout: wt buried under an anchor
         touch(
             &root
@@ -1351,9 +1511,23 @@ mod tests {
         assert_eq!(pairs, vec![("X/dev", "alpha"), ("Y/dev", "beta")]);
     }
 
+    /// Write `dir/.git` as a linked worktree's gitfile — the shape a real
+    /// spawn leaves behind — naming a repo root that does not exist, so no
+    /// fixture shells out to git.
+    fn linked_worktree(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        let gitdir = dir
+            .join("..")
+            .join("missing-repo")
+            .join(".git")
+            .join("worktrees")
+            .join("w1");
+        std::fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    }
+
     /// Seed `<wt>/<folder>` as a marked group whose members are the given
-    /// relative paths (an empty relative path makes the folder itself the
-    /// worktree, as for a single repo).
+    /// relative paths as linked worktrees (an empty relative path makes the
+    /// folder itself the worktree, as for a single repo).
     fn seed_group(
         wt: &std::path::Path,
         folder: &str,
@@ -1363,7 +1537,7 @@ mod tests {
     ) -> PathBuf {
         let group = wt.join(folder);
         for member in members {
-            touch(&group.join(member).join(".git"));
+            linked_worktree(&group.join(member));
         }
         write_group_marker(&group, kind, name).unwrap();
         group
@@ -1502,7 +1676,7 @@ mod tests {
         let tmp = Scratch::new();
         let root = tmp.path().join("worktrees");
         let wt = root.join("wt.feat");
-        touch(&wt.join("X").join("dev").join("repo").join(".git"));
+        linked_worktree(&wt.join("X").join("dev").join("repo"));
         let app = seed_group(&wt, "app", crate::git::GroupKind::Repo, "App", &[""]);
 
         let cfg_tmp = Scratch::new();
@@ -1521,6 +1695,149 @@ mod tests {
             "the marked group is not an old-layout member"
         );
         assert_eq!(entry_for(&entries, &app).anchor, "App");
+    }
+
+    #[test]
+    fn scanner_lists_a_member_nested_inside_another() {
+        // A workspace member can hold another member's worktree: `repo1` and
+        // `repo1/sub` are two members of the group, not one.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["repo1", "repo1/sub"],
+        );
+
+        let cfg_tmp = Scratch::new();
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        let entry = entry_for(&entries, &shop);
+        assert_eq!(entry.members.len(), 2, "{:?}", entry.members);
+        let mut got: Vec<String> = entry
+            .members
+            .iter()
+            .map(|m| normalize_path_key(&m.worktree_path))
+            .collect();
+        let mut want = vec![
+            normalize_path_key(&shop.join("repo1").to_string_lossy()),
+            normalize_path_key(&shop.join("repo1").join("sub").to_string_lossy()),
+        ];
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn scanner_ignores_a_submodule_inside_a_member() {
+        // A submodule's `.git` file points into `…/modules/…`, not at a
+        // worktree admin dir, so it is not a member of the group.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let group = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["repo1"],
+        );
+        let module = group
+            .join("repo1")
+            .join("fake-repo")
+            .join(".git")
+            .join("worktrees")
+            .join("w1")
+            .join("modules")
+            .join("lib");
+        let sub = group.join("repo1").join("lib");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), format!("gitdir: {}\n", module.display())).unwrap();
+
+        let cfg_tmp = Scratch::new();
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        let entry = entry_for(&entries, &group);
+        assert_eq!(entry.members.len(), 1, "{:?}", entry.members);
+        assert_eq!(
+            normalize_path_key(&entry.members[0].worktree_path),
+            normalize_path_key(&group.join("repo1").to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn scanner_ignores_a_vendored_repo_inside_a_member() {
+        // A plain clone inside a member worktree has a real `.git`
+        // directory, not a worktree gitfile, so it is not a member either.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let group = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["repo1"],
+        );
+        touch(&group.join("repo1").join("vendor").join(".git").join("HEAD"));
+
+        let cfg_tmp = Scratch::new();
+        let entries = scan_root(
+            &root,
+            &empty_registry(cfg_tmp.path()),
+            &empty_state(cfg_tmp.path()),
+        );
+
+        let entry = entry_for(&entries, &group);
+        assert_eq!(entry.members.len(), 1, "{:?}", entry.members);
+        assert_eq!(
+            normalize_path_key(&entry.members[0].worktree_path),
+            normalize_path_key(&group.join("repo1").to_string_lossy())
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_removes_nested_members_deepest_first() {
+        // The nested member is removed before the folder holding it, so it is
+        // removed as a member of its own rather than vanishing with its parent.
+        let tmp = Scratch::new();
+        let root = tmp.path().join("worktrees");
+        let wt = root.join("wt.feat");
+        let shop = seed_group(
+            &wt,
+            "shop",
+            crate::git::GroupKind::Workspace,
+            "Shop",
+            &["repo1", "repo1/sub"],
+        );
+        let members = group_member_dirs(&shop);
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(
+            members_deepest_first(&members),
+            vec![shop.join("repo1").join("sub"), shop.join("repo1")],
+            "the nested member is removed first"
+        );
+
+        let cfg_tmp = Scratch::new();
+        delete_group(&root, &shop, &empty_registry(cfg_tmp.path()))
+            .await
+            .unwrap();
+
+        assert!(!shop.join("repo1").join("sub").exists());
+        assert!(!shop.join("repo1").exists());
+        assert!(!shop.exists());
+        assert!(!wt.join("shop.rt-group").exists());
     }
 
     #[tokio::test]

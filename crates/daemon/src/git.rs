@@ -843,7 +843,9 @@ fn drive_key(path: &Path) -> Option<String> {
 ///
 /// Members on another drive are anchored the same way among themselves and
 /// go under `<group>/<sanitized-anchor-of-that-drive>/<offset>`; relative
-/// paths across drives cannot be preserved anyway.
+/// paths across drives cannot be preserved anyway. That folder's first
+/// segment is suffixed `-2`, `-3`, … as far as needed so it never equals a
+/// primary-drive worktree's path or contains one.
 pub fn workspace_worktree_paths(
     worktrees_root: &Path,
     member_repos: &[&Path],
@@ -879,25 +881,103 @@ pub fn workspace_worktree_paths(
     }
 
     let mut used: HashSet<String> = HashSet::new();
-    let mut out = Vec::with_capacity(member_repos.len());
+    let mut slots: Vec<Option<PathBuf>> = vec![None; member_repos.len()];
+
+    // The primary drive's members first: they take the group folder itself,
+    // and their paths decide which folder another drive may use.
+    for (i, member) in member_repos.iter().enumerate() {
+        if drive_key(member) != primary {
+            continue;
+        }
+        let anchor = anchors
+            .get(&primary)
+            .map_or_else(PathBuf::new, Clone::clone);
+        let path = member_worktree_path(member, &group, &anchor, &used);
+        used.insert(crate::paths::normalize_path_key(&path.to_string_lossy()));
+        slots[i] = Some(path);
+    }
+    let primary_paths: Vec<PathBuf> = slots.iter().flatten().cloned().collect();
+
+    for key in other_drive_keys(member_repos, primary.as_deref()) {
+        let anchor = anchors.get(&key).map_or_else(PathBuf::new, Clone::clone);
+        let base = other_drive_base(&group, &anchor, &primary_paths);
+        for (i, member) in member_repos.iter().enumerate() {
+            if drive_key(member) != key {
+                continue;
+            }
+            let path = member_worktree_path(member, &base, &anchor, &used);
+            used.insert(crate::paths::normalize_path_key(&path.to_string_lossy()));
+            slots[i] = Some(path);
+        }
+    }
+    slots.into_iter().flatten().collect()
+}
+
+/// One member's worktree path: `base` joined with the member's offset from
+/// `anchor`, or a suffixed leaf when the member is its own anchor.
+fn member_worktree_path(
+    member: &Path,
+    base: &Path,
+    anchor: &Path,
+    used: &HashSet<String>,
+) -> PathBuf {
+    match strip_path_prefix(member, anchor) {
+        Some(rel) if !rel.as_os_str().is_empty() => base.join(rel),
+        // The member is its own anchor (a filesystem root): name it after
+        // its leaf, suffixed when another member already took that name.
+        _ => unused_leaf_path(base, &leaf_name(member), used),
+    }
+}
+
+/// The drives other than `primary`, in the order their first member appears.
+fn other_drive_keys(member_repos: &[&Path], primary: Option<&str>) -> Vec<Option<String>> {
+    let mut keys: Vec<Option<String>> = Vec::new();
     for member in member_repos {
         let key = drive_key(member);
-        let anchor = anchors.get(&key).map_or_else(PathBuf::new, Clone::clone);
-        let base = if key == primary {
-            group.clone()
-        } else {
-            group.join(sanitize_anchor(&anchor))
-        };
-        let path = match strip_path_prefix(member, &anchor) {
-            Some(rel) if !rel.as_os_str().is_empty() => base.join(rel),
-            // The member is its own anchor (a filesystem root): name it after
-            // its leaf, suffixed when another member already took that name.
-            _ => unused_leaf_path(&base, &leaf_name(member), &used),
-        };
-        used.insert(crate::paths::normalize_path_key(&path.to_string_lossy()));
-        out.push(path);
+        if primary == key.as_deref() || keys.contains(&key) {
+            continue;
+        }
+        keys.push(key);
     }
-    out
+    keys
+}
+
+/// The folder an other-drive member's group sits under: the anchor's first
+/// sanitized segment, suffixed `-2`, `-3`, … until no primary-drive worktree
+/// is that folder or sits below it. Without this, an other-drive member whose
+/// offset starts with a primary member's leaf would land on top of it.
+fn other_drive_base(group: &Path, anchor: &Path, primary_paths: &[PathBuf]) -> PathBuf {
+    let sanitized = sanitize_anchor(anchor);
+    let mut parts: Vec<String> = sanitized
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let Some(head) = parts.first().cloned() else {
+        return group.to_path_buf();
+    };
+    let mut n = 1usize;
+    loop {
+        parts[0] = if n == 1 {
+            head.clone()
+        } else {
+            format!("{head}-{n}")
+        };
+        let base = parts
+            .iter()
+            .fold(group.to_path_buf(), |acc, part| acc.join(part));
+        if !primary_paths.iter().any(|p| is_at_or_under(p, &base)) {
+            return base;
+        }
+        n += 1;
+    }
+}
+
+/// Whether `path` is `base` or sits below it, compared the way session paths
+/// are (case-folded, forward slashes).
+fn is_at_or_under(path: &Path, base: &Path) -> bool {
+    let path = crate::paths::normalize_path_key(&path.to_string_lossy());
+    let base = crate::paths::normalize_path_key(&base.to_string_lossy());
+    path == base || path.starts_with(&format!("{base}/"))
 }
 
 /// The folder name a member falls back to when it has no offset: its leaf,
@@ -1208,6 +1288,36 @@ mod tests {
                 PathBuf::from(r"C:\wt\wt.main\ws\Y\team-b\api"),
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_worktree_paths_other_drive_never_meets_a_primary_offset() {
+        // `Y:\b`'s anchor sanitizes to `Y`, which is also the first segment of
+        // the primary drive's `X:\dev\Y\b` offset. The other drive's folder
+        // takes the next free name instead of landing on the same path.
+        let root = PathBuf::from(r"C:\wt");
+        let members = paths(&[r"X:\dev\a", r"X:\dev\Y\b", r"Y:\b"]);
+        let got = workspace_worktree_paths(&root, &refs(&members), "main", "ws");
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from(r"C:\wt\wt.main\ws\a"),
+                PathBuf::from(r"C:\wt\wt.main\ws\Y\b"),
+                PathBuf::from(r"C:\wt\wt.main\ws\Y-2\b"),
+            ]
+        );
+        for (i, a) in got.iter().enumerate() {
+            for b in &got[i + 1..] {
+                let ka = crate::paths::normalize_path_key(&a.to_string_lossy());
+                let kb = crate::paths::normalize_path_key(&b.to_string_lossy());
+                assert_ne!(ka, kb, "two members share {ka}");
+                assert!(
+                    !ka.starts_with(&format!("{kb}/")) && !kb.starts_with(&format!("{ka}/")),
+                    "{ka} and {kb} nest"
+                );
+            }
+        }
     }
 
     #[cfg(windows)]
