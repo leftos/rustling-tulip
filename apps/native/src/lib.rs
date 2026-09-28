@@ -33,6 +33,8 @@ mod layout_chooser;
 mod layout_chooser_view;
 mod links;
 mod mouse;
+mod move_panes;
+mod move_panes_view;
 mod net;
 mod notice_view;
 mod notices;
@@ -40,6 +42,9 @@ mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
+mod pane_close;
+mod pane_close_view;
+mod pane_menu;
 mod quit;
 mod quit_view;
 mod run_confirm;
@@ -393,6 +398,8 @@ pub struct RootView {
     tab_menu: Option<TabMenu>,
     /// The open tab menu's keyboard focus, so Esc reaches it.
     tab_menu_focus: FocusHandle,
+    /// The pane-close and Move panes dialogs and the empty pane's menu.
+    pane_ui: pane_menu::PaneUi,
     /// Each session's appearance changes the client sent and the daemon has
     /// not answered, keyed by request. Every send starts from the stored
     /// appearance with these over it, so a held key steps from where its
@@ -631,6 +638,7 @@ impl RootView {
             container_sends: HashMap::new(),
             tab_menu: None,
             tab_menu_focus: cx.focus_handle(),
+            pane_ui: pane_menu::PaneUi::new(cx.focus_handle(), cx.focus_handle()),
             pending_appearance: appearance::InFlightAppearance::default(),
             ui_save_deadline: None,
             ui_save_timer: None,
@@ -1121,7 +1129,10 @@ impl RootView {
             && !self.notices.has_modal()
             && self.layout_chooser.is_none()
             && self.cleanup_failed.is_empty()
-            && self.exit.is_none();
+            && self.exit.is_none()
+            && self.pane_ui.close.is_none()
+            && self.pane_ui.move_panes.is_none()
+            && self.pane_ui.menu.is_none();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && keyboard_free
         {
@@ -1145,10 +1156,11 @@ impl RootView {
             self.renaming = None;
         }
         self.drop_stale_tab_menu();
+        let dropped_pane_ui = self.drop_stale_pane_ui();
         let dropped_picker = self.drop_stale_sc_picker();
         self.try_wanted_session(window, cx);
         let dropped_changes = self.seed_source_control(window, cx);
-        if dropped_picker || dropped_changes {
+        if dropped_pane_ui || dropped_picker || dropped_changes {
             self.after_notice_closed(window, cx);
         }
         cx.notify();
@@ -1589,6 +1601,16 @@ impl RootView {
             cx.stop_propagation();
             return;
         }
+        if self.on_pane_ui_key(ks, window, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if self.pane_ui.move_panes.is_some() {
+            if self.on_move_panes_key(ks, window, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.delete_dialog.is_some() {
             self.on_delete_dialog_key(ks, window, cx);
             cx.stop_propagation();
@@ -1914,6 +1936,7 @@ impl Render for RootView {
             .children(self.session_menu_layer(cx).into_iter().flatten())
             .children(self.shell_menu_layer(cx).into_iter().flatten())
             .children(self.tab_menu_layer(cx).into_iter().flatten())
+            .children(self.empty_pane_menu_layer(cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
             .children(self.sc_picker_layer())
             .children(self.sc_file_menu_layer(cx).into_iter().flatten())
@@ -1926,6 +1949,8 @@ impl Render for RootView {
             .children(self.shell_dialog_layer(cx))
             .children(self.appearance_editor_layer(cx))
             .children(self.settings_layer(window, cx))
+            .children(self.pane_close_layer(cx))
+            .children(self.move_panes_layer(cx))
             .children(delete_under)
             .children(self.discard_confirm_layer(cx))
             .children(self.stash_drop_layer(cx))

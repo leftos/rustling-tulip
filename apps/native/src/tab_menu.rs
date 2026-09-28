@@ -15,6 +15,8 @@ pub(crate) enum TabAction {
     /// Swaps the Grid submenu back for the rows.
     CloseGrid,
     Rearrange(RearrangeLayout),
+    /// Opens the Move panes dialog.
+    MovePanes,
     FontUp,
     FontDown,
     FontReset,
@@ -75,7 +77,8 @@ fn counted(count: usize, noun: &str) -> String {
     }
 }
 
-fn grid_label(cols: usize, bound: usize) -> String {
+/// `<c> cols × <r> rows` for `bound` panes in `cols` columns.
+pub(crate) fn grid_label(cols: usize, bound: usize) -> String {
     format!(
         "{} × {}",
         counted(cols, "col"),

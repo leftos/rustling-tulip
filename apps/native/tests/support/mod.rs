@@ -63,9 +63,11 @@ fn sc_picker_shown(root: &RootView) -> bool {
     root.sc_picker_open() && root.source_control_panel().picker.is_some()
 }
 
-/// Whether the layout chooser, the worktree cleanup-failed dialog or the
-/// exit dialog shows `selector`: the dialog while it is open, a control
-/// while the open dialog has it. `None` for any other selector.
+/// Whether the layout chooser, the worktree cleanup-failed dialog, the pane
+/// dialogs, the empty pane's menu or the exit dialog shows `selector`: the
+/// dialog while it is open, a control while the open dialog has it, and the
+/// header's move button on a shown pane with a session. `None` for any
+/// other selector.
 fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let has = |controls: Vec<(String, String)>| controls.iter().any(|(c, _)| c == selector);
     let shown = if selector == "layout-chooser" {
@@ -76,6 +78,25 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         root.cleanup_failed_open()
     } else if selector.starts_with("cleanup-") {
         has(root.cleanup_failed_controls())
+    } else if selector == "pane-close" {
+        root.pane_close_open()
+    } else if selector.starts_with("pane-close-") {
+        has(root.pane_close_controls())
+    } else if selector == "move-panes" {
+        root.move_panes_open()
+    } else if selector.starts_with("move-panes-") {
+        has(root.move_panes_controls())
+    } else if selector == "empty-pane-menu" {
+        root.empty_pane_menu().is_some()
+    } else if selector.starts_with("empty-pane-menu-")
+        || selector.starts_with("empty-pane-move-")
+        || selector == "empty-pane-close"
+    {
+        root.empty_pane_menu_rows()
+            .iter()
+            .any(|row| row == selector)
+    } else if let Some(pane) = selector.strip_prefix("pane-move-new-tab-") {
+        root.active_pane_ids().iter().any(|p| p == pane) && root.pane_session(pane).is_some()
     } else if selector == "exit-confirm-dialog" {
         root.exit_dialog_open()
     } else if selector.starts_with("exit-") {

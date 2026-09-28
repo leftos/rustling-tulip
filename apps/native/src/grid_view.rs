@@ -767,7 +767,14 @@ impl RootView {
         let shell = bordered_button(shell, cx, move |this, window, cx| {
             this.shell_in_pane(&ids.0, &ids.1, window, cx);
         });
-        let body = spawn_choices("No session", [spawn, shell]);
+        let ids = (tab_id.to_owned(), pane_id.to_owned());
+        let body = spawn_choices("No session", [spawn, shell]).on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.open_empty_pane_menu(&ids.0, &ids.1, event.position, window, cx);
+                cx.stop_propagation();
+            }),
+        );
         match focus {
             Some(handle) => body
                 .track_focus(&handle)
@@ -933,8 +940,9 @@ impl RootView {
     ) -> Div {
         let label = session_id.map_or_else(|| "Empty pane".to_owned(), |id| self.session_label(id));
         let ids = (tab_id.to_owned(), pane_id.to_owned());
-        let (right, down, close) = (ids.clone(), ids.clone(), ids);
+        let (right, down, close, menu_ids) = (ids.clone(), ids.clone(), ids.clone(), ids);
         let menu_session = session_id.map(str::to_owned);
+        let close_session = menu_session.clone();
         let name = format!("pane-header-{pane_id}");
         div()
             .debug_selector(|| name)
@@ -943,8 +951,11 @@ impl RootView {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if let Some(id) = &menu_session {
                         this.open_session_menu(id, event.position, window, cx);
-                        cx.stop_propagation();
+                    } else {
+                        let (tab, pane) = &menu_ids;
+                        this.open_empty_pane_menu(tab, pane, event.position, window, cx);
                     }
+                    cx.stop_propagation();
                 }),
             )
             .flex()
@@ -991,11 +1002,29 @@ impl RootView {
                     }),
                 ),
             )
+            .children(session_id.map(|_| {
+                let (tab, pane) = (tab_id.to_owned(), pane_id.to_owned());
+                header_button(
+                    pane_id,
+                    "pane-move-new-tab",
+                    "↗",
+                    "Move this pane to a new tab",
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                    this.move_pane_to_new_tab(&tab, &pane);
+                }))
+            }))
             .child(
                 header_button(pane_id, "close-pane", "×", "Close pane").on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, _| {
-                        let (tab_id, pane_id) = close.clone();
-                        this.send(ClientMessage::ClosePane { tab_id, pane_id });
+                    move |this, _: &ClickEvent, window, cx| {
+                        let (tab_id, pane_id) = &close;
+                        this.close_pane_clicked(
+                            tab_id,
+                            pane_id,
+                            close_session.as_deref(),
+                            window,
+                            cx,
+                        );
                     },
                 )),
             )

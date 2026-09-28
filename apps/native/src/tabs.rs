@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, SessionSnapshot, SessionStatus, SplitDirection,
-    SplitPlace, TabEntry,
+    ClientMessage, DaemonMessage, GridNode, PaneDropEdge, SessionSnapshot, SessionStatus,
+    SplitDirection, SplitPlace, TabEntry,
 };
 
 /// The divider ratios the daemon accepts; it clamps to the same range.
@@ -390,6 +390,22 @@ pub fn pick_balanced_split_target(grid: &GridNode) -> Option<SplitTarget> {
         direction: balance_split_direction(rect),
         place: SplitPlace::Second,
     })
+}
+
+/// Where a pane moved into `grid` lands: the first empty pane, which it
+/// replaces, else the pane [`pick_balanced_split_target`] picks, split on
+/// its right or its bottom. Ported from `pickBalancedDropTarget` in the
+/// Tauri app's `utils/grid.ts`.
+pub fn pick_balanced_drop_target(grid: &GridNode) -> Option<(String, PaneDropEdge)> {
+    if let Some(empty) = collect_panes(grid).iter().find(|p| p.session.is_none()) {
+        return Some((empty.id.to_owned(), PaneDropEdge::Replace));
+    }
+    let target = pick_balanced_split_target(grid)?;
+    let edge = match target.direction {
+        SplitDirection::Horizontal => PaneDropEdge::Right,
+        SplitDirection::Vertical => PaneDropEdge::Bottom,
+    };
+    Some((target.pane_id, edge))
 }
 
 /// The first tab, and its pane, that shows `session_id`.
@@ -1923,6 +1939,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn drop_target_prefers_empty_pane_replace() {
+        assert_eq!(
+            pick_balanced_drop_target(&three()),
+            Some(("b".to_owned(), PaneDropEdge::Replace)),
+            "the empty pane takes it, though `a` is larger"
+        );
+    }
+
+    #[test]
     fn tab_pill_hover_counts_panes_and_names_each_tab_once() {
         let many = TabPill::Many(vec!["a".to_owned(), "a".to_owned(), "b".to_owned()]);
         assert_eq!(many.hover(), "Open in 3 panes: a, b");
@@ -1934,6 +1959,22 @@ pub(crate) mod tests {
         assert_eq!(
             TabPill::Unbound.hover(),
             "No tab references this session — click to open it in a new tab"
+        );
+    }
+
+    #[test]
+    fn drop_target_splits_the_largest_pane_right_or_bottom() {
+        let full = split(H, 0.5, pane("a", Some("s1")), pane("c", Some("s2")));
+        assert_eq!(
+            pick_balanced_drop_target(&full),
+            Some(("a".to_owned(), PaneDropEdge::Bottom)),
+            "a tall half splits along its height"
+        );
+        let stacked = split(V, 0.3, pane("top", Some("s1")), pane("bottom", Some("s2")));
+        assert_eq!(
+            pick_balanced_drop_target(&stacked),
+            Some(("bottom".to_owned(), PaneDropEdge::Right)),
+            "a wide pane splits along its width"
         );
     }
 }

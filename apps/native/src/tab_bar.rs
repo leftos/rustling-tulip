@@ -161,6 +161,13 @@ impl RootView {
             lines.push(MenuLine::Separator);
             lines.extend(rearrange);
         }
+        if bound >= 3 {
+            lines.push(MenuLine::row(
+                "tab-menu-move-panes",
+                "Move panes to new tab…",
+                TabAction::MovePanes,
+            ));
+        }
         lines.push(MenuLine::Separator);
         lines.extend(self.font_lines(&menu.tab_id));
         lines.push(MenuLine::Separator);
@@ -238,6 +245,7 @@ impl RootView {
             return;
         }
         self.menu = None;
+        self.pane_ui.menu = None;
         self.tab_menu = Some(TabMenu {
             tab_id: tab_id.to_owned(),
             at,
@@ -353,6 +361,10 @@ impl RootView {
                     layout,
                 });
                 self.close_tab_menu(window, cx);
+            }
+            TabAction::MovePanes => {
+                self.tab_menu = None;
+                self.open_move_panes(tab_id, window, cx);
             }
             TabAction::FontUp => self.bump_tab_font(tab_id, 1.0, cx),
             TabAction::FontDown => self.bump_tab_font(tab_id, -1.0, cx),
@@ -692,6 +704,7 @@ impl RootView {
     /// A context menu or a popup Esc closes is open.
     fn menu_open(&self) -> bool {
         self.tab_menu.is_some()
+            || self.pane_ui.menu.is_some()
             || self.menu.is_some()
             || self.container_menu.is_some()
             || self.shell_menu.is_some()
