@@ -15,17 +15,30 @@ Items are in priority order. Each needs a design pass (the questions listed) bef
   - Billing: measured in [gui-mode-billing.md](../spikes/gui-mode-billing.md). It runs on the subscription's usage windows today (`apiKeySource: none`, the plan's 5-hour and 7-day windows in `rate_limit_event`). The CLI counts it as SDK-style use, which a paused Anthropic billing change would move to a separate credit. The terms allow it for personal use only, so keep the terminal UI as the fallback.
   - How permission requests reach the client: the stream-json permission-prompt tool, or a hook.
   - How the native client renders a chat: a new view kind next to the terminal and the diff tabs.
-  - Whether a session remembers its view, and the default view per agent.
+  - Ruling (user, 2026-09-28): a session remembers its last view (kept on the daemon's session); a new Claude session starts in the terminal view.
 - [ ] **"Needs You" view.** One place listing every session waiting on the user, grouped as Needs you / Working / Done / Idle, where clicking a card focuses that session's pane. Orca ships this as an experimental kanban board (`onorca.dev/docs/model/agents-sessions`). It's more useful once hook-reported status exists.
-  - A rail view in the native client, or a filter on the sidebar.
+  - Ruling (user, 2026-09-28): a view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter.
 - [ ] **Link a worktree to an issue or PR.** When spawning, paste or search a GitHub issue or PR URL; the session and its sidebar row show the link, and the PR's state once it exists. Orca does this for GitHub, GitLab, Linear and Jira (`onorca.dev/docs/model/worktrees`). It sits next to the presets' GitHub-issue-range prompts.
-  - GitHub only, through `gh`, or a provider abstraction.
+  - Ruling (user, 2026-09-28): GitHub only, through `gh`; no provider abstraction.
 - [ ] **Agents that drive rustling-tulip.** A small CLI, run inside a session, that talks to the daemon over its WebSocket: spawn a child session (optionally in a new worktree) with a first prompt, send text to another session, and read another session's recent output or transcript. VelaTerm's `vspawn` / `vtell` / `vrefer` / `vsearch` (`src-tauri/src/agent/spawn_cli.rs`, `tell.rs`, `cli_client.rs`) and herdr's socket API do this, and each ships a skill that teaches the agent to use them.
   - How a session authenticates: a per-session token in its environment, never the daemon's full `auth_token`.
   - Which daemon messages the CLI may send.
-  - Whether a spawned child shows under its parent in the sidebar.
+  - Ruling (user, 2026-09-28): a spawned child sits in its own repo or workspace container like any session, and its leaf carries a `↳ <parent label>` tag; no nesting under the parent leaf.
 - [ ] **Plan, then execute in parallel.** A planner session splits a task and the user approves the split; then one executor session per part runs in its own worktree, and work that falls short goes back to the same executor with its context. VelaTerm: `src-tauri/src/agent/plan_execute.rs` and `docs/manuals/planning-and-execution_*.md`. It builds on the item above and on workspace sessions.
 - [ ] **Resume agents after a reboot.** A reboot kills the tracers too. On the next start, offer to resume the sessions that were live at shutdown, not only through the Recover dialog. Orca records each live agent's conversation id at quit and injects `--resume <id>` into the restored pane on a cold start (stablyai/orca PR #5240). The session history and Recover already hold what's needed; this is the automatic prompt.
-  - Prompt on start, or resume without asking.
+  - Ruling (user, 2026-09-28): prompt on start ("Resume all", "Choose…", "Dismiss"); a dismissed prompt leaves the sessions in Recover. Never resume without asking.
   - How to tell a reboot from a user Stop: the sessions whose tracers were lost with no end recorded.
-- [ ] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Post a short comment describing rustling-tulip's layout: one worktree set per workspace, each member's path relative to a shared anchor preserved, and `--add-dir` for every extra member. This posts publicly under the user's account, so confirm the text with the user first.
+- [ ] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Post a short comment describing rustling-tulip's layout: one worktree set per workspace, each member's path relative to a shared anchor preserved, and `--add-dir` for every extra member. This posts publicly under the user's account, so confirm the text with the user first. Draft, awaiting the user's approval (it opens with the agent-authored marker line):
+
+  > 🤖 Posted by Claude Code on behalf of @leftos.
+  >
+  > For what it's worth, here's how multi-repo workspaces work in rustling-tulip, a daemon-plus-client agent manager I've been building. A workspace is a named set of registered repos. Spawning a session into it on branch `X` creates (or reuses) one worktree per member, all under one folder for that branch: `<worktrees-root>/wt.<branch>/<anchor>/<member offset>`. The anchor is the common path prefix of the members' parent folders, and each member keeps its offset from it, so a relative reference between members in source (`../other-repo`) still resolves between the worktrees. One agent process runs with its cwd in the first member's worktree and `--add-dir <worktree>` for every other member. Members on different drives have no common prefix; those fall back to their leaf name under the first member's anchor and lose the relative path for that member only.
+  >
+  > For example, a workspace of two repos, spawned on branch `feature/login`:
+  >
+  > | Member | Source repo | Worktree |
+  > |---|---|---|
+  > | 1 | `D:\src\apps\web` | `<root>\wt.feature-login\D\src\apps\web` |
+  > | 2 | `D:\src\libs\core` | `<root>\wt.feature-login\D\src\libs\core` |
+  >
+  > The members' parents are `D:\src\apps` and `D:\src\libs`, so the anchor is `D:\src` (written `D\src` under the branch folder). `web` refers to `core` as `../../libs/core`, and that still resolves between the two worktrees. The agent starts with its cwd in `<root>\wt.feature-login\D\src\apps\web` and `--add-dir <root>\wt.feature-login\D\src\libs\core`. `<root>` is the worktrees root, `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees` by default. Happy to go into more detail if it helps.

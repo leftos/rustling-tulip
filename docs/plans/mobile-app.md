@@ -46,6 +46,6 @@ Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 
 - **Relay authentication:** how the relay itself keeps strangers from using it, for example a relay secret the daemon and the phone both present, separate from the end-to-end TLS.
 - **Recent output for MA6:** render the session's screen to text on the daemon, or send raw scrollback bytes and render them in the app.
-- **Size:** which client's terminal size wins when the phone and the desktop show the same session (MA8). This matters for Claude's terminal UI, which redraws to the size it's given.
+- **Size:** settled (user, 2026-09-28): when the phone and the desktop show the same session (MA8), the PTY takes the size of the client that last sent input to it; Claude's terminal UI redraws on each switch.
 - **Terminal renderer for MA8:** a Flutter terminal package such as `xterm` on pub.dev, or render in Rust (`alacritty_terminal`, as the native client does) and draw the grid in Flutter.
 - **Cost and upkeep of the VPS:** provider, region, and how it gets updates.
