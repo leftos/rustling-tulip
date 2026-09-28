@@ -27,10 +27,18 @@ All three kinds were right. The speech still leaks identifiers a voice reads bad
 ## Cost and latency
 
 - **Through the CLI** (`claude -p --model haiku`, with `--setting-sources "" --strict-mcp-config --tools ""`): one alert reported 9 input tokens, 7,161 cache-read tokens (the CLI's own system prompt), 2,452 output tokens and `total_cost_usd` 0.013, with 17.2 s of API time. At 100 alerts a day that is about $1.30.
-- **Direct Messages API** (allowed, user 2026-09-28): the filled prompt is 1,734 characters, roughly 450 tokens, and the reply about 80 tokens. At Haiku 4.5's $1 / $5 per million tokens that is about $0.0005 + $0.0004 ≈ $0.001 an alert, about $0.09 at 100 a day. Estimated, not measured: no API key is set on this machine, so the direct call and its latency are still to run.
+- **Direct Messages API** (allowed, user 2026-09-28; `waiting-alerts/api.py`, key from `ANTHROPIC_API_KEY_TOAST`), measured on the same three messages with `claude-haiku-4-5` at $1 / $5 per million tokens:
+
+  | Message | kind | wall | tokens in / out | cost |
+  |---|---|---|---|---|
+  | `message-update.md` | `working_update` | 1.29 s | 595 / 67 | $0.00093 |
+  | `message-done.md` | `done_waiting` | 1.05 s | 447 / 55 | $0.00072 |
+  | `message-question.md` | `needs_answer` | 1.44 s | 437 / 67 | $0.00077 |
+
+  About $0.08 at 100 alerts a day, and 15–30 times faster than the CLI. The kinds matched the CLI runs; the speech dropped one identifier ("reattach orphans") but kept "P4.13b".
 - `--bare` would trim the CLI's startup, but it reads only `ANTHROPIC_API_KEY`, so it needs a key too.
 
 ## Next
 
-- Run the direct API call once a key exists: latency and the real token counts.
+- Haiku wraps its JSON in a code fence though the prompt says not to: use structured outputs (`output_config.format`) in v3 instead of parsing around the fence.
 - Iterate the prompt against identifiers in speech: spell out or drop plan numbers and function names.
