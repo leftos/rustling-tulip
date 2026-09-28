@@ -11,6 +11,7 @@ mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{AttentionReason, DaemonMessage};
+use rustling_tulip_native::LeafHighlight;
 use support::{Fixture, Harness, TestDir, pane, repo, session, tab, workspace};
 
 /// The tag and name of the container holding leaf `id`, and the leaf's and
@@ -179,6 +180,37 @@ fn sidebar_divider_clamps_persists_and_restores(cx: &mut TestAppContext) {
     );
     h.click_on("activity-sessions");
     assert_eq!(h.bounds("sidebar-panel").size.width, px(400.0));
+}
+
+#[gpui::test]
+fn attention_leaf_is_highlighted(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture.sessions.push(session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    let highlight = |h: &mut Harness<'_>, id: &str| h.root(|root, _| root.leaf_highlight(id));
+    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::None);
+
+    for id in ["s1", "s2"] {
+        h.send(DaemonMessage::Attention {
+            session_id: id.to_owned(),
+            reason: AttentionReason::AwaitingInput,
+        });
+    }
+    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::Attention);
+    assert_eq!(
+        highlight(&mut h, "s1"),
+        LeafHighlight::AttentionSelected,
+        "s1 is the shown session"
+    );
+    assert!(h.bounds("leaf-s2").origin.x >= px(0.0), "painted");
+
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").status("working").build(),
+        request_id: None,
+    });
+    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::None, "calm again");
 }
 
 #[gpui::test]

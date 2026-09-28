@@ -226,6 +226,7 @@ impl RootView {
             before = before.len(),
             "exit dialog: shutting the daemon down"
         );
+        self.notifications.note_stops(&before);
         self.command(NetCommand::Shutdown { before, drain });
         let now = (self.now)();
         if let Some(exit) = &mut self.exit {

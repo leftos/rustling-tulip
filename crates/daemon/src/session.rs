@@ -325,11 +325,13 @@ impl SessionRegistry {
         let Some(arc) = self.get(id) else {
             return false;
         };
-        let (snap, recent_tail) = {
+        let (snap, recent_tail, entered_error) = {
             let mut guard = lock(&arc);
+            let was_error = guard.status == SessionStatus::Error;
             f(&mut guard);
             let tail = trim_recent_tail(&guard.recent_actions);
-            (guard.snapshot(), tail)
+            let entered_error = !was_error && guard.status == SessionStatus::Error;
+            (guard.snapshot(), tail, entered_error)
         };
         // Sync the persisted recent_actions tail so an abandoned session
         // can show "what was this doing right before the daemon died?".
@@ -342,6 +344,9 @@ impl SessionRegistry {
         let _ = self
             .events
             .send(SessionEvent::Updated(Box::new(snap), origin));
+        if entered_error {
+            self.fan_out_attention(id.to_owned(), protocol::AttentionReason::Error);
+        }
         true
     }
 
@@ -903,5 +908,44 @@ mod tests {
     fn trim_recent_tail_empty_input_empty_output() {
         let tail = trim_recent_tail(&[]);
         assert!(tail.is_empty());
+    }
+
+    /// The attention reasons `events` holds, draining it.
+    fn drained_attention(
+        events: &mut broadcast::Receiver<SessionEvent>,
+    ) -> Vec<protocol::AttentionReason> {
+        let mut reasons = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SessionEvent::Attention { reason, .. } = event {
+                reasons.push(reason);
+            }
+        }
+        reasons
+    }
+
+    #[test]
+    fn update_into_error_fans_out_error_attention_once() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("error-attention");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", protocol::SessionMode::Headless));
+        let mut events = registry.subscribe();
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert_eq!(
+            drained_attention(&mut events),
+            [protocol::AttentionReason::Error]
+        );
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert!(drained_attention(&mut events).is_empty(), "already Error");
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+        registry.update("s1", |rec| rec.status = SessionStatus::Error);
+        assert_eq!(
+            drained_attention(&mut events),
+            [protocol::AttentionReason::Error]
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

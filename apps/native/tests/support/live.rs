@@ -22,7 +22,7 @@ use rustling_tulip_native::{
 };
 use serde_json::{Value, json};
 
-use super::{Harness, OpenRecorder, Outbox, TestClock};
+use super::{Harness, NotifyRecorder, OpenRecorder, Outbox, TestClock};
 
 /// How long the daemon has to write `daemon.json` and answer `/health`.
 const START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -608,6 +608,7 @@ impl<'a> Harness<'a> {
         let clock = TestClock::new();
         let quits = std::rc::Rc::new(std::cell::Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
+        let notifier = Arc::new(NotifyRecorder::default());
         let deps = RootDeps {
             tx: tx.clone(),
             events: view_events,
@@ -617,6 +618,7 @@ impl<'a> Harness<'a> {
             now: clock.clock(),
             quit: super::quit_recorder(&quits),
             open: opener.clone(),
+            notify: notifier.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -630,6 +632,7 @@ impl<'a> Harness<'a> {
             outbox: Outbox::default(),
             quits,
             opener,
+            notifier,
         };
         (
             harness,

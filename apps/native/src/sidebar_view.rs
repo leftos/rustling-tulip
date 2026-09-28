@@ -17,8 +17,8 @@ use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
 use crate::sidebar::{Activity, Container, ContainerKind, Leaf};
 use crate::spawn_view::SpawnEntry;
 use crate::{
-    BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, dot_color, drag_handle,
-    status_dot, tooltip,
+    BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, dot_color,
+    drag_handle, status_dot, tooltip,
 };
 
 const ROW_HEIGHT: f32 = 22.0;
@@ -289,11 +289,61 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
         }))
 }
 
-/// A session's row, with a stripe in its accent down its left edge.
+/// How a leaf row shows that its session needs attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafHighlight {
+    None,
+    /// A soft amber fill and an amber border.
+    Attention,
+    /// As [`Self::Attention`], with a deeper fill and an amber stripe in
+    /// place of the accent, on the selected leaf.
+    AttentionSelected,
+}
+
+impl LeafHighlight {
+    const fn of(attention: bool, selected: bool) -> Self {
+        match (attention, selected) {
+            (false, _) => Self::None,
+            (true, false) => Self::Attention,
+            (true, true) => Self::AttentionSelected,
+        }
+    }
+}
+
+/// [`WARNING`] at `alpha`, as `0xRRGGBBAA`.
+const fn warning_alpha(alpha: u32) -> u32 {
+    (WARNING << 8) | alpha
+}
+
+impl RootView {
+    /// How leaf `id` is highlighted for attention; `None` when it is not
+    /// listed or needs none.
+    #[must_use]
+    pub fn leaf_highlight(&self, id: &str) -> LeafHighlight {
+        let attention = self
+            .sidebar
+            .containers()
+            .iter()
+            .flat_map(|container| &container.leaves)
+            .any(|leaf| leaf.id == id && leaf.attention);
+        LeafHighlight::of(attention, self.focused_session().as_deref() == Some(id))
+    }
+}
+
+/// A session's row, with a stripe in its accent down its left edge; a
+/// session needing attention is filled and bordered in amber.
 fn leaf_row(leaf: &Leaf, selected: bool, accent: u32, cx: &mut Context<RootView>) -> Stateful<Div> {
     let id = leaf.id.clone();
     let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
+    let highlight = LeafHighlight::of(leaf.attention, selected);
+    let (background, border, stripe) = match highlight {
+        LeafHighlight::None => (None, 0, accent),
+        LeafHighlight::Attention => (Some(warning_alpha(0x24)), warning_alpha(0x61), accent),
+        LeafHighlight::AttentionSelected => {
+            (Some(warning_alpha(0x38)), warning_alpha(0x61), WARNING)
+        }
+    };
     div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
@@ -307,6 +357,9 @@ fn leaf_row(leaf: &Leaf, selected: bool, accent: u32, cx: &mut Context<RootView>
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .when(selected, |row| row.bg(gpui::rgb(SELECTED_BG)))
+        .when_some(background, |row, fill| row.bg(gpui::rgba(fill)))
+        .border_1()
+        .border_color(gpui::rgba(border))
         .child(session_dot(leaf.status, &leaf.id))
         .child(
             div()
@@ -328,11 +381,11 @@ fn leaf_row(leaf: &Leaf, selected: bool, accent: u32, cx: &mut Context<RootView>
         .child(
             div()
                 .absolute()
-                .left_0()
-                .top_0()
-                .bottom_0()
+                .left(px(-1.0))
+                .top(px(-1.0))
+                .bottom(px(-1.0))
                 .w(px(ACCENT_STRIPE_WIDTH))
-                .bg(gpui::rgb(accent)),
+                .bg(gpui::rgb(stripe)),
         )
         .on_mouse_down(
             MouseButton::Right,

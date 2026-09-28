@@ -6814,6 +6814,7 @@ dependencies = [
  "serde_json",
  "similar",
  "syntect",
+ "tauri-winrt-notification",
  "tokio",
  "tokio-tungstenite",
  "tracing",

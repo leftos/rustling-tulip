@@ -3,8 +3,8 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AppearanceOverrides, ContainerRef, DaemonMessage, RepoEntry, SessionKind, SessionMode,
-    SessionSnapshot, SessionStatus, WorkspaceEntry,
+    AppearanceOverrides, AttentionReason, ContainerRef, DaemonMessage, RepoEntry, SessionKind,
+    SessionMode, SessionSnapshot, SessionStatus, WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -150,6 +150,49 @@ pub struct UiState {
     /// The Settings modal's App title tab.
     #[serde(default)]
     pub title: TitleSettings,
+    /// Which attention reasons fire an OS notification.
+    #[serde(default)]
+    pub notifications: NotificationSettings,
+}
+
+/// Which attention reasons fire an OS notification; each is on unless
+/// turned off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationSettings {
+    pub awaiting_input: bool,
+    pub stopped: bool,
+    pub error: bool,
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        Self {
+            awaiting_input: true,
+            stopped: true,
+            error: true,
+        }
+    }
+}
+
+impl NotificationSettings {
+    /// Whether `reason` fires a notification.
+    #[must_use]
+    pub const fn fires(&self, reason: AttentionReason) -> bool {
+        match reason {
+            AttentionReason::AwaitingInput => self.awaiting_input,
+            AttentionReason::Stopped => self.stopped,
+            AttentionReason::Error => self.error,
+        }
+    }
+
+    fn set(&mut self, reason: AttentionReason, on: bool) {
+        match reason {
+            AttentionReason::AwaitingInput => self.awaiting_input = on,
+            AttentionReason::Stopped => self.stopped = on,
+            AttentionReason::Error => self.error = on,
+        }
+    }
 }
 
 /// The General settings saved on this machine.
@@ -218,6 +261,7 @@ impl Default for UiState {
             window: None,
             general: GeneralSettings::default(),
             title: TitleSettings::default(),
+            notifications: NotificationSettings::default(),
         }
     }
 }
@@ -449,6 +493,11 @@ impl SidebarModel {
     /// Whether the window title ends with the product name.
     pub fn set_title_suffix(&mut self, on: bool) {
         self.ui.title.suffix = on;
+    }
+
+    /// Whether `reason` fires an OS notification.
+    pub fn set_notification(&mut self, reason: AttentionReason, on: bool) {
+        self.ui.notifications.set(reason, on);
     }
 
     /// Records the main window's place; returns whether it changed.
@@ -1095,7 +1144,7 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::*;
-    use protocol::{AttentionReason, SessionMember};
+    use protocol::SessionMember;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1735,6 +1784,11 @@ mod tests {
                 show_count: false,
                 suffix: false,
             },
+            notifications: NotificationSettings {
+                awaiting_input: true,
+                stopped: false,
+                error: false,
+            },
         };
         save_ui_state(&dir.0, &state).expect("first save");
         save_ui_state(&dir.0, &state).expect("save over the existing file");
@@ -1755,6 +1809,36 @@ mod tests {
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.title.show_count, "a group missing a field fills it");
         assert!(!loaded.title.suffix);
+    }
+
+    #[test]
+    fn notification_toggles_default_on_when_missing_and_round_trip() {
+        let dir = TestDir::new("notifications");
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.notifications, NotificationSettings::default());
+        for reason in [
+            AttentionReason::AwaitingInput,
+            AttentionReason::Stopped,
+            AttentionReason::Error,
+        ] {
+            assert!(loaded.notifications.fires(reason), "{reason:?} on");
+        }
+
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "notifications": { "stopped": false } }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.notifications.awaiting_input, "a missing field fills");
+        assert!(!loaded.notifications.fires(AttentionReason::Stopped));
+
+        let mut model = SidebarModel::new(loaded);
+        model.set_notification(AttentionReason::Error, false);
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        assert_eq!(&load_ui_state(&dir.0), model.ui_state());
+        assert!(!load_ui_state(&dir.0).notifications.error);
     }
 
     #[test]

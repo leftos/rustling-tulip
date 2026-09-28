@@ -169,9 +169,9 @@ The frontend has no search addon, bell handling or title parsing; `terminal_titl
 
 ## Notifications & attention
 
-- [ ] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx`
-- [ ] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx`
-- [ ] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
+- [x] OS notifications for awaiting input / stopped / error, each toggleable; body is the session label; permission requested at startup — `App.tsx` (native: P4.3; Windows has no permission prompt, and a Stop this client sent does not notify it)
+- [x] Notifications settings: permission badge, "Request permission" — `SettingsModal.tsx` (native: Windows' read-only toast state and a link to its notification settings)
+- [x] Attention: leaf highlight and "!", container roll-up; cleared when the user selects the session or it calms down — `App.tsx`, `Sidebar.tsx`
 - [x] Toasts: error / warning / info, 8s auto-dismiss, optional sticky, same-key toasts update in place — `ErrorToast.tsx` (native: P1.7c, and warning, sticky and same-key update in P4.1)
 - [ ] Toasts for failed git writes and for actions unavailable on remote — `App.tsx` (native: failed git writes toast and show a section banner since P3.4)
 - [x] "✓ copied" chip after a confirmed clipboard write — `CopyPulse.tsx`, `utils/clipboard.ts`

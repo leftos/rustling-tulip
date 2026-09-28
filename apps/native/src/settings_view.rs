@@ -1,19 +1,23 @@
 //! The Settings modal: a tab list on the left and the chosen tab's rows
-//! beside it. General holds keep-awake and copy on select, Appearance the
-//! appearance editor at the app level, App title the window title's
+//! beside it. General holds keep-awake and copy on select, Notifications
+//! the per-reason notification toggles and Windows' toast state, Appearance
+//! the appearance editor at the app level, App title the window title's
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, FontWeight, Keystroke, Stateful, Window, div, prelude::*,
     px,
 };
-use protocol::ClientMessage;
+use protocol::{AttentionReason, ClientMessage};
 
+use crate::appearance;
 use crate::appearance_view::{Level, close_footer};
 use crate::mouse::CopyOnSelect;
+use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::tabs::tab_session_counts;
 use crate::window_title::compute_title;
@@ -92,6 +96,10 @@ pub(crate) enum SettingsControl {
     CopyOnSelect,
     TitleCount,
     TitleSuffix,
+    NotifySettingsLink,
+    NotifyAwaitingInput,
+    NotifyStopped,
+    NotifyError,
 }
 
 impl SettingsControl {
@@ -101,6 +109,10 @@ impl SettingsControl {
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
             Self::TitleSuffix => "settings-title-product-suffix",
+            Self::NotifySettingsLink => "settings-open-windows-notifications",
+            Self::NotifyAwaitingInput => "settings-notify-awaiting-input",
+            Self::NotifyStopped => "settings-notify-stopped",
+            Self::NotifyError => "settings-notify-error",
         }
     }
 }
@@ -210,10 +222,15 @@ impl RootView {
             SettingsTab::AppTitle => {
                 vec![SettingsControl::TitleCount, SettingsControl::TitleSuffix]
             }
-            SettingsTab::Notifications
-            | SettingsTab::SpawnDefaults
-            | SettingsTab::Worktrees
-            | SettingsTab::Appearance => Vec::new(),
+            SettingsTab::Notifications => vec![
+                SettingsControl::NotifySettingsLink,
+                SettingsControl::NotifyAwaitingInput,
+                SettingsControl::NotifyStopped,
+                SettingsControl::NotifyError,
+            ],
+            SettingsTab::SpawnDefaults | SettingsTab::Worktrees | SettingsTab::Appearance => {
+                Vec::new()
+            }
         }
     }
 
@@ -265,6 +282,14 @@ impl RootView {
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
+            SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
+            SettingsControl::NotifyAwaitingInput => {
+                self.toggle_notification(AttentionReason::AwaitingInput, cx);
+            }
+            SettingsControl::NotifyStopped => {
+                self.toggle_notification(AttentionReason::Stopped, cx);
+            }
+            SettingsControl::NotifyError => self.toggle_notification(AttentionReason::Error, cx),
         }
         cx.notify();
     }
@@ -294,8 +319,60 @@ impl RootView {
     ) {
         self.settings_tab = tab;
         self.settings_control = None;
+        if tab == SettingsTab::Notifications {
+            self.read_notify_state(window, cx);
+        }
         self.settings_tabs_focus.focus(window);
         cx.notify();
+    }
+
+    /// Reads Windows' toast setting on a background thread; the tab shows
+    /// `checking…` until it arrives.
+    fn read_notify_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.notifications.state = None;
+        let notifier = Arc::clone(&self.notifications.notifier);
+        let read = cx
+            .background_executor()
+            .spawn(async move { notifier.state() });
+        cx.spawn_in(window, async move |this, cx| {
+            let state = read.await;
+            // Fails only when the view is gone, and its window with it.
+            this.update(cx, |this, cx| {
+                this.notifications.state = Some(state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The Notifications tab's line on Windows' toast setting.
+    #[must_use]
+    pub fn notifications_state_line(&self) -> String {
+        format!(
+            "Windows notifications: {}",
+            NotifyState::line_label(self.notifications.state)
+        )
+    }
+
+    fn toggle_notification(&mut self, reason: AttentionReason, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().notifications.fires(reason);
+        self.sidebar.set_notification(reason, on);
+        self.save_ui();
+        cx.notify();
+    }
+
+    /// Opens Windows' notification settings on a background thread; a
+    /// failure is only logged.
+    fn open_windows_notification_settings(&self, cx: &mut Context<Self>) {
+        let opener = Arc::clone(&self.opener);
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(err) = opener.url(WINDOWS_NOTIFICATION_SETTINGS) {
+                    tracing::warn!("could not open Windows' notification settings: {err}");
+                }
+            })
+            .detach();
     }
 
     /// A key while Settings is open; returns whether it was the frame's.
@@ -522,10 +599,73 @@ impl RootView {
                 .into_iter()
                 .collect(),
             SettingsTab::AppTitle => self.app_title_tab(focused, cx),
-            SettingsTab::Notifications | SettingsTab::SpawnDefaults | SettingsTab::Worktrees => {
+            SettingsTab::Notifications => self.notifications_tab(focused, cx),
+            SettingsTab::SpawnDefaults | SettingsTab::Worktrees => {
                 vec![hint(COMING_SOON).into_any_element()]
             }
         }
+    }
+
+    fn notifications_tab(
+        &self,
+        focused: Option<SettingsControl>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let link = SettingsControl::NotifySettingsLink;
+        let selector = link.selector();
+        let open = div()
+            .id(selector)
+            .debug_selector(|| selector.to_owned())
+            .px(px(4.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(gpui::rgb(if focused == Some(link) {
+                TEXT
+            } else {
+                PANEL_BG
+            }))
+            .text_color(gpui::rgb(appearance::BUILTIN_ACCENT))
+            .cursor_pointer()
+            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            .on_click(press(link, cx))
+            .child("Open Windows notification settings");
+        let state = div()
+            .debug_selector(|| "settings-notify-state".to_owned())
+            .child(self.notifications_state_line());
+        let windows = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(state)
+            .child(open);
+        let settings = &self.sidebar.ui_state().notifications;
+        let rows = [
+            (
+                SettingsControl::NotifyAwaitingInput,
+                AttentionReason::AwaitingInput,
+                "Awaiting input",
+            ),
+            (
+                SettingsControl::NotifyStopped,
+                AttentionReason::Stopped,
+                "Stopped",
+            ),
+            (
+                SettingsControl::NotifyError,
+                AttentionReason::Error,
+                "Errored",
+            ),
+        ]
+        .map(|(control, reason, label)| {
+            toggle(control, settings.fires(reason), label, focused, cx)
+        });
+        let section = section("Notifications")
+            .child(windows)
+            .child(hint(
+                "Fire an OS notification when a session transitions to:",
+            ))
+            .children(rows);
+        vec![section.into_any_element()]
     }
 
     fn general_tab(

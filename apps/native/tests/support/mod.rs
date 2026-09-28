@@ -22,8 +22,8 @@ use protocol::{
     WorkspaceEntry,
 };
 use rustling_tulip_native::{
-    Activity, Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, OpenFailure, Opener,
-    QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
+    Activity, Clock, Connection, HandshakeInfo, NetCommand, NetDeps, NetEvent, Notifier,
+    NotifyState, OpenFailure, Opener, QuitFn, RootDeps, RootView, ScPanel, bind_keys, spawn_net,
 };
 use serde_json::{Value, json};
 
@@ -270,6 +270,16 @@ impl SessionBuilder {
             .set("workspace_id", json!(workspace_id))
     }
 
+    /// Named `label` by the user.
+    pub fn user_label(self, label: &str) -> Self {
+        self.set("user_label", json!(label))
+    }
+
+    /// With `label` as the daemon's label.
+    pub fn label(self, label: &str) -> Self {
+        self.set("label", json!(label))
+    }
+
     pub fn build(self) -> SessionSnapshot {
         serde_json::from_value(self.0).expect("session fixture")
     }
@@ -344,6 +354,8 @@ pub struct Harness<'a> {
     quits: Rc<Cell<usize>>,
     /// What the terminals' Ctrl+clicks opened.
     opener: Arc<OpenRecorder>,
+    /// The notifications attention events showed.
+    notifier: Arc<NotifyRecorder>,
 }
 
 /// What a Ctrl+click on a terminal link opened.
@@ -437,6 +449,36 @@ impl Opener for OpenRecorder {
     }
 }
 
+/// A notifier that only records the notifications it was asked to show, as
+/// a spec must never show a real toast, and reports the Windows state a
+/// spec set (on until set).
+pub struct NotifyRecorder {
+    shown: Mutex<Vec<(String, String)>>,
+    state: Mutex<NotifyState>,
+}
+
+impl Default for NotifyRecorder {
+    fn default() -> Self {
+        Self {
+            shown: Mutex::new(Vec::new()),
+            state: Mutex::new(NotifyState::On),
+        }
+    }
+}
+
+impl Notifier for NotifyRecorder {
+    fn notify(&self, title: &str, body: &str) {
+        self.shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((title.to_owned(), body.to_owned()));
+    }
+
+    fn state(&self) -> NotifyState {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// What the client sent, drained from its channel: the messages
 /// [`Harness::sent`] has not returned yet, the other commands
 /// [`Harness::commands`] has not, and the ids of its `LoadScrollback`
@@ -464,6 +506,7 @@ impl<'a> Harness<'a> {
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
+        let notifier = Arc::new(NotifyRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -473,6 +516,7 @@ impl<'a> Harness<'a> {
             now: clock.clock(),
             quit: quit_recorder(&quits),
             open: opener.clone(),
+            notify: notifier.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -486,6 +530,7 @@ impl<'a> Harness<'a> {
             outbox: Outbox::default(),
             quits,
             opener,
+            notifier,
         };
         harness.connect();
         harness
@@ -502,6 +547,7 @@ impl<'a> Harness<'a> {
         let clock = TestClock::new();
         let quits = Rc::new(Cell::new(0));
         let opener = Arc::new(OpenRecorder::default());
+        let notifier = Arc::new(NotifyRecorder::default());
         let deps = RootDeps {
             tx,
             events: rx,
@@ -511,6 +557,7 @@ impl<'a> Harness<'a> {
             now: clock.clock(),
             quit: quit_recorder(&quits),
             open: opener.clone(),
+            notify: notifier.clone(),
         };
         let (root, cx) =
             cx.add_window_view(move |window, cx| RootView::with_transport(deps, window, cx));
@@ -524,6 +571,7 @@ impl<'a> Harness<'a> {
             outbox: Outbox::default(),
             quits,
             opener,
+            notifier,
         }
     }
 
@@ -550,6 +598,26 @@ impl<'a> Harness<'a> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(host.to_owned());
+    }
+
+    /// Every notification shown, as (title, body), oldest first, once the
+    /// view has settled.
+    pub fn notified(&mut self) -> Vec<(String, String)> {
+        self.cx.run_until_parked();
+        self.notifier
+            .shown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reports `state` as Windows' toast setting from now on.
+    pub fn set_notify_state(&self, state: NotifyState) {
+        *self
+            .notifier
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = state;
     }
 
     /// The run confirm's title and detail while it is open.

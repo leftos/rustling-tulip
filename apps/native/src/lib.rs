@@ -34,6 +34,7 @@ mod mouse;
 mod net;
 mod notice_view;
 mod notices;
+mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
@@ -95,6 +96,7 @@ use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::notices::Notices;
+use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
@@ -135,12 +137,14 @@ pub use crate::net::{
 pub use crate::notices::{
     ActionFailedNotice, CheckoutChoice, CheckoutPrompt, TOAST_LIFETIME, Toast, ToastKind, ToastSpec,
 };
+pub use crate::notify::{Notifier, NotifyState};
 pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf,
 };
+pub use crate::sidebar_view::LeafHighlight;
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};
@@ -183,6 +187,9 @@ pub struct RootDeps {
     /// Opens the links Ctrl+click picks in the terminals, on background
     /// threads.
     pub open: Arc<dyn Opener>,
+    /// Shows the OS notifications attention events fire, on background
+    /// threads.
+    pub notify: Arc<dyn Notifier>,
 }
 
 /// Opens the client's window on a live daemon connection, focusing
@@ -438,6 +445,8 @@ pub struct RootView {
     pending_arrangement: Option<layout_chooser::Arrangement>,
     /// Opens the terminals' links, on background threads.
     opener: Arc<dyn Opener>,
+    /// The OS notifications attention events fire.
+    notifications: notify::Notifications,
     /// The confirm open before a link runs a file that runs code.
     run_confirm: Option<RunConfirm>,
     /// The run confirm's keyboard focus.
@@ -499,6 +508,11 @@ impl RootView {
             now: Arc::new(Instant::now),
             quit: Box::new(|cx: &mut App| cx.quit()),
             open: Arc::new(SystemOpener),
+            notify: if offscreen::requested() {
+                Arc::new(SilentNotifier)
+            } else {
+                Arc::new(SystemNotifier)
+            },
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.
@@ -561,6 +575,7 @@ impl RootView {
             now,
             quit,
             open,
+            notify,
         } = deps;
         Self::watch_window(window, cx);
         let view = cx.weak_entity();
@@ -638,6 +653,7 @@ impl RootView {
             chooser_focus: cx.focus_handle(),
             pending_arrangement: None,
             opener: open,
+            notifications: notify::Notifications::new(notify),
             run_confirm: None,
             run_focus: cx.focus_handle(),
             sc: ScModel::default(),
@@ -1158,6 +1174,7 @@ impl RootView {
     }
 
     fn send(&self, msg: ClientMessage) {
+        self.notifications.note_stops([&msg]);
         self.command(NetCommand::Send(Box::new(msg)));
     }
 
@@ -1297,6 +1314,7 @@ impl RootView {
             _ => None,
         };
         self.fold_sidebar(&msg);
+        self.notify_on(&msg, cx);
         if self.on_panel_message(&msg, window, cx) {
             return;
         }

@@ -73,7 +73,8 @@ const EXECUTABLE_EXTENSIONS: &[&str] = &[
 /// spec passes a recorder, since the test platform cannot open anything.
 /// Every method may block, so each runs on a background thread.
 pub trait Opener: Send + Sync {
-    /// Opens `url`, an `http` or `https` URL [`validate_http_url`] passed.
+    /// Opens `url`: an `http` or `https` URL [`validate_http_url`] passed,
+    /// or the `ms-settings:` URI of Windows' notification settings.
     ///
     /// # Errors
     /// When the URL could not be handed to the browser.
