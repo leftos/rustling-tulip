@@ -13,22 +13,25 @@ here being serial, with a log under .tmp/gate-selftest, and prints `ok <case>` o
 every second here (GATE_SAMPLE_SECONDS=1) so the stall and ceiling cases end in seconds. Every case but the slot cases
 and the nesting case runs with GATE_SLOT_HELD=1, so the self-test never waits on, or holds up, the gates other sessions
 are running; the slot cases and the nesting case set GATE_TEST_SLOT_PREFIX to a prefix of this run's own, so their
-gates take slots no other session's gate can hold. The cases that leave a process behind on purpose write its pid to a file, check it by pid and stop it by
-pid afterwards. Each gate started as its own process gets 90 s of wall time, after which the case fails and the gate is
-killed with its tree. A case whose verdict rests on timing and fails while its log says the machine was under 30% free
-prints `skip <case>: machine busy (free <p>%)` instead of failing.
+gates take slots no other session's gate can hold. The cases that leave a process behind on purpose write its pid to a
+file, check it by pid and stop it by pid afterwards. Each gate started as its own process gets 90 s of wall time,
+after which the case fails and the gate is killed with its tree. A case whose verdict rests on timing and fails while
+its log says the machine was under 30% free prints `skip <case>: machine busy (free <p>%)` instead of failing: a kill
+line gives the free share outright, a passed line as the load-adjusted time over the wall time.
 
 The cases run side by side, each set in a pwsh of its own, so a case that changes its session's environment, location
 or priority changes only its own. Most spend their time waiting rather than computing, and each of those runs in a
-process of its own, at most half as many at once as there are logical processors. The self-test runs below normal
+process of its own, at most half as many at once as there are logical processors, scaled down by the share of the
+machine free when the self-test starts (measured over a second) and never fewer than two. The self-test runs below normal
 priority while they do, so the processes it starts, which inherit that, do not starve the commands, which run below
 normal too, while they start. The cases whose command keeps a core busy
 and whose verdict rests on that CPU time (CPU, a grandchild's, a packaged child's, a nested job's, short-lived children's
 and the ceiling) run one after another in a single process once those are done, so that none of them shares the machine
 with another. The slot cases and the nesting case run one after another in a process of their own from the start, since
 they take the machine's slots and wait rather than compute, and the failing-sampler case runs last in that process: its
-gates cannot say how busy the machine was, so its timing gets no skip, and by then the waiting cases have ended. Each process's lines are printed once it and every one
-before it in that order has finished, so the output reads the same from run to run.
+gates cannot say how busy the machine was, so its timing gets no skip, and by then the waiting cases have ended. Each
+process's lines are printed once it and every one before it in that order has finished, so the output reads the same
+from run to run.
 
 The backstop is reached only through GATE_TEST_SAMPLER_FAIL, the gate's one test hook: tripping it with a working
 sampler takes a machine busy enough that five times the ceiling passes in wall time before the ceiling does on the
@@ -274,7 +277,7 @@ function Test-OldServer {
 function Test-OutputProgress {
     $script = '1..8 | ForEach-Object { [Console]::Out.WriteLine($_); Start-Sleep 1 }'
     $run = Test-Run -Case 'output' -Timeout 60 -Stall 3 -Script $script -Expected 0
-    Write-Result 'output counts as progress' $run.Why
+    Write-TimedResult -Case 'output counts as progress' -LogCase 'output' -Why $run.Why
 }
 
 # The busy cases below keep their command busy for 6 s against a 3 s stall window sampled every second: a gate that did
@@ -320,7 +323,7 @@ function Test-OrphanKill {
     $why = Get-RunProblem -Case 'orphan-kill' -Run $result.Run -Expected 124 -Holds "gate: terminated the job's \d+ processes"
     if (-not $why -and $result.Grandchild -eq 0) { $why = 'the grandchild never wrote its pid before the kill' }
     elseif (-not $why -and $alive) { $why = "the grandchild $($result.Grandchild) outlived the kill" }
-    Write-Result 'a kill reaches a grandchild whose parent exited' $why
+    Write-TimedResult -Case 'a kill reaches a grandchild whose parent exited' -LogCase 'orphan-kill' -Why $why
 }
 
 # A silent, CPU-busy pwsh that writes its pid to the file given and ends on its own after the seconds given, so a leak
@@ -364,7 +367,7 @@ function Test-PackagedKill {
     $why = Get-RunProblem -Case 'packaged-kill' -Run $result.Run -Expected 124 -Holds "gate: terminated the job's \d+ processes"
     if (-not $why -and $result.Child -eq 0) { $why = 'the child never wrote its pid before the kill' }
     elseif (-not $why -and $alive) { $why = "the child $($result.Child) outlived the kill" }
-    Write-Result 'a kill reaches the child of a packaged pwsh' $why
+    Write-TimedResult -Case 'a kill reaches the child of a packaged pwsh' -LogCase 'packaged-kill' -Why $why
 }
 
 # The command puts a silent busy child in a job of its own, nested in the gate's: the child's CPU time must count as
@@ -563,7 +566,7 @@ function Test-RelativeLog {
     $why = $null
     if ($status -ne 0) { $why = "exit $status, expected 0; see $sub/relative.log" }
     elseif (-not (Test-Path (Join-Path $sub 'relative.log'))) { $why = "no log at $sub/relative.log" }
-    Write-Result 'a relative -Log after Set-Location is watched where the command writes it' $why
+    Write-TimedResult -Case 'a relative -Log after Set-Location is watched where the command writes it' -LogCase 'relative/relative' -Why $why
 }
 
 # Each usage error, its gate started beside the others'.
@@ -572,7 +575,8 @@ function Test-Usage {
         @{ Case = 'no-log'; Arguments = @('-TimeoutSeconds', '5', '-Slot', 'light', '--', 'pwsh', '-c', 'exit 0'); Names = 'missing -Log' },
         @{ Case = 'no-timeout'; Arguments = @('-Log', "$dir/no-timeout.log", '-Slot', 'light', '--', 'pwsh', '-c', 'exit 0')
             Names = 'missing -TimeoutSeconds' },
-        @{ Case = 'bad-timeout'; Arguments = @('-Log', "$dir/bad-timeout.log", '-TimeoutSeconds', 'abc', '-Slot', 'light', '--', 'pwsh', '-c', 'exit 0')
+        @{ Case = 'bad-timeout'
+            Arguments = @('-Log', "$dir/bad-timeout.log", '-TimeoutSeconds', 'abc', '-Slot', 'light', '--', 'pwsh', '-c', 'exit 0')
             Names = "-TimeoutSeconds must be a whole number above 0, got 'abc'" },
         @{ Case = 'no-slot'; Arguments = @('-Log', "$dir/no-slot.log", '-TimeoutSeconds', '5', '--', 'pwsh', '-c', 'exit 0')
             Names = 'missing -Slot' },
@@ -635,7 +639,8 @@ function Test-SlotOverlap {
 }
 
 # With one slot of the kind, two gates of that kind started together run one after the other. The slot is this run's
-# own, so each gate needs about 5 s of it and 30 s covers both.
+# own, so each gate needs about 5 s of it on an idle machine; the 90 s wait every gate here gets covers both on a machine
+# other sessions keep busy, and costs nothing when the gates finish sooner.
 function Test-SlotKind {
     param([string]$Kind)
     $variable = "GATE_$($Kind.ToUpperInvariant())_SLOTS"
@@ -645,15 +650,15 @@ function Test-SlotKind {
             $arguments = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '60', '-Slot', $Kind, '--', 'pwsh', '-NoProfile', '-c', $script)
             Start-SlotGate -Arguments $arguments -Counts @{ $variable = '1' }
         })
-    $runs = @($started | ForEach-Object { Complete-Pwsh -Started $_ -Seconds 30 })
+    $runs = @($started | ForEach-Object { Complete-Pwsh -Started $_ -Seconds 90 })
     $why = if (@($runs | Where-Object { $_.TimedOut }).Count -gt 0) {
-        "a gate did not finish within 30 s with $variable=1 and $($slotZero[$Kind]) this run's own"
+        "a gate did not finish within 90 s with $variable=1 and $($slotZero[$Kind]) this run's own"
     }
     elseif ($runs[0].Status -ne 0 -or $runs[1].Status -ne 0) {
         "exits $($runs[0].Status) and $($runs[1].Status), expected 0 and 0"
     }
     else { Test-SlotOverlap -Kind $Kind -Cases $cases -Runs $runs }
-    Write-Result "one $Kind slot runs two gates one after the other" $why
+    Write-TimedResult -Case "one $Kind slot runs two gates one after the other" -LogCase $cases[0] -Why $why
 }
 
 function Test-Slot {
@@ -968,9 +973,33 @@ function Invoke-Group {
     }
 }
 
+# The share of the machine's processor time that was idle over one second, read with GetSystemTimes.
+function Measure-FreeShare {
+    if (-not ('SelfTestSystemTimes' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+
+public static class SelfTestSystemTimes
+{
+    [DllImport("kernel32.dll")]
+    public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+}
+'@
+    }
+    $idle, $kernel, $user, $idleAfter, $kernelAfter, $userAfter = 0L, 0L, 0L, 0L, 0L, 0L
+    $null = [SelfTestSystemTimes]::GetSystemTimes([ref]$idle, [ref]$kernel, [ref]$user)
+    Start-Sleep -Seconds 1
+    $null = [SelfTestSystemTimes]::GetSystemTimes([ref]$idleAfter, [ref]$kernelAfter, [ref]$userAfter)
+    $total = ($kernelAfter - $kernel) + ($userAfter - $user)
+    if ($total -le 0) { return 1.0 }
+    return ($idleAfter - $idle) / $total
+}
+
 # Every case: the slot cases in a process of their own throughout, the waiting cases side by side, then the busy cases
 # one after another. This process runs below normal meanwhile, so the case processes and their gates, which inherit
-# its class, compete with the commands on equal terms instead of starving them while they start.
+# its class, compete with the commands on equal terms instead of starving them while they start. The waiting cases run
+# at most half as many at once as there are logical processors, scaled down by the share of the machine free at the
+# start, and never fewer than two: on a machine other sessions already keep busy, more at once only slows each.
 function Invoke-All {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Lowers only this run''s own priority, and puts it back before it returns.')]
@@ -979,8 +1008,9 @@ function Invoke-All {
     $was = $self.PriorityClass
     $self.PriorityClass = 'BelowNormal'
     try {
+        $limit = [math]::Max(2, [math]::Floor([Environment]::ProcessorCount / 2 * (Measure-FreeShare)))
         $slots = Start-CaseProcess ($slotCases -join ',')
-        Invoke-Group -Groups $waitingCases -Limit ([math]::Max(2, [Environment]::ProcessorCount / 2))
+        Invoke-Group -Groups $waitingCases -Limit $limit
         Invoke-Group -Groups @($cpuCases -join ',') -Limit 1
         Write-CaseOutput $slots
     }

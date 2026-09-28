@@ -123,7 +123,7 @@ through cmd.exe /d /s /c.
 
 The options are read by hand out of $args rather than declared in a param block: a declared block sends this script's
 own arguments through PowerShell's parameter binder, which reads the bare -- of
-`pwsh tools/gate.ps1 -Log x -TimeoutSeconds 5 -- dotnet test -c Release` as a parameter name and stops with "the
+`pwsh tools/gate.ps1 -Log x -TimeoutSeconds 5 -Slot heavy -- dotnet test -c Release` as a parameter name and stops with "the
 parameter name '' is ambiguous" (PowerShell 7.5, 2026-09-14). A script with no param block is handed every word
 untouched, separator and all, which is what lets the command keep its own -c. A caller in a session of its own
 (`& tools/gate.ps1 ... -- dotnet build`) has the separator eaten by the parser before the script ever sees it, so the
@@ -1014,7 +1014,7 @@ function Get-NativeType {
     return $typeName -as [type]
 }
 
-# The wrapper's own commentary goes to standard error, as gate.sh writes it, so a caller reading the command's output
+# The wrapper's own commentary goes to standard error, so a caller reading the command's output
 # from the screen is not handed the gate's lines in the middle of it.
 function Write-Gate {
     param([string]$Line)
