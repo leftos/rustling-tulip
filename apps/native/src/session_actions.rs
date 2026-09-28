@@ -395,7 +395,7 @@ impl Duplicates {
     /// `new_id` where the original was (every pane that showed it, or a new
     /// tab when none did) and then discard the original. The discard goes
     /// last so the daemon has rebound the panes before it closes the
-    /// original's, as `App.tsx`'s restart handler orders it.
+    /// original's.
     pub(crate) fn place(
         &mut self,
         request_id: &str,

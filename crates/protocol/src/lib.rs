@@ -3450,9 +3450,9 @@ impl InboundClientMessage {
 }
 
 /// Parse-time wrapper around [`DaemonMessage`]; symmetric to
-/// [`InboundClientMessage`]. Used by Rust clients (the Tauri side, tests)
-/// that consume daemon output. The TS client mirrors the same pattern in
-/// its message dispatch.
+/// [`InboundClientMessage`]. Used by clients (the native client, tests) that
+/// consume daemon output, so a message type they do not know is logged and
+/// dropped instead of failing the connection.
 #[derive(Debug, Clone)]
 pub enum InboundDaemonMessage {
     /// Boxed because `DaemonMessage` is a wide tagged enum (~264 bytes,
@@ -5628,7 +5628,7 @@ mod tests {
             );
         }
 
-        // The wire shape the TS mirror and the clients read.
+        // The wire shape the clients read.
         let oversized: DaemonMessage = serde_json::from_str(
             r#"{"type":"file_snapshot","id":"g1","repo_id":"r1","path":"a.bin","against":null,"old":"","new":"","language":"plaintext","unavailable":{"kind":"too_large","bytes":3145728,"limit":2097152}}"#,
         )
@@ -5936,5 +5936,137 @@ mod tests {
         );
         let json = serde_json::to_value(&req).expect("encode");
         assert!(json.get("resume_conversation").is_none(), "{json}");
+    }
+}
+
+/// Protocol 22 is still in `supported` for installed clients that speak only
+/// it. The fixtures are messages a v22 client may send or read: the minimal
+/// shapes (every optional field left out, a scalar `protocol_version` on
+/// `Hello`) and the fuller ones the v22 Tauri client sent (`Hello` with
+/// `protocol_versions` and `client_id`, a spawn with a `request_id`). A change
+/// that stops decoding them, or a `supported` list that drops 22, fails here.
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
+mod v22_compat {
+    use super::*;
+
+    const V22_SNAPSHOT: &str = r#"{"id":"s1","label":"repo","kind":"single","members":[{"repo_id":"r1","repo_name":"repo","branch":"main","worktree_path":"D:/repo"}],"status":"idle","mode":"interactive","started_at":"2026-01-01T00:00:00Z","exit_code":null,"metrics":{"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"last_activity_at":null},"recent_actions":[],"agent":"claude"}"#;
+
+    #[test]
+    fn v22_hello_decodes() {
+        let hello: ClientMessage =
+            serde_json::from_str(r#"{"type":"hello","protocol_version":22,"auth_token":"tok"}"#)
+                .expect("a v22 hello decodes");
+        assert!(
+            matches!(
+                &hello,
+                ClientMessage::Hello { protocol_version: 22, protocol_versions, auth_token, client_id: None, client_name: None }
+                    if protocol_versions.is_empty() && auth_token == "tok"
+            ),
+            "{hello:?}"
+        );
+    }
+
+    #[test]
+    fn v22_spawn_session_decodes() {
+        let spawn: ClientMessage = serde_json::from_str(
+            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null}"#,
+        )
+        .expect("a v22 spawn_session decodes");
+        assert!(
+            matches!(
+                &spawn,
+                ClientMessage::SpawnSession(SpawnRequest {
+                    target: SpawnTarget::Single { repo_id, .. },
+                    mode: SessionMode::Interactive,
+                    request_id: None,
+                    ..
+                }) if repo_id == "r1"
+            ),
+            "{spawn:?}"
+        );
+    }
+
+    #[test]
+    fn v22_hello_with_versions_decodes() {
+        let hello: ClientMessage = serde_json::from_str(
+            r#"{"type":"hello","protocol_version":22,"protocol_versions":[22],"auth_token":"tok","client_id":"c1"}"#,
+        )
+        .expect("a v22 hello with its version list decodes");
+        assert!(
+            matches!(
+                &hello,
+                ClientMessage::Hello { protocol_version: 22, protocol_versions, client_id: Some(id), .. }
+                    if protocol_versions == &[22] && id == "c1"
+            ),
+            "{hello:?}"
+        );
+    }
+
+    #[test]
+    fn v22_spawn_with_request_id_decodes() {
+        let spawn: ClientMessage = serde_json::from_str(
+            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null,"request_id":"q1"}"#,
+        )
+        .expect("a v22 spawn_session with a request_id decodes");
+        assert!(
+            matches!(
+                &spawn,
+                ClientMessage::SpawnSession(SpawnRequest { request_id: Some(id), .. }) if id == "q1"
+            ),
+            "{spawn:?}"
+        );
+    }
+
+    #[test]
+    fn v22_load_scrollback_decodes() {
+        let load: ClientMessage =
+            serde_json::from_str(r#"{"type":"load_scrollback","session_id":"s1"}"#)
+                .expect("a v22 load_scrollback decodes");
+        assert!(
+            matches!(
+                &load,
+                ClientMessage::LoadScrollback { session_id, request_id: None } if session_id == "s1"
+            ),
+            "{load:?}"
+        );
+    }
+
+    #[test]
+    fn v22_session_updated_decodes() {
+        let updated: DaemonMessage = serde_json::from_str(&format!(
+            r#"{{"type":"session_updated","session":{V22_SNAPSHOT}}}"#
+        ))
+        .expect("a v22 session_updated decodes");
+        assert!(
+            matches!(
+                &updated,
+                DaemonMessage::SessionUpdated { session, request_id: None } if session.id == "s1"
+            ),
+            "{updated:?}"
+        );
+
+        let listed: DaemonMessage = serde_json::from_str(&format!(
+            r#"{{"type":"sessions","sessions":[{V22_SNAPSHOT}]}}"#
+        ))
+        .expect("a v22 sessions list decodes");
+        assert!(
+            matches!(
+                &listed,
+                DaemonMessage::Sessions { sessions } if sessions.len() == 1 && sessions[0].id == "s1"
+            ),
+            "{listed:?}"
+        );
+    }
+
+    #[test]
+    fn supported_versions_keep_22() {
+        assert!(
+            SUPPORTED_PROTOCOL_VERSIONS.contains(&22),
+            "installed v22 clients still connect; supported = {SUPPORTED_PROTOCOL_VERSIONS:?}"
+        );
     }
 }

@@ -1,11 +1,11 @@
 ---
 name: add-protocol-message
-description: Add a new message to the rustling-tulip wire protocol. Walks the user through the 4-file pattern (Rust enum -> daemon handler -> TS type -> TS dispatcher) and enforces the project's invariants (snake_case tags, data_b64 for binary, additive-versus-breaking change rules).
+description: Add a new message to the rustling-tulip wire protocol. Walks the user through the 3-step pattern (Rust enum -> daemon handler -> native client handling) and enforces the project's invariants (snake_case tags, data_b64 for binary, additive-versus-breaking change rules, protocol 22 kept decodable for the installed Tauri app).
 ---
 
 # Add a protocol message
 
-Use this skill when the user wants to add a new daemon<->client message, or extend an existing message struct. It codifies the project's hand-mirrored protocol pattern so nothing is missed.
+Use this skill when the user wants to add a new daemon<->client message, or extend an existing message struct. It codifies the project's protocol pattern so nothing is missed.
 
 ## Interview the user first
 
@@ -30,7 +30,9 @@ These come from `CLAUDE.md` — re-state them so the user is making the call del
 
 When in doubt, treat it as breaking. If the user picks "bump", also remind them to append the new version to `SUPPORTED_PROTOCOL_VERSIONS` so older clients can still negotiate.
 
-## The 4-file edit pattern
+The daemon keeps protocol 22 in `supported` while the installed Tauri app (the `tauri` branch) is in use, so a change must leave every v22 message decodable. The `v22_compat` tests in `crates/protocol` fail if it does not.
+
+## The 3-step edit pattern
 
 Edit in this order. Do not skip the order — the Rust enum is the source of truth and downstream changes depend on the field names you chose.
 
@@ -66,45 +68,24 @@ Guardrails:
 - Use `tracing::{info, warn, error, debug}` for logging, never `println!`.
 - Return errors as `DaemonMessage::Error { message, .. }` on the same connection — never panic, never `unwrap()`.
 
-### 3. `apps/tauri-app/src/types.ts`
+### 3. Native client handling (`apps/native/src`)
 
-Mirror the variant in the `ClientMessage` or `DaemonMessage` union type. The `type` tag is the snake_case form of the Rust variant name. Field names stay snake_case (the frontend does not camelCase wire shapes — verify against existing variants if uncertain).
+The native client uses the Rust types from `crates/protocol` directly; there is no mirror to update.
 
-```typescript
-export type ClientMessage =
-  // ... existing variants ...
-  | {
-      type: "your_new_message";
-      repo_id: string;
-      force: boolean;
-    };
-```
-
-Mapping rules:
-- `String` -> `string`
-- `Option<T>` -> `T | null` (never `T | undefined`)
-- `Vec<T>` -> `T[]`
-- `bool` -> `boolean`
-- `u32`/`u64`/`i32`/`f64` -> `number`
-- `data_b64: String` -> `data_b64: string` and add a `// base64-encoded` comment
-
-### 4. `apps/tauri-app/src/api.ts`
-
-If the new message is a `DaemonMessage`, add a case to the receive dispatcher (`handleMessage` or equivalent) that does something with it — either updates state, surfaces a toast, or logs and drops. A `DaemonMessage` variant that has no handler is a silent bug.
-
-If the new message is a `ClientMessage`, add a typed helper that constructs and sends it (look at `requestSpawnConfig`, `loadScrollback`, etc. for the pattern). Helpers go alphabetically near related helpers.
+- A `DaemonMessage` variant reaches the view through `net.rs` (`on_daemon_message` emits `NetEvent::Message`) and is dispatched in `RootView::on_message` (`apps/native/src/lib.rs`). Add the arm there that updates state or surfaces it. A variant the client should act on but has no arm for is silently ignored.
+- A `ClientMessage` variant is sent from the view with `self.send(ClientMessage::YourNewMessage { .. })`, which forwards it to the network thread as `NetCommand::Send`.
+- Add a UI spec (`apps/native/tests/ui_*.rs`) that drives the round trip against the scripted fake daemon.
 
 ## After the edits
 
-1. Run `cargo build` to confirm the Rust side compiles.
-2. Run `pnpm typecheck` in `apps/tauri-app/` to confirm the TS side compiles.
-3. Invoke the `protocol-sync-checker` subagent to verify there are no orphan variants, missing dispatcher cases, or field-name typos. The subagent reads both sides and reports drift with file:line precision.
-4. Only after the subagent gives a clean report, suggest the user run `cargo clippy --all-targets -- -D warnings` and `pnpm tauri dev` to smoke-test the round trip.
+1. Run `cargo build` to confirm the workspace compiles.
+2. Run `cargo test -p protocol v22_compat` to confirm the change keeps protocol 22 decodable.
+3. Run `cargo test -p protocol` and the native client's UI spec that covers the message (`cargo test -p rustling-tulip-native --test ui_<name>`).
+4. Run `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Common mistakes to catch
 
 - Forgetting the `#[serde(default)]` on a new optional field that was claimed as additive — without it, older peers will fail to decode.
-- Using `camelCase` field names in TS to match local conventions. The wire is snake_case on both sides.
-- Adding a `DaemonMessage` variant but no handler in `api.ts` — the message arrives and is silently dropped.
-- Writing `T | undefined` instead of `T | null` in the TS mirror. JSON.parse will produce `null` for `Option::None`, and `undefined` will not type-narrow.
+- Adding a `DaemonMessage` variant but no arm in the native client's `on_message` — the message arrives and is silently dropped.
+- Changing a field or variant that a v22 message uses: the installed Tauri app still speaks 22, and `v22_compat` catches it.
 - Treating a field-rename as additive. Rename is always breaking — bump the version.

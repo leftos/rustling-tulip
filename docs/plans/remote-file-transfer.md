@@ -14,7 +14,7 @@ The daemon and protocol half (FT.1) has landed.
 
 ## Rulings
 
-- **Client:** native client only. The frozen Tauri app does not get this feature, and there it keeps showing its "not available remotely" toast.
+- **Client:** native client only. The Tauri app (on the `tauri` branch) does not get this feature, and there it keeps showing its "not available remotely" toast.
 - **Viewing:** the remote client saves the file to a per-host download folder, then opens it the way a local Ctrl-click does: `code -g path:line:col` when the link has a line, otherwise the OS default handler.
 - **Scope:** only paths inside a registered repo root or one of its session worktrees. The daemon canonicalizes the path and rejects `..` segments, absolute paths that land elsewhere, and symlinks that point outside.
 - **Size:** no cap. The file streams in chunks so PTY traffic on the same socket keeps flowing.

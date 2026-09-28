@@ -112,6 +112,8 @@ tracer over the socket.
 
 ## 3. Autostart on login
 
+Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `main`; it lives on the `tauri` branch (tag `tauri-last`), and the native client recovers `autostart.rs` from the tag in its Phase 6. The `apps/tauri-app/...` paths, frontend files and `pnpm tauri` commands in this plan refer to that branch.
+
 - `apps/tauri-app/src-tauri/src/autostart.rs` — Windows arm (HKCU `Run` via
   `winreg`, lines ~12–49); non-Windows `get_autostart` returns `false` (~54–62)
   and `set_autostart` errors "unsupported" (~67–78). `winreg` is already

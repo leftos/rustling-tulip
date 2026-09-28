@@ -203,12 +203,7 @@ Per item:
 1. **History, part 1 (daemon + protocol types):** `history.rs` storage, end-reason capture on every end path, retention, and `--session-id` on Claude spawns.
 2. **History, part 2:** `transcripts.rs` matching, the tracer-log importer, `ListSessionHistory` / `SessionHistory`.
 3. **Recovery:** `RecoverSessions` with the three `RecoverAs` paths, `resume_conversation` plumbing, Standalone Claude target.
-4. **Tauri app first** (an exception to the Tauri freeze, so recovery is usable during the native buildout):
-   - TS mirror of the new messages and types in `apps/tauri-app/src/types.ts` and `api.ts`.
-   - A "Recover sessions" button with the unexpected-end badge in the sidebar header, near the existing "Resume all".
-   - The same dialog as Design 6, in React.
-   - A Vitest or e2e spec where the suite supports it.
-   - Then ship it with `.\rt.ps1 installer`.
+4. **Tauri app first** (done): the TS mirror, a "Recover sessions" button with its badge and the Design 6 dialog in React shipped in the Tauri app, which now lives on the `tauri` branch; `main` has no TS mirror, so this step does not apply there.
 5. **Native client:** rail button, badge and dialog, as in Design 6.
 6. Docs and plan tick. Then an e2e run through `.\rt.ps1 native-e2e` only.
 

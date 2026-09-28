@@ -5,9 +5,6 @@ all-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-# Only flag unmaintained crates we directly depend on. The gtk-rs, unic-*, and
-# proc-macro-error advisories all come in transitively through tauri/wry, which
-# we can't upgrade away from — flagging them is noise we can't action.
 unmaintained = "workspace"
 
 [licenses]
@@ -29,10 +26,6 @@ allow = [
     # webpki-roots (via reqwest's rustls-tls) ships the Mozilla CA bundle under
     # the Community Data License Agreement — Permissive 2.0.
     "CDLA-Permissive-2.0",
-    # arboard's Windows clipboard backend (clipboard-win, error-code) is under
-    # the Boost Software License — permissive, OSI-approved, no attribution
-    # requirement (strictly more permissive than the MIT/BSD entries above).
-    "BSL-1.0",
     # libfuzzer-sys (via gpui → image → ravif → rav1e, the native client's image
     # stack) bundles LLVM's libFuzzer under the University of Illinois/NCSA
     # licence — permissive, OSI-approved, BSD-3-style attribution only.

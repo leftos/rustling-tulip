@@ -191,7 +191,8 @@ fn locate_tracer_template_candidate(
     current_exe: &Path,
     installed_candidate: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
-    // Preferred: the directory Tauri's supervisor told us holds the original
+    // Preferred: the directory the client's supervisor (`daemon-client`)
+    // told us holds the original
     // templates. Required when the daemon is running from
     // `<binaries_dir>/rustling-tulipd-<hash>.exe` (the post-cache layout),
     // because the tracer template lives in the install dir / target dir, not
@@ -225,9 +226,10 @@ fn locate_tracer_template_candidate(
     }
 
     // Installed-app fallback: a compatible daemon can survive an app reinstall
-    // and be reused without inheriting the current supervisor's template-dir
-    // environment. Current-user NSIS installs place external bins beside the
-    // app under LOCALAPPDATA\rustling-tulip, so the daemon can still recover.
+    // and be reused without inheriting the template-dir environment
+    // `daemon-client` set when it spawned the daemon. Current-user NSIS
+    // installs place the daemon and tracer beside the app under
+    // LOCALAPPDATA\rustling-tulip, so the daemon can still recover.
     if let Some(candidate) = installed_candidate {
         if candidate.is_file() {
             return Ok(candidate);

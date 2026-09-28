@@ -1,6 +1,6 @@
 # rustling-tulip
 
-Multi-repo Claude Code wrapper. Tauri desktop app + long-lived Rust daemon that orchestrates many parallel `claude` sessions across repos and across coordinated multi-repo "workspaces".
+Multi-repo Claude Code wrapper. Native desktop client + long-lived Rust daemon that orchestrates many parallel `claude` sessions across repos and across coordinated multi-repo "workspaces".
 
 ## Layout
 
@@ -10,8 +10,9 @@ crates/
   daemon/       - long-lived background daemon (WS server, PTY pool, registry)
   daemon-client/ - client-side daemon supervision shared by the clients
 apps/
-  native/       - native desktop client (GPUI + alacritty_terminal), replacing tauri-app
-  tauri-app/    - desktop client (Rust src-tauri + React + xterm.js)
+  native/       - native desktop client (GPUI + alacritty_terminal)
+tools/
+  e2e/fake-claude/ - fake `claude` CLI shim for the native e2e tier
 docs/
   plans/        - design docs and milestone plans
 ```
@@ -19,18 +20,18 @@ docs/
 ## Build
 
 ```powershell
-# daemon + protocol
-cargo build
+# daemon + tracer + native client
+.\rt.ps1 build
 
-# Tauri app
-cd apps/tauri-app
-pnpm install
-pnpm tauri dev
+# build, then run the native client
+.\rt.ps1
 ```
+
+`.\rt.ps1 help` lists the other commands.
 
 ## Run
 
-The Tauri app auto-starts the daemon if it isn't already running. Daemon listens on a random loopback port; connection details are written to `%APPDATA%\leftos\rustling-tulip\config\daemon.json` (override the directory with `RUSTLING_TULIP_CONFIG_DIR`).
+The native client auto-starts the daemon if it isn't already running. Daemon listens on a random loopback port; connection details are written to `%APPDATA%\leftos\rustling-tulip\config\daemon.json` (override the directory with `RUSTLING_TULIP_CONFIG_DIR`).
 
 ## Phase status
 
@@ -50,9 +51,9 @@ See `docs/plan.md` for the full plan and `docs/plans/` for follow-up designs.
 
 ## Glossary
 
-- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native` that replaces the Tauri app; see `docs/plans/native-client.md`.
-- **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file; the native client reaches parity when it is all ticked.
-- **Tauri freeze**: the Tauri app takes bug fixes only while the native client catches up; new features go to the native client.
+- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/plans/native-client.md`.
+- **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
+- **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.

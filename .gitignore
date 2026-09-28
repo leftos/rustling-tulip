@@ -2,17 +2,6 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
-# Node / pnpm
-node_modules/
-.pnpm-store/
-dist/
-dist-ssr/
-*.tsbuildinfo
-
-# Tauri
-apps/tauri-app/src-tauri/gen/
-apps/tauri-app/src-tauri/binaries/
-
 # Editor
 .vs/
 .vscode/*

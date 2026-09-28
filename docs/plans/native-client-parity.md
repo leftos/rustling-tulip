@@ -1,6 +1,6 @@
 # Native client: feature parity checklist
 
-Every user-visible feature of the Tauri client, traced to the code that implements it, so the native client can reach parity area by area. Frontend paths are relative to `apps/tauri-app/src/`; host paths start with `src-tauri/src/`. **(hard)** marks items with no ready-made native equivalent. Inventory taken 2026-09-23 (148 items); parent plan: [native-client.md](./native-client.md).
+Every user-visible feature of the Tauri client, traced to the code that implements it, so the native client can reach parity area by area. Frontend paths are relative to `apps/tauri-app/src/`; host paths start with `src-tauri/src/`. All these paths refer to the `tauri-last` tag (the Tauri app is no longer on `main`). **(hard)** marks items with no ready-made native equivalent. Inventory taken 2026-09-23 (148 items); parent plan: [native-client.md](./native-client.md).
 
 ## Riskiest for the port
 

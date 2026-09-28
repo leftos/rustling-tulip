@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
-use daemon_client::{ClientIdentity, RetirePolicy};
+use daemon_client::ClientIdentity;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::{SinkExt as _, StreamExt as _};
 use protocol::{ClientMessage, DaemonHandshake, DaemonMessage, InboundDaemonMessage};
@@ -149,10 +149,7 @@ pub fn spawn_with(
 }
 
 fn ensure_daemon() -> EnsureFuture {
-    Box::pin(daemon_client::ensure_running(
-        RetirePolicy::ReuseCompatible,
-        NATIVE_PROTOCOL_VERSIONS,
-    ))
+    Box::pin(daemon_client::ensure_running(NATIVE_PROTOCOL_VERSIONS))
 }
 
 /// The network thread's body: build the runtime and run the loop on it until

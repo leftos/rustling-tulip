@@ -14,36 +14,32 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 - Siblings: none.
 - Pre-loop hooks: none.
 - Finished-item convention: **tick the line** (`- [x]`), never delete it. Tick the parity lines the item delivered in `native-client-parity.md` in the same commit. A finished subplan is `git mv`'d to `docs/plans/completed/` in the shipping commit; follow-ups left over from it go into a new plan, never back into the moved one.
-- Tracker: `gh issue list --repo leftos/rustling-tulip --state open --json number,title`. No triage skill; place issues by the step-0 rule. A bug in the Tauri app is still taken (it is frozen to bug fixes, not closed).
+- Tracker: `gh issue list --repo leftos/rustling-tulip --state open --json number,title`. No triage skill; place issues by the step-0 rule. A bug in the Tauri app is fixed on the `tauri` branch, not `main`; a daemon fix lands on `main` first and is cherry-picked there.
 - Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client its root view and app-state module (whatever P1.1 names them; P1.4–P1.8 all mount into them).
 
 ## Rulings every brief carries
 
-- **Tauri freeze**: `apps/tauri-app` takes bug fixes only. A new feature lands in the native client alone. An item that needs a protocol change still updates the TS mirror (`apps/tauri-app/src/types.ts`, `api.ts`), because the `protocol-mirror` prek hook and the running Tauri app both depend on it until cutover.
-- **Protocol:** additive changes only, the `add-protocol-message` skill's 4-file pattern, no `protocol-version.json` bump for additive changes (CLAUDE.md "When to bump").
+- **Protocol:** additive changes only, the `add-protocol-message` skill's 3-step pattern, no `protocol-version.json` bump for additive changes (CLAUDE.md "When to bump").
+- **Protocol 22 stays decodable** while the installed Tauri app is in use: a protocol change keeps every v22 message decoding, proved by `cargo test -p protocol v22_compat`.
 - **Testable core, thin view:** state that a feature adds (sidebar tree, split tree, tab list, key mapping, span building) lives in plain-Rust modules with unit tests; the GPUI view only renders it and forwards events. The proving command is that module's `cargo test -p <crate> <filter>`, red first.
 
 ## Agents and gates
 
-- Explore: `Explore`. Protocol drift: `protocol-sync-checker` after any `crates/protocol` change. Rust design second opinion: `oracle`.
-- Reviewers: `code-review` for every item; `protocol-sync-checker` as well when `crates/protocol` changed.
+- Explore: `Explore`. Rust design second opinion: `oracle`.
+- Reviewers: `code-review` for every item.
 - Gates, each wrapped as `cmd > .tmp/<name>.log 2>&1; rc=$?; tail -n 20 .tmp/<name>.log; (exit $rc)` from the worktree root:
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (what `.\rt.ps1 clippy` and prek run)
-  - `cargo test -p <crate>` for each touched crate
+  - `cargo test -p <crate>` for each touched crate (for `crates/protocol` this includes `v22_compat`)
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed
-  - `pnpm --dir apps/tauri-app typecheck` when `apps/tauri-app/src` changed
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).
 - Parent-side gate: `git -C <wt> status --short` in the worktree and in the main checkout.
 
 ## Traps
 
-- **Probing against the user's live daemon.** Running the native client (or any test daemon) with default dirs attaches to the user's real sessions: the client's `Resize` changes their PTYs, and a probe daemon's startup reap kills every `rt-tracer*` under its binaries dir that its own config dir doesn't reference, so one started with only `RUSTLING_TULIP_CONFIG_DIR` isolated kills the installed app's live sessions machine-wide. A spawned daemon sets all of `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to `.tmp/` dirs (as `tools/e2e/wdio.conf.ts` does); a client run against the real daemon attaches only to a throwaway plain-shell session the brief names.
+- **Probing against the user's live daemon.** Running the native client (or any test daemon) with default dirs attaches to the user's real sessions: the client's `Resize` changes their PTYs, and a probe daemon's startup reap kills every `rt-tracer*` under its binaries dir that its own config dir doesn't reference, so one started with only `RUSTLING_TULIP_CONFIG_DIR` isolated kills the installed app's live sessions machine-wide. A spawned daemon sets all of `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to `.tmp/` dirs (as `rt.ps1 native-e2e` does); a client run against the real daemon attaches only to a throwaway plain-shell session the brief names.
 - **GPUI in the workspace makes cold builds heavy.** Once `apps/native` is a member, `cargo clippy --workspace` and `cargo test --workspace` compile GPUI; a fresh worktree's first build does it from scratch. Each worktree keeps its own default `target/` (13–37 GB): a shared `CARGO_TARGET_DIR` mixed up two trees' `protocol` builds. The in-tree `target/` goes when the landing step removes the worktree.
-- **A fresh worktree can't pass workspace clippy (or the prek clippy hook) until the Tauri build inputs exist.** `tauri-build` fails with `resource path binaries\rustling-tulipd-x86_64-pc-windows-msvc.exe doesn't exist` until the daemon and tracer are staged as sidecars, and it also needs an `apps/tauri-app/dist/` directory. Before the first gate in a new worktree, run `pwsh -WorkingDirectory <worktree> -File rt.ps1 build` (a bare `.\rt.ps1 build` from an agent's shell runs in the main checkout, builds main and fails with "Daemon binary missing" for the worktree) (it builds `daemon` + `tracer` and stages them into `apps/tauri-app/src-tauri/binaries/`) and `New-Item -ItemType Directory -Force apps/tauri-app/dist`. Both paths are gitignored, so nothing lands in the diff. Every brief carries this as its setup step. `rc.exe` was not needed on this machine (not on PATH; clippy passed in five worktrees without it).
 - **No `git stash`** to isolate edits, since parallel agents share the tree: show an error is pre-existing with `git diff -- <file>` instead.
-- **Stale sidecar binaries:** `.\rt.ps1 installer` copies only when the target is older than the source; delete a suspicious binary and rebuild rather than trusting "Finished".
-- **E2E (Tauri bug fixes only):** run one spec with `pnpm exec wdio run wdio.conf.ts --spec <file>` from `tools/e2e`; a full parallel run flakes about one spec per run, so rerun a failure alone; `pnpm run doctor` (not `pnpm doctor`) checks msedgedriver against WebView2.
 
 ## Concurrency
 
@@ -58,7 +54,7 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 |---|---|
 | Native feature delivered | tick the item in `docs/plans/native-client.md` and the parity lines it covered in `docs/plans/native-client-parity.md` |
 | A crate, binary, `rt.ps1` verb, env var or on-disk path added, moved or removed | `CLAUDE.md` (Project shape, Common commands, Environment variables, Where things live), `README.md` Layout / Build |
-| Wire protocol | `crates/protocol/src/lib.rs` doc comments, the TS mirror (until cutover), CLAUDE.md "Wire-protocol gotchas" when a rule changes |
+| Wire protocol | `crates/protocol/src/lib.rs` doc comments, CLAUDE.md "Wire-protocol gotchas" when a rule changes |
 | Tracer ABI | `docs/tracer-abi.md` |
 | A term used in a project-specific sense (a new plan word, a phase name) | `README.md` Glossary |
 | A plan finished | `git mv` to `docs/plans/completed/`, one-line entry under "Shipped" in `docs/plan.md` |

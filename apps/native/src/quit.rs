@@ -1,9 +1,9 @@
 //! The quit flow's rules: which sessions count as active, what the exit
 //! dialog offers and says, the branch-fate walk over the worktree sessions
 //! before a "remove worktrees" quit, the messages that quit sends, and the
-//! wait for the daemon's answer. Mirrors the Tauri app's
-//! `ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts` and the exit half of
-//! `App.tsx`.
+//! wait for the daemon's answer. Follows the Tauri app's exit confirmation
+//! and worktree queue (`ExitConfirmDialog.tsx`, `utils/exitWorktreeQueue.ts`
+//! and the exit half of `App.tsx` at the `tauri-last` tag).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

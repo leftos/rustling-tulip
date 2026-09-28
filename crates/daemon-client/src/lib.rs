@@ -1,10 +1,9 @@
 //! Daemon supervision shared by the rustling-tulip clients.
 //!
 //! A client calls [`ensure_running`] to get the handshake of a healthy daemon
-//! it can speak to: it reuses a running `rustling-tulipd`, retires one whose
-//! protocol (or, under [`RetirePolicy::RetireStale`], binary) is out of date,
-//! or spawns a fresh one from the
-//! content-addressed binary cache. The crate also resolves the per-user files
+//! it can speak to: it reuses a running `rustling-tulipd` whose protocol it
+//! speaks, retires one whose protocol it does not, or spawns a fresh one from
+//! the content-addressed binary cache. The crate also resolves the per-user files
 //! every client shares with the daemon (the config dir, `daemon.json`, the
 //! client-identity file) and force-stops the daemon ([`stop`]).
 //!
@@ -13,7 +12,7 @@
 
 mod supervisor;
 
-pub use supervisor::{RetirePolicy, ensure_running, locate_daemon_binary};
+pub use supervisor::ensure_running;
 
 use anyhow::{Context as _, anyhow, bail};
 use protocol::DaemonHandshake;

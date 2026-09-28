@@ -9,12 +9,12 @@
 # There is no CI in this repo, so these hooks are the only automated gates.
 # They are split by cost:
 #
-#   pre-commit — hygiene plus the lint gates (fmt, clippy, tsc, oxlint), so
-#                every commit is warning-free without a per-edit hook adding
-#                latency inside the editing loop.
-#   pre-push   — the test suites (cargo test, vitest) and the protocol-mirror
-#                check. Slower, but they run per push rather than per commit,
-#                and this is the last point before code leaves the machine.
+#   pre-commit — hygiene plus the lint gates (fmt, clippy), so every commit
+#                is warning-free without a per-edit hook adding latency inside
+#                the editing loop.
+#   pre-push   — the test suite (cargo test). Slower, but it runs per push
+#                rather than per commit, and this is the last point before
+#                code leaves the machine.
 #
 # Anything needing the network (`cargo deny check` wants the advisory DB) is
 # deliberately left out: a hook that fails on a plane is a hook that gets
@@ -26,12 +26,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Rust and TS sources only. Markdown is excluded because two trailing
+      # Sources and config only. Markdown is excluded because two trailing
       # spaces are a hard line break, and the plan docs rely on it.
       - id: trailing-whitespace
-        types_or: [rust, ts, tsx, javascript, json, yaml, toml, css]
+        types_or: [rust, javascript, json, yaml, toml]
       - id: end-of-file-fixer
-        types_or: [rust, ts, tsx, javascript, json, yaml, toml, css]
+        types_or: [rust, javascript, json, yaml, toml]
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: check-json
@@ -41,11 +41,11 @@ repos:
       # lives in the config dir, not the repo, but the cost of being wrong here
       # is a leaked key in git history.
       - id: detect-private-key
-      # Cargo.lock, pnpm-lock.yaml and the native client's bundled fonts are
-      # legitimately large; nothing else should be.
+      # Cargo.lock and the native client's bundled fonts are legitimately
+      # large; nothing else should be.
       - id: check-added-large-files
         args: [--maxkb=512]
-        exclude: '^(Cargo\.lock|.*/pnpm-lock\.yaml|apps/native/assets/fonts/.*\.ttf)$'
+        exclude: '^(Cargo\.lock|apps/native/assets/fonts/.*\.ttf)$'
 
   - repo: local
     hooks:
@@ -72,44 +72,5 @@ repos:
         entry: cargo test --workspace
         language: system
         types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
-
-      # `pnpm --dir` instead of a `cd`, so the hook works the same from any
-      # shell on any platform.
-      - id: tsc
-        name: tsc --noEmit
-        entry: pnpm --dir apps/tauri-app typecheck
-        language: system
-        files: ^apps/tauri-app/(src/|.*\.json$|.*\.ts$)
-        pass_filenames: false
-        stages: [pre-commit]
-
-      - id: oxlint
-        name: oxlint
-        entry: pnpm --dir apps/tauri-app exec oxlint src
-        language: system
-        files: ^apps/tauri-app/src/.*\.(ts|tsx)$
-        pass_filenames: false
-        stages: [pre-commit]
-
-      - id: vitest
-        name: vitest run
-        entry: pnpm --dir apps/tauri-app test
-        language: system
-        files: ^apps/tauri-app/src/
-        pass_filenames: false
-        stages: [pre-push]
-
-      # The TS mirrors of the Rust wire enums are hand-maintained with no
-      # codegen (see CLAUDE.md), so drift is silent until something
-      # deserialises wrong at runtime. Cheap enough to check on every push.
-      - id: protocol-mirror
-        name: protocol Rust/TS mirror in sync
-        # Through uv: on Windows a bare `python3` resolves to the Microsoft
-        # Store installer stub and the hook dies with exit 9009 unchecked.
-        entry: uv run --no-project python scripts/check_protocol_mirror.py
-        language: system
-        files: ^(crates/protocol/src/lib\.rs|apps/tauri-app/src/(types|api)\.ts|apps/tauri-app/src/App\.tsx)$
         pass_filenames: false
         stages: [pre-push]

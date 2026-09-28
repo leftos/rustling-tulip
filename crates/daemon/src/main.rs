@@ -180,7 +180,8 @@ fn sweep_binary_cache(
 ) {
     let mut in_use: HashSet<PathBuf> = HashSet::new();
 
-    // Pin the daemon's own running exe. Tauri spawned us from a cached copy
+    // Pin the daemon's own running exe. The client's supervisor
+    // (`daemon-client`) spawned us from a cached copy
     // (`<binaries_dir>/rustling-tulipd-<hash>.exe`), so current_exe() is
     // already a cache entry — including it here keeps GC from deleting the
     // file out from under our process. If the daemon was started directly
