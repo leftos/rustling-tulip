@@ -8,20 +8,27 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    Keystroke, Pixels, ScrollHandle, SharedString, Stateful, Subscription, Task, Window, canvas,
-    div, point, prelude::*, px, relative,
+    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollHandle, SharedString,
+    Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
 };
 use protocol::{Agent, DaemonMessage};
 
+use crate::combobox::{ComboRow, list_placement};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
-    MODEL_ALIASES, OpenChoice, Outcome, RunMode, Runtime, ShareButton, SpawnForm, TabChoices,
-    Target, WorktreeMode, approval_label, codex_sandbox_label, cursor_sandbox_label,
+    ListField, MODEL_ALIASES, OpenChoice, Outcome, RunMode, Runtime, ShareButton, SpawnForm,
+    TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label, cursor_sandbox_label,
+};
+use crate::spawn_preview::{
+    CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
+    staleness_notice,
 };
 use crate::spawns::PaneAim;
-use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
+use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
+use crate::{
+    BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip,
+};
 
 const DIALOG_WIDTH: f32 = 520.0;
 /// The dialog's greatest height, as a share of the window's; the body
@@ -45,6 +52,12 @@ const CURSOR_PLAN_LABEL: &str = "Plan mode (read-only / planning)";
 const CURSOR_PLAN_TIP: &str = "Start cursor in --plan mode (read-only / planning)";
 const NO_ENV: &str = "No extra env vars.";
 const REMOVE_ENV_TIP: &str = "Remove env var";
+/// The tallest a branch list grows before it scrolls.
+const LIST_MAX_HEIGHT: f32 = 200.0;
+const CURRENT_TAG: &str = "current";
+const PREVIEW_HEADERS: [&str; 4] = ["Repo", "Branch", "Action", "Path"];
+/// An "ok" badge of the workspace preview table.
+const BADGE_OK: u32 = 0x004e_c9b0;
 
 /// Where the spawn dialog was opened from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +87,24 @@ pub(crate) struct SpawnDialog {
     _subscriptions: Vec<Subscription>,
     /// Wakes the view when the wait for a branch suggestion runs out.
     timer: Option<Task<()>>,
+    /// Sends a repo's preview request once its debounce runs out.
+    preview_timer: Option<Task<()>>,
     /// Where the body is scrolled to.
     scroll: ScrollHandle,
     /// The focus moved since the body last scrolled the focused control
     /// into view.
     reveal: bool,
+    /// Where the dialog card was last laid out; a branch list stays inside.
+    panel_bounds: Option<Bounds<Pixels>>,
+    /// Where the field whose list shows was last laid out.
+    list_anchor: Option<Bounds<Pixels>>,
+}
+
+/// Which of the dialog's laid-out bounds a measurement is.
+#[derive(Debug, Clone, Copy)]
+enum Measured {
+    Panel,
+    ListAnchor,
 }
 
 impl SpawnDialog {
@@ -200,7 +226,65 @@ impl RootView {
                 .then(|| Control::RunMode(form.run_mode())),
         );
         chosen.extend(agent_options_chosen(form));
+        chosen.extend(
+            form.collision()
+                .map(|_| Control::Reuse(form.reuse_choice())),
+        );
         chosen.iter().map(Control::selector).collect()
+    }
+
+    /// The warning that the base trails its remote counterpart, while a
+    /// repo's preview shows one.
+    #[must_use]
+    pub fn spawn_base_stale(&self) -> Option<String> {
+        let form = &self.spawn_dialog.as_ref()?.form;
+        if form.is_workspace() {
+            return None;
+        }
+        form.preview_members().first().and_then(staleness_notice)
+    }
+
+    /// The collision notice while it shows: its headline, then each choice
+    /// with its note.
+    #[must_use]
+    pub fn spawn_collision(&self) -> Option<Vec<String>> {
+        let form = &self.spawn_dialog.as_ref()?.form;
+        let notice = collision_notice(form.collision()?)?;
+        Some(vec![
+            notice.headline,
+            format!("{} {REUSE_NOTE}", notice.reuse_label),
+            format!("{RECREATE_LABEL} {}", notice.recreate_note),
+        ])
+    }
+
+    /// Whether the workspace's Preview button can be pressed.
+    #[must_use]
+    pub fn spawn_preview_enabled(&self) -> bool {
+        self.spawn_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.form.preview_enabled())
+    }
+
+    /// The workspace preview table's rows: the repo, the branch, the action
+    /// badges joined by " · ", and the path.
+    #[must_use]
+    pub fn spawn_preview_rows(&self) -> Vec<Vec<String>> {
+        let Some(dialog) = &self.spawn_dialog else {
+            return Vec::new();
+        };
+        let form = &dialog.form;
+        if !form.is_workspace() {
+            return Vec::new();
+        }
+        let (branch, default_base) = (form.branch().trim(), form.default_base());
+        form.preview_members()
+            .iter()
+            .map(|member| {
+                let row = member_row(member, branch, &default_base);
+                let badges: Vec<String> = row.badges.into_iter().map(|(text, _)| text).collect();
+                vec![row.repo, row.branch, badges.join(" · "), row.path]
+            })
+            .collect()
     }
 
     /// The text of the headless prompt field, while the dialog is open.
@@ -229,6 +313,25 @@ impl RootView {
     pub fn spawn_dialog_base(&self, cx: &gpui::App) -> Option<String> {
         let dialog = self.spawn_dialog.as_ref()?;
         Some(dialog.base_input.read(cx).text().to_owned())
+    }
+
+    /// The rows the branch field's list shows, or `None` while it is closed.
+    #[must_use]
+    pub fn spawn_branch_rows(&self) -> Option<Vec<String>> {
+        self.spawn_list_rows(ListField::Branch)
+    }
+
+    /// The rows the base branch field's list shows, or `None` while it is
+    /// closed.
+    #[must_use]
+    pub fn spawn_base_rows(&self) -> Option<Vec<String>> {
+        self.spawn_list_rows(ListField::Base)
+    }
+
+    fn spawn_list_rows(&self, field: ListField) -> Option<Vec<String>> {
+        let form = &self.spawn_dialog.as_ref()?.form;
+        form.list_shown(field)
+            .then(|| form.list_rows(field).iter().map(ComboRow::label).collect())
     }
 
     /// Opens the dialog from `entry`, unless there is no repo, the
@@ -297,8 +400,11 @@ impl RootView {
             env_inputs: Vec::new(),
             _subscriptions: subscriptions,
             timer: None,
+            preview_timer: None,
             scroll: ScrollHandle::new(),
             reveal: true,
+            panel_bounds: None,
+            list_anchor: None,
         });
         self.send_all(messages);
         self.after_spawn_change(cx);
@@ -350,19 +456,30 @@ impl RootView {
 
     /// Enter submits (Ctrl+Enter in the prompt), Esc closes, an edit
     /// reaches the form and a click in the field moves the form's focus
-    /// there.
+    /// there. In a field with a branch list, Enter and Esc go to the list
+    /// while it shows, Up and Down move through it, and leaving the field
+    /// closes it.
     fn watch_field(
         input: &Entity<TextInput>,
         field: Field,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<Subscription> {
+        let list = ListField::of(&field.control());
         let keys = cx.subscribe_in(
             input,
             window,
-            |this, _, event: &TextInputEvent, window, cx| match event {
-                TextInputEvent::Submit => this.submit_spawn_dialog(window, cx),
-                TextInputEvent::Cancel => this.close_spawn_dialog(window, cx),
+            move |this, _, event: &TextInputEvent, window, cx| match event {
+                TextInputEvent::Submit => {
+                    if !list.is_some_and(|list| this.enter_spawn_list(list, cx)) {
+                        this.submit_spawn_dialog(window, cx);
+                    }
+                }
+                TextInputEvent::Cancel => {
+                    if !list.is_some_and(|list| this.escape_spawn_list(list, cx)) {
+                        this.close_spawn_dialog(window, cx);
+                    }
+                }
             },
         );
         let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
@@ -377,8 +494,11 @@ impl RootView {
                     Field::EnvKey(index) => form.edit_env_key(index, &text),
                     Field::EnvValue(index) => form.edit_env_value(index, &text),
                 }
+                if let Some(list) = list {
+                    form.list_edited(list);
+                }
             }
-            cx.notify();
+            this.after_spawn_change(cx);
         });
         let handle = input.read(cx).focus_handle(cx);
         let focus = cx.on_focus(&handle, window, move |this, _, cx| {
@@ -388,7 +508,101 @@ impl RootView {
             }
             cx.notify();
         });
-        vec![keys, edits, focus]
+        let mut subscriptions = vec![keys, edits, focus];
+        if let Some(list) = list {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                move |this, _, key: &NavKey, _, cx| {
+                    if let Some(dialog) = &mut this.spawn_dialog {
+                        dialog.form.list_nav(list, *key == NavKey::Down);
+                    }
+                    cx.notify();
+                },
+            ));
+            subscriptions.push(cx.on_blur(&handle, window, move |this, _, cx| {
+                this.close_spawn_list(list, cx);
+            }));
+        }
+        subscriptions
+    }
+
+    /// Enter in `list`'s field: commits the highlighted row while the list
+    /// shows; returns whether it did.
+    fn enter_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) -> bool {
+        let Some(dialog) = &mut self.spawn_dialog else {
+            return false;
+        };
+        let committed = dialog.form.enter_list(list, &mut self.branch_cache);
+        if committed {
+            self.after_spawn_change(cx);
+        }
+        committed
+    }
+
+    /// Esc in `list`'s field: closes the list while it shows; returns
+    /// whether it did.
+    fn escape_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) -> bool {
+        let closed = self
+            .spawn_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.form.escape_list(list));
+        if closed {
+            cx.notify();
+        }
+        closed
+    }
+
+    fn open_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.spawn_dialog {
+            dialog.form.open_list(list);
+            cx.notify();
+        }
+    }
+
+    fn close_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.spawn_dialog {
+            dialog.form.close_list(list);
+            cx.notify();
+        }
+    }
+
+    fn hover_spawn_list(&mut self, list: ListField, index: usize, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.spawn_dialog
+            && dialog.form.hover_list(list, index)
+        {
+            cx.notify();
+        }
+    }
+
+    fn pick_spawn_list(&mut self, list: ListField, index: usize, cx: &mut Context<Self>) {
+        let Some(dialog) = &mut self.spawn_dialog else {
+            return;
+        };
+        dialog.form.pick_list(list, index, &mut self.branch_cache);
+        self.after_spawn_change(cx);
+    }
+
+    /// Keeps where the card or the listed field was laid out; a change
+    /// draws again so the list is placed from it.
+    fn measure_spawn(
+        &mut self,
+        what: Measured,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dialog) = &mut self.spawn_dialog else {
+            return;
+        };
+        let slot = match what {
+            Measured::Panel => &mut dialog.panel_bounds,
+            Measured::ListAnchor => &mut dialog.list_anchor,
+        };
+        if *slot != Some(bounds) {
+            *slot = Some(bounds);
+            cx.defer_in(window, |_, window, _| window.refresh());
+        }
     }
 
     /// Closes the dialog and hands the keyboard back to the active pane.
@@ -464,12 +678,22 @@ impl RootView {
         }
     }
 
-    /// The fields follow the form, and a timer waits out a suggestion.
+    /// The fields follow the form, a timer waits out a suggestion, and the
+    /// preview follows the fields, a timer waiting out its debounce.
     fn after_spawn_change(&mut self, cx: &mut Context<Self>) {
         let now = (self.now)();
         let Some(dialog) = &mut self.spawn_dialog else {
             return;
         };
+        dialog.form.follow_preview(now);
+        dialog.preview_timer = dialog.form.preview_due().map(|due| {
+            let delay = due.saturating_duration_since(now);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                // Fails only when the view is gone, and the dialog with it.
+                this.update(cx, Self::send_due_preview).ok();
+            })
+        });
         let form = &dialog.form;
         let (branch, base) = (form.branch().to_owned(), form.base().to_owned());
         let placeholders = (form.branch_placeholder(now), form.default_base());
@@ -494,6 +718,19 @@ impl RootView {
                     this.update(cx, Self::after_spawn_change).ok();
                 })
             });
+        cx.notify();
+    }
+
+    /// The preview debounce ran out: its request goes to the daemon.
+    fn send_due_preview(&mut self, cx: &mut Context<Self>) {
+        let now = (self.now)();
+        let msg = self
+            .spawn_dialog
+            .as_mut()
+            .and_then(|dialog| dialog.form.take_due_preview(now));
+        if let Some(msg) = msg {
+            self.send(msg);
+        }
         cx.notify();
     }
 
@@ -581,7 +818,11 @@ impl RootView {
                 true
             }
             "escape" => {
-                self.close_spawn_dialog(window, cx);
+                let list_closed =
+                    ListField::of(&focused).is_some_and(|list| self.escape_spawn_list(list, cx));
+                if !list_closed {
+                    self.close_spawn_dialog(window, cx);
+                }
                 true
             }
             _ if self.spawn_field_focused(window, cx) => false,
@@ -699,7 +940,8 @@ impl RootView {
             })
             .child(dialog_header(focus == Control::Close, cx))
             .child(body)
-            .child(footer(form, &focus, cx));
+            .child(footer(form, &focus, cx))
+            .child(measurer(Measured::Panel, cx));
         let mut layers = vec![backdrop("spawn-dialog", panel)];
         if let Some(button) = form.share_confirm() {
             layers.push(self.share_layer(button, cx));
@@ -725,7 +967,11 @@ impl RootView {
         if form.pinning() {
             worktree.push(existing_field(form, focus, cx));
         }
-        let base = (form.use_worktree() && !form.pinning()).then(|| base_field(dialog, focus, cx));
+        let mut base = Vec::new();
+        if form.use_worktree() && !form.pinning() {
+            base.push(base_field(dialog, focus, cx));
+            base.extend(preview_rows(form, focus, cx));
+        }
         if form.is_workspace() {
             branch.into_iter().chain(worktree).chain(base).collect()
         } else {
@@ -1141,6 +1387,147 @@ fn input_box(
         .when(focused, |field| field.child(reveal_marker(cx)))
 }
 
+/// Measures where it is laid out, filling its parent, for `what`.
+fn measurer(what: Measured, cx: &mut Context<RootView>) -> impl IntoElement {
+    let root = cx.weak_entity();
+    canvas(
+        move |bounds, window, cx| {
+            // Fails only when the view is gone, and the dialog with it.
+            root.update(cx, |this, cx| this.measure_spawn(what, bounds, window, cx))
+                .ok();
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .inset(px(0.0))
+}
+
+/// A text field with its branch list: a click opens the list, a press
+/// outside the field and the list closes it, and while it shows the list
+/// hangs under the field (over it when there is more room there), inside
+/// the dialog.
+fn list_input(
+    dialog: &SpawnDialog,
+    list: ListField,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let control = list.control();
+    let input = dialog.input(&control).cloned();
+    let boxed = match &input {
+        Some(input) => input_box(&control, input, focus, cx),
+        None => div(),
+    };
+    let shown = dialog.form.list_shown(list);
+    boxed
+        .relative()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| this.open_spawn_list(list, cx)),
+        )
+        .on_mouse_down_out(cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+            this.close_spawn_list(list, cx);
+        }))
+        .when(shown, |boxed| {
+            boxed
+                .child(measurer(Measured::ListAnchor, cx))
+                .child(branch_list(dialog, list, cx))
+        })
+}
+
+/// The open list of `list`'s field, drawn over the dialog.
+fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>) -> AnyElement {
+    let form = &dialog.form;
+    let rows = form.list_rows(list);
+    let highlight = form.list_highlight(list);
+    let current = form.current_branch();
+    let prefix = list.control().selector();
+    let wanted = px(LIST_MAX_HEIGHT);
+    let (above, max_height) = match (dialog.panel_bounds, dialog.list_anchor) {
+        (Some(panel), Some(anchor)) => list_placement(
+            panel.top()..panel.bottom(),
+            anchor.top()..anchor.bottom(),
+            wanted,
+        ),
+        _ => (false, wanted),
+    };
+    let items: Vec<AnyElement> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let is_current =
+                matches!(row, ComboRow::Branch(name) if Some(name.as_str()) == current);
+            list_row(
+                list,
+                &prefix,
+                index,
+                row,
+                (index == highlight, is_current),
+                cx,
+            )
+        })
+        .collect();
+    let name = format!("{prefix}-list");
+    let panel = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .absolute()
+        .left(px(0.0))
+        .w_full()
+        .when(above, |list| list.bottom(relative(1.0)).mb(px(2.0)))
+        .when(!above, |list| list.top(relative(1.0)).mt(px(2.0)))
+        .max_h(max_height)
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .py(px(2.0))
+        .bg(gpui::rgb(PANEL_BG))
+        .border_1()
+        .border_color(gpui::rgb(BORDER))
+        .rounded(px(4.0))
+        .occlude()
+        .children(items);
+    deferred(panel).with_priority(1).into_any_element()
+}
+
+/// One row of a branch list; `(highlighted, current)` say how it looks.
+fn list_row(
+    list: ListField,
+    prefix: &str,
+    index: usize,
+    row: &ComboRow,
+    (highlighted, current): (bool, bool),
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let name = format!("{prefix}-option-{index}");
+    let tag_name = format!("{name}-current");
+    let tag = current.then(|| muted(CURRENT_TAG).debug_selector(move || tag_name));
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .justify_between()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .cursor_pointer()
+        .when(highlighted, |row| row.bg(gpui::rgb(SELECTED_BG)))
+        .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+            this.hover_spawn_list(list, index, cx);
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+                this.pick_spawn_list(list, index, cx);
+            }),
+        )
+        .child(row.label())
+        .children(tag)
+        .into_any_element()
+}
+
 fn branch_field(
     dialog: &SpawnDialog,
     focus: &Control,
@@ -1154,7 +1541,11 @@ fn branch_field(
         (false, true) => "New worktree branch",
         (false, false) => "Branch",
     };
-    let input = input_box(&Control::Branch, &dialog.branch_input, focus, cx);
+    let input = if form.has_list(ListField::Branch) {
+        list_input(dialog, ListField::Branch, focus, cx)
+    } else {
+        input_box(&Control::Branch, &dialog.branch_input, focus, cx)
+    };
     let random = form.use_worktree().then(|| {
         let look = Look {
             selected: false,
@@ -1172,11 +1563,158 @@ fn branch_field(
 
 fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
     let form = &dialog.form;
-    let input = input_box(&Control::Base, &dialog.base_input, focus, cx);
+    let input = list_input(dialog, ListField::Base, focus, cx);
     let failed = (form.fetch_failed() && !form.is_workspace()).then(|| muted(FETCH_FAILED));
     field("Base branch (optional)")
         .child(input)
         .children(failed)
+        .into_any_element()
+}
+
+/// What follows the base field: a repo's staleness warning, a workspace's
+/// Preview button and table, and the collision notice with its choice.
+fn preview_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+    if form.is_workspace() {
+        let look = Look {
+            selected: false,
+            focused: *focus == Control::Preview,
+            enabled: form.preview_enabled(),
+        };
+        let button = option_button(&Control::Preview, "Preview", look, cx);
+        rows.push(div().flex().child(button).into_any_element());
+        if !form.preview_members().is_empty() {
+            rows.push(preview_table(form));
+        }
+    } else if let Some(text) = form.preview_members().first().and_then(staleness_notice) {
+        rows.push(
+            warning_box()
+                .debug_selector(|| "spawn-base-stale".to_owned())
+                .child(text)
+                .into_any_element(),
+        );
+    }
+    if let Some(notice) = form.collision().and_then(collision_notice) {
+        rows.push(collision_box(&notice, form.reuse_choice(), focus, cx));
+    }
+    rows
+}
+
+/// A box outlined in the warning colour.
+fn warning_box() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .p(px(8.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(gpui::rgb(WARNING))
+}
+
+/// The collision notice: what is already there, and Reuse or Recreate.
+fn collision_box(
+    notice: &CollisionNotice,
+    chosen: ReuseChoice,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> AnyElement {
+    let recreate_note = if notice.danger {
+        div()
+            .debug_selector(|| "spawn-collision-danger".to_owned())
+            .text_color(gpui::rgb(DANGER))
+            .child(notice.recreate_note)
+    } else {
+        muted(notice.recreate_note)
+    };
+    let choices = [
+        (ReuseChoice::Reuse, notice.reuse_label, muted(REUSE_NOTE)),
+        (ReuseChoice::Recreate, RECREATE_LABEL, recreate_note),
+    ]
+    .into_iter()
+    .map(|(choice, label, note)| {
+        let control = Control::Reuse(choice);
+        let look = Look {
+            selected: false,
+            focused: *focus == control,
+            enabled: true,
+        };
+        let mark = if choice == chosen { "◉" } else { "○" };
+        let row = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(6.0))
+            .child(mark)
+            .child(label)
+            .child(note);
+        div()
+            .flex()
+            .child(option_button(&control, row, look, cx))
+            .into_any_element()
+    });
+    warning_box()
+        .debug_selector(|| "spawn-collision".to_owned())
+        .child(notice.headline.clone())
+        .children(choices)
+        .into_any_element()
+}
+
+/// One cell of the workspace preview table.
+fn table_cell(column: usize) -> Div {
+    let cell = div().min_w(px(0.0));
+    match column {
+        0 => cell.w(px(90.0)),
+        1 => cell.w(px(110.0)),
+        2 => cell.flex_1().flex().flex_wrap().gap(px(4.0)),
+        _ => cell.w(px(130.0)).text_color(gpui::rgb(MUTED)),
+    }
+}
+
+/// Each member's repo, branch, what the spawn does there and its path.
+fn preview_table(form: &SpawnForm) -> AnyElement {
+    let header = div()
+        .flex()
+        .gap(px(6.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .children(
+            PREVIEW_HEADERS
+                .iter()
+                .enumerate()
+                .map(|(column, title)| table_cell(column).child(*title)),
+        );
+    let (branch, default_base) = (form.branch().trim(), form.default_base());
+    let rows = form.preview_members().iter().map(|member| {
+        let row = member_row(member, branch, &default_base);
+        let selector = format!("spawn-preview-row-{}", member.repo_id);
+        let badges = row.badges.into_iter().map(|(text, tone)| {
+            let color = match tone {
+                Tone::Ok => BADGE_OK,
+                Tone::Warn => WARNING,
+            };
+            div()
+                .px(px(4.0))
+                .rounded(px(3.0))
+                .border_1()
+                .border_color(gpui::rgb(color))
+                .text_color(gpui::rgb(color))
+                .child(text)
+        });
+        div()
+            .debug_selector(move || selector)
+            .flex()
+            .gap(px(6.0))
+            .child(table_cell(0).child(row.repo))
+            .child(table_cell(1).child(row.branch))
+            .child(table_cell(2).children(badges))
+            .child(table_cell(3).child(row.path))
+    });
+    div()
+        .debug_selector(|| "spawn-preview-table".to_owned())
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(header)
+        .children(rows)
         .into_any_element()
 }
 

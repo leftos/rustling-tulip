@@ -82,10 +82,10 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [x] Trusted launch checkbox (per-runtime skip-permissions / yolo flag) with a warning banner — `SpawnDialog.tsx`
 - [x] Advanced: model, Claude approval mode, Codex sandbox, Cursor plan mode + sandbox, env vars (invalid-key and duplicate warnings) — `SpawnDialog.tsx`
 - [x] Single-repo: create worktree (saved per repo), new / use existing, picker (in use / stopped / stale, size, age), confirm before sharing with a live session — `SpawnDialog.tsx` `SingleForm`
-- [ ] Branch combobox: lists all branches, filters as you type, marks current, "Create branch" row, arrow/Enter, Esc closes the list only — `BranchCombobox.tsx`
+- [x] Branch combobox: lists all branches, filters as you type, marks current, "Create branch" row, arrow/Enter, Esc closes the list only — `BranchCombobox.tsx`
 - [x] Suggested branch name, "Random", "picking a name…", cached between opens — `SpawnDialog.tsx` `useBranchField`, `utils/branchSuggestion.ts`
-- [ ] Base branch defaults to `origin/<default>`; notes a failed background fetch; debounced preview for N commits behind and existing worktree/branch (reuse or recreate) — `SpawnDialog.tsx` (native: the default and the fetch note landed in P1.7c; the preview is Phase 4)
-- [ ] Workspace form: one branch for all members, create worktrees, new / existing group ("N bound, M to be created"), base, preview table — `SpawnDialog.tsx` `WorkspaceForm` (native: all but the preview table landed in P1.7c)
+- [x] Base branch defaults to `origin/<default>`; notes a failed background fetch; debounced preview for N commits behind and existing worktree/branch (reuse or recreate) — `SpawnDialog.tsx` (native: the default and the fetch note landed in P1.7c, the preview in P4.7)
+- [x] Workspace form: one branch for all members, create worktrees, new / existing group ("N bound, M to be created"), base, preview table — `SpawnDialog.tsx` `WorkspaceForm` (native: the preview table landed in P4.7, the rest in P1.7c)
 - [x] Double-submit guard; Esc closes, backdrop click doesn't — `SpawnDialog.tsx`
 - [x] Dirty in-place checkout prompts Carry changes / Stash & switch, then resends — `CheckoutConfirmModal.tsx`
 - [x] "Spawning session…" toast; placement (new tab / this pane / smart) and terminal focus — `App.tsx`, `utils/autofocus.ts`

@@ -1911,6 +1911,10 @@ pub enum ClientMessage {
         workspace_id: String,
         branch_name: String,
         base_branch: Option<String>,
+        /// Echoed on the [`DaemonMessage::WorkspaceSpawnPreview`] reply, and on the
+        /// [`DaemonMessage::Error`] sent to the requester when the preview fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Single-repo counterpart of [`ClientMessage::PreviewWorkspaceSpawn`]:
     /// resolve where a spawn would fork from, and whether it would land on an
@@ -1921,6 +1925,10 @@ pub enum ClientMessage {
         branch_name: String,
         base_branch: Option<String>,
         use_worktree: bool,
+        /// Echoed on the [`DaemonMessage::SpawnPreview`] reply, and on the
+        /// [`DaemonMessage::Error`] sent to the requester when the preview fails.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Run `git fetch --prune` for a repo so subsequent previews compare
     /// against current remote refs. Advisory and non-blocking: the daemon
@@ -2867,11 +2875,6 @@ pub enum SnapshotUnavailable {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "SessionUpdated carries the whole SessionSnapshot, the most common message on \
-              the wire; boxing it would change every producer and consumer for ~200 bytes"
-)]
 pub enum DaemonMessage {
     /// `protocol_version` is the negotiated wire version the daemon picked
     /// from the intersection of its `SUPPORTED_PROTOCOL_VERSIONS` and the
@@ -3063,12 +3066,20 @@ pub enum DaemonMessage {
         workspace_id: String,
         branch_name: String,
         per_member: Vec<MemberSpawnPreview>,
+        /// The `request_id` of the [`ClientMessage::PreviewWorkspaceSpawn`] this
+        /// answers; absent when the request carried none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Reply to [`ClientMessage::PreviewSpawn`].
     SpawnPreview {
         repo_id: String,
         branch_name: String,
         preview: MemberSpawnPreview,
+        /// The `request_id` of the [`ClientMessage::PreviewSpawn`] this
+        /// answers; absent when the request carried none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// Reply to [`ClientMessage::FetchRepo`]. `error` carries git's message
     /// when the fetch failed; the client reports it as a freshness caveat
@@ -3356,8 +3367,8 @@ pub enum DaemonMessage {
         message: String,
         /// The `request_id` of the spawn, duplicate, session appearance
         /// change or git read (`RepoStatus`, `ListStashes`, `ListCommits`,
-        /// `GetCommit`, `GetRemoteUrl`) that failed, on the reply to its
-        /// requester.
+        /// `GetCommit`, `GetRemoteUrl`) or spawn preview (`PreviewSpawn`,
+        /// `PreviewWorkspaceSpawn`) that failed, on the reply to its requester.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
@@ -5206,6 +5217,94 @@ mod tests {
                     if session_id == "s1" && id == "req-2"
             ),
             "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn preview_spawn_request_id_round_trips() {
+        let msg = ClientMessage::PreviewSpawn {
+            repo_id: "r1".to_string(),
+            branch_name: "feat".to_string(),
+            base_branch: Some("main".to_string()),
+            use_worktree: true,
+            request_id: Some("pv-1".to_string()),
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        assert!(json.contains(r#""request_id":"pv-1""#), "{json}");
+        let decoded: ClientMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::PreviewSpawn { request_id: Some(id), .. } if id == "pv-1"
+            ),
+            "{decoded:?}"
+        );
+        let ws = ClientMessage::PreviewWorkspaceSpawn {
+            workspace_id: "w1".to_string(),
+            branch_name: "feat".to_string(),
+            base_branch: None,
+            request_id: None,
+        };
+        let unset = serde_json::to_string(&ws).expect("serialize");
+        assert!(!unset.contains("request_id"), "{unset}");
+        let old: ClientMessage = serde_json::from_str(
+            r#"{"type":"preview_workspace_spawn","workspace_id":"w1","branch_name":"feat","base_branch":null}"#,
+        )
+        .expect("a workspace preview without request_id decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::PreviewWorkspaceSpawn {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_preview_without_request_id_still_decodes() {
+        let preview = r#"{"repo_id":"r1","repo_name":"r1","branch_exists":false,"effective_base":null,"worktree_path":"/wt"}"#;
+        let single: DaemonMessage = serde_json::from_str(&format!(
+            r#"{{"type":"spawn_preview","repo_id":"r1","branch_name":"feat","preview":{preview}}}"#
+        ))
+        .expect("a spawn preview without request_id decodes");
+        assert!(
+            matches!(
+                &single,
+                DaemonMessage::SpawnPreview {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{single:?}"
+        );
+        let workspace: DaemonMessage = serde_json::from_str(&format!(
+            r#"{{"type":"workspace_spawn_preview","workspace_id":"w1","branch_name":"feat","per_member":[{preview}]}}"#
+        ))
+        .expect("a workspace spawn preview without request_id decodes");
+        assert!(
+            matches!(
+                &workspace,
+                DaemonMessage::WorkspaceSpawnPreview {
+                    request_id: None,
+                    ..
+                }
+            ),
+            "{workspace:?}"
+        );
+        let echoed = DaemonMessage::WorkspaceSpawnPreview {
+            workspace_id: "w1".to_string(),
+            branch_name: "feat".to_string(),
+            per_member: Vec::new(),
+            request_id: Some("pv-2".to_string()),
+        };
+        let json = serde_json::to_string(&echoed).expect("serialize");
+        let back: DaemonMessage = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            matches!(&back, DaemonMessage::WorkspaceSpawnPreview { request_id: Some(id), .. } if id == "pv-2"),
+            "{back:?}"
         );
     }
 

@@ -9,12 +9,15 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage, PermissionMode,
-    PinnedMemberWorktree, RepoEntry, RootWorktreeEntry, RootWorktreeStatus, SessionMode,
-    SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget, SuggestTarget, TabEntry,
-    WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget, WorktreeReusePolicy,
+    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage,
+    MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry, RootWorktreeEntry,
+    RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget,
+    SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
+    WorktreeReusePolicy,
 };
 
+use crate::combobox::{ComboRow, Combobox};
+use crate::spawn_preview::{Preview, PreviewKey, ReuseChoice};
 use crate::spawns::OpenIn;
 
 /// How long a branch-name suggestion is waited for before the field stops
@@ -272,6 +275,31 @@ pub(crate) enum WorktreeMode {
     Existing,
 }
 
+/// A text field with a branch list under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListField {
+    Branch,
+    Base,
+}
+
+impl ListField {
+    pub(crate) fn control(self) -> Control {
+        match self {
+            Self::Branch => Control::Branch,
+            Self::Base => Control::Base,
+        }
+    }
+
+    /// The field a control is, if it has a list.
+    pub(crate) fn of(control: &Control) -> Option<Self> {
+        match control {
+            Control::Branch => Some(Self::Branch),
+            Control::Base => Some(Self::Base),
+            _ => None,
+        }
+    }
+}
+
 /// A focusable control of the dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -299,6 +327,10 @@ pub(crate) enum Control {
     EnvValue(usize),
     EnvRemove(usize),
     EnvAdd,
+    /// A workspace's Preview button.
+    Preview,
+    /// A collision notice's choice.
+    Reuse(ReuseChoice),
     Cancel,
     Submit,
 }
@@ -321,6 +353,9 @@ impl Control {
             Self::Branch => "spawn-branch".to_owned(),
             Self::Random => "spawn-branch-random".to_owned(),
             Self::Base => "spawn-base-branch".to_owned(),
+            Self::Preview => "spawn-preview".to_owned(),
+            Self::Reuse(ReuseChoice::Reuse) => "spawn-collision-reuse".to_owned(),
+            Self::Reuse(ReuseChoice::Recreate) => "spawn-collision-recreate".to_owned(),
             Self::Cancel => "spawn-cancel".to_owned(),
             Self::Submit => "spawn-submit".to_owned(),
             other => other.advanced_selector(),
@@ -574,8 +609,13 @@ pub(crate) struct SpawnForm {
     mode: WorktreeMode,
     branch: BranchField,
     base: BaseField,
+    /// The branch field's list, which offers a "Create branch" row.
+    branch_list: Combobox,
+    base_list: Combobox,
     refs: Refs,
     existing: Existing,
+    /// Where a new worktree would fork from, and what to do on a collision.
+    preview: Preview,
     /// The headless prompt, as typed.
     prompt: String,
     advanced: Advanced,
@@ -624,8 +664,11 @@ impl SpawnForm {
             mode: WorktreeMode::New,
             branch: BranchField::default(),
             base: BaseField::default(),
+            branch_list: Combobox::new(true),
+            base_list: Combobox::new(false),
             refs: Refs::default(),
             existing: Existing::default(),
+            preview: Preview::default(),
             prompt: String::new(),
             advanced: Advanced::default(),
             focus: Control::Branch,
@@ -654,6 +697,8 @@ impl SpawnForm {
         self.mode = WorktreeMode::New;
         self.existing = Existing::default();
         self.refs = Refs::default();
+        self.branch_list.close();
+        self.base_list.close();
         self.base = BaseField {
             value: self.default_base(),
             touched: false,
@@ -882,9 +927,116 @@ impl SpawnForm {
                     .collect();
                 self.set_existing(options);
             }
+            DaemonMessage::SpawnPreview {
+                repo_id,
+                branch_name,
+                preview,
+                request_id,
+            } => {
+                if !self
+                    .preview
+                    .on_repo_reply(repo_id, branch_name, preview, request_id.as_deref())
+                {
+                    return None;
+                }
+            }
+            DaemonMessage::WorkspaceSpawnPreview {
+                workspace_id,
+                branch_name,
+                per_member,
+                request_id,
+            } => {
+                if !self.preview.on_workspace_reply(
+                    workspace_id,
+                    branch_name,
+                    per_member,
+                    request_id.as_deref(),
+                ) {
+                    return None;
+                }
+            }
+            DaemonMessage::Error {
+                request_id: Some(id),
+                ..
+            } => {
+                if !self.preview.on_error(id) {
+                    return None;
+                }
+            }
             _ => return None,
         }
         Some(Vec::new())
+    }
+
+    /// The preview the fields call for: none without a new worktree or a
+    /// branch name.
+    fn preview_key(&self) -> Option<PreviewKey> {
+        let branch = self.branch.value.trim();
+        if !self.use_worktree || self.mode == WorktreeMode::Existing || branch.is_empty() {
+            return None;
+        }
+        let branch = branch.to_owned();
+        let base = Some(self.base.value.trim())
+            .filter(|base| !base.is_empty())
+            .map(str::to_owned);
+        Some(match &self.target {
+            Target::Repo(repo_id) => PreviewKey::Repo {
+                repo_id: repo_id.clone(),
+                branch,
+                base,
+            },
+            Target::Workspace(workspace_id) => PreviewKey::Workspace {
+                workspace_id: workspace_id.clone(),
+                branch,
+                base,
+            },
+        })
+    }
+
+    /// The preview follows the fields as they are at `now`; a change drops
+    /// what is on show and resets the reuse choice.
+    pub(crate) fn follow_preview(&mut self, now: Instant) {
+        let key = self.preview_key();
+        self.preview.follow(key, now);
+    }
+
+    /// When a repo's preview request goes out.
+    pub(crate) fn preview_due(&self) -> Option<Instant> {
+        self.preview.due()
+    }
+
+    /// A repo's preview request, once its debounce ran out at `now`.
+    pub(crate) fn take_due_preview(&mut self, now: Instant) -> Option<ClientMessage> {
+        self.preview.take_due(now)
+    }
+
+    /// Each member's preview on show; empty while there is none.
+    pub(crate) fn preview_members(&self) -> &[MemberSpawnPreview] {
+        if self.base_shown() {
+            self.preview.members()
+        } else {
+            &[]
+        }
+    }
+
+    /// The member whose worktree or branch is already there, while the
+    /// preview shows one.
+    pub(crate) fn collision(&self) -> Option<&MemberSpawnPreview> {
+        self.preview.collision().filter(|_| self.base_shown())
+    }
+
+    pub(crate) fn reuse_choice(&self) -> ReuseChoice {
+        self.preview.reuse()
+    }
+
+    /// Whether a workspace's Preview button can ask.
+    pub(crate) fn preview_enabled(&self) -> bool {
+        self.preview.can_request()
+    }
+
+    /// Whether the base branch field shows: a new worktree.
+    fn base_shown(&self) -> bool {
+        self.use_worktree && !self.pinning()
     }
 
     /// New refs move the base (until edited) and an untouched in-place
@@ -938,6 +1090,154 @@ impl SpawnForm {
         }
         self.base.touched = true;
         text.clone_into(&mut self.base.value);
+    }
+
+    /// Whether `field` has a list: the base always, the branch for a repo
+    /// (a workspace's branch is a plain field).
+    pub(crate) fn has_list(&self, field: ListField) -> bool {
+        field == ListField::Base || !self.is_workspace()
+    }
+
+    /// The branches `field`'s list offers: the known ones for the branch;
+    /// the remote ones, then the local ones, each once, for the base.
+    pub(crate) fn list_options(&self, field: ListField) -> Vec<String> {
+        match field {
+            ListField::Branch => self.refs.known.clone(),
+            ListField::Base => {
+                let mut options = self.refs.remote.clone();
+                for branch in &self.refs.known {
+                    if !options.contains(branch) {
+                        options.push(branch.clone());
+                    }
+                }
+                options
+            }
+        }
+    }
+
+    fn list_value(&self, field: ListField) -> String {
+        match field {
+            ListField::Branch => self.branch.value.clone(),
+            ListField::Base => self.base.value.clone(),
+        }
+    }
+
+    fn combobox(&self, field: ListField) -> &Combobox {
+        match field {
+            ListField::Branch => &self.branch_list,
+            ListField::Base => &self.base_list,
+        }
+    }
+
+    fn combobox_mut(&mut self, field: ListField) -> &mut Combobox {
+        match field {
+            ListField::Branch => &mut self.branch_list,
+            ListField::Base => &mut self.base_list,
+        }
+    }
+
+    /// The rows `field`'s list offers for what the field holds.
+    pub(crate) fn list_rows(&self, field: ListField) -> Vec<ComboRow> {
+        if !self.has_list(field) {
+            return Vec::new();
+        }
+        let options = self.list_options(field);
+        self.combobox(field).rows(&self.list_value(field), &options)
+    }
+
+    /// Whether `field`'s list shows: open, with a row to show.
+    pub(crate) fn list_shown(&self, field: ListField) -> bool {
+        self.combobox(field).is_open() && !self.list_rows(field).is_empty()
+    }
+
+    /// The highlighted row of `field`'s list.
+    pub(crate) fn list_highlight(&self, field: ListField) -> usize {
+        self.combobox(field).highlight(self.list_rows(field).len())
+    }
+
+    /// The branch checked out in the repo, marked in the lists.
+    pub(crate) fn current_branch(&self) -> Option<&str> {
+        self.refs.current.as_deref()
+    }
+
+    /// A click in `field` opens its list.
+    pub(crate) fn open_list(&mut self, field: ListField) {
+        if self.has_list(field) {
+            self.combobox_mut(field).open();
+        }
+    }
+
+    /// An edit in `field` opens its list on the row of the branch it names
+    /// exactly, else on the first row.
+    pub(crate) fn list_edited(&mut self, field: ListField) {
+        if self.has_list(field) {
+            let (value, options) = (self.list_value(field), self.list_options(field));
+            self.combobox_mut(field).edited(&value, &options);
+        }
+    }
+
+    pub(crate) fn close_list(&mut self, field: ListField) {
+        self.combobox_mut(field).close();
+    }
+
+    /// Up or Down (`down`) in `field`.
+    pub(crate) fn list_nav(&mut self, field: ListField, down: bool) {
+        if !self.has_list(field) {
+            return;
+        }
+        let (value, options) = (self.list_value(field), self.list_options(field));
+        let combo = self.combobox_mut(field);
+        if down {
+            combo.down(&value, &options);
+        } else {
+            combo.up();
+        }
+    }
+
+    /// The pointer is over row `index`; returns whether that moved the
+    /// highlight.
+    pub(crate) fn hover_list(&mut self, field: ListField, index: usize) -> bool {
+        self.combobox_mut(field).hover(index)
+    }
+
+    /// Esc in `field`: closes its list if it shows, and says whether it did.
+    pub(crate) fn escape_list(&mut self, field: ListField) -> bool {
+        let (value, options) = (self.list_value(field), self.list_options(field));
+        self.has_list(field) && self.combobox_mut(field).escape(&value, &options)
+    }
+
+    /// Enter in `field`: commits the highlighted row if the list shows, and
+    /// says whether it did.
+    pub(crate) fn enter_list(&mut self, field: ListField, cache: &mut BranchCache) -> bool {
+        if !self.has_list(field) {
+            return false;
+        }
+        let (value, options) = (self.list_value(field), self.list_options(field));
+        let picked = self.combobox_mut(field).enter(&value, &options);
+        self.commit_list(field, picked, cache)
+    }
+
+    /// Row `index` of `field`'s list was pressed.
+    pub(crate) fn pick_list(&mut self, field: ListField, index: usize, cache: &mut BranchCache) {
+        let (value, options) = (self.list_value(field), self.list_options(field));
+        let picked = self.combobox_mut(field).pick(&value, &options, index);
+        self.commit_list(field, picked, cache);
+    }
+
+    fn commit_list(
+        &mut self,
+        field: ListField,
+        picked: Option<String>,
+        cache: &mut BranchCache,
+    ) -> bool {
+        let Some(text) = picked else {
+            return false;
+        };
+        match field {
+            ListField::Branch => self.edit_branch(&text, cache),
+            ListField::Base => self.edit_base(&text),
+        }
+        true
     }
 
     /// Replaces the registry. A target that went away snaps to the first
@@ -1454,7 +1754,16 @@ impl SpawnForm {
                     .map(|o| Control::Existing(o.key.clone())),
             );
         }
-        let base = (self.use_worktree && !self.pinning()).then_some(Control::Base);
+        let mut base = Vec::new();
+        if self.base_shown() {
+            base.push(Control::Base);
+            if self.is_workspace() && self.preview_enabled() {
+                base.push(Control::Preview);
+            }
+            if self.collision().is_some() {
+                base.extend(ReuseChoice::ALL.map(Control::Reuse));
+            }
+        }
         if self.is_workspace() {
             branch.into_iter().chain(worktree).chain(base).collect()
         } else {
@@ -1524,6 +1833,13 @@ impl SpawnForm {
                 Vec::new()
             }
             Control::Random => self.random(cache, now),
+            Control::Preview => self.preview.request().into_iter().collect(),
+            Control::Reuse(choice) => {
+                if self.collision().is_some() {
+                    self.preview.choose(*choice);
+                }
+                Vec::new()
+            }
             Control::Branch
             | Control::Base
             | Control::Target(_)
@@ -1714,7 +2030,7 @@ impl SpawnForm {
                 base_branch,
                 use_worktree: self.use_worktree,
                 checkout_strategy: None,
-                worktree_reuse: WorktreeReusePolicy::default(),
+                worktree_reuse: self.reuse_policy(),
                 existing_worktree: pick.and_then(|o| match &o.pin {
                     Pin::Worktree(path) => Some(path.clone()),
                     Pin::Group(_) => None,
@@ -1725,7 +2041,7 @@ impl SpawnForm {
                 branch_name,
                 base_branch,
                 use_worktree: self.use_worktree,
-                worktree_reuse: WorktreeReusePolicy::default(),
+                worktree_reuse: self.reuse_policy(),
                 existing_worktrees: pick
                     .and_then(|o| match &o.pin {
                         Pin::Group(members) => Some(members.clone()),
@@ -1733,6 +2049,15 @@ impl SpawnForm {
                     })
                     .unwrap_or_default(),
             },
+        }
+    }
+
+    /// The collision choice while a collision shows, else Reuse.
+    fn reuse_policy(&self) -> WorktreeReusePolicy {
+        if self.collision().is_some() {
+            self.preview.policy()
+        } else {
+            WorktreeReusePolicy::Reuse
         }
     }
 

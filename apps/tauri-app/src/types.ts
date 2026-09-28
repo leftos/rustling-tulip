@@ -959,6 +959,7 @@ export type ClientMessage =
       workspace_id: string;
       branch_name: string;
       base_branch: string | null;
+      request_id?: string;
     }
   | {
       type: "preview_spawn";
@@ -966,6 +967,7 @@ export type ClientMessage =
       branch_name: string;
       base_branch: string | null;
       use_worktree: boolean;
+      request_id?: string;
     }
   | { type: "fetch_repo"; repo_id: string }
   | {
@@ -1368,12 +1370,14 @@ export type DaemonMessage =
       workspace_id: string;
       branch_name: string;
       per_member: MemberSpawnPreview[];
+      request_id?: string;
     }
   | {
       type: "spawn_preview";
       repo_id: string;
       branch_name: string;
       preview: MemberSpawnPreview;
+      request_id?: string;
     }
   | {
       type: "repo_fetched";

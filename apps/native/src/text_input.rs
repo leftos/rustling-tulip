@@ -5,7 +5,8 @@
 //! [`TextInput::multi_line`] makes one that wraps to its width and grows from
 //! a minimum to a maximum number of rows, scrolling past that; there Enter
 //! inserts a line break, Ctrl+Enter submits, and Up and Down move between
-//! rows. Esc emits [`TextInputEvent::Cancel`] in both. Every edit the user
+//! rows; a single-line input emits [`NavKey`] for them instead. Esc emits
+//! [`TextInputEvent::Cancel`] in both. Every edit the user
 //! makes emits [`TextChanged`], and [`TextInput::set_text`] replaces the text
 //! without it. A read-only input ([`TextInput::set_read_only`]) ignores edits.
 
@@ -78,7 +79,11 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("escape", Escape, context),
         ]);
     }
-    cx.bind_keys([KeyBinding::new("enter", Enter, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("enter", Enter, Some(CONTEXT)),
+        KeyBinding::new("up", Up, Some(CONTEXT)),
+        KeyBinding::new("down", Down, Some(CONTEXT)),
+    ]);
     let multi_line = Some(MULTI_LINE_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", Newline, multi_line),
@@ -94,6 +99,14 @@ pub fn bind_keys(cx: &mut App) {
 pub enum TextInputEvent {
     Submit,
     Cancel,
+}
+
+/// Up or Down in a single-line input, for an owner that navigates a list
+/// with them; the key still reaches the input's parents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavKey {
+    Up,
+    Down,
 }
 
 /// The user edited the text: typing, IME, deletion, cut or paste.
@@ -149,6 +162,8 @@ impl Mode {
 impl EventEmitter<TextInputEvent> for TextInput {}
 
 impl EventEmitter<TextChanged> for TextInput {}
+
+impl EventEmitter<NavKey> for TextInput {}
 
 impl Focusable for TextInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -286,11 +301,21 @@ impl TextInput {
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(false, false, cx);
+        if self.mode.is_multi_line() {
+            self.move_vertically(false, false, cx);
+        } else {
+            cx.emit(NavKey::Up);
+            cx.propagate();
+        }
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_vertically(true, false, cx);
+        if self.mode.is_multi_line() {
+            self.move_vertically(true, false, cx);
+        } else {
+            cx.emit(NavKey::Down);
+            cx.propagate();
+        }
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {

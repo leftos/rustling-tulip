@@ -1492,11 +1492,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             workspace_id,
             branch_name,
             base_branch,
+            request_id,
         } => {
             // Preview always reflects the worktree path; the in-place
             // affordance is hidden behind the use_worktree spawn flag and
             // doesn't change preview output meaningfully.
-            let (_, resolved) = ws::resolve_workspace(
+            let resolved = ws::resolve_workspace(
                 &hub.state,
                 &hub.state.worktrees_dir(),
                 &workspace_id,
@@ -1509,19 +1510,26 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     pins: &[],
                 },
             )
-            .await?;
-            let per_member = ws::previews(&resolved, &branch_name).await;
-            let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
-                workspace_id,
-                branch_name,
-                per_member,
-            });
+            .await;
+            match resolved {
+                Ok((_, resolved)) => {
+                    let per_member = ws::previews(&resolved, &branch_name).await;
+                    let _ = out_tx.send(DaemonMessage::WorkspaceSpawnPreview {
+                        workspace_id,
+                        branch_name,
+                        per_member,
+                        request_id,
+                    });
+                }
+                Err(err) => send_preview_failure(out_tx, &err, request_id),
+            }
         }
         ClientMessage::PreviewSpawn {
             repo_id,
             branch_name,
             base_branch,
             use_worktree,
+            request_id,
         } => {
             let preview = preview_single_spawn(
                 hub,
@@ -1530,12 +1538,18 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 base_branch.as_deref(),
                 use_worktree,
             )
-            .await?;
-            let _ = out_tx.send(DaemonMessage::SpawnPreview {
-                repo_id,
-                branch_name,
-                preview,
-            });
+            .await;
+            match preview {
+                Ok(preview) => {
+                    let _ = out_tx.send(DaemonMessage::SpawnPreview {
+                        repo_id,
+                        branch_name,
+                        preview,
+                        request_id,
+                    });
+                }
+                Err(err) => send_preview_failure(out_tx, &err, request_id),
+            }
         }
         ClientMessage::FetchRepo { repo_id } => {
             fetch_repo(hub, repo_id, out_tx).await;
@@ -2882,6 +2896,21 @@ async fn reply_git_read<F>(
             });
         }
     }
+}
+
+/// Answers a failed spawn preview (`PreviewSpawn`, `PreviewWorkspaceSpawn`)
+/// with an `Error` to this requester only, carrying the `request_id` it asked
+/// with so the client can clear that pending preview.
+fn send_preview_failure(
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+    err: &anyhow::Error,
+    request_id: Option<String>,
+) {
+    warn!(?err, "spawn preview failed");
+    let _ = out_tx.send(DaemonMessage::Error {
+        message: err.to_string(),
+        request_id,
+    });
 }
 
 /// Runs a stage/unstage/commit body, then on success broadcasts the fresh
@@ -6665,6 +6694,131 @@ mod tests {
                 &msg,
                 DaemonMessage::Error { message, request_id: Some(id) }
                     if id == "q2" && message.starts_with("remote url failed:")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    /// A hub with one `git init`ed repo `r1` and a workspace `w1` holding it.
+    fn hub_with_previewable_repo(tag: &str) -> (Hub, ScratchDir) {
+        let (hub, scratch) = test_hub(tag);
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        hub.state
+            .mutate(|s| {
+                s.repos.push(protocol::RepoEntry {
+                    id: "r1".to_string(),
+                    name: "r1".to_string(),
+                    path: repo.to_string_lossy().into_owned(),
+                    default_branch: None,
+                    default_use_worktree: true,
+                    appearance: AppearanceOverrides::default(),
+                    last_agent: None,
+                    last_spawn_config: None,
+                });
+                s.workspaces.push(protocol::WorkspaceEntry {
+                    id: "w1".to_string(),
+                    name: "w1".to_string(),
+                    member_repo_ids: vec!["r1".to_string()],
+                    linked_vscode_workspace: None,
+                    default_use_worktree: true,
+                    appearance: AppearanceOverrides::default(),
+                    last_spawn_config: None,
+                });
+            })
+            .expect("register repo and workspace");
+        (hub, scratch)
+    }
+
+    #[tokio::test]
+    async fn a_spawn_preview_echoes_its_request_id() {
+        let (hub, _scratch) = hub_with_previewable_repo("preview-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::PreviewSpawn {
+                repo_id: "r1".to_string(),
+                branch_name: "feat".to_string(),
+                base_branch: None,
+                use_worktree: true,
+                request_id: Some("p1".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::SpawnPreview { repo_id, request_id: Some(id), .. }
+                    if id == "p1" && repo_id == "r1"
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_spawn_preview_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("preview-fail-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::PreviewSpawn {
+                repo_id: "no-such-repo".to_string(),
+                branch_name: "feat".to_string(),
+                base_branch: None,
+                use_worktree: true,
+                request_id: Some("p2".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { message, request_id: Some(id) }
+                    if id == "p2" && message.contains("no-such-repo")
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_spawn_preview_echoes_its_request_id() {
+        let (hub, _scratch) = hub_with_previewable_repo("ws-preview-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::PreviewWorkspaceSpawn {
+                workspace_id: "w1".to_string(),
+                branch_name: "feat".to_string(),
+                base_branch: None,
+                request_id: Some("p3".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::WorkspaceSpawnPreview { workspace_id, request_id: Some(id), .. }
+                    if id == "p3" && workspace_id == "w1"
+            ),
+            "{msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_workspace_spawn_preview_echoes_its_request_id() {
+        let (hub, _scratch) = test_hub("ws-preview-fail-rid");
+        let msg = dispatch_one(
+            &hub,
+            ClientMessage::PreviewWorkspaceSpawn {
+                workspace_id: "no-such-workspace".to_string(),
+                branch_name: "feat".to_string(),
+                base_branch: None,
+                request_id: Some("p4".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                &msg,
+                DaemonMessage::Error { request_id: Some(id), .. } if id == "p4"
             ),
             "{msg:?}"
         );

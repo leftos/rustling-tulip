@@ -210,7 +210,7 @@ fn enter_in_branch_field_submits_once(cx: &mut TestAppContext) {
     h.keys("x");
     assert_eq!(branch(&mut h).as_deref(), Some("wt/brave-foxx"));
 
-    h.keys("enter");
+    h.keys("escape enter");
     let mut sent = h.sent();
     assert!(!is_open(&mut h), "a submit closes the dialog");
     h.keys("enter");
