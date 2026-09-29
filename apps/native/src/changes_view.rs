@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
+use crate::palette::{CHANGES_ADDED, CHANGES_MODIFIED, CHANGES_RENAMED, CHANGES_UNTRACKED};
 use crate::sc_writes::{
     ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
 };
@@ -47,11 +48,6 @@ const INDENT_STEP: f32 = 12.0;
 const STATUS_WIDTH: f32 = 14.0;
 const CARET_WIDTH: f32 = 10.0;
 const PATHS_MAX_HEIGHT: f32 = 200.0;
-/// The status letters' colours, as the Tauri changes tree draws them.
-const MODIFIED: u32 = 0x00d4_a72c;
-const ADDED: u32 = 0x004e_c9b0;
-const RENAMED: u32 = 0x0056_9cd6;
-const UNTRACKED: u32 = 0x006a_9955;
 
 /// What a changes-view button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,11 +354,11 @@ fn push_tree_rows(ctx: &TreeCtx<'_>, folder: &Folder, depth: usize, rows: &mut V
 
 fn status_color(status: &str) -> u32 {
     match status {
-        "M" => MODIFIED,
-        "A" => ADDED,
+        "M" => CHANGES_MODIFIED,
+        "A" => CHANGES_ADDED,
         "D" => DANGER,
-        "R" => RENAMED,
-        "?" => UNTRACKED,
+        "R" => CHANGES_RENAMED,
+        "?" => CHANGES_UNTRACKED,
         "U" => MUTED,
         _ => TEXT,
     }

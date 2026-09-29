@@ -13,6 +13,7 @@ use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::notices::ToastKind;
+use crate::palette::{BACKDROP_TINT, OVERLAY_TINT};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, MenuEntry, MenuMode, SessionAction, Step, abandoned_lines,
     action_state, exit_code_label, exited_message, header_shows_exit_code, menu_entries,
@@ -27,10 +28,6 @@ use crate::{
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
-/// The stopped-pane overlay: translucent, so the terminal shows through.
-const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
-/// The dim layer behind the delete-worktree confirm.
-pub(crate) const BACKDROP_TINT: u32 = 0x0000_0099;
 const DIALOG_WIDTH: f32 = 440.0;
 
 /// `panel` centred over a tinted layer that takes every click beneath it, and

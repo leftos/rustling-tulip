@@ -15,6 +15,7 @@ use protocol::{ClientMessage, DaemonMessage, RecoverItemResult, SessionSnapshot}
 
 use crate::activity_bar::badge_text;
 use crate::notice_view::modal_panel;
+use crate::palette::TRANSPARENT;
 use crate::recover::{
     Activation, Control, FocusMove, Group, GroupKind, Names, RECOVER_TIMEOUT, RecoverDialog, Row,
     other_toggle_label,
@@ -699,7 +700,7 @@ fn conversation_choice(
         .border_color(if focused {
             gpui::rgb(TEXT)
         } else {
-            gpui::rgba(0x0000_0000)
+            gpui::rgba(TRANSPARENT)
         })
         .child(muted(chosen_conversation(row).unwrap_or_default()))
         .into_any_element()

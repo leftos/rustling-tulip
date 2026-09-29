@@ -10,6 +10,7 @@ use protocol::{ClientMessage, ClonableLayout, TabEntry};
 
 use crate::layout_chooser::{Control, FALLBACK_ASPECT, LayoutChooser, Mode, arrangement_messages};
 use crate::notice_view::modal_panel;
+use crate::palette::SELECTED_BG;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::tabs::collect_panes;
 use crate::{BORDER, HOVER_BG, MUTED, RootView, TEXT};
@@ -18,7 +19,6 @@ const TITLE: &str = "Set up this window";
 const INTRO: &str = "This is a new client. Sessions are shared with every connected window, but each curates its own tabs. How should this window start?";
 const LAYOUT_LABEL: &str = "Layout";
 const MAX_LABEL: &str = "Max sessions per tab";
-const SELECTED_BG: u32 = 0x0037_3a44;
 
 impl RootView {
     /// Whether the first-connect layout chooser is open.

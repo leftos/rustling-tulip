@@ -28,6 +28,7 @@ use crate::links::TerminalLink;
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
+use crate::palette::{SHELL_MARK_BORDER, SHELL_MARK_FAIL, SHELL_MARK_OK};
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
@@ -1608,7 +1609,7 @@ fn gutter_dot(
         .rounded_full()
         .bg(dot_color(dot.status))
         .border_1()
-        .border_color(gpui::rgba(0x0000_0059))
+        .border_color(gpui::rgba(SHELL_MARK_BORDER))
         .tooltip(crate::tooltip(dot.tooltip))
         .on_mouse_down(
             MouseButton::Left,
@@ -1623,8 +1624,8 @@ fn gutter_dot(
 /// the shell gave no code for.
 fn dot_color(status: ShellStatus) -> Rgba {
     gpui::rgb(match status {
-        ShellStatus::Ok => 0x004e_c9b0,
-        ShellStatus::Fail => 0x00f4_8771,
+        ShellStatus::Ok => SHELL_MARK_OK,
+        ShellStatus::Fail => SHELL_MARK_FAIL,
         ShellStatus::Unknown => crate::MUTED,
     })
 }

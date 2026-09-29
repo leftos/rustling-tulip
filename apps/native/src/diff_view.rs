@@ -5,8 +5,6 @@
 //! text column shows is laid out. Tokens take their syntax class's colour
 //! once the tab hands the view each side's classes.
 
-#![expect(clippy::unreadable_literal, reason = "colours read as #rrggbbaa")]
-
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -21,28 +19,16 @@ use gpui::{
 
 use crate::diff_model::{DiffModel, Row, RowKind, Side};
 use crate::fonts::{self, FontSettings};
+use crate::palette::{
+    DIFF_CURRENT_BAR, DIFF_DELETE_BG, DIFF_DELETE_WORD_BG, DIFF_DIVIDER, DIFF_FILLER_BG,
+    DIFF_GUTTER_TEXT, DIFF_INSERT_BG, DIFF_INSERT_WORD_BG, DIFF_TEXT,
+};
 use crate::syntax::{self, Highlighted, TokenClass};
 use crate::theme;
 
-/// A deleted line's half, and the old half of a modified row.
-const DELETE_BG: u32 = 0xf8514926;
-/// An inserted line's half, and the new half of a modified row.
-const INSERT_BG: u32 = 0x3fb95026;
-/// A changed word on the old side.
-const DELETE_WORD_BG: u32 = 0xf8514959;
-/// A changed word on the new side.
-const INSERT_WORD_BG: u32 = 0x3fb95059;
-/// The half of a row whose side has no line.
-const FILLER_BG: u32 = 0x8080800f;
-const TEXT: u32 = 0xccccccff;
-const GUTTER_TEXT: u32 = 0x6e7681ff;
-/// The bar left of the current hunk's rows.
-const CURRENT_BAR: u32 = 0x4c8dffcc;
 const CURRENT_BAR_WIDTH: f32 = 2.0;
 /// The space between a gutter's number and its line.
 const GUTTER_PAD: f32 = 8.0;
-/// The line between the two halves.
-const DIVIDER: u32 = 0x20222aff;
 const DIVIDER_WIDTH: f32 = 1.0;
 
 /// Where [`DiffView::go`] moves the current hunk.
@@ -496,7 +482,7 @@ impl DiffView {
                             .w(px(CURRENT_BAR_WIDTH))
                             .h_full()
                             .flex_none()
-                            .when(current, |bar| bar.bg(rgba(CURRENT_BAR))),
+                            .when(current, |bar| bar.bg(rgba(DIFF_CURRENT_BAR))),
                     )
                     .child(old)
                     .child(
@@ -504,7 +490,7 @@ impl DiffView {
                             .w(px(DIVIDER_WIDTH))
                             .h_full()
                             .flex_none()
-                            .bg(rgba(DIVIDER)),
+                            .bg(rgba(DIFF_DIVIDER)),
                     )
                     .child(new)
             })
@@ -525,12 +511,20 @@ impl DiffView {
     ) -> (Div, Option<SharedString>) {
         let cell = div().flex_1().min_w(px(0.0)).h_full().flex().flex_row();
         let Some(side) = side_of(row, half) else {
-            return (cell.bg(rgba(FILLER_BG)), None);
+            return (cell.bg(rgba(DIFF_FILLER_BG)), None);
         };
         let changed = row.kind != RowKind::Equal;
         let (line_text, tint, word_tint) = match half {
-            Half::Old => (self.model.old_text(side), DELETE_BG, DELETE_WORD_BG),
-            Half::New => (self.model.new_text(side), INSERT_BG, INSERT_WORD_BG),
+            Half::Old => (
+                self.model.old_text(side),
+                DIFF_DELETE_BG,
+                DIFF_DELETE_WORD_BG,
+            ),
+            Half::New => (
+                self.model.new_text(side),
+                DIFF_INSERT_BG,
+                DIFF_INSERT_WORD_BG,
+            ),
         };
         let words = self.model.inline(index).map(|spans| match half {
             Half::Old => spans.left.as_slice(),
@@ -569,7 +563,7 @@ impl DiffView {
                     .flex_none()
                     .pr(px(GUTTER_PAD / 2.0))
                     .text_right()
-                    .text_color(rgba(GUTTER_TEXT))
+                    .text_color(rgba(DIFF_GUTTER_TEXT))
                     .child(side.line_no.to_string()),
             )
             .child(
@@ -726,7 +720,7 @@ impl Render for DiffView {
             .relative()
             .size_full()
             .bg(background())
-            .text_color(rgba(TEXT))
+            .text_color(rgba(DIFF_TEXT))
             .font_family(metrics.family)
             .text_size(px(self.font.size))
             .line_height(px(metrics.line_height))

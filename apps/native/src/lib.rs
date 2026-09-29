@@ -44,6 +44,7 @@ mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
+mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;
@@ -331,19 +332,9 @@ pub(crate) const WINDOW_SIZE: (u16, u16) = (1000, 640);
 const UI_TEXT_SIZE: f32 = 12.0;
 /// The footer's height in logical pixels.
 pub const FOOTER_HEIGHT: f32 = 22.0;
-/// Background of the footer and the tab bar, as `0xRRGGBB`.
-pub const BAR_BG: u32 = 0x0025_2526;
-/// Background of the sidebar and panels, as `0xRRGGBB`.
-pub const PANEL_BG: u32 = 0x000f_1014;
-const OVERLAY_BG: u32 = 0x001e_1e1e;
-const HOVER_BG: u32 = 0x002d_2f36;
-const BORDER: u32 = 0x0020_222a;
-const TEXT: u32 = 0x00cc_cccc;
-const MUTED: u32 = 0x009a_9a9a;
-const DANGER: u32 = 0x00ef_5c5c;
-const DANGER_BG: u32 = 0x003a_1c1f;
-/// Amber, for something the user should look at that is not a failure.
-const WARNING: u32 = 0x00e8_a531;
+pub use palette::{BAR_BG, PANEL_BG};
+pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, OVERLAY_BG, TEXT, WARNING};
+use palette::{STATUS_ERR, STATUS_IDLE, STATUS_OK};
 
 /// What a press on a drag handle is resizing.
 enum Drag {
@@ -2436,10 +2427,10 @@ fn status_dot(dot: DotKind, id: impl Into<ElementId>) -> AnyElement {
 /// The footer dot's colour, from the Tauri app's status tokens.
 fn dot_color(dot: DotKind) -> u32 {
     match dot {
-        DotKind::Ok => 0x003f_b96a,
+        DotKind::Ok => STATUS_OK,
         DotKind::Pending => WARNING,
-        DotKind::Idle | DotKind::Stopped => 0x0083_8a96,
-        DotKind::Err => 0x00ef_5c5c,
+        DotKind::Idle | DotKind::Stopped => STATUS_IDLE,
+        DotKind::Err => STATUS_ERR,
     }
 }
 

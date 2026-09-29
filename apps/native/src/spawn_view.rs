@@ -14,6 +14,7 @@ use gpui::{
 use protocol::{Agent, DaemonMessage};
 
 use crate::combobox::{ComboRow, list_placement};
+use crate::palette::{SELECTED_BG, SPAWN_BADGE_OK};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
@@ -34,7 +35,6 @@ const DIALOG_WIDTH: f32 = 520.0;
 /// The dialog's greatest height, as a share of the window's; the body
 /// scrolls past it.
 const PANEL_MAX_HEIGHT: f32 = 0.9;
-const SELECTED_BG: u32 = 0x0037_3a44;
 const DIALOG_TITLE: &str = "Spawn session";
 const SHARE_TITLE: &str = "Share this worktree?";
 const SHARE_BODY: &str = "A session is already running in the worktree you picked. Both agents will see each other's uncommitted edits, and concurrent writes to the same file will overwrite one another.";
@@ -56,8 +56,6 @@ const REMOVE_ENV_TIP: &str = "Remove env var";
 const LIST_MAX_HEIGHT: f32 = 200.0;
 const CURRENT_TAG: &str = "current";
 const PREVIEW_HEADERS: [&str; 4] = ["Repo", "Branch", "Action", "Path"];
-/// An "ok" badge of the workspace preview table.
-const BADGE_OK: u32 = 0x004e_c9b0;
 
 /// Where the spawn dialog was opened from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1752,7 +1750,7 @@ fn preview_table(form: &SpawnForm) -> AnyElement {
         let selector = format!("spawn-preview-row-{}", member.repo_id);
         let badges = row.badges.into_iter().map(|(text, tone)| {
             let color = match tone {
-                Tone::Ok => BADGE_OK,
+                Tone::Ok => SPAWN_BADGE_OK,
                 Tone::Warn => WARNING,
             };
             div()

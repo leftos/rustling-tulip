@@ -26,7 +26,6 @@ Review: `code-review`; a person compares the running client with the boards. Ver
 
 The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.1 → PT.2 → PT.4a → PT.4b; PT.3 needs PT.1; PT.9 needs PT.2; PT.5 and PT.7 need PT.4b; PT.6a needs PT.4a, PT.6b follows PT.6a; PT.8a needs PT.3; PT.8b needs PT.8a and PT.6b.
 
-- [ ] **PT.1 Palette module, no visual change**: the colour constants and scattered literals into a new `palette.rs`. Settled: every UI colour moves, the stragglers the step's list missed included (`activity_bar.rs`, `changes_view.rs`, `diff_view.rs`, `session_menu.rs`, `term_view.rs`, `recover_view.rs`); old names kept and re-exported from `lib.rs`; equal values stay distinct tokens; a test pins each token to today's value.
 - [ ] **PT.2 Petal values, accent and terminal ground**: the tokens, the coral default accent and Petal presets, the `#0C0B0E` ground, "Graphite" preset renamed "Slate".
 - [ ] **PT.3 Schibsted Grotesk as the UI face**: four static TTFs with their `OFL.txt`.
 - [ ] **PT.4a Status glyphs**: working ring, asking diamond, waiting ring, idle dot, plus spawning, stopped and error, in leaves, headers, tab pills and the footer.

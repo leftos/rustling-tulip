@@ -14,6 +14,7 @@ use crate::appearance;
 use crate::appearance_view::Level;
 use crate::connection::DotKind;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
+use crate::palette::SELECTED_BG;
 use crate::session_actions::inline_actions;
 use crate::sidebar::{Activity, Container, ContainerKind, Leaf, SidebarView, can_attach};
 use crate::spawn_view::SpawnEntry;
@@ -26,7 +27,6 @@ use crate::{
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
 const LEAF_INDENT: f32 = 22.0;
-const SELECTED_BG: u32 = 0x0037_3a44;
 const TAG_TEXT_SIZE: f32 = 10.0;
 const ACCENT_STRIPE_WIDTH: f32 = 3.0;
 

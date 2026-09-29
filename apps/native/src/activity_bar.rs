@@ -7,6 +7,7 @@
 use gpui::{ClickEvent, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, svg};
 
 use crate::assets::{NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SOURCE_CONTROL_ICON};
+use crate::palette::RAIL_BADGE_TEXT;
 use crate::sidebar::Activity;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, WARNING, tooltip};
 
@@ -17,8 +18,6 @@ const ACTIVE_BAR_WIDTH: f32 = 2.0;
 const BADGE_HEIGHT: f32 = 16.0;
 const BADGE_TEXT_SIZE: f32 = 10.0;
 const BADGE_INSET: f32 = 4.0;
-/// The badge's text, dark on the accent.
-const BADGE_TEXT: u32 = 0x000f_1014;
 
 /// The badge's text for `count`: hidden at 0, `99+` above 99.
 #[must_use]
@@ -203,7 +202,7 @@ fn badge(selector: &'static str, text: String, color: u32) -> Div {
         .px(px(4.0))
         .rounded_full()
         .bg(gpui::rgb(color))
-        .text_color(gpui::rgb(BADGE_TEXT))
+        .text_color(gpui::rgb(RAIL_BADGE_TEXT))
         .text_size(px(BADGE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .debug_selector(move || selector.to_owned())

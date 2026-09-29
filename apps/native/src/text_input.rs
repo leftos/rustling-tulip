@@ -22,6 +22,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
+use crate::palette::{INPUT_CURSOR, INPUT_PLACEHOLDER, INPUT_SELECTION, INPUT_TEXT};
+
 /// The key context a single-line input's bindings apply in.
 const CONTEXT: &str = "TextInput";
 /// The key context of a multi-line input, its own so Enter and the vertical
@@ -29,10 +31,6 @@ const CONTEXT: &str = "TextInput";
 const MULTI_LINE_CONTEXT: &str = "TextInputMultiLine";
 const DEFAULT_MIN_ROWS: usize = 2;
 const DEFAULT_MAX_ROWS: usize = 6;
-const TEXT_COLOR: u32 = 0x00cc_cccc;
-const PLACEHOLDER_COLOR: u32 = 0x006a_6a6a;
-const CURSOR_COLOR: u32 = 0x00cc_cccc;
-const SELECTION_COLOR: u32 = 0x264f_78ff;
 
 actions!(
     text_input,
@@ -812,7 +810,7 @@ impl TextLayout {
                     point(origin.x + left, top),
                     point(origin.x + right, top + self.line_height),
                 );
-                Some(fill(corners, rgba(SELECTION_COLOR)))
+                Some(fill(corners, rgba(INPUT_SELECTION)))
             })
             .collect()
     }
@@ -1063,9 +1061,9 @@ impl Shaping {
     fn of(input: &TextInput, window: &Window) -> Self {
         let style = window.text_style();
         let (text, color) = if input.content.is_empty() {
-            (input.placeholder.clone(), rgb(PLACEHOLDER_COLOR))
+            (input.placeholder.clone(), rgb(INPUT_PLACEHOLDER))
         } else {
-            (input.content.clone(), rgb(TEXT_COLOR))
+            (input.content.clone(), rgb(INPUT_TEXT))
         };
         // A single-line input draws one row: a line break its owner set draws
         // as a space, byte for byte, so the offsets still hold.
@@ -1202,7 +1200,7 @@ impl Element for TextElement {
         let origin = point(bounds.left(), bounds.top() - scroll_y);
         let (selection, cursor) = if selected.is_empty() {
             let caret = Bounds::new(origin + caret, size(px(2.), line_height));
-            (Vec::new(), Some(fill(caret, rgb(CURSOR_COLOR))))
+            (Vec::new(), Some(fill(caret, rgb(INPUT_CURSOR))))
         } else {
             (layout.selection_quads(&selected, origin), None)
         };
