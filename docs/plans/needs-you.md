@@ -10,13 +10,13 @@ With many sessions open, the only signs that one is waiting are the leaf's amber
 
 - A view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter (borrowed-ideas.md).
 - Kept beside the Dashboard: the Dashboard groups needs-you sessions among all others, and this view stays as a compact always-visible list (spoken-alerts.md, Q5).
-- Option buttons that answer a question belong to needs-you *cards*, driven by the hook's structured question data, with "Go to pane" as the fallback (spoken-alerts.md, Q6). Whether the compact list carries them is open (Q3 below).
+- Option buttons that answer a question belong to needs-you *cards*, driven by the hook's structured question data, with "Go to pane" as the fallback (spoken-alerts.md, Q6). The compact list carries none: a click goes to the pane (Q3).
 
 ## Design
 
 ### What counts as needing you
 
-A session is listed when any of these holds, checked in this order (the first match names the row's reason). Parked (`is_inactive`) and abandoned (`is_abandoned`) sessions are never listed: Resume and the Recover dialog own them.
+A session is listed when any of these holds, checked in this order (the first match names the row's reason). Parked (`is_inactive`) and abandoned (`is_abandoned`) sessions are never listed: Resume and the Recover dialog own them. Sessions excluded from busy tracking (P4.16) are listed like any other: the exclusion is about busy counts, and its ruling keeps their OS notifications (Q4).
 
 | Reason | Condition | Source | Leaves the list when |
 | - | - | - | - |
@@ -49,7 +49,7 @@ A click is a leaf click: `RootView::select_session` (`lib.rs`), which focuses th
 
 ### Rail item and badge
 
-A third rail item after Sessions, before Source control, with its own icon (`assets/`, an inbox or hand glyph drawn to the rail's 18 px stroke). Its badge counts the listed rows through `badge_text` (hidden at 0, `99+`), in the leaf-attention amber (`WARNING`) rather than the accent, so it reads as "waiting" and not as "uncommitted". The rail is always shown, folded panel or not, so the badge is the always-visible part; the list is one click away. `item_tip` stops hard-coding "uncommitted": each item supplies its own noun ("3 waiting on you", "5 uncommitted"). The Recover item (High priority) also generalises the rail; whichever lands second rebases onto the other's `Item` shape.
+A third rail item after Sessions, before Source control, with its own icon (`assets/`, an inbox or hand glyph drawn to the rail's 18 px stroke). Its badge counts the listed rows through `badge_text` (hidden at 0, `99+`), in the leaf-attention amber (`WARNING`) rather than the accent, so it reads as "waiting" and not as "uncommitted". The rail is always shown, folded panel or not, so the badge is the always-visible part; the list is one click away. `item_tip` stops hard-coding "uncommitted": each item supplies its own noun ("3 waiting on you", "5 uncommitted"). The Recover dialog (High priority, in progress on a branch) also adds a rail button with a badge to `activity_bar.rs`, so NY.3 rebases onto it and extends its `Item` shape rather than adding a second one. There is no key binding for the view or for jumping to the longest-waiting session; the rail item and its badge are the entry point (Q5).
 
 The rail does not switch to Needs You on its own when a session starts waiting (the badge and the toast already say so; taking the panel away from Sessions or Source control mid-task would be worse).
 
@@ -63,7 +63,7 @@ The label is minute-grained past a minute and second-grained below it. A 1 s rep
 
 ### What it needs from the daemon
 
-One additive field, useful without Waves 7 and 8 and needed by the Dashboard's "Needs you sorted by longest waiting" (DB.2) as well:
+One additive field, useful without Waves 6 and 7 and needed by the Dashboard's "Needs you sorted by longest waiting" (DB.2) as well:
 
 - `SessionSnapshot.status_since: Option<DateTime<Utc>>`, `#[serde(default)]`: when `status` last changed. `SessionRegistry::update_from` (`crates/daemon/src/session.rs`) stamps it whenever the closure changes `status`, and record creation sets it. A reattached session after a daemon restart takes the restart time (not persisted: the sidecar keeps no status). Protocol 22 ignores the unknown field; `supported` does not change.
 
@@ -77,7 +77,7 @@ No new message. `pending_input` (HS.2) and `summary` (SA.1) arrive on the existi
 
 ## Steps
 
-NY.1 to NY.3 need neither Wave 6 nor Wave 7 and ship the degraded view; NY.4 needs HS.2; NY.5 needs SA.1 (and shows Answer rows only once SA.6 fills summaries).
+NY.1 to NY.3 need neither Wave 6 nor Wave 7 and land now, ahead of Wave 6, as the reduced view (Q1); NY.4 needs HS.2; NY.5 needs SA.1 (and shows Answer rows only once SA.6 fills summaries).
 
 - [ ] **NY.1 `status_since` on the snapshot.** `crates/protocol/src/lib.rs`: the field. `crates/daemon/src/session.rs`: stamp in `update_from` when `status` differs from before the closure, and at record creation; audit the direct `rec.status =` writes outside `update_from` (`rg -n "\.status = " crates/daemon/src`) and route any that bypass it. Proof: a protocol round-trip test with and without the field, `cargo test -p protocol v22_compat`; a daemon unit test that a status change stamps a new time, a same-status update keeps the old one, and a new record has one. Gates: `-p protocol -p daemon`.
 - [ ] **NY.2 The list model.** New `apps/native/src/needs_you.rs` (plain Rust, no GPUI): `NeedsYouRow { session_id, container_name, accent, label, reason: Reason, since, detail: String }`, `enum Reason { Asking, Answer, Ended }`, `fn rows(model: &SidebarModel) -> Vec<NeedsYouRow>` built from `containers()` (sidebar order, display labels, the attention flag) and the snapshots; the membership table, the order, the degraded line-2 text, and `fn waited(now, since) -> String`. Proof: unit tests for each membership row (including parked and abandoned excluded, and an Asking row that survives a cleared attention), the order (oldest first, no-`since` after, Ended last, sidebar order on ties), line 2 with and without a terminal title and for each Ended form, and `waited` at 0 s, 59 s, 60 s, 1 h 5 m. Gates: `-p rustling-tulip-native`. Needs NY.1.
@@ -87,6 +87,8 @@ NY.1 to NY.3 need neither Wave 6 nor Wave 7 and ship the degraded view; NY.4 nee
 - [ ] **NY.6 Docs.** `docs/native-client.md` (a Needs You section: membership, order, badge), `docs/architecture.md` task index (the view's files), the README glossary ("Needs You", "status_since"), CLAUDE.md's `native-ui.json` line if the `activity` values are listed; delete the MAIN.md line and borrowed-ideas.md's entry, and this doc, once NY.5 lands. Proof: the diff.
 
 ## Open questions
+
+Answered (user): Q1 (a) NY.1–NY.3 land now, ahead of Wave 6, as the reduced view, and NY.4 and NY.5 follow their waves; Q2 (a) `Error` and attention-flagged `Stopped` rows are listed after the waiting ones and dismissed by a click; Q3 (a) no answer buttons in the compact rows; Q4 (a) sessions excluded from busy tracking are listed like any other; Q5 (a) no shortcut to the longest-waiting session.
 
 1. **When NY.1–NY.3 land.** (a) Recommended: as soon as they are free, ahead of Wave 6, as the degraded view; NY.4 and NY.5 follow their waves. How: the MAIN line splits into a now-line (NY.1–NY.3) and a Wave 7 line (NY.4–NY.5). Worst case: the heuristic misses a prompt whose wording changed, and the user learns to trust a list that is quietly incomplete until Wave 6. (b) Keep all of it in Wave 7. Worst case: the rail item waits behind the summarizer and key-store work for a list that needs neither.
 2. **Ended rows.** (a) Recommended: list `Error` and attention-flagged `Stopped` sessions after the waiting ones, dismissed by a click. How: the attention set already tracks them. Worst case: a batch of sessions finishing together pads the list and the badge until each is clicked. (b) Waiting only (Asking and Answer). Worst case: a session that crashed is only in the sidebar's "!" and a toast, the thing this view exists to replace. (c) Error only. Worst case: a clean exit the user was waiting for goes unlisted.

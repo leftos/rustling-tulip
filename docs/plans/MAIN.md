@@ -14,9 +14,10 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 
 ## High priority
 
-Bugs, and the user's request to recover killed sessions.
+Bugs, the user's request to recover killed sessions, and the reduced Needs You view the user moved ahead.
 
 - [ ] **Recover dialog in the native client** (user; session recovery step 5): the rail button, its badge of unrecovered unexpected ends and the Recover dialog, as in [session-recovery.md](./session-recovery.md) Design 6. `apps/native/src/activity_bar.rs`, new `recover.rs` / `recover_view.rs`, `lib.rs`, `spawns.rs`, `tests/ui_recover.rs`. Gates: `-p rustling-tulip-native`, then the live tier (`e2e_recover.rs`); hand-test the badge against the real history.
+- [ ] **"Needs You" view, reduced** (user: ahead of Wave 6): NY.1 `status_since` on the snapshot, NY.2 the list model, NY.3 the rail item and panel, working on today's status heuristic; every session waiting on the user in one place beside Sessions and Source control. Design and rulings: [needs-you.md](./needs-you.md).
 
 ## Waves
 
@@ -74,7 +75,7 @@ Review: `code-review`; a person listens to the voices and looks at the Dashboard
 
 - [ ] **Spoken alerts when an agent waits** (user): a cheap-model summary (DeepSeek Flash by default, providers and keys chosen in Settings, the daemon calling the provider's Messages API directly: an exception to CLAUDE.md's no-direct-API rule that changes with SA.6) classified `needs_answer` / `working_update` / `done_waiting`, prefixed with the repo's spoken name and spoken with Windows' built-in voices; steps SA.1–SA.11. Phone alerts wait for the mobile app's MA7 push. Design and rulings: [spoken-alerts.md](./spoken-alerts.md).
 - [ ] **Dashboard view** (user): a tab of cards across all live sessions, fed by the alerts' summarizer, grouped Needs you / Working / Done / Idle, with files changed and an activity timeline; steps DB.1–DB.4 (DB.5 rides the mobile app's MA6). Design: [spoken-alerts.md](./spoken-alerts.md#dashboard-view).
-- [ ] **"Needs You" view**: every session waiting on the user in one place, as an activity-rail view beside Sessions and Source control (ruled; kept beside the Dashboard's needs-you group); steps NY.1–NY.6. Design and open questions: [needs-you.md](./needs-you.md).
+- [ ] **"Needs You" view, hook detail and summaries** (NY.4 needs HS.2, NY.5 needs SA.1, then NY.6 docs): line 2 from `pending_input`, the Answer rows from summaries. Design: [needs-you.md](./needs-you.md).
 
 ### Wave 8 — Subagent streams (`crates/daemon/src/subagents.rs`, `server.rs`, `apps/native/src/sidebar.rs`, `sidebar_view.rs`, new `subagent_view.rs`)
 
@@ -138,7 +139,7 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 Borrowed from Orca and VelaTerm; details, sources, rulings and open questions in [borrowed-ideas.md](./borrowed-ideas.md).
 
-- [ ] **Conversation view (GUI mode)** (user: likes VelaTerm's): a Claude session as a chat with tool cards and permission buttons, switchable with the terminal view; a session remembers its last view. Billing spike: runs on the subscription's usage windows today, personal use only ([gui-mode-billing.md](../spikes/gui-mode-billing.md)). The mobile app's MA9 depends on it. Design drafted, steps CV.0 (spike) to CV.11, open questions pending: [conversation-view.md](./conversation-view.md).
+- [ ] **Conversation view (GUI mode)** (user: likes VelaTerm's): a Claude session as a chat with tool cards and permission buttons, switchable with the terminal view; a session remembers its last view. Billing spike: runs on the subscription's usage windows today, personal use only ([gui-mode-billing.md](../spikes/gui-mode-billing.md)). The mobile app's MA9 depends on it. Design and the user's answers, steps CV.0 (spike) to CV.11: [conversation-view.md](./conversation-view.md).
 - [ ] **Link a worktree to a GitHub issue or PR at spawn**, through `gh` only.
 - [ ] **Agents that drive rustling-tulip**: a CLI run inside a session to spawn, message and read other sessions, authenticated by a per-session token.
 - [ ] **Plan, then execute in parallel across worktrees**: a planner session splits a task, the user approves, one executor per part; builds on the item above.
