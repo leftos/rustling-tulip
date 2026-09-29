@@ -44,7 +44,7 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 
 ## Concurrency
 
-- Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> main` from the main checkout.
+- Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default; a Tauri fix is cut from and lands on `tauri`).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
 - Depends on, where file lists hide it: the dependencies a line or its subplan names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 6 → Wave 7); a protocol message one item adds and another item's view consumes.
 - Context: read the status bar's figure at every landing (`jq .context_window.used_percentage <scratchpad>/statusline.json`); past 40% the loop stops refilling, per the user-level `nextup`.
@@ -64,7 +64,7 @@ The repo keeps no CHANGELOG.
 
 ## Landing
 
-- Commit in the worktree (fast-forward it onto `main` first if `main` moved; rerun the gates if that brought in new commits). Commit messages: ≤4-char type tag, imperative, ≤72-char subject, the session's attribution trailers.
-- From the main checkout: `git merge --ff-only <slug>`, then `git push origin main`. Pushing straight to `main` is the user's standing rule for this solo repo. A session running from a worktree offers `/ship` at each push point instead of pushing (user-level `nextup`, "A worktree session offers a ship instead of a push").
-- Then `git merge-base --is-ancestor <slug> main` && `git worktree remove ../rustling-tulip.wt/<slug>` && `git branch -d <slug>`.
+- Commit in the worktree (fast-forward it onto its `landOn` branch first if that moved; rerun the gates if that brought in new commits). Commit messages: ≤4-char type tag, imperative, ≤72-char subject, the session's attribution trailers. A stacked item lands after the item under it.
+- From the checkout that has `landOn` out (the main checkout for `main`): `git merge --ff-only <slug>`, then `git push origin <landOn>` when `origin/<landOn>` exists (a local session branch is not pushed; it ships with its own branch). Pushing straight to `main` is the user's standing rule for this solo repo. A session running from a worktree offers `/ship` at each push point instead of pushing (user-level `nextup`, "A worktree session offers a ship instead of a push").
+- Then, once `git cherry <landOn> <slug> <base sha>` prints no `+` line (user-level `nextup` §4 step 6): `git worktree remove ../rustling-tulip.wt/<slug>` && `git branch -D <slug>`.
 - The main checkout hosts at most one implementer, and none while a gate runs there.
