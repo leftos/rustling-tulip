@@ -317,6 +317,7 @@ impl RootView {
                     button.label().to_owned(),
                     button == RunButton::Run,
                     confirm.focused() == button,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_run_button(button, window, cx);

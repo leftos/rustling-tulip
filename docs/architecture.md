@@ -70,6 +70,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change tabs or panes | `apps/native/src/tabs.rs`, `tab_bar.rs`, `tab_menu.rs`, `grid_view.rs`, `pane_menu.rs`, daemon `crates/daemon/src/tabs.rs` |
 | Change the terminal pane | `apps/native/src/term_view.rs`, `term.rs`, `term_input.rs`, `keys.rs`, `mouse.rs`, `links.rs`, `shell_marks.rs` |
 | Change the spawn dialog | `apps/native/src/spawn_form.rs`, `spawn_view.rs`, `spawn_preview.rs`, `combobox.rs`, `spawns.rs` |
+| Change buttons, text fields, dialogs, menus or toasts | `apps/native/src/buttons.rs` (button and field looks, the focus ring), `session_menu.rs` (`dialog_button`, `bordered_button`, `menu_frame`, `popover_frame`, `backdrop`), `notice_view.rs` (`modal_panel`, `toast_frame`), `palette.rs` |
 | Change session actions and menus | `apps/native/src/session_menu.rs`, `session_actions.rs`, `branch_fate.rs`, `discard_confirm.rs` |
 | Change Settings | `apps/native/src/settings_view.rs`, `appearance.rs`, `appearance_view.rs`, `sidebar.rs` (`UiState` in native-ui.json) |
 | Change source control or diffs | `apps/native/src/source_control.rs`, `source_control_view.rs`, `changes_view.rs`, `sc_writes.rs`, `stashes.rs`, `history.rs`, `diff_model.rs`, `diff_view.rs`, `diff_tab.rs`, `syntax.rs` |

@@ -5,9 +5,10 @@ use std::collections::HashSet;
 
 use gpui::{AnyElement, ClickEvent, Context, ElementId, SharedString, Window, div, prelude::*, px};
 
-use crate::session_menu::dialog_button;
+use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::notice_view::{CLOSE_SIZE, toast_frame};
 use crate::undo::{self, TabSnapshot, UndoEntry};
-use crate::{BORDER, FOOTER_HEIGHT, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
 /// The widest the shelf gets; a narrower window narrows it.
 const SHELF_WIDTH: f32 = 460.0;
@@ -157,12 +158,11 @@ impl RootView {
             return None;
         }
         let width = (window.viewport_size().width / px(1.0) - 2.0 * SHELF_MARGIN).min(SHELF_WIDTH);
-        let accent = self.sidebar.appearance(None).accent.value;
         let cards: Vec<AnyElement> = self
             .undo
             .entries()
             .iter()
-            .map(|entry| undo_card(entry, accent, cx))
+            .map(|entry| undo_card(entry, cx))
             .collect();
         Some(
             div()
@@ -187,30 +187,20 @@ impl RootView {
     }
 }
 
-/// One entry's card: what it says, its Undo button and its ✕. The Undo
-/// button wears the app's accent.
-fn undo_card(entry: &UndoEntry, accent: u32, cx: &mut Context<RootView>) -> AnyElement {
+/// One entry's card: what it says, its primary Undo button and its ✕.
+fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
     let id = entry.id;
-    let action = dialog_button(
-        &format!("undo-action-{id}"),
-        undo::UNDO_LABEL.to_owned(),
-        false,
-        false,
-    )
-    .flex_none()
-    .h(px(28.0))
-    .text_color(gpui::rgb(accent))
-    .border_color(gpui::rgb(accent))
-    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_undo(id, window, cx);
-    }));
-    let dismiss = dialog_button(&format!("undo-dismiss-{id}"), "✕".to_owned(), false, false)
+    let action = primary_button(&format!("undo-action-{id}"), ButtonSize::Compact, true)
         .flex_none()
-        .w(px(28.0))
-        .h(px(28.0))
-        .flex()
-        .items_center()
-        .justify_center()
+        .child(undo::UNDO_LABEL)
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_undo(id, window, cx);
+        }));
+    let dismiss = outlined_button(&format!("undo-dismiss-{id}"), ButtonSize::Compact, true)
+        .flex_none()
+        .w(px(CLOSE_SIZE))
+        .px(px(0.0))
+        .child("✕")
         .tooltip(tooltip("Dismiss undo"))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.dismiss_undo(id, cx);
@@ -221,20 +211,11 @@ fn undo_card(entry: &UndoEntry, accent: u32, cx: &mut Context<RootView>) -> AnyE
         .truncate()
         .child(entry.message.clone());
     let name = format!("undo-entry-{id}");
-    div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
+    toast_frame(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
         .flex()
         .items_center()
         .gap(px(8.0))
-        .p(px(10.0))
-        .min_h(px(42.0))
-        .bg(gpui::rgb(PANEL_BG))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(6.0))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
         .occlude()
         .child(message)
         .child(action)

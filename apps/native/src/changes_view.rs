@@ -795,6 +795,7 @@ impl RootView {
                     label,
                     danger,
                     confirm.focused() == button,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_discard_button(button, window, cx);
@@ -802,11 +803,10 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let close = dialog_button("discard-confirm-close", "✕".to_owned(), false, false).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| {
+        let close = dialog_button("discard-confirm-close", "✕".to_owned(), false, false, true)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.press_discard_button(DiscardButton::Cancel, window, cx);
-            }),
-        );
+            }));
         let header = div()
             .flex()
             .items_center()

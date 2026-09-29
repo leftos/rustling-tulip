@@ -143,6 +143,7 @@ impl RootView {
                 dialog.label(control),
                 control.danger(),
                 control == dialog.focused(),
+                true,
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.press_pane_close(control, window, cx);

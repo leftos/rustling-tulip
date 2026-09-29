@@ -1025,6 +1025,7 @@ impl RootView {
                     button.label().to_owned(),
                     false,
                     focused == button,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_share(button, window, cx);
@@ -1084,7 +1085,7 @@ fn panel(id: &'static str) -> Stateful<Div> {
 }
 
 fn dialog_header(close_focused: bool, cx: &mut Context<RootView>) -> Div {
-    let close = dialog_button("spawn-close", "✕".to_owned(), false, close_focused).on_click(
+    let close = dialog_button("spawn-close", "✕".to_owned(), false, close_focused, true).on_click(
         cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
     );
     div()

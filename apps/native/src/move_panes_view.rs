@@ -303,7 +303,7 @@ impl RootView {
     }
 }
 
-/// A control of the dialog, outlined while focused and shaded while chosen;
+/// A control of the dialog, ringed while focused and shaded while chosen;
 /// a disabled Move is dimmed.
 fn move_panes_button(
     model: &MovePanes,
@@ -312,20 +312,20 @@ fn move_panes_button(
     selected: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
+    let enabled = control != Control::Confirm || model.confirm_enabled();
     let button = dialog_button(
         &model.selector(control),
         label,
         false,
         control == model.focused(),
+        enabled,
     )
-    .when(selected, |button| button.bg(gpui::rgb(HOVER_BG)))
-    .when(
-        control == Control::Confirm && !model.confirm_enabled(),
-        |button| button.opacity(0.6).cursor_default(),
-    );
-    button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-        this.press_move_panes(control, window, cx);
-    }))
+    .when(selected, |button| button.bg(gpui::rgb(HOVER_BG)));
+    button.when(enabled, |button| {
+        button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.press_move_panes(control, window, cx);
+        }))
+    })
 }
 
 fn muted(text: impl Into<gpui::SharedString>) -> Div {

@@ -491,6 +491,7 @@ impl RootView {
                     model.label(button, counts),
                     button.is_danger(),
                     focused == Some(button),
+                    enabled,
                 );
                 if enabled {
                     element
@@ -499,7 +500,7 @@ impl RootView {
                         }))
                         .into_any_element()
                 } else {
-                    element.opacity(0.5).cursor_default().into_any_element()
+                    element.into_any_element()
                 }
             })
             .collect();

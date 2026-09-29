@@ -8,7 +8,8 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::{BORDER, FOOTER_HEIGHT, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::notice_view::toast_frame;
+use crate::{FOOTER_HEIGHT, RootView, tooltip};
 
 /// How long the chip takes to fade out.
 pub const CHIP_LIFETIME: Duration = Duration::from_millis(1200);
@@ -133,21 +134,15 @@ impl RootView {
     pub(crate) fn chip_layer(&self) -> Option<AnyElement> {
         let chars = self.copy_chip.chars()?;
         let generation = self.copy_chip.generation();
-        let chip = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "copied-chip-{generation}"
-            ))))
-            .debug_selector(|| CHIP_LABEL.to_owned())
-            .px(px(10.0))
-            .py(px(3.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .child(CHIP_LABEL)
-            .tooltip(tooltip(chip_tooltip(chars)));
+        let chip = toast_frame(ElementId::Name(SharedString::from(format!(
+            "copied-chip-{generation}"
+        ))))
+        .debug_selector(|| CHIP_LABEL.to_owned())
+        .shadow_none()
+        .px(px(10.0))
+        .py(px(3.0))
+        .child(CHIP_LABEL)
+        .tooltip(tooltip(chip_tooltip(chars)));
         Some(
             div()
                 .absolute()

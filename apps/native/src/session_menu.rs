@@ -11,9 +11,11 @@ use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
 use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
+use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
+use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{BACKDROP_TINT, OVERLAY_TINT};
+use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, MenuEntry, MenuMode, SessionAction, Step, abandoned_lines,
     action_state, exit_code_label, exited_message, header_shows_exit_code, menu_entries,
@@ -21,10 +23,7 @@ use crate::session_actions::{
 };
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
-use crate::{
-    BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
-    tooltip,
-};
+use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
 
 pub(crate) const MENU_WIDTH: f32 = 240.0;
 const NEW_SESSION_TIP: &str = "Open the spawn dialog; the new session takes over this pane";
@@ -43,34 +42,43 @@ pub(crate) fn backdrop(selector: &'static str, panel: Stateful<Div>) -> AnyEleme
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::rgba(BACKDROP_TINT))
+        .bg(gpui::rgba(SCRIM))
         .occlude()
         .child(panel)
         .into_any_element()
 }
 
-/// The frame a context menu sits in, tagged `id` and holding `focus`; a
-/// press outside it runs `on_out`.
+/// The corner radius of a menu and of a popover.
+const POPOVER_RADIUS: f32 = 10.0;
+
+/// The card a popover sits in, tagged `id`: the chip fill with a strong
+/// edge, taking the pointer from whatever is under it.
+pub(crate) fn popover_frame(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .bg(gpui::rgb(CHIP))
+        .border_1()
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(POPOVER_RADIUS))
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+        .occlude()
+}
+
+/// The frame a context menu sits in, a [`popover_frame`] tagged `id` and
+/// holding `focus`; a press outside it runs `on_out`.
 pub(crate) fn menu_frame(
     id: &'static str,
     focus: &FocusHandle,
     on_out: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
+    popover_frame(id)
         .track_focus(focus)
         .flex()
         .flex_col()
         .w(px(MENU_WIDTH))
         .p(px(4.0))
-        .bg(gpui::rgb(PANEL_BG))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(6.0))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
-        .occlude()
         .on_mouse_down_out(on_out)
 }
 
@@ -777,17 +785,41 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let button = menu_item(selector, label, is_danger(action));
-        if action.pending_label().is_some() && self.duplicates.is_pending(session_id) {
+        if !self.action_ready(session_id, action) {
             return button.opacity(0.6).cursor_default();
         }
-        let session_id = session_id.to_owned();
-        button.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                this.choose_action(&session_id, action, window, cx);
-            }),
-        )
+        on_action_press(button, session_id, action, cx)
+    }
+
+    /// A compact button of a pane overlay for `action` on `session_id`,
+    /// outlined or danger as the menu colours it; a disabled one stops its
+    /// press.
+    fn overlay_action_button(
+        &self,
+        session_id: &str,
+        action: SessionAction,
+        selector: &str,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let kind = if is_danger(action) {
+            ButtonKind::Danger
+        } else {
+            ButtonKind::Outlined
+        };
+        let ready = self.action_ready(session_id, action);
+        let button = button(selector, kind, ButtonSize::Compact, ready).child(label);
+        if ready {
+            on_action_press(button, session_id, action, cx)
+        } else {
+            button
+        }
+    }
+
+    /// Whether `action` on `session_id` can run now: a duplicate waits for
+    /// the one in flight.
+    fn action_ready(&self, session_id: &str, action: SessionAction) -> bool {
+        action.pending_label().is_none() || !self.duplicates.is_pending(session_id)
     }
 
     /// The pane header's Stop (then "Confirm stop" / "Cancel"), or the exit
@@ -920,9 +952,7 @@ impl RootView {
             .map(|action| {
                 let selector = format!("exited-{}-{pane_id}", action.key());
                 let label = self.action_label(session, action, true);
-                self.action_button(&session.id, action, &selector, label, cx)
-                    .border_1()
-                    .border_color(gpui::rgb(BORDER))
+                self.overlay_action_button(&session.id, action, &selector, label, cx)
                     .into_any_element()
             })
             .collect();
@@ -954,9 +984,7 @@ impl RootView {
             .map(|inline| {
                 let selector = format!("abandoned-{}-{pane_id}", inline.key);
                 let label = self.action_label(session, inline.action, true);
-                self.action_button(&session.id, inline.action, &selector, label, cx)
-                    .border_1()
-                    .border_color(gpui::rgb(BORDER))
+                self.overlay_action_button(&session.id, inline.action, &selector, label, cx)
                     .tooltip(tooltip(inline.tip))
                     .into_any_element()
             })
@@ -1057,7 +1085,7 @@ fn overlay_layer(name: String) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .gap(px(10.0))
-        .bg(gpui::rgba(OVERLAY_TINT))
+        .bg(gpui::rgba(SCRIM))
         .occlude()
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
@@ -1273,10 +1301,16 @@ impl RootView {
     pub(crate) fn delete_dialog_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.delete_dialog.as_ref()?;
         let confirm = &dialog.confirm;
-        let close = dialog_button("delete-worktree-dialog-close", "✕".to_owned(), false, false)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.close_delete_dialog(window, cx);
-            }));
+        let close = dialog_button(
+            "delete-worktree-dialog-close",
+            "✕".to_owned(),
+            false,
+            false,
+            true,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.close_delete_dialog(window, cx);
+        }));
         let progress = dialog
             .owner
             .progress()
@@ -1307,6 +1341,7 @@ impl RootView {
                     confirm.label(button),
                     button.is_danger(),
                     focused,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_delete_dialog(button, window, cx);
@@ -1314,20 +1349,8 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = div()
-            .id("delete-worktree-panel")
+        let panel = modal_panel("delete-worktree-panel")
             .track_focus(&self.dialog_focus)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .w(px(DIALOG_WIDTH))
-            .p(px(14.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
             .child(header)
             .child(self.delete_dialog_body(confirm))
             .child(div().flex().justify_end().gap(px(6.0)).children(buttons));
@@ -1369,27 +1392,43 @@ impl RootView {
     }
 }
 
-/// A button of the delete-worktree confirm; the focused one is outlined.
+/// A dialog's button: outlined, or outlined with the danger colour's text;
+/// the focused one wears the focus ring. A disabled one is dimmed and its
+/// press stops at it; its caller attaches no handler to it.
 pub(crate) fn dialog_button(
     selector: &str,
     label: String,
     danger: bool,
     focused: bool,
+    enabled: bool,
 ) -> Stateful<Div> {
-    let name = selector.to_owned();
-    div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
-        .px(px(10.0))
-        .py(px(4.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
-        .cursor_pointer()
-        .text_color(gpui::rgb(if danger { DANGER } else { TEXT }))
-        .when(danger, |button| button.bg(gpui::rgb(DANGER_BG)))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+    let kind = if danger {
+        ButtonKind::Danger
+    } else {
+        ButtonKind::Outlined
+    };
+    let size = ButtonSize::Regular;
+    button(selector, kind, size, enabled)
+        .when(focused, |button| button.child(focus_ring(size.radius())))
         .child(label)
+}
+
+/// `button`, which runs `action` on `session_id` on a left press and keeps
+/// the press from the root.
+fn on_action_press(
+    button: Stateful<Div>,
+    session_id: &str,
+    action: SessionAction,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let session_id = session_id.to_owned();
+    button.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+            cx.stop_propagation();
+            this.choose_action(&session_id, action, window, cx);
+        }),
+    )
 }
 
 /// Runs `act` on a left press and keeps the press from the root.
@@ -1417,35 +1456,27 @@ pub(crate) struct BorderedButton {
     pub enabled: bool,
 }
 
-/// `button`, which runs `act` on a left press as [`on_press`] does. A
-/// disabled one is dimmed, has no hover and the default cursor, and its
-/// press only stops at it.
+/// `button`, a compact outlined button that runs `act` on a left press as
+/// [`on_press`] does. A disabled one is dimmed, has no hover and the default
+/// cursor, and its press only stops at it: `act` is never attached.
 pub(crate) fn bordered_button(
     button: BorderedButton,
     cx: &mut Context<RootView>,
     act: impl Fn(&mut RootView, &mut Window, &mut Context<RootView>) + 'static,
 ) -> Stateful<Div> {
-    let name = button.selector;
-    let base = div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(TEXT))
-        .tooltip(tooltip(button.tip))
-        .child(button.label);
-    if button.enabled {
-        let base = base
-            .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)));
+    let BorderedButton {
+        selector,
+        label,
+        tip,
+        enabled,
+    } = button;
+    let base = outlined_button(&selector, ButtonSize::Compact, enabled)
+        .tooltip(tooltip(tip))
+        .child(label);
+    if enabled {
         on_press(base, cx, act)
     } else {
-        base.opacity(0.6)
-            .cursor_default()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        base
     }
 }
 
@@ -1502,7 +1533,7 @@ fn swatch_row(selector: &str, label: &'static str, color: Option<u32>) -> Statef
 
 /// A thin line between groups of menu rows.
 pub(crate) fn menu_separator() -> Div {
-    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(BORDER))
+    div().h(px(1.0)).my(px(4.0)).bg(gpui::rgb(LINE_STRONG))
 }
 
 /// A small text button in a pane header.
@@ -1543,7 +1574,7 @@ fn rename_row(input: &Entity<TextInput>) -> AnyElement {
                 .text_color(gpui::rgb(MUTED))
                 .child("Rename session (blank restores the default)"),
         )
-        .child(div().w_full().child(input.clone()))
+        .child(field_frame(true).child(input.clone()))
         .into_any_element()
 }
 

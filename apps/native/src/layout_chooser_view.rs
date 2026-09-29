@@ -233,7 +233,7 @@ fn option_row(
         .into_any_element()
 }
 
-/// A small button of the picker: filled when chosen, outlined when focused.
+/// A small button of the picker: filled when chosen, ringed when focused.
 fn picker_button(
     chooser: &LayoutChooser,
     control: &Control,
@@ -247,6 +247,7 @@ fn picker_button(
         chooser.label(control, aspect),
         false,
         control == focused,
+        true,
     )
     .when(chooser.is_selected(control), |button| {
         button.bg(gpui::rgb(SELECTED_BG))

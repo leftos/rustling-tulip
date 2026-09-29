@@ -8,6 +8,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, RootWorktreeEntry, RootWorktreeStatus};
 
+use crate::buttons::RING_ROOM;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::session_menu::{backdrop, dialog_button};
@@ -371,6 +372,7 @@ impl RootView {
             .id("worktrees-manager-list")
             .max_h(window.viewport_size().height * LIST_MAX_SHARE)
             .overflow_y_scroll()
+            .p(px(RING_ROOM))
             .flex()
             .flex_col()
             .gap(px(8.0))
@@ -478,13 +480,14 @@ fn manager_button(
         manager.label(&control),
         danger,
         focused == Some(&control),
+        manager.enabled(&control),
     );
     let button = match manager.tooltip(&control) {
         Some(tip) => button.tooltip(tooltip(tip)),
         None => button,
     };
     if !manager.enabled(&control) {
-        return button.opacity(0.5).cursor_default();
+        return button;
     }
     button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_worktrees_control(&control, window, cx);
@@ -500,6 +503,7 @@ fn confirm_layer(confirm: &Confirm, cx: &mut Context<RootView>) -> AnyElement {
             confirm.label(button).to_owned(),
             button == ConfirmButton::Ok,
             confirm.focused() == button,
+            true,
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             this.answer_worktrees_confirm(button, window, cx);

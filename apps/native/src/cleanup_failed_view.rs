@@ -7,6 +7,7 @@ use gpui::{
 };
 use protocol::{DaemonMessage, WorktreeCleanupFailure};
 
+use crate::buttons::RING_ROOM;
 use crate::cleanup_failed::{CleanupFailed, Control, open_folder_target, truncate_cmdline};
 use crate::notice_view::modal_panel;
 use crate::open::OpenJob;
@@ -256,6 +257,7 @@ impl RootView {
             .id("cleanup-failed-list")
             .max_h(window.viewport_size().height * LIST_MAX_SHARE)
             .overflow_y_scroll()
+            .p(px(RING_ROOM))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -274,7 +276,7 @@ impl RootView {
     }
 }
 
-/// A button of the dialog, outlined while focused; a checkbox shows its
+/// A button of the dialog, ringed while focused; a checkbox shows its
 /// mark before the process name.
 fn cleanup_button(
     dialog: &CleanupFailed,
@@ -294,6 +296,7 @@ fn cleanup_button(
         label,
         danger,
         control == dialog.focused(),
+        true,
     )
     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_cleanup_control(control, window, cx);

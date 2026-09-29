@@ -14,6 +14,7 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, RecoverItemResult, SessionSnapshot};
 
 use crate::activity_bar::badge_text;
+use crate::buttons::RING_ROOM;
 use crate::notice_view::modal_panel;
 use crate::palette::TRANSPARENT;
 use crate::recover::{
@@ -465,6 +466,7 @@ impl RootView {
             .id("recover-list")
             .max_h(window.viewport_size().height * LIST_MAX_SHARE)
             .overflow_y_scroll()
+            .p(px(RING_ROOM))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -589,7 +591,7 @@ fn enabled(dialog: &RecoverDialog, control: &Control) -> bool {
     }
 }
 
-/// A control as a button, outlined while focused; a disabled one is dimmed
+/// A control as a button, ringed while focused; a disabled one is dimmed
 /// and inert.
 fn control_button(
     dialog: &RecoverDialog,
@@ -601,9 +603,10 @@ fn control_button(
         control_label(dialog, &control),
         false,
         dialog.focus() == Some(&control),
+        enabled(dialog, &control),
     );
     if !enabled(dialog, &control) {
-        return button.opacity(0.5).cursor_default();
+        return button;
     }
     button.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
         this.press_recover_control(&control, window, cx);

@@ -550,6 +550,7 @@ impl RootView {
                     label.to_owned(),
                     danger,
                     confirm.focused() == button,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.press_drop_button(button, window, cx);
@@ -557,10 +558,16 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let close = dialog_button("stash-drop-confirm-close", "✕".to_owned(), false, false)
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                this.press_drop_button(DropButton::Cancel, window, cx);
-            }));
+        let close = dialog_button(
+            "stash-drop-confirm-close",
+            "✕".to_owned(),
+            false,
+            false,
+            true,
+        )
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.press_drop_button(DropButton::Cancel, window, cx);
+        }));
         let header = div()
             .flex()
             .items_center()

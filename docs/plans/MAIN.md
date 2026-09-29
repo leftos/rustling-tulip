@@ -24,13 +24,12 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.8a first, since PT.6a's Session and Shell buttons and PT.9's Commit and Stash buttons use its outlined and filled-primary button forms, and PT.5 shares `lib.rs` with it; PT.6b follows PT.6a; PT.8b needs PT.8a and PT.6b; PT.7 is free to start.
+The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.5, PT.6a, PT.7 and PT.9 are free to start (PT.6a and PT.9 build their buttons on `buttons.rs`; PT.5 and PT.7 both edit `lib.rs`, so they run one after the other); PT.6b follows PT.6a; PT.8b needs PT.6b.
 
 - [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
 - [ ] **PT.6a Sidebar header, toolbar and containers**, with the Session button's `Ctrl N` hint.
 - [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
-- [ ] **PT.8a Overlays, menus, buttons and inputs**.
 - [ ] **PT.8b Spawn dialog and Settings**.
 - [ ] **PT.9 Source control and diffs**.
 - [ ] **PT.10 Petal docs**: `docs/native-client.md` "Theme and fonts", CLAUDE.md's `native-ui.json` line, the README glossary.

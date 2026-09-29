@@ -8,15 +8,15 @@ use gpui::{
     Stateful, Subscription, Window, div, prelude::*, px,
 };
 
+use crate::notice_view::modal_panel;
 use crate::session_menu::{backdrop, dialog_button};
 use crate::shell_dialog::{
     FOLDER_PLACEHOLDER, PATH_HINT, ShellControl, ShellForm, standalone_shell_request,
 };
 use crate::spawns::OpenIn;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
+use crate::{BORDER, HOVER_BG, MUTED, RootView, TEXT};
 
-const DIALOG_WIDTH: f32 = 440.0;
 const TITLE: &str = "Open a shell";
 const SAVE_DEFAULT_LABEL: &str = "Use as quick shell default";
 const CLEAR_DEFAULT_LABEL: &str = "Use home folder for + Shell";
@@ -355,6 +355,7 @@ impl RootView {
             "✕".to_owned(),
             false,
             focus == ShellControl::Close,
+            true,
         )
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.close_shell_dialog(window, cx);
@@ -371,13 +372,13 @@ impl RootView {
             "Browse…".to_owned(),
             false,
             focus == ShellControl::Browse,
+            browse_enabled,
         )
         .when(browse_enabled, |button| {
             button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.press_shell_control(ShellControl::Browse, window, cx);
             }))
-        })
-        .when(!browse_enabled, |button| button.opacity(0.5));
+        });
         let field = div()
             .flex()
             .flex_col()
@@ -402,19 +403,7 @@ impl RootView {
                 this.press_shell_control(ShellControl::ClearDefault, window, cx);
             }))
         });
-        let panel = div()
-            .id("shell-panel")
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .w(px(DIALOG_WIDTH))
-            .p(px(14.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
+        let panel = modal_panel("shell-panel")
             .track_focus(&self.shell_focus)
             .child(header)
             .child(field)
@@ -510,6 +499,7 @@ fn footer(folder: &str, focus: ShellControl, cx: &mut Context<RootView>) -> Div 
         "Cancel".to_owned(),
         false,
         focus == ShellControl::Cancel,
+        true,
     )
     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
         this.press_shell_control(ShellControl::Cancel, window, cx);
@@ -520,13 +510,13 @@ fn footer(folder: &str, focus: ShellControl, cx: &mut Context<RootView>) -> Div 
         "Open shell".to_owned(),
         false,
         focus == ShellControl::Submit,
+        can_submit,
     )
     .when(can_submit, |button| {
         button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.press_shell_control(ShellControl::Submit, window, cx);
         }))
-    })
-    .when(!can_submit, |button| button.opacity(0.5));
+    });
     div()
         .flex()
         .justify_end()

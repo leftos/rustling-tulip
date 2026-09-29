@@ -3,22 +3,28 @@
 //! [`crate::spawns`].
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke, SharedString, Stateful,
-    Window, div, prelude::*, px,
+    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, FontWeight, Keystroke,
+    SharedString, Stateful, Window, div, point, prelude::*, px,
 };
 use protocol::{ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
 
+use crate::buttons::{ButtonSize, outlined_button};
 use crate::notices::{
     ActionFailedNotice, CheckoutAsk, CheckoutChoice, CheckoutPrompt, Toast, ToastKind, ToastSpec,
 };
+use crate::palette::{CHIP, DIALOG_SHADOW, LINE_STRONG, SURFACE, TOAST_SHADOW};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawns::OpenIn;
-use crate::{
-    BORDER, DANGER, FOOTER_HEIGHT, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
-};
+use crate::{DANGER, FOOTER_HEIGHT, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING};
 
 const TOAST_WIDTH: f32 = 320.0;
 const MODAL_WIDTH: f32 = 440.0;
+/// The corner radius of a modal's card.
+pub(crate) const MODAL_RADIUS: f32 = 14.0;
+/// The corner radius of a toast's card.
+const TOAST_RADIUS: f32 = 10.0;
+/// The side of a toast's and an undo entry's square close button.
+pub(crate) const CLOSE_SIZE: f32 = 28.0;
 const SPAWNING_TITLE: &str = "Spawning session…";
 const SPAWNING_DETAIL: &str = "Worktree creation may take a few seconds.";
 const SHELL_SPAWNING_DETAIL: &str = "Shell startup may take a few seconds.";
@@ -444,9 +450,10 @@ impl RootView {
         notice: &ActionFailedNotice,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let ok = dialog_button("action-failed-dismiss", "OK".to_owned(), false, true).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| this.close_action_failed(window, cx)),
-        );
+        let ok = dialog_button("action-failed-dismiss", "OK".to_owned(), false, true, true)
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_action_failed(window, cx);
+            }));
         let detail = notice.detail.split('\n').map(|line| {
             // An empty line keeps its height.
             div().child(if line.is_empty() { " " } else { line }.to_owned())
@@ -475,7 +482,7 @@ impl RootView {
         focused_layer: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let close = dialog_button("checkout-close", "✕".to_owned(), false, false).on_click(
+        let close = dialog_button("checkout-close", "✕".to_owned(), false, false, true).on_click(
             cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.answer_checkout(CheckoutChoice::Cancel, window, cx);
             }),
@@ -501,6 +508,7 @@ impl RootView {
                     choice.label().to_owned(),
                     false,
                     prompt.focused() == choice,
+                    true,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.answer_checkout(choice, window, cx);
@@ -522,15 +530,18 @@ impl RootView {
 /// border is red.
 fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
     let id = toast.id;
-    let close = dialog_button(&format!("toast-close-{id}"), "✕".to_owned(), false, false)
+    let close = outlined_button(&format!("toast-close-{id}"), ButtonSize::Compact, true)
         .flex_none()
+        .w(px(CLOSE_SIZE))
+        .px(px(0.0))
+        .child("✕")
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.dismiss_toast(id, cx);
         }));
     let accent = match toast.kind {
-        ToastKind::Error => DANGER,
-        ToastKind::Warning => WARNING,
-        ToastKind::Info => BORDER,
+        ToastKind::Error => Some(DANGER),
+        ToastKind::Warning => Some(WARNING),
+        ToastKind::Info => None,
     };
     let detail = toast
         .detail
@@ -548,23 +559,43 @@ fn toast_card(toast: &Toast, cx: &mut Context<RootView>) -> AnyElement {
         )
         .children(detail);
     let name = format!("toast-{id}");
-    div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
+    toast_frame(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
         .flex()
         .items_start()
         .gap(px(8.0))
-        .p(px(10.0))
-        .bg(gpui::rgb(PANEL_BG))
-        .border_1()
-        .border_color(gpui::rgb(accent))
-        .rounded(px(6.0))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+        .when_some(accent, |card, accent| card.border_color(gpui::rgb(accent)))
         .occlude()
         .child(body)
         .child(close)
         .into_any_element()
+}
+
+/// The card a toast, an undo entry and the copied chip sit in, tagged `id`:
+/// the chip fill with a strong edge, which an error or a warning recolours.
+pub(crate) fn toast_frame(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(14.0))
+        .py(px(12.0))
+        .bg(gpui::rgb(CHIP))
+        .border_1()
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(TOAST_RADIUS))
+        .shadow(vec![drop_shadow(TOAST_SHADOW, 18.0, 40.0)])
+        .text_size(px(UI_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT))
+}
+
+/// A soft shadow of `color` (`0xRRGGBBAA`) cast `drop` px down and blurred
+/// `blur` px.
+fn drop_shadow(color: u32, drop: f32, blur: f32) -> BoxShadow {
+    BoxShadow {
+        color: gpui::rgba(color).into(),
+        offset: point(px(0.0), px(drop)),
+        blur_radius: px(blur),
+        spread_radius: px(0.0),
+    }
 }
 
 /// A modal's card.
@@ -576,10 +607,11 @@ pub(crate) fn modal_panel(id: &'static str) -> Stateful<Div> {
         .gap(px(10.0))
         .w(px(MODAL_WIDTH))
         .p(px(14.0))
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(SURFACE))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(6.0))
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(MODAL_RADIUS))
+        .shadow(vec![drop_shadow(DIALOG_SHADOW, 30.0, 80.0)])
         .text_size(px(UI_TEXT_SIZE))
         .text_color(gpui::rgb(TEXT))
 }

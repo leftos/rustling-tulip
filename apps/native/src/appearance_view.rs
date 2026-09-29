@@ -666,10 +666,11 @@ impl RootView {
             return None;
         }
         let title = self.appearance_editor_title()?;
-        let close =
-            dialog_button("appearance-close", "×".to_owned(), false, false).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| this.close_appearance_editor(window, cx),
-            ));
+        let close = dialog_button("appearance-close", "×".to_owned(), false, false, true).on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_appearance_editor(window, cx);
+            }),
+        );
         let header = div()
             .flex()
             .items_center()
@@ -1062,9 +1063,9 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
 
 /// The size: `−`, the size it resolves to, `+`.
 fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView>) -> Div {
-    let down = dialog_button("appearance-size-down", "−".to_owned(), false, false)
+    let down = dialog_button("appearance-size-down", "−".to_owned(), false, false, true)
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_appearance_size(-1.0, cx)));
-    let up = dialog_button("appearance-size-up", "+".to_owned(), false, false)
+    let up = dialog_button("appearance-size-up", "+".to_owned(), false, false, true)
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_appearance_size(1.0, cx)));
     let value = format!("{}px", view.resolved.font_size.value);
     let stepper = div()
@@ -1178,7 +1179,7 @@ fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<
 /// The footer with its Close button, tagged `selector`.
 pub(crate) fn close_footer(selector: &'static str, cx: &mut Context<RootView>) -> Div {
     div().flex().justify_end().child(
-        dialog_button(selector, "Close".to_owned(), false, false).on_click(cx.listener(
+        dialog_button(selector, "Close".to_owned(), false, false, true).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
             },

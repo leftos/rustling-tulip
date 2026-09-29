@@ -10,6 +10,7 @@ pub mod appearance;
 mod appearance_view;
 mod assets;
 mod branch_fate;
+mod buttons;
 mod changes_view;
 mod cleanup_failed;
 mod cleanup_failed_view;
@@ -116,12 +117,14 @@ use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::needs_you_view::moves_needs_you;
+use crate::notice_view::MODAL_RADIUS;
 use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
 use crate::session_actions::{Duplicates, HeaderStopConfirm, self_exited};
+use crate::session_menu::popover_frame;
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
 use crate::shell_view::ShellDialog;
@@ -334,8 +337,8 @@ const UI_TEXT_SIZE: f32 = 12.0;
 /// The footer's height in logical pixels.
 pub const FOOTER_HEIGHT: f32 = 22.0;
 pub use palette::{BAR_BG, PANEL_BG};
-pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, OVERLAY_BG, TEXT, WARNING};
-use palette::{STATUS_ERR, STATUS_IDLE, STATUS_OK};
+pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT, WARNING};
+use palette::{CHIP, LINE_STRONG, SCRIM, STATUS_ERR, STATUS_IDLE, STATUS_OK, SURFACE};
 
 /// What a press on a drag handle is resizing.
 enum Drag {
@@ -2235,8 +2238,7 @@ impl RootView {
                     .map(|(label, value)| detail_row(label, value)),
             )
             .child(self.handshake_row(cx));
-        div()
-            .id("daemon-flyout")
+        popover_frame("daemon-flyout")
             .absolute()
             .left(px(PADDING))
             .bottom(px(FOOTER_HEIGHT + 4.0))
@@ -2245,13 +2247,6 @@ impl RootView {
             .flex_col()
             .gap(px(8.0))
             .p(px(10.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .occlude()
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Daemon"))
             .child(details)
             .child(self.files_section())
@@ -2386,10 +2381,10 @@ fn connecting_overlay(
         .px(px(40.0))
         .py(px(32.0))
         .min_w(px(280.0))
-        .bg(gpui::rgb(PANEL_BG))
+        .bg(gpui::rgb(SURFACE))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(6.0))
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(MODAL_RADIUS))
         .child(status_dot(dot, "overlay-dot"))
         .child(div().text_color(gpui::rgb(TEXT)).child(text))
         .child(restart);
@@ -2402,7 +2397,7 @@ fn connecting_overlay(
         .flex()
         .items_center()
         .justify_center()
-        .bg(gpui::rgb(OVERLAY_BG))
+        .bg(gpui::rgba(SCRIM))
         .occlude()
         .child(card)
 }
@@ -2499,10 +2494,10 @@ impl Render for Tip {
             .px(px(6.0))
             .py(px(2.0))
             .font_family(fonts::UI_FAMILY)
-            .bg(gpui::rgb(PANEL_BG))
+            .bg(gpui::rgb(CHIP))
             .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(4.0))
+            .border_color(gpui::rgb(LINE_STRONG))
+            .rounded(px(10.0))
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
             .child(self.0.clone())

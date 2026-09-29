@@ -44,6 +44,19 @@ pub const FAINT: u32 = 0x006e_6a77;
 pub const ACCENT: u32 = 0x00f0_7a62;
 /// Text or a glyph drawn on the accent, as `0xRRGGBB`.
 pub const ON_ACCENT: u32 = 0x001c_100d;
+/// A hovered primary button's fill: the accent 12% of the way to [`TEXT`],
+/// as `0xRRGGBB`.
+pub const ACCENT_HOVER: u32 = 0x00f0_8772;
+/// A pressed primary button's fill: the accent 12% of the way to
+/// [`ON_ACCENT`], as `0xRRGGBB`.
+pub const ACCENT_PRESSED: u32 = 0x00d7_6d58;
+
+/// The dim layer behind a dialog and over a stopped pane, as `0xRRGGBBAA`.
+pub const SCRIM: u32 = 0x0605_08a8;
+/// The shadow a dialog's card casts, as `0xRRGGBBAA`.
+pub const DIALOG_SHADOW: u32 = 0x0000_0099;
+/// The shadow a toast casts, as `0xRRGGBBAA`.
+pub const TOAST_SHADOW: u32 = 0x0000_0073;
 
 /// A working session's glyph, as `0xRRGGBB`.
 pub const WORKING: u32 = 0x006c_a6ff;
@@ -95,9 +108,16 @@ pub(crate) const WARNING: u32 = ASKING;
 /// The fill of a selected sidebar row, layout row or chooser button, which is
 /// [`CHIP`], as `0xRRGGBB`.
 pub(crate) const SELECTED_BG: u32 = CHIP;
+/// A text input's text, which is [`TEXT`], as `0xRRGGBB`.
+pub(crate) const INPUT_TEXT: u32 = TEXT;
+/// A text input's placeholder, which is [`SUBTLE`], as `0xRRGGBB`.
+pub(crate) const INPUT_PLACEHOLDER: u32 = SUBTLE;
+/// A text input's caret, which is [`ACCENT`], as `0xRRGGBB`.
+pub(crate) const INPUT_CURSOR: u32 = ACCENT;
+/// A text input's selection, which is [`ACCENT`] at 30% alpha, as
+/// `0xRRGGBBAA`.
+pub(crate) const INPUT_SELECTION: u32 = (ACCENT << 8) | 0x4d;
 
-/// The background of a flyout's panel, as `0xRRGGBB`.
-pub(crate) const OVERLAY_BG: u32 = 0x001e_1e1e;
 /// The fill behind an armed destructive control, as `0xRRGGBB`.
 pub(crate) const DANGER_BG: u32 = 0x003a_1c1f;
 
@@ -110,15 +130,6 @@ pub(crate) const STATUS_ERR: u32 = 0x00ef_5c5c;
 
 /// An "ok" badge of the spawn dialog's workspace preview table, as `0xRRGGBB`.
 pub(crate) const SPAWN_BADGE_OK: u32 = 0x004e_c9b0;
-
-/// A text input's text, as `0xRRGGBB`.
-pub(crate) const INPUT_TEXT: u32 = 0x00cc_cccc;
-/// A text input's placeholder, as `0xRRGGBB`.
-pub(crate) const INPUT_PLACEHOLDER: u32 = 0x006a_6a6a;
-/// A text input's caret, as `0xRRGGBB`.
-pub(crate) const INPUT_CURSOR: u32 = 0x00cc_cccc;
-/// A text input's selection, as `0xRRGGBBAA`.
-pub(crate) const INPUT_SELECTION: u32 = 0x264f_78ff;
 
 /// The rail's badge text, dark on the accent, as `0xRRGGBB`.
 pub(crate) const RAIL_BADGE_TEXT: u32 = 0x000f_1014;
@@ -152,12 +163,6 @@ pub(crate) const DIFF_GUTTER_TEXT: u32 = 0x6e76_81ff;
 pub(crate) const DIFF_CURRENT_BAR: u32 = 0x4c8d_ffcc;
 /// The line between a diff's two halves, as `0xRRGGBBAA`.
 pub(crate) const DIFF_DIVIDER: u32 = 0x2022_2aff;
-
-/// The stopped-pane overlay, translucent so the terminal shows through, as
-/// `0xRRGGBBAA`.
-pub(crate) const OVERLAY_TINT: u32 = 0x1e1e_1ecc;
-/// The dim layer behind the delete-worktree confirm, as `0xRRGGBBAA`.
-pub(crate) const BACKDROP_TINT: u32 = 0x0000_0099;
 
 /// The border of a pane's shell-mark dot, as `0xRRGGBBAA`.
 pub(crate) const SHELL_MARK_BORDER: u32 = 0x0000_0059;
@@ -216,6 +221,11 @@ mod tests {
         assert_eq!(FAINT, 0x006e_6a77);
         assert_eq!(ACCENT, 0x00f0_7a62);
         assert_eq!(ON_ACCENT, 0x001c_100d);
+        assert_eq!(ACCENT_HOVER, 0x00f0_8772);
+        assert_eq!(ACCENT_PRESSED, 0x00d7_6d58);
+        assert_eq!(SCRIM, 0x0605_08a8);
+        assert_eq!(DIALOG_SHADOW, 0x0000_0099);
+        assert_eq!(TOAST_SHADOW, 0x0000_0073);
         assert_eq!(WORKING, 0x006c_a6ff);
         assert_eq!(ASKING, 0x00f6_bc4e);
         assert_eq!(ON_ASKING, 0x002a_1b00);
@@ -229,16 +239,12 @@ mod tests {
         assert!((DIFF_DELETE_WASH_ALPHA - 0.13).abs() < f32::EPSILON);
         assert!((DIFF_INSERT_WASH_ALPHA - 0.12).abs() < f32::EPSILON);
         assert!((DIFF_FILLER_ALPHA - 0.025).abs() < f32::EPSILON);
-        assert_eq!(OVERLAY_BG, 0x001e_1e1e);
         assert_eq!(DANGER_BG, 0x003a_1c1f);
         assert_eq!(STATUS_OK, 0x003f_b96a);
         assert_eq!(STATUS_IDLE, 0x0083_8a96);
         assert_eq!(STATUS_ERR, 0x00ef_5c5c);
         assert_eq!(SPAWN_BADGE_OK, 0x004e_c9b0);
-        assert_eq!(INPUT_TEXT, 0x00cc_cccc);
-        assert_eq!(INPUT_PLACEHOLDER, 0x006a_6a6a);
-        assert_eq!(INPUT_CURSOR, 0x00cc_cccc);
-        assert_eq!(INPUT_SELECTION, 0x264f_78ff);
+        assert_eq!(INPUT_SELECTION, 0xf07a_624d);
         assert_eq!(RAIL_BADGE_TEXT, 0x000f_1014);
         assert_eq!(CHANGES_MODIFIED, 0x00d4_a72c);
         assert_eq!(CHANGES_ADDED, 0x004e_c9b0);
@@ -253,8 +259,6 @@ mod tests {
         assert_eq!(DIFF_GUTTER_TEXT, 0x6e76_81ff);
         assert_eq!(DIFF_CURRENT_BAR, 0x4c8d_ffcc);
         assert_eq!(DIFF_DIVIDER, 0x2022_2aff);
-        assert_eq!(OVERLAY_TINT, 0x1e1e_1ecc);
-        assert_eq!(BACKDROP_TINT, 0x0000_0099);
         assert_eq!(SHELL_MARK_BORDER, 0x0000_0059);
         assert_eq!(SHELL_MARK_OK, 0x004e_c9b0);
         assert_eq!(SHELL_MARK_FAIL, 0x00f4_8771);
@@ -271,6 +275,26 @@ mod tests {
         assert_eq!(MUTED, TEXT_2);
         assert_eq!(WARNING, ASKING);
         assert_eq!(SELECTED_BG, CHIP);
+        assert_eq!(INPUT_TEXT, TEXT);
+        assert_eq!(INPUT_PLACEHOLDER, SUBTLE);
+        assert_eq!(INPUT_CURSOR, ACCENT);
+    }
+
+    /// The scrim is near-black at two thirds: `rgba(6, 5, 8, 0.66)`.
+    #[test]
+    fn scrim_is_060508_at_66_percent() {
+        let [r, g, b, a] = SCRIM.to_be_bytes();
+        assert_eq!((r, g, b), (0x06, 0x05, 0x08));
+        let alpha = f64::from(a) / 255.0;
+        assert!((alpha - 0.66).abs() < 0.5 / 255.0, "alpha is {alpha:.4}");
+    }
+
+    /// A text input's selection is the accent at 30% alpha.
+    #[test]
+    fn input_selection_is_the_accent_at_30_percent() {
+        assert_eq!(INPUT_SELECTION >> 8, ACCENT);
+        let alpha = f64::from(INPUT_SELECTION & 0xff) / 255.0;
+        assert!((alpha - 0.30).abs() < 0.5 / 255.0, "alpha is {alpha:.4}");
     }
 
     /// The floors every token pair the client draws must keep: ordinary text
@@ -285,6 +309,13 @@ mod tests {
             ("SUBTLE on SURFACE", SUBTLE, SURFACE, 4.5),
             ("SUBTLE on CHIP", SUBTLE, CHIP, 4.5),
             ("ON_ACCENT on ACCENT", ON_ACCENT, ACCENT, 4.5),
+            ("ON_ACCENT on ACCENT_HOVER", ON_ACCENT, ACCENT_HOVER, 4.5),
+            (
+                "ON_ACCENT on ACCENT_PRESSED",
+                ON_ACCENT,
+                ACCENT_PRESSED,
+                4.5,
+            ),
             ("ON_ASKING on ASKING", ON_ASKING, ASKING, 4.5),
         ];
         for (pair, on, under, floor) in pairs {

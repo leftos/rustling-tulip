@@ -846,10 +846,11 @@ impl RootView {
         if !self.settings_open() {
             return None;
         }
-        let close =
-            dialog_button("settings-close", "×".to_owned(), false, false).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| this.close_appearance_editor(window, cx),
-            ));
+        let close = dialog_button("settings-close", "×".to_owned(), false, false, true).on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.close_appearance_editor(window, cx);
+            }),
+        );
         let header = div()
             .flex()
             .items_center()
@@ -1149,11 +1150,12 @@ impl RootView {
             label.to_owned(),
             false,
             focused == Some(keep_awake),
+            enabled,
         );
         let button = if enabled {
             button.on_click(press(keep_awake, cx))
         } else {
-            button.opacity(0.5).cursor_default()
+            button
         };
         let status = hint(self.keep_awake_status())
             .debug_selector(|| "settings-keep-awake-status".to_owned());
@@ -1280,11 +1282,12 @@ fn settings_button(
         label.to_owned(),
         false,
         focused == Some(control),
+        enabled,
     );
     if enabled {
         button.on_click(press(control, cx))
     } else {
-        button.opacity(0.5).cursor_default()
+        button
     }
 }
 
