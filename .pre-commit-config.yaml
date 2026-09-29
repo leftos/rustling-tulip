@@ -7,14 +7,10 @@
 #   prek auto-update --cooldown-days 7
 #
 # There is no CI in this repo, so these hooks are the only automated gates.
-# They are split by cost:
-#
-#   pre-commit — hygiene plus the lint gates (fmt, clippy), so every commit
-#                is warning-free without a per-edit hook adding latency inside
-#                the editing loop.
-#   pre-push   — the test suite (cargo test). Slower, but it runs per push
-#                rather than per commit, and this is the last point before
-#                code leaves the machine.
+# They run at pre-commit: hygiene plus the lint gates (fmt, clippy), so every
+# commit is warning-free without a per-edit hook adding latency inside the
+# editing loop. No hook runs the test suite; `cargo test --workspace` runs by
+# hand.
 #
 # Anything needing the network (`cargo deny check` wants the advisory DB) is
 # deliberately left out: a hook that fails on a plane is a hook that gets
@@ -66,11 +62,3 @@ repos:
         types: [rust]
         pass_filenames: false
         stages: [pre-commit]
-
-      - id: cargo-test
-        name: cargo test
-        entry: cargo test --workspace
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]

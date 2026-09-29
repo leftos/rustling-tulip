@@ -6,7 +6,7 @@ The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed'
 
 - **GPUI 0.2.2 + `alacritty_terminal` 0.26.** The client moved off the web stack; GPUI draws natively and `alacritty_terminal` supplies a mature VT parser and grid. Iced is the fallback if GPUI's API churn becomes a problem.
 - The native client can run side by side with the Tauri app against one daemon, since the daemon accepts several clients.
-- **Crate rules.** `apps/native` is a main-workspace member under the workspace lints, prek clippy and test, and `cargo deny check`. `main.rs` is a thin binary over the library `rustling_tulip_native`, so specs link the library.
+- **Crate rules.** `apps/native` is a main-workspace member under the workspace lints, prek clippy, `cargo test` and `cargo deny check`. `main.rs` is a thin binary over the library `rustling_tulip_native`, so specs link the library.
 - **Testable core, thin view.** State a feature adds (sidebar tree, split tree, tab list, key mapping, span building, forms, dialogs' focus rings) lives in plain-Rust modules with unit tests; the GPUI `*_view.rs` renders it and forwards events. Every feature mounts into `RootView` (`lib.rs`), the hotspot concurrent items rebase over.
 - **Clipboard** goes through GPUI's own API (no `arboard`).
 
