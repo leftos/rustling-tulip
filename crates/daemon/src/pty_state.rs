@@ -615,6 +615,7 @@ mod hysteresis_tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
+            agent_conversation_id: None,
         }
     }
 

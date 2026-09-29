@@ -175,6 +175,10 @@ pub struct SessionRecord {
     /// for shells, headless runs, other agents, and sessions whose sidecar
     /// predates the field.
     pub claude_session_id: Option<String>,
+    /// The conversation id the session's own agent CLI resumes with, set only
+    /// for Codex and Cursor sessions once it is known. Mirrored into the
+    /// sidecar and copied into the session's history entry.
+    pub agent_conversation_id: Option<String>,
 }
 
 impl SessionRecord {
@@ -460,6 +464,7 @@ impl SessionRegistry {
             user_label: guard.user_label.clone(),
             label: guard.label.clone(),
             appearance: guard.appearance.clone(),
+            agent_conversation_id: guard.agent_conversation_id.clone(),
         }
     }
 
@@ -851,6 +856,7 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
+            agent_conversation_id: meta.agent_conversation_id.clone(),
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -910,6 +916,7 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
+            agent_conversation_id: meta.agent_conversation_id.clone(),
         };
         push_recent_action(
             &mut record,
@@ -954,6 +961,7 @@ impl SessionRegistry {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
+            agent_conversation_id: meta.agent_conversation_id.clone(),
         };
         push_recent_action(
             &mut record,
@@ -1022,6 +1030,7 @@ mod tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
+            agent_conversation_id: None,
         }
     }
 
@@ -1370,6 +1379,63 @@ mod tests {
         assert_eq!(meta.user_label.as_deref(), Some("mine"));
         assert_eq!(meta.label, "mine");
         assert_eq!(meta.appearance.accent_color.as_deref(), Some("#38bdf8"));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn setting_agent_conversation_id_on_the_record_reaches_the_sidecar() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-agent-conversation-id");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+
+        registry.update("s1", |rec| {
+            rec.agent_conversation_id = Some("019a2b3c-codex".to_string());
+        });
+
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(
+            meta.agent_conversation_id.as_deref(),
+            Some("019a2b3c-codex")
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn abandoned_insert_keeps_agent_conversation_id() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("abandoned-agent-conversation-id");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut meta = crate::orphan::meta_from_record(
+            "s1".to_string(),
+            1,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Codex,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        meta.agent_conversation_id = Some("019a2b3c-codex".to_string());
+
+        registry.insert_abandoned(&meta);
+
+        let arc = registry.get("s1").expect("the abandoned session");
+        assert_eq!(
+            lock(&arc).agent_conversation_id.as_deref(),
+            Some("019a2b3c-codex")
+        );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

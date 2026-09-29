@@ -162,6 +162,11 @@ pub struct OrphanMeta {
     /// this field existed.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// The conversation id the session's own agent CLI resumes with (Codex,
+    /// Cursor). `None` for Claude sessions, for a session whose id is not
+    /// known yet, and for sidecars written before this field existed.
+    #[serde(default)]
+    pub agent_conversation_id: Option<String>,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -476,6 +481,8 @@ pub fn meta_from_record(
         tracer_pipe,
         tracer_exe_path,
         claude_session_id,
+        // Mirrored from the record, like the status.
+        agent_conversation_id: None,
     })
 }
 
@@ -495,6 +502,7 @@ pub struct RecordMirror {
     pub user_label: Option<String>,
     pub label: String,
     pub appearance: AppearanceOverrides,
+    pub agent_conversation_id: Option<String>,
 }
 
 impl RecordMirror {
@@ -509,6 +517,7 @@ impl RecordMirror {
             && meta.label == self.label
             && meta.appearance == self.appearance
             && meta.accent_color.is_none()
+            && meta.agent_conversation_id == self.agent_conversation_id
     }
 
     fn apply(&self, meta: &mut OrphanMeta) {
@@ -525,6 +534,8 @@ impl RecordMirror {
         // record was built, so it is dropped from every rewrite.
         meta.accent_color = None;
         meta.appearance = self.appearance.clone();
+        meta.agent_conversation_id
+            .clone_from(&self.agent_conversation_id);
     }
 }
 
@@ -770,6 +781,7 @@ mod tests {
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
             claude_session_id: None,
+            agent_conversation_id: None,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -883,6 +895,58 @@ mod tests {
         }"#;
         let old_meta = load_meta_from_bytes(old).expect("parse old meta");
         assert_eq!(old_meta.claude_session_id, None);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn agent_conversation_id_round_trips_and_defaults_on_old_meta() {
+        let dirs = scratch_dirs("agent-conversation-id");
+        let mut meta = meta_from_record(
+            "s-codex".to_string(),
+            4242,
+            "repo:main".to_string(),
+            SessionKind::Single,
+            SessionMode::Interactive,
+            vec![],
+            chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            None,
+            Some("rt-tracer".to_string()),
+            Agent::Codex,
+            None,
+            None,
+            None,
+            Some(4242),
+            Some(r"\\.\pipe\rt-tracer-s-codex".to_string()),
+            None,
+            None,
+        )
+        .expect("build meta");
+        assert_eq!(meta.agent_conversation_id, None);
+        meta.agent_conversation_id = Some("019a2b3c-codex".to_string());
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s-codex").expect("load meta");
+        assert_eq!(
+            loaded.agent_conversation_id.as_deref(),
+            Some("019a2b3c-codex")
+        );
+        assert_eq!(loaded.claude_session_id, None);
+
+        // A sidecar written before the field existed decodes with `None`.
+        let old = br#"{
+            "on_disk_version": 2,
+            "session_id": "old",
+            "pid": 9001,
+            "label": "legacy",
+            "kind": "single",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z",
+            "program_name": "rt-tracer",
+            "tracer_pid": 9001,
+            "tracer_pipe": "\\\\.\\pipe\\rt-tracer-old"
+        }"#;
+        let old_meta = load_meta_from_bytes(old).expect("parse old meta");
+        assert_eq!(old_meta.agent_conversation_id, None);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

@@ -3741,6 +3741,7 @@ async fn spawn_interactive_session(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: claude_session_id.clone(),
+        agent_conversation_id: None,
     };
     push_recent_action(&mut record, "session started".to_string());
 
@@ -3935,6 +3936,7 @@ async fn spawn_plain_shell_session(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,
+        agent_conversation_id: None,
     };
     push_recent_action(
         &mut record,
@@ -4077,6 +4079,7 @@ fn spawn_headless_session(
         scrollback_snapshot_req: None,
         spawn_origin: None,
         claude_session_id: None,
+        agent_conversation_id: None,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -7280,6 +7283,7 @@ mod tests {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
+            agent_conversation_id: None,
         }
     }
 

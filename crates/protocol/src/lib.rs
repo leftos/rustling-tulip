@@ -613,6 +613,11 @@ pub struct HistoryEntry {
     /// entries and for imports from before revisions were stamped.
     #[serde(default)]
     pub import_rev: u32,
+    /// The conversation id the session's own agent CLI resumes with: set
+    /// only for Codex and Cursor sessions. A Claude conversation stays in
+    /// `claude_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_conversation_id: Option<String>,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -788,9 +793,11 @@ pub struct SpawnRequest {
     /// requester. Broadcasts never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// A Claude conversation to resume: an interactive Claude spawn passes
+    /// The agent's conversation to resume: an interactive Claude spawn passes
     /// `--resume <id>` instead of a fresh `--session-id`, and no initial
-    /// prompt. Not part of [`SpawnConfig`], so it is never replayed.
+    /// prompt. A daemon that cannot resume the chosen agent's conversation
+    /// ignores it and starts a fresh run. Not part of [`SpawnConfig`], so it
+    /// is never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_conversation: Option<String>,
 }
@@ -2610,7 +2617,9 @@ pub enum ClientMessage {
 pub struct RecoverItem {
     /// The ended session's id: its history entry's `session_id`.
     pub history_id: String,
-    /// The Claude conversation to resume, when one was chosen.
+    /// The conversation to resume, when one was chosen: a Claude conversation
+    /// for the Claude kinds, the entry's own `agent_conversation_id` for
+    /// [`RecoverAs::OwnAgent`]. `None` recovers as a fresh run.
     #[serde(default)]
     pub conversation_id: Option<String>,
     pub how: RecoverAs,
@@ -2627,6 +2636,10 @@ pub enum RecoverAs {
     /// A plain shell in the session's folder, typing `claude --resume <id>`
     /// when a conversation was chosen.
     Shell,
+    /// The session's own agent (Codex, Cursor) with its recorded settings, in
+    /// the session's own target, resuming its own conversation when one is
+    /// given.
+    OwnAgent,
     /// A kind from a newer client. The item fails with an error.
     #[serde(other)]
     Unknown,
@@ -2644,6 +2657,10 @@ pub struct SessionHistoryItem {
     /// The registered repo whose path is the entry's folder.
     #[serde(default)]
     pub folder_repo_id: Option<String>,
+    /// Whether [`RecoverAs::OwnAgent`] can resume the entry's own
+    /// conversation; false means it recovers as a fresh run.
+    #[serde(default)]
+    pub own_agent_resumable: bool,
 }
 
 /// A Claude conversation a history entry may be recovered into.
@@ -5788,7 +5805,7 @@ mod tests {
                 "end":{"type":"tracer_lost"},"claude_session_id":null,"source":"tracer_log","recovered_at":null,
                 "end_time_known":true,"import_rev":1},
        "candidates":[{"id":"85573bb1-c581-489e-baaa-94d5a384744c","last_active":"2026-09-27T18:27:37Z","title":"Fix the …"}],
-       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat"}
+       "folder_is_git_repo":true,"folder_repo_id":"repo-yaat","own_agent_resumable":false}
     ]}"#;
 
     #[test]
@@ -5857,6 +5874,57 @@ mod tests {
         let entry: HistoryEntry = assert_round_trip(&json);
         assert!(!entry.end_time_known);
         assert_eq!(entry.import_rev, 1);
+    }
+
+    #[test]
+    fn history_entry_agent_conversation_id_round_trips_and_defaults() {
+        let json = format!(
+            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":0,"agent_conversation_id":"019a2b3c-codex"}}"#
+        );
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert_eq!(
+            entry.agent_conversation_id.as_deref(),
+            Some("019a2b3c-codex")
+        );
+
+        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
+        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
+        assert_eq!(entry.agent_conversation_id, None);
+        let encoded = serde_json::to_value(&entry).expect("encode");
+        assert!(encoded.get("agent_conversation_id").is_none(), "{encoded}");
+    }
+
+    #[test]
+    fn own_agent_recover_item_round_trips() {
+        let item: RecoverItem = assert_round_trip(
+            r#"{"history_id":"h1","conversation_id":"019a2b3c-codex","how":{"type":"own_agent"}}"#,
+        );
+        assert_eq!(item.how, RecoverAs::OwnAgent);
+        assert_eq!(item.conversation_id.as_deref(), Some("019a2b3c-codex"));
+
+        let fresh: RecoverItem = assert_round_trip(
+            r#"{"history_id":"h2","conversation_id":null,"how":{"type":"own_agent"}}"#,
+        );
+        assert_eq!(fresh.how, RecoverAs::OwnAgent);
+        assert_eq!(fresh.conversation_id, None);
+    }
+
+    #[test]
+    fn history_item_resumable_defaults_false() {
+        let mut msg: serde_json::Value =
+            serde_json::from_str(SESSION_HISTORY_JSON).expect("contract is json");
+        let item = &mut msg["items"][0];
+        item.as_object_mut()
+            .expect("an item is an object")
+            .remove("own_agent_resumable");
+        let decoded: SessionHistoryItem =
+            serde_json::from_value(item.clone()).expect("decode an item from an older daemon");
+        assert!(!decoded.own_agent_resumable);
+
+        item["own_agent_resumable"] = serde_json::json!(true);
+        let decoded: SessionHistoryItem = serde_json::from_value(item.clone()).expect("decode");
+        assert!(decoded.own_agent_resumable);
+        assert_eq!(serde_json::to_value(&decoded).expect("encode"), *item);
     }
 
     #[test]

@@ -122,6 +122,7 @@ pub fn entry_from_record(
         model: None,
         end_time_known: true,
         import_rev: 0,
+        agent_conversation_id: rec.agent_conversation_id.clone(),
     }
 }
 
@@ -500,6 +501,7 @@ fn entry_from_tracer_log(
         },
         end_time_known: end.known,
         import_rev: IMPORT_REV,
+        agent_conversation_id: None,
     })
 }
 
@@ -630,6 +632,7 @@ fn history_item(
         candidates,
         folder_is_git_repo,
         folder_repo_id,
+        own_agent_resumable: false,
     }
 }
 
@@ -765,6 +768,9 @@ pub fn plan_recovery(
     if item.how == RecoverAs::Unknown {
         return Err("unsupported recovery kind".to_owned());
     }
+    if item.how == RecoverAs::OwnAgent {
+        return Err(OWN_AGENT_UNAVAILABLE.to_owned());
+    }
     let folder = entry_folder(entry).unwrap_or_default();
     if let Some(id) = &item.conversation_id
         && !conversation_exists(folder, id)
@@ -807,10 +813,15 @@ pub fn plan_recovery(
             request: shell_request(folder, item.conversation_id.as_deref()),
             register_repo: None,
         },
+        RecoverAs::OwnAgent => return Err(OWN_AGENT_UNAVAILABLE.to_owned()),
         RecoverAs::Unknown => return Err("unsupported recovery kind".to_owned()),
     };
     Ok(plan)
 }
+
+/// Why a [`RecoverAs::OwnAgent`] item fails: this daemon cannot yet recover a
+/// session as its own agent.
+const OWN_AGENT_UNAVAILABLE: &str = "Recovering as the session's own agent isn't available yet.";
 
 fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
     item.conversation_id
@@ -1218,6 +1229,7 @@ pub(crate) mod test_support {
             scrollback_snapshot_req: None,
             spawn_origin: None,
             claude_session_id: None,
+            agent_conversation_id: None,
         }
     }
 
@@ -1270,6 +1282,19 @@ mod tests {
 
     fn entry(id: &str, end: SessionEnd, ended_at: DateTime<Utc>) -> HistoryEntry {
         entry_from_record(&record(id, SessionMode::Interactive), end, ended_at)
+    }
+
+    #[test]
+    fn entry_from_record_copies_agent_conversation_id() {
+        let mut rec = record("s1", SessionMode::Interactive);
+        rec.agent = Agent::Codex;
+        rec.agent_conversation_id = Some("019a2b3c-codex".to_owned());
+        let entry = entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        assert_eq!(
+            entry.agent_conversation_id.as_deref(),
+            Some("019a2b3c-codex")
+        );
+        assert_eq!(entry.claude_session_id, None);
     }
 
     #[test]
