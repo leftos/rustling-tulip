@@ -41,6 +41,7 @@ Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 - [ ] **MA7 Push notifications.** A new additive protocol message registers a device's push token with the daemon. On `Attention`, the daemon sends APNs and FCM pushes with the user's keys, respecting the existing notification toggles. The keys live in the config dir, outside `state.json`.
 - [ ] **MA8 Full terminal.** A terminal per session with a phone key bar (Esc, Tab, arrows, Ctrl), resizing that doesn't fight the desktop's size for the same session, and scrollback replay.
 - [ ] **MA9 Conversation view.** Sessions as chats. Depends on the conversation-view item in [borrowed-ideas.md](./borrowed-ideas.md), and on `--print` staying on the subscription.
+- [ ] **MA10 Accounts screen.** Every Claude account with its 5h and 7d usage and reset times, a Switch button, and the auto-switch on/off and threshold, over the messages in [accounts.md](./accounts.md). Adding, removing and logging in stay on the desktop. MA7 sends auto-switch and all-exhausted events as pushes under their own toggle.
 
 ## Open questions
 

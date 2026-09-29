@@ -79,5 +79,15 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Fix round**: review findings sent back to the worker that made the change.
 - **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
+- **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
+- **Account store**: cswap's folder of saved logins (`~/.claude-swap-backup` on Windows), read and written by both cswap and the daemon.
+- **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
+- **Auto-switch**: moving the active account to another one when its binding usage window reaches the threshold, run by the daemon or by `cswap auto`, never both.
+- **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
+- **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
+- **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
+- **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
+- **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
+- **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
 - **Feature marker**: `branch: feat/<name>` on a `docs/plans/MAIN.md` line; every item under it lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the marker and merged with `--rebase` by `/ship` once every line under the marker is ticked.

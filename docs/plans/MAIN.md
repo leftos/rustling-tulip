@@ -8,7 +8,7 @@ Entry point for anyone, human or agent, continuing this project. **Open work onl
 - **A review finding the item does not fix** becomes a new line in the wave that shares its files, never a sub-item under landed work.
 - **Only open waves stand here**: the commit that lands a wave's last line deletes the wave's heading and renumbers the rest from 1; a new item joins the wave whose files or subject it shares, or opens a new wave before [Backlog and singles](#backlog-and-singles).
 
-Reference: [architecture.md](../architecture.md) (components, what the product does, the task index of files per kind of change) · [native-client.md](../native-client.md) (the client's settled design) · [native-client-parity.md](./native-client-parity.md) (every feature the native client must have) · [completed/](./completed/) (finished designs kept for their rationale) · the README glossary. Subplans: [native-client.md](./native-client.md) (rulings for the open Phase 4–6 items), [remote-file-transfer.md](./remote-file-transfer.md), [hook-status.md](./hook-status.md), [spoken-alerts.md](./spoken-alerts.md), [subagent-streams.md](./subagent-streams.md), [dispatch-follow.md](./dispatch-follow.md), [borrowed-ideas.md](./borrowed-ideas.md), [petal.md](./petal.md), [needs-you.md](./needs-you.md), [conversation-view.md](./conversation-view.md), [deepseek-sessions.md](./deepseek-sessions.md), [mobile-app.md](./mobile-app.md), [macos-compat.md](./macos-compat.md), [reboot-resume.md](./reboot-resume.md), [issue-link.md](./issue-link.md), [agent-cli.md](./agent-cli.md), [agent-skill-pack.md](./agent-skill-pack.md), [recover-own-agent.md](./recover-own-agent.md).
+Reference: [architecture.md](../architecture.md) (components, what the product does, the task index of files per kind of change) · [native-client.md](../native-client.md) (the client's settled design) · [native-client-parity.md](./native-client-parity.md) (every feature the native client must have) · [completed/](./completed/) (finished designs kept for their rationale) · the README glossary. Subplans: [native-client.md](./native-client.md) (rulings for the open Phase 4–6 items), [remote-file-transfer.md](./remote-file-transfer.md), [hook-status.md](./hook-status.md), [spoken-alerts.md](./spoken-alerts.md), [subagent-streams.md](./subagent-streams.md), [dispatch-follow.md](./dispatch-follow.md), [borrowed-ideas.md](./borrowed-ideas.md), [petal.md](./petal.md), [needs-you.md](./needs-you.md), [conversation-view.md](./conversation-view.md), [deepseek-sessions.md](./deepseek-sessions.md), [mobile-app.md](./mobile-app.md), [macos-compat.md](./macos-compat.md), [reboot-resume.md](./reboot-resume.md), [issue-link.md](./issue-link.md), [agent-cli.md](./agent-cli.md), [agent-skill-pack.md](./agent-skill-pack.md), [recover-own-agent.md](./recover-own-agent.md), [accounts.md](./accounts.md).
 
 **Gates.** Every build and test runs through the repo's gate from the worktree root: `pwsh tools/gate.ps1 -Log .tmp/<name>.log -TimeoutSeconds <n> -Slot <heavy|light> -- <command>`. The standard set, named by a wave as "the gates": `-- cargo fmt --all --check` (light), `-- cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy), `-- cargo test -p <crate>` for each crate the wave names (heavy; `-p protocol` includes `v22_compat`), and `-- cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light). The live tier is `-- pwsh ./rt.ps1 native-e2e` (heavy) and the OS tier `-- pwsh ./rt.ps1 native-smoke` (light). Every item gets a `code-review`; a visible result no test can prove lands on green gates and is listed for a hand-test.
 
@@ -118,7 +118,13 @@ Review: `code-review`, and a security read of the pinned-TLS and pairing code. V
 
 Review: `code-review`, and a security read of the relay and per-device credentials. Verification: the gates for the Rust crates; the phone builds and a session answered from the phone by hand.
 
-- [ ] **Mobile app MA2–MA9** (user; after Wave 11): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
+- [ ] **Mobile app MA2–MA10** (user; after Wave 11): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, accounts screen, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
+
+### Wave 13 — Claude accounts (new `crates/daemon/src/accounts/`, `server.rs`, `crates/protocol`, `apps/native/src/footer.rs`, new `accounts.rs` and `accounts_view.rs`, `settings_view.rs`, `notify.rs`)
+
+Review: `code-review`, and a security read of the credential handling and the local-only gate. Verification: the gates with `-p protocol -p daemon -p rustling-tulip-native`; the live tier for CA.11; a hand-test switching accounts while two sessions run, with `cswap list` showing the same state.
+
+- [ ] **Built-in claude-swap** (user; `branch: feat/claude-accounts`): the daemon holds several Claude logins in cswap's own store, polls their 5h/7d usage, and switches the machine's login by hand or automatically, from the desktop, a remote client or the phone. The footer chip and a Settings → Accounts tab. Steps CA.0 (spike) to CA.12. Design and rulings: [accounts.md](./accounts.md).
 
 ## Backlog and singles
 
@@ -134,6 +140,10 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 - [ ] **Blocked on a Mac: verify M0–M3 on real hardware**: `cargo build` and `cargo clippy` there, tracer reattach across a daemon restart, `killpg` cleanup of the child tree, and the LaunchAgent plist written and removed by the autostart toggle. See [macos-compat.md](./macos-compat.md).
 - [ ] **M4 packaging, signing and notarization**: deferred while distribution is local dev builds only. See [macos-compat.md](./macos-compat.md).
+
+### Agent CLIs
+
+- [ ] **Self-update an agent CLI before launching it** (user): every Claude, Codex or Cursor spawn first tries to update that CLI to its latest version, then launches it. Needs a design pass: each CLI's own update command (`claude update`, and what Codex and Cursor offer); how long a spawn may wait and whether a recent successful check is reused; one update at a time when several spawns start together; Windows refusing to replace a binary that running sessions hold; a failed or offline update still launching the installed version, with the reason logged. `crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`, `spawn_plan.rs`.
 
 ### Open questions and blocked items
 

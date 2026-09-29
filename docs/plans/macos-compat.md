@@ -141,6 +141,8 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
   `rt.sh` (or a `cargo xtask`) sibling; the underlying `cargo`/`pnpm` commands are
   identical. Not a blocker for `cargo build` / `pnpm tauri dev`.
 
+- [ ] Keychain credential writer for the accounts module ([accounts.md](./accounts.md)): on macOS the live Claude credential is in the Keychain, not `.credentials.json`. Implement `CredentialWriter` over the `security` CLI as cswap's `macos_keychain.py` does, and allow for Claude Code's roughly 30-second Keychain cache before a switch takes effect.
+
 ## 5. Minor cleanups (work as-is, optionally tidy)
 
 - `crates/daemon/src/main.rs:208–213` — `is_tracer_image` strips `.exe`
