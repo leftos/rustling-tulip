@@ -37,6 +37,14 @@ The user approved "Petal" for the native client (`apps/native`): a graphite grou
   - **Set** in Settings → General's "Sidebar" section as a second `choice_row`, "Leaf density", under "Default view": that section already holds the sidebar's other layout choice, and the Appearance tab is for per-level colours and fonts.
 - **Terminal ground (user, Q7):** the built-in terminal ground becomes `TERMINAL_GROUND` #0C0B0E; the ANSI palette stays as ported, with its contrast pass re-run against the new ground; a user's or a program's (OSC 11) background still wins; the chrome stays graphite whatever a pane's ground. The "Graphite" background preset (#111318) is renamed "Slate". `theme.rs` no longer matches the Tauri app's pinned values.
 - **Pane cards (user, Q8):** 8 px radius on the pane frame and header; since GPUI clips children to rectangles, the terminal grid is inset by the 1 px border and its inner corners stay square.
+- **Controls (the boards, plus the user's answers where the boards show nothing):**
+  - Scrim `rgba(6,5,8,0.66)` as a new `SCRIM` token; the dialog card is `SURFACE`, 1 px `LINE_STRONG`, 14 px radius (Spawn board). Menus and popovers are `CHIP`, 1 px `LINE_STRONG`, 10 px radius. Toasts are `CHIP`, 1 px `LINE_STRONG`, 10 px radius, padding 12/14 (Main board).
+  - Buttons (boards): outlined = transparent, 1 px `LINE_STRONG`, `TEXT`; primary = `ACCENT` fill, `ON_ACCENT` text, weight 700, no border; danger = outlined with `DANGER` text (never filled). Sizes: regular 32 px tall, padding 0 14, radius 7, 12.5 px; compact 28 px, padding 0 12, radius 6, 12 px (toasts); large 36 px, padding 0 16, radius 8, 13 px (Spawn footer).
+  - Hover (user): outlined buttons and menu items take a `HOVER` fill; the primary brightens slightly; pressed is one step darker.
+  - Disabled (user): any kind at 45% opacity, default cursor, no hover.
+  - Keyboard focus (user): a 2 px `ACCENT` ring outside the control's own border, on every button kind and on inputs.
+  - Text inputs: 34 px, `GROUND`, 1 px `LINE_STRONG`, radius 7 (boards); caret `ACCENT`, selection `ACCENT` at 30%, placeholder `SUBTLE` (user).
+  - Tokens these add (`SCRIM`, and any input colour not yet in `palette.rs`) go into `palette.rs` in the item that needs them; the "later items never edit `palette.rs`" rule covers only recolouring existing tokens.
 - **Pixel probes read tokens by name.** `tests/smoke_window.rs` already compares against `lib.rs`'s `PANEL_BG` / `BAR_BG`, so it follows the values; PT.5 adds a probe of the coral active-rail bar, since `SUNKEN` (#0B0A0D) is close to the all-black capture the probe guards against.
 
 ## Items

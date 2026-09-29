@@ -1,0 +1,145 @@
+# Secrets in the spawn dialog's environment rows
+
+Design for the "Environment rows are stored and sent in plain text" line in [MAIN.md](./MAIN.md) (Wave 2). Found in [deepseek-sessions.md](./deepseek-sessions.md#findings-outside-this-item). Builds on env references (`${env:NAME}` rows, commit `caa7c0d`: `resolve_env_refs` in `crates/daemon/src/server.rs`, `crates/daemon/src/user_env.rs`, the dialog's plain-text warning in `apps/native/src/spawn_form.rs`) and on the key store spoken alerts settled for SA.2 ([spoken-alerts.md](./spoken-alerts.md): Windows Credential Manager through `keyring-core`). Step ids are `ES.n`.
+
+## Problem
+
+Part of the finding is covered by env references: `SpawnRequest.extra_env`'s doc comment says to put secrets there "as references, never as literal values" (`crates/protocol/src/lib.rs:776-781`), and a row written `${env:NAME}` is stored and echoed as the reference and resolved only for the child. What is open:
+
+- A **literal** value is still stored and sent verbatim. The dialog warns about it (`spawn_form.rs:1644-1661`, "Stored in plain text. Use ${env:KEY} …") but never blocks, and only for keys with a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment.
+- Env references need the user to set a user environment variable first; a key pasted into the dialog is the path of least effort.
+- Existing files may hold literal secrets under any key, and `state.json`'s `last_spawn_config` keeps one until the next spawn on that repo or workspace.
+
+Where a literal row goes today (every site carries `extra_env` unchanged unless noted):
+
+1. Typed: `EnvRow { key, value }` (`apps/native/src/spawn_form.rs:201-204`), a plain `TextInput` for the value (`apps/native/src/spawn_view.rs:459`), sent by `SpawnForm::extra_env` (`spawn_form.rs:2230-2237`) as `SpawnRequest.extra_env: Vec<(String, String)>` (`crates/protocol/src/lib.rs:776-783`), serialized as `[["KEY","value"], …]`.
+2. Pre-checked: `ClientMessage::SpawnSession` resolves references only to refuse an unset one (`crates/daemon/src/server.rs:1629-1646`, the lookup at 1633).
+3. Captured: `spawn_session` builds `stored_config = SpawnConfig::from_request(&req)` (`server.rs:3201`), which copies `extra_env` (`protocol/src/lib.rs:936-945`, line 943) into `SpawnConfig.extra_env` (`lib.rs:836-837`). Resolution for the child happens after, at `server.rs:3242`.
+4. `state.json`: `persist_repo_last_spawn_config` / `persist_workspace_last_spawn_config` (`crates/daemon/src/registry.rs:180-205`, called from `server.rs:3336-3356`) write it into `RepoEntry.last_spawn_config` / `WorkspaceEntry.last_spawn_config` (`protocol/src/lib.rs:308`, `331`).
+5. Wire, to every connected client: the same call broadcasts `StateEvent::Repos` / `StateEvent::Workspaces` (`server.rs:3357-3363`), forwarded as `DaemonMessage::Repos` / `Workspaces` (`server.rs:1014-1018`; the variants at `protocol/src/lib.rs:2944-2949`); every new connection gets both at hello (`server.rs:1404-1405`).
+6. The session record: `SessionRecord.spawn_config` (`crates/daemon/src/session.rs:134`), set by the interactive, plain-shell and headless spawn paths (`server.rs:3736`, `3930`, `4074`).
+7. `sessions/<id>/meta.json`: `orphan::meta_from_record(…, Some(stored_config), …)` (`server.rs:3804`, `3995`, `4116`; `crates/daemon/src/orphan.rs:430-473`) into `OrphanMeta.spawn_config` (`orphan.rs:113`), written by `write_meta` (`orphan.rs:194-200`) and rewritten on every record sync; restored onto the record at startup by `insert_orphan` / `insert_abandoned` / `insert_reattached` (`session.rs:850`, `910`, `955`).
+8. `history/<id>.json`: `history::entry_from_record` copies it (`crates/daemon/src/history.rs:99-127`, line 110) into `HistoryEntry.spawn_config` (`protocol/src/lib.rs:577`), written by `write_entry` (`history.rs:142-149`) and kept 7 days (`history::prune`, called at startup from `crates/daemon/src/main.rs:131`).
+9. Wire, on request: `GetSpawnConfig` (`protocol/src/lib.rs:1977-1982`) answered with the record's config in `SpawnConfigReply` (`server.rs:1653-1658`; `lib.rs:3085-3092`); `ListSessionHistory` answered with `SessionHistory` items (`server.rs:2629`) whose `SessionHistoryItem.entry` (`lib.rs:2652-2653`) carries the history entry's `spawn_config`.
+10. Replayed, each re-resolving references at `server.rs:3242`: Duplicate and Restart (`duplicate_request` → `to_duplicate_request`, `server.rs:4394-4412`), the sidebar's Resume (`resume_abandoned` → `to_clone_request`, `server.rs:5195-5228`), Recover (`recover_one`, `server.rs:5394-5436`, through `history::claude_request` / `recorded_request` → `to_clone_request`, `history.rs:972-1010`), and Launch last, which is client-side: the client sends `last_spawn_config` back as a `SpawnSession`. Codex capture reads the rows too (`history::recorded_env`, `history.rs:650-655`; `codex_rollout::codex_home`, `crates/daemon/src/codex_rollout.rs:64-89`, which resolves a reference row at 77).
+11. The child: `merged_env` (`server.rs:6716-6728`) puts the resolved rows over the keep-list (`passthrough_env`, `server.rs:6644-6667`), into `PtySpawnSpec.env` / `HeadlessSpec.env` (`server.rs:3696`, `4047`), whose `Debug` prints keys only. PTY env goes to the tracer by `Command::env` (`crates/daemon/src/tracer_client.rs:306-307`), never over the tracer pipe or into a log.
+
+Clients today: the native client neither sends `GetSpawnConfig` nor prefills env rows (`spawn_form.rs:910-943` reads only the agent and run mode from `last_spawn_config`); its Launch last is P4.11 and its Shift-duplicate prefill P4.12c, both unbuilt. The installed Tauri app (protocol 22, `tauri` branch) prefills its env rows from `SpawnConfigReply` and `last_spawn_config` (`apps/tauri-app/src/components/SpawnDialog.tsx:163`) and sends `config.extra_env` back verbatim on Launch last (`apps/tauri-app/src/App.tsx:1288`).
+
+## Settled
+
+- Plan it and draft the options before the DeepSeek steps (Wave 2) (user).
+- Env references stand: `${env:NAME}` is resolved from the daemon's environment, then `HKCU\Environment`, at spawn, and only the reference is stored and echoed; a secret-like literal gets a warning in the dialog (user, the earlier ruling this builds on).
+
+## Design
+
+### The options
+
+- **A. Seal into a store, keep a reference.** At spawn the daemon moves each secret row's literal value into an OS store and replaces it with a reference, `${secret:<id>}`, before anything is captured. Every stored file and every echo then carries the reference, and every respawn resolves it as it resolves `${env:NAME}` today. The wire shape of `extra_env` does not change, so a client that sends a config back verbatim (the Tauri app) keeps working. Costs a store module, an index of ids, and cleanup of ids nothing references.
+- **B. Never store the value; hold it in daemon memory only.** Secret rows are stripped from every stored config and echo; the live record keeps the value for Duplicate and Restart while the daemon runs. After a daemon restart, and for every Recover and Launch last, the value is gone and must be typed again, which needs a new "values needed" prompt in each of those flows and cannot be answered by the Tauri app.
+- **C. Refuse literal secret values.** The daemon refuses a spawn whose secret-like row holds a literal, and the dialog blocks Spawn until the row is an env reference. No store, no new files; the user must set a user environment variable for every key first, and a secret under a name the pattern misses is still stored in plain text.
+- **D. Encrypt the files at rest.** `state.json`, `meta.json` and history written DPAPI-encrypted. Protects the files from other users and from backups, not from the wire: `Repos`, `SpawnConfigReply` and `SessionHistory` still send the value to every client, and every hand inspection of the config dir needs a decoder.
+
+The recommendation is **A** with Windows Credential Manager, detailed below. It assumes the recommended answer to every open question.
+
+### Which rows are sealed
+
+A row is sealed when its value is a literal (not `${env:…}` or `${secret:…}`), non-empty, and either its key has a whole `_`-delimited segment `KEY`, `TOKEN`, `SECRET` or `PASSWORD` in any case (the pattern the dialog warns on today), or the client listed its key in a new `SpawnRequest.secret_env_keys: Vec<String>` (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`), set by the dialog's per-row Secret toggle (Open question 1). The daemon applies the pattern itself, so a request from any client, the Tauri app included, is covered. The pattern and the reference parser move into the protocol crate (`protocol::env_rows::is_secret_key`, `protocol::env_rows::reference`), replacing the native copy (`spawn_form.rs:1645`) and the daemon's `env_reference` (`server.rs:6672-6679`), so the two sides cannot drift.
+
+### The reference
+
+`${secret:<id>}`, where `<id>` is 32 lowercase hex characters (a fresh UUID v4, simple form). It is a value like any other in `Vec<(String, String)>`, so no stored or wire type changes. A client that learns it can spawn with it, and the child gets the value; that is no more than the auth token already allows (any authenticated client can spawn a shell and read the user's Credential Manager or environment itself), and it is the same exposure `${env:NAME}` has today.
+
+### The store
+
+New `crates/daemon/src/env_secrets.rs`:
+
+- Values live in Windows Credential Manager through `keyring-core` with the Windows native store, the crates and settings spoken alerts' SA.2 recorded (`keyring-core` 1.0.0, `windows-native-keyring-store` 1.1.0 with default features off; versions re-checked when ES.2 lands). Service `rustling-tulip`, or `rustling-tulip:<first 8 hex of the SHA-256 of the config dir path>` when `RUSTLING_TULIP_CONFIG_DIR` is set, so an isolated daemon (the e2e tier) never shares entries with the user's own. User `env/<KEY>/<id>`, so the user can recognise and delete an entry in Credential Manager. SA.2 then reuses this module's store setup instead of writing its own, as it reuses `user_env::Secret`.
+- An index, `<config dir>/env-secrets.json`, lists `{id, key, created_at}` per stored value, never the value; written with `secret::write_private` through a temp file and rename. The Windows store is used without its `search` feature, so the index is how the daemon knows which ids exist.
+- `seal(key, value) -> Result<String, SpawnFailure>` returns the id: an indexed id with the same key whose stored value equals `value` is reused, else a new id is stored and indexed. Reuse keeps one entry per distinct value, however many spawns use it.
+- `open(id) -> Option<user_env::Secret>` reads a value; `delete(id)` removes the entry and its index line.
+- A value the store refuses (Credential Manager caps a credential blob at 2,560 bytes, `CRED_MAX_CREDENTIAL_BLOB_SIZE`; whether `keyring-core` stores UTF-16, halving that, is unverified) refuses the spawn: "`<KEY>`'s value is too long to save securely; use `${env:<KEY>}` instead."
+- `Debug` on everything here prints ids and keys only.
+
+### Spawn
+
+- `spawn_session` seals first: `env_secrets::seal_rows(&mut req.extra_env, &req.secret_env_keys)` runs before `SpawnConfig::from_request` (`server.rs:3201`), so the captured config, the record, `meta.json`, `state.json`, the `Repos` broadcast and, at the end, the history entry all get the reference. `secret_env_keys` is not part of `SpawnConfig`: once sealed, the reference itself marks the row.
+- `resolve_env_refs` (`server.rs:6684-6709`) resolves both kinds: `${env:NAME}` as today, `${secret:ID}` through `env_secrets::open`. A missing id refuses as Open question 3 rules, before any git work, as an unset env reference does now. The pre-check at `server.rs:1633` checks secret references too, so a missing one is refused before a checkout confirm. `codex_rollout::codex_home_with` (`codex_rollout.rs:69-89`) passes through the same resolver.
+- A spawn that fails after sealing leaves an indexed id no config references; cleanup below removes it.
+- DeepSeek's `spawn_env` (DK.5) takes the rows after this resolution and is unaffected; its locked-key refusal sees keys, not values.
+
+### Echoes and clients
+
+- `SpawnConfigReply`, `Repos` / `Workspaces` and `SessionHistory` send the reference, never the value, because the reference is what is stored (Open question 4). No handler changes.
+- Native (ES.6): the Secret toggle on each env row, ticked while the key matches the pattern until the user changes it, fills `secret_env_keys`. The plain-text warning becomes a muted note on a secret row, "Saved in Windows Credential Manager; only a reference is kept.", and stays a warning, reworded, on a literal row the user has un-ticked. A prefilled `${secret:…}` row (P4.11's Launch last "edit first", P4.12c's prefill) shows as Open question 7 rules.
+- Tauri (protocol 22): its dialog shows `${secret:<id>}` as the value text and its Launch last sends it back; both work unchanged. A literal it sends is sealed by the pattern. It has no Secret toggle, so a secret under a name the pattern misses stays literal from that client.
+
+### Existing files
+
+At startup, after `state.json` loads and before orphan recovery reads the sidecars, the daemon seals every literal secret row in `state.json`'s `last_spawn_config`s, every `sessions/<id>/meta.json` and every `history/<id>.json` (Open question 5), rewriting each file that changed, as `migrate_paths_in_place` does for paths (`crates/daemon/src/state.rs:352-369`). Only the name pattern applies, since old files have no toggle. A store failure leaves that file as it was and logs a `warn!` naming the file and the key, never the value; the next start tries again.
+
+### Cleanup
+
+At startup, after `history::prune` (`main.rs:131`) and the migration, every indexed id that no `last_spawn_config`, sidecar or history entry references and that is older than one hour is deleted from the store and the index (Open question 6). An entry therefore outlives its last reference until the next daemon start. The hour covers a spawn sealed by an older daemon instance moments before a restart.
+
+### Out of scope
+
+The value still reaches the tracer's and the child's environment, as `${env:NAME}` values and DeepSeek's key do; any same-user process can read a process's environment. Scrollback, which may hold anything a session printed, is not scrubbed.
+
+### Protocol (additive, no bump)
+
+`SpawnRequest.secret_env_keys` (default empty, skipped when empty); `protocol::env_rows` helpers; doc comments on `SpawnRequest.extra_env` (the `${secret:ID}` form, sealing by name or `secret_env_keys`, "a literal secret is never stored"), on `SpawnConfig.extra_env` (which has none today: "values are literals or references; secret literals were sealed at spawn"), and on `SpawnConfigReply`, `RepoEntry.last_spawn_config` and `HistoryEntry.spawn_config` ("carries references, never secret values"). A v22 `SpawnSession` without the field decodes; the replies keep their shape. `cargo test -p protocol v22_compat` proves it; `supported` does not change.
+
+## Steps
+
+Order: ES.1 and ES.2 in parallel; ES.3 needs both; ES.4 needs ES.3; ES.5 needs ES.4; ES.6 needs ES.1 and PT.8b (it edits the dialog PT.8b restyles); ES.7 needs ES.4; ES.8 last. ES.3 lands before DK.5, which moves `merged_env` and the env code ES.3 edits out of `server.rs`. The gates are MAIN.md's; each step's proof names the crates.
+
+- [ ] **ES.1 Protocol.** `SpawnRequest.secret_env_keys`; `protocol::env_rows` with `is_secret_key(key)` and `reference(value) -> Option<Reference>` (`Env(name)` / `Secret(id)`); the doc comments above. File: `crates/protocol/src/lib.rs` (a `mod env_rows` or a section of it). Proof, red first: `secret_env_keys_defaults_empty_and_is_not_serialized_when_empty`, `reference_parses_env_and_secret_forms_and_rejects_the_rest` (embedded, unclosed, bad name, a 31-character or upper-case id), `secret_key_matches_whole_segments_only` (`ANTHROPIC_API_KEY`, `db_password` yes; `KEYBOARD`, `MONKEY_BUSINESS` no); in `v22_compat`, `v22_spawn_session_with_a_literal_env_row_decodes`; `cargo test -p protocol` (includes `v22_compat`).
+- [ ] **ES.2 Secret store.** New `crates/daemon/src/env_secrets.rs` (store setup with the per-config-dir service, index file, `seal`, `open`, `delete`, key- and id-only `Debug`), its `mod` line in `main.rs`, the crates in `crates/daemon/Cargo.toml`, `deny.toml` if a licence needs listing. Proof, red first, on `keyring_core::mock` and a temp config dir: a sealed value opens; the same key and value reuse the id; another value gets a new id; `delete` removes the entry and the index line; an unknown id opens `None`; the index file's bytes never contain the value sentinel; an over-long value refuses naming the key; `format!("{:?}")` of every type holds no value; the service name differs with `RUSTLING_TULIP_CONFIG_DIR` set; `cargo test -p daemon env_secrets`, then `cargo deny check`.
+- [ ] **ES.3 Seal and resolve at spawn.** `seal_rows` before `SpawnConfig::from_request` in `spawn_session`; `resolve_env_refs` resolving `${secret:ID}`, refusing a missing one; the pre-check at the `SpawnSession` handler; `env_reference` replaced by `protocol::env_rows::reference`; `codex_rollout.rs`'s resolver call. Files: `crates/daemon/src/server.rs`, `codex_rollout.rs`. Proof, red first, on `test_hub` with the mock store: `a_literal_secret_row_is_stored_as_a_reference_everywhere` (the record's config, the `meta.json` bytes, the `state.json` bytes, the `Repos` broadcast, a `GetSpawnConfig` reply and, after a stop, the history entry: none holds the sentinel, each holds `${secret:`), `the_child_gets_the_sealed_value` (`child_env_probe`), `a_plain_literal_row_is_stored_verbatim`, `a_secret_env_keys_row_is_sealed_though_its_name_is_plain`, `duplicate_resume_and_recover_resolve_the_sealed_value` (the probe after each), `a_missing_secret_refuses_before_any_git_work` (no worktree folder, no registry entry, the message names the key), `a_missing_secret_is_refused_before_the_checkout_confirm`, `codex_home_resolves_a_secret_reference_row`; `cargo test -p daemon`.
+- [ ] **ES.4 Seal existing files at startup.** A pass over `state.json` (beside `migrate_paths_in_place`), every sidecar and every history entry, run from `main.rs` before orphan recovery. Files: `crates/daemon/src/state.rs`, `orphan.rs`, `history.rs`, `main.rs`. Proof, red first, with fixture files holding a sentinel under `ANTHROPIC_API_KEY` and `RUST_LOG=debug`: after the pass, each file holds a reference and no sentinel, `RUST_LOG` is untouched, the store opens the sentinel; a second pass changes nothing (file mtimes kept); a failing store leaves the file byte-identical and logs without the value; an unreadable history file is skipped; `cargo test -p daemon`.
+- [ ] **ES.5 Cleanup of unreferenced secrets.** `env_secrets::collect_unreferenced(referenced, now)`, called from `main.rs` after `history::prune` and ES.4. Files: `crates/daemon/src/env_secrets.rs`, `main.rs`. Proof, red first: an id referenced only by a history entry is kept; one referenced by nothing and two hours old is deleted from store and index; one referenced by nothing and five minutes old is kept; an index line whose store entry is already gone is dropped; `cargo test -p daemon env_secrets`.
+- [ ] **ES.6 Native dialog.** `EnvRow` gains the Secret choice (following the pattern until touched); `SpawnForm` sends `secret_env_keys`; `env_plaintext_warning` becomes the note and the reworded warning, using `protocol::env_rows`; a prefilled `${secret:…}` row renders per Open question 7. Files: `apps/native/src/spawn_form.rs`, `spawn_view.rs`, `tests/ui_spawn_dialog.rs`. Proof, red first: `spawn_form.rs` tests that the toggle follows the key until touched, a ticked row's key is in `secret_env_keys` and an un-ticked pattern row's is not (the daemon still seals it), the note and warning texts, a `${secret:…}` value counts as a reference; `ui_spawn_dialog` specs `a_secret_row_shows_the_saved_note_and_sends_its_key`, `a_prefilled_sealed_row_shows_saved_secret` (via a form seeded with a config, since no native prefill exists yet); `cargo test -p rustling-tulip-native --lib spawn_form` and `--test ui_spawn_dialog`. Needs ES.1, PT.8b.
+- [ ] **ES.7 Live tier: the value reaches the child and no file.** `fake-claude` gains `/env <NAME>` (`RT_ENV <NAME> unset`, `RT_ENV <NAME> sha256=<hex>` for a name ending `_KEY` or `_TOKEN`, else the value), the command DK.8 then reuses. A new `e2e_recover.rs` spec: a `SpawnSession` with `RT_TEST_API_KEY=<sentinel>` as a literal row; `/env RT_TEST_API_KEY` prints the sentinel's hash; the tracer is killed, the entry recovered, `/env` again prints the hash; every file under the isolated config dir (`state.json`, `sessions/`, `history/`, `env-secrets.json`, `logs/`) is searched and holds no sentinel. The spec's daemon runs with the per-config-dir service, and the spec deletes its Credential Manager entries at teardown (target name format recorded in ES.2). Files: `tools/e2e/fake-claude/index.mjs`, `tools/e2e/fake-claude/README.md`, `apps/native/tests/support/live.rs`, `apps/native/tests/e2e_recover.rs`. Proof: `pwsh ./rt.ps1 native-e2e` through the gate (heavy).
+- [ ] **ES.8 Docs.** CLAUDE.md ("Where things live on disk": `env-secrets.json`, and Credential Manager entries under the `rustling-tulip` service); `docs/architecture.md` (the spawn line and a task-index row "Change how env rows are stored": `env_secrets.rs`, `server.rs` `resolve_env_refs`, `protocol` `env_rows`, `spawn_form.rs`); `docs/native-client.md` (the Secret toggle and the saved-secret row); the README glossary (terms below; the Env reference entry gains "see Secret reference"; `ES.1` in a step-id entry); SA.2's line in `spoken-alerts.md` (reuse `env_secrets`' store setup); the finding line in `deepseek-sessions.md` removed; the MAIN.md line and this subplan deleted once promoted.
+
+## Glossary terms this subplan coins
+
+- **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.
+- **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup.
+- **Secret row**: an environment row whose key has a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment or which the dialog's Secret toggle marks.
+- **ES.1**: step ids in `env-secrets.md` (secrets in environment rows).
+
+## Open questions
+
+1. **Which rows count as secret.**
+   - (a) Recommended: the name pattern, applied by the daemon, plus a per-row Secret toggle in the dialog that adds a key the pattern misses (`secret_env_keys`); the toggle cannot exempt a pattern key. How: the daemon seals the union; the toggle is ticked by the pattern until touched. Worst case: a harmless pattern row such as `SSH_KEY_PATH` is sealed, so its value shows as a saved secret instead of the path.
+   - (b) The name pattern only. How: no protocol field, no toggle. Worst case: a key under a name like `GH_PAT` or `OPENAI_ORG` is stored in plain text.
+   - (c) Every literal row. How: no pattern at all. Worst case: `RUST_LOG=debug` becomes an opaque credential, and Credential Manager fills with non-secrets.
+2. **Where a secret lives instead.**
+   - (a) Recommended: Windows Credential Manager through `keyring-core`, the store SA.2 already settled. How: one credential per distinct value, an id index in the config dir. Worst case: new crates to vet in `deny.toml`, and a value over the credential size limit must use `${env:NAME}` instead.
+   - (b) A DPAPI-encrypted file in the config dir (`CryptProtectData` at user scope, the `Win32_Security_Cryptography` feature of the `windows` crate already in use). How: `env-secrets.bin`, a map of id to encrypted value. Worst case: a file format of our own, invisible to the user, and a separate macOS answer.
+   - (c) Not stored: the value lives only on the live session record in daemon memory. How: stored configs drop the row's value. Worst case: after any daemon restart, every Recover, Resume, Duplicate and Launch last of that session hits Open question 3, and the Tauri app cannot supply the value at all.
+3. **What Recover, Duplicate, Restart, Resume and Launch last do when a secret is missing** (deleted in Credential Manager, or cleaned up).
+   - (a) Recommended: refuse, as an unset env reference does. How: `ActionFailed` "A saved secret is missing" / "`<KEY>`'s saved value is no longer in Windows Credential Manager." / hint "Open the spawn dialog, type the value again, and spawn."; Recover shows it on the item. Worst case: a Recover after the user cleared Credential Manager fails until they spawn afresh.
+   - (b) Spawn without that variable and warn. How: the row is dropped and a toast names it. Worst case: a session silently runs against another account or the default credential.
+   - (c) Open the spawn dialog prefilled with that row empty and focused. How: a new client flow on each respawn path. Worst case: native-only work on five paths, and the Tauri app still fails.
+4. **What `SpawnConfigReply` (and `Repos`, `Workspaces`, `SessionHistory`) send for a secret row.**
+   - (a) Recommended: the reference, `${secret:<id>}`. How: nothing changes on the wire; it is what is stored. Worst case: a client that learns the id can spawn with it, which the auth token already allows.
+   - (b) The key only: the row is left out and an additive `secret_keys` list names it. How: a new field on `SpawnConfig`. Worst case: the Tauri app's Launch last and prefill drop the row and spawn without it.
+   - (c) A masked value (`********`). How: the daemon masks on output. Worst case: the Tauri app sends the asterisks back and the child gets `********` as its key.
+5. **Existing plain-text files.**
+   - (a) Recommended: seal on load. How: the startup pass moves pattern-matching literals into the store and rewrites `state.json`, sidecars and history. Worst case: with Credential Manager unavailable at startup, the files stay plain until a later start succeeds.
+   - (b) Redact on load. How: pattern-matching literal values are removed from every file, no store involved. Worst case: Launch last or Recover of an old session runs without its key and fails or bills the wrong account.
+   - (c) Leave them to age out. How: history goes after 7 days, sidecars on stop, `last_spawn_config` on the next spawn. Worst case: a key typed months ago stays in `state.json` for a repo never launched again.
+6. **Cleaning up saved secrets.**
+   - (a) Recommended: at daemon start, delete ids nothing references and older than an hour. How: after `history::prune` and the migration. Worst case: a secret outlives its last reference until the next daemon start.
+   - (b) Never delete; the user removes entries in Credential Manager. How: no cleanup code. Worst case: one entry per distinct value ever typed, forever, each resolvable by id.
+   - (c) Delete when the last reference goes, at runtime. How: checks on sidecar delete, history prune and `last_spawn_config` replace. Worst case: a missed path deletes a secret still referenced, and a Recover fails per Open question 3.
+7. **How the dialog shows a prefilled sealed row** (Launch last "edit first", the Shift-duplicate prefill).
+   - (a) Recommended: a read-only "Saved secret" value with a Replace button that clears it for typing. How: the row keeps sending the reference until replaced. Worst case: the user cannot see which saved value it is without opening Credential Manager.
+   - (b) The raw `${secret:<id>}` text in an ordinary field. How: no new rendering. Worst case: an accidental edit of the id makes the spawn fail as a missing secret.
+   - (c) Leave sealed rows out of the prefill. How: the form drops them. Worst case: the edited spawn silently runs without the key.
+8. **Masking the value field while typing.**
+   - (a) Recommended: no masking; the problem is storage and the wire, and the dialog is on the user's own screen. How: unchanged `TextInput`. Worst case: a key is visible on a shared or recorded screen while typed.
+   - (b) Mask secret rows' values with a reveal toggle. How: a masked mode on `TextInput`. Worst case: new widget work, and a pasted key cannot be checked by eye before spawning.
