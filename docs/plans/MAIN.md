@@ -127,10 +127,6 @@ Review: `code-review`, and a security read of the relay and per-device credentia
 
 Items that share no files with a wave, what waits on something outside the repo, and ideas that need a design pass before they are brief-sized.
 
-### Docs
-
-- [ ] **Bring `docs/architecture.md` and `docs/native-client.md` up to the recent landings** (doc-drift scan: 5 commits on their named files since 2026-09-28): the task index and components name neither `apps/native/src/palette.rs` (5e655d7) nor the Needs You panel's `needs_you.rs` / `needs_you_view.rs` (ee9bb60, b378bcc), and say nothing of the per-session sidecar write and delete gates (b378bcc, 924643a) or the agent conversation id carried through history and orphan recovery (a841967). Write needs-you.md's NY.6 native-client.md section for NY.1–NY.3 now; NY.6 then adds only NY.4–NY.5.
-
 ### Build tooling
 
 - [ ] **The OS smoke tier fails on every run since the first-connect layout chooser** (found by PT.2 and PT.3): a fresh isolated config mints a new client id, so `LayoutInitRequired` opens the chooser's 60% black backdrop (`BACKDROP_TINT`, `layout_chooser_view.rs`) over the window and both pixel probes in `apps/native/tests/smoke_window.rs` (`wait_painted`) read scrim-over-colour. Seed the smoke client's layout before launch.
