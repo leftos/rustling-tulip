@@ -178,7 +178,9 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> 
     let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(err) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
+        if let Err(cleanup) = std::fs::remove_file(&tmp) {
+            warn!(?cleanup, path = %tmp.display(), "failed to remove temp file after a failed rename");
+        }
         return Err(err).with_context(|| format!("renaming onto {}", path.display()));
     }
     Ok(())

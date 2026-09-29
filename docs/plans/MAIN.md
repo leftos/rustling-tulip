@@ -130,7 +130,6 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
-- [ ] **`recreating_a_worktree_moves_it_off_the_stale_base` collides across concurrent runs** (found landing NY.3): it uses the fixed temp path `rt-wt-recreate-tree`, so two worktrees running `cargo test -p daemon` at once fail with "already exists"; give it a per-process path. `crates/daemon/src/git.rs`.
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
 

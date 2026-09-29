@@ -5,7 +5,6 @@
 //! `headless::spawn` wires stdout into that parser and stderr into
 //! `recent_actions`; the rest is agent-agnostic.
 
-use crate::orphan;
 use crate::paths::Dirs;
 use crate::scrollback;
 use crate::session::{SessionRegistry, push_recent_action};
@@ -85,8 +84,8 @@ impl HeadlessHandle {
 }
 
 /// Spawn the headless child and wire its stdout into the registry.
-/// Returns immediately; the parser runs in a background task. `dirs` is used
-/// to clean up the orphan-meta sidecar when the child exits.
+/// Returns immediately; the parser runs in a background task. `dirs` is where
+/// the child's output is appended to its scrollback.
 pub fn spawn(
     spec: &HeadlessSpec,
     registry: &Arc<SessionRegistry>,
@@ -125,7 +124,7 @@ pub fn spawn(
     // replayed on reattach.
     let registry_for_stdout = Arc::clone(registry);
     let session_for_stdout = session_id.clone();
-    let dirs_for_stdout = dirs.clone();
+    let dirs_for_stdout = dirs;
     let backend = crate::agents::backend_for(spec.agent);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
@@ -167,7 +166,6 @@ pub fn spawn(
     // a kill request, so `HeadlessHandle::kill` never reaches for the child.
     let registry_for_exit = Arc::clone(registry);
     let session_for_exit = session_id;
-    let dirs_for_exit = dirs;
     tokio::spawn(async move {
         let mut child = child;
         let mut kill_rx = kill_rx;
@@ -199,7 +197,7 @@ pub fn spawn(
         });
         registry_for_exit
             .fan_out_attention(session_for_exit.clone(), protocol::AttentionReason::Stopped);
-        orphan::try_delete_meta(&dirs_for_exit, &session_for_exit);
+        registry_for_exit.delete_sidecar(&session_for_exit);
     });
 
     Ok(handle)

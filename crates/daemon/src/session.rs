@@ -240,11 +240,22 @@ pub struct SessionRegistry {
     /// the registry can't sync `recent_actions` back to disk — callers
     /// that construct registries in tests (none today) would pass `None`.
     dirs: Option<Dirs>,
-    /// Serialises every write of a session's sidecar. Two read-modify-writes
-    /// racing each other would otherwise be free to leave the older of the
-    /// two on disk, so the sidecar could keep a status or title the record
-    /// has already left behind.
-    sidecar_sync: Mutex<()>,
+    /// One gate per session, serialising every write and the delete of that
+    /// session's sidecar. Two read-modify-writes racing each other would
+    /// otherwise be free to leave the older of the two on disk, and a write
+    /// racing the delete could put a sidecar back for a session that ended.
+    /// Sessions never wait on each other's disk I/O. Lock order: a sidecar
+    /// gate, then the registry map, then a record; this map's own lock is
+    /// only held to look a gate up, with no other lock held.
+    sidecar_gates: Mutex<HashMap<String, Arc<Mutex<SidecarGate>>>>,
+}
+
+/// The per-session sidecar lock's state.
+#[derive(Debug, Default)]
+struct SidecarGate {
+    /// The sidecar was deleted because the session ended; no write may
+    /// bring it back. Session ids are never reused, so this never resets.
+    deleted: bool,
 }
 
 impl SessionRegistry {
@@ -254,8 +265,47 @@ impl SessionRegistry {
             by_id: RwLock::new(HashMap::new()),
             events,
             dirs: Some(dirs),
-            sidecar_sync: Mutex::new(()),
+            sidecar_gates: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The sidecar gate for `id`, created on first use.
+    fn sidecar_gate(&self, id: &str) -> Arc<Mutex<SidecarGate>> {
+        Arc::clone(lock(&self.sidecar_gates).entry(id.to_owned()).or_default())
+    }
+
+    /// Drop `id`'s map entry if it is still `gate`: a writer that found the
+    /// record gone under a gate it made (or kept past `remove`) leaves no
+    /// entry behind, and never takes out a newer one.
+    fn forget_gate(&self, id: &str, gate: &Arc<Mutex<SidecarGate>>) {
+        let mut gates = lock(&self.sidecar_gates);
+        if gates.get(id).is_some_and(|held| Arc::ptr_eq(held, gate)) {
+            gates.remove(id);
+        }
+    }
+
+    /// Run `write` with `id`'s record inside the session's sidecar gate,
+    /// unless its sidecar was deleted when the session ended or the record
+    /// is gone. The record is looked up under the gate, so a write racing
+    /// `remove` either sees the record or skips.
+    fn with_sidecar_gate(&self, id: &str, write: impl FnOnce(&Arc<Mutex<SessionRecord>>)) {
+        let gate = self.sidecar_gate(id);
+        let held = lock(&gate);
+        if held.deleted {
+            return;
+        }
+        let Some(arc) = self.get(id) else {
+            drop(held);
+            self.forget_gate(id, &gate);
+            return;
+        };
+        write(&arc);
+    }
+
+    /// Whether the gates map holds an entry for `id`.
+    #[cfg(test)]
+    fn has_sidecar_gate(&self, id: &str) -> bool {
+        lock(&self.sidecar_gates).contains_key(id)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -314,10 +364,16 @@ impl SessionRegistry {
     }
 
     pub fn remove(&self, id: &str) {
-        let mut guard = write(&self.by_id);
-        if guard.remove(id).is_some() {
-            let _ = self.events.send(SessionEvent::Removed(id.to_string()));
+        {
+            let mut guard = write(&self.by_id);
+            if guard.remove(id).is_some() {
+                let _ = self.events.send(SessionEvent::Removed(id.to_string()));
+            }
         }
+        // Every sidecar write checks the record under the gate, so a write
+        // still holding this gate skips, and one that makes a new gate finds
+        // the record gone.
+        lock(&self.sidecar_gates).remove(id);
     }
 
     pub fn update<F>(&self, id: &str, f: F)
@@ -328,52 +384,83 @@ impl SessionRegistry {
     }
 
     /// Mirror a record's persisted fields (see [`orphan::RecordMirror`]) into
-    /// its sidecar. The values are read under the record lock inside the one
-    /// critical section every sidecar write shares, so the last writer always
-    /// writes the newest values and a record that is already gone is skipped
-    /// rather than resurrected. A session without a sidecar on disk is a
-    /// no-op (see [`orphan::try_sync_record_fields`]).
+    /// its sidecar. The values are read under the record lock inside the
+    /// session's sidecar gate, so the last writer always writes the newest
+    /// values. A record that is already gone, or whose sidecar was deleted
+    /// when it ended, is skipped rather than resurrected. A session without a
+    /// sidecar on disk is a no-op (see [`orphan::try_sync_record_fields`]).
     pub fn sync_sidecar(&self, id: &str) {
         let Some(dirs) = self.dirs.as_ref() else {
             return;
         };
-        let _guard = lock(&self.sidecar_sync);
-        self.sync_sidecar_locked(dirs, id);
+        self.with_sidecar_gate(id, |arc| Self::sync_record(dirs, id, arc));
     }
 
     /// Write a session's spawn-time sidecar, then mirror the record into it,
-    /// both inside the critical section every sidecar write shares. A status
-    /// tick that lands between the snapshot `meta` was built from and this
-    /// write finds no sidecar to update, so the write alone would leave the
-    /// stale snapshot on disk until the session's next change.
+    /// both inside the session's sidecar gate. A status tick that lands
+    /// between the snapshot `meta` was built from and this write finds no
+    /// sidecar to update, so the write alone would leave the stale snapshot
+    /// on disk until the session's next change. Writes nothing once the
+    /// record is gone or the session has ended and its sidecar was deleted —
+    /// a child that exits at once can get there before its spawn does.
     pub fn write_sidecar(&self, meta: &OrphanMeta) {
         let Some(dirs) = self.dirs.as_ref() else {
             return;
         };
-        let _guard = lock(&self.sidecar_sync);
-        orphan::try_write_meta(dirs, meta);
-        self.sync_sidecar_locked(dirs, &meta.session_id);
+        let id = meta.session_id.as_str();
+        self.with_sidecar_gate(id, |arc| {
+            orphan::try_write_meta(dirs, meta);
+            Self::sync_record(dirs, id, arc);
+        });
     }
 
-    fn sync_sidecar_locked(&self, dirs: &Dirs, id: &str) {
-        let Some(arc) = self.get(id) else {
+    /// Delete a session's sidecar because the session ended, inside its
+    /// sidecar gate, and bar every later write of it: a sync still draining
+    /// after the exit would otherwise put back a sidecar that the next daemon
+    /// start reads as an abandoned session.
+    ///
+    /// A session the registry no longer holds has no writer left to bar
+    /// (every write checks the record under the gate), so its sidecar is
+    /// deleted without making a gate for it.
+    pub fn delete_sidecar(&self, id: &str) {
+        let Some(dirs) = self.dirs.as_ref() else {
             return;
         };
-        let mirror = {
-            let guard = lock(&arc);
-            orphan::RecordMirror {
-                recent_actions_tail: trim_recent_tail(&guard.recent_actions),
-                status: guard.status,
-                status_since: guard.status_since,
-                terminal_title: guard.terminal_title.clone(),
-                current_cwd: guard.current_cwd.clone(),
-                default_label: guard.default_label.clone(),
-                user_label: guard.user_label.clone(),
-                label: guard.label.clone(),
-                appearance: guard.appearance.clone(),
-            }
-        };
-        orphan::try_sync_record_fields(dirs, id, &mirror);
+        if self.get(id).is_none() {
+            orphan::try_delete_meta(dirs, id);
+            return;
+        }
+        let gate = self.sidecar_gate(id);
+        let mut gate = lock(&gate);
+        gate.deleted = true;
+        orphan::try_delete_meta(dirs, id);
+    }
+
+    /// `id`'s sidecar gate, so a test can hold it and stand in for a write
+    /// that is part-way through.
+    #[cfg(test)]
+    fn hold_sidecar_sync(&self, id: &str) -> Arc<Mutex<SidecarGate>> {
+        self.sidecar_gate(id)
+    }
+
+    fn sync_record(dirs: &Dirs, id: &str, arc: &Arc<Mutex<SessionRecord>>) {
+        orphan::try_sync_record_fields(dirs, id, &Self::record_mirror(arc));
+    }
+
+    /// The record's persisted fields, read under its lock.
+    fn record_mirror(arc: &Arc<Mutex<SessionRecord>>) -> orphan::RecordMirror {
+        let guard = lock(arc);
+        orphan::RecordMirror {
+            recent_actions_tail: trim_recent_tail(&guard.recent_actions),
+            status: guard.status,
+            status_since: guard.status_since,
+            terminal_title: guard.terminal_title.clone(),
+            current_cwd: guard.current_cwd.clone(),
+            default_label: guard.default_label.clone(),
+            user_label: guard.user_label.clone(),
+            label: guard.label.clone(),
+            appearance: guard.appearance.clone(),
+        }
     }
 
     /// [`Self::update`], its broadcast carrying `origin`. Returns whether
@@ -399,9 +486,9 @@ impl SessionRegistry {
         // Mirror the record into its sidecar so an abandoned session can show
         // "what was this doing right before the daemon died?" and a live-tracer
         // reattach can restore a session that was still waiting for input. The
-        // sync re-reads the record instead of using `snap` and shares one
-        // critical section with every other sync, so the last writer always
-        // writes the newest values.
+        // sync re-reads the record instead of using `snap`, inside the
+        // session's sidecar gate that every write of its sidecar takes, so
+        // the last writer always writes the newest values.
         self.sync_sidecar(id);
         let _ = self
             .events
@@ -443,6 +530,7 @@ impl PendingInsert<'_> {
     pub fn discard(self) {
         let id = lock(&self.arc).id.clone();
         write(&self.registry.by_id).remove(&id);
+        lock(&self.registry.sidecar_gates).remove(&id);
     }
 
     /// [`Self::publish`], its broadcast carrying `origin`, which the record
@@ -698,9 +786,7 @@ async fn watch_exit(
         return;
     }
     registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
-    if let Some(dirs) = dirs {
-        orphan::try_delete_meta(&dirs, &session_id);
-    }
+    registry.delete_sidecar(&session_id);
 }
 
 /// Build a [`SessionRecord`] from a sidecar [`OrphanMeta`] and surface it via
@@ -1287,9 +1373,190 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
+    fn meta_file(dirs: &Dirs, id: &str) -> std::path::PathBuf {
+        dirs.sessions_dir.join(id).join("meta.json")
+    }
+
+    /// Syncs parked behind the session's sidecar gate while the record moves
+    /// on must write the record as it is when they run, not as it was when
+    /// they were asked for: each reads the record afresh inside the gate.
+    #[test]
+    fn syncs_parked_behind_the_gate_write_the_latest_record() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-gate");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+        let older = DateTime::from_timestamp(1_600_000_000, 0).expect("a fixed stamp");
+        let newer = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        let rec = registry.get("s1").expect("the record");
+        {
+            let mut guard = lock(&rec);
+            guard.status = SessionStatus::Working;
+            guard.status_since = Some(older);
+            guard.terminal_title = Some("old".to_string());
+        }
+
+        let gate = registry.hold_sidecar_sync("s1");
+        let held = lock(&gate);
+        let syncs: Vec<_> = (0..2)
+            .map(|_| {
+                let registry = Arc::clone(&registry);
+                std::thread::spawn(move || registry.sync_sidecar("s1"))
+            })
+            .collect();
+        // The map's handle, the test's and one per parked sync.
+        wait_until_gate_is_shared(&gate, 4);
+        {
+            let mut guard = lock(&rec);
+            guard.status = SessionStatus::AwaitingInput;
+            guard.status_since = Some(newer);
+            guard.terminal_title = Some("new".to_string());
+        }
+        drop(held);
+        for sync in syncs {
+            sync.join().expect("a sync thread");
+        }
+
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(meta.status, Some(SessionStatus::AwaitingInput));
+        assert_eq!(meta.status_since, Some(newer));
+        assert_eq!(meta.terminal_title.as_deref(), Some("new"));
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Block until `gate` has `handles` owners: every writer and the delete
+    /// clone the gate just before they lock it, so a count this high means
+    /// that many of them are at the gate.
+    fn wait_until_gate_is_shared(gate: &Arc<Mutex<SidecarGate>>, handles: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(gate) < handles {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of {handles} handles reached the gate",
+                Arc::strong_count(gate)
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A delete that lands while a sync is part-way through its read-modify-
+    /// write waits for it, so the sync cannot put the sidecar back after it:
+    /// the next daemon start would read it as an abandoned session.
+    #[test]
+    fn a_sync_racing_the_delete_leaves_no_sidecar() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-delete-race");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+
+        // Stand in for a sync that has read the sidecar and not yet written.
+        let gate = registry.hold_sidecar_sync("s1");
+        let held = lock(&gate);
+        let read = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let deleter = {
+            let registry = Arc::clone(&registry);
+            std::thread::spawn(move || registry.delete_sidecar("s1"))
+        };
+        // The map's handle, the test's and the delete's.
+        wait_until_gate_is_shared(&gate, 3);
+        assert!(
+            meta_file(&dirs, "s1").exists(),
+            "the delete waits for the write in flight"
+        );
+        crate::orphan::write_meta(&dirs, &read).expect("the in-flight write lands");
+        drop(held);
+        deleter.join().expect("the delete thread");
+        assert!(!meta_file(&dirs, "s1").exists(), "the delete ran after it");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// The gates map keeps no entry for a session the registry has let go:
+    /// not after `remove`, not after a discarded pending insert, not for a
+    /// write that finds its record gone, and not for a delete of an unknown
+    /// id.
+    #[test]
+    fn sidecar_gates_do_not_outlive_their_sessions() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-gate-cleanup");
+        let registry = SessionRegistry::new(dirs.clone());
+
+        write_meta_for(&dirs, "s1");
+        registry.insert(record("s1", SessionMode::Interactive));
+        registry.update("s1", |rec| rec.status = SessionStatus::AwaitingInput);
+        assert!(registry.has_sidecar_gate("s1"), "a write made the gate");
+        registry.remove("s1");
+        assert!(!registry.has_sidecar_gate("s1"), "remove drops it");
+
+        let pending = registry.insert_pending(record("s2", SessionMode::Interactive));
+        registry.sync_sidecar("s2");
+        assert!(registry.has_sidecar_gate("s2"));
+        pending.discard();
+        assert!(!registry.has_sidecar_gate("s2"), "a discard drops it");
+
+        // A late writer that lost the race with `remove` makes a fresh gate.
+        registry.sync_sidecar("s1");
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        registry.write_sidecar(&meta);
+        assert!(
+            !registry.has_sidecar_gate("s1"),
+            "a write that finds its record gone drops the gate it made"
+        );
+
+        registry.delete_sidecar("s1");
+        assert!(
+            !registry.has_sidecar_gate("s1"),
+            "a delete of an unknown id makes no gate"
+        );
+        assert!(
+            !meta_file(&dirs, "s1").exists(),
+            "and still deletes the file"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A child that exits at once can end its session before the spawn
+    /// writes the sidecar; that late write must not leave a sidecar behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spawn_write_after_the_session_ended_writes_nothing() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        use crate::pty::PtyExit;
+        use std::time::Duration;
+        let dirs = scratch_dirs("sidecar-write-after-exit");
+        write_meta_for(&dirs, "s1");
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+
+        let _ = exit_tx.send(PtyExit::Code(0));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while meta_file(&dirs, "s1").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the exit deletes the sidecar");
+
+        registry.write_sidecar(&meta);
+        assert!(
+            !meta_file(&dirs, "s1").exists(),
+            "an ended session's sidecar stays deleted"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
     /// Title, cwd and status updates racing on three threads must leave the
     /// sidecar matching the record: every write of the sidecar reads the
-    /// record afresh inside one shared critical section, so the last writer
+    /// record afresh inside the session's sidecar gate, so the last writer
     /// always writes the newest value of every field. A stress loop, not a
     /// forced interleaving: a regression fails it often, not every run.
     #[test]

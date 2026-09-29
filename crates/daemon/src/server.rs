@@ -3810,7 +3810,7 @@ async fn spawn_interactive_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
-        write_meta_then_sync(hub, &session_id, &meta);
+        write_meta_then_sync(hub, &meta);
     }
 
     if let Some(injector) = cfg.prompt_injector.clone() {
@@ -4001,7 +4001,7 @@ async fn spawn_plain_shell_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
-        write_meta_then_sync(hub, &session_id, &meta);
+        write_meta_then_sync(hub, &meta);
     }
 
     // A recovered shell types `claude --resume <id>` through an injector.
@@ -4122,7 +4122,7 @@ fn spawn_headless_session(
     {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
-        write_meta_then_sync(hub, &session_id, &meta);
+        write_meta_then_sync(hub, &meta);
     }
 
     Ok(snap)
@@ -5459,7 +5459,7 @@ fn mark_history_recovered(hub: &Hub, session_id: &str) {
 /// recover.
 fn discard_abandoned(hub: &Hub, session_id: &str, out_tx: &mpsc::UnboundedSender<DaemonMessage>) {
     record_end(hub, session_id, SessionEnd::StoppedByUser);
-    orphan::try_delete_meta(&hub.dirs, session_id);
+    hub.sessions.delete_sidecar(session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
     let _ = out_tx.send(DaemonMessage::SessionRemoved {
@@ -5704,8 +5704,7 @@ fn session_spawn_base(hub: &Hub, session_id: &str) -> SessionBase {
 
 /// Write a session's spawn-time sidecar and mirror the record into it (see
 /// [`SessionRegistry::write_sidecar`]).
-fn write_meta_then_sync(hub: &Hub, session_id: &str, meta: &orphan::OrphanMeta) {
-    debug_assert_eq!(meta.session_id, session_id);
+fn write_meta_then_sync(hub: &Hub, meta: &orphan::OrphanMeta) {
     hub.sessions.write_sidecar(meta);
 }
 
@@ -5835,7 +5834,7 @@ async fn discard_session(
         crate::worktree_cleanup::prune_empty_ancestors(parent, &worktrees_root);
     }
     record_end(hub, session_id, SessionEnd::StoppedByUser);
-    orphan::try_delete_meta(&hub.dirs, session_id);
+    hub.sessions.delete_sidecar(session_id);
     orphan::try_delete_session_dir(&hub.dirs, session_id);
     hub.sessions.remove(session_id);
     close_session_panes(hub, session_id);
@@ -6013,7 +6012,7 @@ async fn stop_session(hub: &Hub, session_id: &str) -> anyhow::Result<()> {
             }
         }
     }
-    orphan::try_delete_meta(&hub.dirs, session_id);
+    hub.sessions.delete_sidecar(session_id);
     Ok(())
 }
 
@@ -7388,7 +7387,7 @@ mod tests {
             rec.status = SessionStatus::AwaitingInput;
         });
 
-        write_meta_then_sync(&hub, "s1", &meta);
+        write_meta_then_sync(&hub, &meta);
 
         let loaded = orphan::load_meta(&hub.dirs, "s1").expect("load meta");
         assert_eq!(loaded.status, Some(SessionStatus::AwaitingInput));
