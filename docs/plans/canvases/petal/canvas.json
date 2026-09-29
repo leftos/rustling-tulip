@@ -1,0 +1,86 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Conversation.dc.html": {
+      "h": 900,
+      "title": "Conversation view",
+      "w": 1440,
+      "x": 3040,
+      "y": 0
+    },
+    "Dashboard.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Dashboard view",
+      "w": 1440,
+      "x": 1520,
+      "y": 0
+    },
+    "Main.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Main window",
+      "w": 1440,
+      "x": 0,
+      "y": 0
+    },
+    "PhoneDashboard.dc.html": {
+      "h": 844,
+      "title": "Phone dashboard",
+      "w": 390,
+      "x": 4560,
+      "y": 1020
+    },
+    "SettingsAlerts.dc.html": {
+      "h": 900,
+      "title": "Settings: Alerts",
+      "w": 1440,
+      "x": 3040,
+      "y": 1020
+    },
+    "SourceControl.dc.html": {
+      "h": 900,
+      "title": "Source control + diff",
+      "w": 1440,
+      "x": 1520,
+      "y": 1020
+    },
+    "Spawn.dc.html": {
+      "h": 900,
+      "title": "Spawn dialog",
+      "w": 1440,
+      "x": 0,
+      "y": 1020
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-09-28T22:23:03Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "canvas"
+  },
+  "notes": {
+    "title": {
+      "kind": "title1",
+      "maxW": 4950,
+      "text": "rustling-tulip · Petal refresh",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Dashboard.dc.html",
+    "Conversation.dc.html",
+    "Spawn.dc.html",
+    "SourceControl.dc.html",
+    "SettingsAlerts.dc.html",
+    "PhoneDashboard.dc.html"
+  ],
+  "pages": [],
+  "title": "rustling-tulip refresh"
+}

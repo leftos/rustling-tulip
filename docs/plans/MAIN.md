@@ -24,7 +24,7 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.8a first, since PT.6a's Session and Shell buttons and PT.9's Commit and Stash buttons use its outlined and filled-primary button forms, and PT.5 shares `lib.rs` with it; PT.6b follows PT.6a; PT.8b needs PT.8a and PT.6b; PT.7 is free to start.
+The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.8a first, since PT.6a's Session and Shell buttons and PT.9's Commit and Stash buttons use its outlined and filled-primary button forms, and PT.5 shares `lib.rs` with it; PT.6b follows PT.6a; PT.8b needs PT.8a and PT.6b; PT.7 is free to start.
 
 - [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
 - [ ] **PT.6a Sidebar header, toolbar and containers**, with the Session button's `Ctrl N` hint.

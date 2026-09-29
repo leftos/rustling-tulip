@@ -1,6 +1,6 @@
 # Petal: the native client's new look
 
-The user approved "Petal" for the native client (`apps/native`): a graphite ground, a tulip-coral accent, Schibsted Grotesk as the UI face beside Geist Mono, status shapes as well as colours, and refined pane headers and chips. The canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S (seven boards). Index line: [MAIN.md](./MAIN.md), the Petal wave. This subplan splits the look into brief-sized items that build on today's code, records what is settled, and keeps the questions the boards left open with the user's answers.
+The user approved "Petal" for the native client (`apps/native`): a graphite ground, a tulip-coral accent, Schibsted Grotesk as the UI face beside Geist Mono, status shapes as well as colours, and refined pane headers and chips. The canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N (seven boards), saved in the repo as [canvases/petal/](./canvases/petal/): one `.dc.html` per board (`Main`, `Spawn`, `SourceControl`, `SettingsAlerts`, `Dashboard`, `Conversation`, `PhoneDashboard`) and `canvas.json`; re-save it when the canvas is republished. Index line: [MAIN.md](./MAIN.md), the Petal wave. This subplan splits the look into brief-sized items that build on today's code, records what is settled, and keeps the questions the boards left open with the user's answers.
 
 ## Rulings
 
