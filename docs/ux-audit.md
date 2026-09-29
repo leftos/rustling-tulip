@@ -1,5 +1,7 @@
 # UX audit
 
+> **Historical paths.** This audit covers the Tauri app, whose source now lives on the `tauri` branch; its file paths (`utils/a11y.ts`, `GitPanel.tsx` and the rest) resolve there, not on `main`.
+
 A code-evidence audit of the rustling-tulip desktop client surface (Tauri shell + React/xterm.js frontend) plus a parallel checklist of behaviours that need a human at the keyboard to validate. The findings only cover UX-visible issues; architecture/refactor concerns and items called out as deferred in `CLAUDE.md` are out of scope.
 
 **Tracking convention.** Each finding is a `- [ ]` / `- [x]` checkbox. Resolved items keep an `(iter N)` annotation only — the original "Suggested direction:" prose stays for context, but long "Resolved" paragraphs are left out to keep the doc scannable. The full design reasoning for any closed finding lives in the matching commit message + the iter entry in the git history of the old plan index (before `docs/plans/MAIN.md`) (iters 14–48 verbose; iters 49+ one-liners).

@@ -65,7 +65,7 @@ The label is minute-grained past a minute and second-grained below it. A 1 s rep
 
 One additive field, useful without Waves 6 and 7 and needed by the Dashboard's "Needs you sorted by longest waiting" (DB.2) as well:
 
-- `SessionSnapshot.status_since: Option<DateTime<Utc>>`, `#[serde(default)]`: when `status` last changed. `SessionRegistry::update_from` (`crates/daemon/src/session.rs`) stamps it whenever the closure changes `status`, and record creation sets it. A reattached session after a daemon restart takes the restart time (not persisted: the sidecar keeps no status). Protocol 22 ignores the unknown field; `supported` does not change.
+- `SessionSnapshot.status_since: Option<DateTime<Utc>>`, `#[serde(default)]`: when `status` last changed. `SessionRegistry::update_from` (`crates/daemon/src/session.rs`) stamps it whenever the closure changes `status`, and record creation sets it. The `meta.json` sidecar keeps the last `status` and `status_since`, written with every status change, so a session reattached after a daemon restart comes back `AwaitingInput` or `Idle` with its old stamp; any other stored status starts `Idle`, stamped at the restart. Protocol 22 ignores the unknown field; `supported` does not change.
 
 No new message. `pending_input` (HS.2) and `summary` (SA.1) arrive on the existing snapshot and `SessionUpdated` broadcast.
 

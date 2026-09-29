@@ -1,5 +1,7 @@
 # C.1 spike — tracer architecture viability
 
+> **Historical paths.** The `spike_*.rs` files this note cites were deleted later (commits `667739d` and `ca209c6`); they survive in `git log`.
+
 Status: **ready for C.3 implementation**. Three of five questions resolved
 empirically with positive results; the remaining two require a running
 `claude` instance and are written up as runtime experiments the user can

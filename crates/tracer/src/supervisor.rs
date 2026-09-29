@@ -131,10 +131,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cmd.cwd(cfg.cwd.as_path());
     // portable-pty's CommandBuilder::as_command() calls env_clear() before
     // applying the builder's env map, so the child receives ZERO inherited
-    // vars unless we explicitly add them. Forward this process's env (which
-    // the daemon already populated via tracer_client::spawn with the
-    // passthrough keep-list: PATH, APPDATA, USERPROFILE, etc.). Skip the
-    // tracer-internal log var so it doesn't leak into the child env.
+    // vars unless we explicitly add them. Forward this process's env: the
+    // daemon's whole environment (tracer_client::tracer_command never clears
+    // it) plus the spawn's extra vars; the passthrough keep-list governs
+    // headless sessions only. Skip the tracer-internal log var so it doesn't
+    // leak into the child env.
     let mut forwarded_env_count = 0_usize;
     for (k, v) in std::env::vars_os() {
         if k == "RUSTLING_TULIP_TRACER_LOG" {
