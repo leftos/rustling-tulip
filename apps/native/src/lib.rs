@@ -113,6 +113,7 @@ use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
 use crate::footer::{StopConfirm, flyout_rows, log_paths};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
+use crate::needs_you_view::moves_needs_you;
 use crate::notices::Notices;
 use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
@@ -574,6 +575,8 @@ pub struct RootView {
     recover_batches: Vec<Vec<String>>,
     /// Repaints the Needs You panel while it shows, so its waits count up.
     needs_you_timer: Option<Task<()>>,
+    /// How many times that timer has repainted the panel.
+    needs_you_repaints: usize,
 }
 
 impl RootView {
@@ -784,6 +787,7 @@ impl RootView {
             recover_requests: HashMap::new(),
             recover_batches: Vec::new(),
             needs_you_timer: None,
+            needs_you_repaints: 0,
         };
         view.arm_needs_you_repaint(cx);
         view
@@ -1459,10 +1463,17 @@ impl RootView {
     }
 
     /// Folds the message into the sidebar, and forgets the remembered
-    /// session when the message removes it.
-    fn fold_sidebar(&mut self, msg: &DaemonMessage) {
+    /// session when the message removes it. A message that changed the Needs
+    /// You list re-arms the panel's repaint, so its cycle follows the
+    /// youngest wait rather than the list as it stood when the timer was
+    /// armed.
+    fn fold_sidebar(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
+        let before = moves_needs_you(msg).then(|| self.needs_you_list());
         self.sidebar.apply(msg);
         self.forget_remembered_session(msg);
+        if before.is_some_and(|before| self.needs_you_list() != before) {
+            self.arm_needs_you_repaint(cx);
+        }
     }
 
     /// Remembers the session the active terminal tab focuses, so the
@@ -1495,7 +1506,7 @@ impl RootView {
         // The sidebar takes the message before the panes do, so what a
         // snapshot changed is read from the old one.
         let (moved, exit_discard) = self.before_fold(&msg);
-        self.fold_sidebar(&msg);
+        self.fold_sidebar(&msg, cx);
         if let Some(discard) = exit_discard {
             self.send(discard);
         }

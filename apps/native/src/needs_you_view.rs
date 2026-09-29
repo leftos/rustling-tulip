@@ -1,7 +1,8 @@
 //! The Needs You panel: a header counting the sessions waiting on the user,
 //! then one two-line row each, in the order `needs_you::rows` lists them. A
 //! click shows the session; a right-click opens its menu. While the panel
-//! shows, a timer repaints it so the waits keep counting.
+//! shows a wait, a timer repaints it so the waits keep counting, and a list
+//! change re-arms that timer so the cycle follows the youngest wait.
 
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use gpui::{
     ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful, div,
     prelude::*, px,
 };
-use protocol::SessionStatus;
+use protocol::{DaemonMessage, SessionStatus};
 
 use crate::activity_bar::badge_text;
 use crate::needs_you::{self, NeedsYouRow, Reason};
@@ -50,15 +51,28 @@ fn waited_text(now: DateTime<Utc>, since: Option<DateTime<Utc>>) -> String {
 
 /// The header's text for `count` listed sessions.
 fn header_text(count: usize) -> String {
-    if count == 0 {
-        TITLE.to_owned()
-    } else {
-        format!("{TITLE} · {count}")
-    }
+    format!("{TITLE} · {count}")
+}
+
+/// Whether `msg` can change which sessions the panel lists, their order or
+/// their waits: the messages the sidebar model folds in.
+pub(crate) fn moves_needs_you(msg: &DaemonMessage) -> bool {
+    matches!(
+        msg,
+        DaemonMessage::Repos { .. }
+            | DaemonMessage::Workspaces { .. }
+            | DaemonMessage::ContainersReordered { .. }
+            | DaemonMessage::SessionsReordered { .. }
+            | DaemonMessage::Sessions { .. }
+            | DaemonMessage::SessionUpdated { .. }
+            | DaemonMessage::SessionRemoved { .. }
+            | DaemonMessage::Attention { .. }
+    )
 }
 
 impl RootView {
-    fn needs_you_list(&self) -> Vec<NeedsYouRow> {
+    /// The rows the panel draws, in list order.
+    pub(crate) fn needs_you_list(&self) -> Vec<NeedsYouRow> {
         needs_you::rows(&self.sidebar)
     }
 
@@ -94,6 +108,13 @@ impl RootView {
     #[must_use]
     pub fn needs_you_header(&self) -> String {
         header_text(self.needs_you_count())
+    }
+
+    /// How many times the panel's timer has repainted it, so the specs can
+    /// watch the cycle.
+    #[must_use]
+    pub fn needs_you_repaints(&self) -> usize {
+        self.needs_you_repaints
     }
 
     /// The panel, `width` wide.
@@ -138,10 +159,11 @@ impl RootView {
         self.sidebar.activity() == Activity::NeedsYou && !self.sidebar.is_collapsed()
     }
 
-    /// Starts the panel's repaint timer when the panel shows, and drops it
-    /// when it does not.
+    /// Starts the panel's repaint timer when the panel shows a wait, and
+    /// drops it when the panel is hidden or empty: an empty panel has no wait
+    /// to count, and the list change that adds a row re-arms it.
     pub(crate) fn arm_needs_you_repaint(&mut self, cx: &mut Context<Self>) {
-        if !self.needs_you_shown() {
+        if !self.needs_you_shown() || self.needs_you_count() == 0 {
             self.needs_you_timer = None;
             return;
         }
@@ -160,6 +182,7 @@ impl RootView {
             self.needs_you_timer = None;
             return;
         }
+        self.needs_you_repaints += 1;
         cx.notify();
         self.arm_needs_you_repaint(cx);
     }
@@ -285,7 +308,7 @@ mod tests {
 
     #[test]
     fn needs_you_header_counts_rows() {
-        assert_eq!(header_text(0), "NEEDS YOU");
+        assert_eq!(header_text(0), "NEEDS YOU · 0");
         assert_eq!(header_text(3), "NEEDS YOU · 3");
     }
 }

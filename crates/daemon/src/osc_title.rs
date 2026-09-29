@@ -26,8 +26,6 @@
 //!   `Normal` state so a malformed (or hostile) producer can't grow the buffer
 //!   unboundedly.
 
-use crate::orphan;
-use crate::paths::Dirs;
 use crate::session::SessionRegistry;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -409,7 +407,6 @@ pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
     mut output: broadcast::Receiver<Vec<u8>>,
-    dirs: Dirs,
     infer_prompt_cwd: bool,
 ) {
     let registry = Arc::clone(registry);
@@ -427,10 +424,11 @@ pub fn watch(
                             {
                                 debug!(session_id = %session_id, %title, "applying OSC title");
                                 let title_for_update = title.clone();
+                                // The registry update mirrors the title into
+                                // the sidecar.
                                 registry.update(&session_id, |rec| {
                                     rec.terminal_title = Some(title_for_update.clone());
                                 });
-                                orphan::try_update_terminal_title(&dirs, &session_id, &title);
                                 last_title = Some(title);
                             }
                             OscEvent::CurrentCwd(cwd)
@@ -441,7 +439,6 @@ pub fn watch(
                                 registry.update(&session_id, |rec| {
                                     rec.current_cwd = Some(cwd_for_update.clone());
                                 });
-                                orphan::try_update_current_cwd(&dirs, &session_id, &cwd);
                                 last_cwd = Some(cwd);
                             }
                             OscEvent::Title(_) | OscEvent::CurrentCwd(_) => {}

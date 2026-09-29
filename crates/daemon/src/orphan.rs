@@ -18,6 +18,7 @@ use protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tracing::warn;
 
@@ -168,11 +169,18 @@ fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
 }
 
 /// Write `bytes` to `path` through a sibling `.tmp` file and a rename, so a
-/// reader never sees a half-written file.
+/// reader never sees a half-written file. Each write gets its own temp name,
+/// so two writers of the same file never write into or rename each other's
+/// temp file.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("renaming onto {}", path.display()))?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err).with_context(|| format!("renaming onto {}", path.display()));
+    }
     Ok(())
 }
 
@@ -439,8 +447,8 @@ pub fn meta_from_record(
         session_id,
         pid,
         // At spawn time, the effective label IS the daemon-generated
-        // default. Subsequent renames write through via `update_labels`
-        // (which reads + mutates + writes back the sidecar).
+        // default. Subsequent renames reach the sidecar through the
+        // registry's record sync.
         default_label: Some(label.clone()),
         user_label: None,
         label,
@@ -469,143 +477,70 @@ pub fn meta_from_record(
     })
 }
 
-/// Best-effort sync of the rename fields into the sidecar. Mirrors the
-/// `update_terminal_title` / `update_recent_actions_tail` pattern:
-/// read the sidecar, mutate three fields, write back. Silently no-ops
-/// for sessions whose sidecar doesn't exist yet (the next spawn-time
-/// write will pick the latest values up).
-pub fn update_labels(
-    dirs: &Dirs,
-    session_id: &str,
-    default_label: &str,
-    user_label: Option<&str>,
-    effective_label: &str,
-) -> anyhow::Result<()> {
-    let path = meta_path(dirs, session_id);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for rename update"),
-    };
-    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for rename update")?;
-    let already_synced = meta.default_label.as_deref() == Some(default_label)
-        && meta.user_label.as_deref() == user_label
-        && meta.label == effective_label;
-    if already_synced {
-        return Ok(());
-    }
-    meta.default_label = Some(default_label.to_string());
-    meta.user_label = user_label.map(str::to_string);
-    meta.label = effective_label.to_string();
-    write_meta(dirs, &meta)
+/// The sidecar fields that mirror the live [`crate::session::SessionRecord`].
+/// Every change to one of them reaches disk through
+/// [`crate::session::SessionRegistry::sync_sidecar`], which reads them from
+/// the record inside one critical section, so no writer can put back a stale
+/// copy of a field another writer has already moved on.
+#[derive(Debug, Clone)]
+pub struct RecordMirror {
+    pub recent_actions_tail: Vec<String>,
+    pub status: SessionStatus,
+    pub status_since: Option<DateTime<Utc>>,
+    pub terminal_title: Option<String>,
+    pub current_cwd: Option<String>,
+    pub default_label: String,
+    pub user_label: Option<String>,
+    pub label: String,
+    pub appearance: AppearanceOverrides,
 }
 
-pub fn try_update_labels(
-    dirs: &Dirs,
-    session_id: &str,
-    default_label: &str,
-    user_label: Option<&str>,
-    effective_label: &str,
-) {
-    if let Err(err) = update_labels(dirs, session_id, default_label, user_label, effective_label) {
-        warn!(?err, %session_id, "failed to update orphan meta labels");
+impl RecordMirror {
+    fn matches(&self, meta: &OrphanMeta) -> bool {
+        meta.recent_actions_tail == self.recent_actions_tail
+            && meta.status == Some(self.status)
+            && meta.status_since == self.status_since
+            && meta.terminal_title == self.terminal_title
+            && meta.current_cwd == self.current_cwd
+            && meta.default_label.as_deref() == Some(self.default_label.as_str())
+            && meta.user_label == self.user_label
+            && meta.label == self.label
+            && meta.appearance == self.appearance
+            && meta.accent_color.is_none()
     }
-}
 
-/// Best-effort: read the meta sidecar, mutate `terminal_title`, write it back.
-/// Used by the OSC-title parser when the agent emits an OSC 0/1/2 sequence.
-/// Updating the sidecar preserves the terminal-title hint without changing the
-/// canonical repo/workspace label. Returns `Ok(())` for both "meta did not
-/// exist" and "meta updated" — only true I/O errors surface.
-pub fn update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) -> anyhow::Result<()> {
-    let path = meta_path(dirs, session_id);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for terminal_title update"),
-    };
-    let mut meta =
-        load_meta_from_bytes(&bytes).context("loading meta for terminal_title update")?;
-    if meta.terminal_title.as_deref() == Some(new_title) {
-        return Ok(());
-    }
-    meta.terminal_title = Some(new_title.to_string());
-    write_meta(dirs, &meta)
-}
-
-pub fn try_update_terminal_title(dirs: &Dirs, session_id: &str, new_title: &str) {
-    if let Err(err) = update_terminal_title(dirs, session_id, new_title) {
-        warn!(?err, %session_id, "failed to update orphan meta terminal_title");
-    }
-}
-
-/// Best-effort: read the meta sidecar, mutate `current_cwd`, write it back.
-/// Used by the OSC watcher when a shell emits OSC 7. Returns `Ok(())` for
-/// both "meta did not exist" and "meta updated".
-pub fn update_current_cwd(dirs: &Dirs, session_id: &str, new_cwd: &str) -> anyhow::Result<()> {
-    let path = meta_path(dirs, session_id);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for current_cwd update"),
-    };
-    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for current_cwd update")?;
-    if meta.current_cwd.as_deref() == Some(new_cwd) {
-        return Ok(());
-    }
-    meta.current_cwd = Some(new_cwd.to_string());
-    write_meta(dirs, &meta)
-}
-
-pub fn try_update_current_cwd(dirs: &Dirs, session_id: &str, new_cwd: &str) {
-    if let Err(err) = update_current_cwd(dirs, session_id, new_cwd) {
-        warn!(?err, %session_id, "failed to update orphan meta current_cwd");
-    }
-}
-
-pub fn update_appearance(
-    dirs: &Dirs,
-    session_id: &str,
-    appearance: &AppearanceOverrides,
-) -> anyhow::Result<()> {
-    let path = meta_path(dirs, session_id);
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for appearance update"),
-    };
-    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for appearance update")?;
-    if meta.appearance == *appearance && meta.accent_color.is_none() {
-        return Ok(());
-    }
-    meta.accent_color = None;
-    meta.appearance = appearance.clone();
-    write_meta(dirs, &meta)
-}
-
-pub fn try_update_appearance(dirs: &Dirs, session_id: &str, appearance: &AppearanceOverrides) {
-    if let Err(err) = update_appearance(dirs, session_id, appearance) {
-        warn!(?err, %session_id, "failed to update orphan meta appearance");
+    fn apply(&self, meta: &mut OrphanMeta) {
+        meta.recent_actions_tail
+            .clone_from(&self.recent_actions_tail);
+        meta.status = Some(self.status);
+        meta.status_since = self.status_since;
+        meta.terminal_title.clone_from(&self.terminal_title);
+        meta.current_cwd.clone_from(&self.current_cwd);
+        meta.default_label = Some(self.default_label.clone());
+        meta.user_label.clone_from(&self.user_label);
+        meta.label.clone_from(&self.label);
+        // The legacy top-level accent was folded into `appearance` when the
+        // record was built, so it is dropped from every rewrite.
+        meta.accent_color = None;
+        meta.appearance = self.appearance.clone();
     }
 }
 
 /// Best-effort sync of the record's on-disk mirror into the sidecar: the
-/// `recent_actions_tail` and the status/stamp pair. Called by the
-/// registry after every `update()` so abandoned sessions retain the most
-/// recent operational context and a reattach can bring back a session that
-/// was still waiting for input. Silently no-ops if the sidecar doesn't exist
-/// (e.g. for a brand-new session whose spawn pipeline hasn't called
-/// `try_write_meta` yet, or a session that never had a sidecar — plain shells
-/// in some configurations).
+/// recent-actions tail, the status/stamp pair, the terminal title and cwd,
+/// the labels and the appearance. Called by the registry after every
+/// `update()` so abandoned sessions retain the most recent operational
+/// context and a reattach can bring back a session that was still waiting
+/// for input. Silently no-ops if the sidecar doesn't exist (e.g. for a
+/// brand-new session whose spawn pipeline hasn't written it yet, or a session
+/// that never had a sidecar — plain shells in some configurations).
 ///
 /// Returns `Ok(())` for both "meta did not exist" and "meta updated"; real
 /// I/O errors surface as `Err` and the caller logs them.
 pub fn sync_record_fields(
     dirs: &Dirs,
     session_id: &str,
-    new_tail: &[String],
-    status: SessionStatus,
-    status_since: Option<DateTime<Utc>>,
+    mirror: &RecordMirror,
 ) -> anyhow::Result<()> {
     let path = meta_path(dirs, session_id);
     let bytes = match std::fs::read(&path) {
@@ -614,26 +549,15 @@ pub fn sync_record_fields(
         Err(err) => return Err(err).context("reading meta for record sync"),
     };
     let mut meta = load_meta_from_bytes(&bytes).context("loading meta for record sync")?;
-    if meta.recent_actions_tail == new_tail
-        && meta.status == Some(status)
-        && meta.status_since == status_since
-    {
+    if mirror.matches(&meta) {
         return Ok(());
     }
-    meta.recent_actions_tail = new_tail.to_vec();
-    meta.status = Some(status);
-    meta.status_since = status_since;
+    mirror.apply(&mut meta);
     write_meta(dirs, &meta)
 }
 
-pub fn try_sync_record_fields(
-    dirs: &Dirs,
-    session_id: &str,
-    new_tail: &[String],
-    status: SessionStatus,
-    status_since: Option<DateTime<Utc>>,
-) {
-    if let Err(err) = sync_record_fields(dirs, session_id, new_tail, status, status_since) {
+pub fn try_sync_record_fields(dirs: &Dirs, session_id: &str, mirror: &RecordMirror) {
+    if let Err(err) = sync_record_fields(dirs, session_id, mirror) {
         warn!(?err, %session_id, "failed to sync orphan meta record fields");
     }
 }

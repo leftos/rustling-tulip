@@ -424,7 +424,6 @@ async fn reattach_one(
                         &sessions,
                         meta.session_id.clone(),
                         pty.output.subscribe(),
-                        dirs.clone(),
                         meta.mode == SessionMode::PlainShell,
                     );
                     pending.publish();
@@ -1671,27 +1670,13 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                     Some(trimmed.to_string())
                 }
             });
-            let mut labels = None;
+            // The registry update mirrors the new labels into the sidecar.
             hub.sessions.update(&session_id, |guard| {
                 guard.user_label.clone_from(&normalized);
                 guard.label = normalized
                     .clone()
                     .unwrap_or_else(|| guard.default_label.clone());
-                labels = Some((
-                    guard.default_label.clone(),
-                    guard.user_label.clone(),
-                    guard.label.clone(),
-                ));
             });
-            if let Some((default_label, user_label, effective)) = labels {
-                orphan::try_update_labels(
-                    &hub.dirs,
-                    &session_id,
-                    &default_label,
-                    user_label.as_deref(),
-                    &effective,
-                );
-            }
         }
         ClientMessage::SetRepoAppearance {
             repo_id,
@@ -1722,7 +1707,7 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 request_id,
                 connection,
             };
-            set_session_appearance(&hub.sessions, &hub.dirs, change, out_tx);
+            set_session_appearance(&hub.sessions, change, out_tx);
         }
         ClientMessage::Detach { session_id } => {
             let mut forwarders = pty_forwarders.lock().await;
@@ -3793,7 +3778,6 @@ async fn spawn_interactive_session(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
-        hub.dirs.clone(),
         false,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
@@ -3988,7 +3972,6 @@ async fn spawn_plain_shell_session(
         &hub.sessions,
         session_id.clone(),
         pty.output.subscribe(),
-        hub.dirs.clone(),
         true,
     );
     let snap = crate::sync::lock(pending.arc()).snapshot();
@@ -4459,7 +4442,6 @@ struct AppearanceChangeRequest<'a> {
 /// requester with an `Error` carrying it.
 fn set_session_appearance(
     sessions: &SessionRegistry,
-    dirs: &Dirs,
     change: AppearanceChangeRequest<'_>,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
@@ -4480,12 +4462,11 @@ fn set_session_appearance(
         }
     };
     let origin = request_origin(connection, request_id.clone());
+    // The registry update mirrors the new appearance into the sidecar.
     let found = sessions.update_from(session_id, origin, |guard| {
         guard.appearance.clone_from(&appearance);
     });
-    if found {
-        orphan::try_update_appearance(dirs, session_id, &appearance);
-    } else {
+    if !found {
         let _ = out_tx.send(DaemonMessage::Error {
             message: format!("unknown session: {session_id}"),
             request_id,
@@ -5721,13 +5702,11 @@ fn session_spawn_base(hub: &Hub, session_id: &str) -> SessionBase {
         })
 }
 
-/// Write a session's spawn-time sidecar, then re-sync it from the record. A
-/// status tick that lands between the snapshot the sidecar was built from and
-/// this write finds no sidecar to update, so the write alone would leave the
-/// stale snapshot on disk until the session's next status change.
+/// Write a session's spawn-time sidecar and mirror the record into it (see
+/// [`SessionRegistry::write_sidecar`]).
 fn write_meta_then_sync(hub: &Hub, session_id: &str, meta: &orphan::OrphanMeta) {
-    orphan::try_write_meta(&hub.dirs, meta);
-    hub.sessions.sync_sidecar(session_id);
+    debug_assert_eq!(meta.session_id, session_id);
+    hub.sessions.write_sidecar(meta);
 }
 
 async fn discard_session(
@@ -8162,7 +8141,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_appearance_echoes_the_request_id_in_order_to_the_requester_only() {
-        let (sessions, dirs) = appearance_registry("echo");
+        let (sessions, _dirs) = appearance_registry("echo");
         let (out_tx, mut requester) = mpsc::unbounded_channel();
         let (other_tx, mut other) = mpsc::unbounded_channel();
         let forwarders = [
@@ -8180,7 +8159,7 @@ mod tests {
                 request_id: Some(id.to_string()),
                 connection: 1,
             };
-            set_session_appearance(&sessions, &dirs, change, &out_tx);
+            set_session_appearance(&sessions, change, &out_tx);
         }
 
         let sky = Some("#38bdf8".to_string());
@@ -8380,7 +8359,7 @@ mod tests {
 
     #[test]
     fn a_session_appearance_for_an_unknown_session_echoes_the_request_id_on_the_error() {
-        let (sessions, dirs) = appearance_registry("unknown");
+        let (sessions, _dirs) = appearance_registry("unknown");
         let mut other_client = sessions.subscribe();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let change = AppearanceChangeRequest {
@@ -8390,7 +8369,7 @@ mod tests {
             connection: 1,
         };
 
-        set_session_appearance(&sessions, &dirs, change, &out_tx);
+        set_session_appearance(&sessions, change, &out_tx);
 
         let reply = out_rx.try_recv().expect("the requester hears of the miss");
         assert!(
@@ -8406,7 +8385,7 @@ mod tests {
 
     #[test]
     fn a_refused_session_appearance_echoes_the_request_id_on_the_error() {
-        let (sessions, dirs) = appearance_registry("refused");
+        let (sessions, _dirs) = appearance_registry("refused");
         let mut other_client = sessions.subscribe();
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let change = AppearanceChangeRequest {
@@ -8416,7 +8395,7 @@ mod tests {
             connection: 1,
         };
 
-        set_session_appearance(&sessions, &dirs, change, &out_tx);
+        set_session_appearance(&sessions, change, &out_tx);
 
         let reply = out_rx.try_recv().expect("the requester hears the refusal");
         assert!(

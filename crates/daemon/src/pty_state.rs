@@ -94,11 +94,13 @@ pub struct WatchStreams {
 /// agent whose spinner/elapsed-time title keeps repainting stays Working even
 /// when the redraw is too small to clear the echo budget.
 ///
-/// `initial` is the status the session's record already carries. A reattached
-/// session comes back `AwaitingInput` or `Working`, and the watcher has to
-/// start there: seeded `Idle` it would never arm the idle timer that settles a
-/// restored session back to `Idle`, so the restored status would stick until
-/// the agent's next byte.
+/// `initial` is the status the session's record already carries: a reattached
+/// session comes back `Idle` or `AwaitingInput`, since
+/// `SessionRegistry::insert_reattached` restores those two and stamps any
+/// other stored status `Idle` at the restart. The watcher has to start there:
+/// seeded `Idle`, a record restored `AwaitingInput` would never arm the idle
+/// timer that reclassifies it, so the restored status would stick until the
+/// agent's next byte.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -208,8 +210,11 @@ pub fn watch(
 /// Plain shells deliberately avoid the Claude prompt classifier, but they can
 /// still expose useful activity: command output should set the status to
 /// `Working`, while echoed input and prompt redraws should leave it `Idle`.
-/// `initial` seeds the watcher the same way it seeds [`watch`], so a shell
-/// reattached `Working` still settles back once the PTY goes quiet.
+/// `initial` is the status the session's record already carries. A plain
+/// shell only moves between `Idle` and `Working`, and its idle timer only
+/// fires from `Working`, so any other stored status seeds `Idle` (see
+/// [`State::seed_plain_shell`]): seeded `AwaitingInput` the watcher would
+/// never leave it.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
@@ -222,7 +227,7 @@ pub fn watch_plain_shell(
         mut input_pulses,
     } = streams;
     tokio::spawn(async move {
-        let mut state = State::seed(initial);
+        let mut state = State::seed_plain_shell(initial);
         let mut last_output = Instant::now();
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -313,16 +318,33 @@ enum State {
 }
 
 impl State {
-    /// The watcher's starting point for a record already carrying `status`.
-    /// Only `AwaitingInput` and `Working` are states the watcher acts on — it
-    /// settles both back to `Idle` after [`IDLE_AFTER`] of silence — so every
-    /// other stored status starts there.
+    /// The agent watcher's starting point for a record already carrying
+    /// `status`. Only `AwaitingInput` and `Working` are states the watcher
+    /// acts on: after [`IDLE_AFTER`] of silence it reclassifies both against
+    /// the scrollback, so `AwaitingInput` holds while the prompt is on screen
+    /// and anything else settles to `Idle`. Every other stored status starts
+    /// at `Idle`.
     fn seed(status: SessionStatus) -> Self {
         match status {
             SessionStatus::AwaitingInput => Self::AwaitingInput,
             SessionStatus::Working => Self::Working,
             SessionStatus::Spawning
             | SessionStatus::Idle
+            | SessionStatus::Stopped
+            | SessionStatus::Error => Self::Idle,
+        }
+    }
+
+    /// The plain-shell watcher's starting point for a record already carrying
+    /// `status`. A shell only moves between `Idle` and `Working`, and only
+    /// `Working` arms its idle timer, so every other stored status starts at
+    /// `Idle`.
+    fn seed_plain_shell(status: SessionStatus) -> Self {
+        match status {
+            SessionStatus::Working => Self::Working,
+            SessionStatus::Spawning
+            | SessionStatus::Idle
+            | SessionStatus::AwaitingInput
             | SessionStatus::Stopped
             | SessionStatus::Error => Self::Idle,
         }
@@ -529,7 +551,7 @@ mod tests {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod hysteresis_tests {
-    use super::{IDLE_AFTER, WatchStreams, watch, watch_plain_shell};
+    use super::{IDLE_AFTER, State, WatchStreams, watch, watch_plain_shell};
     use crate::paths::Dirs;
     use crate::session::{SessionRecord, SessionRegistry};
     use chrono::Utc;
@@ -710,6 +732,21 @@ mod hysteresis_tests {
         h.heartbeat(0);
         settle().await;
         assert_eq!(h.status(), SessionStatus::Working);
+    }
+
+    /// A plain shell never waits for input, and its idle timer only fires from
+    /// `Working`: seeded `AwaitingInput` it would never leave it.
+    #[test]
+    fn plain_shell_seeded_awaiting_input_starts_idle() {
+        assert_eq!(
+            State::seed_plain_shell(SessionStatus::AwaitingInput),
+            State::Idle
+        );
+        assert_eq!(
+            State::seed_plain_shell(SessionStatus::Working),
+            State::Working
+        );
+        assert_eq!(State::seed_plain_shell(SessionStatus::Idle), State::Idle);
     }
 
     /// A session reattached `AwaitingInput` has to settle back to `Idle` once
