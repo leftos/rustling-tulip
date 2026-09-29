@@ -44,7 +44,7 @@ mod notify;
 pub mod offscreen;
 mod open;
 mod open_view;
-mod palette;
+pub mod palette;
 mod pane_close;
 mod pane_close_view;
 mod pane_menu;

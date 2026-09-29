@@ -193,7 +193,7 @@ fn a_preset_click_sends_accent_and_frame_for_the_session(cx: &mut TestAppContext
         session_appearances(&sent, "s1"),
         [AppearanceOverrides {
             terminal_font_size: Some(16),
-            ..colored(Some("#fb7185"), None)
+            ..colored(Some("#e7849b"), None)
         }],
         "accent and frame together, the size kept; sent {sent:?}"
     );
@@ -213,7 +213,7 @@ fn a_preset_click_sends_accent_and_frame_for_the_session(cx: &mut TestAppContext
     );
     assert_eq!(
         hint(&mut h, "accent"),
-        "Resolved: #fb7185 from current",
+        "Resolved: #e7849b from current",
         "the send still on its way shows"
     );
     assert!(
@@ -332,14 +332,14 @@ fn container_right_click_opens_the_container_editor_and_sends_set_repo_appearanc
         Some("Inherit app")
     );
     assert_eq!(hint(&mut h, "size"), "Resolved: 15px from repo");
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #5b9bff from built-in");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #f07a62 from built-in");
 
     h.click_on("appearance-accent-preset-sky");
 
     let sent = h.sent();
     let expected = AppearanceOverrides {
         terminal_font_size: Some(15),
-        ..colored(Some("#38bdf8"), None)
+        ..colored(Some("#8fd3e8"), None)
     };
     assert_eq!(
         container_appearances(&sent),
@@ -393,19 +393,19 @@ fn container_changes_before_the_echo_build_on_each_other(cx: &mut TestAppContext
 
     h.click_on("appearance-accent-preset-sky");
     h.click_on("appearance-background-preset-paper");
-    let both = colored(Some("#38bdf8"), Some("#f6f4ef"));
+    let both = colored(Some("#8fd3e8"), Some("#f6f4ef"));
     assert_eq!(
         container_appearances(&h.sent()),
         [
-            ("repo r1".to_owned(), colored(Some("#38bdf8"), None)),
+            ("repo r1".to_owned(), colored(Some("#8fd3e8"), None)),
             ("repo r1".to_owned(), both.clone()),
         ],
         "the second send carries the first, not yet echoed"
     );
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #38bdf8 from current");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #8fd3e8 from current");
 
     let mut echoed = repo("r1", "C:/repos/r1");
-    echoed.appearance = colored(Some("#38bdf8"), None);
+    echoed.appearance = colored(Some("#8fd3e8"), None);
     h.send(DaemonMessage::Repos {
         repos: vec![echoed],
     });
@@ -426,7 +426,7 @@ fn container_changes_before_the_echo_build_on_each_other(cx: &mut TestAppContext
     });
     assert_eq!(
         hint(&mut h, "accent"),
-        "Resolved: #5b9bff from built-in",
+        "Resolved: #f07a62 from built-in",
         "once echoed, the stored overrides lead again"
     );
     h.click_on("appearance-bold");
@@ -612,22 +612,22 @@ fn ctrl_comma_opens_settings_and_app_level_changes_persist_locally_without_a_mes
     assert_eq!(appearance_sends(&h.sent()), 0, "the app level stays here");
     assert_eq!(
         h.root(|root, _| root.session_accent("s1")),
-        Some(0x38bdf8),
+        Some(0x8fd3e8),
         "the session inherits the app's accent"
     );
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #38bdf8 from current");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #8fd3e8 from current");
     assert_eq!(hint(&mut h, "size"), "Resolved: 14px from app");
     assert_eq!(hint(&mut h, "bold"), "Resolved: bold from app");
     let saved = saved_ui(&dir);
-    assert_eq!(saved["app_appearance"]["accent_color"], "#38bdf8");
-    assert_eq!(saved["app_appearance"]["terminal_frame_color"], "#38bdf8");
+    assert_eq!(saved["app_appearance"]["accent_color"], "#8fd3e8");
+    assert_eq!(saved["app_appearance"]["terminal_frame_color"], "#8fd3e8");
     assert_eq!(saved["terminal_font"]["size"], 14.0);
     assert_eq!(saved["terminal_font"]["bold"], true);
 
     h.click_on("appearance-size-reset");
     h.click_on("appearance-accent-reset");
     assert_eq!(hint(&mut h, "size"), "Resolved: 13px from built-in");
-    assert_eq!(hint(&mut h, "accent"), "Resolved: #5b9bff from built-in");
+    assert_eq!(hint(&mut h, "accent"), "Resolved: #f07a62 from built-in");
     let saved = saved_ui(&dir);
     assert_eq!(saved["terminal_font"]["size"], 13.0);
     assert!(saved["app_appearance"]["accent_color"].is_null());

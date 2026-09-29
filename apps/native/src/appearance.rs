@@ -15,10 +15,11 @@ use protocol::{AppearanceError, AppearanceOverrides, RepoEntry, SessionSnapshot,
 use serde::{Deserialize, Serialize};
 
 use crate::fonts::{self, FontSettings};
+use crate::palette;
 use crate::theme;
 
 /// The accent a session has when no level sets one.
-pub const BUILTIN_ACCENT: u32 = 0x5b9bff;
+pub const BUILTIN_ACCENT: u32 = palette::ACCENT;
 /// The terminal background a session has when no level sets one: the
 /// theme's default.
 pub const BUILTIN_BACKGROUND: u32 = packed(theme::DEFAULT_BACKGROUND);
@@ -33,34 +34,30 @@ pub struct Preset {
 }
 
 /// The accent choices, which the quick menu applies to the frame as well.
-pub const ACCENT_PRESETS: [Preset; 7] = [
+pub const ACCENT_PRESETS: [Preset; 6] = [
     Preset {
-        name: "Default",
+        name: "Coral",
         color: BUILTIN_ACCENT,
     },
     Preset {
-        name: "Sky",
-        color: 0x38bdf8,
-    },
-    Preset {
-        name: "Blue",
-        color: 0x3b82f6,
-    },
-    Preset {
-        name: "Violet",
-        color: 0x8b5cf6,
-    },
-    Preset {
-        name: "Emerald",
-        color: 0x22c55e,
-    },
-    Preset {
-        name: "Amber",
-        color: 0xf59e0b,
-    },
-    Preset {
         name: "Rose",
-        color: 0xfb7185,
+        color: 0xe7849b,
+    },
+    Preset {
+        name: "Ochre",
+        color: 0xd9a15c,
+    },
+    Preset {
+        name: "Periwinkle",
+        color: 0x8fb3f0,
+    },
+    Preset {
+        name: "Sky",
+        color: 0x8fd3e8,
+    },
+    Preset {
+        name: "Lilac",
+        color: 0xc9b8ff,
     },
 ];
 
@@ -71,7 +68,7 @@ pub const BACKGROUND_PRESETS: [Preset; 6] = [
         color: BUILTIN_BACKGROUND,
     },
     Preset {
-        name: "Graphite",
+        name: "Slate",
         color: 0x111318,
     },
     Preset {
@@ -1120,6 +1117,38 @@ mod tests {
         for preset in ACCENT_PRESETS.iter().chain(&BACKGROUND_PRESETS) {
             assert_eq!(parse_color(&hex(preset.color)), Some(preset.color));
         }
+    }
+
+    #[test]
+    fn the_accent_presets_are_the_six_petal_colours() {
+        let names: Vec<&str> = ACCENT_PRESETS.iter().map(|preset| preset.name).collect();
+        assert_eq!(
+            names,
+            ["Coral", "Rose", "Ochre", "Periwinkle", "Sky", "Lilac"]
+        );
+        assert_eq!(
+            ACCENT_PRESETS.map(|preset| preset.color),
+            [0xf07a62, 0xe7849b, 0xd9a15c, 0x8fb3f0, 0x8fd3e8, 0xc9b8ff]
+        );
+        assert_eq!(
+            ACCENT_PRESETS[0].color, BUILTIN_ACCENT,
+            "the built-in accent is the first preset"
+        );
+    }
+
+    #[test]
+    fn the_background_presets_offer_slate_and_not_graphite() {
+        let names: Vec<&str> = BACKGROUND_PRESETS
+            .iter()
+            .map(|preset| preset.name)
+            .collect();
+        assert!(names.contains(&"Slate"), "{names:?}");
+        assert!(!names.contains(&"Graphite"), "{names:?}");
+        let slate = BACKGROUND_PRESETS
+            .iter()
+            .find(|preset| preset.name == "Slate")
+            .expect("Slate is one of the presets");
+        assert_eq!(slate.color, 0x111318);
     }
 
     #[test]

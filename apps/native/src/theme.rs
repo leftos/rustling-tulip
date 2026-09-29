@@ -1,16 +1,18 @@
 //! The terminal's colour theme: the base palette with every colour nudged
 //! away from the background until it keeps a legible contrast ratio.
 //!
-//! The arithmetic here matches the Tauri client's `terminalTheme.ts`, so both
-//! clients paint the same colours; its expected values are pinned in this
-//! module's tests.
+//! The arithmetic here is ported from the Tauri client's `terminalTheme.ts`;
+//! the default ground is this client's own, so the two no longer paint the
+//! same colours. Its expected values are pinned in this module's tests.
 
 #![expect(clippy::unreadable_literal, reason = "hex colors read as #rrggbb")]
 
 use alacritty_terminal::vte::ansi::Rgb;
 
+use crate::palette;
+
 /// The background a pane starts from until it is told to use another one.
-pub const DEFAULT_BACKGROUND: Rgb = rgb(0x08090b);
+pub const DEFAULT_BACKGROUND: Rgb = rgb(palette::TERMINAL_GROUND);
 
 /// The contrast a colour must reach against the background: the default text
 /// colour, the caret and the selection tint, the eight base colours, and the
@@ -230,15 +232,15 @@ mod tests {
     fn default_theme_matches_the_ported_values() {
         let theme = Theme::default();
         assert_eq!(theme.bg, DEFAULT_BACKGROUND);
-        assert_eq!(theme.bg, rgb(0x08090b));
+        assert_eq!(theme.bg, rgb(0x0c0b0e));
         assert_eq!(theme.fg, rgb(0xe5e6e8));
         assert_eq!(theme.caret, rgb(0xffffff));
         assert_eq!(theme.selection, rgb(0x5b9bff));
         assert!((theme.selection_alpha - 0.3).abs() < f64::EPSILON);
         assert_eq!(theme.selection_fg, theme.fg);
-        // `buildTerminalTheme("#08090b")`, as printed by Node. Base black is
-        // the one entry that moves — it is below 2.4:1 and so is raised —
-        // while base red already clears it and comes through unchanged.
+        // `build_theme` on the default ground. Base black is the one entry
+        // that moves — it is below 2.4:1 and so is raised — while base red
+        // already clears it and comes through unchanged.
         assert_eq!(
             theme.ansi,
             [

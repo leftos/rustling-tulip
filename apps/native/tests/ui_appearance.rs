@@ -16,6 +16,7 @@ use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, SplitDirection,
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, BUILTIN_BACKGROUND, PaneFrame};
+use rustling_tulip_native::palette::BORDER;
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 /// The version the harness's handshake speaks.
@@ -24,9 +25,6 @@ const HARNESS_PROTOCOL: u32 = 1;
 const PAPER: u32 = 0xf6f4ef;
 /// The default text colour the contrast-adjusted theme gives Paper.
 const PAPER_FOREGROUND: u32 = 0x1a1c22;
-/// The pane border of a pane without its tab's focus.
-const BORDER: u32 = 0x0020_222a;
-
 /// The harness on `fixture`, with every session's scrollback answered and
 /// pane `p1` focused, and everything sent so far drained.
 fn focused<'a>(cx: &'a mut TestAppContext, dir: &TestDir, fixture: &Fixture) -> Harness<'a> {
@@ -263,9 +261,7 @@ fn accent_preset_from_the_session_menu_sends_both_fields(cx: &mut TestAppContext
     let mut h = focused(cx, &dir, &fixture);
 
     open_accent_menu(&mut h, "s1");
-    for name in [
-        "default", "sky", "blue", "violet", "emerald", "amber", "rose",
-    ] {
+    for name in ["coral", "rose", "ochre", "periwinkle", "sky", "lilac"] {
         assert!(h.in_model(&format!("accent-preset-{name}")), "{name}");
     }
     assert!(
@@ -279,8 +275,8 @@ fn accent_preset_from_the_session_menu_sends_both_fields(cx: &mut TestAppContext
     assert_eq!(
         appearances,
         [AppearanceOverrides {
-            accent_color: Some("#fb7185".to_owned()),
-            terminal_frame_color: Some("#fb7185".to_owned()),
+            accent_color: Some("#e7849b".to_owned()),
+            terminal_frame_color: Some("#e7849b".to_owned()),
             terminal_background_color: Some("#111318".to_owned()),
             terminal_font_size: Some(16),
             ..AppearanceOverrides::default()
@@ -325,14 +321,14 @@ fn an_accent_pick_keeps_a_font_step_still_on_its_way(cx: &mut TestAppContext) {
     assert_eq!(sizes, [Some(14)], "the step goes out");
 
     open_accent_menu(&mut h, "s1");
-    h.click_on("accent-preset-amber");
+    h.click_on("accent-preset-ochre");
 
     let sent = h.sent();
     assert_eq!(
         session_appearances(&sent, "s1"),
         [AppearanceOverrides {
-            accent_color: Some("#f59e0b".to_owned()),
-            terminal_frame_color: Some("#f59e0b".to_owned()),
+            accent_color: Some("#d9a15c".to_owned()),
+            terminal_frame_color: Some("#d9a15c".to_owned()),
             terminal_font_size: Some(14),
             ..AppearanceOverrides::default()
         }],
@@ -360,14 +356,14 @@ fn a_status_update_between_accent_picks_leaves_the_last_pick(cx: &mut TestAppCon
     assert_eq!(
         accents,
         [
-            Some("#38bdf8".to_owned()),
-            Some("#fb7185".to_owned()),
-            Some("#38bdf8".to_owned())
+            Some("#8fd3e8".to_owned()),
+            Some("#e7849b".to_owned()),
+            Some("#8fd3e8".to_owned())
         ],
         "A, B, A all go out; sent {sent:?}"
     );
 
-    for color in ["#38bdf8", "#fb7185"] {
+    for color in ["#8fd3e8", "#e7849b"] {
         h.send(DaemonMessage::SessionUpdated {
             session: accented("s1", color),
             request_id: None,
@@ -376,7 +372,7 @@ fn a_status_update_between_accent_picks_leaves_the_last_pick(cx: &mut TestAppCon
 
     assert_eq!(
         next_step(&mut h),
-        (Some(14), Some("#38bdf8".to_owned())),
+        (Some(14), Some("#8fd3e8".to_owned())),
         "status updates answer no send, so the last pick still stands"
     );
 }
@@ -431,7 +427,7 @@ fn a_session_list_keeps_the_sends_in_flight_of_the_sessions_it_holds(cx: &mut Te
     });
     assert_eq!(
         next_step(&mut h),
-        (Some(14), Some("#38bdf8".to_owned())),
+        (Some(14), Some("#8fd3e8".to_owned())),
         "a listed session's pick may still be on the wire, so the next send carries it"
     );
 
@@ -505,8 +501,8 @@ fn a_removed_session_forgets_its_sends_in_flight(cx: &mut TestAppContext) {
     assert_eq!(
         session_appearances(&sent, "s1"),
         [AppearanceOverrides {
-            accent_color: Some("#38bdf8".to_owned()),
-            terminal_frame_color: Some("#38bdf8".to_owned()),
+            accent_color: Some("#8fd3e8".to_owned()),
+            terminal_frame_color: Some("#8fd3e8".to_owned()),
             ..AppearanceOverrides::default()
         }],
         "the unanswered size step went with the session; sent {sent:?}"

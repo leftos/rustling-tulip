@@ -1357,8 +1357,8 @@ mod tests {
             .map(|b| (b.row, b.col, b.len, b.color))
             .collect();
         // The selection tint over the default background at 30%: each channel
-        // of #08090b moved 30% of the way to #5b9bff, rounded.
-        assert_eq!(bg, [(0, 0, 2, rgb(0x213554))]);
+        // of #0c0b0e moved 30% of the way to #5b9bff, rounded.
+        assert_eq!(bg, [(0, 0, 2, rgb(0x243656))]);
         let texts: Vec<_> = snap
             .text
             .iter()
@@ -1478,7 +1478,7 @@ mod tests {
         // Dim text sits 35% of the way from the foreground to the background.
         assert_eq!(
             default_named(NamedColor::DimForeground, &theme),
-            rgb(0x98999b)
+            rgb(0x99999c)
         );
     }
 
@@ -1563,7 +1563,7 @@ mod tests {
             resolve(Color::Named(NamedColor::Background), &colors, &theme),
             theme.bg
         );
-        assert_eq!(theme.bg, rgb(0x08090b));
+        assert_eq!(theme.bg, rgb(0x0c0b0e));
         assert_eq!(fed(b"").snapshot().background, theme.bg);
         assert_eq!(fed(b"").snapshot().caret, theme.caret);
     }
@@ -1591,13 +1591,13 @@ mod tests {
         assert!(plain.bg.is_empty());
         // A cell painted the theme's own background is still a span against
         // the program's.
-        let painted = fed(b"\x1b]11;#ffffff\x07\x1b[48;2;8;9;11mX").snapshot();
+        let painted = fed(b"\x1b]11;#ffffff\x07\x1b[48;2;12;11;14mX").snapshot();
         let bg: Vec<_> = painted
             .bg
             .iter()
             .map(|b| (b.row, b.col, b.len, b.color))
             .collect();
-        assert_eq!(bg, [(0, 0, 1, rgb(0x08090b))]);
+        assert_eq!(bg, [(0, 0, 1, rgb(0x0c0b0e))]);
     }
 
     #[test]
