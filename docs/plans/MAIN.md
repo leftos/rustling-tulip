@@ -24,10 +24,8 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.4a → PT.4b; PT.5 and PT.7 need PT.4b; PT.6a needs PT.4a, PT.6b follows PT.6a; PT.8b needs PT.8a and PT.6b.
+The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.6b follows PT.6a; PT.8b needs PT.8a and PT.6b; the rest are free to start.
 
-- [ ] **PT.4a Status glyphs**: working ring, asking diamond, waiting ring, idle dot, plus spawning, stopped and error, in leaves, headers, tab pills and the footer.
-- [ ] **PT.4b Unseen turns**: an agent's finished turn shows the waiting ring until this client focuses it.
 - [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
 - [ ] **PT.6a Sidebar header, toolbar and containers**, with the Session button's `Ctrl N` hint.
 - [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.

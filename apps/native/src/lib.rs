@@ -71,6 +71,7 @@ mod spawn_view;
 mod spawns;
 mod stash_view;
 mod stashes;
+mod status_glyph;
 pub mod syntax;
 mod tab_bar;
 mod tab_menu;
@@ -1152,9 +1153,10 @@ impl RootView {
 
     /// A leaf click: show the pane holding the session, or place the
     /// session when no pane shows it. A session without a terminal only has
-    /// its attention cleared.
+    /// its attention and its unseen turn cleared.
     fn select_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar.clear_attention(id);
+        self.sidebar.mark_seen(id);
         if let Some((tab_id, pane_id)) = find_tab_containing_session(self.tabs.tabs(), id) {
             self.tabs.focus_pane(&tab_id, &pane_id);
             self.after_tabs_change(window, cx);
@@ -1460,6 +1462,8 @@ impl RootView {
     /// armed.
     fn fold_sidebar(&mut self, msg: &DaemonMessage, cx: &mut Context<Self>) {
         let before = moves_needs_you(msg).then(|| self.needs_you_list());
+        let focused = self.focused_session();
+        self.sidebar.set_focused_session(focused.as_deref());
         self.sidebar.apply(msg);
         self.forget_remembered_session(msg);
         if before.is_some_and(|before| self.needs_you_list() != before) {

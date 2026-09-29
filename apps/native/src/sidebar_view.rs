@@ -4,12 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Window, div, prelude::*, px,
-};
-use protocol::SessionStatus;
-
 use crate::appearance;
 use crate::appearance_view::Level;
 use crate::connection::DotKind;
@@ -18,10 +12,15 @@ use crate::palette::SELECTED_BG;
 use crate::session_actions::inline_actions;
 use crate::sidebar::{Activity, Container, ContainerKind, Leaf, SidebarView, can_attach};
 use crate::spawn_view::SpawnEntry;
+use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
 use crate::{
     BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, dot_color,
-    drag_handle, status_dot, tooltip,
+    drag_handle, tooltip,
+};
+use gpui::{
+    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, div, prelude::*, px,
 };
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
@@ -560,7 +559,11 @@ fn leaf_row(
         .border_1()
         .border_color(gpui::rgba(border))
         .tooltip(tooltip(leaf.tooltip.clone()))
-        .child(session_dot(leaf.status, format!("leaf-dot-{}", leaf.id)))
+        .child(glyph_view(
+            glyph(leaf.status, leaf.mode, leaf.unseen),
+            GlyphSize::Leaf,
+            &format!("leaf-glyph-{}", leaf.id),
+        ))
         .child(
             div()
                 .flex_1()
@@ -673,29 +676,6 @@ impl RootView {
                 .collect()
         })
     }
-}
-
-/// A session's status dot: pulsing while working, hollow while spawning,
-/// amber while awaiting input.
-pub(crate) fn session_dot(status: SessionStatus, id: impl Into<SharedString>) -> AnyElement {
-    let id = id.into();
-    match status {
-        SessionStatus::Working => status_dot(DotKind::Pending, id),
-        SessionStatus::Idle => status_dot(DotKind::Ok, id),
-        SessionStatus::Stopped => status_dot(DotKind::Stopped, id),
-        SessionStatus::Error => status_dot(DotKind::Err, id),
-        SessionStatus::AwaitingInput => plain_dot()
-            .bg(gpui::rgb(dot_color(DotKind::Pending)))
-            .into_any_element(),
-        SessionStatus::Spawning => plain_dot()
-            .border_1()
-            .border_color(gpui::rgb(dot_color(DotKind::Pending)))
-            .into_any_element(),
-    }
-}
-
-fn plain_dot() -> Div {
-    div().flex_none().size(px(8.0)).rounded_full()
 }
 
 fn attention_mark() -> Div {

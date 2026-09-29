@@ -11,12 +11,13 @@ use gpui::{
     ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful, div,
     prelude::*, px,
 };
-use protocol::{DaemonMessage, SessionStatus};
+use protocol::{DaemonMessage, SessionMode, SessionStatus};
 
 use crate::activity_bar::badge_text;
 use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
-use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING, session_dot};
+use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
+use crate::status_glyph::{Glyph, GlyphSize, glyph, glyph_view};
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
 const HEADER_HEIGHT: f32 = 26.0;
@@ -132,11 +133,17 @@ impl RootView {
             body.child(empty_state())
         } else {
             body.children(rows.iter().map(|row| {
-                let status = self
-                    .sidebar
-                    .session(&row.session_id)
-                    .map_or(SessionStatus::AwaitingInput, |s| s.status);
-                needs_you_row(row, status, now, cx)
+                let mark = self.sidebar.session(&row.session_id).map_or_else(
+                    || {
+                        glyph(
+                            SessionStatus::AwaitingInput,
+                            SessionMode::Interactive,
+                            false,
+                        )
+                    },
+                    |s| glyph(s.status, s.mode, self.sidebar.is_unseen(&s.id)),
+                );
+                needs_you_row(row, mark, now, cx)
             }))
         };
         div()
@@ -226,11 +233,11 @@ fn empty_state() -> Div {
         .child(div().child("Sessions waiting on an answer, a permission or a look show here."))
 }
 
-/// A listed session: its dot, container, label and wait on line one, what
-/// it wants on line two.
+/// A listed session: its status glyph, container, label and wait on line
+/// one, what it wants on line two.
 fn needs_you_row(
     row: &NeedsYouRow,
-    status: SessionStatus,
+    mark: Glyph,
     now: DateTime<Utc>,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
@@ -243,9 +250,10 @@ fn needs_you_row(
         .items_center()
         .gap(px(6.0))
         .h(px(ROW_HEIGHT))
-        .child(session_dot(
-            status,
-            format!("needs-you-dot-{}", row.session_id),
+        .child(glyph_view(
+            mark,
+            GlyphSize::Leaf,
+            &format!("needs-you-glyph-{}", row.session_id),
         ))
         .child(
             div()

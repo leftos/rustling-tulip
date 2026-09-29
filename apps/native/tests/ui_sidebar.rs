@@ -624,3 +624,105 @@ fn leaf_tooltip_lists_title_and_cwd(cx: &mut TestAppContext) {
     );
     assert_eq!(tags(&mut h, "s1"), [tag("pwsh", "Running pwsh")]);
 }
+
+/// Whether leaf `id` draws the status glyph named `shape`.
+fn leaf_glyph(h: &mut Harness<'_>, id: &str, shape: &str) -> bool {
+    h.bounds(&format!("leaf-glyph-{id}-{shape}")).origin.x >= px(0.0)
+}
+
+#[gpui::test]
+fn each_leaf_draws_its_status_glyph(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("work").status("working").build(),
+            session("ask").status("awaiting_input").build(),
+            session("idle").build(),
+            session("sh").shell("D:/src/app").build(),
+            session("spawn").status("spawning").build(),
+            session("stop").status("stopped").build(),
+            session("err").status("error").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", None))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for (id, shape) in [
+        ("work", "working"),
+        ("ask", "asking"),
+        ("idle", "idle"),
+        ("sh", "idle"),
+        ("spawn", "spawning"),
+        ("stop", "stopped"),
+        ("err", "error"),
+    ] {
+        assert!(leaf_glyph(&mut h, id, shape), "{id} draws {shape}");
+    }
+}
+
+/// Whether leaf `id` holds an unseen turn. The glyph selectors cannot say
+/// a glyph is gone: gpui keeps a selector's bounds from earlier frames.
+fn leaf_unseen(h: &mut Harness<'_>, id: &str) -> Option<bool> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|leaf| leaf.id == id)
+            .map(|leaf| leaf.unseen)
+    })
+}
+
+#[gpui::test]
+fn background_turn_ending_waits_until_its_leaf_is_clicked(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").status("working").build());
+    fixture
+        .sessions
+        .push(session("s2").status("working").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    for id in ["s1", "s2"] {
+        h.send(DaemonMessage::SessionUpdated {
+            session: session(id).build(),
+            request_id: None,
+        });
+    }
+
+    assert!(leaf_glyph(&mut h, "s2", "waiting"), "s2 ended unseen");
+    assert!(
+        leaf_glyph(&mut h, "s1", "idle"),
+        "s1 ended in the focused pane"
+    );
+    assert_eq!(leaf_unseen(&mut h, "s1"), Some(false));
+
+    h.click_on("leaf-s2");
+    assert!(leaf_glyph(&mut h, "s2", "idle"), "the click saw it");
+    assert_eq!(leaf_unseen(&mut h, "s2"), Some(false));
+}
+
+#[gpui::test]
+fn unseen_session_rebound_into_the_focused_pane_is_seen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").build());
+    fixture
+        .sessions
+        .push(session("s2").status("working").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.send(DaemonMessage::SessionUpdated {
+        session: session("s2").build(),
+        request_id: None,
+    });
+    assert_eq!(leaf_unseen(&mut h, "s2"), Some(true), "s2 ended unseen");
+
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s2"))),
+    });
+
+    assert_eq!(
+        leaf_unseen(&mut h, "s2"),
+        Some(false),
+        "the focused pane shows s2 now"
+    );
+}

@@ -77,9 +77,12 @@ pub enum SidebarView {
 pub struct Leaf {
     pub id: String,
     pub status: SessionStatus,
+    pub mode: SessionMode,
     pub label: String,
     pub runtime: Option<String>,
     pub attention: bool,
+    /// The agent's last turn ended while this client looked elsewhere.
+    pub unseen: bool,
     pub state: LeafState,
     /// Launched with approval prompts bypassed.
     pub trusted: bool,
@@ -197,6 +200,8 @@ pub struct TreeInputs<'a> {
     /// Manual session order per container id.
     pub session_order: &'a HashMap<String, Vec<String>>,
     pub attention: &'a HashSet<String>,
+    /// Agent sessions whose finished turn this client has not seen.
+    pub unseen: &'a HashSet<String>,
     pub collapsed: &'a BTreeSet<String>,
 }
 
@@ -421,6 +426,12 @@ pub struct SidebarModel {
     container_order: Vec<ContainerRef>,
     session_order: HashMap<String, Vec<String>>,
     attention: HashSet<String>,
+    /// Agent sessions whose turn ended while this client showed another
+    /// session focused, until the user looks at them.
+    unseen: HashSet<String>,
+    /// The session this client shows focused, as the root last reported it
+    /// before folding a message in.
+    focused: Option<String>,
     ui: UiState,
 }
 
@@ -457,11 +468,20 @@ impl SidebarModel {
 
     fn apply_session_message(&mut self, msg: &DaemonMessage) {
         match msg {
-            DaemonMessage::Sessions { sessions } => sessions.clone_into(&mut self.sessions),
+            DaemonMessage::Sessions { sessions } => {
+                for session in sessions {
+                    let before = self.session(&session.id).map(|s| s.status);
+                    self.note_turn(before, session);
+                }
+                self.unseen
+                    .retain(|id| sessions.iter().any(|s| &s.id == id));
+                sessions.clone_into(&mut self.sessions);
+            }
             DaemonMessage::SessionUpdated { session, .. } => self.update_session(session),
             DaemonMessage::SessionRemoved { session_id } => {
                 self.sessions.retain(|s| &s.id != session_id);
                 self.attention.remove(session_id);
+                self.unseen.remove(session_id);
             }
             DaemonMessage::Attention { session_id, .. } => {
                 self.attention.insert(session_id.clone());
@@ -473,6 +493,8 @@ impl SidebarModel {
     /// Replace or append the session; a session that settled back into
     /// working, idle or spawning on its own no longer needs attention.
     fn update_session(&mut self, session: &SessionSnapshot) {
+        let before = self.session(&session.id).map(|s| s.status);
+        self.note_turn(before, session);
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(existing) => existing.clone_from(session),
             None => self.sessions.push(session.clone()),
@@ -483,6 +505,41 @@ impl SidebarModel {
         ) {
             self.attention.remove(&session.id);
         }
+    }
+
+    /// An agent session going from working to idle while another session
+    /// is shown focused joins the unseen set; any status but idle leaves
+    /// it, so the set holds only idle sessions.
+    fn note_turn(&mut self, before: Option<SessionStatus>, session: &SessionSnapshot) {
+        match session.status {
+            SessionStatus::Idle
+                if before == Some(SessionStatus::Working)
+                    && session.mode != SessionMode::PlainShell
+                    && self.focused.as_deref() != Some(session.id.as_str()) =>
+            {
+                self.unseen.insert(session.id.clone());
+            }
+            SessionStatus::Idle => {}
+            _ => {
+                self.unseen.remove(&session.id);
+            }
+        }
+    }
+
+    /// Records the session this client shows focused, so a turn that ends
+    /// there is not marked unseen.
+    pub fn set_focused_session(&mut self, id: Option<&str>) {
+        self.focused = id.map(str::to_owned);
+    }
+
+    /// The user looked at the session: its finished turn is seen.
+    pub fn mark_seen(&mut self, id: &str) {
+        self.unseen.remove(id);
+    }
+
+    /// Whether the session's last turn ended unseen.
+    pub fn is_unseen(&self, id: &str) -> bool {
+        self.unseen.contains(id)
     }
 
     pub fn sessions(&self) -> &[SessionSnapshot] {
@@ -516,6 +573,7 @@ impl SidebarModel {
             container_order: &self.container_order,
             session_order: &self.session_order,
             attention: &self.attention,
+            unseen: &self.unseen,
             collapsed: &self.ui.collapsed_containers,
         })
     }
@@ -526,6 +584,7 @@ impl SidebarModel {
             tabs,
             &self.sessions,
             &self.attention,
+            &self.unseen,
             &self.ui.collapsed_containers,
         )
     }
@@ -1017,7 +1076,7 @@ fn container(
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
-        .map(|s| leaf(s, inputs.attention))
+        .map(|s| leaf(s, inputs.attention, inputs.unseen))
         .collect();
     let key = container_key(kind, id);
     Container {
@@ -1032,13 +1091,15 @@ fn container(
     }
 }
 
-fn leaf(s: &SessionSnapshot, attention: &HashSet<String>) -> Leaf {
+fn leaf(s: &SessionSnapshot, attention: &HashSet<String>, unseen: &HashSet<String>) -> Leaf {
     Leaf {
         id: s.id.clone(),
         status: s.status,
+        mode: s.mode,
         label: display_label(s),
         runtime: runtime_label(s),
         attention: attention.contains(&s.id),
+        unseen: unseen.contains(&s.id),
         state: LeafState::of(s),
         trusted: s.elevated_authority,
         tooltip: label_tooltip(s),
@@ -1066,6 +1127,7 @@ pub fn build_tab_containers(
     tabs: &[TabEntry],
     sessions: &[SessionSnapshot],
     attention: &HashSet<String>,
+    unseen: &HashSet<String>,
     collapsed: &BTreeSet<String>,
 ) -> Vec<Container> {
     let by_id: HashMap<&str, &SessionSnapshot> =
@@ -1084,7 +1146,7 @@ pub fn build_tab_containers(
             .filter_map(|id| by_id.get(id).copied())
             .map(|s| {
                 shown.insert(s.id.as_str());
-                leaf(s, attention)
+                leaf(s, attention, unseen)
             })
             .collect();
         out.push(tab_view_container(
@@ -1101,7 +1163,10 @@ pub fn build_tab_containers(
         .collect();
     if !unbound.is_empty() {
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
-        let leaves = unbound.into_iter().map(|s| leaf(s, attention)).collect();
+        let leaves = unbound
+            .into_iter()
+            .map(|s| leaf(s, attention, unseen))
+            .collect();
         out.push(tab_view_container(
             ContainerKind::Unbound,
             "",
@@ -1548,6 +1613,7 @@ mod tests {
                 container_order: &self.container_order,
                 session_order: &self.session_order,
                 attention: &HashSet::new(),
+                unseen: &HashSet::new(),
                 collapsed: &BTreeSet::new(),
             })
         }
@@ -1962,6 +2028,96 @@ mod tests {
         assert!(!attention_of(&model, "a"));
     }
 
+    fn unseen_of(model: &SidebarModel, id: &str) -> bool {
+        model
+            .containers()
+            .iter()
+            .flat_map(|c| c.leaves.iter())
+            .find(|l| l.id == id)
+            .is_some_and(|l| l.unseen)
+    }
+
+    fn set_status(model: &mut SidebarModel, session: &SessionSnapshot, status: SessionStatus) {
+        let mut updated = session.clone();
+        updated.status = status;
+        model.apply(&DaemonMessage::SessionUpdated {
+            session: updated,
+            request_id: None,
+        });
+    }
+
+    /// `session` works, then its turn ends.
+    fn finish_turn(model: &mut SidebarModel, session: &SessionSnapshot) {
+        set_status(model, session, SessionStatus::Working);
+        set_status(model, session, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn background_agent_turn_ending_is_unseen() {
+        for mode in [SessionMode::Interactive, SessionMode::Headless] {
+            let mut a = in_repo("a", "r1");
+            a.mode = mode;
+            let mut model = model_with(vec![a.clone(), in_repo("b", "r1")]);
+            model.set_focused_session(Some("b"));
+            finish_turn(&mut model, &a);
+            assert!(unseen_of(&model, "a"), "{mode:?}");
+            assert!(!unseen_of(&model, "b"), "{mode:?}: b never worked");
+        }
+    }
+
+    #[test]
+    fn turn_ending_across_a_relist_is_unseen() {
+        let a = in_repo("a", "r1");
+        let mut model = model_with(vec![a.clone()]);
+        set_status(&mut model, &a, SessionStatus::Working);
+        model.apply(&DaemonMessage::Sessions {
+            sessions: vec![a.clone()],
+        });
+        assert!(unseen_of(&model, "a"));
+    }
+
+    #[test]
+    fn shell_turn_is_never_unseen() {
+        let sh = shell("s", Some("D:\\r1"), SessionKind::Standalone);
+        let mut model = model_with(vec![sh.clone()]);
+        finish_turn(&mut model, &sh);
+        assert!(!model.is_unseen("s"));
+    }
+
+    #[test]
+    fn focused_session_turn_is_seen() {
+        let a = in_repo("a", "r1");
+        let mut model = model_with(vec![a.clone()]);
+        model.set_focused_session(Some("a"));
+        finish_turn(&mut model, &a);
+        assert!(!model.is_unseen("a"));
+    }
+
+    #[test]
+    fn unseen_clears_on_any_other_status_seen_or_removal() {
+        for clear in [
+            "working", "stopped", "asking", "seen", "removed", "relisted",
+        ] {
+            let a = in_repo("a", "r1");
+            let mut model = model_with(vec![a.clone()]);
+            finish_turn(&mut model, &a);
+            assert!(model.is_unseen("a"), "{clear}: joined first");
+            match clear {
+                "working" => set_status(&mut model, &a, SessionStatus::Working),
+                "stopped" => set_status(&mut model, &a, SessionStatus::Stopped),
+                "asking" => set_status(&mut model, &a, SessionStatus::AwaitingInput),
+                "seen" => model.mark_seen("a"),
+                "removed" => model.apply(&DaemonMessage::SessionRemoved {
+                    session_id: "a".to_owned(),
+                }),
+                _ => model.apply(&DaemonMessage::Sessions {
+                    sessions: Vec::new(),
+                }),
+            }
+            assert!(!model.is_unseen("a"), "{clear}");
+        }
+    }
+
     #[test]
     fn attention_rolls_up_to_container() {
         let mut model = model_with(vec![in_repo("a", "r1"), in_repo("b", "r1")]);
@@ -2297,7 +2453,13 @@ mod tests {
     }
 
     fn tab_view(tabs: &[TabEntry], sessions: &[SessionSnapshot]) -> Vec<Container> {
-        build_tab_containers(tabs, sessions, &HashSet::new(), &BTreeSet::new())
+        build_tab_containers(
+            tabs,
+            sessions,
+            &HashSet::new(),
+            &HashSet::new(),
+            &BTreeSet::new(),
+        )
     }
 
     #[test]
@@ -2414,6 +2576,7 @@ mod tests {
             &tabs,
             &[session("s1"), session("s2")],
             &attention,
+            &HashSet::new(),
             &BTreeSet::new(),
         );
         let marks: Vec<(bool, bool)> = tree

@@ -10,8 +10,8 @@ use gpui::{
     px, relative,
 };
 use protocol::{
-    ClientMessage, GridNode, SessionSnapshot, SessionStatus, SplitDirection, SplitPlace,
-    TabContent, TabEntry,
+    ClientMessage, GridNode, SessionMode, SessionSnapshot, SessionStatus, SplitDirection,
+    SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
@@ -20,9 +20,9 @@ use crate::headless;
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, display_label, label_tooltip, runtime_label};
-use crate::sidebar_view::session_dot;
 use crate::spawn_view::SpawnEntry;
 use crate::spawns::{OpenIn, PaneAim};
+use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::{
@@ -170,7 +170,8 @@ impl RootView {
     /// Brings the terminals in line with the tab model: one per pane,
     /// attached to the pane's session and sizing the PTY only in the active
     /// tab. `Detach` goes out once no pane shows a session; the panes still
-    /// showing a session that lost one re-attach.
+    /// showing a session that lost one re-attach. The session the focused
+    /// pane now shows has its finished turn seen, as a focus would.
     pub(crate) fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let before = tabs::view_counts(
             self.panes
@@ -187,6 +188,9 @@ impl RootView {
         to_sync.extend(changes.resync);
         for session_id in to_sync {
             self.sync_session(&session_id, cx);
+        }
+        if let Some(id) = self.focused_session() {
+            self.sidebar.mark_seen(&id);
         }
         self.update_pane_roles(cx);
     }
@@ -263,7 +267,11 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(tab_id) = self.panes.get(pane_id).map(|slot| slot.tab_id.clone()) {
+        if let Some(slot) = self.panes.get(pane_id) {
+            let (tab_id, session) = (slot.tab_id.clone(), slot.session.clone());
+            if let Some(session) = session {
+                self.sidebar.mark_seen(&session);
+            }
             self.tabs.set_focused(&tab_id, pane_id);
             self.remember_focused_session();
             self.update_pane_roles(cx);
@@ -936,7 +944,7 @@ impl RootView {
             .into_any_element()
     }
 
-    /// The session's status dot, name, runtime, trusted and headless marks,
+    /// The session's status glyph, name, runtime, trusted and headless marks,
     /// its Stop or exit code, split right and down (Shift: left and up),
     /// move and close; a session with members lists their branches on a
     /// second row. A right-click opens the session's menu.
@@ -949,7 +957,7 @@ impl RootView {
     ) -> Div {
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
-            .map(header_parts);
+            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)));
         let members = parts
             .as_ref()
             .filter(|parts| !parts.members.is_empty())
@@ -1060,7 +1068,8 @@ impl RootView {
     /// session; `None` for an empty pane.
     #[must_use]
     pub fn pane_header_parts(&self, pane_id: &str) -> Option<PaneHeaderParts> {
-        self.active_pane_session(pane_id).map(header_parts)
+        self.active_pane_session(pane_id)
+            .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)))
     }
 }
 
@@ -1068,7 +1077,10 @@ impl RootView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneHeaderParts {
     pub status: SessionStatus,
-    /// The status dot's hover text.
+    pub mode: SessionMode,
+    /// The agent's last turn ended while this client looked elsewhere.
+    pub unseen: bool,
+    /// The status glyph's hover text.
     pub status_tip: String,
     pub title: String,
     pub title_tip: String,
@@ -1080,7 +1092,7 @@ pub struct PaneHeaderParts {
     pub members: Vec<(String, String)>,
 }
 
-fn header_parts(session: &SessionSnapshot) -> PaneHeaderParts {
+fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
     let mut chips: Vec<(String, String)> = runtime_label(session)
         .map(|runtime| {
             let tip = format!("Running {runtime}");
@@ -1102,6 +1114,8 @@ fn header_parts(session: &SessionSnapshot) -> PaneHeaderParts {
         .collect();
     PaneHeaderParts {
         status: session.status,
+        mode: session.mode,
+        unseen,
         status_tip: format!("status: {}", headless::status_label(session.status)),
         title: display_label(session),
         title_tip: label_tooltip(session),
@@ -1111,7 +1125,7 @@ fn header_parts(session: &SessionSnapshot) -> PaneHeaderParts {
     }
 }
 
-/// The header's left side: the status dot, the name and the chips, or
+/// The header's left side: the status glyph, the name and the chips, or
 /// "Empty pane".
 fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElement> {
     let title = div()
@@ -1128,7 +1142,11 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
             .id(SharedString::from(format!("pane-status-{pane_id}")))
             .flex_none()
             .pr(px(4.0))
-            .child(session_dot(parts.status, format!("pane-dot-{pane_id}")))
+            .child(glyph_view(
+                glyph(parts.status, parts.mode, parts.unseen),
+                GlyphSize::Leaf,
+                &format!("pane-glyph-{pane_id}"),
+            ))
             .tooltip(tooltip(parts.status_tip.clone()))
             .into_any_element(),
         title
