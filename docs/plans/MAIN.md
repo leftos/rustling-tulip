@@ -27,7 +27,21 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-- [ ] **Build the approved "Petal" look** (user; canvas https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S): graphite ground, tulip-coral accent, Schibsted Grotesk beside Geist Mono, status shapes, refined pane headers and chips; steps PT.1–PT.10, each a line here once the split's open questions are answered. Boards for features not built yet are assigned to their waves there. Split, rulings and open questions: [petal.md](./petal.md).
+The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.1 → PT.2 → PT.4a → PT.4b; PT.3 needs PT.1; PT.9 needs PT.2; PT.5 and PT.7 need PT.4b; PT.6a needs PT.4a, PT.6b follows PT.6a; PT.8a needs PT.3; PT.8b needs PT.8a and PT.6b.
+
+- [ ] **PT.1 Palette module, no visual change**: the colour constants and scattered literals into a new `palette.rs`.
+- [ ] **PT.2 Petal values, accent and terminal ground**: the tokens, the coral default accent and Petal presets, the `#0C0B0E` ground, "Graphite" preset renamed "Slate".
+- [ ] **PT.3 Schibsted Grotesk as the UI face**: four static TTFs with their `OFL.txt`.
+- [ ] **PT.4a Status glyphs**: working ring, asking diamond, waiting ring, idle dot, plus spawning, stopped and error, in leaves, headers, tab pills and the footer.
+- [ ] **PT.4b Unseen turns**: an agent's finished turn shows the waiting ring until this client focuses it.
+- [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
+- [ ] **PT.6a Sidebar header, toolbar and containers**, with the Session button's `Ctrl N` hint.
+- [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.
+- [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
+- [ ] **PT.8a Overlays, menus, buttons and inputs**.
+- [ ] **PT.8b Spawn dialog and Settings**.
+- [ ] **PT.9 Source control and diffs**.
+- [ ] **PT.10 Petal docs**: `docs/native-client.md` "Theme and fonts", CLAUDE.md's `native-ui.json` line, the README glossary.
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
 
