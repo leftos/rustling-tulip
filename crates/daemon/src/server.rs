@@ -5320,7 +5320,12 @@ async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let repos = hub.state.with_persisted(|s| s.repos.clone());
     tokio::task::spawn_blocking(move || {
         let claude_home = crate::transcripts::claude_home();
-        history::history_items(&dirs, &repos, claude_home.as_deref())
+        history::history_items(
+            &dirs,
+            &repos,
+            claude_home.as_deref(),
+            crate::codex_rollout::codex_home,
+        )
     })
     .await
     .unwrap_or_else(|err| {
@@ -5397,19 +5402,23 @@ async fn recover_one(
         .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
     let entry = history::read_one(&hub.dirs, &item.history_id)
         .ok_or_else(|| format!("no history entry {}", item.history_id))?;
-    let claude_home = crate::transcripts::claude_home();
     let (repos, workspaces) = hub
         .state
         .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
-    let registered = history::Registered {
-        repos: &repos,
-        workspaces: &workspaces,
-    };
-    let mut plan = history::plan_recovery(&entry, item, &registered, |folder, id| {
-        claude_home
-            .as_deref()
-            .is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
-    })?;
+    let planned_item = item.clone();
+    // Planning looks up transcripts and rollouts on disk.
+    let mut plan = tokio::task::spawn_blocking(move || {
+        let registered = history::Registered {
+            repos: &repos,
+            workspaces: &workspaces,
+        };
+        let claude_home = crate::transcripts::claude_home();
+        history::plan_recovery(&entry, &planned_item, &registered, |agent, folder, id| {
+            recovery_conversation_exists(&entry, claude_home.as_deref(), agent, folder, id)
+        })
+    })
+    .await
+    .map_err(|err| format!("planning the recovery failed: {err}"))??;
     if let Some(path) = plan.register_repo.clone() {
         let repo = register_repo(hub, &path, None, out_tx)
             .await
@@ -5425,6 +5434,26 @@ async fn recover_one(
         .map_err(|err| format!("{err:#}"))?;
     finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
     Ok(snapshot.id)
+}
+
+/// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
+/// transcript, or Codex's rollout under the Codex home `entry`'s spawn
+/// recorded. A recorded Cursor chat always counts.
+fn recovery_conversation_exists(
+    entry: &protocol::HistoryEntry,
+    claude_home: Option<&Path>,
+    agent: Agent,
+    folder: &str,
+    id: &str,
+) -> bool {
+    match agent {
+        Agent::Claude => {
+            claude_home.is_some_and(|home| crate::transcripts::transcript_exists(home, folder, id))
+        }
+        Agent::Codex => crate::codex_rollout::codex_home(history::recorded_env(entry))
+            .is_some_and(|home| crate::codex_rollout::rollout_exists(&home, id)),
+        Agent::Cursor => true,
+    }
 }
 
 /// After a successful recovery spawn of `history_id` as `new_id`: mark the

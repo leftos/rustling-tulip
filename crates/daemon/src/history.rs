@@ -21,8 +21,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use protocol::{
     Agent, AgentOptions, ConversationCandidate, HistoryEntry, HistorySource, InjectorStartup,
     InjectorStep, PinnedMemberWorktree, PromptInjector, RecoverAs, RecoverItem, RepoEntry,
-    SessionEnd, SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnRequest,
-    SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
+    SessionEnd, SessionHistoryItem, SessionKind, SessionMember, SessionMode, SpawnConfig,
+    SpawnRequest, SpawnTarget, WorkspaceEntry, WorktreeReusePolicy,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -645,21 +645,32 @@ pub fn entry_folder(entry: &HistoryEntry) -> Option<&str> {
         .filter(|folder| !folder.is_empty())
 }
 
+/// The environment rows `entry`'s spawn recorded, or none without a config.
+#[must_use]
+pub fn recorded_env(entry: &HistoryEntry) -> &[(String, String)] {
+    entry
+        .spawn_config
+        .as_ref()
+        .map_or(&[], |config| config.extra_env.as_slice())
+}
+
 /// The history as the client lists it: every non-headless entry, newest end
 /// first, with the conversations it may be recovered into and what its folder
 /// is. `claude_home` is `None` when Claude Code's home can't be found, and
-/// then no entry has candidates.
+/// then no Claude entry has candidates. `codex_home` gives a Codex entry's
+/// home from its recorded environment rows.
 #[must_use]
 pub fn history_items(
     dirs: &Dirs,
     repos: &[RepoEntry],
     claude_home: Option<&Path>,
+    codex_home: impl Fn(&[(String, String)]) -> Option<PathBuf>,
 ) -> Vec<SessionHistoryItem> {
     let now = Utc::now();
     read_all(dirs)
         .into_iter()
         .filter(|entry| entry.mode != SessionMode::Headless)
-        .map(|entry| history_item(entry, repos, claude_home, now))
+        .map(|entry| history_item(entry, repos, claude_home, &codex_home, now))
         .collect()
 }
 
@@ -667,13 +678,19 @@ fn history_item(
     entry: HistoryEntry,
     repos: &[RepoEntry],
     claude_home: Option<&Path>,
+    codex_home: &impl Fn(&[(String, String)]) -> Option<PathBuf>,
     now: DateTime<Utc>,
 ) -> SessionHistoryItem {
     let folder = entry_folder(&entry).map(str::to_owned);
-    let candidates = match (claude_home, folder.as_deref()) {
-        (Some(home), Some(folder)) => conversation_candidates(&entry, home, folder, now),
+    // A Codex or Cursor session recovers as its own agent, never into a
+    // Claude conversation.
+    let candidates = match (entry.agent, claude_home, folder.as_deref()) {
+        (Agent::Claude, Some(home), Some(folder)) => {
+            conversation_candidates(&entry, home, folder, now)
+        }
         _ => Vec::new(),
     };
+    let own_agent_resumable = own_agent_resumable(&entry, codex_home);
     let folder_is_git_repo = folder
         .as_deref()
         .is_some_and(|folder| Path::new(folder).join(".git").exists());
@@ -686,7 +703,25 @@ fn history_item(
         candidates,
         folder_is_git_repo,
         folder_repo_id,
-        own_agent_resumable: false,
+        own_agent_resumable,
+    }
+}
+
+/// Whether recovering `entry` as its own agent resumes its conversation: a
+/// Codex entry whose recorded rollout is still under its Codex home, or a
+/// Cursor entry with a recorded chat.
+fn own_agent_resumable(
+    entry: &HistoryEntry,
+    codex_home: &impl Fn(&[(String, String)]) -> Option<PathBuf>,
+) -> bool {
+    let Some(id) = entry.agent_conversation_id.as_deref() else {
+        return false;
+    };
+    match entry.agent {
+        Agent::Claude => false,
+        Agent::Codex => codex_home(recorded_env(entry))
+            .is_some_and(|home| codex_rollout::rollout_exists(&home, id)),
+        Agent::Cursor => true,
     }
 }
 
@@ -804,30 +839,34 @@ pub fn branch_or_placeholder(current: anyhow::Result<Option<String>>) -> String 
     }
 }
 
-/// Plan how `item` recovers `entry`. A Claude session goes back under the
-/// repo or workspace in `registered` it ran in, with every member pinned to
-/// the folder it ran in, so recovery never checks out a branch or creates a
-/// worktree. `conversation_exists(folder, id)` says whether Claude Code still
-/// holds conversation `id` for `folder`. The error is the message the client
-/// shows for the item.
+/// Plan how `item` recovers `entry`. A session goes back under the repo or
+/// workspace in `registered` it ran in, with every member pinned to the
+/// folder it ran in, so recovery never checks out a branch or creates a
+/// worktree. A Claude session recovers as Claude (or a shell); a Codex or
+/// Cursor session only as its own agent. `conversation_exists(agent, folder,
+/// id)` says whether `agent` still holds conversation `id` for `folder`. The
+/// error is the message the client shows for the item.
 pub fn plan_recovery(
     entry: &HistoryEntry,
     item: &RecoverItem,
     registered: &Registered<'_>,
-    conversation_exists: impl Fn(&str, &str) -> bool,
+    conversation_exists: impl Fn(Agent, &str, &str) -> bool,
 ) -> Result<RecoveryPlan, String> {
     if entry.recovered_at.is_some() {
         return Err("already recovered".to_owned());
     }
+    if entry.mode == SessionMode::Headless {
+        return Err("a headless session can't be recovered".to_owned());
+    }
     if item.how == RecoverAs::Unknown {
         return Err("unsupported recovery kind".to_owned());
     }
-    if item.how == RecoverAs::OwnAgent {
-        return Err(OWN_AGENT_UNAVAILABLE.to_owned());
-    }
     let folder = entry_folder(entry).unwrap_or_default();
+    if entry.agent != Agent::Claude || item.how == RecoverAs::OwnAgent {
+        return own_agent_plan(entry, item, folder, registered, conversation_exists);
+    }
     if let Some(id) = &item.conversation_id
-        && !conversation_exists(folder, id)
+        && !conversation_exists(Agent::Claude, folder, id)
     {
         return Err(format!("conversation {id} not found for {folder}"));
     }
@@ -867,15 +906,58 @@ pub fn plan_recovery(
             request: shell_request(folder, item.conversation_id.as_deref()),
             register_repo: None,
         },
-        RecoverAs::OwnAgent => return Err(OWN_AGENT_UNAVAILABLE.to_owned()),
-        RecoverAs::Unknown => return Err("unsupported recovery kind".to_owned()),
+        RecoverAs::OwnAgent | RecoverAs::Unknown => {
+            return Err("unsupported recovery kind".to_owned());
+        }
     };
     Ok(plan)
 }
 
-/// Why a [`RecoverAs::OwnAgent`] item fails: this daemon cannot yet recover a
-/// session as its own agent.
-const OWN_AGENT_UNAVAILABLE: &str = "Recovering as the session's own agent isn't available yet.";
+/// A Codex or Cursor `entry` recovered as its own agent from its recorded
+/// spawn settings, pinned like a Claude recovery: resuming the item's
+/// conversation, which must be the one the entry recorded and still exist,
+/// else a fresh run with no first prompt. Refuses every other pairing of
+/// agent and kind.
+fn own_agent_plan(
+    entry: &HistoryEntry,
+    item: &RecoverItem,
+    folder: &str,
+    registered: &Registered<'_>,
+    conversation_exists: impl Fn(Agent, &str, &str) -> bool,
+) -> Result<RecoveryPlan, String> {
+    if entry.agent == Agent::Claude || item.how != RecoverAs::OwnAgent {
+        let name = agent_name(entry.agent);
+        return Err(format!("a {name} session recovers as {name}"));
+    }
+    let Some(config) = &entry.spawn_config else {
+        return Err("no spawn settings recorded".to_owned());
+    };
+    if let Some(id) = item.conversation_id.as_deref() {
+        if entry.agent_conversation_id.as_deref() != Some(id) {
+            return Err("not this session's conversation".to_owned());
+        }
+        if !conversation_exists(entry.agent, folder, id) {
+            return Err(format!("conversation {id} not found for {folder}"));
+        }
+    }
+    let mut request = recorded_request(entry, config, folder, registered);
+    request
+        .resume_conversation
+        .clone_from(&item.conversation_id);
+    Ok(RecoveryPlan {
+        request,
+        register_repo: None,
+    })
+}
+
+/// The agent's name as a recovery refusal says it.
+fn agent_name(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "Claude",
+        Agent::Codex => "Codex",
+        Agent::Cursor => "Cursor",
+    }
+}
 
 fn required_conversation(item: &RecoverItem) -> Result<&str, String> {
     item.conversation_id
@@ -893,21 +975,37 @@ fn claude_request(
     conversation: &str,
     registered: &Registered<'_>,
 ) -> SpawnRequest {
-    let members = entry_members(entry, folder, registered.repos);
     let Some(config) = &entry.spawn_config else {
+        let members = entry_members(entry, folder, registered.repos);
         let target = folder_target(entry, &members, registered);
         return folder_claude(entry, target, conversation);
     };
-    let mut request = config.to_clone_request();
-    request.mode = SessionMode::Interactive;
-    if request.agent() != Agent::Claude {
+    let mut request = recorded_request(entry, config, folder, registered);
+    // A plain shell's record says Claude while its stored config may carry
+    // the spawn dialog's options for another agent.
+    if request.mode == SessionMode::PlainShell {
         request.agent_options = AgentOptions::Claude {
             permission_mode: None,
         };
     }
+    request.mode = SessionMode::Interactive;
+    request.resume_conversation = Some(conversation.to_owned());
+    request
+}
+
+/// `config` as a request with its recorded target pinned to the folders the
+/// session ran in, else the registered workspace or repo its folders are,
+/// else its folder; no first prompt and no injector.
+fn recorded_request(
+    entry: &HistoryEntry,
+    config: &SpawnConfig,
+    folder: &str,
+    registered: &Registered<'_>,
+) -> SpawnRequest {
+    let members = entry_members(entry, folder, registered.repos);
+    let mut request = config.to_clone_request();
     request.target = pin_recorded(&config.target, &members, registered)
         .unwrap_or_else(|| folder_target(entry, &members, registered));
-    request.resume_conversation = Some(conversation.to_owned());
     request
 }
 
@@ -2000,7 +2098,7 @@ mod recovery_tests {
         workspaces: &[WorkspaceEntry],
     ) -> Result<RecoveryPlan, String> {
         let registered = Registered { repos, workspaces };
-        plan_recovery(entry, item, &registered, |_, _| true)
+        plan_recovery(entry, item, &registered, |_, _, _| true)
     }
 
     fn repo(id: &str, path: &str) -> RepoEntry {
@@ -2078,8 +2176,10 @@ mod recovery_tests {
                 repos: &[],
                 workspaces: &[],
             },
-            |folder, id| {
-                asked.borrow_mut().push((folder.to_owned(), id.to_owned()));
+            |agent, folder, id| {
+                asked
+                    .borrow_mut()
+                    .push((agent, folder.to_owned(), id.to_owned()));
                 false
             },
         );
@@ -2089,7 +2189,7 @@ mod recovery_tests {
         );
         assert_eq!(
             *asked.borrow(),
-            [(r"D:\yaat".to_owned(), "gone".to_owned())]
+            [(Agent::Claude, r"D:\yaat".to_owned(), "gone".to_owned())]
         );
     }
 
@@ -2159,7 +2259,7 @@ mod recovery_tests {
     }
 
     #[test]
-    fn claude_from_a_shell_or_codex_config_is_forced_to_interactive_claude() {
+    fn claude_from_a_shell_config_is_forced_to_interactive_claude() {
         let mut entry = folder_only(vec![member("r1", r"D:\repo")]);
         let mut config = workspace_config();
         config.mode = SessionMode::PlainShell;
@@ -2172,6 +2272,243 @@ mod recovery_tests {
 
         assert_eq!(req.mode, SessionMode::Interactive);
         assert_eq!(req.agent(), Agent::Claude);
+        assert_eq!(req.resume_conversation.as_deref(), Some(CONV));
+    }
+
+    const CODEX_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    const CODEX_FOLDER: &str = r"C:\wt\repo";
+
+    fn codex_config() -> SpawnConfig {
+        SpawnConfig {
+            target: SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: "feat/x".to_owned(),
+                base_branch: Some("main".to_owned()),
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Codex {
+                sandbox: Some(protocol::CodexSandbox::WorkspaceWrite),
+            },
+            model: Some("gpt-5-codex".to_owned()),
+            extra_env: vec![("CODEX_HOME".to_owned(), r"D:\codex-home".to_owned())],
+        }
+    }
+
+    /// A Codex session in one repo's worktree, with its spawn config and
+    /// the conversation id `id` when one was captured.
+    fn codex_entry(id: Option<&str>) -> HistoryEntry {
+        let mut entry = folder_only(vec![member("r1", CODEX_FOLDER)]);
+        entry.agent = Agent::Codex;
+        entry.agent_conversation_id = id.map(str::to_owned);
+        entry.spawn_config = Some(codex_config());
+        entry
+    }
+
+    fn codex_plan(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveryPlan, String> {
+        plan_in(entry, item, &[repo("r1", r"D:\repo")], &[])
+    }
+
+    #[test]
+    fn own_agent_resumes_a_codex_entry_pinned_to_its_folder() {
+        let entry = codex_entry(Some(CODEX_ID));
+
+        let plan = codex_plan(&entry, &item(RecoverAs::OwnAgent, Some(CODEX_ID))).expect("plan");
+
+        assert_eq!(plan.register_repo, None);
+        let req = plan.request;
+        assert_eq!(
+            req.target,
+            SpawnTarget::Single {
+                repo_id: "r1".to_owned(),
+                branch_name: "feat/x".to_owned(),
+                base_branch: Some("main".to_owned()),
+                use_worktree: true,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: Some(CODEX_FOLDER.to_owned()),
+            }
+        );
+        assert_every_member_pinned(&req.target, 1);
+        assert_eq!(req.agent_options, codex_config().agent_options);
+        assert_eq!(req.mode, SessionMode::Interactive);
+        assert_eq!(req.model.as_deref(), Some("gpt-5-codex"));
+        assert!(!req.dangerously_skip_permissions);
+        assert_eq!(req.extra_env, codex_config().extra_env);
+        assert_eq!(req.resume_conversation.as_deref(), Some(CODEX_ID));
+        assert_eq!(req.initial_prompt, None);
+        assert_eq!(req.prompt_injector, None);
+    }
+
+    #[test]
+    fn own_agent_without_id_is_a_fresh_run() {
+        for recorded in [None, Some(CODEX_ID)] {
+            let entry = codex_entry(recorded);
+            let req = plan_recovery(
+                &entry,
+                &item(RecoverAs::OwnAgent, None),
+                &Registered {
+                    repos: &[repo("r1", r"D:\repo")],
+                    workspaces: &[],
+                },
+                |_, _, _| false,
+            )
+            .expect("plan")
+            .request;
+
+            assert_eq!(req.agent(), Agent::Codex);
+            assert_eq!(req.resume_conversation, None, "recorded {recorded:?}");
+            assert_eq!(req.initial_prompt, None);
+            assert_eq!(req.prompt_injector, None);
+            assert_every_member_pinned(&req.target, 1);
+        }
+    }
+
+    #[test]
+    fn own_agent_with_another_id_fails() {
+        for recorded in [None, Some(CODEX_ID)] {
+            assert_eq!(
+                codex_plan(
+                    &codex_entry(recorded),
+                    &item(RecoverAs::OwnAgent, Some("0199ffff-other"))
+                ),
+                Err("not this session's conversation".to_owned()),
+                "recorded {recorded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn own_agent_with_a_gone_rollout_fails() {
+        let entry = codex_entry(Some(CODEX_ID));
+        let result = plan_recovery(
+            &entry,
+            &item(RecoverAs::OwnAgent, Some(CODEX_ID)),
+            &Registered {
+                repos: &[],
+                workspaces: &[],
+            },
+            |_, _, _| false,
+        );
+        assert_eq!(
+            result,
+            Err(format!(
+                "conversation {CODEX_ID} not found for {CODEX_FOLDER}"
+            ))
+        );
+    }
+
+    #[test]
+    fn own_agent_without_spawn_config_fails() {
+        let mut entry = codex_entry(Some(CODEX_ID));
+        entry.spawn_config = None;
+        for conversation in [None, Some(CODEX_ID)] {
+            assert_eq!(
+                codex_plan(&entry, &item(RecoverAs::OwnAgent, conversation)),
+                Err("no spawn settings recorded".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn own_agent_on_a_claude_entry_fails() {
+        let mut entry = folder_only(vec![member("r1", CODEX_FOLDER)]);
+        entry.spawn_config = Some(workspace_config());
+        for conversation in [None, Some(CONV)] {
+            assert_eq!(
+                plan(&entry, &item(RecoverAs::OwnAgent, conversation)),
+                Err("a Claude session recovers as Claude".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_entry_refuses_claude_recovery() {
+        let register = RecoverAs::RegisterRepoThenClaude {
+            path: CODEX_FOLDER.to_owned(),
+        };
+        for how in [RecoverAs::Claude, register, RecoverAs::Shell] {
+            assert_eq!(
+                codex_plan(&codex_entry(Some(CODEX_ID)), &item(how.clone(), Some(CONV))),
+                Err("a Codex session recovers as Codex".to_owned()),
+                "{how:?}"
+            );
+            let mut cursor = codex_entry(None);
+            cursor.agent = Agent::Cursor;
+            assert_eq!(
+                codex_plan(&cursor, &item(how.clone(), Some(CONV))),
+                Err("a Cursor session recovers as Cursor".to_owned()),
+                "{how:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_headless_entry_is_refused() {
+        let register = RecoverAs::RegisterRepoThenClaude {
+            path: CODEX_FOLDER.to_owned(),
+        };
+        let mut claude = folder_only(vec![member("r1", CODEX_FOLDER)]);
+        claude.mode = SessionMode::Headless;
+        let mut codex = codex_entry(Some(CODEX_ID));
+        codex.mode = SessionMode::Headless;
+        for entry in [&claude, &codex] {
+            for how in [
+                RecoverAs::Claude,
+                register.clone(),
+                RecoverAs::Shell,
+                RecoverAs::OwnAgent,
+                RecoverAs::Unknown,
+            ] {
+                assert_eq!(
+                    codex_plan(entry, &item(how.clone(), Some(CODEX_ID))),
+                    Err("a headless session can't be recovered".to_owned()),
+                    "{:?} {how:?}",
+                    entry.agent
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn own_agent_is_planned_before_any_claude_transcript_lookup() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let lookup = |agent: Agent, folder: &str, id: &str| {
+            asked
+                .borrow_mut()
+                .push((agent, folder.to_owned(), id.to_owned()));
+            true
+        };
+        let registered = Registered {
+            repos: &[],
+            workspaces: &[],
+        };
+        let entry = codex_entry(Some(CODEX_ID));
+
+        plan_recovery(
+            &entry,
+            &item(RecoverAs::OwnAgent, Some(CODEX_ID)),
+            &registered,
+            lookup,
+        )
+        .expect("plan");
+        let refused = plan_recovery(
+            &entry,
+            &item(RecoverAs::Claude, Some(CONV)),
+            &registered,
+            lookup,
+        );
+
+        assert!(refused.is_err());
+        assert_eq!(
+            *asked.borrow(),
+            [(Agent::Codex, CODEX_FOLDER.to_owned(), CODEX_ID.to_owned())],
+            "only the Codex rollout is looked up"
+        );
     }
 
     #[test]
@@ -2627,7 +2964,7 @@ mod recovery_tests {
                 .expect("repo"),
         ];
 
-        let items = history_items(&dirs, &repos, Some(&home));
+        let items = history_items(&dirs, &repos, Some(&home), |_| None);
 
         let ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
         assert_eq!(ids, ["known", "gone", "shell"], "headless is left out");
@@ -2660,7 +2997,7 @@ mod recovery_tests {
         assert!(items[2].folder_is_git_repo, "a .git file counts");
         assert_eq!(items[2].folder_repo_id, None);
 
-        let no_home = history_items(&dirs, &repos, None);
+        let no_home = history_items(&dirs, &repos, None, |_| None);
         assert!(no_home.iter().all(|i| i.candidates.is_empty()));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
@@ -2677,7 +3014,7 @@ mod recovery_tests {
         write_transcript(&home, folder, "within-a-day", ended - TimeDelta::hours(20));
         write_transcript(&home, folder, "too-old", ended - TimeDelta::hours(25));
 
-        let items = history_items(&dirs, &[], Some(&home));
+        let items = history_items(&dirs, &[], Some(&home), |_| None);
 
         let ids: Vec<&str> = items[0].candidates.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["within-a-day"]);
@@ -2698,7 +3035,7 @@ mod recovery_tests {
             write_transcript(&home, &folder, id, *at);
         }
         write_if_absent(&dirs, e).expect("write entry");
-        let items = history_items(&dirs, &[], Some(&home));
+        let items = history_items(&dirs, &[], Some(&home), |_| None);
         let _ = std::fs::remove_dir_all(&dirs.config);
         items[0].candidates.iter().map(|c| c.id.clone()).collect()
     }
@@ -2756,5 +3093,129 @@ mod recovery_tests {
             candidate_ids("items-known-end", &e, &transcripts),
             ["in-grace", "in-session"]
         );
+    }
+
+    /// An interactive `agent` entry in `folder` whose spawn recorded
+    /// `CODEX_HOME=<codex_home>`, with its conversation id when given, and a
+    /// Claude transcript written in its window (a Claude entry would get it
+    /// as a candidate).
+    fn agent_entry(
+        dirs: &Dirs,
+        agent: Agent,
+        session_id: &str,
+        conversation: Option<&str>,
+        codex_home: &Path,
+    ) -> HistoryEntry {
+        let folder = dirs.config.join("agent-folder");
+        let folder = folder.to_string_lossy();
+        let ended = DateTime::from_timestamp(Utc::now().timestamp() - 600, 0).expect("time");
+        let mut entry = history_entry(session_id, SessionMode::Interactive, &folder, ended);
+        entry.agent = agent;
+        entry.agent_conversation_id = conversation.map(str::to_owned);
+        let mut config = codex_config();
+        config.extra_env = vec![(
+            "CODEX_HOME".to_owned(),
+            codex_home.to_string_lossy().into_owned(),
+        )];
+        entry.spawn_config = Some(config);
+        write_transcript(
+            &dirs.config.join("claude-home"),
+            &folder,
+            &format!("claude-{session_id}"),
+            ended - TimeDelta::minutes(5),
+        );
+        write_if_absent(dirs, &entry).expect("write entry");
+        entry
+    }
+
+    /// Items for `dirs`, the Codex home read from each entry's own
+    /// `CODEX_HOME` row.
+    fn agent_items(dirs: &Dirs) -> HashMap<String, SessionHistoryItem> {
+        let codex_home = |env: &[(String, String)]| {
+            env.iter()
+                .find(|(name, _)| name == "CODEX_HOME")
+                .map(|(_, value)| PathBuf::from(value))
+        };
+        history_items(
+            dirs,
+            &[],
+            Some(&dirs.config.join("claude-home")),
+            codex_home,
+        )
+        .into_iter()
+        .map(|item| (item.entry.session_id.clone(), item))
+        .collect()
+    }
+
+    #[test]
+    fn codex_history_item_has_no_candidates_and_resumable_follows_rollout() {
+        let dirs = scratch_dirs("items-codex");
+        let codex_home = dirs.config.join("codex-home");
+        let day = codex_home
+            .join("sessions")
+            .join("2026")
+            .join("09")
+            .join("28");
+        std::fs::create_dir_all(&day).expect("day folder");
+        std::fs::write(
+            day.join(format!("rollout-2026-09-28T10-00-00-{CODEX_ID}.jsonl")),
+            "{}\n",
+        )
+        .expect("rollout");
+        agent_entry(&dirs, Agent::Codex, "kept", Some(CODEX_ID), &codex_home);
+        agent_entry(
+            &dirs,
+            Agent::Codex,
+            "gone",
+            Some("0199ffff-gone"),
+            &codex_home,
+        );
+        agent_entry(&dirs, Agent::Codex, "none", None, &codex_home);
+        agent_entry(
+            &dirs,
+            Agent::Codex,
+            "other-home",
+            Some(CODEX_ID),
+            &dirs.config.join("elsewhere"),
+        );
+        agent_entry(&dirs, Agent::Claude, "claude", None, &codex_home);
+
+        let items = agent_items(&dirs);
+
+        assert_eq!(items.len(), 5);
+        for id in ["kept", "gone", "none", "other-home"] {
+            assert!(
+                items[id].candidates.is_empty(),
+                "{id} gets no Claude transcripts"
+            );
+        }
+        assert!(
+            !items["claude"].candidates.is_empty(),
+            "a Claude entry still does"
+        );
+        assert!(items["kept"].own_agent_resumable);
+        assert!(!items["gone"].own_agent_resumable, "its rollout is gone");
+        assert!(!items["none"].own_agent_resumable, "no id recorded");
+        assert!(
+            !items["other-home"].own_agent_resumable,
+            "looked up under the entry's own Codex home"
+        );
+        assert!(!items["claude"].own_agent_resumable);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn cursor_history_item_resumable_when_id_recorded() {
+        let dirs = scratch_dirs("items-cursor");
+        let nowhere = dirs.config.join("no-codex-home");
+        agent_entry(&dirs, Agent::Cursor, "chat", Some(CODEX_ID), &nowhere);
+        agent_entry(&dirs, Agent::Cursor, "no-chat", None, &nowhere);
+
+        let items = agent_items(&dirs);
+
+        assert!(items["chat"].own_agent_resumable);
+        assert!(!items["no-chat"].own_agent_resumable);
+        assert!(items.values().all(|item| item.candidates.is_empty()));
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

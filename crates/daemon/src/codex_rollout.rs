@@ -165,13 +165,6 @@ fn codex_home_from(
 /// 19-character local time and `-`, up to `_` or `.jsonl`. Compressed
 /// (`.jsonl.zst`) names count.
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only rollout_exists uses it, and only the tests call that"
-    )
-)]
 pub fn id_from_file_name(name: &str) -> Option<&str> {
     name_parts(name).map(|(_, id)| id)
 }
@@ -352,7 +345,6 @@ pub fn find_rollout(
 /// Whether any day folder under `<home>/sessions` holds a rollout for `id`.
 /// Reads file names only.
 #[must_use]
-#[cfg_attr(not(test), expect(dead_code, reason = "only the tests call it"))]
 pub fn rollout_exists(home: &Path, id: &str) -> bool {
     list_dir(&home.join("sessions"))
         .iter()

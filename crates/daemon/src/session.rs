@@ -1402,11 +1402,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 
-    #[test]
-    fn abandoned_insert_keeps_agent_conversation_id() {
-        use crate::history::test_support::scratch_dirs;
-        let dirs = scratch_dirs("abandoned-agent-conversation-id");
-        let registry = SessionRegistry::new(dirs.clone());
+    /// A Codex session's sidecar carrying a captured conversation id.
+    fn codex_meta_with_conversation() -> OrphanMeta {
         let mut meta = crate::orphan::meta_from_record(
             "s1".to_string(),
             1,
@@ -1428,14 +1425,53 @@ mod tests {
         )
         .expect("build meta");
         meta.agent_conversation_id = Some("019a2b3c-codex".to_string());
+        meta
+    }
 
-        registry.insert_abandoned(&meta);
-
-        let arc = registry.get("s1").expect("the abandoned session");
+    fn assert_keeps_agent_conversation_id(registry: &SessionRegistry) {
+        let arc = registry.get("s1").expect("the inserted session");
         assert_eq!(
             lock(&arc).agent_conversation_id.as_deref(),
             Some("019a2b3c-codex")
         );
+    }
+
+    #[test]
+    fn abandoned_insert_keeps_agent_conversation_id() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("abandoned-agent-conversation-id");
+        let registry = SessionRegistry::new(dirs.clone());
+
+        registry.insert_abandoned(&codex_meta_with_conversation());
+
+        assert_keeps_agent_conversation_id(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn orphan_insert_keeps_agent_conversation_id() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("orphan-agent-conversation-id");
+        let registry = SessionRegistry::new(dirs.clone());
+
+        registry.insert_orphan(&codex_meta_with_conversation());
+
+        assert_keeps_agent_conversation_id(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn reattached_insert_keeps_agent_conversation_id() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("reattached-agent-conversation-id");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+
+        registry
+            .insert_reattached(&codex_meta_with_conversation(), pty)
+            .publish();
+
+        assert_keeps_agent_conversation_id(&registry);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

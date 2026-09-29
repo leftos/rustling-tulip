@@ -793,11 +793,13 @@ pub struct SpawnRequest {
     /// requester. Broadcasts never carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// The agent's conversation to resume: an interactive Claude spawn passes
-    /// `--resume <id>` instead of a fresh `--session-id`, and no initial
-    /// prompt. A daemon that cannot resume the chosen agent's conversation
-    /// ignores it and starts a fresh run. Not part of [`SpawnConfig`], so it
-    /// is never replayed.
+    /// The agent's conversation to resume. An interactive Claude spawn passes
+    /// `--resume <id>` instead of a fresh `--session-id`, and Codex runs
+    /// `codex resume <id>`; both drop the initial prompt. Cursor passes
+    /// `--resume <id>` and still sends the initial prompt, so a client that
+    /// wants a prompt-free resume sends none. A daemon that cannot resume the
+    /// chosen agent's conversation ignores it and starts a fresh run. Not
+    /// part of [`SpawnConfig`], so it is never replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_conversation: Option<String>,
 }
