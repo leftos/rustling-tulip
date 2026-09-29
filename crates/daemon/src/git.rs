@@ -1407,6 +1407,18 @@ mod tests {
         root
     }
 
+    /// A path beside `repo` named after the repo's own leaf, so two test runs
+    /// sharing the shared temp dir never collide on a fixed sibling name.
+    fn sibling(repo: &Path, suffix: &str) -> PathBuf {
+        repo.with_file_name(format!(
+            "{}-{suffix}",
+            repo.file_name()
+                .expect("repo leaf")
+                .to_string_lossy()
+                .into_owned()
+        ))
+    }
+
     fn write_file(repo: &Path, name: &str, body: &str) {
         std::fs::write(repo.join(name), body).expect("write file");
     }
@@ -1525,7 +1537,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_from_remote_ref_skips_the_stale_local_branch() {
         let repo = init_stale_repo("wt-remote-base", 4).await;
-        let wt = repo.with_file_name("rt-wt-remote-base-tree");
+        let wt = sibling(&repo, "remote-base-tree");
         let _ = std::fs::remove_dir_all(&wt);
 
         worktree_add(&repo, &wt, "wt/fresh", Some("origin/main"))
@@ -1554,7 +1566,7 @@ mod tests {
     #[tokio::test]
     async fn recreating_a_worktree_moves_it_off_the_stale_base() {
         let repo = init_stale_repo("wt-recreate", 5).await;
-        let wt = repo.with_file_name("rt-wt-recreate-tree");
+        let wt = sibling(&repo, "recreate-tree");
         let _ = std::fs::remove_dir_all(&wt);
 
         worktree_add(&repo, &wt, "wt/stale", Some("main"))
@@ -1758,13 +1770,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_holding_branch_finds_the_checkout() {
         let repo = init_repo("holder").await;
-        let wt = repo.with_file_name(format!(
-            "{}-wt",
-            repo.file_name()
-                .expect("repo leaf")
-                .to_string_lossy()
-                .into_owned()
-        ));
+        let wt = sibling(&repo, "wt");
         let _ = std::fs::remove_dir_all(&wt);
         worktree_add(&repo, &wt, "wt/held", Some("main"))
             .await
@@ -1950,7 +1956,7 @@ mod tests {
     #[tokio::test]
     async fn worktree_add_rejects_remote_tracking_branch_name() {
         let repo = init_stale_repo("wt-remote-name", 1).await;
-        let wt = repo.with_file_name("rt-wt-remote-name-tree");
+        let wt = sibling(&repo, "remote-name-tree");
         let _ = std::fs::remove_dir_all(&wt);
 
         let result = worktree_add(&repo, &wt, "origin/main", Some("origin/main")).await;
