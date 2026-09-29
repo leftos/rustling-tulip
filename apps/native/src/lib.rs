@@ -36,6 +36,7 @@ mod mouse;
 mod move_panes;
 mod move_panes_view;
 mod needs_you;
+mod needs_you_view;
 mod net;
 mod notice_view;
 mod notices;
@@ -149,6 +150,7 @@ pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
     MoreRow,
 };
+pub use crate::needs_you_view::NeedsYouEntry;
 pub use crate::net::{
     EnsureFuture, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS, NetCommand, NetDeps, NetEvent,
     StopFuture, spawn_with as spawn_net,
@@ -570,6 +572,8 @@ pub struct RootView {
     /// Recovered sessions to place, one batch per answer, waiting for every
     /// snapshot of their batch.
     recover_batches: Vec<Vec<String>>,
+    /// Repaints the Needs You panel while it shows, so its waits count up.
+    needs_you_timer: Option<Task<()>>,
 }
 
 impl RootView {
@@ -685,7 +689,7 @@ impl RootView {
             .as_deref()
             .map_or_else(UiState::default, load_ui_state);
         cx.set_global(mouse::CopyOnSelect(ui.general.copy_on_select));
-        Self {
+        let mut view = Self {
             tx,
             now,
             conn: Connection::new(),
@@ -779,7 +783,10 @@ impl RootView {
             recover_timer: None,
             recover_requests: HashMap::new(),
             recover_batches: Vec::new(),
-        }
+            needs_you_timer: None,
+        };
+        view.arm_needs_you_repaint(cx);
+        view
     }
 
     /// Sends a request to close the window through the quit flow.
@@ -1139,6 +1146,7 @@ impl RootView {
         } else {
             self.seed_history();
         }
+        self.arm_needs_you_repaint(cx);
         cx.notify();
     }
 

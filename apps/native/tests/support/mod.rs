@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use gpui::{
     App, Bounds, Entity, InputHandler, KeyDownEvent, Keystroke, Modifiers, MouseButton,
@@ -42,6 +43,18 @@ fn side_part_shown(root: &RootView, selector: &str) -> bool {
         "sidebar-divider" => open,
         "activity-badge" => root.activity_badge().is_some(),
         "recover-badge" => root.recover_badge().is_some(),
+        "needs-you-badge" => root.needs_you_badge().is_some(),
+        "needs-you-panel" | "needs-you-header" => open && root.activity() == Activity::NeedsYou,
+        "needs-you-empty" => {
+            open && root.activity() == Activity::NeedsYou && root.needs_you_rows().is_empty()
+        }
+        _ if selector.starts_with("needs-you-row-") => {
+            open && root.activity() == Activity::NeedsYou
+                && root
+                    .needs_you_rows()
+                    .iter()
+                    .any(|row| selector.strip_prefix("needs-you-row-") == Some(&row.session_id))
+        }
         "sc-picker-menu" => sc_picker_shown(root),
         _ if selector.starts_with("sc-picker-") => {
             sc_picker_shown(root)
@@ -309,6 +322,11 @@ impl SessionBuilder {
 
     pub fn status(self, status: &str) -> Self {
         self.set("status", json!(status))
+    }
+
+    /// When the status last changed.
+    pub fn status_since(self, at: DateTime<Utc>) -> Self {
+        self.set("status_since", json!(at))
     }
 
     pub fn in_repo(self, repo_id: &str) -> Self {

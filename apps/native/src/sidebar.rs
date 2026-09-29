@@ -213,9 +213,15 @@ pub enum CwdHome {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
-    #[default]
-    Sessions,
     SourceControl,
+    /// The sessions waiting on the user.
+    NeedsYou,
+    /// The sessions panel; also what a value this build does not know loads
+    /// as, so a newer build's panel keeps the rest of the file (`serde(other)`
+    /// must be the last variant).
+    #[default]
+    #[serde(other)]
+    Sessions,
 }
 
 /// The persisted sidebar layout.
@@ -2473,5 +2479,32 @@ mod tests {
         assert_eq!(load_ui_state(&dir.0).sidebar_view, SidebarView::Repos);
         std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_view": "tabs" }"#).expect("write");
         assert_eq!(load_ui_state(&dir.0).sidebar_view, SidebarView::Tabs);
+    }
+
+    #[test]
+    fn activity_round_trips_needs_you() {
+        let text = serde_json::to_string(&Activity::NeedsYou).expect("serialise");
+        assert_eq!(text, r#""needs_you""#);
+        let back: Activity = serde_json::from_str(&text).expect("deserialise");
+        assert_eq!(back, Activity::NeedsYou);
+        let source_control: Activity =
+            serde_json::from_str(r#""source_control""#).expect("deserialise");
+        assert_eq!(source_control, Activity::SourceControl);
+    }
+
+    #[test]
+    fn unknown_activity_loads_as_sessions() {
+        let dir = TestDir::new("unknown-activity");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "activity": "timeline", "sidebar_width": 333.0 }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.activity, Activity::Sessions);
+        assert!(
+            (loaded.sidebar_width - 333.0).abs() < f32::EPSILON,
+            "the rest of the file still loads"
+        );
     }
 }

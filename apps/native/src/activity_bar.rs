@@ -1,11 +1,12 @@
-//! The activity rail at the window's left edge: Sessions and Source control,
-//! which pick the panel beside it and fold it, the badge counting the
-//! uncommitted changes, and at the bottom the Recover sessions button with
+//! The activity rail at the window's left edge: Sessions, Needs You and
+//! Source control, which pick the panel beside it and fold it, the badges
+//! counting the sessions waiting on the user and the uncommitted changes, and
+//! at the bottom the Recover sessions button with
 //! its badge and the Settings gear.
 
 use gpui::{ClickEvent, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, svg};
 
-use crate::assets::{RECOVER_ICON, SESSIONS_ICON, SOURCE_CONTROL_ICON};
+use crate::assets::{NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SOURCE_CONTROL_ICON};
 use crate::sidebar::Activity;
 use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, WARNING, tooltip};
 
@@ -29,10 +30,11 @@ pub fn badge_text(count: usize) -> Option<String> {
     }
 }
 
-/// A rail item's tooltip, in the Tauri client's words.
-fn item_tip(label: &str, badge: usize, active: bool, collapsed: bool) -> String {
+/// A rail item's tooltip, in the Tauri client's words; `noun` says what the
+/// badge counts.
+fn item_tip(label: &str, badge: usize, noun: &str, active: bool, collapsed: bool) -> String {
     let base = if badge > 0 {
-        format!("{label} ({badge} uncommitted)")
+        format!("{label} ({badge} {noun})")
     } else {
         label.to_owned()
     };
@@ -53,6 +55,10 @@ struct Item {
     label: &'static str,
     icon: &'static str,
     badge: usize,
+    badge_selector: &'static str,
+    badge_color: u32,
+    /// What the badge counts, in the tooltip.
+    noun: &'static str,
 }
 
 impl RootView {
@@ -70,6 +76,7 @@ impl RootView {
 
     /// The rail, always shown, left of the panel.
     pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> Div {
+        let accent = self.sidebar.appearance(None).accent.value;
         let items = [
             Item {
                 activity: Activity::Sessions,
@@ -77,6 +84,19 @@ impl RootView {
                 label: "Sessions",
                 icon: SESSIONS_ICON,
                 badge: 0,
+                badge_selector: "activity-sessions-badge",
+                badge_color: accent,
+                noun: "",
+            },
+            Item {
+                activity: Activity::NeedsYou,
+                selector: "activity-needs-you",
+                label: "Needs You",
+                icon: NEEDS_YOU_ICON,
+                badge: self.needs_you_count(),
+                badge_selector: "needs-you-badge",
+                badge_color: WARNING,
+                noun: "waiting on you",
             },
             Item {
                 activity: Activity::SourceControl,
@@ -84,6 +104,9 @@ impl RootView {
                 label: "Source control",
                 icon: SOURCE_CONTROL_ICON,
                 badge: self.sc_badge(),
+                badge_selector: "activity-badge",
+                badge_color: accent,
+                noun: "uncommitted",
             },
         ];
         div()
@@ -138,9 +161,11 @@ impl RootView {
                 )
             })
             .when_some(badge_text(item.badge), |row, text| {
-                row.child(badge("activity-badge", text, accent))
+                row.child(badge(item.badge_selector, text, item.badge_color))
             })
-            .tooltip(tooltip(item_tip(item.label, item.badge, active, collapsed)))
+            .tooltip(tooltip(item_tip(
+                item.label, item.badge, item.noun, active, collapsed,
+            )))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                 this.click_activity(activity, window, cx);
             }))
@@ -160,6 +185,7 @@ impl RootView {
         } else {
             self.seed_history();
         }
+        self.arm_needs_you_repaint(cx);
         cx.notify();
     }
 }
@@ -230,4 +256,26 @@ fn settings_gear(cx: &mut Context<RootView>) -> Stateful<Div> {
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.open_settings(window, cx);
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_tip_uses_each_items_noun() {
+        assert_eq!(
+            item_tip("Needs You", 3, "waiting on you", false, false),
+            "Needs You (3 waiting on you) — click to show (Ctrl+B)"
+        );
+        assert_eq!(
+            item_tip("Source control", 2, "uncommitted", true, false),
+            "Source control (2 uncommitted) — click to collapse sidebar (Ctrl+B)"
+        );
+        assert_eq!(
+            item_tip("Sessions", 0, "", false, true),
+            "Sessions — click to open (Ctrl+B)",
+            "no badge, no count"
+        );
+    }
 }

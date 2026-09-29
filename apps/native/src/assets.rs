@@ -13,9 +13,11 @@ pub(crate) const SOURCE_CONTROL_ICON: &str = "icons/source-control.svg";
 pub(crate) const REFRESH_ICON: &str = "icons/refresh.svg";
 /// The rail's Recover sessions icon.
 pub(crate) const RECOVER_ICON: &str = "icons/recover.svg";
+/// The rail's Needs You icon.
+pub(crate) const NEEDS_YOU_ICON: &str = "icons/needs-you.svg";
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 4] = [
+const ASSETS: [(&str, &[u8]); 5] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -26,6 +28,10 @@ const ASSETS: [(&str, &[u8]); 4] = [
     ),
     (REFRESH_ICON, include_bytes!("../assets/icons/refresh.svg")),
     (RECOVER_ICON, include_bytes!("../assets/icons/recover.svg")),
+    (
+        NEEDS_YOU_ICON,
+        include_bytes!("../assets/icons/needs-you.svg"),
+    ),
 ];
 
 /// The bundled assets; the app registers it with `Application::with_assets`.

@@ -23,8 +23,8 @@ use crate::{
     drag_handle, status_dot, tooltip,
 };
 
-const ROW_HEIGHT: f32 = 22.0;
-const ROW_PADDING: f32 = 8.0;
+pub(crate) const ROW_HEIGHT: f32 = 22.0;
+pub(crate) const ROW_PADDING: f32 = 8.0;
 const LEAF_INDENT: f32 = 22.0;
 const SELECTED_BG: u32 = 0x0037_3a44;
 const TAG_TEXT_SIZE: f32 = 10.0;
@@ -48,6 +48,7 @@ impl RootView {
             let panel = match self.sidebar.activity() {
                 Activity::Sessions => self.sidebar_panel(width, cx),
                 Activity::SourceControl => self.source_control_view(width, cx),
+                Activity::NeedsYou => self.needs_you_view(width, cx),
             };
             row.child(panel).child(divider(active, cx))
         };

@@ -3,11 +3,6 @@
 //! Plain Rust over the sidebar model, so the list is unit-testable without
 //! GPUI; the view in `needs_you_view` draws these rows.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired into the Needs You view in NY.3")
-)]
-
 use crate::appearance;
 use crate::sidebar::{Leaf, SidebarModel};
 use chrono::{DateTime, Utc};
@@ -312,6 +307,21 @@ mod tests {
         assert_eq!(listed[0].since, Some(stamp(-300)));
         assert_eq!(listed[2].since, None, "an unstamped wait sorts last");
         assert_eq!(listed[3].reason, Reason::Ended);
+    }
+
+    #[test]
+    fn ended_row_carries_status_since() {
+        let mut stopped = ended("s1", SessionStatus::Stopped, Some(1));
+        stopped.status_since = Some(stamp(-90));
+        let mut model = list(vec![stopped]);
+        attend(&mut model, "s1");
+        let listed = rows(&model);
+        assert_eq!(listed[0].reason, Reason::Ended);
+        assert_eq!(
+            listed[0].since,
+            Some(stamp(-90)),
+            "an ended row reads the time since it ended"
+        );
     }
 
     #[test]
