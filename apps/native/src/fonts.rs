@@ -1,6 +1,6 @@
-//! The terminal's fonts: the families the client bundles, the font settings
-//! a pane renders with, and how a requested family resolves against the
-//! fonts the text system knows.
+//! The client's fonts: the terminal families and the interface family it
+//! bundles, the font settings a pane renders with, and how a requested
+//! family resolves against the fonts the text system knows.
 
 use std::borrow::Cow;
 
@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 /// The family a pane renders in when the settings name none.
 pub const DEFAULT_FAMILY: &str = "Geist Mono";
+/// The family the client's own interface draws in; terminal panes draw in
+/// their own.
+pub const UI_FAMILY: &str = "Schibsted Grotesk";
 pub const DEFAULT_SIZE: f32 = 13.0;
 /// The smallest size any level may set: the protocol's.
 pub const MIN_SIZE: f32 = *protocol::TERMINAL_FONT_SIZES.start() as f32;
@@ -86,6 +89,36 @@ const BUNDLED_FILES: [Face; 14] = [
     italic(include_bytes!(
         "../assets/fonts/CascadiaCode/CascadiaCode-BoldItalic.ttf"
     )),
+];
+
+/// A bundled UI face and the weight its `OS/2` table declares.
+struct UiFace {
+    data: &'static [u8],
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the tests check each face's weight against it")
+    )]
+    weight: u16,
+}
+
+/// The bundled UI faces of [`UI_FAMILY`]: Regular, Medium, `SemiBold` and Bold.
+const UI_FILES: [UiFace; 4] = [
+    UiFace {
+        data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Regular.ttf"),
+        weight: 400,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Medium.ttf"),
+        weight: 500,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-SemiBold.ttf"),
+        weight: 600,
+    },
+    UiFace {
+        data: include_bytes!("../assets/fonts/SchibstedGrotesk/SchibstedGrotesk-Bold.ttf"),
+        weight: 700,
+    },
 ];
 
 /// How a terminal pane draws its text.
@@ -172,14 +205,15 @@ pub fn line_height(ascent: f32, descent: f32, size: f32) -> f32 {
 }
 
 /// Registers the bundled fonts with the text system; a failure is logged
-/// and the terminal falls back to installed families.
+/// and the client falls back to installed families.
 pub fn register_bundled(cx: &App) {
     let fonts = BUNDLED_FILES
         .iter()
         .map(|face| Cow::Borrowed(face.data))
+        .chain(UI_FILES.iter().map(|face| Cow::Borrowed(face.data)))
         .collect();
     if let Err(err) = cx.text_system().add_fonts(fonts) {
-        tracing::error!("registering the bundled terminal fonts: {err:#}");
+        tracing::error!("registering the bundled fonts: {err:#}");
     }
 }
 
@@ -199,12 +233,14 @@ pub fn system_families(cx: &App) -> Vec<SharedString> {
 }
 
 /// `families` as a font picker lists them: sorted, each once, without the
-/// bundled ones and without the hidden system faces whose names start
-/// with `.`.
+/// bundled ones — including the interface's family, which no terminal draws
+/// in — and without the hidden system faces whose names start with `.`.
 fn picker_families(families: Vec<SharedString>) -> Vec<SharedString> {
     let mut families: Vec<SharedString> = families
         .into_iter()
-        .filter(|family| !BUNDLED_FAMILIES.contains(&family.as_ref()))
+        .filter(|family| {
+            !BUNDLED_FAMILIES.contains(&family.as_ref()) && family.as_ref() != UI_FAMILY
+        })
         .filter(|family| !family.starts_with('.'))
         .collect();
     families.sort();
@@ -236,6 +272,12 @@ mod tests {
             "Consolas",
         ]));
         assert_eq!(listed, names(&["Arial", "Consolas"]));
+    }
+
+    #[test]
+    fn the_picker_never_lists_the_ui_family() {
+        let listed = picker_families(names(&[UI_FAMILY, "Consolas"]));
+        assert_eq!(listed, names(&["Consolas"]));
     }
 
     #[test]
@@ -368,10 +410,39 @@ mod tests {
         be_u16(data, os2 + 62) & 1 == 1
     }
 
+    /// The face's `OS/2` `usWeightClass`.
+    fn os2_weight(data: &[u8]) -> u16 {
+        let tables = usize::from(be_u16(data, 4));
+        let os2 = (0..tables)
+            .map(|i| 12 + i * 16)
+            .find(|&record| data.get(record..record + 4) == Some(b"OS/2".as_slice()))
+            .map(|record| be_u32(data, record + 8))
+            .expect("an OS/2 table");
+        be_u16(data, os2 + 4)
+    }
+
     #[test]
     fn bundled_faces_carry_their_italic_style() {
         for (i, face) in BUNDLED_FILES.iter().enumerate() {
             assert_eq!(os2_italic(face.data), face.italic, "face {i}");
+        }
+    }
+
+    #[test]
+    fn ui_faces_are_truetype_or_opentype() {
+        for face in UI_FILES {
+            let tag = face.data.get(..4).expect("a font header");
+            assert!(
+                tag == [0, 1, 0, 0] || tag == b"OTTO" || tag == b"true",
+                "not a TrueType/OpenType file: {tag:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_faces_carry_their_declared_weight() {
+        for (i, face) in UI_FILES.iter().enumerate() {
+            assert_eq!(os2_weight(face.data), face.weight, "face {i}");
         }
     }
 }
