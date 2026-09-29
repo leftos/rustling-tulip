@@ -62,7 +62,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change status detection | `crates/daemon/src/pty_state.rs`, `crates/daemon/src/osc_title.rs` |
 | Change worktree or git behaviour | `crates/daemon/src/git.rs`, `workspace.rs`, `worktrees_admin.rs`, `worktree_cleanup.rs`, `branch_fate.rs`, `branch_names.rs`, `git_write.rs`, `git_watch.rs` |
 | Change persisted host state | `crates/daemon/src/state.rs`, `crates/daemon/src/paths.rs` |
-| Change session history or recovery | `crates/daemon/src/history.rs`, `transcripts.rs`, `tracer_log.rs`; the dialog: `apps/native/src/recover.rs`, `recover_view.rs`, `spawns.rs` (`place_several`) |
+| Change session history or recovery | `crates/daemon/src/history.rs`, `transcripts.rs`, `tracer_log.rs`, `codex_rollout.rs` (a Codex session's conversation id); the dialog: `apps/native/src/recover.rs`, `recover_view.rs`, `spawns.rs` (`place_several`) |
 | Change daemon startup or supervision | `crates/daemon/src/main.rs`, `instance_lock.rs`, `binary_cache.rs`, `orphan.rs`, `crates/daemon-client/src/supervisor.rs` |
 | Add a native client view or dialog | a plain-Rust model module in `apps/native/src/` → its `*_view.rs` → mounted and routed in `apps/native/src/lib.rs` (`RootView`) → a spec in `apps/native/tests/ui_*.rs` over `tests/support/mod.rs` |
 | Change the sidebar or activity rail | `apps/native/src/sidebar.rs`, `sidebar_view.rs`, `activity_bar.rs`; the Needs You panel: `needs_you.rs`, `needs_you_view.rs` |
