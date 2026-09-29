@@ -55,6 +55,7 @@ impl RootView {
                 tracing::warn!(session = %id, "closing a pane whose session is unknown");
             }
             self.record_pane_close(tab_id, pane_id, None, cx);
+            self.tabs.mark_closing_if_last_pane(tab_id);
             self.send(ClientMessage::ClosePane {
                 tab_id: tab_id.to_owned(),
                 pane_id: pane_id.to_owned(),
@@ -110,6 +111,7 @@ impl RootView {
                     cx,
                 );
                 tracing::info!(pane = %dialog.pane_id(), "closing the pane, keeping its session");
+                self.tabs.mark_closing_if_last_pane(dialog.tab_id());
                 self.send(dialog.close_pane_message());
             }
             Control::Discard => {
@@ -118,6 +120,7 @@ impl RootView {
                     session = %dialog.session_id(),
                     "closing the pane and discarding its session, keeping the worktree"
                 );
+                self.tabs.mark_closing_if_last_pane(dialog.tab_id());
                 for msg in dialog.discard_keep_messages() {
                     self.send(msg);
                 }

@@ -158,6 +158,10 @@ pub struct TabsModel {
     focus_request: Option<String>,
     pub close_confirm: CloseConfirm,
     pub selection: TabSelection,
+    /// Tabs this client asked to close whose `TabRemoved` has not arrived:
+    /// still in the list, but gone as far as a restore is concerned, since
+    /// the daemon handles the removal before anything sent after it.
+    closing: HashSet<String>,
 }
 
 /// `ratio` inside the daemon's range; a ratio that is not a number becomes
@@ -867,6 +871,7 @@ impl TabsModel {
         self.focused
             .retain(|tab_id, _| live.contains(tab_id.as_str()));
         self.selection.prune(&live);
+        self.closing.retain(|id| live.contains(id.as_str()));
         let active = self
             .active
             .take()
@@ -934,6 +939,7 @@ impl TabsModel {
     fn remove(&mut self, tab_id: &str) {
         self.tabs.retain(|t| t.id != tab_id);
         self.focused.remove(tab_id);
+        self.closing.remove(tab_id);
         self.prune_selection();
         if self.close_confirm.armed() == Some(tab_id) {
             self.close_confirm.disarm();
@@ -1035,10 +1041,34 @@ impl TabsModel {
             .insert(tab_id.to_owned(), focus_pane.map(str::to_owned));
     }
 
-    /// Forgets every pending arrival: a fresh connection's list decides what
-    /// shows.
+    /// Forgets every pending arrival and every closing tab: a fresh
+    /// connection's list decides what shows and what still exists.
     pub fn clear_pending_restore(&mut self) {
         self.pending_restore.clear();
+        self.closing.clear();
+    }
+
+    /// The tabs whose close is on its way: still listed, but gone for a
+    /// restore.
+    pub fn closing(&self) -> &HashSet<String> {
+        &self.closing
+    }
+
+    /// Records that this client asked to close `tab_id`.
+    pub fn mark_closing(&mut self, tab_id: &str) {
+        self.closing.insert(tab_id.to_owned());
+    }
+
+    /// Marks `tab_id` closing when it holds a single pane: closing or moving
+    /// that pane takes the whole tab with it.
+    pub fn mark_closing_if_last_pane(&mut self, tab_id: &str) {
+        let last_pane = self
+            .tab(tab_id)
+            .and_then(TabEntry::grid)
+            .is_some_and(|grid| collect_panes(grid).len() == 1);
+        if last_pane {
+            self.mark_closing(tab_id);
+        }
     }
 
     /// Where `session` goes: into the active tab by
@@ -1666,6 +1696,54 @@ pub(crate) mod tests {
         let mut gone = TabsModel::new(Some("t9".to_owned()));
         gone.apply(&tabs_msg(&[t1, t2, t3]));
         assert_eq!(gone.active_id(), Some("t1"));
+    }
+
+    #[test]
+    fn a_closing_tab_is_forgotten_when_it_is_removed() {
+        let mut model = model_with(&[tab("t1", &pane("a", None)), tab("t2", &pane("b", None))]);
+        model.mark_closing("t1");
+        assert!(model.closing().contains("t1"));
+
+        model.apply(&updated(&tab("t1", &pane("c", None))));
+        assert!(model.closing().contains("t1"), "an update clears no mark");
+
+        assert!(model.apply(&DaemonMessage::TabRemoved {
+            tab_id: "t1".to_owned(),
+        }));
+        assert!(!model.closing().contains("t1"));
+        assert!(model.closing().is_empty());
+    }
+
+    #[test]
+    fn a_full_list_drops_closing_marks() {
+        let mut model = model_with(&[tab("t1", &pane("a", None)), tab("t2", &pane("b", None))]);
+        model.mark_closing("t1");
+        model.mark_closing("t2");
+
+        assert!(model.apply(&tabs_msg(&[
+            tab("t1", &pane("a", None)),
+            tab("t3", &pane("c", None)),
+        ])));
+        assert!(
+            model.closing().contains("t1"),
+            "still listed: its close may still be on its way"
+        );
+        assert!(
+            !model.closing().contains("t2"),
+            "gone from the list: nothing waits"
+        );
+    }
+
+    #[test]
+    fn reset_clears_closing_marks() {
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        model.mark_closing("t1");
+
+        model.clear_pending_restore();
+        assert!(
+            model.closing().is_empty(),
+            "a fresh connection starts clean"
+        );
     }
 
     #[test]

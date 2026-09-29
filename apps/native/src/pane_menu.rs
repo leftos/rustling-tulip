@@ -224,6 +224,7 @@ impl RootView {
                             .filter_map(|id| self.tab_snapshot(id, Some(&pane_id)))
                             .collect();
                         self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
+                        self.tabs.mark_closing_if_last_pane(&tab_id);
                         self.send(ClientMessage::MovePane {
                             src_tab_id: tab_id,
                             src_pane_id: pane_id,
@@ -239,6 +240,7 @@ impl RootView {
             }
             MenuAction::Close => {
                 self.record_pane_close(&tab_id, &pane_id, None, cx);
+                self.tabs.mark_closing_if_last_pane(&tab_id);
                 self.send(ClientMessage::ClosePane { tab_id, pane_id });
             }
         }

@@ -84,7 +84,10 @@ impl RootView {
             return;
         };
         self.schedule_undo_expiry(cx);
-        let live: HashSet<String> = self.tabs.tabs().iter().map(|tab| tab.id.clone()).collect();
+        // A tab whose removal is on its way counts as gone: the daemon
+        // removes it before the restore lands, so only a `RestoreTab` can
+        // put it back.
+        let live = undo::live_tabs(self.tabs.tabs(), self.tabs.closing());
         let known: HashSet<String> = self
             .sidebar
             .sessions()

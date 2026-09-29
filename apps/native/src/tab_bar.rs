@@ -412,6 +412,7 @@ impl RootView {
             .map(|tab| tab.id.clone())
             .collect();
         for other in others {
+            self.tabs.mark_closing(&other);
             self.send(ClientMessage::CloseTab { tab_id: other });
         }
         self.close_tab_menu(window, cx);
@@ -758,6 +759,7 @@ impl RootView {
             if let Some(snapshot) = self.tab_snapshot(&tab.id, None) {
                 self.record_undo(undo::closed_tab_message(&tab.name), vec![snapshot], cx);
             }
+            self.tabs.mark_closing(&tab.id);
             self.send(ClientMessage::CloseTab { tab_id: tab.id });
         }
         close

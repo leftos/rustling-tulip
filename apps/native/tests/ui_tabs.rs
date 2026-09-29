@@ -693,6 +693,50 @@ fn closing_a_tab_offers_undo_that_sends_restore_tab_at_its_index(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn undo_before_the_removal_arrives_sends_restore_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &two_tabs());
+    h.click_on("tab-t2");
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t2".to_owned()),
+        "t2 is the tab shown, so the restore takes it back"
+    );
+
+    h.click_on("tab-close-t2");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CloseTab { tab_id }] if tab_id == "t2"),
+        "sent {sent:?}"
+    );
+    let (id, _) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+
+    // The daemon has not answered the close yet, so its list still holds t2.
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t2" && *index == 1),
+        "a closing tab is restored, not replaced: {sent:?}"
+    );
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t2".to_owned(),
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t2", &pane("p2", None)),
+    });
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t2".to_owned()),
+        "the restored tab shows again"
+    );
+}
+
+#[gpui::test]
 fn close_others_offers_no_undo(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &three_tabs());

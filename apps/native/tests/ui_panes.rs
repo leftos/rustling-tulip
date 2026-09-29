@@ -756,6 +756,46 @@ fn undo_of_last_pane_close_sends_restore_tab(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn undo_of_last_pane_close_before_removal_sends_restore_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.click_on("close-pane-p1");
+    h.click_on("pane-close-only");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ClosePane { pane_id, .. }] if pane_id == "p1"),
+        "sent {sent:?}"
+    );
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Closed pane \"s1\"");
+
+    // The tab goes with its last pane, and the removal has not arrived yet,
+    // so the client still lists t1.
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 0),
+        "the tab its last pane went with comes back: {sent:?}"
+    );
+
+    h.send(DaemonMessage::TabRemoved {
+        tab_id: "t1".to_owned(),
+    });
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t1", &pane("p1", Some("s1"))),
+    });
+    assert_eq!(
+        active(&mut h).as_deref(),
+        Some("t1"),
+        "the restored tab shows again"
+    );
+}
+
+#[gpui::test]
 fn discard_offers_no_undo(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &with_empty(session("s1").in_repo("r1").build()));
@@ -836,6 +876,57 @@ fn move_to_tab_undo_restores_both_tab_snapshots(cx: &mut TestAppContext) {
         "the moved pane is back in the tab it left: {sent:?}"
     );
     assert_eq!(active(&mut h).as_deref(), Some("t1"), "the tab shown stays");
+}
+
+#[gpui::test]
+fn move_undo_before_source_removal_restores_source_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", None)),
+            tab(
+                "t2",
+                &split(
+                    SplitDirection::Vertical,
+                    pane("p3", Some("s2")),
+                    pane("p4", None),
+                ),
+            ),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    h.right_click_on("pane-header-p1");
+    h.click_on("empty-pane-menu-move");
+    h.click_on("empty-pane-move-t2");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_pane_id, dst_tab_id, .. }]
+            if src_pane_id == "p1" && dst_tab_id == "t2"),
+        "sent {sent:?}"
+    );
+
+    let (id, message) = undo_entries(&mut h)
+        .first()
+        .cloned()
+        .expect("an undo entry");
+    assert_eq!(message, "Moved pane");
+
+    // t1 held that pane alone, so the move takes the tab with it and the
+    // removal is on its way; the client still lists t1.
+    h.click_on(&format!("undo-action-{id}"));
+    let sent = h.sent();
+    assert_eq!(restored(&sent), ["t1", "t2"], "both go back: {sent:?}");
+    assert!(
+        matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
+        "the tab the pane left comes back: {sent:?}"
+    );
+    assert!(
+        matches!(&sent[1], ClientMessage::RestoreTabSnapshot { tab } if tab.id == "t2"),
+        "the destination is replaced in place: {sent:?}"
+    );
 }
 
 #[gpui::test]

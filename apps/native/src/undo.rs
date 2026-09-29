@@ -167,6 +167,18 @@ pub fn restore_messages(
         .collect()
 }
 
+/// The listed tabs minus the closing ones: a tab whose removal the client
+/// has asked for counts as gone, because the daemon handles the removal
+/// before the restore that follows it, so only
+/// [`ClientMessage::RestoreTab`] can put it back.
+#[must_use]
+pub fn live_tabs(tabs: &[TabEntry], closing: &HashSet<String>) -> HashSet<String> {
+    tabs.iter()
+        .filter(|tab| !closing.contains(&tab.id))
+        .map(|tab| tab.id.clone())
+        .collect()
+}
+
 /// `tab` with every pane whose session the client no longer knows emptied.
 fn keeping_known_sessions(tab: &TabEntry, known_sessions: &HashSet<String>) -> TabEntry {
     let mut tab = tab.clone();
@@ -483,6 +495,56 @@ mod tests {
         assert!(
             matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
             "the source tab is gone, so it comes back: {sent:?}"
+        );
+        assert!(
+            matches!(&sent[1], ClientMessage::RestoreTabSnapshot { tab } if tab.id == "t2"),
+            "the destination is still open: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_tab_being_closed_counts_as_gone() {
+        let now = Instant::now();
+        let mut shelf = UndoShelf::default();
+        let id = shelf.push(
+            closed_tab_message("t1"),
+            vec![snapshot("t1", 1, false, None)],
+            now,
+        );
+        let entry = shelf.take(id).expect("the entry is there");
+
+        let listed = [tab_of("t2", Some("s1")), tab_of("t1", Some("s1"))];
+        let live = live_tabs(&listed, &ids(&["t1"]));
+        assert_eq!(live, ids(&["t2"]), "the closing tab is not live");
+
+        let sent = restore_messages(&entry, &live, &ids(&["s1"]));
+        assert!(
+            matches!(sent.as_slice(), [ClientMessage::RestoreTab { tab, index }] if tab.id == "t1" && *index == 1),
+            "its removal is on its way, so it comes back at its index: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_move_whose_source_is_closing_restores_it_and_replaces_the_destination() {
+        let now = Instant::now();
+        let mut shelf = UndoShelf::default();
+        let id = shelf.push(
+            MOVED_PANE.to_owned(),
+            vec![
+                snapshot("t1", 0, true, Some("p1")),
+                snapshot("t2", 1, false, Some("p2")),
+            ],
+            now,
+        );
+        let entry = shelf.take(id).expect("the entry is there");
+
+        let listed = [tab_of("t1", Some("s1")), tab_of("t2", Some("s1"))];
+        let live = live_tabs(&listed, &ids(&["t1"]));
+        let sent = restore_messages(&entry, &live, &ids(&["s1"]));
+        assert_eq!(restored(&sent), ["t1", "t2"]);
+        assert!(
+            matches!(&sent[0], ClientMessage::RestoreTab { tab, index } if tab.id == "t1" && *index == 0),
+            "the tab the pane left is closing, so it comes back: {sent:?}"
         );
         assert!(
             matches!(&sent[1], ClientMessage::RestoreTabSnapshot { tab } if tab.id == "t2"),
