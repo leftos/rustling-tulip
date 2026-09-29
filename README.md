@@ -79,3 +79,5 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Fix round**: review findings sent back to the worker that made the change.
 - **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
+- **Feature marker**: `branch: feat/<name>` on a `docs/plans/MAIN.md` line; every item under it lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
+- **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the marker and merged with `--rebase` by `/ship` once every line under the marker is ticked.
