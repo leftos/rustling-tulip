@@ -5415,6 +5415,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "base64",
+ "chrono",
  "daemon-client",
  "futures",
  "gpui",

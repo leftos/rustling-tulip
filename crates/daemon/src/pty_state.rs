@@ -532,6 +532,7 @@ mod hysteresis_tests {
             mode: SessionMode::Interactive,
             started_at: Utc::now(),
             status: SessionStatus::Idle,
+            status_since: Some(Utc::now()),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: Vec::new(),

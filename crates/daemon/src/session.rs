@@ -92,6 +92,10 @@ pub struct SessionRecord {
     pub mode: SessionMode,
     pub started_at: DateTime<Utc>,
     pub status: SessionStatus,
+    /// When `status` last changed. [`SessionRegistry::update_from`] stamps it
+    /// whenever an update moves the status, and every record-creation path
+    /// stamps one, so a client can tell how long a session has been waiting.
+    pub status_since: Option<DateTime<Utc>>,
     pub exit_code: Option<i32>,
     pub metrics: SessionMetrics,
     pub recent_actions: Vec<String>,
@@ -205,6 +209,7 @@ impl SessionRecord {
             kind: self.kind.clone(),
             members: self.members.clone(),
             status: self.status,
+            status_since: self.status_since,
             mode: self.mode,
             started_at: self.started_at,
             exit_code: self.exit_code,
@@ -328,7 +333,11 @@ impl SessionRegistry {
         let (snap, recent_tail, entered_error) = {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
+            let was_status = guard.status;
             f(&mut guard);
+            if guard.status != was_status {
+                guard.status_since = Some(Utc::now());
+            }
             let tail = trim_recent_tail(&guard.recent_actions);
             let entered_error = !was_error && guard.status == SessionStatus::Error;
             (guard.snapshot(), tail, entered_error)
@@ -676,6 +685,7 @@ impl SessionRegistry {
             mode: meta.mode,
             started_at: meta.started_at,
             status: SessionStatus::Idle,
+            status_since: Some(Utc::now()),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -722,6 +732,7 @@ impl SessionRegistry {
             mode: meta.mode,
             started_at: meta.started_at,
             status: SessionStatus::Idle,
+            status_since: Some(Utc::now()),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -765,6 +776,7 @@ impl SessionRegistry {
             mode: meta.mode,
             started_at: meta.started_at,
             status: SessionStatus::Stopped,
+            status_since: Some(Utc::now()),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -832,6 +844,7 @@ mod tests {
             mode: SessionMode::Headless,
             started_at: Utc::now(),
             status: SessionStatus::Idle,
+            status_since: Some(Utc::now()),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: Vec::new(),
@@ -965,6 +978,86 @@ mod tests {
         assert_eq!(
             drained_attention(&mut events),
             [protocol::AttentionReason::Error]
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn status_change_stamps_status_since() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("status-since-stamp");
+        let registry = SessionRegistry::new(dirs.clone());
+        let before = Utc::now() - chrono::Duration::seconds(60);
+        let mut rec = record("s1", SessionMode::Headless);
+        rec.status_since = Some(before);
+        registry.insert(rec);
+
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+
+        let snapshots = registry.snapshots();
+        let since = snapshots.first().and_then(|s| s.status_since);
+        assert!(
+            since.is_some_and(|t| t > before),
+            "a status change stamps a fresh time: {since:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn same_status_update_keeps_status_since() {
+        use crate::history::test_support::{record, scratch_dirs};
+        let dirs = scratch_dirs("status-since-keep");
+        let registry = SessionRegistry::new(dirs.clone());
+        let stamped = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        let mut rec = record("s1", SessionMode::Headless);
+        rec.status = SessionStatus::Working;
+        rec.status_since = Some(stamped);
+        registry.insert(rec);
+
+        registry.update("s1", |rec| rec.exit_code = Some(0));
+        registry.update("s1", |rec| rec.status = SessionStatus::Working);
+
+        let snapshots = registry.snapshots();
+        assert_eq!(
+            snapshots.first().and_then(|s| s.status_since),
+            Some(stamped),
+            "an update that leaves the status alone keeps the stamp"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn new_record_has_status_since() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("status-since-new");
+        let registry = SessionRegistry::new(dirs.clone());
+        let meta = crate::orphan::meta_from_record(
+            "s1".to_string(),
+            1,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        registry.insert_orphan(&meta);
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert!(
+            snapshots[0].status_since.is_some(),
+            "every record-creation path stamps one"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

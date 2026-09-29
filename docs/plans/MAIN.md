@@ -17,7 +17,7 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 Bugs, the user's request to recover killed sessions, and the reduced Needs You view the user moved ahead.
 
 - [ ] **Recover dialog in the native client** (user; session recovery step 5): the rail button, its badge of unrecovered unexpected ends and the Recover dialog, as in [session-recovery.md](./session-recovery.md) Design 6. `apps/native/src/activity_bar.rs`, new `recover.rs` / `recover_view.rs`, `lib.rs`, `spawns.rs`, `tests/ui_recover.rs`. Gates: `-p rustling-tulip-native`, then the live tier (`e2e_recover.rs`); hand-test the badge against the real history.
-- [ ] **"Needs You" view, reduced** (user: ahead of Wave 6): NY.1 `status_since` on the snapshot, NY.2 the list model, NY.3 the rail item and panel, working on today's status heuristic; every session waiting on the user in one place beside Sessions and Source control. Design and rulings: [needs-you.md](./needs-you.md).
+- [ ] **"Needs You" view, reduced** (user: ahead of Wave 6): NY.3 the rail item and panel over the landed `status_since` and `needs_you.rs` list model, working on today's status heuristic; rebases on the Recover dialog's rail button; every session waiting on the user in one place beside Sessions and Source control. Design and rulings: [needs-you.md](./needs-you.md).
 
 ## Waves
 
@@ -91,6 +91,7 @@ Review: `code-review`; a person listens to the voices and looks at the Dashboard
 
 - [ ] **Spoken alerts when an agent waits** (user): a cheap-model summary (DeepSeek Flash by default, providers and keys chosen in Settings, the daemon calling the provider's Messages API directly: an exception to CLAUDE.md's no-direct-API rule that changes with SA.6) classified `needs_answer` / `working_update` / `done_waiting`, prefixed with the repo's spoken name and spoken with Windows' built-in voices; steps SA.1–SA.11. Phone alerts wait for the mobile app's MA7 push. Design and rulings: [spoken-alerts.md](./spoken-alerts.md).
 - [ ] **Dashboard view** (user): a tab of cards across all live sessions, fed by the alerts' summarizer, grouped Needs you / Working / Done / Idle, with files changed and an activity timeline; steps DB.1–DB.4 (DB.5 rides the mobile app's MA6). Design: [spoken-alerts.md](./spoken-alerts.md#dashboard-view).
+- [ ] **A daemon restart resets `status_since`** (found in NY.1's review): the stamp is not saved in the `meta.json` sidecar, so `insert_orphan`, `insert_reattached` and `insert_abandoned` stamp now, and a session asking for 2 h before a restart shows seconds and sorts below newer waits. Persist the last status and its stamp in the sidecar and restore them on reattach. `crates/daemon/src/session.rs`, `orphan.rs`.
 - [ ] **"Needs You" view, hook detail and summaries** (NY.4 needs HS.2, NY.5 needs SA.1, then NY.6 docs): line 2 from `pending_input`, the Answer rows from summaries. Design: [needs-you.md](./needs-you.md).
 
 ### Wave 8 — Subagent streams (`crates/daemon/src/subagents.rs`, `server.rs`, `apps/native/src/sidebar.rs`, `sidebar_view.rs`, new `subagent_view.rs`)

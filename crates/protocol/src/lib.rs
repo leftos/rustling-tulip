@@ -431,6 +431,9 @@ pub struct SessionSnapshot {
     pub kind: SessionKind,
     pub members: Vec<SessionMember>,
     pub status: SessionStatus,
+    /// When `status` last changed; `None` from a daemon that predates it.
+    #[serde(default)]
+    pub status_since: Option<DateTime<Utc>>,
     pub mode: SessionMode,
     pub started_at: DateTime<Utc>,
     pub exit_code: Option<i32>,
@@ -2879,6 +2882,12 @@ pub enum SnapshotUnavailable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "`SessionUpdated` carries the whole canonical `SessionSnapshot`, the \
+              wire's session shape; boxing it would churn every daemon and client \
+              match arm that reads the session"
+)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonMessage {
     /// `protocol_version` is the negotiated wire version the daemon picked
@@ -5941,6 +5950,28 @@ mod tests {
         );
         let json = serde_json::to_value(&req).expect("encode");
         assert!(json.get("resume_conversation").is_none(), "{json}");
+    }
+
+    /// A minimal snapshot a daemon that predates `status_since` sends.
+    const SNAPSHOT_WITHOUT_STATUS_SINCE: &str = r#"{"id":"s1","label":"repo","kind":"single","members":[],"status":"awaiting_input","mode":"interactive","started_at":"2026-01-01T00:00:00Z","exit_code":null,"metrics":{"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"last_activity_at":null},"recent_actions":[],"agent":"claude"}"#;
+
+    #[test]
+    fn session_snapshot_status_since_round_trips() {
+        let json = r#"{"id":"s1","label":"repo","kind":"single","members":[],"status":"awaiting_input","status_since":"2026-01-02T03:04:05Z","mode":"interactive","started_at":"2026-01-01T00:00:00Z","exit_code":null,"metrics":{"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"last_activity_at":null},"recent_actions":[],"agent":"claude"}"#;
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(json).expect("a stamped snapshot decodes");
+        let stamp = snapshot.status_since.expect("the stamp decodes");
+        assert_eq!(stamp.to_rfc3339(), "2026-01-02T03:04:05+00:00");
+        let encoded = serde_json::to_string(&snapshot).expect("encodes");
+        let back: SessionSnapshot = serde_json::from_str(&encoded).expect("round-trips");
+        assert_eq!(back, snapshot, "the stamp survives a round trip");
+    }
+
+    #[test]
+    fn session_snapshot_without_status_since_decodes() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert_eq!(snapshot.status_since, None, "an absent stamp reads as None");
     }
 }
 

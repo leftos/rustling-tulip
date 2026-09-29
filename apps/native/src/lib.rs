@@ -35,6 +35,7 @@ mod links;
 mod mouse;
 mod move_panes;
 mod move_panes_view;
+mod needs_you;
 mod net;
 mod notice_view;
 mod notices;
