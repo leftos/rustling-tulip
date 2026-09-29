@@ -128,8 +128,6 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
-- [ ] **The OS smoke tier fails on every run since the first-connect layout chooser** (found by PT.2 and PT.3): a fresh isolated config mints a new client id, so `LayoutInitRequired` opens the chooser's 60% black backdrop (`BACKDROP_TINT`, `layout_chooser_view.rs`) over the window and both pixel probes in `apps/native/tests/smoke_window.rs` (`wait_painted`) read scrim-over-colour. Seed the smoke client's layout before launch.
-
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
 

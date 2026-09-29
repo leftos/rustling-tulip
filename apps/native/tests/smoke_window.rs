@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use protocol::ClientMessage;
+use protocol::{ClientMessage, InitLayoutKind};
 use rustling_tulip_native::{
     BAR_BG, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, PANEL_BG, SIDEBAR_DEFAULT_WIDTH,
 };
@@ -73,6 +73,13 @@ const PANE_CHANGE_FLOOR: f32 = 1000.0;
 /// What the client logs once its handshake with the daemon succeeds
 /// (`apps/native/src/net.rs`).
 const CONNECTED_LINE: &str = "connected to daemon";
+/// The file the native client keeps its identity in, under the config dir
+/// (`CLIENT_ID_FILE` in `apps/native/src/net.rs`).
+const CLIENT_ID_FILE: &str = "client-id-native";
+/// What the client logs when the daemon offers it the first-connect chooser
+/// (`apps/native/src/layout_chooser_view.rs`). The chooser's backdrop dims
+/// the probes, so a smoke run must never see this line.
+const CHOOSER_LINE: &str = "first connect for this client";
 /// The line the shell prints for the typed command.
 const MARKER: &str = "rt-smoke-marker";
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(20);
@@ -138,6 +145,31 @@ fn seed_shell(daemon: &LiveDaemon) -> String {
         .as_str()
         .expect("the spawned session's id")
         .to_owned()
+}
+
+/// Seeds the identity the client binary will launch with, and a layout for it,
+/// so the daemon answers its `Hello` with `Tabs` instead of
+/// `LayoutInitRequired` and the client never opens the first-connect chooser,
+/// whose full-window backdrop would dim the probes below.
+///
+/// The identity goes in the daemon's isolated config dir under the name the
+/// client reads (`CLIENT_ID_FILE`), and the layout is created by the test's
+/// own socket sending that identity's `InitLayout`, as `place_first_session`
+/// does in the live tier.
+fn seed_layout(daemon: &LiveDaemon) {
+    let identity = daemon_client::client_identity_in(&daemon.config_dir(), CLIENT_ID_FILE)
+        .expect("create the smoke client's identity");
+    let mut ws = connect(daemon, &identity.client_id);
+    read_until(&mut ws, "\"type\":\"layout_init_required\"");
+    send(
+        &mut ws,
+        &ClientMessage::InitLayout {
+            kind: InitLayoutKind::AllSessions,
+        },
+    );
+    read_until(&mut ws, "\"type\":\"tabs\"");
+    let _ = ws.close(None);
+    let _ = ws.flush();
 }
 
 fn send(ws: &mut Socket, msg: &ClientMessage) {
@@ -407,6 +439,7 @@ fn open(test: &str) -> Smoke {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let daemon = LiveDaemon::start(test);
     let session = seed_shell(&daemon);
+    seed_layout(&daemon);
     let client = launch_client(&daemon);
     let hwnd = find_window(client.0.id());
     assert_out_of_the_way(hwnd);
@@ -435,6 +468,21 @@ fn wait_connected(smoke: &Smoke) {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Asserts the client took the layout seeded before it launched instead of
+/// opening the first-connect chooser. Called once the window has painted: the
+/// chooser line is written while the client walks the daemon's opening state
+/// burst, which the paint itself proves is over, so the check cannot read the
+/// log before the line would have been written.
+fn assert_no_layout_chooser(smoke: &Smoke) {
+    let log = smoke.daemon.config_dir().join("logs").join("native.log");
+    let text = std::fs::read_to_string(&log).expect("read the client's log");
+    assert!(
+        !text.contains(CHOOSER_LINE),
+        "the client opened the first-connect layout chooser: {} contains {CHOOSER_LINE:?}",
+        log.display()
+    );
 }
 
 fn post(hwnd: HWND, message: u32, wparam: usize, lparam: isize) {
@@ -684,6 +732,7 @@ fn smoke_window_opens_cloaked_unfocused_and_connects() {
     let smoke = open("smoke-connect");
     wait_connected(&smoke);
     wait_painted(smoke.hwnd);
+    assert_no_layout_chooser(&smoke);
     assert_out_of_the_way(smoke.hwnd);
 }
 
@@ -694,6 +743,7 @@ fn smoke_posted_keys_reach_the_shell() {
     let hwnd = smoke.hwnd;
     wait_connected(&smoke);
     wait_painted(hwnd);
+    assert_no_layout_chooser(&smoke);
     let mut shell = connect(&smoke.daemon, "rt-smoke-reader");
     // The pane's baseline is taken after the prompt, so the shell's startup
     // output cannot pass for the typed command's redraw.
