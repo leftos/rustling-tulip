@@ -1,11 +1,17 @@
 //! Spawns this client asked for, matched to the daemon's reply by request id
 //! and placed where the user chose to open them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use protocol::{CheckoutStrategy, ClientMessage, SessionSnapshot, SpawnRequest, SpawnTarget};
+use protocol::{
+    CheckoutStrategy, ClientMessage, GridNode, SessionSnapshot, SpawnRequest, SpawnTarget,
+    SplitPlace,
+};
 
-use crate::tabs::{PaneTarget, Placement, TabsModel, collect_panes};
+use crate::tabs::{
+    PaneTarget, Placement, SplitTarget, TabsModel, collect_panes, find_tab_containing_session,
+    pane_target_for_session,
+};
 
 /// Where a spawned session opens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +252,135 @@ impl PendingSpawns {
         *checkout_strategy = strategy;
         pending.prompted = false;
         Some(ClientMessage::SpawnSession(request.clone()))
+    }
+}
+
+/// The requests that place `recovered` where a normal spawn would go: beside
+/// its repo's or workspace's pane in the active tab, else its first empty
+/// pane, else a split of its largest pane, else a new tab. Each placement is
+/// applied to a copy of the active tab's grid before the next is chosen, so
+/// no two take the same pane. A session a pane already shows, or one listed
+/// twice, is placed once at most.
+pub(crate) fn place_several(
+    recovered: &[SessionSnapshot],
+    tabs: &TabsModel,
+    sessions: &[SessionSnapshot],
+) -> Vec<ClientMessage> {
+    let mut active: Option<(String, GridNode)> = tabs
+        .active_id()
+        .and_then(|id| tabs.tab(id))
+        .and_then(|tab| tab.grid().map(|grid| (tab.id.clone(), grid.clone())));
+    let mut known = sessions.to_vec();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut shadows = ShadowPanes::default();
+    let mut messages = Vec::new();
+    for session in recovered {
+        if !seen.insert(session.id.as_str())
+            || find_tab_containing_session(tabs.tabs(), &session.id).is_some()
+        {
+            continue;
+        }
+        if !known.iter().any(|s| s.id == session.id) {
+            known.push(session.clone());
+        }
+        let placement = active
+            .as_mut()
+            .and_then(|(tab_id, grid)| {
+                let target = pane_target_for_session(grid, &known, session)?;
+                let target = shadows.take(grid, target, &session.id);
+                Some(Placement::Pane {
+                    tab_id: tab_id.clone(),
+                    target,
+                })
+            })
+            .unwrap_or(Placement::NewTab);
+        messages.push(placement.message(&session.id));
+    }
+    messages
+}
+
+/// The panes [`place_several`] adds to its copy of a grid. The daemon names
+/// a split's new pane, so a copy's new pane has a stand-in id; a later split
+/// aimed at one splits the real pane it came from instead.
+#[derive(Default)]
+struct ShadowPanes {
+    /// Stand-in pane id to the real pane split to make it.
+    origin: HashMap<String, String>,
+}
+
+impl ShadowPanes {
+    /// `target` made real (a stand-in pane's split aimed at its origin) and
+    /// applied to `grid` for `session_id`.
+    fn take(&mut self, grid: &mut GridNode, target: PaneTarget, session_id: &str) -> PaneTarget {
+        match target {
+            PaneTarget::Replace { pane_id } => {
+                fill_pane(grid, &pane_id, session_id);
+                PaneTarget::Replace { pane_id }
+            }
+            PaneTarget::Split(mut split) => {
+                if let Some(origin) = self.origin.get(&split.pane_id) {
+                    split.pane_id.clone_from(origin);
+                }
+                let stand_in = format!("recovered-pane-{}", self.origin.len());
+                self.origin.insert(stand_in.clone(), split.pane_id.clone());
+                let new_pane = GridNode::Pane {
+                    pane_id: stand_in,
+                    session_id: Some(session_id.to_owned()),
+                };
+                split_pane(grid, &split, new_pane);
+                PaneTarget::Split(split)
+            }
+        }
+    }
+}
+
+/// Shows `session_id` in pane `pane_id` of `grid`.
+fn fill_pane(grid: &mut GridNode, pane_id: &str, session_id: &str) {
+    match grid {
+        GridNode::Pane {
+            pane_id: id,
+            session_id: shown,
+        } => {
+            if id == pane_id {
+                *shown = Some(session_id.to_owned());
+            }
+        }
+        GridNode::Split { first, second, .. } => {
+            fill_pane(first, pane_id, session_id);
+            fill_pane(second, pane_id, session_id);
+        }
+    }
+}
+
+/// Splits the pane `split` names in two, `new_pane` on its `place` side, as
+/// the daemon's `SplitPane` does. Returns whether it found the pane.
+fn split_pane(grid: &mut GridNode, split: &SplitTarget, new_pane: GridNode) -> bool {
+    let is_target = matches!(grid, GridNode::Pane { pane_id, .. } if *pane_id == split.pane_id);
+    if is_target {
+        let old = std::mem::replace(
+            grid,
+            GridNode::Pane {
+                pane_id: String::new(),
+                session_id: None,
+            },
+        );
+        let (first, second) = match split.place {
+            SplitPlace::First => (new_pane, old),
+            SplitPlace::Second => (old, new_pane),
+        };
+        *grid = GridNode::Split {
+            direction: split.direction,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        return true;
+    }
+    match grid {
+        GridNode::Pane { .. } => false,
+        GridNode::Split { first, second, .. } => {
+            split_pane(first, split, new_pane.clone()) || split_pane(second, split, new_pane)
+        }
     }
 }
 
@@ -1004,6 +1139,118 @@ mod tests {
         assert_eq!(
             spawns.resolve_checkout(Some("a"), "R1", "x").as_deref(),
             Some("a")
+        );
+    }
+
+    /// The pane each placement request aims at, as `(kind, pane, session)`.
+    fn aimed(messages: &[ClientMessage]) -> Vec<(&'static str, String, String)> {
+        messages
+            .iter()
+            .map(|msg| match msg {
+                ClientMessage::ReplacePaneSession {
+                    pane_id,
+                    session_id,
+                    ..
+                } => (
+                    "replace",
+                    pane_id.clone(),
+                    session_id.clone().unwrap_or_default(),
+                ),
+                ClientMessage::SplitPane {
+                    pane_id,
+                    new_session_id,
+                    ..
+                } => (
+                    "split",
+                    pane_id.clone(),
+                    new_session_id.clone().unwrap_or_default(),
+                ),
+                ClientMessage::CreateTab {
+                    initial_session_id, ..
+                } => (
+                    "tab",
+                    String::new(),
+                    initial_session_id.clone().unwrap_or_default(),
+                ),
+                other => panic!("not a placement: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn recovered_sessions_placed_once_each() {
+        let tabs = model_with(&[tab("t1", &pane("a", Some("shown")))]);
+        let new = session("new", None, None);
+        let shown = session("shown", None, None);
+        let sessions = [new.clone(), shown.clone()];
+        let messages = place_several(&[new.clone(), new, shown], &tabs, &sessions);
+        assert_eq!(
+            aimed(&messages),
+            [("split", "a".to_owned(), "new".to_owned())],
+            "listed twice, placed once; one a pane already shows is left alone"
+        );
+
+        let none = TabsModel::new(None);
+        let messages = place_several(
+            &[session("x", None, None), session("y", None, None)],
+            &none,
+            &[],
+        );
+        assert_eq!(
+            aimed(&messages),
+            [
+                ("tab", String::new(), "x".to_owned()),
+                ("tab", String::new(), "y".to_owned())
+            ],
+            "no active tab: a tab each"
+        );
+    }
+
+    #[test]
+    fn several_recovered_do_not_share_a_pane() {
+        let grid = protocol::GridNode::Split {
+            direction: protocol::SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(pane("a", Some("s1"))),
+            second: Box::new(protocol::GridNode::Split {
+                direction: protocol::SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(pane("b", None)),
+                second: Box::new(pane("c", None)),
+            }),
+        };
+        let tabs = model_with(&[tab("t1", &grid)]);
+        let recovered = [
+            session("n1", None, None),
+            session("n2", None, None),
+            session("n3", None, None),
+        ];
+        let messages = place_several(&recovered, &tabs, &[session("s1", None, None)]);
+        assert_eq!(
+            aimed(&messages),
+            [
+                ("replace", "b".to_owned(), "n1".to_owned()),
+                ("replace", "c".to_owned(), "n2".to_owned()),
+                ("split", "a".to_owned(), "n3".to_owned()),
+            ],
+            "each empty pane once, then a split of the largest"
+        );
+
+        let tabs = model_with(&[tab("t1", &pane("a", Some("s1")))]);
+        let recovered = [
+            session("r1", Some("repo"), None),
+            session("r2", Some("repo"), None),
+            session("r3", Some("repo"), None),
+        ];
+        let messages = place_several(&recovered, &tabs, &[session("s1", Some("repo"), None)]);
+        assert_eq!(
+            aimed(&messages),
+            [
+                ("split", "a".to_owned(), "r1".to_owned()),
+                ("split", "a".to_owned(), "r2".to_owned()),
+                ("split", "a".to_owned(), "r3".to_owned()),
+            ],
+            "beside the repo's pane; a pane the daemon has not named yet is never aimed at"
         );
     }
 

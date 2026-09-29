@@ -354,6 +354,7 @@ impl RootView {
             || self.shell_dialog.is_some()
             || (self.appearance_editor.is_some() && !handoff)
             || (self.worktrees_manager.is_some() && !handoff)
+            || self.recover.is_some()
             || self.delete_dialog.is_some()
             || self.menu.is_some()
             || self.container_menu.is_some()

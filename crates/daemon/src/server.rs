@@ -124,7 +124,43 @@ pub struct Hub {
     /// push so a freshly-connected client renders the toggle correctly
     /// without waiting for the next broadcast.
     pub keep_awake_status: tokio::sync::watch::Receiver<crate::keep_awake::Status>,
+    /// The session ids a recovery or a Resume is spawning for right now, so
+    /// the two never start the same session twice.
+    pub recovering: RecoveryClaims,
 }
+
+/// The session ids being recovered or resumed right now.
+#[derive(Clone, Default)]
+pub struct RecoveryClaims(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl RecoveryClaims {
+    /// Claims `id` for one recovery; None while another holds it. The claim
+    /// ends when the returned guard drops, on every exit path.
+    pub(crate) fn claim(&self, id: &str) -> Option<RecoveryClaim> {
+        if !crate::sync::lock(&self.0).insert(id.to_owned()) {
+            return None;
+        }
+        Some(RecoveryClaim {
+            claims: self.clone(),
+            id: id.to_owned(),
+        })
+    }
+}
+
+/// One held claim from [`RecoveryClaims::claim`].
+pub(crate) struct RecoveryClaim {
+    claims: RecoveryClaims,
+    id: String,
+}
+
+impl Drop for RecoveryClaim {
+    fn drop(&mut self) {
+        crate::sync::lock(&self.claims.0).remove(&self.id);
+    }
+}
+
+/// The error a recovery or Resume gets while another holds the session.
+const ALREADY_RECOVERING: &str = "already being recovered";
 
 impl Hub {
     /// Broadcast a tab-layout change scoped to one client's layout. Only that
@@ -508,6 +544,7 @@ pub async fn run(
         pairing: Arc::new(AsyncMutex::new(None)),
         keep_awake_enabled: Arc::new(keep_awake_tx),
         keep_awake_status: keep_awake_status_rx,
+        recovering: RecoveryClaims::default(),
     };
     start_hub_tasks(&hub, client_count_rx);
 
@@ -5147,6 +5184,10 @@ async fn resume_abandoned(
     session_id: &str,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> anyhow::Result<()> {
+    let _claim = hub
+        .recovering
+        .claim(session_id)
+        .ok_or_else(|| anyhow!("session {session_id} is {ALREADY_RECOVERING}"))?;
     let rec = hub
         .sessions
         .get(session_id)
@@ -5172,17 +5213,26 @@ async fn resume_abandoned(
     let mut req = stored.to_clone_request();
     req.initial_prompt = last_prompt;
     let snap = spawn_session(hub, req, None).await?;
-
-    // Rebind any pane that pointed at the abandoned session to the fresh one,
-    // in every client layout, so the resume reattaches to its original slot
-    // instead of orphaning into the sidebar as an unbound session.
-    rebind_session_panes(hub, session_id, &snap.id);
-
-    // Remove the abandoned placeholder and delete the sidecar atomically
-    // after the spawn succeeds. If spawn failed, the placeholder stays
-    // so the user can try again.
-    discard_abandoned(hub, session_id, out_tx);
+    finish_resume(hub, session_id, &snap.id, out_tx);
     Ok(())
+}
+
+/// After a successful Resume spawn of the abandoned `old_id` as `new_id`:
+/// rebind any pane that pointed at the abandoned session to the fresh one,
+/// in every client layout, so the resume reattaches to its original slot
+/// instead of orphaning into the sidebar as an unbound session; remove the
+/// abandoned placeholder and its sidecar (if the spawn failed, the
+/// placeholder stays so the user can try again); and mark its history entry
+/// recovered, so it stops counting as a session to recover.
+fn finish_resume(
+    hub: &Hub,
+    old_id: &str,
+    new_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    rebind_session_panes(hub, old_id, new_id);
+    discard_abandoned(hub, old_id, out_tx);
+    mark_history_recovered(hub, old_id);
 }
 
 /// Resume every session currently flagged as abandoned. Iterates the
@@ -5250,23 +5300,14 @@ async fn register_repo(
 }
 
 /// The session history as the client lists it, read off the async runtime.
-/// A session still in the Abandoned group is left out: it is resumed from
-/// there, not recovered.
+/// A session still in the Abandoned group is listed too: recovering it from
+/// the history removes it from that group.
 async fn session_history_items(hub: &Hub) -> Vec<protocol::SessionHistoryItem> {
     let dirs = hub.dirs.clone();
     let repos = hub.state.with_persisted(|s| s.repos.clone());
-    let abandoned: std::collections::HashSet<String> = hub
-        .sessions
-        .snapshots()
-        .into_iter()
-        .filter(|snap| snap.is_abandoned)
-        .map(|snap| snap.id)
-        .collect();
     tokio::task::spawn_blocking(move || {
         let claude_home = crate::transcripts::claude_home();
-        let mut items = history::history_items(&dirs, &repos, claude_home.as_deref());
-        items.retain(|item| !abandoned.contains(&item.entry.session_id));
-        items
+        history::history_items(&dirs, &repos, claude_home.as_deref())
     })
     .await
     .unwrap_or_else(|err| {
@@ -5337,6 +5378,10 @@ async fn recover_one(
     item: &protocol::RecoverItem,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) -> Result<String, String> {
+    let _claim = hub
+        .recovering
+        .claim(&item.history_id)
+        .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
     let entry = history::read_one(&hub.dirs, &item.history_id)
         .ok_or_else(|| format!("no history entry {}", item.history_id))?;
     let claude_home = crate::transcripts::claude_home();
@@ -5365,10 +5410,38 @@ async fn recover_one(
     let snapshot = spawn_session(hub, plan.request, None)
         .await
         .map_err(|err| format!("{err:#}"))?;
-    if let Err(err) = history::mark_recovered(&hub.dirs, &item.history_id, chrono::Utc::now()) {
-        warn!(?err, history_id = %item.history_id, "failed to mark history entry recovered");
-    }
+    finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
     Ok(snapshot.id)
+}
+
+/// After a successful recovery spawn of `history_id` as `new_id`: mark the
+/// history entry recovered and, when that session still sits in the
+/// Abandoned group, hand its panes to `new_id` in every client layout and
+/// remove it from there. Its history entry already exists, so the removal
+/// writes no second end.
+fn finish_recovery(
+    hub: &Hub,
+    history_id: &str,
+    new_id: &str,
+    out_tx: &mpsc::UnboundedSender<DaemonMessage>,
+) {
+    mark_history_recovered(hub, history_id);
+    let still_abandoned = hub
+        .sessions
+        .get(history_id)
+        .is_some_and(|rec| crate::sync::lock(&rec).is_abandoned);
+    if still_abandoned {
+        rebind_session_panes(hub, history_id, new_id);
+        discard_abandoned(hub, history_id, out_tx);
+    }
+}
+
+/// Stamp the history entry for `session_id` recovered now, logging a failure
+/// instead of returning it: the recovery itself already succeeded.
+fn mark_history_recovered(hub: &Hub, session_id: &str) {
+    if let Err(err) = history::mark_recovered(&hub.dirs, session_id, chrono::Utc::now()) {
+        warn!(?err, history_id = %session_id, "failed to mark history entry recovered");
+    }
 }
 
 /// Remove an abandoned session from the registry + delete its sidecar.
@@ -6636,6 +6709,7 @@ mod tests {
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
+            recovering: RecoveryClaims::default(),
         };
         (hub, scratch)
     }
@@ -7297,7 +7371,7 @@ mod tests {
 
     #[tokio::test]
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
-    async fn session_history_omits_sessions_still_abandoned() {
+    async fn history_lists_abandoned_tracer_lost_session() {
         use crate::history::test_support::record;
         let (hub, _scratch) = spawnless_test_hub("history-abandoned");
         write_history(&hub, "gone", SessionMode::PlainShell, false);
@@ -7317,7 +7391,125 @@ mod tests {
         };
         let mut ids: Vec<&str> = items.iter().map(|i| i.entry.session_id.as_str()).collect();
         ids.sort_unstable();
-        assert_eq!(ids, ["gone", "stopped"]);
+        assert_eq!(ids, ["abandoned", "gone", "stopped"]);
+        let abandoned_item = items
+            .iter()
+            .find(|i| i.entry.session_id == "abandoned")
+            .expect("abandoned listed");
+        assert_eq!(abandoned_item.entry.end, SessionEnd::TracerLost);
+    }
+
+    /// Insert `id` as an abandoned session with an unrecovered `TracerLost`
+    /// history entry, as a tracer loss leaves it.
+    fn insert_abandoned_with_history(hub: &Hub, id: &str) {
+        write_history(hub, id, SessionMode::Interactive, false);
+        let mut rec = crate::history::test_support::record(id, SessionMode::Interactive);
+        rec.is_abandoned = true;
+        rec.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(rec);
+    }
+
+    #[tokio::test]
+    async fn recovering_abandoned_entry_removes_abandoned_session() {
+        let (hub, _scratch) = spawnless_test_hub("recover-abandoned");
+        insert_abandoned_with_history(&hub, "lost");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        assert!(
+            hub.sessions.get("lost").is_none(),
+            "left the Abandoned group"
+        );
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(DaemonMessage::SessionRemoved { ref session_id }) if session_id == "lost"
+        ));
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert!(entry.recovered_at.is_some(), "marked recovered");
+        assert_eq!(entry.end, SessionEnd::TracerLost, "no second end written");
+    }
+
+    #[tokio::test]
+    async fn resume_abandoned_marks_history_recovered() {
+        let (hub, _scratch) = spawnless_test_hub("resume-marks-recovered");
+        insert_abandoned_with_history(&hub, "lost");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        finish_resume(&hub, "lost", "fresh", &out_tx);
+        assert!(hub.sessions.get("lost").is_none(), "placeholder removed");
+        let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
+        assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
+        assert_eq!(entry.end, SessionEnd::TracerLost);
+    }
+
+    #[tokio::test]
+    async fn recovering_abandoned_entry_rebinds_its_panes() {
+        let (hub, _scratch) = spawnless_test_hub("recover-rebinds");
+        insert_abandoned_with_history(&hub, "lost");
+        let tab = tabs::make_tab(None, Some("lost".to_owned()), &[]);
+        hub.state
+            .mutate_all_layouts(|layouts| {
+                layouts.insert(
+                    "client".to_owned(),
+                    crate::state::ClientLayout {
+                        name: None,
+                        tabs: vec![tab],
+                    },
+                );
+            })
+            .expect("seed a layout");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        finish_recovery(&hub, "lost", "fresh", &out_tx);
+        let shown: Vec<Option<String>> = hub
+            .state
+            .mutate_all_layouts(|layouts| {
+                layouts["client"]
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| match &tab.content {
+                        protocol::TabContent::Grid {
+                            grid: protocol::GridNode::Pane { session_id, .. },
+                        } => Some(session_id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .expect("read the layout");
+        assert_eq!(shown, [Some("fresh".to_owned())], "the pane follows");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn concurrent_recover_and_resume_claim_once() {
+        let claims = RecoveryClaims::default();
+        let first = claims.claim("x").expect("the first claim wins");
+        assert!(claims.claim("x").is_none(), "a second claim loses");
+        assert!(claims.claim("y").is_some(), "claims are per id");
+        drop(first);
+        assert!(claims.claim("x").is_some(), "a dropped claim frees the id");
+
+        let (hub, _scratch) = spawnless_test_hub("recover-claims");
+        insert_abandoned_with_history(&hub, "lost");
+        let _held = hub.recovering.claim("lost").expect("claim");
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let resumed = resume_abandoned(&hub, "lost", &out_tx).await;
+        let err = resumed.expect_err("a Resume while a recovery holds it fails");
+        assert!(err.to_string().contains(ALREADY_RECOVERING), "{err}");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: "lost".to_owned(),
+                    conversation_id: None,
+                    how: protocol::RecoverAs::Claude,
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results[0].error.as_deref(), Some(ALREADY_RECOVERING));
+        assert!(hub.sessions.get("lost").is_some(), "nothing was spawned");
     }
 
     /// A test hub whose spawns fail before any process starts: its binaries

@@ -48,6 +48,8 @@ mod pane_close_view;
 mod pane_menu;
 mod quit;
 mod quit_view;
+mod recover;
+mod recover_view;
 mod run_confirm;
 mod sc_writes;
 mod scrollback_load;
@@ -157,6 +159,7 @@ pub use crate::notices::{
 pub use crate::notify::{Notifier, NotifyState};
 pub use crate::open::{OpenFailure, Opener};
 pub use crate::quit_view::QuitFn;
+pub use crate::recover_view::RecoverRow;
 pub use crate::shell_marks::{ShellDot, ShellStatus};
 pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, LeafState,
@@ -552,6 +555,21 @@ pub struct RootView {
     worktrees_manager: Option<worktrees_manager::WorktreesManager>,
     /// The Manage worktrees modal's keyboard focus.
     worktrees_focus: FocusHandle,
+    /// The ended sessions the daemon keeps, which the Recover dialog lists.
+    session_history: recover::SessionHistory,
+    /// The Recover dialog, while open.
+    recover: Option<recover::RecoverDialog>,
+    /// The Recover dialog's keyboard focus.
+    recover_focus: FocusHandle,
+    /// Ends the wait for a recovery that goes unanswered.
+    recover_timer: Option<Task<()>>,
+    /// The recoveries this connection sent and has had no answer to, by
+    /// request id, each with the requested sessions that were abandoned
+    /// (the daemon hands those their old panes itself).
+    recover_requests: HashMap<String, HashSet<String>>,
+    /// Recovered sessions to place, one batch per answer, waiting for every
+    /// snapshot of their batch.
+    recover_batches: Vec<Vec<String>>,
 }
 
 impl RootView {
@@ -755,6 +773,12 @@ impl RootView {
             worktrees_tab: None,
             worktrees_manager: None,
             worktrees_focus: cx.focus_handle(),
+            session_history: recover::SessionHistory::default(),
+            recover: None,
+            recover_focus: cx.focus_handle(),
+            recover_timer: None,
+            recover_requests: HashMap::new(),
+            recover_batches: Vec::new(),
         }
     }
 
@@ -1198,6 +1222,7 @@ impl RootView {
             && self.shell_dialog.is_none()
             && self.appearance_editor.is_none()
             && self.worktrees_manager.is_none()
+            && self.recover.is_none()
             && self.delete_dialog.is_none()
             && self.changes.discard.is_none()
             && self.changes.file_menu.is_none()
@@ -1403,6 +1428,7 @@ impl RootView {
             self.reset_session_ui(window, cx);
             self.reset_notices(window, cx);
             self.reset_undo(cx);
+            self.close_recover_on_overlay(window, cx);
         }
         if exit_relevant {
             self.after_exit_event(window, cx);
@@ -1471,8 +1497,7 @@ impl RootView {
         }
         self.drop_stale_session_ui(window, cx);
         self.on_spawn_dialog_message(&msg, window, cx);
-        self.on_cleanup_failed_message(&msg, window, cx);
-        self.on_worktrees_message(&msg, cx);
+        self.on_dialog_message(&msg, window, cx);
         if let DaemonMessage::Tabs { tabs } = &msg {
             self.on_tab_list(tabs, window, cx);
         }
@@ -1562,6 +1587,19 @@ impl RootView {
         }
     }
 
+    /// Hands the message to the cleanup-failed dialog, the worktrees
+    /// manager and the Recover dialog.
+    fn on_dialog_message(
+        &mut self,
+        msg: &DaemonMessage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_cleanup_failed_message(msg, window, cx);
+        self.on_worktrees_message(msg, cx);
+        self.on_recover_message(msg, window, cx);
+    }
+
     /// A new connection: fresh panes, nothing in flight, and every dialog,
     /// menu and notice of the old one closed.
     fn on_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1584,6 +1622,7 @@ impl RootView {
         self.close_layout_chooser(window, cx);
         self.reset_cleanup_failed(window, cx);
         self.reset_worktrees(window, cx);
+        self.reset_recover(window, cx);
     }
 
     /// Whether `session`'s snapshot moves its appearance, read against the
@@ -1747,6 +1786,10 @@ impl RootView {
             if self.on_shell_dialog_key(ks, window, cx) {
                 cx.stop_propagation();
             }
+            return;
+        }
+        if self.on_recover_key(ks, window, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.worktrees_manager.is_some() {
@@ -2078,6 +2121,7 @@ impl Render for RootView {
             .children(self.appearance_editor_layer(cx))
             .children(self.settings_layer(window, cx))
             .children(self.worktrees_manager_layer(window, cx))
+            .children(self.recover_layer(window, cx))
             .children(self.pane_close_layer(cx))
             .children(self.move_panes_layer(cx))
             .children(delete_under)

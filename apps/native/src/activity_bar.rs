@@ -1,12 +1,13 @@
 //! The activity rail at the window's left edge: Sessions and Source control,
 //! which pick the panel beside it and fold it, the badge counting the
-//! uncommitted changes, and the Settings gear at the bottom.
+//! uncommitted changes, and at the bottom the Recover sessions button with
+//! its badge and the Settings gear.
 
 use gpui::{ClickEvent, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, svg};
 
-use crate::assets::{SESSIONS_ICON, SOURCE_CONTROL_ICON};
+use crate::assets::{RECOVER_ICON, SESSIONS_ICON, SOURCE_CONTROL_ICON};
 use crate::sidebar::Activity;
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, tooltip};
+use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, WARNING, tooltip};
 
 const RAIL_WIDTH: f32 = 40.0;
 const ICON_SIZE: f32 = 18.0;
@@ -99,6 +100,7 @@ impl RootView {
             .border_color(gpui::rgb(BORDER))
             .children(items.into_iter().map(|item| self.rail_item(item, cx)))
             .child(div().flex_1())
+            .child(recover_button(self.session_history.badge_count(), cx))
             .child(settings_gear(cx))
     }
 
@@ -136,7 +138,7 @@ impl RootView {
                 )
             })
             .when_some(badge_text(item.badge), |row, text| {
-                row.child(badge(text, accent))
+                row.child(badge("activity-badge", text, accent))
             })
             .tooltip(tooltip(item_tip(item.label, item.badge, active, collapsed)))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -162,7 +164,7 @@ impl RootView {
     }
 }
 
-fn badge(text: String, accent: u32) -> Div {
+fn badge(selector: &'static str, text: String, color: u32) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
@@ -174,12 +176,40 @@ fn badge(text: String, accent: u32) -> Div {
         .h(px(BADGE_HEIGHT))
         .px(px(4.0))
         .rounded_full()
-        .bg(gpui::rgb(accent))
+        .bg(gpui::rgb(color))
         .text_color(gpui::rgb(BADGE_TEXT))
         .text_size(px(BADGE_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
-        .debug_selector(|| "activity-badge".to_owned())
+        .debug_selector(move || selector.to_owned())
         .child(text)
+}
+
+/// The Recover sessions button, above the gear, with its badge counting the
+/// sessions lost and not yet recovered.
+fn recover_button(badge_count: usize, cx: &mut Context<RootView>) -> Stateful<Div> {
+    div()
+        .id("activity-recover")
+        .debug_selector(|| "activity-recover".to_owned())
+        .relative()
+        .flex()
+        .justify_center()
+        .items_center()
+        .py(px(ITEM_PADDING))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .child(
+            svg()
+                .path(RECOVER_ICON)
+                .size(px(ICON_SIZE))
+                .text_color(gpui::rgb(MUTED)),
+        )
+        .when_some(badge_text(badge_count), |row, text| {
+            row.child(badge("recover-badge", text, WARNING))
+        })
+        .tooltip(tooltip("Recover sessions"))
+        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.toggle_recover(window, cx);
+        }))
 }
 
 /// The Settings gear, pinned to the rail's bottom.

@@ -2444,6 +2444,7 @@ mod tests {
             pairing: Arc::new(AsyncMutex::new(None)),
             keep_awake_enabled: Arc::new(keep_awake_enabled),
             keep_awake_status,
+            recovering: crate::server::RecoveryClaims::default(),
         };
         (hub, preset_rx, scratch)
     }

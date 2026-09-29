@@ -41,6 +41,7 @@ fn side_part_shown(root: &RootView, selector: &str) -> bool {
         "sidebar-panel" => open && root.activity() == Activity::Sessions,
         "sidebar-divider" => open,
         "activity-badge" => root.activity_badge().is_some(),
+        "recover-badge" => root.recover_badge().is_some(),
         "sc-picker-menu" => sc_picker_shown(root),
         _ if selector.starts_with("sc-picker-") => {
             sc_picker_shown(root)
@@ -64,7 +65,8 @@ fn sc_picker_shown(root: &RootView) -> bool {
 }
 
 /// Whether the layout chooser, the worktree cleanup-failed dialog, the pane
-/// dialogs, the empty pane's menu or the exit dialog shows `selector`: the
+/// dialogs, the empty pane's menu, the Recover dialog or the exit dialog
+/// shows `selector`: the
 /// dialog while it is open, a control while the open dialog has it, and the
 /// header's move button on a shown pane with a session. `None` for any
 /// other selector.
@@ -113,6 +115,10 @@ fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         root.worktrees_manager_buttons()
             .iter()
             .any(|button| button.selector == selector)
+    } else if selector == "recover" {
+        root.recover_open()
+    } else if selector.starts_with("recover-") && selector != "recover-badge" {
+        has(root.recover_controls())
     } else if selector == "exit-confirm-dialog" {
         root.exit_dialog_open()
     } else if selector.starts_with("exit-") {
@@ -396,6 +402,101 @@ impl SessionBuilder {
 
     pub fn build(self) -> SessionSnapshot {
         serde_json::from_value(self.0).expect("session fixture")
+    }
+}
+
+/// A history fixture: a Claude session in repo `r1` that the daemon lost
+/// ten minutes ago, with one conversation to resume.
+pub struct HistoryItemBuilder(Value);
+
+pub fn history_item(id: &str) -> HistoryItemBuilder {
+    let ended = chrono::Utc::now() - chrono::Duration::minutes(10);
+    HistoryItemBuilder(json!({
+        "entry": {
+            "session_id": id, "label": format!("label-{id}"), "kind": "single",
+            "mode": "interactive", "agent": "claude",
+            "spawn_config": {
+                "target": {
+                    "kind": "single", "repo_id": "r1", "branch_name": "main", "base_branch": null,
+                    "use_worktree": false, "worktree_reuse": "reuse"
+                },
+                "mode": "interactive", "dangerously_skip_permissions": false,
+                "agent_options": {"kind": "claude", "permission_mode": null},
+                "model": null, "extra_env": []
+            },
+            "members": [{"repo_id": "r1", "repo_name": "r1", "branch": "main", "worktree_path": "D:\\r1"}],
+            "workspace_id": null, "primary_cwd": "D:\\r1", "current_cwd": null,
+            "program_name": "claude", "started_at": null, "ended_at": ended,
+            "end": {"type": "tracer_lost"}, "claude_session_id": null, "source": "record",
+            "recovered_at": null
+        },
+        "candidates": [{"id": format!("c-{id}"), "last_active": ended, "title": format!("Chat {id}")}],
+        "folder_is_git_repo": true, "folder_repo_id": null
+    }))
+}
+
+impl HistoryItemBuilder {
+    fn entry(mut self, key: &str, value: Value) -> Self {
+        self.0["entry"][key] = value;
+        self
+    }
+
+    /// Ended how `end` says (a `SessionEnd` in its wire form).
+    pub fn end(self, end: Value) -> Self {
+        self.entry("end", end)
+    }
+
+    /// Stopped by the user.
+    pub fn stopped(self) -> Self {
+        self.end(json!({"type": "stopped_by_user"}))
+    }
+
+    /// Ended `minutes` ago.
+    pub fn ended_minutes_ago(self, minutes: i64) -> Self {
+        let at = chrono::Utc::now() - chrono::Duration::minutes(minutes);
+        self.entry("ended_at", json!(at))
+    }
+
+    /// Already recovered.
+    pub fn recovered(self) -> Self {
+        let at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        self.entry("recovered_at", json!(at))
+    }
+
+    /// Conversations `ids`, the first the newest.
+    pub fn candidates(mut self, ids: &[&str]) -> Self {
+        let candidates: Vec<Value> = (11_i64..)
+            .zip(ids)
+            .map(|(age, id)| {
+                let at = chrono::Utc::now() - chrono::Duration::minutes(age);
+                json!({"id": id, "last_active": at, "title": format!("Chat {id}")})
+            })
+            .collect();
+        self.0["candidates"] = Value::Array(candidates);
+        self
+    }
+
+    /// Known only by its folder `cwd`: no spawn config, no repo member.
+    /// `repo_id` is the registered repo at that folder, if any.
+    pub fn folder_only(mut self, cwd: &str, git: bool, repo_id: Option<&str>) -> Self {
+        self.0["folder_is_git_repo"] = json!(git);
+        self.0["folder_repo_id"] = json!(repo_id);
+        self.entry("spawn_config", Value::Null)
+            .entry("members", json!([]))
+            .entry("primary_cwd", json!(cwd))
+    }
+
+    /// A plain shell in `cwd` with no conversation.
+    pub fn shell(mut self, cwd: &str) -> Self {
+        self.0["candidates"] = json!([]);
+        self.0["folder_is_git_repo"] = json!(false);
+        self.entry("mode", json!("plain_shell"))
+            .entry("members", json!([]))
+            .entry("primary_cwd", json!(cwd))
+    }
+
+    pub fn build(self) -> protocol::SessionHistoryItem {
+        serde_json::from_value(self.0).expect("history item fixture")
     }
 }
 
@@ -804,6 +905,12 @@ impl<'a> Harness<'a> {
             protocol_version: PROTOCOL,
             supported_versions: vec![PROTOCOL],
         });
+        // Every connection asks for the session history; the specs that
+        // care about it send a Welcome of their own.
+        self.drain();
+        self.outbox
+            .unread
+            .retain(|msg| !matches!(msg, ClientMessage::ListSessionHistory { .. }));
     }
 
     pub fn load(&mut self, fixture: &Fixture) {
