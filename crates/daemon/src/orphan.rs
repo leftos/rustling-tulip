@@ -13,7 +13,9 @@
 use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
-use protocol::{Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMode, SpawnConfig};
+use protocol::{
+    Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMode, SessionStatus, SpawnConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -121,6 +123,17 @@ pub struct OrphanMeta {
     /// before B.1.
     #[serde(default)]
     pub recent_actions_tail: Vec<String>,
+    /// The session's status when the sidecar was last written. A reattach
+    /// restores a session that was waiting for input (or idle) as it was, and
+    /// treats every other stored status as one it has no evidence for. `None`
+    /// for sidecars written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<SessionStatus>,
+    /// When `status` last changed, so a reattached session shows how long it
+    /// has been waiting instead of starting that clock over. `None` whenever
+    /// `status` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_since: Option<DateTime<Utc>>,
     /// OS pid of the `rt-tracer.exe` process supervising this session's PTY.
     /// `None` for sidecars written before C.3 (no tracer in the picture) and
     /// for any future spawn path that doesn't go through a tracer. Liveness
@@ -445,6 +458,10 @@ pub fn meta_from_record(
         spawn_config,
         last_prompt,
         recent_actions_tail: Vec::new(),
+        // The spawn pipeline fills these from the record it just published;
+        // `meta_from_record` never sees that record.
+        status: None,
+        status_since: None,
         tracer_pid,
         tracer_pipe,
         tracer_exe_path,
@@ -572,38 +589,52 @@ pub fn try_update_appearance(dirs: &Dirs, session_id: &str, appearance: &Appeara
     }
 }
 
-/// Best-effort sync of `recent_actions_tail` into the sidecar. Called by
-/// the registry after every `update()` so abandoned sessions retain the
-/// most recent operational context. Silently no-ops if the sidecar
-/// doesn't exist (e.g. for a brand-new session whose spawn pipeline
-/// hasn't called `try_write_meta` yet, or a session that never had a
-/// sidecar — plain shells in some configurations).
+/// Best-effort sync of the record's on-disk mirror into the sidecar: the
+/// `recent_actions_tail` and the status/stamp pair. Called by the
+/// registry after every `update()` so abandoned sessions retain the most
+/// recent operational context and a reattach can bring back a session that
+/// was still waiting for input. Silently no-ops if the sidecar doesn't exist
+/// (e.g. for a brand-new session whose spawn pipeline hasn't called
+/// `try_write_meta` yet, or a session that never had a sidecar — plain shells
+/// in some configurations).
 ///
-/// Returns `Ok(())` for both "meta did not exist" and "meta updated";
-/// real I/O errors surface as `Err` and the caller logs them.
-pub fn update_recent_actions_tail(
+/// Returns `Ok(())` for both "meta did not exist" and "meta updated"; real
+/// I/O errors surface as `Err` and the caller logs them.
+pub fn sync_record_fields(
     dirs: &Dirs,
     session_id: &str,
     new_tail: &[String],
+    status: SessionStatus,
+    status_since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<()> {
     let path = meta_path(dirs, session_id);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err).context("reading meta for recent_actions update"),
+        Err(err) => return Err(err).context("reading meta for record sync"),
     };
-    let mut meta =
-        load_meta_from_bytes(&bytes).context("loading meta for recent_actions update")?;
-    if meta.recent_actions_tail == new_tail {
+    let mut meta = load_meta_from_bytes(&bytes).context("loading meta for record sync")?;
+    if meta.recent_actions_tail == new_tail
+        && meta.status == Some(status)
+        && meta.status_since == status_since
+    {
         return Ok(());
     }
     meta.recent_actions_tail = new_tail.to_vec();
+    meta.status = Some(status);
+    meta.status_since = status_since;
     write_meta(dirs, &meta)
 }
 
-pub fn try_update_recent_actions_tail(dirs: &Dirs, session_id: &str, new_tail: &[String]) {
-    if let Err(err) = update_recent_actions_tail(dirs, session_id, new_tail) {
-        warn!(?err, %session_id, "failed to update orphan meta recent_actions_tail");
+pub fn try_sync_record_fields(
+    dirs: &Dirs,
+    session_id: &str,
+    new_tail: &[String],
+    status: SessionStatus,
+    status_since: Option<DateTime<Utc>>,
+) {
+    if let Err(err) = sync_record_fields(dirs, session_id, new_tail, status, status_since) {
+        warn!(?err, %session_id, "failed to sync orphan meta record fields");
     }
 }
 
@@ -732,6 +763,56 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_round_trips_status_and_since() {
+        let dirs = scratch_dirs("status-round-trip");
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        let mut meta = meta_from_record(
+            "s1".to_string(),
+            1,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            since,
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        meta.status = Some(SessionStatus::AwaitingInput);
+        meta.status_since = Some(since);
+        write_meta(&dirs, &meta).expect("write meta");
+
+        let loaded = load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(loaded.status, Some(SessionStatus::AwaitingInput));
+        assert_eq!(loaded.status_since, Some(since));
+
+        // A sidecar written before these fields existed loads with both unset
+        // rather than being rejected.
+        let legacy = br#"{
+            "on_disk_version": 2,
+            "session_id": "legacy",
+            "pid": 1234,
+            "label": "legacy",
+            "kind": "standalone",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        write_sidecar(&dirs, "legacy", legacy);
+        let loaded = load_meta(&dirs, "legacy").expect("load legacy meta");
+        assert_eq!(loaded.status, None);
+        assert_eq!(loaded.status_since, None);
+    }
+
+    #[test]
     fn current_version_sidecar_round_trips() {
         let original = OrphanMeta {
             on_disk_version: CURRENT_SIDECAR_VERSION,
@@ -757,6 +838,8 @@ mod tests {
             spawn_config: None,
             last_prompt: None,
             recent_actions_tail: Vec::new(),
+            status: None,
+            status_since: None,
             tracer_pid: Some(1234),
             tracer_pipe: Some(r"\\.\pipe\rt-tracer-s1".to_string()),
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),

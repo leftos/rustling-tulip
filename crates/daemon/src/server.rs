@@ -392,25 +392,32 @@ async fn reattach_one(
                         Some(dirs.clone()),
                     );
                     let (in_tx, in_rx) = mpsc::unbounded_channel::<usize>();
-                    {
+                    let restored = {
                         let mut guard = crate::sync::lock(pending.arc());
                         guard.scrollback_snapshot_req = Some(snap_tx);
                         guard.input_notifier = Some(in_tx);
-                    }
+                        guard.status
+                    };
                     if meta.mode == SessionMode::PlainShell {
                         pty_state::watch_plain_shell(
                             &sessions,
                             meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            in_rx,
+                            pty_state::WatchStreams {
+                                output: pty.output.subscribe(),
+                                input_pulses: in_rx,
+                            },
+                            restored,
                         );
                     } else {
                         pty_state::watch(
                             &sessions,
                             meta.session_id.clone(),
-                            pty.output.subscribe(),
-                            in_rx,
+                            pty_state::WatchStreams {
+                                output: pty.output.subscribe(),
+                                input_pulses: in_rx,
+                            },
                             attention_tx.clone(),
+                            restored,
                         );
                     }
                     osc_title::watch(
@@ -3766,9 +3773,12 @@ async fn spawn_interactive_session(
     pty_state::watch(
         &hub.sessions,
         session_id.clone(),
-        pty.output.subscribe(),
-        in_rx,
+        pty_state::WatchStreams {
+            output: pty.output.subscribe(),
+            input_pulses: in_rx,
+        },
         hub.attention_tx.clone(),
+        SessionStatus::Idle,
     );
     osc_title::watch(
         &hub.sessions,
@@ -3785,7 +3795,7 @@ async fn spawn_interactive_session(
     // underlying agent is captured in `agent`. is_session_alive prefers
     // `tracer_pid` + "rt-tracer" when the new fields are present.
     if let Some(pid) = pid
-        && let Ok(meta) = orphan::meta_from_record(
+        && let Ok(mut meta) = orphan::meta_from_record(
             session_id.clone(),
             pid,
             label,
@@ -3805,7 +3815,9 @@ async fn spawn_interactive_session(
             claude_session_id,
         )
     {
-        orphan::try_write_meta(&hub.dirs, &meta);
+        meta.status = Some(snap.status);
+        meta.status_since = snap.status_since;
+        write_meta_then_sync(hub, &session_id, &meta);
     }
 
     if let Some(injector) = cfg.prompt_injector.clone() {
@@ -3954,8 +3966,11 @@ async fn spawn_plain_shell_session(
     pty_state::watch_plain_shell(
         &hub.sessions,
         session_id.clone(),
-        pty.output.subscribe(),
-        in_rx,
+        pty_state::WatchStreams {
+            output: pty.output.subscribe(),
+            input_pulses: in_rx,
+        },
+        SessionStatus::Idle,
     );
     // Keep `osc_title::watch` so window-title escape sequences (which pwsh
     // emits by default) are recorded as `terminal_title` annotations; the
@@ -3971,7 +3986,7 @@ async fn spawn_plain_shell_session(
     pending.publish_from(cfg.origin.clone());
 
     if let Some(pid) = pid
-        && let Ok(meta) = orphan::meta_from_record(
+        && let Ok(mut meta) = orphan::meta_from_record(
             session_id.clone(),
             pid,
             label,
@@ -3992,7 +4007,9 @@ async fn spawn_plain_shell_session(
             None,
         )
     {
-        orphan::try_write_meta(&hub.dirs, &meta);
+        meta.status = Some(snap.status);
+        meta.status_since = snap.status_since;
+        write_meta_then_sync(hub, &session_id, &meta);
     }
 
     // A recovered shell types `claude --resume <id>` through an injector.
@@ -4088,7 +4105,7 @@ fn spawn_headless_session(
     pending.publish_from(cfg.origin.clone());
 
     if let Some(pid) = handle.pid()
-        && let Ok(meta) = orphan::meta_from_record(
+        && let Ok(mut meta) = orphan::meta_from_record(
             session_id.clone(),
             pid,
             label,
@@ -4111,7 +4128,9 @@ fn spawn_headless_session(
             None,
         )
     {
-        orphan::try_write_meta(&hub.dirs, &meta);
+        meta.status = Some(snap.status);
+        meta.status_since = snap.status_since;
+        write_meta_then_sync(hub, &session_id, &meta);
     }
 
     Ok(snap)
@@ -5693,12 +5712,31 @@ fn session_spawn_base(hub: &Hub, session_id: &str) -> SessionBase {
         })
 }
 
+/// Write a session's spawn-time sidecar, then re-sync it from the record. A
+/// status tick that lands between the snapshot the sidecar was built from and
+/// this write finds no sidecar to update, so the write alone would leave the
+/// stale snapshot on disk until the session's next status change.
+fn write_meta_then_sync(hub: &Hub, session_id: &str, meta: &orphan::OrphanMeta) {
+    orphan::try_write_meta(&hub.dirs, meta);
+    hub.sessions.sync_sidecar(session_id);
+}
+
 async fn discard_session(
     hub: &Hub,
     session_id: &str,
     cleanup: &[protocol::CleanupAction],
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
+    // A repeated discard reaches here after the record is gone — the client's
+    // pane close following its own auto-discard for a self-exited session.
+    // Every step below is a no-op for an unknown id at best (the history end,
+    // the registry removal) and a needless write at worst: the layout sweep
+    // rewrites state.json, and the sidecar deletes would take a session dir
+    // the registry no longer vouches for with them.
+    if hub.sessions.get(session_id).is_none() {
+        debug!(%session_id, "discard_session for unknown session; ignoring");
+        return;
+    }
     // Discard drops the registry record and can delete worktrees from disk —
     // the most destructive thing a client can ask for. It left no trail at
     // all, which made "the session vanished" impossible to attribute from a
@@ -7257,6 +7295,101 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].session_id, "s1");
         assert_eq!(entries[0].end, SessionEnd::StoppedByUser);
+    }
+
+    /// The spawn-time sidecar is built from a snapshot taken before the
+    /// session's first status tick; the sync right after the write must leave
+    /// the status that actually reached the record on disk.
+    #[tokio::test]
+    async fn spawn_sidecar_sync_picks_up_a_status_change() {
+        use crate::history::test_support::record;
+        let (hub, _scratch) = test_hub("spawn-sidecar-sync");
+        hub.sessions.insert(record("s1", SessionMode::Interactive));
+        let mut meta = orphan::meta_from_record(
+            "s1".to_string(),
+            1,
+            "s1".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            Vec::new(),
+            Utc::now(),
+            None,
+            None,
+            Agent::Claude,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build meta");
+        meta.status = Some(SessionStatus::Working);
+        meta.status_since =
+            Some(chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("a fixed stamp"));
+
+        // The first status tick lands after the snapshot was taken, and its own
+        // sync found no sidecar to update.
+        hub.sessions.update("s1", |rec| {
+            rec.status = SessionStatus::AwaitingInput;
+        });
+
+        write_meta_then_sync(&hub, "s1", &meta);
+
+        let loaded = orphan::load_meta(&hub.dirs, "s1").expect("load meta");
+        assert_eq!(loaded.status, Some(SessionStatus::AwaitingInput));
+        let live = hub
+            .sessions
+            .snapshots()
+            .into_iter()
+            .next()
+            .expect("the record");
+        assert_eq!(loaded.status_since, live.status_since);
+    }
+
+    /// A discard for a session the registry no longer holds — the client's
+    /// pane close racing its own auto-discard — must leave the disk alone.
+    #[tokio::test]
+    async fn discard_of_unknown_session_is_a_no_op() {
+        let (hub, _scratch) = test_hub("discard-unknown");
+        hub.state.mutate(|_| ()).expect("persist state.json");
+        // A sidecar left behind by a session the registry no longer lists.
+        let stray = hub.dirs.sessions_dir.join("ghost");
+        std::fs::create_dir_all(&stray).expect("create stray session dir");
+        std::fs::write(stray.join("meta.json"), b"{}").expect("write stray meta");
+        let before = std::fs::read(&hub.dirs.state_file).expect("read state.json");
+        let before_mtime = std::fs::metadata(&hub.dirs.state_file)
+            .and_then(|m| m.modified())
+            .expect("state.json mtime");
+
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        discard_session(&hub, "ghost", &[], &out_tx).await;
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "an unknown session produces no reply"
+        );
+        assert!(
+            stray.join("meta.json").is_file(),
+            "the stray sidecar survives"
+        );
+        assert_eq!(
+            std::fs::read(&hub.dirs.state_file).expect("read state.json"),
+            before,
+            "state.json keeps its contents"
+        );
+        assert_eq!(
+            std::fs::metadata(&hub.dirs.state_file)
+                .and_then(|m| m.modified())
+                .expect("state.json mtime"),
+            before_mtime,
+            "state.json is not rewritten"
+        );
+        assert!(
+            crate::history::read_one(&hub.dirs, "ghost").is_none(),
+            "no history entry for a session that never existed"
+        );
     }
 
     #[tokio::test]

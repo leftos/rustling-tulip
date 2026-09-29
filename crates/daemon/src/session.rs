@@ -240,6 +240,11 @@ pub struct SessionRegistry {
     /// the registry can't sync `recent_actions` back to disk — callers
     /// that construct registries in tests (none today) would pass `None`.
     dirs: Option<Dirs>,
+    /// Serialises the sidecar read-modify-write. Two updates racing through
+    /// `meta.json.tmp` would otherwise be free to leave the older of the two
+    /// writes on disk, so the sidecar could keep a status the record has
+    /// already left behind.
+    sidecar_sync: Mutex<()>,
 }
 
 impl SessionRegistry {
@@ -249,6 +254,7 @@ impl SessionRegistry {
             by_id: RwLock::new(HashMap::new()),
             events,
             dirs: Some(dirs),
+            sidecar_sync: Mutex::new(()),
         })
     }
 
@@ -321,6 +327,38 @@ impl SessionRegistry {
         self.update_from(id, None, f);
     }
 
+    /// Mirror a record's persisted fields — `recent_actions_tail`, `status`
+    /// and `status_since` — into its sidecar. The values are read under the
+    /// record lock inside the one critical section every sync shares, so the
+    /// last writer always writes the newest values and a record that is
+    /// already gone is skipped rather than resurrected. A session without a
+    /// sidecar on disk is a no-op (see [`orphan::try_sync_record_fields`]).
+    pub fn sync_sidecar(&self, id: &str) {
+        let Some(dirs) = self.dirs.as_ref() else {
+            return;
+        };
+        let _guard = lock(&self.sidecar_sync);
+        let Some(arc) = self.get(id) else {
+            return;
+        };
+        let (tail, status, status_since) = {
+            let guard = lock(&arc);
+            (
+                trim_recent_tail(&guard.recent_actions),
+                guard.status,
+                guard.status_since,
+            )
+        };
+        orphan::try_sync_record_fields(dirs, id, &tail, status, status_since);
+    }
+
+    /// Hold the sidecar-sync lock until the returned guard drops, so a test
+    /// can park the syncs a pair of racing updates would run.
+    #[cfg(test)]
+    pub fn hold_sidecar_sync(&self) -> std::sync::MutexGuard<'_, ()> {
+        lock(&self.sidecar_sync)
+    }
+
     /// [`Self::update`], its broadcast carrying `origin`. Returns whether
     /// the registry holds `id`.
     pub fn update_from<F>(&self, id: &str, origin: Option<UpdateOrigin>, f: F) -> bool
@@ -330,7 +368,7 @@ impl SessionRegistry {
         let Some(arc) = self.get(id) else {
             return false;
         };
-        let (snap, recent_tail, entered_error) = {
+        let (snap, entered_error) = {
             let mut guard = lock(&arc);
             let was_error = guard.status == SessionStatus::Error;
             let was_status = guard.status;
@@ -338,18 +376,16 @@ impl SessionRegistry {
             if guard.status != was_status {
                 guard.status_since = Some(Utc::now());
             }
-            let tail = trim_recent_tail(&guard.recent_actions);
             let entered_error = !was_error && guard.status == SessionStatus::Error;
-            (guard.snapshot(), tail, entered_error)
+            (guard.snapshot(), entered_error)
         };
-        // Sync the persisted recent_actions tail so an abandoned session
-        // can show "what was this doing right before the daemon died?".
-        // Skipped if the sidecar doesn't exist (e.g. for brand-new sessions
-        // where the spawn pipeline hasn't called try_write_meta yet, or
-        // for sessions that never had a sidecar in the first place).
-        if let Some(dirs) = &self.dirs {
-            orphan::try_update_recent_actions_tail(dirs, id, &recent_tail);
-        }
+        // Mirror the record into its sidecar so an abandoned session can show
+        // "what was this doing right before the daemon died?" and a live-tracer
+        // reattach can restore a session that was still waiting for input. The
+        // sync re-reads the record instead of using `snap` and shares one
+        // critical section with every other sync, so the last writer always
+        // writes the newest values.
+        self.sync_sidecar(id);
         let _ = self
             .events
             .send(SessionEvent::Updated(Box::new(snap), origin));
@@ -614,6 +650,16 @@ async fn watch_exit(
     // which is a lost tracer as far as anyone can tell.
     let exit = rx.await.unwrap_or(PtyExit::TracerLost);
     let code = exit.code();
+    // Record the end before the `Stopped` update goes out. A client that
+    // reacts to that update by discarding the session writes its own
+    // `StoppedByUser` entry, and `history::write_if_absent` keeps whichever
+    // lands first — so an exit that loses that race is recorded as thrown
+    // away by the user instead of as the exit it was. The update below
+    // touches nothing the entry is built from (label, members, spawn_config,
+    // started_at) and nothing else it reads.
+    if let Some(dirs) = dirs.as_ref() {
+        history::record_session_end(&registry, dirs, &session_id, history::end_for_exit(exit));
+    }
     let mut abandoned = false;
     registry.update(&session_id, |rec| {
         abandoned = matches!(exit, PtyExit::TracerLost) && rec.pty.is_some();
@@ -632,14 +678,10 @@ async fn watch_exit(
     });
     if abandoned {
         registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Error);
-        if let Some(dirs) = dirs {
-            history::record_session_end(&registry, &dirs, &session_id, history::end_for_exit(exit));
-        }
         return;
     }
     registry.fan_out_attention(session_id.clone(), protocol::AttentionReason::Stopped);
     if let Some(dirs) = dirs {
-        history::record_session_end(&registry, &dirs, &session_id, history::end_for_exit(exit));
         orphan::try_delete_meta(&dirs, &session_id);
     }
 }
@@ -717,11 +759,23 @@ impl SessionRegistry {
     /// daemon had spawned it directly. Surfaced with `is_abandoned = false`
     /// and the same overall shape as a fresh spawn.
     ///
+    /// The status comes from the sidecar when the session was waiting for
+    /// input or sitting idle when the daemon went away, so it comes back that
+    /// way with the stamp it had. Every other stored status is one the
+    /// reattach has no evidence for, and starts at `Idle` stamped now.
+    ///
     /// Returns a [`PendingInsert`] so the caller can patch
     /// `scrollback_snapshot_req` (produced by [`attach_lifecycle`]) onto the
     /// record before publishing the `SessionUpdated` snapshot.
     pub fn insert_reattached(&self, meta: &OrphanMeta, pty: Arc<PtyHandle>) -> PendingInsert<'_> {
         let (default_label, user_label, label) = resolve_labels_from_meta(meta);
+        let (status, status_since) = match (meta.status, meta.status_since) {
+            (
+                Some(restored @ (SessionStatus::Idle | SessionStatus::AwaitingInput)),
+                Some(since),
+            ) => (restored, since),
+            _ => (SessionStatus::Idle, Utc::now()),
+        };
         let mut record = SessionRecord {
             id: meta.session_id.clone(),
             label,
@@ -731,8 +785,8 @@ impl SessionRegistry {
             members: meta.members.clone(),
             mode: meta.mode,
             started_at: meta.started_at,
-            status: SessionStatus::Idle,
-            status_since: Some(Utc::now()),
+            status,
+            status_since: Some(status_since),
             exit_code: None,
             metrics: SessionMetrics::default(),
             recent_actions: meta.recent_actions_tail.clone(),
@@ -1058,6 +1112,208 @@ mod tests {
         assert!(
             snapshots[0].status_since.is_some(),
             "every record-creation path stamps one"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Write a sidecar for `id` the way a daemon that synced its status
+    /// leaves it. The fixture is literal JSON: it pins the on-disk shape
+    /// rather than the struct this build happens to serialize.
+    fn write_sidecar_with_status(dirs: &Dirs, id: &str, status: &str, since: DateTime<Utc>) {
+        let dir = dirs.sessions_dir.join(id);
+        std::fs::create_dir_all(&dir).expect("create session dir");
+        let since = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let json = format!(
+            r#"{{"on_disk_version": 2, "session_id": "{id}", "pid": 1234, "label": "{id}",
+                "kind": "standalone", "mode": "interactive", "members": [],
+                "started_at": "2024-01-01T00:00:00Z",
+                "status": "{status}", "status_since": "{since}"}}"#
+        );
+        std::fs::write(dir.join("meta.json"), json).expect("write meta.json");
+    }
+
+    /// The exit watcher's history write must land before the `Stopped` update
+    /// reaches clients: a client that reacts to that update by discarding the
+    /// session writes its own `StoppedByUser` entry, and only the first write
+    /// survives. The history write lock is held across the broadcast so the
+    /// check cannot race the write it is checking for — the writer parks on
+    /// the lock, and the guard is only released afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "holding the history write lock across the broadcast is this test's mechanism: \
+                  it parks the writer so the check cannot race the write it is looking for"
+    )]
+    async fn exit_end_is_recorded_before_stopped_broadcast() {
+        use crate::history::test_support::{
+            fake_pty, hold_history_write_lock, insert_live, record, scratch_dirs, wait_for_entry,
+        };
+        use crate::pty::PtyExit;
+        use protocol::SessionEnd;
+        use std::time::Duration;
+
+        let dirs = scratch_dirs("exit-end-before-broadcast");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+        let mut events = registry.subscribe();
+
+        let guard = hold_history_write_lock();
+        let _ = exit_tx.send(PtyExit::Code(0));
+        let broadcast = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(SessionEvent::Updated(snap, _)) = events.recv().await
+                    && snap.status == SessionStatus::Stopped
+                {
+                    return;
+                }
+            }
+        })
+        .await;
+        if broadcast.is_ok() {
+            let entry = crate::history::read_one(&dirs, "s1")
+                .expect("the history entry exists when the Stopped update is observed");
+            assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
+        }
+        drop(guard);
+
+        let entry = wait_for_entry(&dirs, "s1").await;
+        assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Every status change must reach the sidecar, in the same read-modify-
+    /// write that carries the recent-actions tail.
+    #[tokio::test]
+    async fn status_change_is_synced_to_sidecar() {
+        use crate::history::test_support::{
+            fake_pty, insert_live, record, scratch_dirs, write_meta_for,
+        };
+        let dirs = scratch_dirs("status-synced-to-sidecar");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        insert_live(
+            &registry,
+            &dirs,
+            record("s1", SessionMode::Interactive),
+            &pty,
+        );
+
+        registry.update("s1", |rec| rec.status = SessionStatus::AwaitingInput);
+        let stamped = registry
+            .snapshots()
+            .first()
+            .and_then(|s| s.status_since)
+            .expect("a status change stamps one");
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(meta.status, Some(SessionStatus::AwaitingInput));
+        assert_eq!(meta.status_since, Some(stamped));
+
+        registry.update("s1", |rec| rec.exit_code = Some(0));
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(
+            meta.status_since,
+            Some(stamped),
+            "an update that leaves the status alone leaves the stored stamp alone"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// Two updates racing their sidecar writes must leave the sidecar holding
+    /// the newer of the two, whichever sync runs last: every sync reads the
+    /// record afresh inside one shared critical section.
+    #[tokio::test]
+    async fn concurrent_status_updates_leave_sidecar_at_latest() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-race");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+        let older = DateTime::from_timestamp(1_600_000_000, 0).expect("a fixed stamp");
+        let newer = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+
+        // Both writes of the racing pair land on the record while the syncs
+        // that mirror them are parked, so both syncs run afterwards.
+        let parked = registry.hold_sidecar_sync();
+        let rec = registry.get("s1").expect("the record");
+        {
+            let mut guard = crate::sync::lock(&rec);
+            guard.status = SessionStatus::Working;
+            guard.status_since = Some(older);
+        }
+        {
+            let mut guard = crate::sync::lock(&rec);
+            guard.status = SessionStatus::AwaitingInput;
+            guard.status_since = Some(newer);
+        }
+        drop(parked);
+        registry.sync_sidecar("s1");
+        registry.sync_sidecar("s1");
+
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert_eq!(meta.status, Some(SessionStatus::AwaitingInput));
+        assert_eq!(
+            meta.status_since,
+            Some(newer),
+            "the last writer wrote the newest stamp, not the older one it started with"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn reattach_restores_awaiting_input_since() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("reattach-awaiting-input");
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        write_sidecar_with_status(&dirs, "s1", "awaiting_input", since);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        registry.insert_reattached(&meta, pty).publish();
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].status,
+            SessionStatus::AwaitingInput,
+            "a session waiting for input comes back waiting"
+        );
+        assert_eq!(
+            snapshots[0].status_since,
+            Some(since),
+            "with the stamp it had before the restart"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn reattach_does_not_restore_working() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("reattach-working");
+        let since = DateTime::from_timestamp(1_700_000_000, 0).expect("a fixed stamp");
+        write_sidecar_with_status(&dirs, "s1", "working", since);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        registry.insert_reattached(&meta, pty).publish();
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].status,
+            SessionStatus::Idle,
+            "only a waiting or idle session is restored as it was"
+        );
+        let since = snapshots[0].status_since.expect("a fresh stamp");
+        assert!(
+            since > Utc::now() - chrono::Duration::minutes(1),
+            "a status that cannot be resumed is stamped now: {since:?}"
         );
         let _ = std::fs::remove_dir_all(&dirs.config);
     }

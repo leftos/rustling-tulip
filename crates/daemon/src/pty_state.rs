@@ -68,6 +68,13 @@ pub struct AttentionEvent {
     pub reason: AttentionReason,
 }
 
+/// The PTY streams a status watcher reads: the session's output broadcast and
+/// the byte counts of the user input forwarded to it.
+pub struct WatchStreams {
+    pub output: broadcast::Receiver<Vec<u8>>,
+    pub input_pulses: mpsc::UnboundedReceiver<usize>,
+}
+
 /// Spawn a background task that watches the given PTY broadcast for a session
 /// and updates its status.
 ///
@@ -86,16 +93,26 @@ pub struct AttentionEvent {
 /// A terminal-title change in the output stream also counts as activity, so an
 /// agent whose spinner/elapsed-time title keeps repainting stays Working even
 /// when the redraw is too small to clear the echo budget.
+///
+/// `initial` is the status the session's record already carries. A reattached
+/// session comes back `AwaitingInput` or `Working`, and the watcher has to
+/// start there: seeded `Idle` it would never arm the idle timer that settles a
+/// restored session back to `Idle`, so the restored status would stick until
+/// the agent's next byte.
 pub fn watch(
     registry: &Arc<SessionRegistry>,
     session_id: String,
-    mut output: broadcast::Receiver<Vec<u8>>,
-    mut input_pulses: mpsc::UnboundedReceiver<usize>,
+    streams: WatchStreams,
     attention_tx: mpsc::UnboundedSender<AttentionEvent>,
+    initial: SessionStatus,
 ) {
     let registry = Arc::clone(registry);
+    let WatchStreams {
+        mut output,
+        mut input_pulses,
+    } = streams;
     tokio::spawn(async move {
-        let mut state = State::Idle;
+        let mut state = State::seed(initial);
         let mut last_output = Instant::now();
         let mut scrollback: Vec<u8> = Vec::with_capacity(SCROLLBACK_BYTES);
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -191,15 +208,21 @@ pub fn watch(
 /// Plain shells deliberately avoid the Claude prompt classifier, but they can
 /// still expose useful activity: command output should set the status to
 /// `Working`, while echoed input and prompt redraws should leave it `Idle`.
+/// `initial` seeds the watcher the same way it seeds [`watch`], so a shell
+/// reattached `Working` still settles back once the PTY goes quiet.
 pub fn watch_plain_shell(
     registry: &Arc<SessionRegistry>,
     session_id: String,
-    mut output: broadcast::Receiver<Vec<u8>>,
-    mut input_pulses: mpsc::UnboundedReceiver<usize>,
+    streams: WatchStreams,
+    initial: SessionStatus,
 ) {
     let registry = Arc::clone(registry);
+    let WatchStreams {
+        mut output,
+        mut input_pulses,
+    } = streams;
     tokio::spawn(async move {
-        let mut state = State::Idle;
+        let mut state = State::seed(initial);
         let mut last_output = Instant::now();
         let mut in_window: VecDeque<(Instant, u32)> = VecDeque::new();
         let mut out_window: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -287,6 +310,23 @@ enum State {
     Idle,
     Working,
     AwaitingInput,
+}
+
+impl State {
+    /// The watcher's starting point for a record already carrying `status`.
+    /// Only `AwaitingInput` and `Working` are states the watcher acts on — it
+    /// settles both back to `Idle` after [`IDLE_AFTER`] of silence — so every
+    /// other stored status starts there.
+    fn seed(status: SessionStatus) -> Self {
+        match status {
+            SessionStatus::AwaitingInput => Self::AwaitingInput,
+            SessionStatus::Working => Self::Working,
+            SessionStatus::Spawning
+            | SessionStatus::Idle
+            | SessionStatus::Stopped
+            | SessionStatus::Error => Self::Idle,
+        }
+    }
 }
 
 impl From<State> for SessionStatus {
@@ -489,7 +529,7 @@ mod tests {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod hysteresis_tests {
-    use super::{IDLE_AFTER, watch, watch_plain_shell};
+    use super::{IDLE_AFTER, WatchStreams, watch, watch_plain_shell};
     use crate::paths::Dirs;
     use crate::session::{SessionRecord, SessionRegistry};
     use chrono::Utc;
@@ -566,20 +606,39 @@ mod hysteresis_tests {
     const SESSION: &str = "s1";
 
     fn start(tag: &str, plain_shell: bool) -> Harness {
+        start_from(tag, plain_shell, SessionStatus::Idle)
+    }
+
+    /// Start a watcher over a record that already carries `initial`, the way a
+    /// session reattached from its sidecar does.
+    fn start_from(tag: &str, plain_shell: bool, initial: SessionStatus) -> Harness {
         let registry = SessionRegistry::new(scratch_dirs(tag));
-        registry.insert(test_record(SESSION));
+        let mut record = test_record(SESSION);
+        record.status = initial;
+        registry.insert(record);
         let (output, output_rx) = broadcast::channel(64);
         let (input, input_rx) = mpsc::unbounded_channel();
         let (attention_tx, attention_rx) = mpsc::unbounded_channel();
         if plain_shell {
-            watch_plain_shell(&registry, SESSION.to_string(), output_rx, input_rx);
+            watch_plain_shell(
+                &registry,
+                SESSION.to_string(),
+                WatchStreams {
+                    output: output_rx,
+                    input_pulses: input_rx,
+                },
+                initial,
+            );
         } else {
             watch(
                 &registry,
                 SESSION.to_string(),
-                output_rx,
-                input_rx,
+                WatchStreams {
+                    output: output_rx,
+                    input_pulses: input_rx,
+                },
                 attention_tx,
+                initial,
             );
         }
         Harness {
@@ -651,5 +710,36 @@ mod hysteresis_tests {
         h.heartbeat(0);
         settle().await;
         assert_eq!(h.status(), SessionStatus::Working);
+    }
+
+    /// A session reattached `AwaitingInput` has to settle back to `Idle` once
+    /// the PTY goes quiet: a watcher started `Idle` never arms the idle timer
+    /// for it, so the restored status would stick until the agent's next byte.
+    #[tokio::test(start_paused = true)]
+    async fn restored_awaiting_input_demotes_after_silence() {
+        let h = start_from("restored-awaiting", false, SessionStatus::AwaitingInput);
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "the restored status is the watcher's seed"
+        );
+        // A redraw below the echo budget that matches no prompt either: only
+        // the idle timer can move this session.
+        h.output
+            .send(b"\x1b[2K\r$ ".to_vec())
+            .expect("watcher still subscribed");
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::AwaitingInput,
+            "a small redraw leaves it waiting"
+        );
+        tokio::time::sleep(IDLE_AFTER + Duration::from_millis(50)).await;
+        settle().await;
+        assert_eq!(
+            h.status(),
+            SessionStatus::Idle,
+            "silence past IDLE_AFTER demotes it"
+        );
     }
 }

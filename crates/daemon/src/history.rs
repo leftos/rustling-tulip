@@ -1145,6 +1145,13 @@ pub(crate) mod test_support {
         (Arc::new(handle), exit_tx)
     }
 
+    /// Hold the history write lock until the returned guard drops. While a
+    /// test holds it, an end path that comes after the lock is parked, so the
+    /// test decides which of two competing writes lands first.
+    pub fn hold_history_write_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::sync::lock(&super::WRITE_LOCK)
+    }
+
     /// Insert `rec` wired to `pty` the way a spawn does, exit watcher included.
     pub fn insert_live(
         registry: &Arc<SessionRegistry>,
