@@ -304,6 +304,16 @@ impl RootView {
         Some(dialog.model_input.read(cx).text().to_owned())
     }
 
+    /// The plain-text warning env row `index` shows, while the dialog is
+    /// open and the row warns.
+    #[must_use]
+    pub fn spawn_dialog_env_plaintext_warning(&self, index: usize) -> Option<String> {
+        self.spawn_dialog
+            .as_ref()?
+            .form
+            .env_plaintext_warning(index)
+    }
+
     /// The text of the branch field, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_branch(&self, cx: &gpui::App) -> Option<String> {
@@ -2037,6 +2047,12 @@ fn env_row(
             .text_color(gpui::rgb(WARNING))
             .child(problem.message())
     });
+    let plaintext = form.env_plaintext_warning(index).map(|warning| {
+        div()
+            .debug_selector(move || format!("spawn-env-plaintext-{index}"))
+            .text_color(gpui::rgb(WARNING))
+            .child(warning)
+    });
     div()
         .flex()
         .flex_col()
@@ -2050,6 +2066,7 @@ fn env_row(
                 .child(remove),
         )
         .children(message)
+        .children(plaintext)
         .into_any_element()
 }
 

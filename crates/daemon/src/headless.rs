@@ -29,7 +29,7 @@ enum Woke {
     KillRequested(bool),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HeadlessSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -38,6 +38,20 @@ pub struct HeadlessSpec {
     /// Agent kind. Drives which backend's `handle_headless_line` parses
     /// stdout — claude's stream-json, codex's exec-json, etc.
     pub agent: Agent,
+}
+
+/// Shows the env's keys only: its values can hold resolved secrets.
+impl std::fmt::Debug for HeadlessSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("HeadlessSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .field("agent", &self.agent)
+            .finish()
+    }
 }
 
 pub struct HeadlessHandle {
@@ -204,6 +218,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn spec_debug_shows_env_keys_but_not_values() {
+        let spec = HeadlessSpec {
+            program: "claude".to_owned(),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-hunter2".to_owned())],
+            agent: Agent::Claude,
+        };
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+    }
 
     /// Per-test scratch config dir so sidecar writes don't collide.
     fn scratch_dirs() -> Dirs {

@@ -25,8 +25,8 @@ use crate::state::AppState;
 use crate::tabs;
 use crate::tracer_client;
 use crate::{
-    git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan, vscode,
-    workspace as ws,
+    git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan, user_env,
+    vscode, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
 use axum::Json;
@@ -1628,7 +1628,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             });
         }
         ClientMessage::SpawnSession(req) => {
-            if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
+            // An unset env reference refuses the spawn before the user is
+            // asked to confirm a checkout it would never make. This is a
+            // lookup only; `spawn_session` resolves again for the child.
+            if let Err(failure) = resolve_env_refs(&req.extra_env, user_env::resolve) {
+                send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
+            } else if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
             } else {
                 // The requester hears of its spawn through the registry's one
@@ -3246,6 +3251,10 @@ pub(crate) async fn spawn_session(
             agent.as_label()
         ));
     }
+    // Env references resolve before any git work, so a refusal leaves no
+    // worktree behind. `stored_config` keeps the references as sent; only the
+    // child's environment gets their values.
+    let extra_env = resolve_env_refs(&extra_env, user_env::resolve)?;
 
     let t_resolve = std::time::Instant::now();
     let mut standalone_add_dirs = Vec::new();
@@ -6646,10 +6655,53 @@ fn passthrough_env() -> Vec<(String, String)> {
     out
 }
 
-/// Build the env list for a spawn: the daemon's keep-list plus user-supplied
-/// `extra_env`, with `extra_env` overriding the keep-list on key collision so
-/// users can override values like `ANTHROPIC_API_KEY`. Deduplicated to avoid
-/// passing the same key twice to the child process.
+/// The `NAME` of a spawn env value written exactly `${env:NAME}`, where `NAME`
+/// is `[A-Za-z_][A-Za-z0-9_]*`. Anything else, including a reference embedded
+/// in longer text, is a literal and has no name.
+fn env_reference(value: &str) -> Option<&str> {
+    let name = value.strip_prefix("${env:")?.strip_suffix('}')?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    let valid = (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some(name)
+}
+
+/// The spawn's `extra_env` with each env reference (see [`env_reference`])
+/// replaced by the value `lookup` finds for it; literals pass through as-is.
+/// A reference `lookup` can't resolve refuses the spawn, naming the variable.
+fn resolve_env_refs(
+    extra_env: &[(String, String)],
+    mut lookup: impl FnMut(&str) -> Option<(user_env::Secret, user_env::Origin)>,
+) -> Result<Vec<(String, String)>, spawn_plan::SpawnFailure> {
+    extra_env
+        .iter()
+        .map(|(key, value)| {
+            let Some(name) = env_reference(value) else {
+                return Ok((key.clone(), value.clone()));
+            };
+            let Some((secret, origin)) = lookup(name) else {
+                return Err(spawn_plan::SpawnFailure {
+                    title: "Environment variable not set".to_owned(),
+                    detail: format!(
+                        "`{name}` isn't set in the daemon's environment or your user environment."
+                    ),
+                    hint: Some(
+                        "Set it as a user environment variable, then spawn again.".to_owned(),
+                    ),
+                });
+            };
+            debug!(key = %key, name, ?origin, "spawn env reference resolved");
+            Ok((key.clone(), secret.expose().to_owned()))
+        })
+        .collect()
+}
+
+/// Build the env list for a spawn: the daemon's keep-list plus the spawn's
+/// `extra_env` keys, with `extra_env` overriding the keep-list on key
+/// collision. `extra` holds values already resolved by [`resolve_env_refs`],
+/// so env references never reach here. Deduplicated to avoid passing the same
+/// key twice to the child process.
 fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
     let mut out = passthrough_env();
     for (k, v) in extra {
@@ -6659,7 +6711,29 @@ fn merged_env(extra: &[(String, String)]) -> Vec<(String, String)> {
             out.push((k.clone(), v.clone()));
         }
     }
+    #[cfg(test)]
+    child_env_probe::record(&out);
     out
+}
+
+/// Test-only record of the last env [`merged_env`] built on this thread: the
+/// env every spawn spec (`PtySpawnSpec` / `HeadlessSpec`) is handed, so a test
+/// can see what a child would get without starting one.
+#[cfg(test)]
+mod child_env_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LAST: RefCell<Option<Vec<(String, String)>>> = const { RefCell::new(None) };
+    }
+
+    pub fn record(env: &[(String, String)]) {
+        LAST.with(|last| *last.borrow_mut() = Some(env.to_vec()));
+    }
+
+    pub fn take() -> Option<Vec<(String, String)>> {
+        LAST.with(|last| last.borrow_mut().take())
+    }
 }
 
 #[cfg(test)]
@@ -7773,6 +7847,237 @@ mod tests {
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
         let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
         assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
+    }
+
+    /// A lookup that knows only `A` (as `va`) in the process scope.
+    fn lookup_a(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
+        user_env::resolve_with(name, |n| (n == "A").then(|| "va".to_owned()), |_| None)
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_whole_value_env_reference_resolves() {
+        let resolved = resolve_env_refs(&env(&[("K", "${env:A}")]), lookup_a).expect("resolves");
+        assert_eq!(resolved, env(&[("K", "va")]));
+    }
+
+    #[test]
+    fn literals_and_embedded_or_invalid_references_pass_through() {
+        let extra = env(&[
+            ("LIT", "plain"),
+            ("EMBEDDED", "x${env:A}y"),
+            ("BAD_NAME", "${env:1BAD}"),
+            ("NO_NAME", "${env:}"),
+            ("UNCLOSED", "${env:A"),
+            ("EXTRA_BRACE", "${env:A}}"),
+            ("EMPTY", ""),
+        ]);
+        let resolved = resolve_env_refs(&extra, |_| None).expect("no references");
+        assert_eq!(resolved, extra);
+    }
+
+    #[test]
+    fn an_unset_env_reference_refuses_naming_the_variable() {
+        let failure = resolve_env_refs(&env(&[("K", "${env:MISSING_1}")]), lookup_a)
+            .expect_err("unset reference refuses");
+        assert_eq!(failure.title, "Environment variable not set");
+        assert_eq!(
+            failure.detail,
+            "`MISSING_1` isn't set in the daemon's environment or your user environment."
+        );
+        assert_eq!(
+            failure.hint.as_deref(),
+            Some("Set it as a user environment variable, then spawn again.")
+        );
+    }
+
+    /// Run git in `repo`, failing the test when it fails; returns stdout.
+    fn git_ok(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["-c", "user.email=t@example.com", "-c", "user.name=Test"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A spawnless hub with repo `r1`: a git repo on `main` with one commit.
+    fn env_ref_repo_hub(tag: &str) -> (Hub, ScratchDir, PathBuf) {
+        let (hub, scratch) = spawnless_test_hub(tag);
+        let repo = scratch.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo dir");
+        git_init(&repo);
+        git_ok(&repo, &["commit", "--allow-empty", "-m", "seed"]);
+        hub.state
+            .mutate(|s| {
+                s.repos.push(protocol::RepoEntry {
+                    id: "r1".to_string(),
+                    name: "r1".to_string(),
+                    path: repo.to_string_lossy().into_owned(),
+                    default_branch: None,
+                    default_use_worktree: false,
+                    appearance: AppearanceOverrides::default(),
+                    last_agent: None,
+                    last_spawn_config: None,
+                });
+            })
+            .expect("register repo");
+        (hub, scratch, repo)
+    }
+
+    fn env_spawn(
+        target: SpawnTarget,
+        mode: SessionMode,
+        extra_env: Vec<(String, String)>,
+        request_id: Option<&str>,
+    ) -> SpawnRequest {
+        SpawnRequest {
+            label: None,
+            target,
+            mode,
+            initial_prompt: None,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
+            model: None,
+            extra_env,
+            prompt_injector: None,
+            request_id: request_id.map(str::to_owned),
+            resume_conversation: None,
+        }
+    }
+
+    const UNSET_REF: &str = "${env:RT_TEST_UNSET_ENV_REF_4C1D}";
+
+    /// The reply must be the unset-reference refusal, echoing `rid`.
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    fn assert_unset_refusal(reply: DaemonMessage, rid: &str) {
+        let DaemonMessage::ActionFailed {
+            title,
+            detail,
+            hint,
+            request_id,
+        } = reply
+        else {
+            panic!("expected action_failed, got {reply:?}");
+        };
+        assert_eq!(title, "Environment variable not set");
+        assert!(detail.contains("`RT_TEST_UNSET_ENV_REF_4C1D`"), "{detail}");
+        assert!(hint.is_some());
+        assert_eq!(request_id.as_deref(), Some(rid));
+    }
+
+    #[tokio::test]
+    async fn a_worktree_spawn_with_an_unset_env_reference_is_refused_before_any_git_work() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("env-ref-unset");
+        let req = env_spawn(
+            single_target(true, None),
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", UNSET_REF)]),
+            Some("rq-env"),
+        );
+        // Straight into `spawn_session`, the path every replay (duplicate,
+        // resume, recover) takes, past the dispatcher's own early check.
+        let err = spawn_session(&hub, req, None)
+            .await
+            .expect_err("an unset reference refuses");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        send_spawn_failure(&out_tx, &err, Some("rq-env"));
+        assert_unset_refusal(out_rx.try_recv().expect("a reply"), "rq-env");
+        let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main worktree: {worktrees}"
+        );
+        assert_eq!(git_ok(&repo, &["branch", "--list", "wt/x"]).trim(), "");
+        let made = std::fs::read_dir(hub.state.worktrees_dir()).map_or(0, Iterator::count);
+        assert_eq!(made, 0, "nothing under the worktrees root");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn an_unset_env_reference_is_refused_before_the_checkout_confirm() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("env-ref-confirm");
+        std::fs::write(repo.join("dirty.txt"), "x\n").expect("dirty the tree");
+        let literal = env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("K", "v")]),
+            Some("rq-lit"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(literal)).await;
+        let DaemonMessage::CheckoutConfirmRequired { .. } = reply else {
+            panic!("the literal spawn needs a checkout confirm, got {reply:?}");
+        };
+        let unset = env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("K", UNSET_REF)]),
+            Some("rq-ref"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(unset)).await;
+        assert_unset_refusal(reply, "rq-ref");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn the_child_env_gets_reference_values_while_stored_and_replayed_configs_keep_references()
+    {
+        let (hub, _scratch, _repo) = env_ref_repo_hub("env-ref-stored");
+        let extra = env(&[("RT_PATH_COPY", "${env:PATH}"), ("RT_LIT", "x${env:PATH}")]);
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        let req = env_spawn(target, SessionMode::PlainShell, extra.clone(), None);
+        let _ = child_env_probe::take();
+        // The spawnless hub fails at the tracer, after the spec is built.
+        spawn_session(&hub, req, None)
+            .await
+            .expect_err("no tracer can start");
+        let child = child_env_probe::take().expect("a spawn spec's env was built");
+        let path = std::env::var("PATH").expect("PATH is set");
+        let value = |key: &str| child.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        assert_eq!(
+            value("RT_PATH_COPY"),
+            Some(path),
+            "the child gets the value"
+        );
+        assert_eq!(value("RT_LIT").as_deref(), Some("x${env:PATH}"));
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        assert_eq!(stored.extra_env, extra, "the reference is stored as sent");
+        assert_eq!(
+            stored.to_clone_request().extra_env,
+            extra,
+            "resume replays it"
+        );
+        assert_eq!(
+            stored
+                .to_duplicate_request(Some("wt/y".to_owned()))
+                .extra_env,
+            extra,
+            "duplicate replays it"
+        );
     }
 
     #[tokio::test]

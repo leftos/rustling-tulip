@@ -522,6 +522,70 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
 }
 
+/// Whether `selector` is drawn at all.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).size.height > px(0.0)
+}
+
+/// Opens Advanced and adds one env row with `key` and `value`, pasted.
+fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
+    h.click_on("spawn-advanced");
+    h.click_on("spawn-env-add");
+    h.set_clipboard(key);
+    h.keys("ctrl-v tab");
+    h.set_clipboard(value);
+    h.keys("ctrl-v");
+}
+
+#[gpui::test]
+fn a_secret_like_literal_env_value_warns_but_still_spawns(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    add_env_row(&mut h, "ANTHROPIC_API_KEY", "sk-ant-x");
+    assert!(drawn(&mut h, "spawn-env-plaintext-0"));
+    assert!(
+        !drawn(&mut h, "spawn-env-problem-0"),
+        "a warning, not a problem"
+    );
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [("ANTHROPIC_API_KEY".to_owned(), "sk-ant-x".to_owned())]
+    );
+}
+
+#[gpui::test]
+fn an_env_reference_hides_the_plaintext_warning_and_is_sent_verbatim(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    add_env_row(&mut h, "ANTHROPIC_API_KEY", "sk-ant-x");
+    assert!(drawn(&mut h, "spawn-env-plaintext-0"));
+    h.set_clipboard("${env:ANTHROPIC_API_KEY}");
+    h.keys(
+        "backspace backspace backspace backspace backspace backspace backspace backspace ctrl-v",
+    );
+    // Bounds outlive a line that stops being drawn, so its absence is read
+    // from the model.
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_env_plaintext_warning(0)),
+        None
+    );
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [(
+            "ANTHROPIC_API_KEY".to_owned(),
+            "${env:ANTHROPIC_API_KEY}".to_owned()
+        )]
+    );
+}
+
 #[gpui::test]
 fn invalid_env_key_blocks_spawn(cx: &mut TestAppContext) {
     let dir = TestDir::new();

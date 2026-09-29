@@ -36,7 +36,7 @@ impl PtyExit {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PtySpawnSpec {
     /// Session id used to derive the tracer pipe name and the orphan sidecar
     /// path. Required even for plain-shell sessions because every PTY now
@@ -48,6 +48,22 @@ pub struct PtySpawnSpec {
     pub env: Vec<(String, String)>,
     pub cols: u16,
     pub rows: u16,
+}
+
+/// Shows the env's keys only: its values can hold resolved secrets.
+impl std::fmt::Debug for PtySpawnSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_keys: Vec<&str> = self.env.iter().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("PtySpawnSpec")
+            .field("session_id", &self.session_id)
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env_keys", &env_keys)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .finish()
+    }
 }
 
 /// All the channel ends needed to construct a [`PtyHandle`]. The tracer-client
@@ -166,6 +182,22 @@ mod tests {
         fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
             Box::new(NoopKiller)
         }
+    }
+
+    #[test]
+    fn spawn_spec_debug_shows_env_keys_but_not_values() {
+        let spec = PtySpawnSpec {
+            session_id: "s1".to_owned(),
+            program: "claude".to_owned(),
+            args: Vec::new(),
+            cwd: PathBuf::from("."),
+            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-hunter2".to_owned())],
+            cols: 80,
+            rows: 24,
+        };
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("ANTHROPIC_API_KEY"), "{shown}");
+        assert!(!shown.contains("hunter2"), "{shown}");
     }
 
     #[test]

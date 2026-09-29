@@ -45,6 +45,7 @@ mod termstate;
 mod tracer_client;
 mod tracer_log;
 mod transcripts;
+mod user_env;
 mod vscode;
 mod workspace;
 mod worktree_cleanup;

@@ -768,9 +768,12 @@ pub struct SpawnRequest {
     /// Optional model override. When `None`, the CLI's default applies.
     /// Sent as `--model <id>` to both claude and codex.
     pub model: Option<String>,
-    /// Extra environment variables merged on top of the daemon's keep-list.
-    /// Later entries override the keep-list on key collision so users can
-    /// override values like `ANTHROPIC_API_KEY`.
+    /// Extra environment variables merged on top of the daemon's keep-list;
+    /// later entries override the keep-list on key collision. A value written
+    /// exactly `${env:NAME}` is an env reference: the daemon reads `NAME` from
+    /// its own environment (then, on Windows, the user's) at spawn, and only the
+    /// reference is stored and echoed. Put secrets such as `ANTHROPIC_API_KEY`
+    /// here as references, never as literal values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
     /// Optional scripted PTY input fed to the child after the PTY comes up.

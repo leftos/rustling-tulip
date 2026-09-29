@@ -1637,6 +1637,29 @@ impl SpawnForm {
         (0..self.advanced.env.len()).all(|index| self.env_problem(index).is_none())
     }
 
+    /// The warning for env row `index` when it looks like a secret typed as
+    /// plain text: a non-empty literal value (not an exact `${env:NAME}`
+    /// reference) under a key with a whole `_`-delimited segment of `KEY`,
+    /// `TOKEN`, `SECRET` or `PASSWORD`, in any case. It never blocks Spawn.
+    pub(crate) fn env_plaintext_warning(&self, index: usize) -> Option<String> {
+        const SECRET_WORDS: [&str; 4] = ["KEY", "TOKEN", "SECRET", "PASSWORD"];
+        let row = self.advanced.env.get(index)?;
+        let key = row.key.trim();
+        let is_reference = row
+            .value
+            .strip_prefix("${env:")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .is_some_and(valid_env_key);
+        let secret_like = key
+            .split('_')
+            .any(|segment| SECRET_WORDS.iter().any(|w| segment.eq_ignore_ascii_case(w)));
+        (secret_like && !is_reference && !row.value.trim().is_empty()).then(|| {
+            format!(
+                "Stored in plain text. Use ${{env:{key}}} to read it from your environment instead."
+            )
+        })
+    }
+
     pub(crate) fn tabs(&self) -> &TabChoices {
         &self.tabs
     }
@@ -3541,6 +3564,56 @@ mod tests {
             env(&[("FOO", " a "), ("BAR", "b"), ("baz", "")])
         );
         assert_eq!(form.focused(), Control::EnvAdd);
+    }
+
+    #[test]
+    fn env_plaintext_warning_flags_secret_like_keys_with_literal_values() {
+        let mut form = ready_form();
+        let rows = [
+            ("ANTHROPIC_API_KEY", "sk-ant-x", true),
+            ("github_token", "ghp_x", true),
+            ("DB_PASSWORD", "hunter2", true),
+            ("MONKEY", "x", false),
+            ("TOKENIZER_PATH", "x", false),
+            ("APIKEY", "x", false),
+            ("KEYS", "x", false),
+            ("ANTHROPIC_API_KEY", "${env:ANTHROPIC_API_KEY}", false),
+            ("MY_SECRET", "", false),
+            ("MY_SECRET", "${env:1BAD}", true),
+            ("MY_SECRET", "${env:}", true),
+            ("MY_SECRET", "x${env:A}", true),
+        ];
+        for _ in &rows {
+            press(&mut form, &Control::EnvAdd);
+        }
+        for (i, (key, value, _)) in rows.iter().enumerate() {
+            form.edit_env_key(i, key);
+            form.edit_env_value(i, value);
+        }
+        for (i, (key, value, warns)) in rows.iter().enumerate() {
+            assert_eq!(
+                form.env_plaintext_warning(i).is_some(),
+                *warns,
+                "{key} = {value:?}"
+            );
+        }
+        assert_eq!(
+            form.env_plaintext_warning(0).as_deref(),
+            Some(
+                "Stored in plain text. Use ${env:ANTHROPIC_API_KEY} to read it from your \
+                 environment instead."
+            )
+        );
+        form.edit_env_key(1, " github_token ");
+        assert_eq!(
+            form.env_plaintext_warning(1).as_deref(),
+            Some(
+                "Stored in plain text. Use ${env:github_token} to read it from your environment instead."
+            ),
+            "the key is trimmed"
+        );
+        assert_eq!(form.env_problem(0), None, "a warning is not a problem");
+        assert_eq!(form.env_plaintext_warning(rows.len()), None);
     }
 
     #[test]
