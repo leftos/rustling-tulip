@@ -11,10 +11,12 @@
                  client via `cargo run -p rustling-tulip-native`. This is
                  the default when no subcommand is given; same as `native`.
       build      Build only -- the daemon, tracer and native client. Debug
-                 by default; -Release for the release profile.
+                 by default; -Release for the release profile. Then sweeps
+                 build output older than 14 days out of target/ (needs
+                 cargo-sweep; a build without it skips the sweep).
       setup      Install/check Windows build prerequisites via winget:
-                 Git, Node.js LTS (fake-claude needs it), Rust/rustup and
-                 Visual Studio C++ Build Tools.
+                 Git, Node.js LTS (fake-claude needs it), Rust/rustup,
+                 Visual Studio C++ Build Tools and cargo-sweep.
       stop       Kill any running daemon and tracer process(es) and clean
                  the stale handshake file. No-op when nothing is running.
       restart    Build the daemon and tracer, stop the running daemon
@@ -120,6 +122,10 @@ $TracerImageName = 'rt-tracer'
 $HandshakeFile   = Join-Path (Get-ConfigDir) 'daemon.json'
 
 $script:SetupRestartNeeded = $false
+
+# `build` sweeps artifacts older than this out of target/ afterwards
+# (cargo-sweep); build output had grown to fill the drive.
+$SweepAgeDays = 14
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -366,6 +372,24 @@ function Install-CommandDependency {
     Invoke-WingetInstall -Id $WingetId -Name $DisplayName
 }
 
+function Install-CargoSweep {
+    # Only cargo subcommand in the prerequisites -- not a winget package,
+    # so it gets its own installer rather than Install-CommandDependency.
+    [CmdletBinding()]
+    param()
+
+    if (Test-CommandAvailable 'cargo-sweep') {
+        Write-Host '==> cargo-sweep already available.' -ForegroundColor DarkGray
+        return
+    }
+
+    Write-Host '==> Installing cargo-sweep (cargo install cargo-sweep --locked)...' -ForegroundColor Cyan
+    & cargo install cargo-sweep --locked
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo install cargo-sweep failed (exit $LASTEXITCODE)"
+    }
+}
+
 function Install-MsvcBuildTools {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
         'PSUseSingularNouns',
@@ -430,6 +454,7 @@ function Invoke-Setup {
     Initialize-RustToolchain
 
     Assert-Tooling
+    Install-CargoSweep
     if ($script:SetupRestartNeeded) {
         Write-Host '==> Setup complete. Restart Windows before building.' -ForegroundColor Yellow
     } else {
@@ -449,6 +474,29 @@ function Invoke-Build {
     Write-Host "==> Building daemon + tracer + native client ($modeLabel)..." -ForegroundColor Cyan
     & cargo @buildArgs
     Test-CargoExitOk 'cargo build -p daemon -p tracer -p rustling-tulip-native'
+    Invoke-BuildSweep
+}
+
+# Reclaims the disk the artifacts of earlier builds hold; a full target/
+# had once filled the drive. Runs after a successful build, never fails
+# it: a missing cargo-sweep only prints how to install it.
+function Invoke-BuildSweep {
+    [CmdletBinding()]
+    param()
+
+    $targetDir = Join-Path $ScriptDir 'target'
+    if (-not (Test-Path $targetDir)) { return }
+
+    if (-not (Test-CommandAvailable 'cargo-sweep')) {
+        Write-Host '==> cargo-sweep not installed; skipping the build-output sweep. Run `.\rt.ps1 setup` to install it.' -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "==> Sweeping build output older than $SweepAgeDays days..." -ForegroundColor Cyan
+    & cargo sweep --time $SweepAgeDays $ScriptDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "==> cargo sweep failed (exit $LASTEXITCODE); continuing." -ForegroundColor Yellow
+    }
 }
 
 function Invoke-Stop {
@@ -573,9 +621,12 @@ Usage:
 Commands:
   launch     Build daemon + tracer, then run the native client (default
              if omitted; same as `native`).
-  build      Build only: daemon, tracer and native client.
+  build      Build only: daemon, tracer and native client. Then sweeps
+             build output older than 14 days out of target/ (needs
+             cargo-sweep; a build without it skips the sweep).
   setup      Install/check Windows build prerequisites via winget (Git,
-             Node.js, Rust, C++ Build Tools). Run once after cloning.
+             Node.js, Rust, C++ Build Tools, cargo-sweep). Run once
+             after cloning.
   stop       Kill any running daemon and tracers; remove the stale
              handshake.
   restart    Build daemon + tracer, stop the running daemon (sessions

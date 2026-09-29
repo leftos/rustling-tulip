@@ -29,9 +29,9 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 ```powershell
 # Convenience wrapper (recommended)
 .\rt.ps1                  # build daemon + tracer, then run the native client (same as `launch` / `native`)
-.\rt.ps1 build            # build only: daemon, tracer and native client
+.\rt.ps1 build            # build only: daemon, tracer and native client, then sweep target/ output older than 14 days (cargo-sweep)
 .\rt.ps1 build -Release   # same, release profile (-Release also applies to launch, restart, native, native-e2e, native-smoke)
-.\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools)
+.\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
 .\rt.ps1 test             # cargo test (workspace)

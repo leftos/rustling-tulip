@@ -23,7 +23,7 @@ docs/
 ## Build
 
 ```powershell
-# daemon + tracer + native client
+# daemon + tracer + native client, then sweep target/ output older than 14 days
 .\rt.ps1 build
 
 # build, then run the native client

@@ -133,7 +133,6 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
-- [ ] **Sweep old build output automatically** (user): `.\rt.ps1 build` sweeps artifacts older than 14 days from the main `target/` on each run (ruled: automatic, with `cargo sweep --time 14`; `rt.ps1 setup` installs cargo-sweep and a build without it skips the sweep with a note), then measure the saving of `D:\.cargo\config.toml`'s `debug = false` for dependencies against `target/` after a full rebuild. The rustling-tulip folders once took 180 GB of the 250 GB drive, and a full drive broke a gate with LNK1180. `rt.ps1`.
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
 
