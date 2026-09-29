@@ -82,7 +82,10 @@ impl AgentBackend for CodexBackend {
             }
         };
         registry.update(session_id, |rec| match parsed {
-            ExecEvent::ThreadStarted => {
+            ExecEvent::ThreadStarted { thread_id } => {
+                if thread_id.is_some() {
+                    rec.agent_conversation_id = thread_id;
+                }
                 rec.status = SessionStatus::Working;
                 push_recent_action(rec, "thread started".to_string());
             }
@@ -203,12 +206,21 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 ///   or just `<initial_prompt>`, or just `<workspace_prelude>`, depending
 ///   on which are present. Codex doesn't expose a system-prompt flag so
 ///   the prelude rides along on the user's first message slot.
+///
+/// With [`CommonSpawnFields::resume_conversation`] set, the form is
+/// `resume -C <cwd> [--add-dir P]... [--model M]
+/// [--dangerously-bypass-approvals-and-sandbox | --sandbox S] <id>`: no
+/// prompt or prelude (the conversation already holds them), `-C` only when
+/// [`CommonSpawnFields::cwd`] is set, and the flags always re-passed.
 fn build_args(
     common: &CommonSpawnFields<'_>,
     sandbox: Option<CodexSandbox>,
     members: &[SessionMember],
     initial_prompt: Option<&str>,
 ) -> Vec<String> {
+    if let Some(id) = common.resume_conversation {
+        return build_resume_args(common, sandbox, members, id);
+    }
     let mut args: Vec<String> = Vec::new();
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
@@ -239,6 +251,37 @@ fn build_args(
     args
 }
 
+/// The `codex resume` form of [`build_args`]. `--yolo` is not listed by
+/// `codex resume --help`, so the long bypass flag is passed instead.
+fn build_resume_args(
+    common: &CommonSpawnFields<'_>,
+    sandbox: Option<CodexSandbox>,
+    members: &[SessionMember],
+    id: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["resume".to_string()];
+    if let Some(cwd) = common.cwd {
+        args.push("-C".to_string());
+        args.push(cwd.to_string());
+    }
+    for extra in members.iter().skip(1) {
+        args.push("--add-dir".to_string());
+        args.push(extra.worktree_path.clone());
+    }
+    if let Some(model) = common.model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if common.dangerously_skip_permissions {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    } else if let Some(s) = sandbox {
+        args.push("--sandbox".to_string());
+        args.push(s.as_cli_arg().to_string());
+    }
+    args.push(id.to_string());
+    args
+}
+
 // ---------------------------------------------------------------------------
 // codex exec --json event schema.
 //
@@ -251,8 +294,12 @@ fn build_args(
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum ExecEvent {
+    /// `thread_id` is the id `codex exec resume <id>` resumes.
     #[serde(rename = "thread.started")]
-    ThreadStarted,
+    ThreadStarted {
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "turn.started")]
     TurnStarted,
     #[serde(rename = "turn.completed")]
@@ -425,7 +472,91 @@ mod tests {
             claude_session_id: None,
             resume_conversation: None,
             add_dirs: &[],
+            cwd: None,
         }
+    }
+
+    const RESUME_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+
+    fn resuming<'a>(
+        skip: bool,
+        model: Option<&'a str>,
+        cwd: Option<&'a str>,
+    ) -> CommonSpawnFields<'a> {
+        CommonSpawnFields {
+            resume_conversation: Some(RESUME_ID),
+            cwd,
+            ..common(skip, model, false)
+        }
+    }
+
+    #[test]
+    fn resume_passes_cd_flags_and_id_without_prompt() {
+        let m = members(&["X:/dev/a"]);
+        let args = build_args(
+            &resuming(false, Some("gpt-5"), Some("X:/dev/a")),
+            Some(CodexSandbox::WorkspaceWrite),
+            &m,
+            Some("hello"),
+        );
+        assert_eq!(
+            args,
+            [
+                "resume",
+                "-C",
+                "X:/dev/a",
+                "--model",
+                "gpt-5",
+                "--sandbox",
+                "workspace-write",
+                RESUME_ID
+            ]
+        );
+        let without_cwd = build_args(&resuming(false, None, None), None, &m, Some("hello"));
+        assert_eq!(without_cwd, ["resume", RESUME_ID]);
+    }
+
+    #[test]
+    fn resume_uses_bypass_flag_not_yolo() {
+        let m = members(&["X:/dev/a"]);
+        let args = build_args(
+            &resuming(true, None, Some("X:/dev/a")),
+            Some(CodexSandbox::ReadOnly),
+            &m,
+            None,
+        );
+        assert_eq!(
+            args,
+            [
+                "resume",
+                "-C",
+                "X:/dev/a",
+                "--dangerously-bypass-approvals-and-sandbox",
+                RESUME_ID
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_workspace_keeps_add_dirs_and_drops_prelude() {
+        let m = members(&["X:/dev/a", "X:/dev/b"]);
+        let args = build_args(
+            &resuming(false, None, Some("X:/dev/a")),
+            None,
+            &m,
+            Some("hello"),
+        );
+        assert_eq!(
+            args,
+            [
+                "resume",
+                "-C",
+                "X:/dev/a",
+                "--add-dir",
+                "X:/dev/b",
+                RESUME_ID
+            ]
+        );
     }
 
     #[test]
@@ -500,5 +631,49 @@ mod tests {
                 .any(|w| w == ["--sandbox", "danger-full-access"])
         );
         assert_eq!(args.last(), Some(&"go".to_string()));
+    }
+
+    #[test]
+    fn thread_started_without_an_id_still_turns_the_session_working() {
+        use crate::history::test_support::{record, scratch_dirs};
+        use protocol::{Agent, SessionMode};
+        let dirs = scratch_dirs("codex-thread-started-no-id");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut rec = record("h2", SessionMode::Headless);
+        rec.agent = Agent::Codex;
+        registry.insert(rec);
+
+        CodexBackend.handle_headless_line(&registry, "h2", r#"{"type":"thread.started"}"#);
+
+        let rec = registry.get("h2").expect("record");
+        let rec = crate::sync::lock(&rec);
+        assert_eq!(rec.status, SessionStatus::Working);
+        assert_eq!(rec.agent_conversation_id, None);
+        drop(rec);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn thread_started_line_sets_the_headless_record_id() {
+        use crate::history::test_support::{record, scratch_dirs};
+        use protocol::{Agent, SessionMode};
+        let dirs = scratch_dirs("codex-thread-started");
+        let registry = SessionRegistry::new(dirs.clone());
+        let mut rec = record("h1", SessionMode::Headless);
+        rec.agent = Agent::Codex;
+        registry.insert(rec);
+
+        CodexBackend.handle_headless_line(
+            &registry,
+            "h1",
+            r#"{"type":"thread.started","thread_id":"0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"}"#,
+        );
+
+        let rec = registry.get("h1").expect("record");
+        assert_eq!(
+            crate::sync::lock(&rec).agent_conversation_id.as_deref(),
+            Some("0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b")
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
     }
 }

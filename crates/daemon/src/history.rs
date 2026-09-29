@@ -8,6 +8,7 @@
 //! sessions are never written: a `claude --print` run has nothing to resume.
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
+use crate::codex_rollout;
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
@@ -79,7 +80,7 @@ pub fn end_for_exit(exit: PtyExit) -> SessionEnd {
 
 /// The folder a session started in: its first member's worktree, or a
 /// standalone shell's requested directory.
-fn primary_cwd(rec: &SessionRecord) -> Option<String> {
+pub(crate) fn primary_cwd(rec: &SessionRecord) -> Option<String> {
     if let Some(first) = rec.members.first() {
         return Some(first.worktree_path.clone());
     }
@@ -181,6 +182,7 @@ pub fn record_session_end(
     let Some(rec) = registry.get(session_id) else {
         return;
     };
+    capture_codex_conversation(registry, dirs, session_id, &rec);
     let entry = {
         let guard = lock(&rec);
         if guard.mode == SessionMode::Headless {
@@ -190,6 +192,58 @@ pub fn record_session_end(
     };
     if let Err(err) = write_if_absent(dirs, &entry) {
         warn!(?err, %session_id, ?end, "failed to write session history entry");
+    }
+}
+
+/// A last look for an interactive Codex session's rollout before its entry
+/// is written, so a first message sent after the watch's last poll still
+/// gives the entry its conversation id.
+fn capture_codex_conversation(
+    registry: &SessionRegistry,
+    dirs: &Dirs,
+    session_id: &str,
+    rec: &Mutex<SessionRecord>,
+) {
+    let (cwd, since, extra_env) = {
+        let guard = lock(rec);
+        if guard.agent != Agent::Codex
+            || guard.mode != SessionMode::Interactive
+            || guard.agent_conversation_id.is_some()
+        {
+            return;
+        }
+        let Some(cwd) = primary_cwd(&guard) else {
+            return;
+        };
+        let extra_env = guard
+            .spawn_config
+            .as_ref()
+            .map(|cfg| cfg.extra_env.clone())
+            .unwrap_or_default();
+        (cwd, guard.started_at, extra_env)
+    };
+    let scan = || {
+        let Some(home) = codex_rollout::codex_home(&extra_env) else {
+            return;
+        };
+        codex_rollout::capture_once(
+            registry,
+            dirs,
+            session_id,
+            &home,
+            &cwd,
+            since,
+            &mut HashSet::new(),
+        );
+    };
+    // The end paths run on the async workers and the scan's directory walk
+    // blocks, so a multi-thread runtime is told before it runs.
+    let on_worker = tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if on_worker {
+        tokio::task::block_in_place(scan);
+    } else {
+        scan();
     }
 }
 
@@ -1374,6 +1428,51 @@ mod tests {
         record_session_end(&registry, &dirs, "shell", SessionEnd::StoppedByUser);
         let ids: Vec<String> = read_all(&dirs).into_iter().map(|e| e.session_id).collect();
         assert_eq!(ids, vec!["shell"]);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn codex_session_end_writes_its_rollout_id_to_the_entry() {
+        let dirs = scratch_dirs("codex-final-scan");
+        let home = dirs.config.join("codex-home");
+        let cwd = r"X:\dev\codex-final-scan";
+        let id = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60";
+        let now = Utc::now();
+        let local = now.with_timezone(&chrono::Local).naive_local();
+        let day = home
+            .join("sessions")
+            .join(local.format("%Y").to_string())
+            .join(local.format("%m").to_string())
+            .join(local.format("%d").to_string());
+        std::fs::create_dir_all(&day).expect("create day folder");
+        let first_line = serde_json::json!({
+            "type": "session_meta",
+            "payload": { "id": id, "session_id": id, "cwd": cwd, "source": "cli" },
+        });
+        let name = format!("rollout-{}-{id}.jsonl", local.format("%Y-%m-%dT%H-%M-%S"));
+        std::fs::write(day.join(name), format!("{first_line}\n")).expect("write rollout");
+
+        let mut rec = record("c1", SessionMode::Interactive);
+        rec.agent = Agent::Codex;
+        rec.started_at = now - TimeDelta::minutes(1);
+        rec.spawn_config = Some(protocol::SpawnConfig {
+            target: SpawnTarget::Standalone {
+                cwd: Some(cwd.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Codex { sandbox: None },
+            model: None,
+            extra_env: vec![("CODEX_HOME".to_owned(), home.to_string_lossy().into_owned())],
+        });
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(rec);
+
+        record_session_end(&registry, &dirs, "c1", SessionEnd::StoppedByUser);
+
+        let entry = read_one(&dirs, "c1").expect("history entry");
+        assert_eq!(entry.agent_conversation_id.as_deref(), Some(id));
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

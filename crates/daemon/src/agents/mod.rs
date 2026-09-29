@@ -30,13 +30,17 @@ pub struct CommonSpawnFields<'a> {
     /// Conversation id the Claude backend passes as `--session-id` on an
     /// interactive spawn. Ignored by headless paths and by other backends.
     pub claude_session_id: Option<&'a str>,
-    /// Conversation the Claude backend resumes with `--resume`, in place of
-    /// `--session-id` and any initial prompt. Ignored by other backends.
+    /// Conversation the Claude backend resumes with `--resume` and the Codex
+    /// backend with `codex resume`, in place of `--session-id` (Claude) and
+    /// any initial prompt. Ignored by the Cursor backend.
     pub resume_conversation: Option<&'a str>,
     /// Directories the Claude backend adds with `--add-dir` after the extra
     /// members' worktrees: a standalone target's `add_dirs`. Ignored by other
     /// backends.
     pub add_dirs: &'a [String],
+    /// The session's working directory, which the Codex backend passes as
+    /// `-C` when it resumes a conversation. Ignored by other backends.
+    pub cwd: Option<&'a str>,
 }
 
 /// Implemented once per supported CLI. Methods are designed so the caller

@@ -96,6 +96,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
 - `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its Claude conversation id), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them with `claude --resume`.
+- `codex-contested.json` — Codex rollout ids found while two Codex sessions waited in one folder, which no session may claim as its conversation (`crates/daemon/src/codex_rollout.rs`); entries drop after 7 days.
 - `daemon.lock` — the single-instance lock; a second daemon on the same config dir exits without touching anything.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
 - `logs/autostart.log` — the login launch's short log: `rustling-tulipd --detach` (what the HKCU `Run` entry runs) copies itself into the binary cache, starts that copy and exits (`crates/daemon/src/detach.rs`). Truncated on each such launch.

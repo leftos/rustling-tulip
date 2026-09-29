@@ -93,6 +93,7 @@ mod tests {
             claude_session_id: None,
             resume_conversation: None,
             add_dirs: &[],
+            cwd: None,
         }
     }
 

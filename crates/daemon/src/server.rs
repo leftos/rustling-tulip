@@ -3632,6 +3632,7 @@ impl SpawnArgs {
             claude_session_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
+            cwd: None,
         }
     }
 }
@@ -6651,7 +6652,7 @@ fn env_reference(value: &str) -> Option<&str> {
 /// The spawn's `extra_env` with each env reference (see [`env_reference`])
 /// replaced by the value `lookup` finds for it; literals pass through as-is.
 /// A reference `lookup` can't resolve refuses the spawn, naming the variable.
-fn resolve_env_refs(
+pub(crate) fn resolve_env_refs(
     extra_env: &[(String, String)],
     mut lookup: impl FnMut(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<Vec<(String, String)>, spawn_plan::SpawnFailure> {
