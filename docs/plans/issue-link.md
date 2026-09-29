@@ -70,6 +70,8 @@ Order: GL.1 → GL.2 → GL.3 → GL.4 → GL.5; GL.6 needs GL.1; GL.7 needs GL.
 
 ## Open questions
 
+Answered (user): Q1 (a) per session, in `SpawnConfig`; Q2 (a) one Link field, paste resolves and other text searches, debounced; Q3 (a) the daemon polls every 5 min while a client is connected, plus on a push and at reconnect; Q4 (a) the field explains a missing or logged-out `gh` and the spawn still works; Q5 (a) search uses the repo's `origin` (a workspace's `members[0]`), pasted GitHub URLs work for any repo; Q6 (a) every respawn path keeps the link, Duplicate included, its prefill with a clear button; Q7 (a) the PR whose head is the session's branch; Q8 (a) no changing the link after spawn in this item; Q9 (b) an empty interactive prompt is prefilled with "GitHub issue <owner>/<repo>#<n>" (or "GitHub PR …").
+
 1. **Per session or per worktree/branch.**
    - (a) Recommended: per session, in `SpawnConfig`, so every respawn path carries it with no new store. Worst case: a second session launched into the same worktree without a link shows none, though the branch is the same work.
    - (b) Per worktree branch, in `state.json` keyed by `(repo_id, branch)`, shown on every session on that branch. Worst case: a new store with its own cleanup when the branch is deleted, and a reused branch name inherits a stale link.

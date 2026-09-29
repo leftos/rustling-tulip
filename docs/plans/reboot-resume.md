@@ -64,6 +64,8 @@ Order: RB.1 → RB.2; RB.3 in parallel with both; RB.4 needs RB.2 and RB.3; RB.5
 
 ## Open questions
 
+Answered (user): Q1 (a) no end recorded plus tracer-lost ends within 60 s of the daemon's last log line; Q2 (a) any joint loss of the daemon and its tracers, no boot-time check; Q3 (a) a modal like the Recover dialog, Esc dismisses; Q4 (a) "Resume all" resumes the rows Recover would pre-tick and names the ones left in Recover.
+
 1. **Which lost sessions the prompt offers.**
    - (a) Recommended: dead sidecars with no end recorded, plus dead sidecars whose unrecovered `TracerLost` entry ended within 60 s of the last line of `daemon.log.old`. How: covers a reboot where the dying daemon saw some tracers go first. Worst case: a tracer that crashed in the last minute before the user killed the daemon by hand is offered with the rest.
    - (b) Only dead sidecars with no end recorded (the ruling read literally). How: RB.2 offers exactly what RB.1 wrote. Worst case: in a reboot where the daemon outlives some tracers by a moment, those sessions are left out, so "Resume all" brings back only part of the set and the rest wait in Recover.
@@ -80,4 +82,4 @@ Order: RB.1 → RB.2; RB.3 in parallel with both; RB.4 needs RB.2 and RB.3; RB.5
 
 ## Findings outside this item
 
-- `plan_recovery` recovers a Codex or Cursor entry that has a spawn config as a Claude session (`claude_request` swaps its `agent_options`), and its conversation candidates are whatever Claude transcripts the folder has in the session's time window, so the Recover dialog can offer a Codex session back as an unrelated Claude conversation. RB.5's defaults inherit this; it is its own item for the orchestrator to put to the user.
+- `plan_recovery` recovers a Codex or Cursor entry that has a spawn config as a Claude session (`claude_request` swaps its `agent_options`), and its conversation candidates are whatever Claude transcripts the folder has in the session's time window, so the Recover dialog can offer a Codex session back as an unrelated Claude conversation. RB.5's defaults inherit this. Ruled (user): a Codex or Cursor entry recovers as a session of its own agent in the same folder (resumed when that CLI can resume, else a fresh run), never as a Claude transcript; tracked as its own MAIN.md line.
