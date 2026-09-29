@@ -68,3 +68,10 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
 - **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
 - **DK.1**: step ids in `deepseek-sessions.md` (DeepSeek Claude sessions), distinct from dispatch-follow's `DF` steps and `DS` leaf tag.
+- **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
+- **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
+- **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
+- **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
+- **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
+- **Fix round**: review findings sent back to the worker that made the change.
+- **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
