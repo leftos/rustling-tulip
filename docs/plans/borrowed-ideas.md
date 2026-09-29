@@ -16,7 +16,7 @@ Items are in priority order. Each needs a design pass (the questions listed) bef
   - How permission requests reach the client: the stream-json permission-prompt tool, or a hook.
   - How the native client renders a chat: a new view kind next to the terminal and the diff tabs.
   - Ruling (user, 2026-09-28): a session remembers its last view (kept on the daemon's session); a new Claude session starts in the terminal view.
-- [ ] **"Needs You" view.** One place listing every session waiting on the user, grouped as Needs you / Working / Done / Idle, where clicking a card focuses that session's pane. Orca ships this as an experimental kanban board (`onorca.dev/docs/model/agents-sessions`). It's more useful once hook-reported status exists.
+- [ ] **"Needs You" view.** One place listing every session waiting on the user, grouped as Needs you / Working / Done / Idle, where clicking a card focuses that session's pane. Orca ships this as an experimental kanban board (`onorca.dev/docs/model/agents-sessions`). It's more useful once hook-reported status exists. NY.1–NY.3 have landed; the rest is in [needs-you.md](./needs-you.md).
   - Ruling (user, 2026-09-28): a view on the native client's activity rail, beside Sessions and Source control, not a sidebar filter.
 - [ ] **Link a worktree to an issue or PR.** When spawning, paste or search a GitHub issue or PR URL; the session and its sidebar row show the link, and the PR's state once it exists. Orca does this for GitHub, GitLab, Linear and Jira (`onorca.dev/docs/model/worktrees`). It sits next to the presets' GitHub-issue-range prompts.
   - Ruling (user, 2026-09-28): GitHub only, through `gh`; no provider abstraction.

@@ -50,7 +50,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 - [ ] DIR/SH containers: "Add repo"; "Add workspace" when a `.code-workspace` is found — `Sidebar.tsx`
 - [ ] Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon — `Sidebar.tsx`
 - [ ] Container context menu: spawn (here / in tab), Launch last again ▸ current / new / named tab / edit first, Appearance…, Launch preset (loading / failed / none), open in Explorer, open in VS Code (repo, linked or multi-root), copy path, Remove — `Sidebar.tsx` `ContainerContextMenu` (native: Appearance… landed in P2.10)
-- [ ] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; still missing: the dot's pulse while working and hollow while spawning)
+- [x] Session leaf: status dot (pulses while working, hollow while spawning), label and tooltip, runtime tag, accent stripe, trusted marker, "!", orphan / abandoned / inactive tags, Resume/Dismiss, tab pill (`T:name`, `T:×N`, unbound button) — `Sidebar.tsx` `SessionLeaf`, `TabPill` (native: the tab pill landed in P4.9; the label tooltip, trusted marker, the three tags and their inline Resume / Dismiss in P4.12a; the pulsing and hollow dot with the sidebar in P1)
 - [x] Click a leaf to jump to its tab and pane and clear attention; double-click an unbound leaf to add it to the active tab — `Sidebar.tsx`, `App.tsx` `onSelectSession` (native: a single click places an unbound leaf in the active tab, by the user's ruling, so there is no double-click action)
 - [ ] Drag a leaf onto a pane or a tab pill — `Sidebar.tsx`
 - [ ] Workspace creator: from repos (name + ≥2 members) or from a VS Code workspace file (parse, show registered / will register) — `WorkspaceCreator.tsx`
@@ -74,7 +74,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Spawn dialog & launch flows
 
-- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c)
+- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b)
 - [ ] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c; no "no repos" state, since native has no Add repo yet)
 - [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`

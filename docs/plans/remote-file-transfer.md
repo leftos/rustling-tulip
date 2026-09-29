@@ -6,9 +6,7 @@ In this doc, the **host** is the machine running the daemon and the **remote cli
 
 ## Status
 
-Blocked on two native-client phases (see [native-client.md](./native-client.md)):
-- Phase 2 (terminal link detection and Ctrl-click open), for the link trigger.
-- Phase 6 (connection picker, pinned-TLS tunnel), because the native client can't connect remotely until then.
+Blocked on native-client Phase 6 (connection picker, pinned-TLS tunnel; see [native-client.md](./native-client.md)): the native client can't connect remotely until then.
 
 The daemon and protocol half (FT.1) has landed.
 
@@ -44,5 +42,5 @@ The daemon and protocol half (FT.1) has landed.
 
 - [x] **FT.1 Daemon + protocol:** the `FetchFile` / `CancelFetch` messages, the path-confinement helper, and chunked streaming with backpressure. Tests cover: a `..` escape, an absolute path outside the root, a symlink escape (skipped when the OS denies symlink creation), a directory, a missing file, an empty file, a file larger than one chunk that reassembles byte-exact, and cancel mid-stream.
 - [ ] **FT.2 Native download sink:** the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule. `FileFetchStarted.resolved_path` is the daemon's canonical path, so on Windows it starts with `\\?\`; strip that before showing it. Needs Phase 6.
-- [ ] **FT.3 Ctrl-click trigger:** in remote mode, terminal links send `FetchFile` with candidate readings. Needs Phase 2 links and FT.2.
+- [ ] **FT.3 Ctrl-click trigger:** in remote mode, terminal links send `FetchFile` with candidate readings. Needs FT.2.
 - [ ] **FT.4 "Fetch file…" popup:** the path input scoped to the focused session's repo or worktree, with progress, cancel, and inline errors. Needs FT.2.

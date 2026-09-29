@@ -132,13 +132,8 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
 
 ## 4. Build, bundle, packaging
 
-- `apps/tauri-app/src-tauri/tauri.conf.json:33` — `"targets": ["nsis"]`
-  (Windows-only). The icon set already includes `icons/icon.icns` (Tauri
-  auto-selects it on macOS), so no new art is needed.
-- [ ] Add a macOS bundle target (`"dmg"`/`"app"`, or platform-conditional
-      `targets`). The `bundle.active = true` + `externalBin`/`resources` work to
-      ship `rustling-tulipd` + `rt-tracer` is still deferred on **all** platforms
-      (see root `CLAUDE.md` → "Things that are deferred") — macOS inherits that.
+- The shipped client is `apps/native` (GPUI); its installer is Phase 6 (Wave 11 in `MAIN.md`), Windows-first.
+- [ ] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds.
 - [ ] Code-signing + notarization (Developer ID cert, `entitlements.plist`,
       `notarytool`). Build-machine/CI concern, not source. Needed for distribution
       but not for local dev runs.

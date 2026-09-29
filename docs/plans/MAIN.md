@@ -1,5 +1,5 @@
 # rustling-tulip: main plan
-<!-- plan-doc-hygiene: 2026-09-28 4dc552d -->
+<!-- plan-doc-hygiene: 2026-09-29 7970fec -->
 
 Entry point for anyone, human or agent, continuing this project. **Open work only**, in the order it is worked: [High priority](#high-priority), then the [Waves](#waves) top to bottom, then [Backlog and singles](#backlog-and-singles). The next item is the first line from the top.
 
@@ -20,11 +20,11 @@ Nothing is ahead of the waves.
 
 A wave is one release-sized bundle of items sharing owning files, so one implementer reads them once and one review covers the bundle. Wave 1 is the Petal look, which the user ruled lands before the rest of Phase 4; Waves 2–5 finish native client Phase 4 (rulings: [native-client.md](./native-client.md)).
 
-### Wave 1 — The "Petal" look (new `palette.rs`, `theme.rs`, `fonts.rs`, `assets/fonts/`, `lib.rs` colours, `activity_bar.rs`, `tab_bar.rs`, `sidebar_view.rs`, `grid_view.rs`, the menus and dialogs)
+### Wave 1 — The "Petal" look (`palette.rs`, `theme.rs`, `fonts.rs`, `assets/fonts/`, `lib.rs` colours, `activity_bar.rs`, `tab_bar.rs`, `sidebar_view.rs`, `grid_view.rs`, the menus and dialogs)
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.1 → PT.2 → PT.4a → PT.4b; PT.3 needs PT.1; PT.9 needs PT.2; PT.5 and PT.7 need PT.4b; PT.6a needs PT.4a, PT.6b follows PT.6a; PT.8a needs PT.3; PT.8b needs PT.8a and PT.6b.
+The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every step's rulings and files are in [petal.md](./petal.md). Order: PT.2 → PT.4a → PT.4b; PT.9 needs PT.2; PT.5 and PT.7 need PT.4b; PT.6a needs PT.4a, PT.6b follows PT.6a; PT.8a needs PT.3; PT.8b needs PT.8a and PT.6b.
 
 - [ ] **PT.2 Petal values, accent and terminal ground**: the tokens, the coral default accent and Petal presets, the `#0C0B0E` ground, "Graphite" preset renamed "Slate".
 - [ ] **PT.3 Schibsted Grotesk as the UI face**: four static TTFs with their `OFL.txt`.
@@ -44,8 +44,7 @@ The user's canvas is https://claude.ai/artifact/85m8ZhzEA4ovQhJqhjCn5S; every st
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`, plus `-p protocol -p daemon` for P4.16's field; hand-test the chips, tags and overlay colours.
 
 - [ ] **Claude sessions on DeepSeek** (user; after Wave 1): a Claude provider (Anthropic / DeepSeek) routing a session the way `~/.claude/bin/claude-deepseek.ps1` does, the key from `DEEPSEEK_API_KEY` never stored, carried through Recover, Restart, Resume, Duplicate and Launch last, a `DeepSeek` chip, a default in Spawn defaults; steps DK.1–DK.13, the dialog and chip steps after PT.6b / PT.7 / PT.8b. Design and answered questions: [deepseek-sessions.md](./deepseek-sessions.md).
-- [ ] **Leaf status dot: pulse while working, hollow while spawning** (parity "Session leaf", left after P4.12a). `sidebar_view.rs`. Petal's PT.4 status glyphs absorb it; delete this line when PT.4 lands.
-- [ ] **Recover brings a Codex or Cursor session back as Claude** (found drafting reboot-resume): `plan_recovery`'s `claude_request` swaps the agent options and offers the folder's Claude transcripts. Ruled (user): recover it as its own agent in the same folder, resumed when that CLI can resume, else a fresh run. Ruled (user): research each CLI's resume support from its own docs or source and capture its conversation id at spawn now; the dialog asks for it with an additive `RecoverAs::OwnAgent`. Settled: a fresh run carries no first prompt; a non-Claude entry offers no Claude transcripts; one without spawn settings is disabled with a reason. `crates/daemon/src/history.rs`, `server.rs`, `agents/codex.rs`, `agents/cursor.rs`, `crates/protocol/src/lib.rs`, `apps/native/src/recover.rs`. Steps RA.0 and CR.0 (spikes) to RA.11. Design and answered questions: [recover-own-agent.md](./recover-own-agent.md).
+- [ ] **Recover brings a Codex or Cursor session back as Claude** (found drafting reboot-resume): `plan_recovery`'s `claude_request` swaps the agent options and offers the folder's Claude transcripts. Ruled (user): recover it as its own agent in the same folder, resumed when that CLI can resume, else a fresh run. Ruled (user): research each CLI's resume support from its own docs or source and capture its conversation id at spawn now; the dialog asks for it with an additive `RecoverAs::OwnAgent`. Settled: a fresh run carries no first prompt; a non-Claude entry offers no Claude transcripts; one without spawn settings is disabled with a reason. `crates/daemon/src/history.rs`, `server.rs`, `agents/codex.rs`, `agents/cursor.rs`, `crates/protocol/src/lib.rs`, `apps/native/src/recover.rs`. Steps RA.0 and CR.0 (spikes) to RA.11; RA.0, CR.0, RA.1 and RA.2 have landed. Design and answered questions: [recover-own-agent.md](./recover-own-agent.md).
 - [ ] **Codex sessions stop on a trust screen, and on a sandbox chooser the first time** (found in the Recover spike RA.0): Codex shows its trust screen even with `--yolo`, and saves trust under the lower-cased, `subst`-resolved path, so a repo opened through a `subst` drive asks again on every spawn and resume; its first run on Windows also asks which sandbox to set up. Find a per-spawn way to pre-trust the folder and skip the chooser (a `-c` config override or the trust key Codex actually reads). `crates/daemon/src/agents/codex.rs`. See [recover-own-agent.md](./recover-own-agent.md).
 - [ ] **P4.12b Session menu rows**: Duplicate ▸, Move to ▸, Add to current / new tab, Reveal worktree. See [native-client.md](./native-client.md#p412-sessions).
 - [ ] **P4.12c Shift-duplicate prefill**: Shift on Duplicate ▸ opens the spawn dialog prefilled from the source session, on P4.4b's target lock, the prefill beating the Spawn defaults; needs P4.12b, which adds the Duplicate ▸ row. `spawn_form.rs`, `spawn_view.rs`, `session_menu.rs`, `session_actions.rs`. See [native-client.md](./native-client.md#p412-sessions).
@@ -55,9 +54,9 @@ Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-t
 
 Review: `code-review`; UI hand-test of the shelf. Verification: the gates with `-p rustling-tulip-native -p daemon`, plus `-p protocol` for the `request_id` on errors.
 
-- [ ] **A tab's closing mark goes stale when the daemon keeps the tab** (found in the undo-before-removal fix's review): the mark (`TabsModel::mark_closing_if_last_pane`) is set from the client's grid, so a split racing the close of the original pane, or a `MovePane` the daemon rolls back, leaves the tab in place and marked until reconnect, and an Undo naming it sends `RestoreTab`, refused with "tab already exists". The failed move can be cleared on its `Error` once errors carry a `request_id` (the item below); the split race needs no mark while a split or move for that tab is in flight. Also mark the "Move this pane to a new tab" path (`ExtractToNewTab`, `pane_menu.rs`), which removes a one-pane source tab unmarked. `apps/native/src/tabs.rs`, `pane_menu.rs`, `pane_close_view.rs`.
+- [ ] **A tab's closing mark goes stale when the daemon keeps the tab** (found in the undo-before-removal fix's review): the mark (`TabsModel::mark_closing_if_last_pane`) is set from the client's grid, so a split racing the close of the original pane, or a `MovePane` the daemon rolls back, leaves the tab in place and marked until reconnect, and an Undo naming it sends `RestoreTab`, refused with "tab already exists". The failed move can be cleared on its `Error` once `MovePane` carries a `request_id` (as the item below needs for `CreateTab` and `MergeTabs`); the split race needs no mark while a split or move for that tab is in flight. Also mark the "Move this pane to a new tab" path (`ExtractToNewTab`, `pane_menu.rs`), which removes a one-pane source tab unmarked. `apps/native/src/tabs.rs`, `pane_menu.rs`, `pane_close_view.rs`.
 - [ ] **P4.17 Keep an untouched layout when panes come and go** (user): a per-client "untouched since picked" flag saved with the tab's layout, set by Rearrange ▸ and the first-connect chooser. See [native-client.md](./native-client.md#p417-keep-an-untouched-layout-when-panes-come-and-go).
-- [ ] **A rejected `CreateTab` or `MergeTabs` leaves the pending-create armed** (found in P4.13a's review), so the next tab to arrive from anywhere becomes active (`arm_create` callers in `tab_bar.rs` merge, `spawns.rs`, `session_menu.rs`). Clear it on the `Error` / `ActionFailed` that answers the request, which needs a `request_id` on those messages (additive).
+- [ ] **A rejected `CreateTab` or `MergeTabs` leaves the pending-create armed** (found in P4.13a's review), so the next tab to arrive from anywhere becomes active (`arm_create` callers in `tab_bar.rs` merge, `spawns.rs`, `session_menu.rs`). Clear it on the `Error` / `ActionFailed` that answers the request, which needs a `request_id` on `CreateTab` and `MergeTabs` (additive; `Error` and `ActionFailed` already carry one) and their error paths echoing it.
 
 ### Wave 4 — Repos, containers and presets (`sidebar.rs`, `sidebar_view.rs`, `spawn_view.rs`, new creator and preset modules, daemon `presets.rs` and `vscode.rs`)
 
@@ -127,6 +126,10 @@ Review: `code-review`, and a security read of the relay and per-device credentia
 ## Backlog and singles
 
 Items that share no files with a wave, what waits on something outside the repo, and ideas that need a design pass before they are brief-sized.
+
+### Docs
+
+- [ ] **Bring `docs/architecture.md` and `docs/native-client.md` up to the recent landings** (doc-drift scan: 5 commits on their named files since 2026-09-28): the task index and components name neither `apps/native/src/palette.rs` (5e655d7) nor the Needs You panel's `needs_you.rs` / `needs_you_view.rs` (ee9bb60, b378bcc), and say nothing of the per-session sidecar write and delete gates (b378bcc, 924643a) or the agent conversation id carried through history and orphan recovery (a841967). Write needs-you.md's NY.6 native-client.md section for NY.1–NY.3 now; NY.6 then adds only NY.4–NY.5.
 
 ### Build tooling
 
