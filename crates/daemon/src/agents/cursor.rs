@@ -1,17 +1,22 @@
 //! Cursor (`cursor-agent` CLI from cursor.com) backend.
 //!
-//! Interactive-only in PR1. Cursor's `--workspace` flag takes a single
-//! directory and has no `--add-dir` equivalent. When spawned against a
-//! multi-repo workspace target, the daemon still creates worktrees for
-//! every member but cursor only sees the first member's worktree as cwd;
-//! the user is on their own (or can prompt cursor explicitly) about the
-//! other member directories.
+//! Interactive only: this backend has no headless path. A fresh interactive
+//! spawn first pre-creates an empty chat with `cursor-agent create-chat`
+//! ([`create_chat`]) and opens it with `--resume <id>`, so the session
+//! records a chat id it can be resumed with later; a resumed spawn passes
+//! the recorded id. Every spawn with a working directory passes
+//! `--workspace <cwd> --trust`, since a chat is matched by its workspace.
+//! `--sandbox enabled` is dropped on Windows, where cursor-agent's sandbox
+//! fails.
 //!
-//! Headless via `cursor-agent --print --output-format stream-json` is
-//! straightforward but deferred to a follow-up.
+//! `--workspace` takes a single directory and there is no `--add-dir`
+//! equivalent: against a multi-repo workspace target the daemon still
+//! creates worktrees for every member, but cursor only sees the first
+//! member's worktree.
 
-use super::{AgentBackend, CommonSpawnFields};
+use super::{AgentBackend, CommonSpawnFields, Launch, PRECREATE_TIMEOUT};
 use anyhow::{Context as _, anyhow};
+use futures::future::BoxFuture;
 use protocol::{AgentOptions, CursorSandbox, SessionMember};
 use std::path::Path;
 use std::process::Stdio;
@@ -51,6 +56,28 @@ impl AgentBackend for CursorBackend {
             }
         };
         build_args(common, plan_mode, sandbox, initial_prompt)
+    }
+
+    /// The pre-created chat, else the resumed one.
+    fn own_conversation_at_spawn(
+        &self,
+        resume: Option<&str>,
+        created: Option<&str>,
+    ) -> Option<String> {
+        created.or(resume).map(str::to_owned)
+    }
+
+    fn precreate_conversation<'a>(
+        &self,
+        launch: &'a Launch<'a>,
+    ) -> Option<BoxFuture<'a, anyhow::Result<String>>> {
+        Some(Box::pin(create_chat(
+            launch.program,
+            launch.prepend,
+            launch.cwd,
+            launch.env,
+            PRECREATE_TIMEOUT,
+        )))
     }
 }
 
@@ -119,7 +146,8 @@ fn usable_sandbox(sandbox: Option<CursorSandbox>) -> Option<CursorSandbox> {
 }
 
 /// Pre-create an empty Cursor chat and return its id: runs `program` with
-/// `prepend` and `create-chat` in `cwd` and reads the first stdout line
+/// `prepend` and `create-chat` in `cwd`, with `env` set on top of the
+/// daemon's environment as for the spawn, and reads the first stdout line
 /// within `timeout`, which must be a UUID. `create-chat` prints the id at
 /// once but may keep running, so its whole process tree is killed however
 /// this ends (an npm shim's child outlives a kill of the top process alone),
@@ -129,18 +157,16 @@ fn usable_sandbox(sandbox: Option<CursorSandbox>) -> Option<CursorSandbox> {
 ///
 /// The program fails to start, closes its output or prints nothing within
 /// `timeout`, or its first line is not a UUID.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the spawn path does not call it yet")
-)]
 pub async fn create_chat(
     program: &str,
     prepend: &[String],
     cwd: &Path,
+    env: &[(String, String)],
     timeout: Duration,
 ) -> anyhow::Result<String> {
     let mut cmd = Command::new(program);
     cmd.args(prepend)
+        .envs(env.iter().map(|(name, value)| (name, value)))
         .arg("create-chat")
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -478,7 +504,7 @@ mod create_chat_tests {
             pid_file.display()
         );
 
-        let id = create_chat("pwsh", &stand_in(&body), &dir, Duration::from_secs(8))
+        let id = create_chat("pwsh", &stand_in(&body), &dir, &[], Duration::from_secs(8))
             .await
             .expect("the chat id");
 
@@ -511,7 +537,13 @@ mod create_chat_tests {
             pid_file.display()
         );
         let args = stand_in(&body);
-        let mut chat = Box::pin(create_chat("pwsh", &args, &dir, Duration::from_secs(30)));
+        let mut chat = Box::pin(create_chat(
+            "pwsh",
+            &args,
+            &dir,
+            &[],
+            Duration::from_secs(30),
+        ));
         let child_started = async {
             while !std::fs::read_to_string(&pid_file).is_ok_and(|pid| !pid.trim().is_empty()) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -553,6 +585,7 @@ mod create_chat_tests {
             "pwsh",
             &stand_in("Start-Sleep 60"),
             &dir,
+            &[],
             Duration::from_millis(1500),
         )
         .await
@@ -568,11 +601,29 @@ mod create_chat_tests {
             "pwsh",
             &stand_in("'not-a-uuid'; Start-Sleep 60"),
             &dir,
+            &[],
             Duration::from_secs(8),
         )
         .await
         .expect_err("junk printed");
         assert!(err.to_string().contains("not a chat id"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn runs_with_the_spawns_env_rows() {
+        let dir = scratch("env");
+        let env = vec![("RT_TEST_CREATE_CHAT_ID".to_owned(), CHAT_ID.to_owned())];
+        let id = create_chat(
+            "pwsh",
+            &stand_in("$env:RT_TEST_CREATE_CHAT_ID; Start-Sleep 60"),
+            &dir,
+            &env,
+            Duration::from_secs(8),
+        )
+        .await
+        .expect("the chat id from the env row");
+        assert_eq!(id, CHAT_ID);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

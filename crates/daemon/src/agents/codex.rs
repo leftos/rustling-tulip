@@ -25,6 +25,17 @@ impl AgentBackend for CodexBackend {
         true
     }
 
+    /// A resumed spawn keeps the resumed id at once: `codex resume` appends
+    /// to the original rollout, whose name predates this spawn. A fresh
+    /// run's id comes from its rollout once found.
+    fn own_conversation_at_spawn(
+        &self,
+        resume: Option<&str>,
+        _created: Option<&str>,
+    ) -> Option<String> {
+        resume.map(str::to_owned)
+    }
+
     fn build_interactive_args(
         &self,
         opts: &AgentOptions,

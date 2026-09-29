@@ -204,26 +204,11 @@ fn capture_codex_conversation(
     session_id: &str,
     rec: &Mutex<SessionRecord>,
 ) {
-    let (cwd, since, extra_env) = {
-        let guard = lock(rec);
-        if guard.agent != Agent::Codex
-            || guard.mode != SessionMode::Interactive
-            || guard.agent_conversation_id.is_some()
-        {
-            return;
-        }
-        let Some(cwd) = primary_cwd(&guard) else {
-            return;
-        };
-        let extra_env = guard
-            .spawn_config
-            .as_ref()
-            .map(|cfg| cfg.extra_env.clone())
-            .unwrap_or_default();
-        (cwd, guard.started_at, extra_env)
+    let Some(look) = codex_rollout::uncaptured(&lock(rec)) else {
+        return;
     };
     let scan = || {
-        let Some(home) = codex_rollout::codex_home(&extra_env) else {
+        let Some(home) = codex_rollout::codex_home(&look.extra_env) else {
             return;
         };
         codex_rollout::capture_once(
@@ -231,8 +216,8 @@ fn capture_codex_conversation(
             dirs,
             session_id,
             &home,
-            &cwd,
-            since,
+            &look.cwd,
+            look.since,
             &mut HashSet::new(),
         );
     };

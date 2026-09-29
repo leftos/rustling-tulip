@@ -427,6 +427,7 @@ async fn reattach_one(
                         meta.mode == SessionMode::PlainShell,
                     );
                     pending.publish();
+                    crate::codex_rollout::watch_session(&sessions, &dirs, &meta.session_id);
                 }
                 Err(err) => {
                     warn!(
@@ -3315,6 +3316,7 @@ pub(crate) async fn spawn_session(
         origin,
         resume_conversation,
         add_dirs: standalone_add_dirs,
+        cwd: primary_cwd.to_string_lossy().into_owned(),
     };
 
     // Record last-used agent per targeted repo. Best-effort: a state.json
@@ -3615,6 +3617,8 @@ struct SpawnArgs {
     resume_conversation: Option<String>,
     /// A standalone target's extra `--add-dir` directories.
     add_dirs: Vec<String>,
+    /// The session's working directory: the primary member's folder.
+    cwd: String,
 }
 
 impl SpawnArgs {
@@ -3632,9 +3636,106 @@ impl SpawnArgs {
             claude_session_id: None,
             resume_conversation: self.resume_conversation.as_deref(),
             add_dirs: &self.add_dirs,
-            cwd: None,
+            cwd: Some(&self.cwd),
         }
     }
+}
+
+/// What a new interactive session's record takes from its spawn.
+struct NewInteractive {
+    session_id: String,
+    label: String,
+    kind: SessionKind,
+    members: Vec<SessionMember>,
+    workspace_id: Option<String>,
+    agent: Agent,
+    cwd: String,
+    stored_config: protocol::SpawnConfig,
+    last_prompt: Option<String>,
+    claude_session_id: Option<String>,
+    started_at: chrono::DateTime<Utc>,
+}
+
+/// The record of a new interactive session, carrying its own agent's
+/// conversation from the start, so its first sidecar write and its spawn
+/// reply hold it and an agent that exits at once ends with it.
+fn interactive_record(
+    new: NewInteractive,
+    conversation: &crate::agents::SpawnConversation,
+    pty: Option<Arc<crate::pty::PtyHandle>>,
+) -> SessionRecord {
+    let mut record = SessionRecord {
+        id: new.session_id,
+        label: new.label.clone(),
+        default_label: new.label,
+        user_label: None,
+        kind: new.kind,
+        worktree_paths: worktree_paths_for_config(&new.stored_config, &new.members),
+        members: new.members,
+        mode: SessionMode::Interactive,
+        started_at: new.started_at,
+        status: SessionStatus::Idle,
+        status_since: Some(new.started_at),
+        exit_code: None,
+        metrics: SessionMetrics::default(),
+        recent_actions: Vec::new(),
+        pty,
+        headless: None,
+        workspace_id: new.workspace_id,
+        agent: new.agent,
+        terminal_title: None,
+        program_name: Some(new.agent.as_label().to_string()),
+        current_cwd: Some(new.cwd),
+        appearance: AppearanceOverrides::default(),
+        spawn_config: Some(new.stored_config),
+        is_abandoned: false,
+        is_inactive: false,
+        last_prompt: new.last_prompt,
+        input_notifier: None,
+        scrollback_snapshot_req: None,
+        spawn_origin: None,
+        claude_session_id: new.claude_session_id,
+        agent_conversation_id: conversation.own.clone(),
+    };
+    push_recent_action(&mut record, "session started".to_string());
+    record
+}
+
+/// Where a session's tracer runs, as its sidecar records it.
+struct TracerSidecar {
+    pid: u32,
+    pipe: String,
+    exe_path: String,
+}
+
+/// The spawn-time sidecar of the new interactive session `record`, whose
+/// child is `pid`. The direct daemon child is `rt-tracer.exe`, not the agent
+/// CLI, so `program_name` names the tracer and `agent` the CLI;
+/// `is_session_alive` prefers `tracer_pid` + "rt-tracer" when those are set.
+fn interactive_meta(
+    record: &SessionRecord,
+    pid: u32,
+    tracer: TracerSidecar,
+) -> anyhow::Result<OrphanMeta> {
+    orphan::meta_from_record(
+        record.id.clone(),
+        pid,
+        record.label.clone(),
+        record.kind.clone(),
+        SessionMode::Interactive,
+        record.members.clone(),
+        record.started_at,
+        record.workspace_id.clone(),
+        Some("rt-tracer".to_string()),
+        record.agent,
+        record.spawn_config.clone(),
+        record.last_prompt.clone(),
+        record.current_cwd.clone(),
+        Some(tracer.pid),
+        Some(tracer.pipe),
+        Some(tracer.exe_path),
+        record.claude_session_id.clone(),
+    )
 }
 
 #[expect(
@@ -3655,16 +3756,32 @@ async fn spawn_interactive_session(
     stored_config: protocol::SpawnConfig,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     let last_prompt = initial_prompt.clone();
-    let backend = crate::agents::backend_for(cfg.agent());
+    let agent = cfg.agent();
+    let backend = crate::agents::backend_for(agent);
+    let raw_program = backend.resolve_program();
+    let (program, prepend_args) = resolve_agent_program(&raw_program);
+    let env = merged_env(&cfg.extra_env);
+    let conversation = crate::agents::spawn_conversation(
+        agent,
+        cfg.resume_conversation.as_deref(),
+        &crate::agents::Launch {
+            program: &program,
+            prepend: &prepend_args,
+            cwd: &primary_cwd,
+            env: &env,
+        },
+    )
+    .await;
     // Claude gets a known conversation id so the session can be resumed with
     // `claude --resume <id>` after it ends. A resumed conversation keeps its id.
-    let claude_session_id = (cfg.agent() == Agent::Claude).then(|| {
+    let claude_session_id = (agent == Agent::Claude).then(|| {
         cfg.resume_conversation
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     });
     let common = CommonSpawnFields {
         claude_session_id: claude_session_id.as_deref(),
+        resume_conversation: conversation.resume.as_deref(),
         ..cfg.common()
     };
     let args = backend.build_interactive_args(
@@ -3674,12 +3791,10 @@ async fn spawn_interactive_session(
         initial_prompt.as_deref(),
     );
 
-    let raw_program = backend.resolve_program();
-    let (program, prepend_args) = resolve_agent_program(&raw_program);
     let mut final_args = prepend_args;
     final_args.extend(args);
     info!(
-        agent = cfg.agent().as_label(),
+        agent = agent.as_label(),
         raw = %raw_program,
         program = %program,
         argc = final_args.len(),
@@ -3693,58 +3808,62 @@ async fn spawn_interactive_session(
         program,
         args: final_args,
         cwd: primary_cwd,
-        env: merged_env(&cfg.extra_env),
+        env,
         cols: 120,
         rows: 32,
     };
-    let tracer_spawn = tracer_client::spawn(
+    let tracer_spawn = match tracer_client::spawn(
         &hub.dirs,
         spec,
         expected_output_subscribers(SessionMode::Interactive),
     )
     .await
-    .with_context(|| format!("spawning {} via tracer", cfg.agent().as_label()))?;
-    let pty = tracer_spawn.handle;
-    let tracer_pid = tracer_spawn.tracer_pid;
-    let tracer_pipe = tracer_spawn.pipe_name;
-    let tracer_exe_path = tracer_spawn.tracer_exe_path.to_string_lossy().into_owned();
-    let pid = pty.pid();
-
-    let started_at = Utc::now();
-    let mut record = SessionRecord {
-        id: session_id.clone(),
-        label: label.clone(),
-        default_label: label.clone(),
-        user_label: None,
-        kind: kind.clone(),
-        members: members.clone(),
-        mode: SessionMode::Interactive,
-        started_at,
-        status: SessionStatus::Idle,
-        status_since: Some(started_at),
-        exit_code: None,
-        metrics: SessionMetrics::default(),
-        recent_actions: Vec::new(),
-        pty: Some(Arc::clone(&pty)),
-        headless: None,
-        workspace_id: workspace_id.clone(),
-        agent: cfg.agent(),
-        terminal_title: None,
-        program_name: Some(cfg.agent().as_label().to_string()),
-        current_cwd: Some(initial_cwd.clone()),
-        appearance: AppearanceOverrides::default(),
-        spawn_config: Some(stored_config.clone()),
-        is_abandoned: false,
-        is_inactive: false,
-        worktree_paths: worktree_paths_for_config(&stored_config, &members),
-        last_prompt: last_prompt.clone(),
-        input_notifier: None,
-        scrollback_snapshot_req: None,
-        spawn_origin: None,
-        claude_session_id: claude_session_id.clone(),
-        agent_conversation_id: None,
+    {
+        Ok(spawned) => spawned,
+        Err(err) => {
+            if let Some(created) = &conversation.created {
+                warn!(
+                    %session_id,
+                    agent = agent.as_label(),
+                    conversation = %created,
+                    "the spawn failed after its conversation was pre-created; that empty conversation is left with the agent"
+                );
+            }
+            return Err(err.context(format!("spawning {} via tracer", agent.as_label())));
+        }
     };
-    push_recent_action(&mut record, "session started".to_string());
+    let pty = tracer_spawn.handle;
+    let tracer = TracerSidecar {
+        pid: tracer_spawn.tracer_pid,
+        pipe: tracer_spawn.pipe_name,
+        exe_path: tracer_spawn.tracer_exe_path.to_string_lossy().into_owned(),
+    };
+    let record = interactive_record(
+        NewInteractive {
+            session_id: session_id.clone(),
+            label,
+            kind,
+            members,
+            workspace_id,
+            agent,
+            cwd: initial_cwd,
+            stored_config,
+            last_prompt,
+            claude_session_id,
+            started_at: Utc::now(),
+        },
+        &conversation,
+        Some(Arc::clone(&pty)),
+    );
+    let meta = pty
+        .pid()
+        .and_then(|pid| match interactive_meta(&record, pid, tracer) {
+            Ok(meta) => Some(meta),
+            Err(err) => {
+                warn!(?err, %session_id, "no sidecar written for the session");
+                None
+            }
+        });
 
     // Two-stage insert: put the record in the registry first so attach_lifecycle's
     // exit watcher can find it, then patch the lifecycle channels onto the record
@@ -3785,35 +3904,12 @@ async fn spawn_interactive_session(
     let snap = crate::sync::lock(pending.arc()).snapshot();
     pending.publish_from(cfg.origin.clone());
 
-    // Post-C.3 the direct daemon child is rt-tracer.exe, not the agent CLI.
-    // Sidecar's `pid` + `program_name` therefore describe the tracer; the
-    // underlying agent is captured in `agent`. is_session_alive prefers
-    // `tracer_pid` + "rt-tracer" when the new fields are present.
-    if let Some(pid) = pid
-        && let Ok(mut meta) = orphan::meta_from_record(
-            session_id.clone(),
-            pid,
-            label,
-            kind,
-            SessionMode::Interactive,
-            members,
-            started_at,
-            workspace_id,
-            Some("rt-tracer".to_string()),
-            cfg.agent(),
-            Some(stored_config),
-            last_prompt,
-            Some(initial_cwd),
-            Some(tracer_pid),
-            Some(tracer_pipe),
-            Some(tracer_exe_path),
-            claude_session_id,
-        )
-    {
+    if let Some(mut meta) = meta {
         meta.status = Some(snap.status);
         meta.status_since = snap.status_since;
         write_meta_then_sync(hub, &meta);
     }
+    crate::codex_rollout::watch_session(&hub.sessions, &hub.dirs, &session_id);
 
     if let Some(injector) = cfg.prompt_injector.clone() {
         inject::run(session_id.clone(), Arc::clone(&pty), injector);
@@ -7859,6 +7955,133 @@ mod tests {
         assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
         let entry = history::read_one(&hub.dirs, "shell").expect("entry kept");
         assert_eq!(entry.recovered_at, None, "a failed recovery is not marked");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recover_own_agent_codex_reaches_codex_spawn() {
+        let (hub, _scratch, repo) = env_ref_repo_hub("recover-own-codex");
+        let folder = repo.to_string_lossy().into_owned();
+        let mut record = history::test_support::record("codex", SessionMode::Interactive);
+        record.agent = Agent::Codex;
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: folder.clone(),
+        }];
+        let mut request = env_spawn(
+            single_target(true, Some(&folder)),
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        );
+        request.agent_options = AgentOptions::Codex { sandbox: None };
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry =
+            history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
+        entry.primary_cwd = Some(folder);
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: "codex".to_owned(),
+                    conversation_id: None,
+                    how: protocol::RecoverAs::OwnAgent,
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, None);
+        let error = results[0].error.as_deref().unwrap_or_default();
+        assert!(error.contains("spawning codex via tracer"), "{error}");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[test]
+    fn spawn_record_carries_the_own_conversation_into_the_first_sidecar_write() {
+        let dirs = history::test_support::scratch_dirs("spawn-own-conversation");
+        let registry = SessionRegistry::new(dirs.clone());
+        let cases = [
+            (
+                "codex-resumed",
+                Agent::Codex,
+                Some("codex-1"),
+                None,
+                "codex-1",
+            ),
+            (
+                "cursor-created",
+                Agent::Cursor,
+                None,
+                Some("chat-1".to_owned()),
+                "chat-1",
+            ),
+        ];
+        for (id, agent, resume, created, want) in cases {
+            let conversation = crate::agents::SpawnConversation::new(agent, resume, created);
+            let request = env_spawn(
+                single_target(true, Some(r"X:\wt\repo")),
+                SessionMode::Interactive,
+                Vec::new(),
+                None,
+            );
+            let record = interactive_record(
+                NewInteractive {
+                    session_id: id.to_owned(),
+                    label: id.to_owned(),
+                    kind: SessionKind::Single,
+                    members: Vec::new(),
+                    workspace_id: None,
+                    agent,
+                    cwd: r"X:\wt\repo".to_owned(),
+                    stored_config: protocol::SpawnConfig::from_request(&request),
+                    last_prompt: None,
+                    claude_session_id: None,
+                    started_at: Utc::now(),
+                },
+                &conversation,
+                None,
+            );
+            assert_eq!(record.agent_conversation_id.as_deref(), Some(want), "{id}");
+            let meta = interactive_meta(
+                &record,
+                4242,
+                TracerSidecar {
+                    pid: 4243,
+                    pipe: format!(r"\\.\pipe\rt-tracer-{id}"),
+                    exe_path: "rt-tracer.exe".to_owned(),
+                },
+            )
+            .expect("sidecar meta");
+            registry.insert(record);
+            registry.write_sidecar(&meta);
+            let written = orphan::load_meta(&dirs, id).expect("the first sidecar write");
+            assert_eq!(written.agent_conversation_id.as_deref(), Some(want), "{id}");
+        }
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn spawn_args_common_carries_the_cwd() {
+        let cfg = SpawnArgs {
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Codex { sandbox: None },
+            model: None,
+            extra_env: Vec::new(),
+            prompt_injector: None,
+            origin: None,
+            resume_conversation: None,
+            add_dirs: Vec::new(),
+            cwd: "X:/wt/repo".to_owned(),
+        };
+        assert_eq!(cfg.common().cwd, Some("X:/wt/repo"));
     }
 
     /// A lookup that knows only `A` (as `va`) in the process scope.

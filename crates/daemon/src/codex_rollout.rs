@@ -8,7 +8,7 @@
 
 use crate::history;
 use crate::orphan;
-use crate::paths::Dirs;
+use crate::paths::{Dirs, normalize_path_key};
 use crate::session::{SessionRecord, SessionRegistry};
 use crate::sync::lock;
 use crate::user_env;
@@ -32,6 +32,10 @@ const FAST_POLL: Duration = Duration::from_secs(2);
 const SLOW_POLL: Duration = Duration::from_secs(10);
 /// How long [`watch`] polls every [`FAST_POLL`].
 const FAST_PHASE: Duration = Duration::from_mins(5);
+/// How long [`watch`] polls at most every [`SLOW_POLL`].
+const SLOW_PHASE: Duration = Duration::from_hours(1);
+/// How often [`watch`] looks once [`SLOW_PHASE`] is over.
+const IDLE_POLL: Duration = Duration::from_mins(1);
 /// How much earlier than the spawn a rollout's name may be stamped.
 const NAME_SLACK: TimeDelta = TimeDelta::seconds(5);
 /// Length of the local time in a rollout's name, `YYYY-MM-DDTHH-MM-SS`.
@@ -280,7 +284,8 @@ fn list_dir(dir: &Path) -> Vec<PathBuf> {
 /// and keeps `rollout-*.jsonl` files whose name time, read as local time and
 /// taken to UTC, is no earlier than `since` minus [`NAME_SLACK`] and whose id
 /// is not in `taken`. Only a file's first line is
-/// read; its `payload.cwd` must equal `cwd` as written and its
+/// read; its `payload.cwd` must equal `cwd` under [`normalize_path_key`]
+/// (slash direction, a trailing separator and, on Windows, case aside) and its
 /// `payload.source` must be `"cli"`. Files read in full that do not match are
 /// added to `seen` and skipped on later calls with the same set.
 pub fn find_rollout(
@@ -291,6 +296,7 @@ pub fn find_rollout(
     seen: &mut HashSet<PathBuf>,
 ) -> Option<String> {
     let earliest = since - NAME_SLACK;
+    let cwd_key = normalize_path_key(cwd);
     let today = Local::now().date_naive();
     let mut day = since.with_timezone(&Local).date_naive();
     let mut days = Vec::new();
@@ -328,7 +334,7 @@ pub fn find_rollout(
             }
             match read_head(&path) {
                 Head::Unfinished => {}
-                Head::Interactive { cwd: found } if found == cwd => {
+                Head::Interactive { cwd: found } if normalize_path_key(&found) == cwd_key => {
                     if best.as_ref().is_none_or(|(best_time, _)| time < *best_time) {
                         best = Some((time, id.to_string()));
                     }
@@ -463,12 +469,81 @@ struct WatchJob {
     home: PathBuf,
 }
 
+/// What a rollout look needs for an interactive Codex session that has no
+/// conversation id yet.
+pub struct Uncaptured {
+    /// The session's primary folder, which the rollout's `payload.cwd` names.
+    pub cwd: String,
+    /// When the session started; older rollouts are not its own.
+    pub since: DateTime<Utc>,
+    /// The spawn's env rows, which may name its `CODEX_HOME`.
+    pub extra_env: Vec<(String, String)>,
+}
+
+/// The rollout look for `rec` when it is an interactive Codex session with
+/// no conversation id and a primary folder; `None` for anything else.
+#[must_use]
+pub fn uncaptured(rec: &SessionRecord) -> Option<Uncaptured> {
+    if rec.agent != Agent::Codex
+        || rec.mode != SessionMode::Interactive
+        || rec.agent_conversation_id.is_some()
+    {
+        return None;
+    }
+    Some(Uncaptured {
+        cwd: history::primary_cwd(rec)?,
+        since: rec.started_at,
+        extra_env: rec
+            .spawn_config
+            .as_ref()
+            .map(|cfg| cfg.extra_env.clone())
+            .unwrap_or_default(),
+    })
+}
+
+/// Start [`watch`] for `session_id` when it is an interactive Codex session
+/// without a conversation id (see [`uncaptured`]): from its `started_at`, in
+/// its primary folder, under the Codex home its spawn settings name. Starts
+/// nothing for any other session.
+pub fn watch_session(registry: &Arc<SessionRegistry>, dirs: &Dirs, session_id: &str) {
+    let Some(look) = registry
+        .get(session_id)
+        .and_then(|arc| uncaptured(&lock(&arc)))
+    else {
+        return;
+    };
+    let Some(home) = codex_home(&look.extra_env) else {
+        warn!(%session_id, "no codex home found; the session's rollout is not watched");
+        return;
+    };
+    debug!(%session_id, cwd = %look.cwd, home = %home.display(), "watching for the codex rollout");
+    watch(
+        Arc::clone(registry),
+        dirs.clone(),
+        session_id.to_owned(),
+        look.cwd,
+        look.since,
+        home,
+    );
+}
+
+/// How long [`watch`] waits before its next look, `elapsed` after it
+/// started: [`FAST_POLL`] for the first [`FAST_PHASE`], [`SLOW_POLL`] until
+/// [`SLOW_PHASE`], then [`IDLE_POLL`].
+fn poll_pause(elapsed: Duration) -> Duration {
+    if elapsed < FAST_PHASE {
+        FAST_POLL
+    } else if elapsed < SLOW_PHASE {
+        SLOW_POLL
+    } else {
+        IDLE_POLL
+    }
+}
+
 /// Poll for `session_id`'s rollout with [`capture_once`], each poll on the
-/// blocking pool: every
-/// [`FAST_POLL`] for the first [`FAST_PHASE`], then every [`SLOW_POLL`].
-/// Stops once the id is claimed, or the session leaves the registry, stops
-/// running or gets an id another way.
-#[cfg_attr(not(test), expect(dead_code, reason = "only the tests start it"))]
+/// blocking pool, pausing [`poll_pause`] between looks. Stops once the id is
+/// claimed, or the session leaves the registry, stops running or gets an id
+/// another way.
 pub fn watch(
     registry: Arc<SessionRegistry>,
     dirs: Dirs,
@@ -510,12 +585,7 @@ pub fn watch(
                     return;
                 }
             }
-            let pause = if started.elapsed() < FAST_PHASE {
-                FAST_POLL
-            } else {
-                SLOW_POLL
-            };
-            tokio::time::sleep(pause).await;
+            tokio::time::sleep(poll_pause(started.elapsed())).await;
         }
         debug!(session_id = %job.session_id, "codex rollout watch ended without an id");
     })
@@ -782,6 +852,41 @@ mod tests {
         let meta = crate::orphan::load_meta(&dirs, "w1").expect("load meta");
         assert_eq!(meta.agent_conversation_id.as_deref(), Some("id-watched"));
         let _ = std::fs::remove_dir_all(&dirs.config);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn watch_backs_off_after_an_hour() {
+        assert_eq!(poll_pause(Duration::ZERO), FAST_POLL);
+        assert_eq!(poll_pause(Duration::from_secs(299)), FAST_POLL);
+        assert_eq!(poll_pause(Duration::from_mins(5)), SLOW_POLL);
+        assert_eq!(poll_pause(Duration::from_secs(3599)), SLOW_POLL);
+        assert_eq!(poll_pause(Duration::from_hours(1)), Duration::from_mins(1));
+        assert_eq!(poll_pause(Duration::from_hours(30)), Duration::from_mins(1));
+    }
+
+    /// Slash direction and case count only on Windows, as in
+    /// [`normalize_path_key`].
+    #[cfg(windows)]
+    #[test]
+    fn codex_find_matches_the_cwd_under_path_normalization() {
+        let now = Utc::now();
+        let since = now - TimeDelta::minutes(1);
+        for (tag, written) in [
+            ("slashes", "X:/dev/proj"),
+            ("trailing", r"X:\dev\proj\"),
+            ("drive-case", r"x:\dev\proj"),
+        ] {
+            let home = scratch_home(&format!("find-normalized-{tag}"));
+            write_rollout(&home, local(now), "id-normalized", written);
+            let found = find_rollout(&home, CWD, since, &HashSet::new(), &mut HashSet::new());
+            assert_eq!(found.as_deref(), Some("id-normalized"), "cwd {written}");
+            let _ = std::fs::remove_dir_all(&home);
+        }
+        let home = scratch_home("find-normalized-other");
+        write_rollout(&home, local(now), "id-sibling", r"X:\dev\proj2");
+        let found = find_rollout(&home, CWD, since, &HashSet::new(), &mut HashSet::new());
+        assert_eq!(found, None, "another folder is not matched");
         let _ = std::fs::remove_dir_all(&home);
     }
 
