@@ -11,9 +11,13 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
+use std::path::PathBuf;
+
 use gpui::{Modifiers, TestAppContext, px};
-use protocol::{CleanupAction, ClientMessage, DaemonMessage, SessionSnapshot};
-use support::{Fixture, Harness, TestDir, pane, session, tab};
+use protocol::{
+    CleanupAction, ClientMessage, DaemonMessage, PaneDropEdge, SessionSnapshot, SplitDirection,
+};
+use support::{Fixture, Harness, Opened, TestDir, pane, session, split, tab};
 
 /// Whether the element tagged `selector` has been painted on screen. gpui
 /// keeps the bounds of an element that left the tree, so a `false` only
@@ -879,7 +883,7 @@ fn duplicate_back_returns_to_actions(cx: &mut TestAppContext) {
         groups(&mut h),
         [
             vec!["menu-rename", "menu-stop"],
-            vec!["session-menu-duplicate"],
+            vec!["session-menu-duplicate", "session-menu-move"],
             APPEARANCE_GROUP.to_vec(),
         ]
     );
@@ -920,7 +924,9 @@ fn duplicate_of_headless_session_is_disabled(cx: &mut TestAppContext) {
 
     h.right_click_on("leaf-s1");
     assert!(
-        groups(&mut h).contains(&vec!["session-menu-duplicate".to_owned()]),
+        groups(&mut h)
+            .concat()
+            .contains(&"session-menu-duplicate".to_owned()),
         "offered, dimmed: {:?}",
         groups(&mut h)
     );
@@ -948,7 +954,7 @@ fn new_rows_sit_between_state_actions_and_appearance(cx: &mut TestAppContext) {
         groups(&mut h),
         [
             vec!["menu-rename", "menu-stop"],
-            vec!["session-menu-duplicate"],
+            ADD_GROUP.to_vec(),
             APPEARANCE_GROUP.to_vec(),
         ]
     );
@@ -973,9 +979,394 @@ fn new_rows_sit_between_state_actions_and_appearance(cx: &mut TestAppContext) {
         groups(&mut h),
         [
             vec!["menu-restart", "menu-remove-pane"],
-            vec!["session-menu-duplicate"],
+            ADD_GROUP.to_vec(),
             APPEARANCE_GROUP.to_vec(),
         ],
         "a stopped session offers Duplicate too"
+    );
+}
+
+const ADD_GROUP: [&str; 3] = [
+    "session-menu-duplicate",
+    "session-menu-add-current",
+    "session-menu-add-new",
+];
+
+fn active_tab(h: &mut Harness<'_>) -> Option<String> {
+    h.root(|root, _| root.active_tab_id().map(str::to_owned))
+}
+
+fn row_label(h: &mut Harness<'_>, selector: &str) -> Option<&'static str> {
+    let selector = selector.to_owned();
+    h.root(move |root, _| root.menu_row_label(&selector))
+}
+
+/// The daemon's answer to a new tab: tab `t9` showing `session_id`.
+fn new_tab_arrives(h: &mut Harness<'_>, session_id: &str) {
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab("t9", &pane("p9", Some(session_id))),
+    });
+}
+
+fn undo_messages(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| {
+        root.undo_entries()
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn move_to_new_tab_sends_extract_and_activates_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").build());
+
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-move");
+    assert_eq!(
+        groups(&mut h),
+        [vec!["move-back", "move-new-tab"]],
+        "no other tab to list"
+    );
+    assert!(h.sent().is_empty(), "opening the submenu sends nothing");
+    h.click_on("move-new-tab");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, name: None, layout: None }]
+            if source_tab_id == "t1" && pane_ids == &["p1"]),
+        "sent {sent:?}"
+    );
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+    assert!(undo_messages(&mut h).is_empty(), "a new tab has no undo");
+    new_tab_arrives(&mut h, "s1");
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t9"),
+        "the new tab shows"
+    );
+}
+
+#[gpui::test]
+fn move_to_tab_sends_move_pane_to_drop_target_with_undo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s2").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+            diff_tab("d1"),
+            tab(
+                "t3",
+                &split(
+                    SplitDirection::Vertical,
+                    pane("p3", Some("s2")),
+                    pane("p4", None),
+                ),
+            ),
+            tab("t4", &pane("p5", Some("s1"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-move");
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["move-back", "move-new-tab"],
+            vec!["move-tab-t2", "move-tab-t3"],
+        ],
+        "grid tabs not showing s1; no diff tab"
+    );
+    h.click_on("move-tab-t3");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, dst_pane_id, edge: PaneDropEdge::Replace }]
+            if src_tab_id == "t1" && src_pane_id == "p1" && dst_tab_id == "t3" && dst_pane_id == "p4"),
+        "the first binding goes to t3's empty pane: sent {sent:?}"
+    );
+    assert_eq!(undo_messages(&mut h), ["Moved pane"]);
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+}
+
+#[gpui::test]
+fn move_from_a_pane_header_moves_that_pane(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s1"))),
+            tab("t3", &pane("p3", None)),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-t2");
+    h.sent();
+
+    h.right_click_on("pane-header-p2");
+    h.click_on("session-menu-move");
+    assert_eq!(
+        groups(&mut h),
+        [vec!["move-back", "move-new-tab"], vec!["move-tab-t3"]]
+    );
+    h.click_on("move-tab-t3");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::MovePane { src_tab_id, src_pane_id, dst_tab_id, .. }]
+            if src_tab_id == "t2" && src_pane_id == "p2" && dst_tab_id == "t3"),
+        "the right-clicked pane moves, not the first binding: sent {sent:?}"
+    );
+
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-move");
+    h.click_on("move-new-tab");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ExtractToNewTab { source_tab_id, pane_ids, .. }]
+            if source_tab_id == "t1" && pane_ids == &["p1"]),
+        "from the sidebar the first binding moves: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn unbound_session_add_to_current_places_it_in_the_active_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = unplaced(cx, &dir, vec![session("s1").build()]);
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        row_label(&mut h, "session-menu-add-current"),
+        Some("Add to current tab")
+    );
+    h.click_on("session-menu-add-current");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) }]
+            if tab_id == "t1" && pane_id == "p1" && id == "s1"),
+        "the active tab's empty pane takes it: sent {sent:?}"
+    );
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p1".to_owned()));
+}
+
+#[gpui::test]
+fn add_to_current_with_diff_tab_active_reads_add_to_new_tab_and_opens_one(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![tab("t1", &pane("p1", None)), diff_tab("d1")],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.click_on("tab-d1");
+    h.sent();
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        row_label(&mut h, "session-menu-add-current"),
+        Some("Add to new tab")
+    );
+    assert!(
+        !h.in_model("session-menu-add-new"),
+        "one Add to new tab row, not two: {:?}",
+        groups(&mut h)
+    );
+    h.click_on("session-menu-add-current");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id) }]
+            if id == "s1"),
+        "sent {sent:?}"
+    );
+    new_tab_arrives(&mut h, "s1");
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t9"));
+}
+
+#[gpui::test]
+fn add_to_new_tab_sends_create_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = unplaced(cx, &dir, vec![session("s1").build()]);
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        row_label(&mut h, "session-menu-add-new"),
+        Some("Add to new tab")
+    );
+    h.click_on("session-menu-add-new");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::CreateTab { name: None, initial_session_id: Some(id) }]
+            if id == "s1"),
+        "the empty pane is left alone: sent {sent:?}"
+    );
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+    new_tab_arrives(&mut h, "s1");
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t9"));
+}
+
+#[gpui::test]
+fn reveal_worktree_opens_the_worktree_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").worktree("r1").build());
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        row_label(&mut h, "session-menu-reveal"),
+        Some("Reveal worktree")
+    );
+    h.click_on("session-menu-reveal");
+    assert_eq!(h.opened(), [Opened::DefaultApp(PathBuf::from("C:/wt/x"))]);
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+    assert!(h.sent().is_empty(), "the daemon is not asked");
+}
+
+#[gpui::test]
+fn reveal_hidden_without_own_worktree(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").build(),
+            session("s2")
+                .members(&[("r1", "main", "C:/src/r1")])
+                .build(),
+        ],
+        tabs: vec![tab(
+            "t1",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p1", Some("s1")),
+                pane("p2", Some("s2")),
+            ),
+        )],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    for leaf in ["leaf-s1", "leaf-s2"] {
+        h.right_click_on(leaf);
+        let shown = groups(&mut h).concat();
+        assert!(
+            shown.contains(&"session-menu-move".to_owned())
+                && !shown.contains(&"session-menu-reveal".to_owned()),
+            "{leaf}: {shown:?}"
+        );
+        h.keys("escape");
+    }
+}
+
+#[gpui::test]
+fn menu_groups_order_is_state_then_location_then_appearance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").worktree("r1").build(),
+            session("s2").worktree("r1").build(),
+        ],
+        tabs: vec![tab("t1", &pane("p1", Some("s1")))],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    h.right_click_on("leaf-s1");
+    let located = [
+        "session-menu-duplicate",
+        "session-menu-move",
+        "session-menu-reveal",
+    ];
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["menu-rename", "menu-stop"],
+            located.to_vec(),
+            APPEARANCE_GROUP.to_vec(),
+        ]
+    );
+    let order = [
+        "menu-stop",
+        "session-menu-duplicate",
+        "session-menu-move",
+        "session-menu-reveal",
+        "session-menu-appearance",
+    ];
+    let tops: Vec<_> = order
+        .iter()
+        .map(|selector| h.bounds(selector).origin.y)
+        .collect();
+    assert!(
+        tops.windows(2).all(|pair| pair[0] < pair[1]),
+        "drawn in {order:?} order: {tops:?}"
+    );
+
+    h.keys("escape");
+    h.right_click_on("leaf-s2");
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["menu-rename", "menu-stop"],
+            vec![
+                "session-menu-duplicate",
+                "session-menu-add-current",
+                "session-menu-add-new",
+                "session-menu-reveal",
+            ],
+            APPEARANCE_GROUP.to_vec(),
+        ],
+        "an unbound session offers the add rows in Move to's place"
+    );
+}
+
+#[gpui::test]
+fn duplicate_into_tab_split_brings_the_tab_forward_and_focuses_the_copy(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build(), session("s9").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s9"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t1"));
+
+    open_duplicate(&mut h, "leaf-s1");
+    h.click_on("duplicate-tab-t2");
+    let id = duplicate_request(&h.sent(), "s1");
+    h.send(updated(session("s2").build(), Some(&id)));
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|m| matches!(m,
+            ClientMessage::SplitPane { tab_id, pane_id, new_session_id: Some(new), .. }
+                if tab_id == "t2" && pane_id == "p2" && new == "s2")),
+        "the copy splits t2's pane: sent {sent:?}"
+    );
+    assert_eq!(
+        active_tab(&mut h).as_deref(),
+        Some("t2"),
+        "its tab comes to the front"
+    );
+    h.send(DaemonMessage::TabUpdated {
+        tab: tab(
+            "t2",
+            &split(
+                SplitDirection::Horizontal,
+                pane("p2", Some("s9")),
+                pane("p6", Some("s2")),
+            ),
+        ),
+    });
+    assert_eq!(active_tab(&mut h).as_deref(), Some("t2"));
+    assert_eq!(
+        h.root(|root, _| root.focused_pane()),
+        Some("p6".to_owned()),
+        "the copy's new pane takes the focus"
     );
 }

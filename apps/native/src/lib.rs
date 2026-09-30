@@ -1189,7 +1189,7 @@ impl RootView {
     /// Sends the session to where smart placement puts it. A filled empty
     /// pane is focused now; a new pane or tab takes focus when the daemon's
     /// update arrives.
-    fn place_session(
+    pub(crate) fn place_session(
         &mut self,
         session: &SessionSnapshot,
         window: &mut Window,

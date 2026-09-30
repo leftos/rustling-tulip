@@ -83,6 +83,28 @@ fn sc_picker_shown(root: &RootView) -> bool {
 /// dialog while it is open, a control while the open dialog has it, and the
 /// header's move button on a shown pane with a session. `None` for any
 /// other selector.
+/// Whether the session menu shows its part `selector` tags: the menu, its
+/// state actions, the rows under them, its appearance rows or an open
+/// submenu's rows; `None` for a selector of no session menu part.
+fn session_menu_part_shown(root: &RootView, selector: &str) -> Option<bool> {
+    let selector = selector.to_owned();
+    let shown = if selector == "session-menu-accent" || selector.starts_with("accent-") {
+        root.accent_menu_rows().contains(&selector)
+    } else if selector == "session-menu" {
+        root.session_menu().is_some()
+    } else if selector.starts_with("menu-") {
+        root.menu_rows().contains(&selector)
+    } else if selector.starts_with("session-menu-")
+        || selector.starts_with("duplicate-")
+        || selector.starts_with("move-")
+    {
+        root.menu_groups().concat().contains(&selector)
+    } else {
+        return None;
+    };
+    Some(shown)
+}
+
 fn modal_part_shown(root: &RootView, selector: &str) -> Option<bool> {
     let has = |controls: Vec<(String, String)>| controls.iter().any(|(c, _)| c == selector);
     let shown = if selector == "layout-chooser" {
@@ -1171,12 +1193,8 @@ impl<'a> Harness<'a> {
                 sessions_shown && shown
             } else if let Some(id) = selector.strip_prefix("pane-grid-") {
                 pane(id)
-            } else if selector == "session-menu-accent" || selector.starts_with("accent-") {
-                root.accent_menu_rows().contains(&selector)
-            } else if selector == "session-menu" {
-                root.session_menu().is_some()
-            } else if selector.starts_with("menu-") {
-                root.menu_rows().contains(&selector)
+            } else if let Some(shown) = session_menu_part_shown(root, &selector) {
+                shown
             } else if let Some(id) = selector
                 .strip_prefix("pane-stop-confirm-")
                 .or_else(|| selector.strip_prefix("pane-stop-cancel-"))

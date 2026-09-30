@@ -1014,7 +1014,7 @@ impl RootView {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     if let Some(id) = &menu_session {
-                        this.open_session_menu(id, event.position, window, cx);
+                        this.open_session_menu(id, Some(&menu_ids), event.position, window, cx);
                     } else {
                         let (tab, pane) = &menu_ids;
                         this.open_empty_pane_menu(tab, pane, event.position, window, cx);

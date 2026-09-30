@@ -301,7 +301,7 @@ fn needs_you_row(
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                this.open_session_menu(&menu_id, event.position, window, cx);
+                this.open_session_menu(&menu_id, None, event.position, window, cx);
                 cx.stop_propagation();
             }),
         )

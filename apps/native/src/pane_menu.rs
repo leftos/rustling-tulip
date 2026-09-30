@@ -192,6 +192,39 @@ impl RootView {
         });
     }
 
+    /// Moves `pane_id` of `tab_id` into grid tab `dst_tab_id` at its
+    /// balanced drop target, recording both tabs for the undo.
+    pub(crate) fn move_pane_to_tab(
+        &mut self,
+        tab_id: &str,
+        pane_id: &str,
+        dst_tab_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self
+            .tabs
+            .tab(dst_tab_id)
+            .and_then(|tab| tab.grid())
+            .and_then(pick_balanced_drop_target);
+        let Some((dst_pane_id, edge)) = target else {
+            tracing::warn!(tab = %dst_tab_id, "move pane: the tab has no pane to drop on");
+            return;
+        };
+        let snapshots = [tab_id, dst_tab_id]
+            .into_iter()
+            .filter_map(|id| self.tab_snapshot(id, Some(pane_id)))
+            .collect();
+        self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
+        self.tabs.mark_closing_if_last_pane(tab_id);
+        self.send(ClientMessage::MovePane {
+            src_tab_id: tab_id.to_owned(),
+            src_pane_id: pane_id.to_owned(),
+            dst_tab_id: dst_tab_id.to_owned(),
+            dst_pane_id,
+            edge,
+        });
+    }
+
     /// Runs a press on a row of the open empty-pane menu.
     fn run_empty_pane_action(
         &mut self,
@@ -212,31 +245,7 @@ impl RootView {
             }
             MenuAction::NewTab => self.move_pane_to_new_tab(&tab_id, &pane_id),
             MenuAction::MoveTo(dst_tab_id) => {
-                let target = self
-                    .tabs
-                    .tab(dst_tab_id)
-                    .and_then(|tab| tab.grid())
-                    .and_then(pick_balanced_drop_target);
-                match target {
-                    Some((dst_pane_id, edge)) => {
-                        let snapshots = [&tab_id, dst_tab_id]
-                            .into_iter()
-                            .filter_map(|id| self.tab_snapshot(id, Some(&pane_id)))
-                            .collect();
-                        self.record_undo(undo::MOVED_PANE.to_owned(), snapshots, cx);
-                        self.tabs.mark_closing_if_last_pane(&tab_id);
-                        self.send(ClientMessage::MovePane {
-                            src_tab_id: tab_id,
-                            src_pane_id: pane_id,
-                            dst_tab_id: dst_tab_id.clone(),
-                            dst_pane_id,
-                            edge,
-                        });
-                    }
-                    None => {
-                        tracing::warn!(tab = %dst_tab_id, "move pane: the tab has no pane to drop on");
-                    }
-                }
+                self.move_pane_to_tab(&tab_id, &pane_id, dst_tab_id, cx);
             }
             MenuAction::Close => {
                 self.record_pane_close(&tab_id, &pane_id, None, cx);

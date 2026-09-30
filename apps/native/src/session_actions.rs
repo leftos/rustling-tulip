@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use protocol::{ClientMessage, SessionSnapshot, SessionStatus, TabEntry};
 
 use crate::headless;
-use crate::sidebar::{LeafState, runtime_label};
-use crate::tabs::{PaneBinding, PaneTarget, Placement, TabsModel};
+use crate::sidebar::{LeafState, can_attach, runtime_label};
+use crate::tabs::{
+    PaneBinding, PaneTarget, Placement, TabsModel, collect_panes, find_tab_containing_session,
+};
 
 /// Which set of actions a session offers. Parked, stopped and running
 /// follow `SessionContextMenu.tsx`'s state buckets. An abandoned session
@@ -89,6 +91,7 @@ pub(crate) enum Submenu {
     None,
     Accent,
     Duplicate,
+    MoveTo,
 }
 
 /// A row of the menu's group between the state actions and the appearance
@@ -97,6 +100,26 @@ pub(crate) enum Submenu {
 pub(crate) enum SessionRow {
     /// "Duplicate ▸", which opens the Duplicate submenu.
     Duplicate,
+    /// "Move to ▸", which opens the Move to submenu; offered while a pane
+    /// shows the session.
+    MoveTo,
+    /// Places the session where a leaf click would; offered while no pane
+    /// shows it. `new_tab` when that placement opens a new tab (no grid tab
+    /// is active), which the label then says.
+    AddToCurrentTab { new_tab: bool },
+    /// Opens the session in a new tab; offered while no pane shows it.
+    AddToNewTab,
+    /// Opens the folder of the session's own worktree.
+    RevealWorktree,
+}
+
+/// Where Move to ▸ moves a pane showing the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MoveTarget {
+    /// A new tab of its own.
+    NewTab,
+    /// Grid tab `id`, at its balanced drop target.
+    Tab(String),
 }
 
 /// A [`SessionRow`] as one session offers it.
@@ -366,42 +389,139 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
 }
 
 /// The rows of the group between the state actions and the appearance
-/// rows. Duplicate ▸ is offered in every state; a headless session's is
-/// dimmed.
-pub(crate) fn session_rows(session: &SessionSnapshot) -> Vec<OfferedRow> {
-    vec![OfferedRow {
+/// rows: Duplicate ▸ in every state (dimmed for a headless session); Move
+/// to ▸ while a pane shows the session, else Add to current tab and Add to
+/// new tab when it can be shown in a pane (only the first, reading Add to
+/// new tab, when placing it would open a tab anyway); Reveal worktree when
+/// it has a worktree of its own.
+pub(crate) fn session_rows(
+    session: &SessionSnapshot,
+    tabs: &TabsModel,
+    sessions: &[SessionSnapshot],
+) -> Vec<OfferedRow> {
+    let offered = |row| OfferedRow {
+        row,
+        disabled: None,
+    };
+    let mut rows = vec![OfferedRow {
         row: SessionRow::Duplicate,
         disabled: headless::is_headless(session).then_some(HEADLESS_DUPLICATE_TIP),
-    }]
+    }];
+    if find_tab_containing_session(tabs.tabs(), &session.id).is_some() {
+        rows.push(offered(SessionRow::MoveTo));
+    } else if can_attach(session) {
+        let new_tab = matches!(tabs.place(session, sessions), Placement::NewTab);
+        rows.push(offered(SessionRow::AddToCurrentTab { new_tab }));
+        if !new_tab {
+            rows.push(offered(SessionRow::AddToNewTab));
+        }
+    }
+    if worktree_to_reveal(session).is_some() {
+        rows.push(offered(SessionRow::RevealWorktree));
+    }
+    rows
+}
+
+/// The folder Reveal worktree opens: the first member's worktree, for a
+/// session with a worktree of its own.
+pub(crate) fn worktree_to_reveal(session: &SessionSnapshot) -> Option<&str> {
+    if !session.has_per_session_worktree {
+        return None;
+    }
+    session
+        .members
+        .first()
+        .map(|member| member.worktree_path.as_str())
+        .filter(|path| !path.is_empty())
+}
+
+/// Whether pane `pane_id` of tab `tab_id` shows `session_id`.
+fn pane_shows(tabs: &[TabEntry], (tab_id, pane_id): &(String, String), session_id: &str) -> bool {
+    tabs.iter()
+        .find(|tab| tab.id == *tab_id)
+        .and_then(TabEntry::grid)
+        .is_some_and(|grid| {
+            collect_panes(grid)
+                .iter()
+                .any(|pane| pane.id == pane_id.as_str() && pane.session == Some(session_id))
+        })
+}
+
+/// A submenu of tabs: Back (tagged `back`), New tab, then `tabs` by name
+/// behind a separator when there are any, tagged `<prefix>-new-tab` and
+/// `<prefix>-tab-<id>`.
+fn tab_lines<'a, T>(
+    back: &'static str,
+    prefix: &str,
+    new_tab: T,
+    tabs: impl Iterator<Item = &'a TabEntry>,
+    to_tab: impl Fn(String) -> T,
+) -> Vec<SubmenuLine<T>> {
+    let mut lines = vec![
+        SubmenuLine::Back { selector: back },
+        SubmenuLine::Choice {
+            selector: format!("{prefix}-new-tab"),
+            label: "New tab".to_owned(),
+            choice: new_tab,
+        },
+    ];
+    let targets: Vec<SubmenuLine<T>> = tabs
+        .map(|tab| SubmenuLine::Choice {
+            selector: format!("{prefix}-tab-{}", tab.id),
+            label: tab.name.clone(),
+            choice: to_tab(tab.id.clone()),
+        })
+        .collect();
+    if !targets.is_empty() {
+        lines.push(SubmenuLine::Separator);
+        lines.extend(targets);
+    }
+    lines
 }
 
 /// The Duplicate submenu: Back, New tab, then every grid tab by name
 /// behind a separator.
 pub(crate) fn duplicate_lines(tabs: &[TabEntry]) -> Vec<SubmenuLine<DuplicateTarget>> {
-    let mut lines = vec![
-        SubmenuLine::Back {
-            selector: "duplicate-back",
-        },
-        SubmenuLine::Choice {
-            selector: "duplicate-new-tab".to_owned(),
-            label: "New tab".to_owned(),
-            choice: DuplicateTarget::NewTab,
-        },
-    ];
-    let grid_tabs: Vec<SubmenuLine<DuplicateTarget>> = tabs
-        .iter()
-        .filter(|tab| tab.grid().is_some())
-        .map(|tab| SubmenuLine::Choice {
-            selector: format!("duplicate-tab-{}", tab.id),
-            label: tab.name.clone(),
-            choice: DuplicateTarget::Tab(tab.id.clone()),
+    tab_lines(
+        "duplicate-back",
+        "duplicate",
+        DuplicateTarget::NewTab,
+        tabs.iter().filter(|tab| tab.grid().is_some()),
+        DuplicateTarget::Tab,
+    )
+}
+
+/// The Move to submenu: Back, New tab, then every grid tab no pane of
+/// which shows `session_id`, behind a separator.
+pub(crate) fn move_lines(tabs: &[TabEntry], session_id: &str) -> Vec<SubmenuLine<MoveTarget>> {
+    let targets = tabs.iter().filter(|tab| {
+        tab.grid().is_some_and(|grid| {
+            !collect_panes(grid)
+                .iter()
+                .any(|pane| pane.session == Some(session_id))
         })
-        .collect();
-    if !grid_tabs.is_empty() {
-        lines.push(SubmenuLine::Separator);
-        lines.extend(grid_tabs);
-    }
-    lines
+    });
+    tab_lines(
+        "move-back",
+        "move",
+        MoveTarget::NewTab,
+        targets,
+        MoveTarget::Tab,
+    )
+}
+
+/// The pane Move to ▸ moves: `clicked`, the `(tab, pane)` whose header
+/// opened the menu, while it still shows `session_id`; else the first pane
+/// that does.
+pub(crate) fn move_source(
+    tabs: &[TabEntry],
+    session_id: &str,
+    clicked: Option<&(String, String)>,
+) -> Option<(String, String)> {
+    clicked
+        .filter(|clicked| pane_shows(tabs, clicked, session_id))
+        .cloned()
+        .or_else(|| find_tab_containing_session(tabs, session_id))
 }
 
 impl SessionRow {
@@ -409,12 +529,20 @@ impl SessionRow {
     pub(crate) fn selector(self) -> &'static str {
         match self {
             Self::Duplicate => "session-menu-duplicate",
+            Self::MoveTo => "session-menu-move",
+            Self::AddToCurrentTab { .. } => "session-menu-add-current",
+            Self::AddToNewTab => "session-menu-add-new",
+            Self::RevealWorktree => "session-menu-reveal",
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Duplicate => "Duplicate ▸",
+            Self::MoveTo => "Move to ▸",
+            Self::AddToCurrentTab { new_tab: false } => "Add to current tab",
+            Self::AddToCurrentTab { new_tab: true } | Self::AddToNewTab => "Add to new tab",
+            Self::RevealWorktree => "Reveal worktree",
         }
     }
 }
@@ -694,11 +822,12 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
 mod tests {
     use super::{
         ActionState, DuplicateTarget, Duplicates, HEADLESS_DUPLICATE_TIP, HeaderStopConfirm,
-        MenuEntry, MenuMode, OfferedRow, PlacedFocus, SessionAction, SessionRow, Step,
-        action_state, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
-        menu_entries, overlay_actions, pane_shows_exit, plan, rename_message, self_exited,
-        session_rows,
+        MenuEntry, MenuMode, MoveTarget, OfferedRow, PlacedFocus, SessionAction, SessionRow, Step,
+        SubmenuLine, action_state, exit_code_label, exited_message, header_shows_exit_code,
+        menu_actions, menu_entries, move_lines, move_source, overlay_actions, pane_shows_exit,
+        plan, rename_message, self_exited, session_rows, worktree_to_reveal,
     };
+    use crate::tabs::TabsModel;
     use crate::tabs::tests::{model_with, pane, tab};
     use protocol::{
         CleanupAction, ClientMessage, GridNode, SessionMode, SessionSnapshot, SessionStatus,
@@ -1128,34 +1257,48 @@ mod tests {
             .any(|m| matches!(m, ClientMessage::DiscardSession { .. }))
     }
 
+    fn rows_of(s: &SessionSnapshot, tabs: &TabsModel) -> Vec<SessionRow> {
+        session_rows(s, tabs, &[])
+            .into_iter()
+            .map(|offered| offered.row)
+            .collect()
+    }
+
     #[test]
     fn actions_duplicate_row_is_offered_for_non_headless_sessions() {
-        let offered = [OfferedRow {
+        let offered = OfferedRow {
             row: SessionRow::Duplicate,
             disabled: None,
-        }];
+        };
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
         for s in [
             session("idle"),
             session("stopped"),
             inactive(with_worktree(session("stopped"))),
             abandoned(),
         ] {
-            assert_eq!(session_rows(&s), offered, "{:?}", action_state(&s));
+            assert_eq!(
+                session_rows(&s, &tabs, &[]).first(),
+                Some(&offered),
+                "{:?}",
+                action_state(&s)
+            );
         }
         assert_eq!(SessionRow::Duplicate.label(), "Duplicate ▸");
     }
 
     #[test]
     fn actions_headless_session_duplicate_row_is_disabled_with_tooltip() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
         for status in ["working", "stopped"] {
             let mut s = session(status);
             s.mode = SessionMode::Headless;
             assert_eq!(
-                session_rows(&s),
-                [OfferedRow {
+                session_rows(&s, &tabs, &[]).first(),
+                Some(&OfferedRow {
                     row: SessionRow::Duplicate,
                     disabled: Some(HEADLESS_DUPLICATE_TIP),
-                }],
+                }),
                 "{status}"
             );
         }
@@ -1163,6 +1306,177 @@ mod tests {
             HEADLESS_DUPLICATE_TIP,
             "Headless sessions are one-shot kickoffs; spawn a new one instead"
         );
+    }
+
+    #[test]
+    fn actions_bound_session_offers_move_to_not_add() {
+        let tabs = model_with(&[
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", None)),
+        ]);
+        for s in [session("idle"), session("stopped")] {
+            assert_eq!(
+                rows_of(&s, &tabs),
+                [SessionRow::Duplicate, SessionRow::MoveTo],
+                "{:?}",
+                s.status
+            );
+        }
+        assert_eq!(SessionRow::MoveTo.label(), "Move to ▸");
+        assert_eq!(SessionRow::MoveTo.selector(), "session-menu-move");
+    }
+
+    #[test]
+    fn actions_unbound_session_offers_add_to_current_and_new_tab() {
+        let mut tabs = model_with(&[tab("t1", &pane("p1", None)), diff_tab("d1")]);
+        tabs.activate("t1");
+        let current = SessionRow::AddToCurrentTab { new_tab: false };
+        for s in [session("idle"), inactive(session("stopped"))] {
+            assert_eq!(
+                rows_of(&s, &tabs),
+                [SessionRow::Duplicate, current, SessionRow::AddToNewTab],
+                "{:?}",
+                action_state(&s)
+            );
+        }
+        assert_eq!(current.label(), "Add to current tab");
+        assert_eq!(current.selector(), "session-menu-add-current");
+        assert_eq!(SessionRow::AddToNewTab.label(), "Add to new tab");
+        assert_eq!(SessionRow::AddToNewTab.selector(), "session-menu-add-new");
+    }
+
+    #[test]
+    fn actions_one_add_to_new_tab_row_when_current_would_open_one() {
+        let mut tabs = model_with(&[tab("t1", &pane("p1", None)), diff_tab("d1")]);
+        tabs.activate("d1");
+        let into_new = SessionRow::AddToCurrentTab { new_tab: true };
+        assert_eq!(
+            rows_of(&session("idle"), &tabs),
+            [SessionRow::Duplicate, into_new],
+            "with a diff tab active the current-tab row opens a tab, so it is the only one"
+        );
+        assert_eq!(into_new.label(), "Add to new tab");
+        assert_eq!(into_new.selector(), "session-menu-add-current");
+        let no_tabs = model_with(&[]);
+        assert_eq!(
+            rows_of(&session("idle"), &no_tabs),
+            [SessionRow::Duplicate, into_new],
+            "no tab at all"
+        );
+    }
+
+    #[test]
+    fn actions_add_rows_hidden_when_attach_is_refused() {
+        let tabs = model_with(&[tab("t1", &pane("p1", None))]);
+        let mut s = session("working");
+        s.mode = SessionMode::Headless;
+        assert_eq!(rows_of(&s, &tabs), [SessionRow::Duplicate]);
+        let shown = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        assert_eq!(
+            rows_of(&s, &shown),
+            [SessionRow::Duplicate, SessionRow::MoveTo],
+            "a headless pane still moves"
+        );
+    }
+
+    #[test]
+    fn actions_reveal_only_for_own_worktree() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        let mut own = with_worktree(session("idle"));
+        own.members[0].worktree_path = "C:/wt/a".to_owned();
+        assert_eq!(worktree_to_reveal(&own), Some("C:/wt/a"));
+        assert_eq!(
+            rows_of(&own, &tabs),
+            [
+                SessionRow::Duplicate,
+                SessionRow::MoveTo,
+                SessionRow::RevealWorktree
+            ]
+        );
+        assert_eq!(SessionRow::RevealWorktree.label(), "Reveal worktree");
+        assert_eq!(SessionRow::RevealWorktree.selector(), "session-menu-reveal");
+
+        let blank = with_worktree(session("idle"));
+        assert_eq!(worktree_to_reveal(&blank), None, "no path to open");
+        let mut shared = session("idle");
+        shared.members[0].worktree_path = "C:/repo".to_owned();
+        assert_eq!(worktree_to_reveal(&shared), None, "not its own worktree");
+        let mut second = with_worktree(session("idle"));
+        second.members[1].worktree_path = "C:/wt/b".to_owned();
+        assert_eq!(worktree_to_reveal(&second), None, "only the first member");
+        for s in [blank, shared, second] {
+            assert_eq!(
+                rows_of(&s, &tabs),
+                [SessionRow::Duplicate, SessionRow::MoveTo]
+            );
+        }
+    }
+
+    #[test]
+    fn actions_move_to_lists_grid_tabs_not_showing_the_session() {
+        let tabs = [
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s9"))),
+            tab("t3", &hsplit(pane("a", Some("s9")), pane("b", Some("s1")))),
+            diff_tab("d1"),
+            tab("t4", &pane("p4", None)),
+        ];
+        let choice = |selector: &str, label: &str, choice: MoveTarget| SubmenuLine::Choice {
+            selector: selector.to_owned(),
+            label: label.to_owned(),
+            choice,
+        };
+        let head = [
+            SubmenuLine::Back {
+                selector: "move-back",
+            },
+            choice("move-new-tab", "New tab", MoveTarget::NewTab),
+        ];
+        let mut expected = head.to_vec();
+        expected.extend([
+            SubmenuLine::Separator,
+            choice("move-tab-t2", "t2", MoveTarget::Tab("t2".to_owned())),
+            choice("move-tab-t4", "t4", MoveTarget::Tab("t4".to_owned())),
+        ]);
+        assert_eq!(move_lines(&tabs, "s1"), expected);
+        let alone = [tab("t1", &pane("p1", Some("s1"))), diff_tab("d1")];
+        assert_eq!(
+            move_lines(&alone, "s1"),
+            head,
+            "no separator when no tab follows"
+        );
+    }
+
+    #[test]
+    fn actions_move_source_is_the_right_clicked_pane_else_first_binding() {
+        let tabs = [
+            tab("t1", &pane("p1", Some("s9"))),
+            tab("t2", &hsplit(pane("a", Some("s1")), pane("b", Some("s1")))),
+            tab("t3", &pane("c", Some("s1"))),
+        ];
+        let ids = |t: &str, p: &str| (t.to_owned(), p.to_owned());
+        assert_eq!(
+            move_source(&tabs, "s1", Some(&ids("t3", "c"))),
+            Some(ids("t3", "c")),
+            "the right-clicked pane"
+        );
+        assert_eq!(
+            move_source(&tabs, "s1", Some(&ids("t2", "b"))),
+            Some(ids("t2", "b"))
+        );
+        assert_eq!(
+            move_source(&tabs, "s1", None),
+            Some(ids("t2", "a")),
+            "else the first binding"
+        );
+        for stale in [ids("t1", "p1"), ids("gone", "x")] {
+            assert_eq!(
+                move_source(&tabs, "s1", Some(&stale)),
+                Some(ids("t2", "a")),
+                "{stale:?} no longer shows s1"
+            );
+        }
+        assert_eq!(move_source(&tabs, "s7", None), None, "no pane shows it");
     }
 
     #[test]
