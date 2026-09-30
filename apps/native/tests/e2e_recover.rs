@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use gpui::TestAppContext;
 use protocol::{
-    ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult, SessionEnd,
+    Agent, ClientMessage, DaemonMessage, RecoverAs, RecoverItem, RecoverItemResult, SessionEnd,
     SessionHistoryItem, SessionKind, SessionMode, SessionSnapshot,
 };
 use serde_json::{Value, json};
@@ -49,6 +49,20 @@ const CURSOR_AT_ORIGIN: &[u8] = b"\x1b[1;1R";
 const SPAWN_LINE: &str = "about to spawn child";
 /// The branch the fixture repo switches to after its Claude session ends.
 const MOVED_ON: &str = "moved-on";
+/// The Codex thread id `fake-claude`'s codex mode writes into its rollout,
+/// and so the id the daemon records for the session.
+const CODEX_THREAD_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+/// The Cursor chat id `fake-claude`'s cursor mode prints for `create-chat`.
+const CURSOR_CHAT_ID: &str = "3f1c2b9e-7a4d-4e8f-9b2a-6c5d4e3f2a1b";
+
+/// Asserts the shim's runtime is on `PATH`: `fake-claude` runs under `node`.
+fn require_node() {
+    let node = Command::new("node")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success());
+    assert!(node, "node not on PATH; fake-claude needs it");
+}
 
 /// Runs `git -C repo <args>`, asserting it succeeded, and returns its
 /// trimmed stdout.
@@ -499,14 +513,179 @@ fn recover_shell_session(
     wait_scrollback_contains(h, client, &new_id, &ran);
 }
 
+/// An interactive spawn of the agent `agent_options` selects, in place in
+/// `repo_id`'s checkout, with `extra_env` rows on it.
+fn spawn_agent_in_place(
+    repo_id: &str,
+    agent_options: &Value,
+    extra_env: &[(&str, &str)],
+) -> ClientMessage {
+    serde_json::from_value(json!({
+        "type": "spawn_session",
+        "label": null,
+        "target": {
+            "kind": "single",
+            "repo_id": repo_id,
+            "branch_name": "main",
+            "base_branch": null,
+            "use_worktree": false,
+        },
+        "mode": "interactive",
+        "initial_prompt": null,
+        "dangerously_skip_permissions": false,
+        "agent_options": agent_options,
+        "model": null,
+        "extra_env": extra_env,
+    }))
+    .expect("spawn request fixture")
+}
+
+/// Types `line` into `session_id` as the client would, with a carriage return
+/// that ends it.
+fn type_line(client: &LiveClient, session_id: &str, line: &str) {
+    client.send(ClientMessage::SendInput {
+        session_id: session_id.to_owned(),
+        data_b64: base64::engine::general_purpose::STANDARD.encode(format!("{line}\r")),
+    });
+}
+
+/// The conversation id the daemon recorded for `session_id`, from its own
+/// sidecar.
+fn sidecar_conversation_id(daemon: &LiveDaemon, session_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(
+        daemon
+            .config_dir()
+            .join("sessions")
+            .join(session_id)
+            .join("meta.json"),
+    )
+    .ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("agent_conversation_id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A Codex session writes a rollout, loses its tracer, and recovers as Codex
+/// resuming the thread the daemon read out of that rollout.
+fn recover_codex_session(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    repo_id: &str,
+) {
+    let codex_home = daemon.dir().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("create the codex home");
+    let codex_home = codex_home.to_string_lossy().into_owned();
+    client.send(spawn_agent_in_place(
+        repo_id,
+        &json!({ "kind": "codex" }),
+        &[("CODEX_HOME", codex_home.as_str()), ("FAKE_AGENT", "codex")],
+    ));
+    let session = wait_snapshot(h, client, "the codex session's snapshot", |s| {
+        s.agent == Agent::Codex && s.mode == SessionMode::Interactive
+    });
+    wait_scrollback_contains(h, client, &session.id, "[fake-codex] ready");
+
+    // Codex writes its thread's rollout on the first message; the daemon's
+    // watcher reads the thread id out of it while the session runs.
+    type_line(client, &session.id, "hello");
+    h.wait_until("the daemon to record the rollout id", ENDED, |_| {
+        sidecar_conversation_id(daemon, &session.id).as_deref() == Some(CODEX_THREAD_ID)
+    });
+
+    kill_session_tracer(h, daemon, &session.id);
+    let entry = wait_tracer_lost(h, daemon, &session.id);
+    assert_eq!(
+        entry["agent_conversation_id"].as_str(),
+        Some(CODEX_THREAD_ID),
+        "the entry carries the rollout's thread id: {entry}"
+    );
+    let item = list_history(h, client, "history-codex", &session.id);
+    assert!(
+        item.candidates.is_empty(),
+        "a Codex entry is offered no Claude conversation: {item:?}"
+    );
+    assert!(item.own_agent_resumable, "its rollout is on disk");
+
+    let results = recover(
+        h,
+        client,
+        "recover-codex",
+        RecoverItem {
+            history_id: session.id.clone(),
+            conversation_id: Some(CODEX_THREAD_ID.to_owned()),
+            how: RecoverAs::OwnAgent,
+        },
+    );
+    let new_id = recovered_session(&results, &session.id);
+    let recovered = wait_snapshot(h, client, "the recovered codex's snapshot", |s| {
+        s.id == new_id
+    });
+    assert_eq!(recovered.agent, Agent::Codex, "{recovered:?}");
+    wait_scrollback_contains(h, client, &new_id, &format!("RT_RESUMED {CODEX_THREAD_ID}"));
+}
+
+/// A Cursor session loses its tracer and recovers as Cursor resuming the chat
+/// the daemon pre-created for it.
+fn recover_cursor_session(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    repo_id: &str,
+) {
+    client.send(spawn_agent_in_place(
+        repo_id,
+        &json!({ "kind": "cursor" }),
+        &[("FAKE_AGENT", "cursor")],
+    ));
+    let session = wait_snapshot(h, client, "the cursor session's snapshot", |s| {
+        s.agent == Agent::Cursor && s.mode == SessionMode::Interactive
+    });
+    h.wait_until("the pre-created chat on the session", ENDED, |_| {
+        sidecar_conversation_id(daemon, &session.id).as_deref() == Some(CURSOR_CHAT_ID)
+    });
+    // The shim's banner: the PTY child is up, so the tracer is settled before
+    // it is killed.
+    wait_scrollback_contains(h, client, &session.id, "[fake-cursor] ready");
+
+    kill_session_tracer(h, daemon, &session.id);
+    let entry = wait_tracer_lost(h, daemon, &session.id);
+    assert_eq!(
+        entry["agent_conversation_id"].as_str(),
+        Some(CURSOR_CHAT_ID),
+        "the entry carries the chat the daemon pre-created: {entry}"
+    );
+    let item = list_history(h, client, "history-cursor", &session.id);
+    assert!(
+        item.candidates.is_empty(),
+        "a Cursor entry is offered no Claude conversation: {item:?}"
+    );
+    assert!(item.own_agent_resumable, "a recorded chat is resumable");
+
+    let results = recover(
+        h,
+        client,
+        "recover-cursor",
+        RecoverItem {
+            history_id: session.id.clone(),
+            conversation_id: Some(CURSOR_CHAT_ID.to_owned()),
+            how: RecoverAs::OwnAgent,
+        },
+    );
+    let new_id = recovered_session(&results, &session.id);
+    let recovered = wait_snapshot(h, client, "the recovered cursor's snapshot", |s| {
+        s.id == new_id
+    });
+    assert_eq!(recovered.agent, Agent::Cursor, "{recovered:?}");
+    wait_scrollback_contains(h, client, &new_id, &format!("RT_RESUMED {CURSOR_CHAT_ID}"));
+}
+
 #[gpui::test]
 #[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
 fn live_recovers_sessions_whose_tracer_died(cx: &mut TestAppContext) {
-    let node = Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok_and(|out| out.status.success());
-    assert!(node, "node not on PATH; fake-claude needs it");
+    require_node();
     let daemon = LiveDaemon::start("recover");
     let repo = daemon.git_fixture();
     let (mut h, client) = Harness::open_live(cx, &daemon);
@@ -515,4 +694,30 @@ fn live_recovers_sessions_whose_tracer_died(cx: &mut TestAppContext) {
     let repo_id = register_repo(&mut h, &client, &daemon, &repo);
     recover_claude_session(&mut h, &client, &daemon, &repo_id);
     recover_shell_session(&mut h, &client, &daemon, &repo);
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_recovers_a_codex_session_as_codex(cx: &mut TestAppContext) {
+    require_node();
+    let daemon = LiveDaemon::start("recover-codex");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    let repo_id = register_repo(&mut h, &client, &daemon, &repo);
+    recover_codex_session(&mut h, &client, &daemon, &repo_id);
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_recovers_a_cursor_session_as_cursor(cx: &mut TestAppContext) {
+    require_node();
+    let daemon = LiveDaemon::start("recover-cursor");
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    let repo_id = register_repo(&mut h, &client, &daemon, &repo);
+    recover_cursor_session(&mut h, &client, &daemon, &repo_id);
 }

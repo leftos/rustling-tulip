@@ -284,6 +284,8 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
         } else {
             "fake-claude.sh"
         });
+    // The Codex and Cursor CLIs resolve to the same shim: the path the daemon
+    // always spawns, with its mode chosen by a spec's `FAKE_AGENT` env row.
     vec![
         (
             "RUSTLING_TULIP_CONFIG_DIR",
@@ -303,7 +305,12 @@ fn isolated_envs(root: &Path, test: &str) -> Vec<(&'static str, OsString)> {
         ),
         ("RUSTLING_TULIP_SHELL", test_shell()),
         ("RUSTLING_TULIP_SHELL_INTEGRATION", OsString::from("0")),
-        ("RUSTLING_TULIP_CLAUDE", fake_claude.into_os_string()),
+        (
+            "RUSTLING_TULIP_CLAUDE",
+            fake_claude.clone().into_os_string(),
+        ),
+        ("RUSTLING_TULIP_CODEX", fake_claude.clone().into_os_string()),
+        ("RUSTLING_TULIP_CURSOR_AGENT", fake_claude.into_os_string()),
         // Claude Code's home, for the daemon's transcript lookups and the
         // sessions it spawns: never the user's `~/.claude`.
         (
