@@ -114,7 +114,7 @@ use crate::appearance_view::AppearanceEditor;
 use crate::changes_view::ChangesUi;
 use crate::connection::{DotKind, Footer};
 use crate::copied::Copied;
-use crate::footer::{StopConfirm, flyout_rows, log_paths};
+use crate::footer::{CountSpan, StopConfirm, flyout_rows, log_paths, status_counts};
 use crate::grid_view::{PaneSlot, RetryGate, divider_ratio};
 use crate::needs_you_view::moves_needs_you;
 use crate::notice_view::MODAL_RADIUS;
@@ -134,6 +134,7 @@ use crate::spawn_form::BranchCache;
 use crate::spawn_view::SpawnDialog;
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
+use crate::status_glyph::{GlyphSize, glyph_view};
 use crate::tab_bar::{Rename, TabMenu};
 use crate::tabs::{PaneTarget, Placement, TabsModel, find_tab_containing_session, tab_pills};
 use crate::term::ShellCommand;
@@ -188,7 +189,7 @@ pub use crate::worktrees_manager_view::{WorktreesButton, WorktreesRow};
 const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
 /// between split panes.
-const DIVIDER_WIDTH: f32 = 4.0;
+pub const DIVIDER_WIDTH: f32 = 4.0;
 /// How long tab font steps and window moves wait before the layout is
 /// written out.
 const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
@@ -335,10 +336,20 @@ pub(crate) const WINDOW_SIZE: (u16, u16) = (1000, 640);
 /// Text size of the footer, flyout and overlay.
 const UI_TEXT_SIZE: f32 = 12.0;
 /// The footer's height in logical pixels.
-pub const FOOTER_HEIGHT: f32 = 22.0;
+pub const FOOTER_HEIGHT: f32 = 28.0;
+/// Text size of the footer's counts and status text.
+const FOOTER_TEXT_SIZE: f32 = 11.5;
+/// The footer's daemon pill: its height and text size.
+const FOOTER_PILL_HEIGHT: f32 = 20.0;
+const FOOTER_PILL_TEXT_SIZE: f32 = 11.0;
+/// Space between the footer's pill and its counts, and between two counts.
+const FOOTER_GAP: f32 = 14.0;
+pub use activity_bar::{ITEM_HEIGHT as RAIL_ITEM_HEIGHT, RAIL_WIDTH};
 pub use palette::{BAR_BG, PANEL_BG};
 pub(crate) use palette::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, TEXT, WARNING};
-use palette::{CHIP, LINE_STRONG, SCRIM, STATUS_ERR, STATUS_IDLE, STATUS_OK, SURFACE};
+use palette::{
+    CHIP, LINE_STRONG, SCRIM, STATUS_ERR, STATUS_IDLE, STATUS_OK, SUNKEN, SURFACE, TEXT_2,
+};
 
 /// What a press on a drag handle is resizing.
 enum Drag {
@@ -2192,19 +2203,26 @@ fn drag_handle(id: impl Into<ElementId>, vertical_line: bool, active: bool) -> S
 }
 
 impl RootView {
-    /// The bottom bar: the daemon pill, then the attached session's status.
+    /// The bottom bar: the daemon pill, the status counts, then the
+    /// attached session's status, right-aligned and the first to truncate.
     fn footer_bar(&self, footer: &Footer, cx: &mut Context<Self>) -> Div {
         let text = match footer.port {
             Some(port) => format!("daemon · {} · :{port}", footer.label),
             None => format!("daemon · {}", footer.label),
         };
+        let counts = status_counts(self.sidebar.sessions(), |id| self.sidebar.is_unseen(id));
         let pill = div()
             .id("daemon-pill")
             .flex()
+            .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .h_full()
-            .px(px(8.0))
+            .gap(px(7.0))
+            .h(px(FOOTER_PILL_HEIGHT))
+            .px(px(9.0))
+            .rounded(px(FOOTER_PILL_HEIGHT / 2.0))
+            .border_1()
+            .border_color(gpui::rgb(LINE_STRONG))
+            .text_size(px(FOOTER_PILL_TEXT_SIZE))
             .cursor_pointer()
             .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
             .when(self.flyout_open, |pill| pill.bg(gpui::rgb(HOVER_BG)))
@@ -2219,14 +2237,25 @@ impl RootView {
             .flex()
             .flex_none()
             .items_center()
+            .gap(px(FOOTER_GAP))
+            .px(px(12.0))
             .h(px(FOOTER_HEIGHT))
-            .bg(gpui::rgb(BAR_BG))
+            .bg(gpui::rgb(SUNKEN))
             .border_t_1()
             .border_color(gpui::rgb(BORDER))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(MUTED))
+            .text_size(px(FOOTER_TEXT_SIZE))
+            .text_color(gpui::rgb(TEXT_2))
             .child(pill)
-            .child(div().px(px(PADDING)).child(self.footer_status()))
+            .children(counts.spans().into_iter().map(footer_count))
+            .child(
+                div()
+                    .debug_selector(|| "footer-status".to_owned())
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_right()
+                    .truncate()
+                    .child(self.footer_status()),
+            )
     }
 
     /// The troubleshooting flyout above the pill: details, files, control.
@@ -2407,6 +2436,24 @@ fn connecting_overlay(
         .bg(gpui::rgba(SCRIM))
         .occlude()
         .child(card)
+}
+
+/// One of the footer's status counts: its glyph, then its text, tagged
+/// `footer-count-<kind>`.
+fn footer_count(span: CountSpan) -> Div {
+    let name = span.kind.name();
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.0))
+        .debug_selector(move || format!("footer-count-{name}"))
+        .child(glyph_view(
+            span.kind.glyph(),
+            GlyphSize::Footer,
+            &format!("footer-glyph-{name}"),
+        ))
+        .child(span.text)
 }
 
 /// The status dot: pulsing while pending, dimmed when stopped.

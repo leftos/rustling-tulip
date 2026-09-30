@@ -25,8 +25,10 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use protocol::{ClientMessage, InitLayoutKind};
+use rustling_tulip_native::palette::{ACCENT, SUNKEN};
 use rustling_tulip_native::{
-    BAR_BG, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, PANEL_BG, SIDEBAR_DEFAULT_WIDTH,
+    DIVIDER_WIDTH, FOOTER_HEIGHT, NATIVE_PROTOCOL_VERSIONS, PANEL_BG, RAIL_WIDTH,
+    SIDEBAR_DEFAULT_WIDTH,
 };
 use serde_json::Value;
 use support::live::{LiveDaemon, kill_tree, spawn_shell};
@@ -60,6 +62,12 @@ const OFFSCREEN_ENV: &str = "RUSTLING_TULIP_OFFSCREEN_WINDOW";
 const MK_LBUTTON: usize = 0x0001;
 /// How long the window gets to paint its sidebar and footer once connected.
 const PAINT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The active rail button's accent bar in logical pixels
+/// (`apps/native/src/activity_bar.rs`): its width at the window's left edge,
+/// and its top and bottom on the first button, which sits at the top.
+const RAIL_BAR_WIDTH: f32 = 2.0;
+const RAIL_BAR_TOP: f32 = 10.0;
+const RAIL_BAR_BOTTOM: f32 = 38.0;
 /// The gap between two captures that must match for the pane to count as
 /// settled.
 const SETTLE_GAP: Duration = Duration::from_millis(250);
@@ -405,10 +413,13 @@ fn physical(value: f32, scale: f32) -> i32 {
 }
 
 /// The pane area of a `width` x `height` client area at `scale`, inset from
-/// the sidebar, tab bar and footer, in client pixels.
+/// the rail, sidebar, divider, tab bar and footer, in client pixels.
 fn pane_area((width, height): (i32, i32), scale: f32) -> RECT {
     RECT {
-        left: physical(SIDEBAR_DEFAULT_WIDTH + 24.0, scale),
+        left: physical(
+            RAIL_WIDTH + SIDEBAR_DEFAULT_WIDTH + DIVIDER_WIDTH + 8.0,
+            scale,
+        ),
         top: physical(40.0, scale),
         right: width - physical(8.0, scale),
         bottom: height - physical(FOOTER_HEIGHT + 8.0, scale),
@@ -581,12 +592,22 @@ impl Frame {
         )
     }
 
-    /// A point at the footer's right end, past its pill and status text.
+    /// A point at the footer's right end, in its padding past the status
+    /// text.
     fn footer_probe(&self, scale: f32) -> (i32, i32) {
         (
             self.width - physical(8.0, scale),
             self.height - physical(FOOTER_HEIGHT / 2.0, scale),
         )
+    }
+
+    /// Whether the rail's first button, Sessions, shows its active bar:
+    /// some pixel of the bar's strip reads [`ACCENT`]. The rail itself is
+    /// [`SUNKEN`], close to the all-black capture the other probes guard
+    /// against, so only the coral bar proves the rail painted.
+    fn rail_bar_seen(&self, scale: f32) -> bool {
+        (physical(RAIL_BAR_TOP, scale)..physical(RAIL_BAR_BOTTOM, scale))
+            .any(|y| (0..physical(RAIL_BAR_WIDTH, scale)).any(|x| self.rgb((x, y)) == ACCENT))
     }
 
     /// How many pixels of the pane area differ between this capture and
@@ -664,16 +685,19 @@ fn wait_painted(hwnd: HWND) -> Frame {
         let frame = capture(hwnd);
         let (sidebar, footer) = (frame.sidebar_probe(scale), frame.footer_probe(scale));
         let seen = (frame.rgb(sidebar), frame.rgb(footer));
-        if seen == (PANEL_BG, BAR_BG) {
+        let rail_bar = frame.rail_bar_seen(scale);
+        if seen == (PANEL_BG, SUNKEN) && rail_bar {
             return frame;
         }
         assert!(
             Instant::now() < deadline,
             "the window did not paint within {PAINT_TIMEOUT:?}: the sidebar at {sidebar:?} \
-             reads {:06x}, not {PANEL_BG:06x}, and the footer at {footer:?} reads {:06x}, not \
-             {BAR_BG:06x} (all black means the capture sees no rendered content)",
+             reads {:06x}, not {PANEL_BG:06x}, the footer at {footer:?} reads {:06x}, not \
+             {SUNKEN:06x}, and the rail's active bar in {ACCENT:06x} is {} (all black means the \
+             capture sees no rendered content)",
             seen.0,
-            seen.1
+            seen.1,
+            if rail_bar { "drawn" } else { "missing" }
         );
         std::thread::sleep(Duration::from_millis(100));
     }

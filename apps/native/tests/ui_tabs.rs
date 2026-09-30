@@ -326,14 +326,34 @@ fn badge_shows_busy_over_total_and_hides_at_zero(cx: &mut TestAppContext) {
         sessions: vec![
             session("s1").status("working").build(),
             session("s2").build(),
+            session("s3").build(),
         ],
-        tabs: vec![tab("t1", &grid), tab("t2", &pane("p3", None))],
+        tabs: vec![
+            tab("t1", &grid),
+            tab("t2", &pane("p3", None)),
+            tab("t3", &pane("p4", Some("s3"))),
+        ],
         ..Fixture::default()
     };
     let mut h = Harness::with(cx, &dir, &fixture);
 
     assert_eq!(h.root(|root, _| root.tab_badge("t1")), Some((1, 2)));
     assert!(h.bounds("tab-badge-t1").origin.x >= px(0.0), "drawn");
+    let pill = h.bounds("tab-badge-t1");
+    let glyph = h.bounds("tab-badge-glyph-t1-working");
+    assert!(
+        pill.contains(&glyph.center()),
+        "the working glyph leads the pill"
+    );
+    assert_eq!(glyph.size.width, px(9.0), "the pill's 9 px glyph");
+
+    assert_eq!(h.root(|root, _| root.tab_badge("t3")), Some((0, 1)));
+    assert!(h.bounds("tab-badge-t3").origin.x >= px(0.0), "0/1 is drawn");
+    assert!(
+        h.bounds("tab-badge-glyph-t3-working").origin.x < px(0.0),
+        "no glyph at zero"
+    );
+
     assert_eq!(h.root(|root, _| root.tab_badge("t2")), None, "no session");
     assert!(h.bounds("tab-badge-t2").origin.x < px(0.0), "not drawn");
 

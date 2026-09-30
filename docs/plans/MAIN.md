@@ -24,10 +24,9 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.5 and PT.6b are free to start side by side (PT.6b's only `lib.rs` edit is one re-export line); PT.7 follows PT.5 (both edit `lib.rs`); PT.8b needs PT.6b. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
+The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.7 is free to start (PT.5 has landed); PT.8b needs PT.6b. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
 
 - [ ] **The diff tab's header clips its title from the left** (seen in a `native-shot diff` after PT.9): at the 1000 px shot width the title reads "oter.rs worktree vs index" beside the toggles and the four nav buttons; ruled (user): the file name first and the folder dimmed after it, the folder truncating, and the Whitespace / Highlight toggles dropping to icons when the header is narrow (petal.md, "Diff header"). `apps/native/src/diff_tab_view.rs` (the 42 px header). A visual fix: shots before and after go to the user before it lands.
-- [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
 - [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
 - [ ] **PT.8b Spawn dialog and Settings**.
@@ -132,6 +131,7 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
+- [ ] **`smoke_posted_keys_reach_the_shell` failed once, then passed unchanged** (seen in PT.5's smoke run): no `rt-smoke-marker` in the shell's scrollback within 30 s (`apps/native/tests/smoke_window.rs` ~785). Rule out PT.5's `pane_area` change (its left edge moved past the 52 px rail) first, then look for a race in posting keys before the shell's prompt.
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
 

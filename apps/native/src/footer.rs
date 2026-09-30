@@ -1,12 +1,105 @@
-//! The footer flyout's state as plain Rust: the detail rows, the two-click
-//! stop, and the log and config paths it opens. The GPUI view only renders
-//! these and forwards clicks.
+//! The footer's state as plain Rust: the status counts, and the flyout's
+//! detail rows, two-click stop, and the log and config paths it opens. The
+//! GPUI view only renders these and forwards clicks.
 
 use std::path::{Path, PathBuf};
+
+use protocol::{SessionMode, SessionSnapshot, SessionStatus};
 
 use crate::LOG_FILE;
 use crate::connection::Connection;
 use crate::net::HandshakeInfo;
+use crate::status_glyph::{Glyph, Shape, glyph};
+
+/// How many sessions show each of the glyphs the footer counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusCounts {
+    /// Sessions waiting on the user's answer (`AwaitingInput`).
+    pub need_you: usize,
+    /// Sessions working.
+    pub working: usize,
+    /// Agent sessions whose finished turn this client has not seen.
+    pub waiting: usize,
+}
+
+/// Which count a footer span shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountKind {
+    NeedYou,
+    Working,
+    Waiting,
+}
+
+impl CountKind {
+    /// The name the span's debug selectors carry.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NeedYou => "need-you",
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+        }
+    }
+
+    /// The glyph the span draws before its text: the one a session it
+    /// counts shows in its leaf.
+    #[must_use]
+    pub fn glyph(self) -> Glyph {
+        let (status, unseen) = match self {
+            Self::NeedYou => (SessionStatus::AwaitingInput, false),
+            Self::Working => (SessionStatus::Working, false),
+            Self::Waiting => (SessionStatus::Idle, true),
+        };
+        glyph(status, SessionMode::Interactive, unseen)
+    }
+}
+
+/// One count the footer shows: its kind and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountSpan {
+    pub kind: CountKind,
+    pub text: String,
+}
+
+impl StatusCounts {
+    /// The spans the footer shows, in order need you, working, waiting; a
+    /// zero count has none.
+    #[must_use]
+    pub fn spans(self) -> Vec<CountSpan> {
+        [
+            (CountKind::NeedYou, self.need_you, "need you"),
+            (CountKind::Working, self.working, "working"),
+            (CountKind::Waiting, self.waiting, "waiting"),
+        ]
+        .into_iter()
+        .filter(|(_, count, _)| *count > 0)
+        .map(|(kind, count, words)| CountSpan {
+            kind,
+            text: format!("{count} {words}"),
+        })
+        .collect()
+    }
+}
+
+/// Counts `sessions` by the glyph each shows, `is_unseen` telling whether a
+/// session's finished turn is in the client's unseen set. A plain shell
+/// shows the idle dot whatever the set says, so it is never waiting.
+#[must_use]
+pub fn status_counts(
+    sessions: &[SessionSnapshot],
+    is_unseen: impl Fn(&str) -> bool,
+) -> StatusCounts {
+    let mut counts = StatusCounts::default();
+    for session in sessions {
+        match glyph(session.status, session.mode, is_unseen(&session.id)).shape {
+            Shape::Asking => counts.need_you += 1,
+            Shape::Working => counts.working += 1,
+            Shape::Waiting => counts.waiting += 1,
+            Shape::Idle | Shape::Spawning | Shape::Stopped | Shape::Error => {}
+        }
+    }
+    counts
+}
 
 /// The flyout's detail rows as (label, value), in display order: State, then
 /// Port, PID and Protocol when a handshake is known, Sessions while open, and
@@ -90,11 +183,157 @@ pub fn log_paths(config_dir: &Path) -> LogPaths {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
-    use super::{LogPaths, StopConfirm, flyout_rows, log_paths};
+    use super::{
+        CountKind, CountSpan, LogPaths, StatusCounts, StopConfirm, flyout_rows, log_paths,
+        status_counts,
+    };
     use crate::connection::Connection;
     use crate::net::HandshakeInfo;
+    use protocol::{SessionMode, SessionSnapshot, SessionStatus};
+    use serde_json::json;
+    use std::collections::HashSet;
     use std::path::Path;
+
+    fn session(id: &str, status: SessionStatus, mode: SessionMode) -> SessionSnapshot {
+        let mut s: SessionSnapshot = serde_json::from_value(json!({
+            "id": id,
+            "label": id,
+            "kind": "single",
+            "members": [],
+            "status": "idle",
+            "mode": "interactive",
+            "started_at": "2026-01-01T00:00:00Z",
+            "exit_code": null,
+            "metrics": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": 0.0,
+                "last_activity_at": null,
+            },
+            "recent_actions": [],
+            "agent": "claude",
+        }))
+        .expect("session fixture");
+        s.status = status;
+        s.mode = mode;
+        s
+    }
+
+    fn agent(id: &str, status: SessionStatus) -> SessionSnapshot {
+        session(id, status, SessionMode::Interactive)
+    }
+
+    fn counts(sessions: &[SessionSnapshot], unseen: &[&str]) -> StatusCounts {
+        let unseen: HashSet<&str> = unseen.iter().copied().collect();
+        status_counts(sessions, |id| unseen.contains(id))
+    }
+
+    fn span(kind: CountKind, text: &str) -> CountSpan {
+        CountSpan {
+            kind,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn counts_need_you_working_and_unseen_turns() {
+        let sessions = [
+            agent("ask-1", SessionStatus::AwaitingInput),
+            agent("ask-2", SessionStatus::AwaitingInput),
+            agent("work-1", SessionStatus::Working),
+            agent("work-2", SessionStatus::Working),
+            agent("work-3", SessionStatus::Working),
+            agent("done", SessionStatus::Idle),
+            agent("seen", SessionStatus::Idle),
+            agent("new", SessionStatus::Spawning),
+            agent("gone", SessionStatus::Stopped),
+            agent("broken", SessionStatus::Error),
+        ];
+        let counts = counts(&sessions, &["done"]);
+        assert_eq!(
+            counts,
+            StatusCounts {
+                need_you: 2,
+                working: 3,
+                waiting: 1,
+            }
+        );
+        assert_eq!(
+            counts.spans(),
+            vec![
+                span(CountKind::NeedYou, "2 need you"),
+                span(CountKind::Working, "3 working"),
+                span(CountKind::Waiting, "1 waiting"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_zero_count_has_no_span() {
+        let sessions = [
+            agent("ask", SessionStatus::AwaitingInput),
+            agent("done", SessionStatus::Idle),
+        ];
+        assert_eq!(
+            counts(&sessions, &["done"]).spans(),
+            vec![
+                span(CountKind::NeedYou, "1 need you"),
+                span(CountKind::Waiting, "1 waiting"),
+            ],
+            "nothing is working, so no working span"
+        );
+    }
+
+    #[test]
+    fn all_zero_counts_have_no_spans() {
+        let sessions = [
+            agent("idle", SessionStatus::Idle),
+            agent("gone", SessionStatus::Stopped),
+        ];
+        assert_eq!(counts(&sessions, &[]), StatusCounts::default());
+        assert!(counts(&sessions, &[]).spans().is_empty());
+        assert!(counts(&[], &[]).spans().is_empty(), "no sessions at all");
+    }
+
+    #[test]
+    fn a_shell_is_never_waiting_even_if_marked_unseen() {
+        let sessions = [
+            session("sh", SessionStatus::Idle, SessionMode::PlainShell),
+            session("hl", SessionStatus::Idle, SessionMode::Headless),
+        ];
+        assert_eq!(
+            counts(&sessions, &["sh", "hl"]),
+            StatusCounts {
+                waiting: 1,
+                ..StatusCounts::default()
+            },
+            "the headless agent counts, the shell does not"
+        );
+    }
+
+    #[test]
+    fn an_unseen_mark_on_a_working_session_counts_it_working() {
+        let sessions = [agent("w", SessionStatus::Working)];
+        assert_eq!(
+            counts(&sessions, &["w"]),
+            StatusCounts {
+                working: 1,
+                ..StatusCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn each_span_draws_the_glyph_its_sessions_show() {
+        assert_eq!(CountKind::NeedYou.glyph().shape.name(), "asking");
+        assert_eq!(CountKind::Working.glyph().shape.name(), "working");
+        assert_eq!(CountKind::Waiting.glyph().shape.name(), "waiting");
+    }
 
     const HANDSHAKE: HandshakeInfo = HandshakeInfo {
         port: 51418,

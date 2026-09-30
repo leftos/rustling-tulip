@@ -1,23 +1,37 @@
 //! The activity rail at the window's left edge: Sessions, Needs You and
 //! Source control, which pick the panel beside it and fold it, the badges
 //! counting the sessions waiting on the user and the uncommitted changes, and
-//! at the bottom the Recover sessions button with
-//! its badge and the Settings gear.
+//! at the bottom the Recover sessions button with its badge and the
+//! Settings button.
 
 use gpui::{ClickEvent, Context, Div, FontWeight, Stateful, Window, div, prelude::*, px, svg};
 
-use crate::assets::{NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SOURCE_CONTROL_ICON};
-use crate::palette::RAIL_BADGE_TEXT;
+use crate::assets::{
+    NEEDS_YOU_ICON, RECOVER_ICON, SESSIONS_ICON, SETTINGS_ICON, SOURCE_CONTROL_ICON,
+};
+use crate::palette::{ACCENT, CHIP, HOVER, SUBTLE, SUNKEN};
 use crate::sidebar::Activity;
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, WARNING, tooltip};
+use crate::{BORDER, RootView, TEXT, tooltip};
 
-const RAIL_WIDTH: f32 = 40.0;
-const ICON_SIZE: f32 = 18.0;
-const ITEM_PADDING: f32 = 9.0;
+/// The rail's width in logical pixels, its right border included.
+pub const RAIL_WIDTH: f32 = 52.0;
+/// One rail button's height in logical pixels; it spans the rail's width.
+/// The buttons stack from the rail's top with no gap.
+pub const ITEM_HEIGHT: f32 = 48.0;
+/// The rounded tile a button's icon sits on.
+const TILE_SIZE: f32 = 36.0;
+const TILE_RADIUS: f32 = 9.0;
+const ICON_SIZE: f32 = 19.0;
 const ACTIVE_BAR_WIDTH: f32 = 2.0;
+/// The active bar's distance from its button's top and bottom.
+const ACTIVE_BAR_INSET: f32 = 10.0;
 const BADGE_HEIGHT: f32 = 16.0;
 const BADGE_TEXT_SIZE: f32 = 10.0;
 const BADGE_INSET: f32 = 4.0;
+/// The ring in the rail's colour that sets a badge off its tile.
+const BADGE_RING: f32 = 2.0;
+/// Space under the Settings button.
+const RAIL_BOTTOM: f32 = 8.0;
 
 /// The badge's text for `count`: hidden at 0, `99+` above 99.
 #[must_use]
@@ -55,7 +69,6 @@ struct Item {
     icon: &'static str,
     badge: usize,
     badge_selector: &'static str,
-    badge_color: u32,
     /// What the badge counts, in the tooltip.
     noun: &'static str,
 }
@@ -75,7 +88,6 @@ impl RootView {
 
     /// The rail, always shown, left of the panel.
     pub(crate) fn activity_rail(&self, cx: &mut Context<Self>) -> Div {
-        let accent = self.sidebar.appearance(None).accent.value;
         let items = [
             Item {
                 activity: Activity::Sessions,
@@ -84,7 +96,6 @@ impl RootView {
                 icon: SESSIONS_ICON,
                 badge: 0,
                 badge_selector: "activity-sessions-badge",
-                badge_color: accent,
                 noun: "",
             },
             Item {
@@ -94,7 +105,6 @@ impl RootView {
                 icon: NEEDS_YOU_ICON,
                 badge: self.needs_you_count(),
                 badge_selector: "needs-you-badge",
-                badge_color: WARNING,
                 noun: "waiting on you",
             },
             Item {
@@ -104,7 +114,6 @@ impl RootView {
                 icon: SOURCE_CONTROL_ICON,
                 badge: self.sc_badge(),
                 badge_selector: "activity-badge",
-                badge_color: accent,
                 noun: "uncommitted",
             },
         ];
@@ -114,53 +123,24 @@ impl RootView {
             .flex_none()
             .w(px(RAIL_WIDTH))
             .h_full()
-            .py(px(6.0))
-            .gap(px(2.0))
+            .pb(px(RAIL_BOTTOM))
             .debug_selector(|| "activity-rail".to_owned())
-            .bg(gpui::rgb(PANEL_BG))
+            .bg(gpui::rgb(SUNKEN))
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .children(items.into_iter().map(|item| self.rail_item(item, cx)))
             .child(div().flex_1())
             .child(recover_button(self.session_history.badge_count(), cx))
-            .child(settings_gear(cx))
+            .child(settings_button(cx))
     }
 
     fn rail_item(&self, item: Item, cx: &mut Context<Self>) -> Stateful<Div> {
         let active = self.sidebar.activity() == item.activity;
         let collapsed = self.sidebar.is_collapsed();
-        let accent = self.sidebar.appearance(None).accent.value;
         let activity = item.activity;
-        let selector = item.selector;
-        div()
-            .id(selector)
-            .debug_selector(move || selector.to_owned())
-            .relative()
-            .flex()
-            .justify_center()
-            .items_center()
-            .py(px(ITEM_PADDING))
-            .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-            .child(
-                svg()
-                    .path(item.icon)
-                    .size(px(ICON_SIZE))
-                    .text_color(gpui::rgb(if active { TEXT } else { MUTED })),
-            )
-            .when(active, |row| {
-                row.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(ACTIVE_BAR_WIDTH))
-                        .bg(gpui::rgb(accent)),
-                )
-            })
+        rail_button(item.selector, item.icon, active)
             .when_some(badge_text(item.badge), |row, text| {
-                row.child(badge(item.badge_selector, text, item.badge_color))
+                row.child(badge(item.badge_selector, text))
             })
             .tooltip(tooltip(item_tip(
                 item.label, item.badge, item.noun, active, collapsed,
@@ -190,11 +170,57 @@ impl RootView {
     }
 }
 
-fn badge(selector: &'static str, text: String, color: u32) -> Div {
+/// A rail button tagged `selector`: `icon` on a rounded tile, which is
+/// filled and led by the accent bar while `active`, and lit on hover.
+fn rail_button(selector: &'static str, icon: &'static str, active: bool) -> Stateful<Div> {
+    let tile = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(TILE_SIZE))
+        .rounded(px(TILE_RADIUS))
+        .when(active, |tile| tile.bg(gpui::rgb(CHIP)))
+        .when(!active, |tile| {
+            tile.group_hover(selector, |style| style.bg(gpui::rgb(HOVER)))
+        })
+        .child(
+            svg()
+                .path(icon)
+                .size(px(ICON_SIZE))
+                .text_color(gpui::rgb(if active { TEXT } else { SUBTLE })),
+        );
+    div()
+        .id(selector)
+        .group(selector)
+        .debug_selector(move || selector.to_owned())
+        .relative()
+        .flex()
+        .flex_none()
+        .justify_center()
+        .items_center()
+        .w_full()
+        .h(px(ITEM_HEIGHT))
+        .cursor_pointer()
+        .when(active, |button| {
+            button.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(ACTIVE_BAR_INSET))
+                    .bottom(px(ACTIVE_BAR_INSET))
+                    .w(px(ACTIVE_BAR_WIDTH))
+                    .rounded(px(ACTIVE_BAR_WIDTH))
+                    .bg(gpui::rgb(ACCENT)),
+            )
+        })
+        .child(tile)
+}
+
+fn badge(selector: &'static str, text: String) -> Div {
     div()
         .absolute()
         .right(px(BADGE_INSET))
-        .bottom(px(BADGE_INSET))
+        .top(px(BADGE_INSET))
         .flex()
         .items_center()
         .justify_center()
@@ -202,35 +228,22 @@ fn badge(selector: &'static str, text: String, color: u32) -> Div {
         .h(px(BADGE_HEIGHT))
         .px(px(4.0))
         .rounded_full()
-        .bg(gpui::rgb(color))
-        .text_color(gpui::rgb(RAIL_BADGE_TEXT))
+        .bg(gpui::rgb(HOVER))
+        .border(px(BADGE_RING))
+        .border_color(gpui::rgb(SUNKEN))
+        .text_color(gpui::rgb(TEXT))
         .text_size(px(BADGE_TEXT_SIZE))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::BOLD)
         .debug_selector(move || selector.to_owned())
         .child(text)
 }
 
-/// The Recover sessions button, above the gear, with its badge counting the
-/// sessions lost and not yet recovered.
+/// The Recover sessions button, above Settings, with its badge counting
+/// the sessions lost and not yet recovered.
 fn recover_button(badge_count: usize, cx: &mut Context<RootView>) -> Stateful<Div> {
-    div()
-        .id("activity-recover")
-        .debug_selector(|| "activity-recover".to_owned())
-        .relative()
-        .flex()
-        .justify_center()
-        .items_center()
-        .py(px(ITEM_PADDING))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(
-            svg()
-                .path(RECOVER_ICON)
-                .size(px(ICON_SIZE))
-                .text_color(gpui::rgb(MUTED)),
-        )
+    rail_button("activity-recover", RECOVER_ICON, false)
         .when_some(badge_text(badge_count), |row, text| {
-            row.child(badge("recover-badge", text, WARNING))
+            row.child(badge("recover-badge", text))
         })
         .tooltip(tooltip("Recover sessions"))
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -238,20 +251,9 @@ fn recover_button(badge_count: usize, cx: &mut Context<RootView>) -> Stateful<Di
         }))
 }
 
-/// The Settings gear, pinned to the rail's bottom.
-fn settings_gear(cx: &mut Context<RootView>) -> Stateful<Div> {
-    div()
-        .id("settings-open")
-        .debug_selector(|| "settings-open".to_owned())
-        .flex()
-        .justify_center()
-        .items_center()
-        .py(px(ITEM_PADDING))
-        .cursor_pointer()
-        .text_size(px(ICON_SIZE))
-        .text_color(gpui::rgb(MUTED))
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-        .child("⚙")
+/// The Settings button, pinned to the rail's bottom.
+fn settings_button(cx: &mut Context<RootView>) -> Stateful<Div> {
+    rail_button("settings-open", SETTINGS_ICON, false)
         .tooltip(tooltip("Settings (Ctrl+,)"))
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.open_settings(window, cx);

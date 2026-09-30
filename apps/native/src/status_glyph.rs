@@ -86,15 +86,9 @@ pub struct Layer {
 pub enum GlyphSize {
     /// Sidebar leaves, pane headers and Needs You rows.
     Leaf = 12,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no view draws a glyph inside a tab pill")
-    )]
+    /// A tab's busy pill.
     Pill = 9,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no view draws a glyph in the footer")
-    )]
+    /// The footer's status counts.
     Footer = 11,
 }
 

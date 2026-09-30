@@ -108,7 +108,7 @@ fn the_rail_switches_to_source_control_and_persists(cx: &mut TestAppContext) {
     assert!(h.in_model("sc-panel"));
     let rail = h.bounds("activity-rail");
     let sc = h.bounds("sc-panel");
-    assert_eq!(rail.size.width, px(40.0));
+    assert_eq!(rail.size.width, px(52.0));
     assert_eq!(
         sc.origin.x,
         rail.right(),
@@ -175,7 +175,7 @@ fn ctrl_b_toggles_the_panel_and_keeps_the_rail(cx: &mut TestAppContext) {
     );
     assert!(!h.in_model("sc-panel"));
     let rail = h.bounds("activity-rail");
-    assert_eq!((rail.origin.x, rail.size.width), (px(0.0), px(40.0)));
+    assert_eq!((rail.origin.x, rail.size.width), (px(0.0), px(52.0)));
     let item = h.center("activity-source-control");
     assert!(rail.contains(&item), "the rail still holds its items");
 

@@ -101,8 +101,8 @@ pub const DIFF_WORD_WASH_ALPHA: f32 = 0.30;
 /// The sidebar's and panels' background, which is [`SURFACE`], as
 /// `0xRRGGBB`.
 pub const PANEL_BG: u32 = SURFACE;
-/// The footer's and the tab bar's background, which is [`SUNKEN`], as
-/// `0xRRGGBB`.
+/// The pane header's and the headless strip's background, which is
+/// [`SUNKEN`], as `0xRRGGBB`.
 pub const BAR_BG: u32 = SUNKEN;
 /// A hovered row's or button's fill, which is [`HOVER`], as `0xRRGGBB`.
 pub(crate) const HOVER_BG: u32 = HOVER;
@@ -139,9 +139,6 @@ pub(crate) const STATUS_ERR: u32 = 0x00ef_5c5c;
 
 /// An "ok" badge of the spawn dialog's workspace preview table, as `0xRRGGBB`.
 pub(crate) const SPAWN_BADGE_OK: u32 = 0x004e_c9b0;
-
-/// The rail's badge text, dark on the accent, as `0xRRGGBB`.
-pub(crate) const RAIL_BADGE_TEXT: u32 = 0x000f_1014;
 
 /// The border of a pane's shell-mark dot, as `0xRRGGBBAA`.
 pub(crate) const SHELL_MARK_BORDER: u32 = 0x0000_0059;
@@ -227,7 +224,6 @@ mod tests {
         assert_eq!(STATUS_ERR, 0x00ef_5c5c);
         assert_eq!(SPAWN_BADGE_OK, 0x004e_c9b0);
         assert_eq!(INPUT_SELECTION, 0xf07a_624d);
-        assert_eq!(RAIL_BADGE_TEXT, 0x000f_1014);
         assert_eq!(SHELL_MARK_BORDER, 0x0000_0059);
         assert_eq!(SHELL_MARK_OK, 0x004e_c9b0);
         assert_eq!(SHELL_MARK_FAIL, 0x00f4_8771);

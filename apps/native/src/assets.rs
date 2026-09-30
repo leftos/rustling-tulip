@@ -15,6 +15,12 @@ pub(crate) const REFRESH_ICON: &str = "icons/refresh.svg";
 pub(crate) const RECOVER_ICON: &str = "icons/recover.svg";
 /// The rail's Needs You icon.
 pub(crate) const NEEDS_YOU_ICON: &str = "icons/needs-you.svg";
+/// The rail's Settings icon.
+pub(crate) const SETTINGS_ICON: &str = "icons/settings.svg";
+/// A tab pill's close icon.
+pub(crate) const TAB_CLOSE_ICON: &str = "icons/tab-close.svg";
+/// The tab bar's new-tab icon.
+pub(crate) const TAB_NEW_ICON: &str = "icons/tab-new.svg";
 
 /// The working glyph's spinning arc.
 pub(crate) const STATUS_ARC_ICON: &str = "icons/status-arc.svg";
@@ -53,7 +59,7 @@ pub(crate) const SIDEBAR_PLUS_ICON: &str = "icons/sidebar-plus.svg";
 pub(crate) const SIDEBAR_MORE_ICON: &str = "icons/sidebar-more.svg";
 
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 22] = [
+const ASSETS: [(&str, &[u8]); 25] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -68,6 +74,15 @@ const ASSETS: [(&str, &[u8]); 22] = [
         NEEDS_YOU_ICON,
         include_bytes!("../assets/icons/needs-you.svg"),
     ),
+    (
+        SETTINGS_ICON,
+        include_bytes!("../assets/icons/settings.svg"),
+    ),
+    (
+        TAB_CLOSE_ICON,
+        include_bytes!("../assets/icons/tab-close.svg"),
+    ),
+    (TAB_NEW_ICON, include_bytes!("../assets/icons/tab-new.svg")),
     (
         STATUS_ARC_ICON,
         include_bytes!("../assets/icons/status-arc.svg"),

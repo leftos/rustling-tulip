@@ -5,23 +5,31 @@
 use gpui::{
     AnyElement, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
     MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Subscription, Window,
-    anchored, deferred, div, prelude::*, px,
+    anchored, deferred, div, prelude::*, px, svg,
 };
-use protocol::{ClientMessage, MergeLayout, RearrangeLayout, TabContent, TabEntry};
+use protocol::{
+    ClientMessage, MergeLayout, RearrangeLayout, SessionMode, SessionStatus, TabContent, TabEntry,
+};
 
+use crate::assets::{TAB_CLOSE_ICON, TAB_NEW_ICON};
 use crate::fonts;
+use crate::palette::{CHIP, GROUND, SUBTLE, SURFACE, WORKING};
 use crate::session_menu::{menu_frame, menu_item, menu_separator, muted_row};
+use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tab_menu::{MenuLine, TabAction, merge_lines, rearrange_lines};
 use crate::tabs::{PillClick, bound_pane_count, collect_panes, tab_session_counts};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::undo;
-use crate::{
-    BAR_BG, BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING,
-    tooltip,
-};
+use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
-const TAB_BAR_HEIGHT: f32 = 26.0;
+const TAB_BAR_HEIGHT: f32 = 38.0;
 const RENAME_WIDTH: f32 = 140.0;
+/// The busy pill's height and text size.
+const BUSY_PILL_HEIGHT: f32 = 18.0;
+const BUSY_PILL_TEXT_SIZE: f32 = 10.5;
+/// The size of a pill's close icon and of the new-tab icon.
+const CLOSE_ICON_SIZE: f32 = 12.0;
+const NEW_TAB_ICON_SIZE: f32 = 15.0;
 /// The alpha of the accent wash on a selected pill, about 14%.
 const SELECTED_WASH_ALPHA: u32 = 0x24;
 
@@ -538,7 +546,7 @@ impl RootView {
             .flex_none()
             .items_center()
             .h(px(TAB_BAR_HEIGHT))
-            .bg(gpui::rgb(BAR_BG))
+            .bg(gpui::rgb(SURFACE))
             .border_b_1()
             .border_color(gpui::rgb(BORDER))
             .text_size(px(UI_TEXT_SIZE))
@@ -582,9 +590,10 @@ impl RootView {
             )
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .h_full()
-            .px(px(10.0))
+            .pl(px(14.0))
+            .pr(px(12.0))
             .border_r_1()
             .border_color(gpui::rgb(BORDER))
             .cursor_pointer()
@@ -822,11 +831,11 @@ impl RootView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PillLook {
     Plain,
-    /// The tab shown: the panel's background.
+    /// The tab shown: the main area's ground.
     Active,
     /// Selected, not shown: a light accent wash.
     Washed,
-    /// Shown and selected: the panel's background in an accent outline.
+    /// Shown and selected: the main area's ground in an accent outline.
     ActiveOutlined,
 }
 
@@ -844,7 +853,7 @@ impl PillLook {
     fn background(self, accent: u32) -> Option<u32> {
         match self {
             Self::Plain => None,
-            Self::Active | Self::ActiveOutlined => Some((PANEL_BG << 8) | 0xff),
+            Self::Active | Self::ActiveOutlined => Some((GROUND << 8) | 0xff),
             Self::Washed => Some((accent << 8) | SELECTED_WASH_ALPHA),
         }
     }
@@ -863,20 +872,62 @@ fn pill_label(tab: &TabEntry) -> String {
     }
 }
 
-/// `{busy}/{total}` before a grid tab's name: amber while a pane is busy.
+/// What a grid tab's busy pill shows.
+#[derive(Debug, PartialEq, Eq)]
+struct BusyPill {
+    /// `{busy}/{total}`.
+    text: String,
+    /// Whether the working glyph leads the text: only while a pane is busy.
+    glyph: bool,
+    /// The text's colour, `0xRRGGBB`.
+    color: u32,
+}
+
+impl BusyPill {
+    /// The working colour with its glyph while a pane is busy, else a grey
+    /// `0/N`.
+    fn of(busy: usize, total: usize) -> Self {
+        Self {
+            text: format!("{busy}/{total}"),
+            glyph: busy > 0,
+            color: if busy > 0 { WORKING } else { SUBTLE },
+        }
+    }
+}
+
+/// The busy pill after a grid tab's name, tagged `tab-badge-<id>`; its glyph
+/// is tagged `tab-badge-glyph-<id>-working`.
 fn busy_badge(tab_id: &str, busy: usize, total: usize) -> Stateful<Div> {
+    let pill = BusyPill::of(busy, total);
     let name = format!("tab-badge-{tab_id}");
+    let glyph_id = format!("tab-badge-glyph-{tab_id}");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
+        .flex()
         .flex_none()
-        .text_color(gpui::rgb(if busy > 0 { WARNING } else { MUTED }))
+        .items_center()
+        .gap(px(4.0))
+        .h(px(BUSY_PILL_HEIGHT))
+        .px(px(6.0))
+        .rounded(px(BUSY_PILL_HEIGHT / 2.0))
+        .bg(gpui::rgb(CHIP))
+        .font_family(fonts::DEFAULT_FAMILY)
+        .text_size(px(BUSY_PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(pill.color))
         .tooltip(tooltip(format!("{busy} of {total} panes busy")))
-        .child(format!("{busy}/{total}"))
+        .when(pill.glyph, |row| {
+            row.child(glyph_view(
+                glyph(SessionStatus::Working, SessionMode::Interactive, false),
+                GlyphSize::Pill,
+                &glyph_id,
+            ))
+        })
+        .child(pill.text)
 }
 
-/// The ×, or ✓ while a close waits for its second click. It acts on the
-/// press so the root's click-elsewhere reset never sees it.
+/// The close icon, or ✓ while a close waits for its second click. It acts
+/// on the press so the root's click-elsewhere reset never sees it.
 fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
     let id = tab_id.to_owned();
     let tip = if armed {
@@ -888,12 +939,27 @@ fn close_button(tab_id: &str, armed: bool, cx: &mut Context<RootView>) -> Statef
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
-        .px(px(3.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .min_w(px(CLOSE_ICON_SIZE + 4.0))
+        .h(px(CLOSE_ICON_SIZE + 4.0))
         .rounded(px(3.0))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(armed, |button| button.text_color(gpui::rgb(DANGER)))
         .tooltip(tooltip(tip))
-        .child(if armed { "✓" } else { "×" })
+        .map(|button| {
+            if armed {
+                button.text_color(gpui::rgb(DANGER)).child("✓")
+            } else {
+                button.child(
+                    svg()
+                        .path(TAB_CLOSE_ICON)
+                        .size(px(CLOSE_ICON_SIZE))
+                        .text_color(gpui::rgb(SUBTLE)),
+                )
+            }
+        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
@@ -908,14 +974,20 @@ fn new_tab_button(cx: &mut Context<RootView>) -> Stateful<Div> {
     div()
         .id("new-tab")
         .debug_selector(|| "new-tab".to_owned())
-        .px(px(10.0))
+        .w(px(TAB_BAR_HEIGHT))
         .h_full()
         .flex()
         .items_center()
+        .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .tooltip(tooltip("New tab"))
-        .child("+")
+        .child(
+            svg()
+                .path(TAB_NEW_ICON)
+                .size(px(NEW_TAB_ICON_SIZE))
+                .text_color(gpui::rgb(MUTED)),
+        )
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
             this.new_tab();
             cx.notify();
@@ -934,7 +1006,7 @@ mod tests {
         let both = PillLook::of(true, true);
         assert_eq!(both, PillLook::ActiveOutlined);
         assert_eq!(both.background(ACCENT), active.background(ACCENT));
-        assert_eq!(both.background(ACCENT), Some((PANEL_BG << 8) | 0xff));
+        assert_eq!(both.background(ACCENT), Some((GROUND << 8) | 0xff));
         assert_eq!(both.outline(ACCENT), Some(ACCENT));
         assert_eq!(active.outline(ACCENT), None);
 
@@ -942,5 +1014,29 @@ mod tests {
         assert_eq!(washed.background(ACCENT), Some((ACCENT << 8) | 0x24));
         assert_eq!(washed.outline(ACCENT), None);
         assert_eq!(PillLook::of(false, false).background(ACCENT), None);
+    }
+
+    #[test]
+    fn busy_pill_shows_the_working_glyph_while_a_pane_is_busy() {
+        assert_eq!(
+            BusyPill::of(1, 2),
+            BusyPill {
+                text: "1/2".to_owned(),
+                glyph: true,
+                color: WORKING,
+            }
+        );
+    }
+
+    #[test]
+    fn idle_busy_pill_is_a_grey_zero_over_total_with_no_glyph() {
+        assert_eq!(
+            BusyPill::of(0, 3),
+            BusyPill {
+                text: "0/3".to_owned(),
+                glyph: false,
+                color: SUBTLE,
+            }
+        );
     }
 }

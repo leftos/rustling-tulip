@@ -33,8 +33,8 @@ use rustling_tulip_native::fonts;
 use rustling_tulip_native::offscreen::show_cloaked;
 use rustling_tulip_native::{
     Activity, Assets, Clock, Connection, FolderPicker, HandshakeInfo, NATIVE_PROTOCOL_VERSIONS,
-    NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener, RootDeps, RootView,
-    bind_keys,
+    NetCommand, NetEvent, Notifier, NotifyState, OpenFailure, Opener, RAIL_ITEM_HEIGHT, RAIL_WIDTH,
+    RootDeps, RootView, bind_keys,
 };
 use serde_json::{Value, json};
 
@@ -48,15 +48,10 @@ const DRIVE_WAIT: Duration = Duration::from_millis(1000);
 const FAKE_PORT: u16 = 4242;
 const FAKE_PID: u32 = 1;
 
-/// The activity rail's layout in logical pixels
-/// (`apps/native/src/activity_bar.rs`): its width, top padding, one item's
-/// height (padding, icon, padding) and the gap between items.
-const RAIL_WIDTH: i32 = 40;
-const RAIL_TOP: i32 = 6;
-const RAIL_ITEM_HEIGHT: i32 = 9 + 18 + 9;
-const RAIL_GAP: i32 = 2;
 /// The Source control item's place on the rail, after Sessions and Needs You.
-const SOURCE_CONTROL_ITEM: i32 = 2;
+/// The rail's buttons stack from its top with no gap, each
+/// [`RAIL_ITEM_HEIGHT`] tall.
+const SOURCE_CONTROL_ITEM: f32 = 2.0;
 
 const TULIP: &str = "rustling-tulip";
 const YAAT: &str = "yaat";
@@ -320,8 +315,13 @@ fn drive(view: View, address: usize, window: &mut Window, cx: &mut App) -> Resul
     match view {
         View::Main => Ok(()),
         View::SourceControl => {
-            let y = RAIL_TOP + SOURCE_CONTROL_ITEM * (RAIL_ITEM_HEIGHT + RAIL_GAP);
-            win32::click(address, (RAIL_WIDTH / 2, y + RAIL_ITEM_HEIGHT / 2))
+            let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the rail's middle lies within a few hundred logical pixels"
+            )]
+            let at = ((RAIL_WIDTH / 2.0).round() as i32, y.round() as i32);
+            win32::click(address, at)
         }
         View::Diff => press("ctrl-3", window, cx),
         View::Settings => press("ctrl-,", window, cx),
