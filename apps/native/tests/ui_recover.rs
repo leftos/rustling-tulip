@@ -20,7 +20,7 @@ use protocol::{
     SplitDirection,
 };
 use rustling_tulip_native::RecoverRow;
-use serde_json::json;
+use serde_json::{Value, json};
 use support::{Fixture, Harness, PROTOCOL, TestDir, history_item, pane, repo, session, split, tab};
 
 fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
@@ -91,6 +91,23 @@ fn recover_request(h: &mut Harness<'_>) -> (String, Vec<RecoverItem>) {
         .filter_map(|msg| match msg {
             ClientMessage::RecoverSessions { request_id, items } => {
                 Some((request_id.expect("a request id"), items))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 1, "one recover request");
+    requests.remove(0)
+}
+
+/// The one `RecoverSessions` sent since the last read, as the JSON the fake
+/// daemon receives.
+fn recover_json(h: &mut Harness<'_>) -> Value {
+    let mut requests: Vec<Value> = h
+        .sent()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ClientMessage::RecoverSessions { .. } => {
+                Some(serde_json::to_value(msg).expect("a recover request serializes"))
             }
             _ => None,
         })
@@ -333,6 +350,107 @@ fn recover_as_choices_match_folder_flags(cx: &mut TestAppContext) {
         Some("Shell running claude --resume"),
         "the only choice stays"
     );
+}
+
+#[gpui::test]
+fn codex_row_recovers_as_codex(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_with(
+        &mut h,
+        vec![
+            history_item("x")
+                .agent("codex")
+                .agent_conversation_id("rollout-7")
+                .own_agent_resumable(true)
+                .ended_minutes_ago(10)
+                .build(),
+        ],
+    );
+    let x = row(&mut h, "x");
+    assert_eq!(
+        x.fixed_how.as_deref(),
+        Some("Codex session, resumes its conversation")
+    );
+    assert_eq!(x.recover_as, None, "one way to recover needs no choice");
+    assert!(!h.in_model("recover-as-x"));
+    assert_eq!(x.disabled, None);
+    assert!(x.ticked, "a resumable loss is pre-ticked");
+
+    h.click_on("recover-submit");
+    let sent = recover_json(&mut h);
+    assert_eq!(
+        sent["items"],
+        json!([{
+            "history_id": "x",
+            "conversation_id": "rollout-7",
+            "how": {"type": "own_agent"},
+        }])
+    );
+}
+
+#[gpui::test]
+fn fresh_run_row_says_so(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_with(
+        &mut h,
+        vec![
+            history_item("x")
+                .agent("codex")
+                .ended_minutes_ago(10)
+                .build(),
+        ],
+    );
+    let x = row(&mut h, "x");
+    assert_eq!(
+        x.fixed_how.as_deref(),
+        Some("Codex session, fresh run: no conversation recorded")
+    );
+    assert!(!x.ticked, "a fresh run is left out of the pre-tick");
+    assert_eq!(button(&mut h), ("Recover 0".to_owned(), false));
+
+    h.click_on("recover-row-x");
+    assert!(row(&mut h, "x").ticked, "the user may still tick it");
+    h.click_on("recover-submit");
+    let sent = recover_json(&mut h);
+    assert_eq!(
+        sent["items"],
+        json!([{
+            "history_id": "x",
+            "conversation_id": null,
+            "how": {"type": "own_agent"},
+        }])
+    );
+}
+
+#[gpui::test]
+fn no_config_agent_row_is_disabled_with_reason(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    open_with(
+        &mut h,
+        vec![
+            history_item("x")
+                .agent("codex")
+                .agent_conversation_id("rollout-7")
+                .own_agent_resumable(true)
+                .folder_only("D:\\proj", true, None)
+                .ended_minutes_ago(10)
+                .build(),
+        ],
+    );
+    let x = row(&mut h, "x");
+    assert_eq!(
+        x.disabled.as_deref(),
+        Some("no spawn settings recorded"),
+        "not the Claude reason"
+    );
+    assert_eq!(x.fixed_how, None, "there is no way to recover to describe");
+    assert!(!x.ticked);
+    h.click_on("recover-select-all");
+    assert!(!row(&mut h, "x").ticked, "a disabled row never ticks");
+    assert_eq!(button(&mut h), ("Recover 0".to_owned(), false));
 }
 
 #[gpui::test]
