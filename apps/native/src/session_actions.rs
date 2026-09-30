@@ -4,11 +4,11 @@
 
 use std::collections::HashMap;
 
-use protocol::{ClientMessage, SessionSnapshot, SessionStatus};
+use protocol::{ClientMessage, SessionSnapshot, SessionStatus, TabEntry};
 
 use crate::headless;
 use crate::sidebar::{LeafState, runtime_label};
-use crate::tabs::PaneBinding;
+use crate::tabs::{PaneBinding, PaneTarget, Placement, TabsModel};
 
 /// Which set of actions a session offers. Parked, stopped and running
 /// follow `SessionContextMenu.tsx`'s state buckets. An abandoned session
@@ -81,21 +81,97 @@ pub(crate) struct HeaderStopConfirm {
     armed: Option<String>,
 }
 
-/// The sessions being restarted or resumed, by the request id of their
+/// Which submenu replaces the context menu's rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Submenu {
+    /// None: the menu shows its rows.
+    #[default]
+    None,
+    Accent,
+    Duplicate,
+}
+
+/// A row of the menu's group between the state actions and the appearance
+/// rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionRow {
+    /// "Duplicate ▸", which opens the Duplicate submenu.
+    Duplicate,
+}
+
+/// A [`SessionRow`] as one session offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OfferedRow {
+    pub(crate) row: SessionRow,
+    /// Why the row is dimmed and does nothing; `None` when it can be chosen.
+    pub(crate) disabled: Option<&'static str>,
+}
+
+/// Why a headless session's Duplicate ▸ is dimmed.
+pub(crate) const HEADLESS_DUPLICATE_TIP: &str =
+    "Headless sessions are one-shot kickoffs; spawn a new one instead";
+
+/// A line of a submenu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmenuLine<T> {
+    /// "‹ Back" to the menu's rows, tagged `selector`.
+    Back {
+        selector: &'static str,
+    },
+    Separator,
+    Choice {
+        selector: String,
+        label: String,
+        choice: T,
+    },
+}
+
+/// Where a duplicate goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DuplicateTarget {
+    /// A restart or resume: the copy takes every pane that showed the
+    /// original, or a new tab when none did, and the original is discarded.
+    Restart,
+    /// A new tab of its own; the original stays.
+    NewTab,
+    /// Grid tab `id`, by [`crate::tabs::pane_target_for_session`]; the
+    /// original stays.
+    Tab(String),
+}
+
+/// A duplicate on its way: the session it copies and where it goes.
+#[derive(Debug)]
+struct PendingDuplicate {
+    original: String,
+    target: DuplicateTarget,
+}
+
+/// The sessions being duplicated, by the request id of their
 /// `DuplicateSession`.
 #[derive(Debug, Default)]
 pub(crate) struct Duplicates {
-    pending: HashMap<String, String>,
+    pending: HashMap<String, PendingDuplicate>,
 }
 
-/// How a duplicate that arrived takes its original's place.
+/// Where the view turns once a duplicate's placement is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlacedFocus {
+    /// A new tab is on its way; its arrival shows it.
+    NewTab,
+    /// Show `tab_id` with `pane_id` focused.
+    Pane { tab_id: String, pane_id: String },
+    /// Show `tab_id`; the pane the placement adds takes the focus when it
+    /// arrives.
+    Tab(String),
+}
+
+/// How a duplicate that arrived is placed.
 #[derive(Debug, Clone)]
 pub(crate) struct Placed {
-    /// Where the duplicate goes, then the original's discard.
+    /// Where the duplicate goes, then, for a restart, the original's
+    /// discard.
     pub(crate) messages: Vec<ClientMessage>,
-    /// The first pane that showed the original, which the duplicate takes
-    /// over and which gets the focus; `None` when it opens a new tab.
-    pub(crate) focus: Option<(String, String)>,
+    pub(crate) focus: PlacedFocus,
 }
 
 pub(crate) fn action_state(session: &SessionSnapshot) -> ActionState {
@@ -289,6 +365,60 @@ pub(crate) fn menu_entries(session: &SessionSnapshot, mode: MenuMode) -> Vec<Men
     entries
 }
 
+/// The rows of the group between the state actions and the appearance
+/// rows. Duplicate ▸ is offered in every state; a headless session's is
+/// dimmed.
+pub(crate) fn session_rows(session: &SessionSnapshot) -> Vec<OfferedRow> {
+    vec![OfferedRow {
+        row: SessionRow::Duplicate,
+        disabled: headless::is_headless(session).then_some(HEADLESS_DUPLICATE_TIP),
+    }]
+}
+
+/// The Duplicate submenu: Back, New tab, then every grid tab by name
+/// behind a separator.
+pub(crate) fn duplicate_lines(tabs: &[TabEntry]) -> Vec<SubmenuLine<DuplicateTarget>> {
+    let mut lines = vec![
+        SubmenuLine::Back {
+            selector: "duplicate-back",
+        },
+        SubmenuLine::Choice {
+            selector: "duplicate-new-tab".to_owned(),
+            label: "New tab".to_owned(),
+            choice: DuplicateTarget::NewTab,
+        },
+    ];
+    let grid_tabs: Vec<SubmenuLine<DuplicateTarget>> = tabs
+        .iter()
+        .filter(|tab| tab.grid().is_some())
+        .map(|tab| SubmenuLine::Choice {
+            selector: format!("duplicate-tab-{}", tab.id),
+            label: tab.name.clone(),
+            choice: DuplicateTarget::Tab(tab.id.clone()),
+        })
+        .collect();
+    if !grid_tabs.is_empty() {
+        lines.push(SubmenuLine::Separator);
+        lines.extend(grid_tabs);
+    }
+    lines
+}
+
+impl SessionRow {
+    /// The row's debug selector.
+    pub(crate) fn selector(self) -> &'static str {
+        match self {
+            Self::Duplicate => "session-menu-duplicate",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Duplicate => "Duplicate ▸",
+        }
+    }
+}
+
 /// The rename a submitted name sends; a blank name restores the default.
 pub(crate) fn rename_message(session_id: &str, text: &str) -> ClientMessage {
     let label = text.trim();
@@ -431,18 +561,25 @@ impl HeaderStopConfirm {
 }
 
 impl Duplicates {
-    /// Records a restart of `session_id` under `request_id` and returns the
-    /// request to send; `None` while one for the session is on the way.
+    /// Records a duplicate of `session_id` to `target` under `request_id`
+    /// and returns the request to send; `None` for a restart while one of
+    /// the session is on the way.
     pub(crate) fn request(
         &mut self,
         session_id: &str,
         request_id: String,
+        target: DuplicateTarget,
     ) -> Option<ClientMessage> {
-        if self.is_pending(session_id) {
+        if target == DuplicateTarget::Restart && self.is_pending(session_id) {
             return None;
         }
-        self.pending
-            .insert(request_id.clone(), session_id.to_owned());
+        self.pending.insert(
+            request_id.clone(),
+            PendingDuplicate {
+                original: session_id.to_owned(),
+                target,
+            },
+        );
         Some(ClientMessage::DuplicateSession {
             session_id: session_id.to_owned(),
             request_id: Some(request_id),
@@ -451,10 +588,12 @@ impl Duplicates {
 
     /// Whether a restart or resume of `session_id` waits for its reply.
     pub(crate) fn is_pending(&self, session_id: &str) -> bool {
-        self.pending.values().any(|original| original == session_id)
+        self.pending
+            .values()
+            .any(|dup| dup.target == DuplicateTarget::Restart && dup.original == session_id)
     }
 
-    /// Whether `request_id` is one of this client's restarts.
+    /// Whether `request_id` is one of this client's duplicates.
     pub(crate) fn has_request(&self, request_id: &str) -> bool {
         self.pending.contains_key(request_id)
     }
@@ -464,52 +603,86 @@ impl Duplicates {
         self.pending.remove(request_id).is_some()
     }
 
-    /// Forgets every restart, as a new connection must.
+    /// Forgets every duplicate, as a new connection must.
     pub(crate) fn clear(&mut self) {
         self.pending.clear();
     }
 
-    /// When `request_id` names a pending restart: the messages that put
-    /// `new_id` where the original was (every pane that showed it, or a new
-    /// tab when none did) and then discard the original. The discard goes
-    /// last so the daemon has rebound the panes before it closes the
-    /// original's.
+    /// When `request_id` names a pending duplicate: the messages that place
+    /// `copy` by its target, and where the view turns. A restart takes the
+    /// original's place ([`restart_placement`]); a copy goes to a new tab,
+    /// or into its tab by pane target, and keeps the original.
     pub(crate) fn place(
         &mut self,
         request_id: &str,
-        new_id: &str,
-        bindings: &[PaneBinding],
+        copy: &SessionSnapshot,
+        tabs: &TabsModel,
+        sessions: &[SessionSnapshot],
     ) -> Option<Placed> {
-        let original = self.pending.remove(request_id)?;
-        let panes: Vec<&PaneBinding> = bindings
-            .iter()
-            .filter(|binding| binding.session_id.as_deref() == Some(original.as_str()))
-            .collect();
-        let mut messages: Vec<ClientMessage> = panes
-            .iter()
-            .map(|binding| ClientMessage::ReplacePaneSession {
-                tab_id: binding.tab_id.clone(),
-                pane_id: binding.pane_id.clone(),
-                session_id: Some(new_id.to_owned()),
-            })
-            .collect();
-        if panes.is_empty() {
-            messages.push(ClientMessage::CreateTab {
-                name: None,
-                initial_session_id: Some(new_id.to_owned()),
-            });
-        }
-        messages.push(ClientMessage::DiscardSession {
-            session_id: original,
-            cleanup: Vec::new(),
-        });
+        let pending = self.pending.remove(request_id)?;
+        let placement = match pending.target {
+            DuplicateTarget::Restart => {
+                return Some(restart_placement(
+                    pending.original,
+                    &copy.id,
+                    &tabs.bindings(),
+                ));
+            }
+            DuplicateTarget::NewTab => Placement::NewTab,
+            DuplicateTarget::Tab(tab_id) => tabs.place_in(&tab_id, copy, sessions),
+        };
+        let focus = match &placement {
+            Placement::NewTab => PlacedFocus::NewTab,
+            Placement::Pane {
+                tab_id,
+                target: PaneTarget::Replace { pane_id },
+            } => PlacedFocus::Pane {
+                tab_id: tab_id.clone(),
+                pane_id: pane_id.clone(),
+            },
+            Placement::Pane { tab_id, .. } => PlacedFocus::Tab(tab_id.clone()),
+        };
         Some(Placed {
-            messages,
-            focus: panes
-                .first()
-                .map(|binding| (binding.tab_id.clone(), binding.pane_id.clone())),
+            messages: vec![placement.message(&copy.id)],
+            focus,
         })
     }
+}
+
+/// The messages that put `new_id` where `original` was (every pane that
+/// showed it, focusing the first, or a new tab when none did) and then
+/// discard the original. The discard goes last so the daemon has rebound
+/// the panes before it closes the original's.
+fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -> Placed {
+    let panes: Vec<&PaneBinding> = bindings
+        .iter()
+        .filter(|binding| binding.session_id.as_deref() == Some(original.as_str()))
+        .collect();
+    let mut messages: Vec<ClientMessage> = panes
+        .iter()
+        .map(|binding| ClientMessage::ReplacePaneSession {
+            tab_id: binding.tab_id.clone(),
+            pane_id: binding.pane_id.clone(),
+            session_id: Some(new_id.to_owned()),
+        })
+        .collect();
+    if panes.is_empty() {
+        messages.push(ClientMessage::CreateTab {
+            name: None,
+            initial_session_id: Some(new_id.to_owned()),
+        });
+    }
+    messages.push(ClientMessage::DiscardSession {
+        session_id: original,
+        cleanup: Vec::new(),
+    });
+    let focus = panes
+        .first()
+        .map_or(PlacedFocus::NewTab, |binding| PlacedFocus::Pane {
+            tab_id: binding.tab_id.clone(),
+            pane_id: binding.pane_id.clone(),
+        });
+    Placed { messages, focus }
 }
 
 #[cfg(test)]
@@ -520,12 +693,17 @@ impl Duplicates {
 )]
 mod tests {
     use super::{
-        ActionState, Duplicates, HeaderStopConfirm, MenuEntry, MenuMode, SessionAction, Step,
+        ActionState, DuplicateTarget, Duplicates, HEADLESS_DUPLICATE_TIP, HeaderStopConfirm,
+        MenuEntry, MenuMode, OfferedRow, PlacedFocus, SessionAction, SessionRow, Step,
         action_state, exit_code_label, exited_message, header_shows_exit_code, menu_actions,
         menu_entries, overlay_actions, pane_shows_exit, plan, rename_message, self_exited,
+        session_rows,
     };
-    use crate::tabs::PaneBinding;
-    use protocol::{CleanupAction, ClientMessage, SessionMode, SessionSnapshot, SessionStatus};
+    use crate::tabs::tests::{model_with, pane, tab};
+    use protocol::{
+        CleanupAction, ClientMessage, GridNode, SessionMode, SessionSnapshot, SessionStatus,
+        SplitDirection,
+    };
     use serde_json::json;
 
     use SessionAction as A;
@@ -912,32 +1090,213 @@ mod tests {
         assert!(!confirm.click("s1"), "a disarm needs two clicks again");
     }
 
-    fn binding(tab: &str, pane: &str, session: Option<&str>) -> PaneBinding {
-        PaneBinding {
-            tab_id: tab.to_owned(),
-            pane_id: pane.to_owned(),
-            session_id: session.map(str::to_owned),
+    fn named(id: &str) -> SessionSnapshot {
+        let mut s = session("idle");
+        s.id = id.to_owned();
+        s
+    }
+
+    fn hsplit(first: GridNode, second: GridNode) -> GridNode {
+        GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
         }
+    }
+
+    fn diff_tab(id: &str) -> protocol::TabEntry {
+        serde_json::from_value(json!({
+            "id": id,
+            "name": id,
+            "content": { "kind": "diff", "repo_id": "r1", "path": "a.rs", "against": null },
+            "created_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("diff tab fixture")
+    }
+
+    fn pane_focus(tab_id: &str, pane_id: &str) -> PlacedFocus {
+        PlacedFocus::Pane {
+            tab_id: tab_id.to_owned(),
+            pane_id: pane_id.to_owned(),
+        }
+    }
+
+    fn has_discard(messages: &[ClientMessage]) -> bool {
+        messages
+            .iter()
+            .any(|m| matches!(m, ClientMessage::DiscardSession { .. }))
+    }
+
+    #[test]
+    fn actions_duplicate_row_is_offered_for_non_headless_sessions() {
+        let offered = [OfferedRow {
+            row: SessionRow::Duplicate,
+            disabled: None,
+        }];
+        for s in [
+            session("idle"),
+            session("stopped"),
+            inactive(with_worktree(session("stopped"))),
+            abandoned(),
+        ] {
+            assert_eq!(session_rows(&s), offered, "{:?}", action_state(&s));
+        }
+        assert_eq!(SessionRow::Duplicate.label(), "Duplicate ▸");
+    }
+
+    #[test]
+    fn actions_headless_session_duplicate_row_is_disabled_with_tooltip() {
+        for status in ["working", "stopped"] {
+            let mut s = session(status);
+            s.mode = SessionMode::Headless;
+            assert_eq!(
+                session_rows(&s),
+                [OfferedRow {
+                    row: SessionRow::Duplicate,
+                    disabled: Some(HEADLESS_DUPLICATE_TIP),
+                }],
+                "{status}"
+            );
+        }
+        assert_eq!(
+            HEADLESS_DUPLICATE_TIP,
+            "Headless sessions are one-shot kickoffs; spawn a new one instead"
+        );
+    }
+
+    #[test]
+    fn actions_duplicate_to_new_tab_creates_a_tab_and_keeps_the_original() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        let mut dups = Duplicates::default();
+        let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::NewTab);
+        assert!(matches!(
+            request,
+            Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id) }) if session_id == "s1" && id == "req-1"
+        ));
+        assert!(!dups.is_pending("s1"), "a copy is no restart on the way");
+        assert!(dups.has_request("req-1"));
+        let placed = dups
+            .place("req-1", &named("s2"), &tabs, &[])
+            .expect("placed");
+        assert_eq!(placed.focus, PlacedFocus::NewTab);
+        assert!(
+            matches!(placed.messages.as_slice(), [
+                ClientMessage::CreateTab { name: None, initial_session_id: Some(id) },
+            ] if id == "s2"),
+            "the copy opens a tab and nothing is discarded: {:?}",
+            placed.messages
+        );
+    }
+
+    #[test]
+    fn actions_duplicate_into_a_tab_places_by_pane_target() {
+        let tabs = model_with(&[
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &hsplit(pane("a", Some("s9")), pane("b", None))),
+            tab("t3", &pane("c", Some("s9"))),
+            diff_tab("d1"),
+        ]);
+        let place = |target: DuplicateTarget| {
+            let mut dups = Duplicates::default();
+            dups.request("s1", "req".to_owned(), target);
+            dups.place("req", &named("s2"), &tabs, &[]).expect("placed")
+        };
+
+        let empty = place(DuplicateTarget::Tab("t2".to_owned()));
+        assert_eq!(empty.focus, pane_focus("t2", "b"));
+        assert!(
+            matches!(empty.messages.as_slice(), [
+                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) },
+            ] if tab_id == "t2" && pane_id == "b" && id == "s2"),
+            "the tab's empty pane takes the copy: {:?}",
+            empty.messages
+        );
+
+        let full = place(DuplicateTarget::Tab("t3".to_owned()));
+        assert_eq!(full.focus, PlacedFocus::Tab("t3".to_owned()));
+        assert!(
+            matches!(full.messages.as_slice(), [
+                ClientMessage::SplitPane { tab_id, pane_id, new_session_id: Some(id), .. },
+            ] if tab_id == "t3" && pane_id == "c" && id == "s2"),
+            "a full tab splits its pane: {:?}",
+            full.messages
+        );
+
+        for gone in ["gone", "d1"] {
+            let placed = place(DuplicateTarget::Tab(gone.to_owned()));
+            assert_eq!(placed.focus, PlacedFocus::NewTab, "{gone}");
+            assert!(
+                matches!(
+                    placed.messages.as_slice(),
+                    [ClientMessage::CreateTab { .. }]
+                ),
+                "{gone}: {:?}",
+                placed.messages
+            );
+        }
+    }
+
+    #[test]
+    fn actions_restart_still_replaces_and_discards() {
+        let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
+        let mut dups = Duplicates::default();
+        dups.request("s1", "copy".to_owned(), DuplicateTarget::NewTab);
+        assert!(
+            dups.request("s1", "restart".to_owned(), DuplicateTarget::Restart)
+                .is_some(),
+            "a copy on the way does not hold up a restart"
+        );
+        assert!(dups.is_pending("s1"));
+        assert!(
+            dups.request("s1", "again".to_owned(), DuplicateTarget::Restart)
+                .is_none()
+        );
+        assert!(
+            dups.request("s1", "copy-2".to_owned(), DuplicateTarget::NewTab)
+                .is_some(),
+            "copies are not held up by the restart"
+        );
+
+        let restarted = dups
+            .place("restart", &named("s3"), &tabs, &[])
+            .expect("placed");
+        assert_eq!(restarted.focus, pane_focus("t1", "p1"));
+        assert!(
+            matches!(restarted.messages.as_slice(), [
+                ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(id) },
+                discard,
+            ] if tab_id == "t1" && pane_id == "p1" && id == "s3" && is_discard(discard, &[])),
+            "{:?}",
+            restarted.messages
+        );
+        assert!(!dups.is_pending("s1"));
+        let copied = dups
+            .place("copy", &named("s2"), &tabs, &[])
+            .expect("placed");
+        assert!(!has_discard(&copied.messages), "{:?}", copied.messages);
     }
 
     #[test]
     fn actions_duplicate_replaces_every_pane_of_the_original_then_discards_it() {
         let mut dups = Duplicates::default();
-        let request = dups.request("s1", "req-1".to_owned());
+        let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::Restart);
         assert!(matches!(
             request,
             Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id) }) if session_id == "s1" && id == "req-1"
         ));
-        let bindings = [
-            binding("t1", "p1", Some("s1")),
-            binding("t1", "p2", Some("s9")),
-            binding("t2", "p3", Some("s1")),
-        ];
-        assert!(dups.place("other", "s2", &bindings).is_none());
+        let tabs = model_with(&[
+            tab(
+                "t1",
+                &hsplit(pane("p1", Some("s1")), pane("p2", Some("s9"))),
+            ),
+            tab("t2", &pane("p3", Some("s1"))),
+        ]);
+        assert!(dups.place("other", &named("s2"), &tabs, &[]).is_none());
         let placed = dups
-            .place("req-1", "s2", &bindings)
+            .place("req-1", &named("s2"), &tabs, &[])
             .expect("the matching reply places the duplicate");
-        assert_eq!(placed.focus, Some(("t1".to_owned(), "p1".to_owned())));
+        assert_eq!(placed.focus, pane_focus("t1", "p1"));
         let replaced: Vec<(&str, &str)> = placed
             .messages
             .iter()
@@ -959,7 +1318,7 @@ mod tests {
             placed.messages
         );
         assert!(
-            dups.place("req-1", "s3", &bindings).is_none(),
+            dups.place("req-1", &named("s3"), &tabs, &[]).is_none(),
             "each request is placed once"
         );
     }
@@ -967,11 +1326,12 @@ mod tests {
     #[test]
     fn actions_duplicate_of_a_session_no_pane_shows_opens_a_tab() {
         let mut dups = Duplicates::default();
-        dups.request("s1", "req-1".to_owned());
+        dups.request("s1", "req-1".to_owned(), DuplicateTarget::Restart);
+        let tabs = model_with(&[tab("t1", &pane("p1", None))]);
         let placed = dups
-            .place("req-1", "s2", &[binding("t1", "p1", None)])
+            .place("req-1", &named("s2"), &tabs, &[])
             .expect("placed");
-        assert_eq!(placed.focus, None);
+        assert_eq!(placed.focus, PlacedFocus::NewTab);
         assert!(
             matches!(placed.messages.as_slice(), [
                 ClientMessage::CreateTab { name: None, initial_session_id: Some(id) },
@@ -984,19 +1344,20 @@ mod tests {
 
     #[test]
     fn actions_duplicate_is_one_at_a_time_until_answered_or_cleared() {
+        let restart = || DuplicateTarget::Restart;
         let mut dups = Duplicates::default();
-        assert!(dups.request("s1", "req-1".to_owned()).is_some());
+        assert!(dups.request("s1", "req-1".to_owned(), restart()).is_some());
         assert!(dups.is_pending("s1"));
         assert!(dups.has_request("req-1"));
         assert!(
-            dups.request("s1", "req-2".to_owned()).is_none(),
+            dups.request("s1", "req-2".to_owned(), restart()).is_none(),
             "a second restart of s1 while the first is on the way"
         );
-        assert!(dups.request("s2", "req-3".to_owned()).is_some());
+        assert!(dups.request("s2", "req-3".to_owned(), restart()).is_some());
         assert!(!dups.fail("unknown"));
         assert!(dups.fail("req-1"));
         assert!(!dups.is_pending("s1"));
-        assert!(dups.request("s1", "req-4".to_owned()).is_some());
+        assert!(dups.request("s1", "req-4".to_owned(), restart()).is_some());
         dups.clear();
         assert!(!dups.is_pending("s1") && !dups.is_pending("s2"));
     }

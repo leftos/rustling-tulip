@@ -1728,7 +1728,7 @@ impl RootView {
         if moved {
             self.apply_session_pane_fonts(&session.id, cx);
         }
-        self.place_duplicate(request_id, &session.id, window, cx);
+        self.place_duplicate(request_id, session, window, cx);
         self.place_spawn(request_id, session, window, cx);
     }
 

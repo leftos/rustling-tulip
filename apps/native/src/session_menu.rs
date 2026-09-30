@@ -17,9 +17,10 @@ use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
 use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
-    ABANDONED_ACTIONS, ActionState, MenuEntry, MenuMode, SessionAction, Step, abandoned_lines,
-    action_state, exit_code_label, exited_message, header_shows_exit_code, menu_entries,
-    orphan_banner_text, overlay_actions, pane_shows_exit, plan, rename_message,
+    ABANDONED_ACTIONS, ActionState, DuplicateTarget, MenuEntry, MenuMode, OfferedRow, PlacedFocus,
+    SessionAction, SessionRow, Step, Submenu, SubmenuLine, abandoned_lines, action_state,
+    duplicate_lines, exit_code_label, exited_message, header_shows_exit_code, menu_entries,
+    orphan_banner_text, overlay_actions, pane_shows_exit, plan, rename_message, session_rows,
 };
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
@@ -120,9 +121,12 @@ pub(crate) struct SessionMenu {
     mode: MenuMode,
     /// The name editor, which replaces the rows while renaming.
     rename: Option<(Entity<TextInput>, Subscription)>,
-    /// Whether the Accent submenu replaces the rows.
-    accent: bool,
+    /// The submenu that replaces the rows, if any.
+    submenu: Submenu,
 }
+
+/// The label of a submenu's row back to the menu's rows.
+const SUBMENU_BACK: &str = "‹ Back";
 
 /// The row that opens the appearance editor.
 const APPEARANCE_ROW: &str = "session-menu-appearance";
@@ -214,13 +218,80 @@ impl RootView {
         }
     }
 
-    /// The open menu when it shows accent rows: its actions list or its
-    /// Accent submenu, for a session the list holds.
-    fn accent_menu(&self) -> Option<&SessionMenu> {
+    /// The open menu when it shows its actions list or one of its
+    /// submenus, for a session the list holds.
+    fn actions_menu(&self) -> Option<&SessionMenu> {
         self.menu
             .as_ref()
             .filter(|menu| menu.rename.is_none() && menu.mode == MenuMode::Actions)
             .filter(|menu| self.sidebar.session(&menu.session_id).is_some())
+    }
+
+    /// The open menu when it shows accent rows: its actions list or its
+    /// Accent submenu.
+    fn accent_menu(&self) -> Option<&SessionMenu> {
+        self.actions_menu()
+            .filter(|menu| menu.submenu != Submenu::Duplicate)
+    }
+
+    /// The rows under the state actions and above the appearance rows, as
+    /// the open menu's session offers them; none while a submenu is open.
+    fn offered_rows(&self) -> Vec<OfferedRow> {
+        self.actions_menu()
+            .filter(|menu| menu.submenu == Submenu::None)
+            .and_then(|menu| self.sidebar.session(&menu.session_id))
+            .map(session_rows)
+            .unwrap_or_default()
+    }
+
+    /// The Duplicate submenu's lines while it is open.
+    fn duplicate_menu_lines(&self) -> Option<Vec<SubmenuLine<DuplicateTarget>>> {
+        self.actions_menu()
+            .filter(|menu| menu.submenu == Submenu::Duplicate)
+            .map(|_| duplicate_lines(self.tabs.tabs()))
+    }
+
+    /// The selectors of the menu's rows as shown now, in the groups its
+    /// separators divide: the state actions, then the rows under them,
+    /// then the appearance rows; or an open submenu's rows (the Accent
+    /// submenu's as one group).
+    #[must_use]
+    pub fn menu_groups(&self) -> Vec<Vec<String>> {
+        if let Some(lines) = self.duplicate_menu_lines() {
+            let mut groups = vec![Vec::new()];
+            for line in lines {
+                let selector = match line {
+                    SubmenuLine::Separator => {
+                        groups.push(Vec::new());
+                        continue;
+                    }
+                    SubmenuLine::Back { selector } => selector.to_owned(),
+                    SubmenuLine::Choice { selector, .. } => selector,
+                };
+                if let Some(group) = groups.last_mut() {
+                    group.push(selector);
+                }
+            }
+            return groups;
+        }
+        let offered = self
+            .offered_rows()
+            .into_iter()
+            .map(|offered| offered.row.selector().to_owned())
+            .collect();
+        [self.menu_rows(), offered, self.accent_menu_rows()]
+            .into_iter()
+            .filter(|group| !group.is_empty())
+            .collect()
+    }
+
+    /// The tooltip of the menu row tagged `selector` when it is dimmed.
+    #[must_use]
+    pub fn menu_disabled_tip(&self, selector: &str) -> Option<&'static str> {
+        self.offered_rows()
+            .into_iter()
+            .find(|offered| offered.row.selector() == selector)
+            .and_then(|offered| offered.disabled)
     }
 
     /// The selectors of the menu's appearance rows as shown now: the rows
@@ -231,7 +302,7 @@ impl RootView {
         let Some(menu) = self.accent_menu() else {
             return Vec::new();
         };
-        if !menu.accent {
+        if menu.submenu != Submenu::Accent {
             return vec![APPEARANCE_ROW.to_owned(), ACCENT_ROW.to_owned()];
         }
         let presets = ACCENT_PRESETS.iter().map(|p| preset_selector(p.name));
@@ -287,7 +358,7 @@ impl RootView {
             at,
             mode: MenuMode::Actions,
             rename: None,
-            accent: false,
+            submenu: Submenu::None,
         });
         self.confirm.disarm();
         self.menu_focus.focus(window);
@@ -414,22 +485,38 @@ impl RootView {
         };
         menu.mode = mode;
         menu.rename = None;
-        menu.accent = false;
+        menu.submenu = Submenu::None;
         self.confirm.disarm();
         self.menu_focus.focus(window);
         cx.notify();
     }
 
-    /// Swaps the menu's rows for the Accent submenu (`open`), or back to
-    /// the actions.
-    fn show_accent_menu(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Swaps the menu's rows for `submenu`, or back to the actions
+    /// ([`Submenu::None`]).
+    fn show_submenu(&mut self, submenu: Submenu, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = &mut self.menu else {
             return;
         };
-        menu.accent = open;
+        menu.submenu = submenu;
         self.confirm.disarm();
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    /// Duplicates `session_id` to `target` and closes the menu; the reply
+    /// places the copy ([`Self::place_duplicate`]).
+    fn duplicate_to(
+        &mut self,
+        session_id: &str,
+        target: DuplicateTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request_id = crate::new_request_id();
+        if let Some(request) = self.duplicates.request(session_id, request_id, target) {
+            self.send(request);
+        }
+        self.close_session_menu(window, cx);
     }
 
     /// Sets `session_id`'s accent and frame colour both to `color`, or
@@ -490,7 +577,10 @@ impl RootView {
             Step::EditName => self.start_session_rename(&session, window, cx),
             Step::Duplicate => {
                 let request_id = crate::new_request_id();
-                if let Some(request) = self.duplicates.request(session_id, request_id) {
+                if let Some(request) =
+                    self.duplicates
+                        .request(session_id, request_id, DuplicateTarget::Restart)
+                {
                     self.send(request);
                     self.close_session_menu(window, cx);
                 }
@@ -534,33 +624,36 @@ impl RootView {
         }
     }
 
-    /// A duplicate that answers one of this client's restarts takes its
-    /// original's panes (focusing the first) or a new tab.
+    /// A duplicate that answers one of this client's requests is placed by
+    /// its target: a restart takes its original's panes (focusing the
+    /// first) or a new tab; a copy opens a new tab, or goes into its tab,
+    /// which comes to the front with the copy focused.
     pub(crate) fn place_duplicate(
         &mut self,
         request_id: Option<&str>,
-        new_id: &str,
+        copy: &SessionSnapshot,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(request_id) = request_id.filter(|id| self.duplicates.has_request(id)) else {
             return;
         };
-        let Some(placed) = self
-            .duplicates
-            .place(request_id, new_id, &self.tabs.bindings())
+        let Some(placed) =
+            self.duplicates
+                .place(request_id, copy, &self.tabs, self.sidebar.sessions())
         else {
             return;
         };
         self.confirm.disarm();
-        if placed.focus.is_none() {
-            self.tabs.arm_create();
+        match &placed.focus {
+            PlacedFocus::NewTab => self.tabs.arm_create(),
+            PlacedFocus::Pane { tab_id, pane_id } => self.tabs.focus_pane(tab_id, pane_id),
+            PlacedFocus::Tab(tab_id) => self.tabs.activate(tab_id),
         }
         for msg in placed.messages {
             self.send(msg);
         }
-        if let Some((tab_id, pane_id)) = placed.focus {
-            self.tabs.focus_pane(&tab_id, &pane_id);
+        if placed.focus != PlacedFocus::NewTab {
             self.after_tabs_change(window, cx);
         }
     }
@@ -624,7 +717,79 @@ impl RootView {
             panel.child(muted_row("Stop session?"))
         })
         .children(rows)
+        .children(self.session_group(&menu.session_id, cx))
         .children(self.accent_rows(menu, cx))
+    }
+
+    /// The rows under the state actions behind a separator, or, once one
+    /// of them is chosen, its submenu.
+    fn session_group(&self, session_id: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        if let Some(lines) = self.duplicate_menu_lines() {
+            return lines
+                .into_iter()
+                .map(|line| Self::duplicate_line(session_id, line, cx))
+                .collect();
+        }
+        let offered = self.offered_rows();
+        if offered.is_empty() {
+            return Vec::new();
+        }
+        let mut rows = vec![menu_separator().into_any_element()];
+        rows.extend(
+            offered
+                .into_iter()
+                .map(|offered| Self::offered_row(offered, cx)),
+        );
+        rows
+    }
+
+    /// A row of the group under the state actions: it opens its submenu,
+    /// or is dimmed with its reason as the tooltip.
+    fn offered_row(offered: OfferedRow, cx: &mut Context<Self>) -> AnyElement {
+        let row = offered.row;
+        let item = menu_item(row.selector(), row.label(), false);
+        if let Some(tip) = offered.disabled {
+            return item
+                .opacity(0.6)
+                .cursor_default()
+                .tooltip(tooltip(tip))
+                .into_any_element();
+        }
+        let submenu = match row {
+            SessionRow::Duplicate => Submenu::Duplicate,
+        };
+        item.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            this.show_submenu(submenu, window, cx);
+        }))
+        .into_any_element()
+    }
+
+    /// A line of the Duplicate submenu for `session_id`.
+    fn duplicate_line(
+        session_id: &str,
+        line: SubmenuLine<DuplicateTarget>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match line {
+            SubmenuLine::Back { selector } => menu_item(selector, SUBMENU_BACK, false)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.show_submenu(Submenu::None, window, cx);
+                }))
+                .into_any_element(),
+            SubmenuLine::Separator => menu_separator().into_any_element(),
+            SubmenuLine::Choice {
+                selector,
+                label,
+                choice,
+            } => {
+                let session_id = session_id.to_owned();
+                menu_item(&selector, label, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.duplicate_to(&session_id, choice.clone(), window, cx);
+                    }))
+                    .into_any_element()
+            }
+        }
     }
 
     /// The Accent row under the actions, or, once it is chosen, the
@@ -634,7 +799,7 @@ impl RootView {
             return Vec::new();
         }
         let session_id = menu.session_id.as_str();
-        if !menu.accent {
+        if menu.submenu != Submenu::Accent {
             let current = self.sidebar.appearance(Some(session_id)).accent.value;
             let level = Level::Session(session_id.to_owned());
             let editor = swatch_row(APPEARANCE_ROW, "Appearance…", None).on_click(cx.listener(
@@ -643,7 +808,7 @@ impl RootView {
                 },
             ));
             let row = swatch_row(ACCENT_ROW, "Accent ▸", Some(current)).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| this.show_accent_menu(true, window, cx),
+                |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::Accent, window, cx),
             ));
             return vec![
                 menu_separator().into_any_element(),
@@ -651,10 +816,9 @@ impl RootView {
                 row.into_any_element(),
             ];
         }
-        let back =
-            swatch_row(BACK_ROW, "‹ Back", None).on_click(cx.listener(
-                |this, _: &ClickEvent, window, cx| this.show_accent_menu(false, window, cx),
-            ));
+        let back = swatch_row(BACK_ROW, SUBMENU_BACK, None).on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| this.show_submenu(Submenu::None, window, cx),
+        ));
         let mut rows = vec![back.into_any_element(), menu_separator().into_any_element()];
         rows.extend(ACCENT_PRESETS.iter().map(|preset| {
             swatch_row(
@@ -713,10 +877,14 @@ impl RootView {
         })
     }
 
-    /// The open menu's rows for its session's current state; none while the
-    /// Accent submenu replaces them.
+    /// The open menu's rows for its session's current state; none while a
+    /// submenu replaces them.
     fn rows(&self) -> Vec<Row> {
-        let Some(menu) = self.menu.as_ref().filter(|menu| !menu.accent) else {
+        let Some(menu) = self
+            .menu
+            .as_ref()
+            .filter(|menu| menu.submenu == Submenu::None)
+        else {
             return Vec::new();
         };
         let Some(session) = self.sidebar.session(&menu.session_id) else {

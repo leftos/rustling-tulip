@@ -748,3 +748,234 @@ fn restart_focuses_the_replaced_pane_in_its_tab(cx: &mut TestAppContext) {
     );
     assert_eq!(h.root(|root, _| root.focused_pane()), Some("p1".to_owned()));
 }
+
+fn groups(h: &mut Harness<'_>) -> Vec<Vec<String>> {
+    h.root(|root, _| root.menu_groups())
+}
+
+fn diff_tab(id: &str) -> protocol::TabEntry {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "name": "a.rs",
+        "content": { "kind": "diff", "repo_id": "r1", "path": "a.rs", "against": null },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("diff tab fixture")
+}
+
+/// Opens `leaf`'s menu and its Duplicate submenu.
+fn open_duplicate(h: &mut Harness<'_>, leaf: &str) {
+    h.right_click_on(leaf);
+    h.click_on("session-menu-duplicate");
+}
+
+const APPEARANCE_GROUP: [&str; 2] = ["session-menu-appearance", "session-menu-accent"];
+
+#[gpui::test]
+fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").build());
+
+    open_duplicate(&mut h, "leaf-s1");
+    h.click_on("duplicate-new-tab");
+    let id = duplicate_request(&h.sent(), "s1");
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+
+    h.send(updated(session("s2").build(), Some(&id)));
+    let placed = placements(h.sent());
+    assert!(
+        matches!(placed.as_slice(), [
+            ClientMessage::CreateTab { name: None, initial_session_id: Some(new) },
+        ] if new == "s2"),
+        "sent {placed:?}"
+    );
+}
+
+#[gpui::test]
+fn duplicate_into_tab_places_the_copy_and_switches_to_it(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", None)),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned())
+    );
+
+    open_duplicate(&mut h, "leaf-s1");
+    h.click_on("duplicate-tab-t2");
+    let id = duplicate_request(&h.sent(), "s1");
+    h.send(updated(session("s2").build(), Some(&id)));
+    let placed = placements(h.sent());
+    assert!(
+        matches!(placed.as_slice(), [
+            ClientMessage::ReplacePaneSession { tab_id, pane_id, session_id: Some(new) },
+        ] if tab_id == "t2" && pane_id == "p2" && new == "s2"),
+        "the copy takes t2's empty pane: sent {placed:?}"
+    );
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t2".to_owned()),
+        "its tab comes to the front"
+    );
+    assert_eq!(h.root(|root, _| root.focused_pane()), Some("p2".to_owned()));
+}
+
+#[gpui::test]
+fn duplicate_lists_new_tab_then_grid_tabs_only(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = Fixture {
+        sessions: vec![session("s1").build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            diff_tab("d1"),
+            tab("t2", &pane("p2", None)),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.sent();
+
+    open_duplicate(&mut h, "leaf-s1");
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["duplicate-back", "duplicate-new-tab"],
+            vec!["duplicate-tab-t1", "duplicate-tab-t2"],
+        ],
+        "every grid tab, the one showing the session too; no diff tab"
+    );
+    assert!(
+        rows(&mut h).is_empty(),
+        "the submenu replaces the state actions"
+    );
+    assert!(
+        h.root(|root, _| root.accent_menu_rows()).is_empty(),
+        "and the appearance rows"
+    );
+    assert!(h.sent().is_empty(), "opening the submenu sends nothing");
+}
+
+#[gpui::test]
+fn duplicate_back_returns_to_actions(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").build());
+
+    open_duplicate(&mut h, "leaf-s1");
+    h.click_on("duplicate-back");
+    assert_eq!(
+        menu_of(&mut h).as_deref(),
+        Some("s1"),
+        "the menu stays open"
+    );
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["menu-rename", "menu-stop"],
+            vec!["session-menu-duplicate"],
+            APPEARANCE_GROUP.to_vec(),
+        ]
+    );
+    assert!(h.sent().is_empty());
+}
+
+#[gpui::test]
+fn duplicate_does_not_discard_the_original(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").exited(0).build());
+
+    h.right_click_on("pane-header-p1");
+    h.click_on("session-menu-duplicate");
+    h.click_on("duplicate-tab-t1");
+    let id = duplicate_request(&h.sent(), "s1");
+    assert!(
+        !pending(&mut h, "s1"),
+        "a copy is no restart: Restart stays offered"
+    );
+    h.send(updated(session("s2").build(), Some(&id)));
+    let sent = h.sent();
+    assert!(
+        placements(sent.clone()).is_empty(),
+        "the original keeps its pane and is not discarded: sent {sent:?}"
+    );
+    assert!(
+        sent.iter().any(|m| matches!(m,
+            ClientMessage::SplitPane { tab_id, pane_id, new_session_id: Some(new), .. }
+                if tab_id == "t1" && pane_id == "p1" && new == "s2")),
+        "the copy splits in beside the original: sent {sent:?}"
+    );
+}
+
+#[gpui::test]
+fn duplicate_of_headless_session_is_disabled(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").headless().build());
+
+    h.right_click_on("leaf-s1");
+    assert!(
+        groups(&mut h).contains(&vec!["session-menu-duplicate".to_owned()]),
+        "offered, dimmed: {:?}",
+        groups(&mut h)
+    );
+    assert_eq!(
+        h.root(|root, _| root.menu_disabled_tip("session-menu-duplicate")),
+        Some("Headless sessions are one-shot kickoffs; spawn a new one instead")
+    );
+    let before = groups(&mut h);
+    h.click_on("session-menu-duplicate");
+    assert_eq!(groups(&mut h), before, "the click opens no submenu");
+    assert!(h.sent().is_empty());
+}
+
+#[gpui::test]
+fn new_rows_sit_between_state_actions_and_appearance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = unplaced(
+        cx,
+        &dir,
+        vec![session("s1").build(), session("s2").exited(0).build()],
+    );
+
+    h.right_click_on("leaf-s1");
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["menu-rename", "menu-stop"],
+            vec!["session-menu-duplicate"],
+            APPEARANCE_GROUP.to_vec(),
+        ]
+    );
+    assert_eq!(
+        h.root(|root, _| root.menu_disabled_tip("session-menu-duplicate")),
+        None
+    );
+    let top = |h: &mut Harness<'_>, selector: &str| h.bounds(selector).origin.y;
+    let (stop, duplicate, appearance) = (
+        top(&mut h, "menu-stop"),
+        top(&mut h, "session-menu-duplicate"),
+        top(&mut h, "session-menu-appearance"),
+    );
+    assert!(
+        stop < duplicate && duplicate < appearance,
+        "drawn in that order: {stop:?} {duplicate:?} {appearance:?}"
+    );
+
+    h.keys("escape");
+    h.right_click_on("leaf-s2");
+    assert_eq!(
+        groups(&mut h),
+        [
+            vec!["menu-restart", "menu-remove-pane"],
+            vec!["session-menu-duplicate"],
+            APPEARANCE_GROUP.to_vec(),
+        ],
+        "a stopped session offers Duplicate too"
+    );
+}
