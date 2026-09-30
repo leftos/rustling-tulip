@@ -11,20 +11,25 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, KeyDownEvent,
-    Stateful, Subscription, Task, Window, div, prelude::*, px,
+    Pixels, Stateful, Subscription, Task, Window, canvas, div, prelude::*, px, relative, svg,
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
+use crate::assets::{
+    DIFF_FIRST_ICON, DIFF_HIGHLIGHT_ICON, DIFF_LAST_ICON, DIFF_NEXT_ICON, DIFF_PREV_ICON,
+    DIFF_WHITESPACE_ICON,
+};
 use crate::buttons::{ButtonSize, outlined_button};
 use crate::diff_model::{DiffModel, DiffOptions};
 use crate::diff_tab::{
     Built, DiffTabBody, DiffTabHeader, DiffTabState, DiffTarget, HIGHLIGHT_LABEL, HIGHLIGHT_TIP,
     LOADING_TEXT, Landed, OPEN_FAILED_TITLE, Snapshot, WHITESPACE_LABEL, WHITESPACE_TIP,
+    split_path,
 };
 use crate::diff_view::{DiffView, Nav};
 use crate::fonts::FontSettings;
 use crate::notices::ToastKind;
-use crate::palette::{LINE, SURFACE};
+use crate::palette::{LINE, SUBTLE, SURFACE};
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
 use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
@@ -33,13 +38,31 @@ use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 const HEADER_HEIGHT: f32 = 42.0;
 const HEADER_PAD_LEFT: f32 = 14.0;
 const HEADER_PAD_RIGHT: f32 = 10.0;
-/// The change buttons, left to right: where each moves, its selector, glyph
+/// Below this header width, in px, the toggles show an icon for their label.
+const NARROW_HEADER_WIDTH: f32 = 900.0;
+/// A narrow header toggle's icon side, in px.
+const TOGGLE_ICON_SIZE: f32 = 14.0;
+/// The room between the file name and its folder, in px.
+const PATH_GAP: f32 = 6.0;
+/// A change button's side, in px: a square box with about 4 px round its
+/// icon.
+const NAV_BUTTON_SIZE: f32 = 24.0;
+/// A change button's icon side, in px.
+const NAV_ICON_SIZE: f32 = 12.0;
+/// The room between two change buttons, in px.
+const NAV_BUTTON_GAP: f32 = 4.0;
+/// The change buttons, left to right: where each moves, its selector, icon
 /// and tooltip.
 const NAV_BUTTONS: [(Nav, &str, &str, &str); 4] = [
-    (Nav::First, "diff-first", "⏮", "First change"),
-    (Nav::Prev, "diff-prev", "◀", "Previous change (Shift+F7)"),
-    (Nav::Next, "diff-next", "▶", "Next change (F7)"),
-    (Nav::Last, "diff-last", "⏭", "Last change"),
+    (Nav::First, "diff-first", DIFF_FIRST_ICON, "First change"),
+    (
+        Nav::Prev,
+        "diff-prev",
+        DIFF_PREV_ICON,
+        "Previous change (Shift+F7)",
+    ),
+    (Nav::Next, "diff-next", DIFF_NEXT_ICON, "Next change (F7)"),
+    (Nav::Last, "diff-last", DIFF_LAST_ICON, "Last change"),
 ];
 
 /// What a diff tab asks of the root view.
@@ -105,6 +128,8 @@ pub(crate) struct DiffTabView {
     pending: [Option<PendingSyntax>; 2],
     /// How many highlight runs the tab started.
     highlight_runs: u64,
+    /// The header's width at the last frame; `None` before the first.
+    header_width: Option<Pixels>,
 }
 
 impl EventEmitter<DiffTabEvent> for DiffTabView {}
@@ -136,6 +161,7 @@ impl DiffTabView {
             syntax: [None, None],
             pending: [None, None],
             highlight_runs: 0,
+            header_width: None,
         }
     }
 
@@ -375,22 +401,39 @@ impl DiffTabView {
         self.state.header(self.include_whitespace, self.highlight)
     }
 
-    fn header_bar(header: &DiffTabHeader, cx: &mut Context<Self>) -> Div {
-        // Right-aligned in a clipped box, so a long path loses its start.
-        let path = div()
-            .id("diff-path")
-            .debug_selector(|| "diff-path".to_owned())
-            .flex()
-            .justify_end()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(header.path.clone()),
-            )
-            .tooltip(tooltip(header.path.clone()));
+    /// Whether the header was narrower than [`NARROW_HEADER_WIDTH`] at the
+    /// last frame.
+    fn narrow_header(&self) -> bool {
+        self.header_width
+            .is_some_and(|width| width < px(NARROW_HEADER_WIDTH))
+    }
+
+    /// Records the header's width; a change redraws the tab after the frame,
+    /// since gpui drops a notify made while it draws.
+    fn width_probe(cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = cx.weak_entity();
+        canvas(
+            move |bounds, _, cx| {
+                let width = bounds.size.width;
+                // Fails only when the view is gone, and the header with it.
+                let moved = tab
+                    .update(cx, |tab, _| tab.header_width.replace(width) != Some(width))
+                    .unwrap_or(false);
+                if moved {
+                    cx.defer(move |cx| {
+                        tab.update(cx, |_, cx| cx.notify()).ok();
+                    });
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    fn header_bar(header: &DiffTabHeader, narrow: bool, cx: &mut Context<Self>) -> Div {
         let mode = div()
             .id("diff-mode")
             .flex_none()
@@ -402,19 +445,22 @@ impl DiffTabView {
         let whitespace = toggle(
             DiffTabEvent::ToggleWhitespace,
             header.include_whitespace,
+            narrow,
             cx,
         );
-        let highlight = toggle(DiffTabEvent::ToggleHighlight, header.highlight, cx);
+        let highlight = toggle(DiffTabEvent::ToggleHighlight, header.highlight, narrow, cx);
         let count = div()
             .flex_none()
             .text_color(gpui::rgb(MUTED))
             .child(header.count.clone());
-        let buttons: Vec<Stateful<Div>> = NAV_BUTTONS
-            .into_iter()
-            .map(|(nav, selector, glyph, tip)| {
-                nav_button(nav, selector, glyph, tip, header.nav_enabled, cx)
-            })
-            .collect();
+        let buttons = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(NAV_BUTTON_GAP))
+            .children(NAV_BUTTONS.into_iter().map(|(nav, selector, icon, tip)| {
+                nav_button(nav, selector, icon, tip, header.nav_enabled, cx)
+            }));
         div()
             .flex()
             .flex_none()
@@ -426,24 +472,76 @@ impl DiffTabView {
             .bg(gpui::rgb(SURFACE))
             .border_b_1()
             .border_color(gpui::rgb(LINE))
-            .child(path)
+            .child(Self::width_probe(cx))
+            .child(path_box(&header.path))
             .child(mode)
             .child(div().flex_1())
             .child(whitespace)
             .child(highlight)
             .child(count)
-            .children(buttons)
+            .child(buttons)
     }
 }
 
+/// The file name, then its folder, which gives up its end to an ellipsis as
+/// room runs out; the full path is the tooltip. The name keeps its width
+/// until the folder is gone, then is cut at its end the same way, as it
+/// never grows past the box.
+fn path_box(path: &str) -> Stateful<Div> {
+    let (name, folder) = split_path(path);
+    let name = div()
+        .debug_selector(|| "diff-path-name".to_owned())
+        .flex_none()
+        .max_w(relative(1.0))
+        .truncate()
+        .text_color(gpui::rgb(TEXT))
+        .child(name.to_owned());
+    div()
+        .id("diff-path")
+        .debug_selector(|| "diff-path".to_owned())
+        .flex()
+        .gap(px(PATH_GAP))
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .child(name)
+        .when(!folder.is_empty(), |path| {
+            path.child(
+                div()
+                    .debug_selector(|| "diff-path-folder".to_owned())
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_color(gpui::rgb(SUBTLE))
+                    .child(folder.to_owned()),
+            )
+        })
+        .tooltip(tooltip(path.to_owned()))
+}
+
 /// A header checkbox that asks the root view for `event`, checked when `on`.
-fn toggle(event: DiffTabEvent, on: bool, cx: &mut Context<DiffTabView>) -> Stateful<Div> {
-    let (selector, label, tip) = match event {
-        DiffTabEvent::ToggleWhitespace => ("diff-whitespace", WHITESPACE_LABEL, WHITESPACE_TIP),
-        DiffTabEvent::ToggleHighlight => ("diff-highlight", HIGHLIGHT_LABEL, HIGHLIGHT_TIP),
+/// A `narrow` one shows an icon for its label, which joins its tooltip.
+fn toggle(
+    event: DiffTabEvent,
+    on: bool,
+    narrow: bool,
+    cx: &mut Context<DiffTabView>,
+) -> Stateful<Div> {
+    let (selector, label, tip, icon) = match event {
+        DiffTabEvent::ToggleWhitespace => (
+            "diff-whitespace",
+            WHITESPACE_LABEL,
+            WHITESPACE_TIP,
+            DIFF_WHITESPACE_ICON,
+        ),
+        DiffTabEvent::ToggleHighlight => (
+            "diff-highlight",
+            HIGHLIGHT_LABEL,
+            HIGHLIGHT_TIP,
+            DIFF_HIGHLIGHT_ICON,
+        ),
     };
     let glyph = if on { "☑" } else { "☐" };
-    div()
+    let toggle = div()
         .id(selector)
         .debug_selector(move || selector.to_owned())
         .flex()
@@ -454,24 +552,45 @@ fn toggle(event: DiffTabEvent, on: bool, cx: &mut Context<DiffTabView>) -> State
         .rounded(px(3.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(glyph)
-        .child(label)
-        .tooltip(tooltip(tip))
-        .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(event)))
+        .child(glyph);
+    let toggle = if narrow {
+        toggle
+            .child(
+                svg()
+                    .path(icon)
+                    .flex_none()
+                    .size(px(TOGGLE_ICON_SIZE))
+                    .text_color(gpui::rgb(TEXT)),
+            )
+            .tooltip(tooltip(format!("{label}: {tip}")))
+    } else {
+        toggle.child(label).tooltip(tooltip(tip))
+    };
+    toggle.on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(event)))
 }
 
-/// A change button; a disabled one is dimmed and takes no click.
+/// A change button, a small square round its icon; a disabled one is
+/// dimmed and takes no click.
 fn nav_button(
     nav: Nav,
     selector: &'static str,
-    glyph: &'static str,
+    icon: &'static str,
     tip: &'static str,
     enabled: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
     outlined_button(selector, ButtonSize::Compact, enabled)
         .flex_none()
-        .child(glyph)
+        .size(px(NAV_BUTTON_SIZE))
+        .min_h(px(NAV_BUTTON_SIZE))
+        .p(px(0.0))
+        .child(
+            svg()
+                .path(icon)
+                .flex_none()
+                .size(px(NAV_ICON_SIZE))
+                .text_color(gpui::rgb(TEXT)),
+        )
         .tooltip(tooltip(tip))
         .when(enabled, |button| {
             button.on_click(cx.listener(move |tab, _: &ClickEvent, _, cx| tab.go(nav, cx)))
@@ -497,6 +616,7 @@ fn message(text: String, note: Option<&'static str>) -> AnyElement {
 impl Render for DiffTabView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let header = self.header();
+        let narrow = self.narrow_header();
         let body = match (self.state.body(), &self.view) {
             (DiffTabBody::Diff, Some(view)) => div()
                 .flex_1()
@@ -519,7 +639,7 @@ impl Render for DiffTabView {
             .h_full()
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
-            .child(Self::header_bar(&header, cx))
+            .child(Self::header_bar(&header, narrow, cx))
             .child(body)
     }
 }

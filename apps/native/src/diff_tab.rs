@@ -211,6 +211,15 @@ pub struct DiffTabHeader {
     pub nav_enabled: bool,
 }
 
+/// `path` split at its last `/` or `\` into the file name and the folder
+/// holding it, which has no trailing separator and is empty for a bare name.
+pub(crate) fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind(['/', '\\']) {
+        Some(at) => (&path[at + 1..], &path[..at]),
+        None => (path, ""),
+    }
+}
+
 /// One diff tab's fetch and build state.
 #[derive(Debug)]
 pub(crate) struct DiffTabState {
@@ -766,5 +775,34 @@ mod tests {
         let empty: UiState = serde_json::from_str("{}").expect("an empty layout");
         assert!(empty.diff_include_whitespace);
         assert!(empty.diff_highlight);
+    }
+
+    #[test]
+    fn a_nested_path_splits_into_its_name_and_folder() {
+        assert_eq!(
+            split_path("apps/native/src/footer.rs"),
+            ("footer.rs", "apps/native/src")
+        );
+    }
+
+    #[test]
+    fn a_bare_file_name_has_no_folder() {
+        assert_eq!(split_path("Cargo.toml"), ("Cargo.toml", ""));
+    }
+
+    #[test]
+    fn a_backslash_path_splits_at_its_last_backslash() {
+        assert_eq!(
+            split_path(r"apps\native\src\footer.rs"),
+            ("footer.rs", r"apps\native\src")
+        );
+    }
+
+    #[test]
+    fn the_folder_keeps_no_trailing_separator() {
+        let (name, folder) = split_path("src/a.rs");
+        assert_eq!((name, folder), ("a.rs", "src"));
+        assert!(!folder.ends_with('/'));
+        assert_eq!(split_path(r"src/deep\b.rs"), ("b.rs", "src/deep"));
     }
 }

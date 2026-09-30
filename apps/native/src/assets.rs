@@ -58,8 +58,21 @@ pub(crate) const SIDEBAR_PLUS_ICON: &str = "icons/sidebar-plus.svg";
 /// The toolbar's ⋯ menu dots.
 pub(crate) const SIDEBAR_MORE_ICON: &str = "icons/sidebar-more.svg";
 
+/// A narrow diff tab header's whitespace toggle: an open box, `␣`.
+pub(crate) const DIFF_WHITESPACE_ICON: &str = "icons/diff-whitespace.svg";
+/// A narrow diff tab header's highlight toggle: a pen.
+pub(crate) const DIFF_HIGHLIGHT_ICON: &str = "icons/diff-highlight.svg";
+/// A diff tab's First change button: a bar and a double chevron, left.
+pub(crate) const DIFF_FIRST_ICON: &str = "icons/diff-first.svg";
+/// A diff tab's Previous change button: a chevron, left.
+pub(crate) const DIFF_PREV_ICON: &str = "icons/diff-prev.svg";
+/// A diff tab's Next change button: a chevron, right.
+pub(crate) const DIFF_NEXT_ICON: &str = "icons/diff-next.svg";
+/// A diff tab's Last change button: a double chevron and a bar, right.
+pub(crate) const DIFF_LAST_ICON: &str = "icons/diff-last.svg";
+
 /// Every bundled asset, by the path the views ask for it under.
-const ASSETS: [(&str, &[u8]); 25] = [
+const ASSETS: [(&str, &[u8]); 31] = [
     (
         SESSIONS_ICON,
         include_bytes!("../assets/icons/sessions.svg"),
@@ -150,6 +163,30 @@ const ASSETS: [(&str, &[u8]); 25] = [
     (
         SIDEBAR_MORE_ICON,
         include_bytes!("../assets/icons/sidebar-more.svg"),
+    ),
+    (
+        DIFF_WHITESPACE_ICON,
+        include_bytes!("../assets/icons/diff-whitespace.svg"),
+    ),
+    (
+        DIFF_HIGHLIGHT_ICON,
+        include_bytes!("../assets/icons/diff-highlight.svg"),
+    ),
+    (
+        DIFF_FIRST_ICON,
+        include_bytes!("../assets/icons/diff-first.svg"),
+    ),
+    (
+        DIFF_PREV_ICON,
+        include_bytes!("../assets/icons/diff-prev.svg"),
+    ),
+    (
+        DIFF_NEXT_ICON,
+        include_bytes!("../assets/icons/diff-next.svg"),
+    ),
+    (
+        DIFF_LAST_ICON,
+        include_bytes!("../assets/icons/diff-last.svg"),
     ),
 ];
 

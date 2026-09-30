@@ -15,12 +15,13 @@ mod support;
 
 use std::ops::Range;
 
-use gpui::{Entity, Hsla, TestAppContext};
+use gpui::{Entity, Hsla, SharedString, TestAppContext, TextRun, px, size};
 use protocol::{
     ClientMessage, DaemonMessage, GitCommit, GitCommitDetail, GitFileChange, SnapshotUnavailable,
     TabEntry,
 };
 use rustling_tulip_native::diff_view::{DiffView, Half};
+use rustling_tulip_native::fonts::UI_FAMILY;
 use rustling_tulip_native::{
     BINARY_TEXT, DIFF_OPEN_FAILED_TITLE, DiffTabBody, DiffTabHeader, EMPTY_TEXT, ToastKind,
 };
@@ -508,6 +509,151 @@ fn a_snapshot_fills_the_header_and_the_count(cx: &mut TestAppContext) {
     assert_eq!(header(&mut h, "d2").mode, "worktree vs index");
     assert_eq!(header(&mut h, "d2").count, "1 change");
     assert_eq!(header(&mut h, "d3").mode, "index vs HEAD");
+}
+
+/// The client's UI text size, which the diff tab's header is drawn at; it
+/// mirrors `UI_TEXT_SIZE` in `lib.rs`, which is private to the crate.
+const UI_TEXT_SIZE: f32 = 12.0;
+/// A file name longer than a narrow header has room for.
+const LONG_NAME: &str =
+    "a_really_long_file_name_a_really_long_file_name_a_really_long_file_name.rs";
+/// A window whose diff tab header is narrower than the toggles' threshold.
+const NARROW: (f32, f32) = (1000.0, 600.0);
+/// A window whose diff tab header is wider than the toggles' threshold.
+const WIDE: (f32, f32) = (2000.0, 600.0);
+
+fn resize(h: &mut Harness<'_>, (width, height): (f32, f32)) {
+    h.cx.simulate_resize(size(px(width), px(height)));
+    h.cx.run_until_parked();
+}
+
+/// `text`'s width, in px, shaped at the UI text size.
+fn shaped_width(h: &mut Harness<'_>, text: &str) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: gpui::font(UI_FAMILY),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = h.cx.update(|window, _| {
+        window.text_system().shape_line(
+            SharedString::from(text.to_owned()),
+            px(UI_TEXT_SIZE),
+            &[run],
+            None,
+        )
+    });
+    line.width / px(1.0)
+}
+
+/// Diff tab `d1` of `path`, shown with one change.
+fn shown_diff(h: &mut Harness<'_>, path: &str) {
+    let id = show(h, &diff_tab("d1", path, None));
+    answer(h, &id, "a\n", "b\n");
+}
+
+#[gpui::test]
+fn the_file_name_stays_whole_when_its_folder_runs_out_of_room(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    let folder = "a/very/long/folder/".repeat(20);
+    shown_diff(&mut h, &format!("{folder}footer.rs"));
+    resize(&mut h, NARROW);
+
+    let name = h.bounds("diff-path-name");
+    let path = h.bounds("diff-path");
+    let whole = shaped_width(&mut h, "footer.rs");
+    assert!(
+        name.size.width / px(1.0) >= whole,
+        "the name is laid out whole: {name:?} for {whole} px"
+    );
+    assert!(
+        name.left() >= path.left() && name.right() <= path.right(),
+        "the name is inside its unclipped box: {name:?} in {path:?}"
+    );
+}
+
+/// Shows `path` in a narrow header and asserts that the name gives up its
+/// end: its box is
+/// narrower than the whole name and ends inside the path box, where gpui
+/// cuts the text to fit and puts `…` at its end. The test platform draws no
+/// glyphs, so the `…` itself is not observable here.
+fn squeezed_name(h: &mut Harness<'_>, path: &str) {
+    shown_diff(h, path);
+    resize(h, NARROW);
+    let name = h.bounds("diff-path-name");
+    let path = h.bounds("diff-path");
+    let whole = shaped_width(h, LONG_NAME);
+    assert!(
+        name.size.width / px(1.0) < whole,
+        "the name gives way: {name:?} for {whole} px"
+    );
+    assert!(
+        name.left() >= path.left() && name.right() <= path.right(),
+        "the name ends inside its box, not clipped by it: {name:?} in {path:?}"
+    );
+}
+
+#[gpui::test]
+fn a_bare_file_name_too_long_for_the_header_is_cut_short(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    squeezed_name(&mut h, LONG_NAME);
+}
+
+#[gpui::test]
+fn the_folder_gives_way_before_a_long_file_name(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    squeezed_name(&mut h, &format!("src/deep/{LONG_NAME}"));
+    let folder = h.bounds("diff-path-folder");
+    assert!(
+        folder.size.width < px(1.0),
+        "the folder is gone before the name shrinks: {folder:?}"
+    );
+}
+
+#[gpui::test]
+fn the_toggles_drop_their_labels_in_a_narrow_header(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &focused());
+    shown_diff(&mut h, "src/main.rs");
+    let toggles = [
+        (
+            "diff-whitespace",
+            shaped_width(&mut h, "include whitespace"),
+        ),
+        ("diff-highlight", shaped_width(&mut h, "highlight")),
+    ];
+
+    resize(&mut h, WIDE);
+    for (toggle, label) in toggles {
+        let width = h.bounds(toggle).size.width / px(1.0);
+        assert!(
+            width >= label,
+            "{toggle} shows its label when wide: {width} px"
+        );
+    }
+
+    resize(&mut h, NARROW);
+    for (toggle, label) in toggles {
+        let width = h.bounds(toggle).size.width / px(1.0);
+        assert!(
+            width < label,
+            "{toggle} drops its label when narrow: {width} px"
+        );
+    }
+    h.click_on("diff-whitespace");
+    assert!(
+        !header(&mut h, "d1").include_whitespace,
+        "the narrow toggle still takes clicks"
+    );
+
+    resize(&mut h, WIDE);
+    let width = h.bounds("diff-whitespace").size.width / px(1.0);
+    assert!(width >= toggles[0].1, "the label comes back: {width} px");
 }
 
 #[gpui::test]

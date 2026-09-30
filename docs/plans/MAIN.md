@@ -26,7 +26,6 @@ Review: `code-review`; a person compares the running client with the boards. Ver
 
 The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.7 and PT.8b are free to start side by side. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
 
-- [ ] **The diff tab's header clips its title from the left** (seen in a `native-shot diff` after PT.9): at the 1000 px shot width the title reads "oter.rs worktree vs index" beside the toggles and the four nav buttons; ruled (user): the file name first and the folder dimmed after it, the folder truncating, and the Whitespace / Highlight toggles dropping to icons when the header is narrow (petal.md, "Diff header"). `apps/native/src/diff_tab_view.rs` (the 42 px header). A visual fix: shots before and after go to the user before it lands.
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
 - [ ] **PT.8b Spawn dialog and Settings**.
 - [ ] **`native-shot` can't show Compact leaves** (found in PT.6b): `apps/native/examples/shot.rs` `Shot::prepare` deletes `native-ui.json` before each run and has no knob for `general.leaf_density`; add a way to seed it (a view such as `main-compact`) so a density change can be shot.
