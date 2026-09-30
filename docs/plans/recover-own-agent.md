@@ -14,6 +14,7 @@ A Codex or Cursor history entry with a spawn config recovers as a Claude session
 - DeepSeek is a Claude provider, not an agent ([deepseek-sessions.md](./deepseek-sessions.md)); its entries have `agent: Claude`, so its rule "a DeepSeek entry recovers as Claude only" (its Q1) is untouched: `OwnAgent` is refused for every Claude entry.
 
 - Accepted limit (found reviewing RA.3): only Codex sessions the daemon runs count as waiting in a folder, so a `codex` started by hand in a plain shell or an outside terminal in the same folder can have its rollout claimed by a daemon Codex session that has not sent anything yet.
+- Ruled (user): own-agent recovery of an entry whose repo is no longer registered runs on its `SpawnTarget::Standalone` fallback: `standalone_supports` (`server.rs`) admits Codex and Cursor, run in the recorded folder with no worktree, as a standalone Claude session is; a recorded folder that no longer exists fails at spawn with the folder-not-found error on that row.
 - A rollout found while another Codex session waits in its folder is recorded as contested in `<config dir>/codex-contested.json` (kept for the 7-day history window), so no session claims it later, across daemon restarts too; ids already in history entries are never claimed again.
 
 ## Design
