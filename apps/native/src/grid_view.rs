@@ -1249,6 +1249,24 @@ fn header_fill(focused: bool) -> u32 {
     if focused { RAISED } else { SURFACE }
 }
 
+/// A title as a pair: an invisible copy that sizes the box to the whole text,
+/// and a drawn copy laid over it that ends in `…` when the box is too narrow.
+/// A plain nowrap text element cannot truncate here because gpui 0.2.2 returns
+/// a text layout's cached size whenever a measure call carries no wrap width
+/// (`elements/text.rs`), and a nowrap title's first measure is the indefinite
+/// one; an absolutely positioned copy meets its definite width straight away.
+fn ellipsized(text: SharedString, drawn: StyledText) -> [AnyElement; 2] {
+    [
+        div().invisible().child(text).into_any_element(),
+        div()
+            .absolute()
+            .inset_0()
+            .text_ellipsis()
+            .child(drawn)
+            .into_any_element(),
+    ]
+}
+
 /// The header's left side: the status glyph, the name and the chips, or
 /// "Empty pane".
 fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElement> {
@@ -1256,6 +1274,7 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
     let title = div()
         .id(ElementId::Name(SharedString::from(title_name.clone())))
         .debug_selector(|| title_name)
+        .relative()
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap();
@@ -1278,7 +1297,10 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
             .tooltip(tooltip(parts.status_tip.clone()))
             .into_any_element(),
         title
-            .child(parts.title.clone())
+            .children(ellipsized(
+                SharedString::from(parts.title.clone()),
+                StyledText::new(parts.title.clone()),
+            ))
             .tooltip(tooltip(parts.title_tip.clone()))
             .into_any_element(),
     ];
@@ -1483,7 +1505,67 @@ fn bounds_probe(cx: &mut Context<RootView>) -> impl IntoElement {
     reason = "tests assert preconditions with expect; failure messages aid debugging"
 )]
 mod tests {
-    use super::RetryGate;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{
+        Context, IntoElement, ParentElement, Render, SharedString, Styled, StyledText,
+        TestAppContext, TextLayout, Window, div, px,
+    };
+
+    use super::{RetryGate, ellipsized};
+
+    /// A pane header's title row: a title box 120 px wide, "Empty pane"-free,
+    /// and a 40 px sibling that never shrinks.
+    struct Row {
+        text: SharedString,
+        drawn: Rc<RefCell<Option<TextLayout>>>,
+    }
+
+    impl Render for Row {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let label = StyledText::new(self.text.clone());
+            *self.drawn.borrow_mut() = Some(label.layout().clone());
+            div()
+                .flex()
+                .w(px(120.0))
+                .child(
+                    div()
+                        .relative()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .children(ellipsized(self.text.clone(), label)),
+                )
+                .child(div().flex_none().w(px(40.0)).h(px(20.0)))
+        }
+    }
+
+    /// Draws `text` in the row and hands back the text the drawn copy ended
+    /// up with.
+    fn drawn_title(text: &'static str, cx: &mut TestAppContext) -> String {
+        let drawn = Rc::new(RefCell::new(None));
+        let row = Row {
+            text: text.into(),
+            drawn: Rc::clone(&drawn),
+        };
+        let (_view, cx) = cx.add_window_view(|_, _| row);
+        cx.run_until_parked();
+        let layout = drawn.borrow().clone().expect("the row rendered");
+        layout.text()
+    }
+
+    #[gpui::test]
+    fn a_title_too_long_for_its_box_ends_in_an_ellipsis(cx: &mut TestAppContext) {
+        let text = drawn_title("Tighten the footer pill spacing", cx);
+        assert!(text.ends_with('…'), "the drawn title is {text:?}");
+    }
+
+    #[gpui::test]
+    fn a_title_that_fits_is_drawn_whole(cx: &mut TestAppContext) {
+        let text = drawn_title("Fix", cx);
+        assert_eq!(text, "Fix", "a title that fits is drawn whole");
+    }
 
     #[test]
     fn grid_retry_goes_out_once_per_session_and_attempt() {

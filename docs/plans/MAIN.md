@@ -20,11 +20,11 @@ Nothing is ahead of the waves.
 
 A wave is one release-sized bundle of items sharing owning files, so one implementer reads them once and one review covers the bundle. Wave 1 holds the Petal look's follow-ups; Waves 2–5 finish native client Phase 4 (rulings: [native-client.md](./native-client.md)).
 
-### Wave 1 — Petal follow-ups (`apps/native/examples/shot.rs`, `grid_view.rs`)
+### Wave 1 — Petal follow-ups (`grid_view.rs` and the nine views that call `.truncate()`)
 
 Review: `code-review`; a person looks at the shots. Verification: the gates with `-p rustling-tulip-native`; `.\rt.ps1 native-shot main` before and after. The look's settled design is `docs/native-client.md` "Petal chrome"; its canvas is saved in [canvases/petal/](./canvases/petal/).
 
-- [ ] **A pane title that runs out of room is clipped mid-letter, with no `…`** (found in PT.7; user: land, then fix): `grid_view.rs`'s pane header truncates its `repo:branch` chip first with an ellipsis, then clips the title. GPUI 0.2.2's `StyledText` keeps its first measurement for nowrap text (`elements/text.rs` ~370–386), and the wrap-plus-one-line-clamp that ellipsizes the chip made every title vanish in the real window (the spec harness's fake text layout hides it). A `debugger` run in a real window first: measure the title's layout and find a form that draws `…`.
+- [ ] **Every other `.truncate()` clips mid-letter with no `…`** (found fixing the pane title): 23 call sites in 9 files (`changes_view.rs` 3, `diff_tab_view.rs` 2, `history_view.rs` 5, `lib.rs` 1, `needs_you_view.rs` 2, `source_control_view.rs` 3, `sidebar_view.rs` 4, `stash_view.rs` 2, `undo_view.rs` 1) share the pane title's cause; the sidebar's session leaf shows it. Move `grid_view.rs`'s `ellipsized` somewhere shared and switch each site to it, with a `#[gpui::test]` per converted element reading its drawn text (`docs/native-client.md` "Truncating text with `…`").
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
 
