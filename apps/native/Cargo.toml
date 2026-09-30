@@ -59,6 +59,7 @@ windows = { version = "0.61", features = [
 
 [dev-dependencies]
 gpui = { version = "0.2.2", features = ["test-support"] }
+png = "0.18"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.61", features = [

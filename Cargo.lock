@@ -5419,6 +5419,7 @@ dependencies = [
  "daemon-client",
  "futures",
  "gpui",
+ "png 0.18.1",
  "protocol",
  "raw-window-handle",
  "regex",

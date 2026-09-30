@@ -14,7 +14,7 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 
 ## High priority
 
-- [ ] **Let agents see the running native client** (user; ruled: lands before PT.5 and PT.7): agents working on UI launch the client and look at it rather than guess, and put visual choices to the user as A/B screenshots or mocks rather than prose. The OS tier (`apps/native/tests/smoke_window.rs`) already captures the cloaked window's frame for its pixel probes (`Frame::rgb`); save that frame as a PNG under `.tmp/` on request (a `rt.ps1` verb), with a fixture daemon state (isolated `.tmp/` dirs, a scripted session list) so a shot shows the view being changed; the remaining Wave 1 briefs name it in their proving steps. `smoke_window.rs`, `rt.ps1`.
+Nothing is ahead of the waves.
 
 ## Waves
 

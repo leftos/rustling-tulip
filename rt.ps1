@@ -44,14 +44,27 @@
                  real client binary in a cloaked window that never
                  takes focus; checks it connects and that posted keys
                  reach the shell.
+      native-shot
+                 Write a PNG of the native client's window showing one view
+                 (`main`, `source-control`, `diff`, `settings` or `spawn`;
+                 default `main`) over a fake daemon with fixed content, via
+                 `cargo run --example shot`. No daemon starts; the window
+                 stays cloaked and never takes focus. Writes
+                 `.tmp\shots\<view>.png` unless a second argument or -Out
+                 gives another path, and prints the PNG's path.
       help       Print the subcommand summary.
 
 .PARAMETER Command
     The subcommand to run (positional). When omitted, defaults to `launch`.
 
 .PARAMETER Release
-    Applies to `build`, `launch`, `restart`, `native`, `native-e2e` and
-    `native-smoke`. Selects the release profile instead of debug.
+    Applies to `build`, `launch`, `restart`, `native`, `native-e2e`,
+    `native-smoke` and `native-shot`. Selects the release profile instead
+    of debug.
+
+.PARAMETER Out
+    Applies to `native-shot`: the PNG to write, instead of the second
+    positional argument and `.tmp\shots\<view>.png`.
 
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
@@ -73,14 +86,17 @@
     Justification = 'Top-level params consumed by sub-functions via $script: scope.')]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'help')]
+    [ValidateSet('', 'build', 'launch', 'setup', 'stop', 'restart', 'test', 'clippy', 'fmt', 'clean', 'native', 'native-e2e', 'native-smoke', 'native-shot', 'help')]
     [string]$Command = '',
 
     [switch]$Release,
 
+    # The PNG `native-shot` writes.
+    [string]$Out,
+
     # Extra arguments forwarded to the underlying tool (e.g. `cargo test --
     # mytest`). Only meaningful for `launch`, `restart`, `test`, `clippy`,
-    # `fmt`, `native`.
+    # `fmt`, `native`, `native-shot` (the view).
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
 )
@@ -611,6 +627,33 @@ function Invoke-NativeE2e { Invoke-NativeSpecFile @('e2e_live', 'e2e_recover') }
 
 function Invoke-NativeSmoke { Invoke-NativeSpecFile 'smoke_window' }
 
+# Writes a PNG of the native client's window showing one view, over a fake
+# daemon with fixed content (apps/native/examples/shot.rs). No daemon starts,
+# so none is built; the window stays cloaked and never takes focus. The first
+# extra argument is the view; the rest go to the example.
+function Invoke-NativeShot {
+    Assert-Tooling
+    $view = if ($Rest) { $Rest[0] } else { 'main' }
+    if ($Rest -and $Rest.Count -gt 2) {
+        throw "native-shot takes at most two positional arguments (the view and the output PNG), got '$($Rest[2..($Rest.Count - 1)] -join ' ')'; pass the output path with -Out <path>."
+    }
+    $positional = if ($Rest -and $Rest.Count -gt 1) { $Rest[1] } else { '' }
+    $outPath = if ($Out) {
+        [IO.Path]::GetFullPath($Out, (Get-Location).Path)
+    } elseif ($positional) {
+        [IO.Path]::GetFullPath($positional, (Get-Location).Path)
+    } else {
+        Join-Path $ScriptDir '.tmp' 'shots' "$view.png"
+    }
+    $cargoArgs = @('run', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native', '--example', 'shot')
+    if ($Release) { $cargoArgs += '--release' }
+    $cargoArgs += @('--', $view, $outPath)
+    Write-Host "==> Taking a shot of the native client's '$view' view..." -ForegroundColor Cyan
+    & cargo @cargoArgs
+    Test-CargoExitOk 'cargo run -p rustling-tulip-native --example shot'
+    Write-Host $outPath
+}
+
 function Show-Help {
     $help = @'
 rt.ps1 -- rustling-tulip dev helper
@@ -645,6 +688,13 @@ Commands:
              Build daemon + tracer, then run the native client's OS smoke
              specs in a cloaked window that never takes focus; checks it
              connects and that posted keys reach the shell.
+  native-shot [<view>] [<out.png>] [-Out <path>]
+             Write a PNG of the native client's window showing <view>
+             (main, source-control, diff, settings, spawn; default main)
+             over a fake daemon with fixed content, then print its path.
+             <out.png> is the PNG to write; -Out says the same thing.
+             Default: .tmp\shots\<view>.png. No daemon starts; the window
+             stays cloaked and never takes focus.
   help       This message.
 
 `launch` and `native` reuse a running daemon whose protocol matches, even
@@ -653,7 +703,8 @@ or protocol.
 
 Flags:
   -Release           Use the release profile (build, launch, restart,
-                     native, native-e2e, native-smoke).
+                     native, native-e2e, native-smoke, native-shot).
+  -Out <path>        The PNG native-shot writes.
 
 Examples:
   .\rt.ps1                       # build + run the native client
@@ -685,6 +736,7 @@ switch ($effective) {
     'native'    { Invoke-Native }
     'native-e2e'   { Invoke-NativeE2e }
     'native-smoke' { Invoke-NativeSmoke }
+    'native-shot'  { Invoke-NativeShot }
     'help'      { Show-Help }
     default     { throw "Unknown command: $effective" }
 }
