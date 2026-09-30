@@ -32,7 +32,7 @@ A row's membership comes from the snapshot, not from the attention set, for Aski
 
 Two lines, the panel's width, no card chrome:
 
-- Line 1: the status shape (the leaf's dot today; Petal's asking diamond once Wave 1 lands), the container name in its accent colour, " · ", the session's display label (the same label the leaf shows), and right-aligned the time waited ("12s", "4m", "1h 5m") since `status_since`.
+- Line 1: the status shape (the leaf's dot today; Petal's asking diamond), the container name in its accent colour, " · ", the session's display label (the same label the leaf shows), and right-aligned the time waited ("12s", "4m", "1h 5m") since `status_since`.
 - Line 2, muted, one line with an ellipsis, the full text in the tooltip: what it wants, from the best source present:
   - `pending_input` (Wave 6): Question → its `header` and first `question` ("Migration: keep newest, merge oldest, or skip?"), with "+2 more" when there are several; Permission → "Allow `<tool_name>`: `<summary>`"; PlanApproval → "Approve plan: " and the plan's first line; Other → its `message`.
   - `summary.headline` (Wave 7), for Answer rows and for Asking rows without `pending_input`.

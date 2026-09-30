@@ -16,7 +16,7 @@ use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, SplitDirection,
 };
 use rustling_tulip_native::appearance::{BUILTIN_ACCENT, BUILTIN_BACKGROUND, PaneFrame};
-use rustling_tulip_native::palette::BORDER;
+use rustling_tulip_native::palette::{BORDER, RAISED, SURFACE};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab};
 
 /// The version the harness's handshake speaks.
@@ -46,6 +46,12 @@ fn accent_of(h: &mut Harness<'_>, id: &str) -> Option<u32> {
 fn frame_of(h: &mut Harness<'_>, pane_id: &str) -> PaneFrame {
     let pane_id = pane_id.to_owned();
     h.root(move |root, _| root.pane_frame_colors(&pane_id))
+        .expect("the pane is in a tab")
+}
+
+fn header_fill_of(h: &mut Harness<'_>, pane_id: &str) -> u32 {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_header_fill(&pane_id))
         .expect("the pane is in a tab")
 }
 
@@ -185,6 +191,11 @@ fn session_accent_colours_the_sidebar_stripe_and_focused_border(cx: &mut TestApp
         "the focused pane's border and accent line take the session's accent"
     );
     assert_eq!(
+        header_fill_of(&mut h, "p1"),
+        RAISED,
+        "the focused header is raised"
+    );
+    assert_eq!(
         fills_of(&mut h, "p1"),
         (BUILTIN_BACKGROUND, 0xfb7185),
         "the ring around the terminal takes the session's frame"
@@ -201,6 +212,11 @@ fn session_accent_colours_the_sidebar_stripe_and_focused_border(cx: &mut TestApp
             accent_line: 0x22c55e,
         },
         "a pane without the focus keeps the plain border"
+    );
+    assert_eq!(
+        header_fill_of(&mut h, "p2"),
+        SURFACE,
+        "an unfocused header sits on the surface"
     );
     assert_eq!(
         fills_of(&mut h, "p2"),

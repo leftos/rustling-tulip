@@ -142,10 +142,6 @@ pub(crate) const SPAWN_BADGE_OK: u32 = 0x004e_c9b0;
 
 /// The border of a pane's shell-mark dot, as `0xRRGGBBAA`.
 pub(crate) const SHELL_MARK_BORDER: u32 = 0x0000_0059;
-/// A shell-mark dot for a command that exited 0, as `0xRRGGBB`.
-pub(crate) const SHELL_MARK_OK: u32 = 0x004e_c9b0;
-/// A shell-mark dot for a command that exited non-zero, as `0xRRGGBB`.
-pub(crate) const SHELL_MARK_FAIL: u32 = 0x00f4_8771;
 
 /// An invisible border, for a control that keeps its size while unfocused, as
 /// `0xRRGGBBAA`.
@@ -225,8 +221,6 @@ mod tests {
         assert_eq!(SPAWN_BADGE_OK, 0x004e_c9b0);
         assert_eq!(INPUT_SELECTION, 0xf07a_624d);
         assert_eq!(SHELL_MARK_BORDER, 0x0000_0059);
-        assert_eq!(SHELL_MARK_OK, 0x004e_c9b0);
-        assert_eq!(SHELL_MARK_FAIL, 0x00f4_8771);
         assert_eq!(TRANSPARENT, 0x0000_0000);
     }
 

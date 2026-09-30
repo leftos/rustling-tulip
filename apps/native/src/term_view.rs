@@ -28,7 +28,7 @@ use crate::links::TerminalLink;
 use crate::mouse::{self, CellSize, CopyOnSelect, Gesture, Tracker, ViewportCell};
 use crate::net::NetCommand;
 use crate::open;
-use crate::palette::{SHELL_MARK_BORDER, SHELL_MARK_FAIL, SHELL_MARK_OK};
+use crate::palette::{DANGER, SHELL_MARK_BORDER, WAITING};
 use crate::scrollback_load::{self, ReplyVerdict, ScrollbackLoad, State as LoadState, Step};
 use crate::shell_marks::{ShellDot, ShellStatus};
 use crate::term::{BgSpan, GridSize, SYNC_TIMEOUT, ShellCommand, Snapshot, Terminal, TextSpan};
@@ -1624,8 +1624,8 @@ fn gutter_dot(
 /// the shell gave no code for.
 fn dot_color(status: ShellStatus) -> Rgba {
     gpui::rgb(match status {
-        ShellStatus::Ok => SHELL_MARK_OK,
-        ShellStatus::Fail => SHELL_MARK_FAIL,
+        ShellStatus::Ok => WAITING,
+        ShellStatus::Fail => DANGER,
         ShellStatus::Unknown => crate::MUTED,
     })
 }
@@ -1926,6 +1926,7 @@ mod tests {
     use std::time::Instant;
 
     use super::{Attachment, ReplyVerdict, ShellStatus, SizeGate, dot_color, paste_log_line};
+    use crate::palette::{DANGER, WAITING};
     use crate::term_input;
 
     fn attach(attachment: &mut Attachment, id: &str) {
@@ -1960,8 +1961,8 @@ mod tests {
 
     #[test]
     fn dots_are_green_for_success_red_for_failure_and_muted_without_a_code() {
-        assert_eq!(dot_color(ShellStatus::Ok), gpui::rgb(0x004e_c9b0));
-        assert_eq!(dot_color(ShellStatus::Fail), gpui::rgb(0x00f4_8771));
+        assert_eq!(dot_color(ShellStatus::Ok), gpui::rgb(WAITING));
+        assert_eq!(dot_color(ShellStatus::Fail), gpui::rgb(DANGER));
         assert_eq!(dot_color(ShellStatus::Unknown), gpui::rgb(crate::MUTED));
     }
 

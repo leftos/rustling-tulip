@@ -20,7 +20,7 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 - `SessionSnapshot` derives spawn-config facts in `SessionRecord::snapshot` (`crates/daemon/src/session.rs`), as `elevated_authority` does.
 - No code runs `gh` today. Git runs through `git.rs::run_git_inner`: `Command::new("git")`, `stdin(null)`, piped output, `CREATE_NO_WINDOW` on Windows, `NON_INTERACTIVE_ENV` plus `kill_on_drop` for network calls, begin/slow timing logs. `git_inspect::parse_forge` already maps an origin URL to `https://github.com/<owner>/<repo>` and forge `github`.
 - `git_watch.rs` watches `.git/refs/**` per repo and parks while `Hub.client_count` is 0.
-- Native: `PaneHeaderParts.chips` (`grid_view.rs` `header_parts`) is a list of `(text, tip)`; `sidebar::Leaf` has `runtime`, `trusted` and `state` tags; `apps/native/src/open.rs` opens a URL through `ShellExecuteExW`; `combobox.rs` is the branch picker's pure list state.
+- Native: `PaneHeaderParts.chips` (`grid_view.rs` `header_parts`) is a `Vec<HeaderChip>` (`kind: HeaderChipKind`, `text`, `tip`); `sidebar::Leaf` has `runtime`, `trusted` and `state` tags; `apps/native/src/open.rs` opens a URL through `ShellExecuteExW`; `combobox.rs` is the branch picker's pure list state.
 
 ### Protocol (additive)
 

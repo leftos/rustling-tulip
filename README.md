@@ -45,7 +45,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Main plan**: `docs/plans/MAIN.md`, the one index of open work, one line an item in working order; a landed line is deleted.
 - **Wave**: a release-sized bundle of main-plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave names its files, review and verification.
 - **Subplan**: a `docs/plans/*.md` file holding the design and rulings for open items, linked from the main plan and deleted once its last item lands and its durable text is promoted into `docs/`.
-- **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), built in the main plan's Petal wave.
+- **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
 - **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.

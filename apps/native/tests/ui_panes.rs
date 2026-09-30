@@ -9,12 +9,14 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
-use gpui::TestAppContext;
+use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
     ClientMessage, DaemonMessage, GridNode, PaneDropEdge, RearrangeLayout, SessionSnapshot,
     SplitDirection, TabEntry,
 };
-use rustling_tulip_native::PaneHeaderParts;
+use rustling_tulip_native::appearance::{BUILTIN_ACCENT, PaneFrame};
+use rustling_tulip_native::palette::{LINE, RAISED, SURFACE};
+use rustling_tulip_native::{HeaderChip, HeaderChipKind, PANE_GUTTER, PaneHeaderParts};
 use serde_json::json;
 use support::{Fixture, Harness, TestDir, pane, session, split, tab};
 
@@ -224,8 +226,45 @@ fn pane_close_esc_cancels(cx: &mut TestAppContext) {
     assert!(h.sent().is_empty());
 }
 
-fn chip(text: &str, tip: &str) -> (String, String) {
-    (text.to_owned(), tip.to_owned())
+const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
+const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
+/// A pane header's height, in logical pixels.
+const HEADER_HEIGHT: f32 = 36.0;
+/// A header chip's height, in logical pixels.
+const CHIP_HEIGHT: f32 = 20.0;
+
+fn chip(kind: HeaderChipKind, text: &str, tip: &str) -> HeaderChip {
+    HeaderChip {
+        kind,
+        text: text.to_owned(),
+        tip: tip.to_owned(),
+    }
+}
+
+fn runtime(name: &str) -> HeaderChip {
+    chip(HeaderChipKind::Runtime, name, &format!("Running {name}"))
+}
+
+/// The height of `selector`'s element, in logical pixels.
+fn height_of(h: &mut Harness<'_>, selector: &str) -> f32 {
+    h.bounds(selector).size.height / px(1.0)
+}
+
+/// Whether `selector`'s element has never been painted.
+fn never_painted(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x < px(0.0)
+}
+
+fn frame_of(h: &mut Harness<'_>, pane_id: &str) -> PaneFrame {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_frame_colors(&pane_id))
+        .expect("the pane is in a tab")
+}
+
+fn header_fill_of(h: &mut Harness<'_>, pane_id: &str) -> u32 {
+    let pane_id = pane_id.to_owned();
+    h.root(move |root, _| root.pane_header_fill(&pane_id))
+        .expect("the pane is in a tab")
 }
 
 fn header_of(h: &mut Harness<'_>, pane_id: &str) -> PaneHeaderParts {
@@ -251,7 +290,7 @@ fn side_by_side(s1: SessionSnapshot, s2: SessionSnapshot) -> Fixture {
 }
 
 #[gpui::test]
-fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
+fn pane_header_shows_runtime_trusted_and_headless_chips(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = side_by_side(
         session("s1")
@@ -271,49 +310,83 @@ fn pane_header_shows_runtime_and_trusted_chips(cx: &mut TestAppContext) {
     assert_eq!(
         header.chips,
         [
-            chip("claude", "Running claude"),
-            chip(
-                "trusted",
-                "Trusted launch: permission prompts were bypassed"
-            ),
+            runtime("claude"),
+            chip(HeaderChipKind::Trusted, "trusted", TRUSTED_TIP),
         ]
     );
-    assert!(!header.headless);
 
     let header = header_of(&mut h, "p2");
-    assert_eq!(header.chips, [chip("codex", "Running codex")]);
-    assert!(header.headless, "a headless session says so");
+    assert_eq!(
+        header.chips,
+        [
+            runtime("codex"),
+            chip(HeaderChipKind::Headless, "headless", HEADLESS_TIP),
+        ],
+        "a headless session says so in a chip"
+    );
+
+    for selector in [
+        "pane-chip-p1-runtime",
+        "pane-chip-p1-trusted",
+        "pane-chip-p2-runtime",
+        "pane-chip-p2-headless",
+    ] {
+        assert!(
+            (height_of(&mut h, selector) - CHIP_HEIGHT).abs() < 0.5,
+            "{selector} is a {CHIP_HEIGHT} px chip"
+        );
+    }
+    assert!(never_painted(&mut h, "pane-chip-p1-headless"));
+    assert!(never_painted(&mut h, "pane-chip-p2-trusted"));
 }
 
 #[gpui::test]
-fn pane_header_member_chips_for_workspace_session(cx: &mut TestAppContext) {
+fn workspace_header_folds_further_members_into_a_count_chip(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = side_by_side(
         session("s1")
             .in_workspace("ws1")
-            .members(&[("r1", "wt/a", "C:/wt/a/r1"), ("r2", "wt/a", "C:/wt/a/r2")])
+            .members(&[
+                ("r1", "wt/a", "C:/wt/a/r1"),
+                ("r2", "wt/a", "C:/wt/a/r2"),
+                ("r3", "wt/b", "C:/wt/b/r3"),
+            ])
             .build(),
         session("s2").build(),
     );
     let mut h = Harness::with(cx, &dir, &fixture);
 
     assert_eq!(
-        header_of(&mut h, "p1").members,
+        header_of(&mut h, "p1").chips,
         [
-            chip("r1: wt/a", "r1: wt/a\nC:/wt/a/r1"),
-            chip("r2: wt/a", "r2: wt/a\nC:/wt/a/r2"),
+            runtime("claude"),
+            chip(HeaderChipKind::Branch, "r1:wt/a", "r1:wt/a\nC:/wt/a/r1"),
+            chip(
+                HeaderChipKind::More,
+                "+2",
+                "r2:wt/a\nC:/wt/a/r2\nr3:wt/b\nC:/wt/b/r3"
+            ),
         ]
     );
-    let two_rows = h.bounds("pane-header-p1").size.height;
-    let one_row = h.bounds("pane-header-p2").size.height;
-    assert!(
-        two_rows > one_row,
-        "the member chips take a second row: {two_rows:?} against {one_row:?}"
-    );
+    assert_eq!(header_of(&mut h, "p2").chips, [runtime("claude")]);
+    for selector in ["pane-chip-p1-branch", "pane-chip-p1-more"] {
+        assert!(
+            (height_of(&mut h, selector) - CHIP_HEIGHT).abs() < 0.5,
+            "{selector} is a {CHIP_HEIGHT} px chip"
+        );
+    }
+    assert!(never_painted(&mut h, "pane-chip-p2-more"));
+    for pane in ["p1", "p2"] {
+        let height = height_of(&mut h, &format!("pane-header-{pane}"));
+        assert!(
+            (height - HEADER_HEIGHT).abs() < 0.5,
+            "{pane}'s header is one {HEADER_HEIGHT} px row, members or not: {height}"
+        );
+    }
 }
 
 #[gpui::test]
-fn plain_shell_header_has_one_row(cx: &mut TestAppContext) {
+fn repo_and_shell_headers_are_one_row(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let fixture = side_by_side(
         session("s1")
@@ -325,14 +398,190 @@ fn plain_shell_header_has_one_row(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture);
 
     let header = header_of(&mut h, "p1");
-    assert!(header.members.is_empty());
     assert_eq!(header.title, "scratch");
-    assert_eq!(header.chips, [chip("pwsh", "Running pwsh")]);
-    let shell = h.bounds("pane-header-p1").size.height;
-    let repo = h.bounds("pane-header-p2").size.height;
+    assert_eq!(header.chips, [runtime("pwsh")]);
+    assert_eq!(
+        header_of(&mut h, "p2").chips,
+        [
+            runtime("claude"),
+            chip(HeaderChipKind::Branch, "r1:main", "r1:main"),
+        ],
+        "a member without a worktree path hovers as its name alone"
+    );
+    for pane in ["p1", "p2"] {
+        let height = height_of(&mut h, &format!("pane-header-{pane}"));
+        assert!(
+            (height - HEADER_HEIGHT).abs() < 0.5,
+            "{pane}'s header is {HEADER_HEIGHT} px: {height}"
+        );
+    }
+}
+
+#[gpui::test]
+fn pane_cards_sit_a_gutter_apart_inside_the_grid_padding(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(session("s1").build(), session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    let grid = h.bounds("tab-grid-t1");
+    let (first, second) = (h.bounds("pane-frame-p1"), h.bounds("pane-frame-p2"));
+    let divider = h.bounds("divider-t1-[]");
+    let gap = (second.left() - first.right()) / px(1.0);
     assert!(
-        shell < repo,
-        "a shell's header is one row, a repo session's two: {shell:?} against {repo:?}"
+        (gap - PANE_GUTTER).abs() < 0.5,
+        "the cards sit {PANE_GUTTER} px apart: {gap}"
+    );
+    assert!(
+        (divider.size.width / px(1.0) - PANE_GUTTER).abs() < 0.5,
+        "the gutter is the drag handle"
+    );
+    for (edge, inset) in [
+        ("left", first.left() - grid.left()),
+        ("top", first.top() - grid.top()),
+        ("right", grid.right() - second.right()),
+        ("bottom", grid.bottom() - second.bottom()),
+    ] {
+        let inset = inset / px(1.0);
+        assert!(
+            (inset - PANE_GUTTER).abs() < 0.5,
+            "the grid's {edge} padding is {PANE_GUTTER} px: {inset}"
+        );
+    }
+}
+
+/// The gap between a pane header's parts, in logical pixels.
+const HEADER_GAP: f32 = 8.0;
+/// The header parts of pane `p1` that never shrink, right of its chips.
+const P1_BUTTONS: [&str; 5] = [
+    "pane-stop-p1",
+    "split-right-p1",
+    "split-down-p1",
+    "pane-move-new-tab-p1",
+    "close-pane-p1",
+];
+
+fn width_of(h: &mut Harness<'_>, selector: &str) -> f32 {
+    h.bounds(selector).size.width / px(1.0)
+}
+
+/// Tab `t1` with `p1` (showing `s1`) taking `ratio` of the width beside
+/// `p2` (showing `s2`).
+fn split_at(ratio: f32) -> TabEntry {
+    tab(
+        "t1",
+        &GridNode::Split {
+            direction: SplitDirection::Horizontal,
+            ratio,
+            first: Box::new(pane("p1", Some("s1"))),
+            second: Box::new(pane("p2", Some("s2"))),
+        },
+    )
+}
+
+/// Every header button of `p1` lies inside its card.
+fn assert_buttons_inside_p1(h: &mut Harness<'_>, stage: &str) {
+    let frame = h.bounds("pane-frame-p1");
+    for button in P1_BUTTONS {
+        let bounds = h.bounds(button);
+        assert!(
+            bounds.origin.x >= frame.left() && bounds.right() <= frame.right() + px(0.5),
+            "{stage}: {button} at {bounds:?} lies inside the card {frame:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_narrow_header_gives_up_the_branch_chip_before_the_title(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let long = |id: &str| {
+        session(id)
+            .label("Petal footer polish")
+            .members(&[(
+                "rustling-tulip",
+                "feat/a-rather-long-branch-name",
+                "C:/wt/x/rustling-tulip",
+            )])
+            .build()
+    };
+    let mut h = Harness::with(cx, &dir, &side_by_side(long("s1"), long("s2")));
+
+    let frame = width_of(&mut h, "pane-frame-p1");
+    let row = frame / 0.5;
+    let title = width_of(&mut h, "pane-title-p1");
+    let branch = width_of(&mut h, "pane-chip-p1-branch");
+    let free = (h.bounds("pane-stop-p1").left() - h.bounds("pane-chip-p1-branch").right())
+        / px(1.0)
+        - 2.0 * HEADER_GAP;
+    assert!(
+        title > 40.0 && branch > 40.0 && free > 0.0,
+        "a half-width pane shows its header whole: title {title}, branch {branch}, room {free}"
+    );
+
+    let short_of_branch = (frame - free - branch / 2.0) / row;
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at(short_of_branch),
+    });
+    assert_buttons_inside_p1(&mut h, "half a branch short");
+    let squeezed = width_of(&mut h, "pane-chip-p1-branch");
+    assert!(
+        squeezed < branch - 1.0,
+        "the branch chip gives way first: {squeezed} of {branch}"
+    );
+    let whole = width_of(&mut h, "pane-title-p1");
+    assert!(
+        (whole - title).abs() < 0.5,
+        "the title stays whole while the branch chip gives way: {whole} of {title}"
+    );
+
+    let short_of_title = (frame - free - branch - title / 2.0) / row;
+    h.send(DaemonMessage::TabUpdated {
+        tab: split_at(short_of_title),
+    });
+    assert_buttons_inside_p1(&mut h, "half a title short");
+    let cut = width_of(&mut h, "pane-title-p1");
+    assert!(
+        cut > 0.0 && cut < title - 1.0,
+        "the title truncates once the branch chip has given way: {cut} of {title}"
+    );
+    assert!(
+        (width_of(&mut h, "pane-chip-p1-runtime") - width_of(&mut h, "pane-chip-p2-runtime")).abs()
+            < 0.5,
+        "the runtime chip never shrinks"
+    );
+}
+
+#[gpui::test]
+fn pane_frame_colors_follow_the_focus(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = side_by_side(session("s1").build(), session("s2").build());
+    let mut h = Harness::with(cx, &dir, &fixture);
+    for s in &fixture.sessions {
+        h.answer_scrollback(&s.id, b"");
+    }
+    let at = h.cell_center("p1", 0, 0);
+    h.click(at, Modifiers::none());
+
+    assert_eq!(
+        frame_of(&mut h, "p1"),
+        PaneFrame {
+            border: BUILTIN_ACCENT,
+            accent_line: BUILTIN_ACCENT,
+        },
+        "the focused card has an accent border"
+    );
+    assert_eq!(header_fill_of(&mut h, "p1"), RAISED, "over a raised header");
+    assert_eq!(
+        frame_of(&mut h, "p2"),
+        PaneFrame {
+            border: LINE,
+            accent_line: BUILTIN_ACCENT,
+        },
+        "an unfocused card has a plain border"
+    );
+    assert_eq!(
+        header_fill_of(&mut h, "p2"),
+        SURFACE,
+        "over a surface header"
     );
 }
 

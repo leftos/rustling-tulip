@@ -152,7 +152,7 @@ pub use crate::diff_tab::{
     LOADING_TEXT as DIFF_LOADING_TEXT, OPEN_FAILED_TITLE as DIFF_OPEN_FAILED_TITLE, WHITESPACE_TIP,
 };
 pub use crate::footer::LogPaths;
-pub use crate::grid_view::PaneHeaderParts;
+pub use crate::grid_view::{HeaderChip, HeaderChipKind, PaneHeaderParts};
 pub use crate::history::{
     CommitDetailView, CommitRow, DetailFile, DetailPane, ForgeButton, HistoryBlock, HistoryBody,
     MoreRow,
@@ -187,8 +187,11 @@ pub use crate::worktrees_manager_view::{WorktreesButton, WorktreesRow};
 
 const PADDING: f32 = 6.0;
 /// Thickness of the drag handles between the sidebar and the tabs, and
-/// between split panes.
+/// between the source-control panel's sections.
 pub const DIVIDER_WIDTH: f32 = 4.0;
+/// The gap between two pane cards, which is their divider's drag handle,
+/// and the padding round a tab's grid of cards.
+pub const PANE_GUTTER: f32 = 6.0;
 /// How long tab font steps and window moves wait before the layout is
 /// written out.
 const UI_SAVE_DEBOUNCE: Duration = Duration::from_millis(500);

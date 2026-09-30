@@ -5,18 +5,22 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, MouseButton,
-    MouseDownEvent, Pixels, SharedString, Stateful, Subscription, Window, canvas, div, prelude::*,
-    px, relative,
+    AnyElement, App, Bounds, ClickEvent, Context, CursorStyle, Div, ElementId, Entity, FocusHandle,
+    FontWeight, HighlightStyle, MouseButton, MouseDownEvent, Pixels, SharedString, Stateful,
+    StyledText, Subscription, Window, canvas, div, prelude::*, px, relative,
 };
 use protocol::{
-    ClientMessage, GridNode, SessionMode, SessionSnapshot, SessionStatus, SplitDirection,
-    SplitPlace, TabContent, TabEntry,
+    ClientMessage, GridNode, SessionMember, SessionMode, SessionSnapshot, SessionStatus,
+    SplitDirection, SplitPlace, TabContent, TabEntry,
 };
 
 use crate::appearance::{self, PaneFrame, Resolved};
 use crate::diff_tab::LOADING_TEXT as DIFF_LOADING_TEXT;
+use crate::fonts::DEFAULT_FAMILY;
 use crate::headless;
+use crate::palette::{
+    ACCENT, CHIP, HOVER, LILAC, LINE, LINE_STRONG, RAISED, SUBTLE, SURFACE, TEXT_2, TRANSPARENT,
+};
 use crate::session_menu::{BorderedButton, bordered_button};
 use crate::shell_dialog::standalone_shell_request;
 use crate::sidebar::{can_attach, display_label, label_tooltip, runtime_label};
@@ -26,8 +30,7 @@ use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{self, PaneBinding, TabsModel};
 use crate::term_view::{PaneEvent, ScrollbackReply, TerminalPane};
 use crate::{
-    BAR_BG, BORDER, DIVIDER_WIDTH, Drag, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE,
-    drag_handle, new_request_id, tooltip,
+    BORDER, Drag, MUTED, PANE_GUTTER, RootView, TEXT, UI_TEXT_SIZE, new_request_id, tooltip,
 };
 
 /// Why a repo-tied spawn button is disabled.
@@ -39,10 +42,24 @@ const PANE_SHELL_TIP: &str = "A plain shell in this pane, in the remembered fold
 pub(crate) const SPAWN_TIP: &str = "Spawn a new session";
 const OPEN_SHELL_TIP: &str = "A plain shell in a new tab, in the remembered folder";
 
-const PANE_HEADER_HEIGHT: f32 = 20.0;
+const PANE_HEADER_HEIGHT: f32 = 36.0;
+/// The corner radius of a pane card and its header.
+const PANE_RADIUS: f32 = 8.0;
+/// The name's size in a pane header.
+const TITLE_TEXT_SIZE: f32 = 12.5;
+const CHIP_HEIGHT: f32 = 20.0;
+const CHIP_RADIUS: f32 = 5.0;
+const CHIP_TEXT_SIZE: f32 = 11.0;
+/// The repo:branch chip's flex shrink against the title's 1: large enough
+/// that the chip gives up nearly all its width before the title gives any.
+const BRANCH_CHIP_SHRINK: f32 = 1000.0;
+/// How strongly the claude runtime chip washes its fill with the accent.
+const RUNTIME_WASH_ALPHA: f32 = 0.13;
+const HEADER_BUTTON_SIZE: f32 = 26.0;
+const HEADER_BUTTON_RADIUS: f32 = 6.0;
 const TRUSTED_TIP: &str = "Trusted launch: permission prompts were bypassed";
-const HEADLESS_NOTE: &str = " · headless";
-/// The accent line down a pane's left edge.
+const HEADLESS_TIP: &str = "Headless session: it runs without a terminal";
+/// The accent line down a pane header's left edge, below its top corner.
 const ACCENT_LINE_WIDTH: f32 = 3.0;
 
 /// A pane's terminal and the session it shows.
@@ -136,12 +153,12 @@ pub(crate) fn divider_ratio(
     let bounds = bounds?;
     let grid = model.tab(tab_id)?.grid()?;
     let rect = tabs::Rect::new(
-        bounds.origin.x / px(1.0),
-        bounds.origin.y / px(1.0),
-        bounds.size.width / px(1.0),
-        bounds.size.height / px(1.0),
+        bounds.origin.x / px(1.0) + PANE_GUTTER,
+        bounds.origin.y / px(1.0) + PANE_GUTTER,
+        (bounds.size.width / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
+        (bounds.size.height / px(1.0) - 2.0 * PANE_GUTTER).max(0.0),
     );
-    let divider = tabs::dividers(grid, rect, DIVIDER_WIDTH)
+    let divider = tabs::dividers(grid, rect, PANE_GUTTER)
         .into_iter()
         .find(|d| d.split_path == split_path)?;
     Some(tabs::ratio_at(&divider, at.0, at.1))
@@ -391,6 +408,21 @@ impl RootView {
     /// accent line.
     #[must_use]
     pub fn pane_frame_colors(&self, pane_id: &str) -> Option<PaneFrame> {
+        let (session, focused) = self.pane_place(pane_id)?;
+        Some(self.frame_colors(pane_id, session, focused))
+    }
+
+    /// The fill of pane `pane_id`'s header, `0xRRGGBB`: raised while the
+    /// pane has its tab's focus, the surface otherwise.
+    #[must_use]
+    pub fn pane_header_fill(&self, pane_id: &str) -> Option<u32> {
+        let (_, focused) = self.pane_place(pane_id)?;
+        Some(header_fill(focused))
+    }
+
+    /// The session pane `pane_id` shows, and whether the pane has its
+    /// tab's focus; `None` when no tab holds the pane.
+    fn pane_place(&self, pane_id: &str) -> Option<(Option<&str>, bool)> {
         let (tab_id, session) = self.tabs.tabs().iter().find_map(|tab| {
             let pane = tabs::collect_panes(tab.grid()?)
                 .into_iter()
@@ -398,7 +430,7 @@ impl RootView {
             Some((tab.id.as_str(), pane.session))
         })?;
         let focused = self.tabs.focused_pane(tab_id).as_deref() == Some(pane_id);
-        Some(self.frame_colors(pane_id, session, focused))
+        Some((session, focused))
     }
 
     /// The colours pane `pane_id`, showing `session`, paints on its edges,
@@ -809,7 +841,16 @@ impl RootView {
                 TabContent::Diff { .. } => self
                     .diff_tab_element(&tab.id)
                     .unwrap_or_else(|| muted_note(DIFF_LOADING_TEXT).into_any_element()),
-                TabContent::Grid { grid } => self.render_node(&tab.id, grid, &mut Vec::new(), cx),
+                TabContent::Grid { grid } => {
+                    let name = format!("tab-grid-{}", tab.id);
+                    div()
+                        .debug_selector(|| name)
+                        .flex()
+                        .size_full()
+                        .p(px(PANE_GUTTER))
+                        .child(self.render_node(&tab.id, grid, &mut Vec::new(), cx))
+                        .into_any_element()
+                }
             },
         };
         div()
@@ -865,7 +906,7 @@ impl RootView {
         let name = format!("divider-{tab_id}-{path:?}");
         let id = ElementId::Name(SharedString::from(name.clone()));
         let (tab_id, split_path) = (tab_id.to_owned(), path.to_vec());
-        drag_handle(id, direction == SplitDirection::Horizontal, active)
+        gutter_handle(id, direction == SplitDirection::Horizontal, active)
             .debug_selector(|| name)
             .on_mouse_down(
                 MouseButton::Left,
@@ -923,31 +964,37 @@ impl RootView {
             .children(self.exited_overlay(tab_id, pane_id, session_id, cx))
             .children(self.abandoned_overlay(pane_id, session_id, cx));
         let colors = self.frame_colors(pane_id, session_id, focused);
-        div()
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .border_1()
-            .border_color(gpui::rgb(colors.border))
-            .child(self.pane_header(tab_id, pane_id, session_id, cx))
-            .child(body)
+        let frame = format!("pane-frame-{pane_id}");
+        let header = self
+            .pane_header(tab_id, pane_id, session_id, cx)
+            .bg(gpui::rgb(header_fill(focused)))
             .child(
                 div()
                     .absolute()
-                    .top_0()
+                    .top(px(PANE_RADIUS))
                     .bottom_0()
                     .left_0()
                     .w(px(ACCENT_LINE_WIDTH))
                     .bg(gpui::rgb(colors.accent_line)),
-            )
+            );
+        div()
+            .debug_selector(|| frame)
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .rounded(px(PANE_RADIUS))
+            .border_1()
+            .border_color(gpui::rgb(colors.border))
+            .child(header)
+            .child(body)
             .into_any_element()
     }
 
-    /// The session's status glyph, name, runtime, trusted and headless marks,
-    /// its Stop or exit code, split right and down (Shift: left and up),
-    /// move and close; a session with members lists their branches on a
-    /// second row. A right-click opens the session's menu.
+    /// The session's status glyph, name and chips (runtime, repo:branch
+    /// with a count of further members, headless, trusted), its Stop or
+    /// exit code, split right and down (Shift: left and up), move and
+    /// close. A right-click opens the session's menu.
     fn pane_header(
         &self,
         tab_id: &str,
@@ -958,21 +1005,9 @@ impl RootView {
         let parts = session_id
             .and_then(|id| self.sidebar.session(id))
             .map(|session| header_parts(session, self.sidebar.is_unseen(&session.id)));
-        let members = parts
-            .as_ref()
-            .filter(|parts| !parts.members.is_empty())
-            .map(|parts| member_row(pane_id, &parts.members));
         let menu_ids = (tab_id.to_owned(), pane_id.to_owned());
         let menu_session = session_id.map(str::to_owned);
         let name = format!("pane-header-{pane_id}");
-        let top = div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .h(px(PANE_HEADER_HEIGHT))
-            .children(header_title(pane_id, parts.as_ref()))
-            .children(self.header_stop(pane_id, session_id, cx))
-            .children(Self::header_buttons(tab_id, pane_id, session_id, cx));
         div()
             .debug_selector(|| name)
             .on_mouse_down(
@@ -987,15 +1022,23 @@ impl RootView {
                     cx.stop_propagation();
                 }),
             )
+            .relative()
             .flex()
-            .flex_col()
             .flex_none()
-            .px(px(6.0))
-            .bg(gpui::rgb(BAR_BG))
+            .items_center()
+            .gap(px(8.0))
+            .h(px(PANE_HEADER_HEIGHT))
+            .pl(px(12.0))
+            .pr(px(8.0))
+            .rounded_t(px(PANE_RADIUS))
+            .border_b_1()
+            .border_color(gpui::rgb(LINE))
             .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(MUTED))
-            .child(top)
-            .children(members)
+            .text_color(gpui::rgb(TEXT_2))
+            .children(header_title(pane_id, parts.as_ref()))
+            .child(div().flex_1())
+            .children(self.header_stop(pane_id, session_id, cx))
+            .children(Self::header_buttons(tab_id, pane_id, session_id, cx))
     }
 
     /// Split right and down (Shift: left and up), move to a new tab when
@@ -1084,34 +1127,77 @@ pub struct PaneHeaderParts {
     pub status_tip: String,
     pub title: String,
     pub title_tip: String,
-    /// The runtime and trusted chips: text and hover text.
-    pub chips: Vec<(String, String)>,
-    /// A headless session's note after the chips.
-    pub headless: bool,
-    /// One `repo: branch` chip per member, with its worktree path.
-    pub members: Vec<(String, String)>,
+    /// The chips after the name, in the order they show.
+    pub chips: Vec<HeaderChip>,
+}
+
+/// What a pane header chip says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderChipKind {
+    /// The agent, or a plain shell's program.
+    Runtime,
+    /// The first member's `repo:branch`.
+    Branch,
+    /// `+N`: the further members of a workspace session.
+    More,
+    Headless,
+    Trusted,
+}
+
+impl HeaderChipKind {
+    /// The chip's part of its selector, `pane-chip-<pane>-<name>`.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Branch => "branch",
+            Self::More => "more",
+            Self::Headless => "headless",
+            Self::Trusted => "trusted",
+        }
+    }
+}
+
+/// One chip in a pane header: its text and hover text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderChip {
+    pub kind: HeaderChipKind,
+    pub text: String,
+    pub tip: String,
+}
+
+impl HeaderChip {
+    fn new(kind: HeaderChipKind, text: impl Into<String>, tip: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            tip: tip.into(),
+        }
+    }
 }
 
 fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
-    let mut chips: Vec<(String, String)> = runtime_label(session)
+    let mut chips: Vec<HeaderChip> = runtime_label(session)
         .map(|runtime| {
             let tip = format!("Running {runtime}");
-            (runtime, tip)
+            HeaderChip::new(HeaderChipKind::Runtime, runtime, tip)
         })
         .into_iter()
         .collect();
-    if session.elevated_authority {
-        chips.push(("trusted".to_owned(), TRUSTED_TIP.to_owned()));
+    chips.extend(member_chips(&session.members));
+    if headless::is_headless(session) {
+        chips.push(HeaderChip::new(
+            HeaderChipKind::Headless,
+            "headless",
+            HEADLESS_TIP,
+        ));
     }
-    let members = session
-        .members
-        .iter()
-        .map(|member| {
-            let text = format!("{}: {}", member.repo_name, member.branch);
-            let tip = format!("{text}\n{}", member.worktree_path);
-            (text, tip)
-        })
-        .collect();
+    if session.elevated_authority {
+        chips.push(HeaderChip::new(
+            HeaderChipKind::Trusted,
+            "trusted",
+            TRUSTED_TIP,
+        ));
+    }
     PaneHeaderParts {
         status: session.status,
         mode: session.mode,
@@ -1120,28 +1206,70 @@ fn header_parts(session: &SessionSnapshot, unseen: bool) -> PaneHeaderParts {
         title: display_label(session),
         title_tip: label_tooltip(session),
         chips,
-        headless: headless::is_headless(session),
-        members,
     }
+}
+
+/// The first member's `repo:branch` chip, hovering as its worktree path,
+/// then a `+N` chip for the rest whose hover lists them.
+fn member_chips(members: &[SessionMember]) -> Vec<HeaderChip> {
+    let name = |member: &SessionMember| format!("{}:{}", member.repo_name, member.branch);
+    let Some((first, rest)) = members.split_first() else {
+        return Vec::new();
+    };
+    let text = name(first);
+    let tip = member_tip(text.clone(), first);
+    let mut chips = vec![HeaderChip::new(HeaderChipKind::Branch, text, tip)];
+    if !rest.is_empty() {
+        let tip = rest
+            .iter()
+            .map(|member| member_tip(name(member), member))
+            .collect::<Vec<_>>()
+            .join("\n");
+        chips.push(HeaderChip::new(
+            HeaderChipKind::More,
+            format!("+{}", rest.len()),
+            tip,
+        ));
+    }
+    chips
+}
+
+/// A member's `repo:branch` over its worktree path, or the name alone when
+/// the member has no path.
+fn member_tip(name: String, member: &SessionMember) -> String {
+    if member.worktree_path.is_empty() {
+        name
+    } else {
+        format!("{name}\n{}", member.worktree_path)
+    }
+}
+
+/// A pane header's fill: raised while the pane has its tab's focus.
+fn header_fill(focused: bool) -> u32 {
+    if focused { RAISED } else { SURFACE }
 }
 
 /// The header's left side: the status glyph, the name and the chips, or
 /// "Empty pane".
 fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElement> {
+    let title_name = format!("pane-title-{pane_id}");
     let title = div()
-        .id(SharedString::from(format!("pane-title-{pane_id}")))
-        .flex_1()
+        .id(ElementId::Name(SharedString::from(title_name.clone())))
+        .debug_selector(|| title_name)
         .min_w(px(0.0))
         .overflow_hidden()
         .whitespace_nowrap();
     let Some(parts) = parts else {
         return vec![title.child("Empty pane").into_any_element()];
     };
+    let title = title
+        .text_size(px(TITLE_TEXT_SIZE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::rgb(TEXT));
     let mut out = vec![
         div()
             .id(SharedString::from(format!("pane-status-{pane_id}")))
             .flex_none()
-            .pr(px(4.0))
             .child(glyph_view(
                 glyph(parts.status, parts.mode, parts.unseen),
                 GlyphSize::Leaf,
@@ -1154,52 +1282,91 @@ fn header_title(pane_id: &str, parts: Option<&PaneHeaderParts>) -> Vec<AnyElemen
             .tooltip(tooltip(parts.title_tip.clone()))
             .into_any_element(),
     ];
-    out.extend(
-        parts
-            .chips
-            .iter()
-            .enumerate()
-            .map(|(i, (text, tip))| header_chip(format!("pane-chip-{pane_id}-{i}"), text, tip)),
-    );
-    if parts.headless {
-        out.push(
-            div()
-                .flex_none()
-                .pr(px(4.0))
-                .child(HEADLESS_NOTE)
-                .into_any_element(),
-        );
-    }
+    out.extend(parts.chips.iter().map(|chip| header_chip(pane_id, chip)));
     out
 }
 
-/// The second header row: one chip per member.
-fn member_row(pane_id: &str, members: &[(String, String)]) -> Div {
-    div()
+/// A 20 px Geist Mono chip: the claude runtime washed in the accent, the
+/// codex runtime in lilac, repo:branch with its repo name bright, trusted
+/// outlined, the rest filled.
+fn header_chip(pane_id: &str, chip: &HeaderChip) -> AnyElement {
+    let name = format!("pane-chip-{pane_id}-{}", chip.kind.name());
+    let base = div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
         .flex()
-        .flex_wrap()
+        .flex_none()
         .items_center()
-        .gap(px(4.0))
-        .pb(px(3.0))
-        .children(
-            members.iter().enumerate().map(|(i, (text, tip))| {
-                header_chip(format!("pane-member-{pane_id}-{i}"), text, tip)
-            }),
-        )
+        .h(px(CHIP_HEIGHT))
+        .px(px(7.0))
+        .rounded(px(CHIP_RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(TRANSPARENT))
+        .bg(gpui::rgb(CHIP))
+        .font_family(DEFAULT_FAMILY)
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(CHIP_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT_2))
+        .tooltip(tooltip(chip.tip.clone()));
+    let base = if chip.kind == HeaderChipKind::Branch {
+        base
+    } else {
+        base.whitespace_nowrap()
+    };
+    let text = chip.text.clone();
+    match chip.kind {
+        HeaderChipKind::Runtime => match text.as_str() {
+            "claude" => base
+                .bg(gpui::Rgba {
+                    a: RUNTIME_WASH_ALPHA,
+                    ..gpui::rgb(ACCENT)
+                })
+                .text_color(gpui::rgb(ACCENT)),
+            "codex" => base.text_color(gpui::rgb(LILAC)),
+            _ => base,
+        }
+        .child(text),
+        HeaderChipKind::Branch => branch_chip(base, text),
+        HeaderChipKind::Trusted => base
+            .bg(gpui::rgba(TRANSPARENT))
+            .border_color(gpui::rgb(LINE_STRONG))
+            .child(text),
+        HeaderChipKind::More | HeaderChipKind::Headless => base.child(text),
+    }
+    .into_any_element()
 }
 
-fn header_chip(id: String, text: &str, tip: &str) -> AnyElement {
+/// The repo:branch chip, its repo name bright and its colon subtle. It is
+/// the first part of a header to give way when the header runs short: it
+/// shrinks and truncates with `…` before the title does, its tooltip
+/// keeping the whole text.
+fn branch_chip(base: Stateful<Div>, text: String) -> Stateful<Div> {
+    let highlights = text.find(':').map(|colon| {
+        let color = |token: u32| HighlightStyle {
+            color: Some(gpui::rgb(token).into()),
+            ..HighlightStyle::default()
+        };
+        [(0..colon, color(TEXT)), (colon..colon + 1, color(SUBTLE))]
+    });
+    let label = StyledText::new(text).with_highlights(highlights.into_iter().flatten());
+    let mut chip = base
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(truncating(label));
+    chip.style().flex_shrink = Some(BRANCH_CHIP_SHRINK);
+    chip
+}
+
+/// One line of text that ends in `…` when its flex parent narrows it.
+/// Wrapping stays on so gpui re-measures the text at the narrowed width,
+/// and the one-line clamp keeps it to a line.
+fn truncating(text: impl IntoElement) -> Div {
     div()
-        .id(SharedString::from(id))
-        .flex_none()
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .whitespace_nowrap()
-        .child(text.to_owned())
-        .tooltip(tooltip(tip.to_owned()))
-        .into_any_element()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .text_ellipsis()
+        .line_clamp(1)
+        .child(text)
 }
 
 /// A split's two children around their divider, the first sized by `ratio`.
@@ -1248,7 +1415,7 @@ fn spawn_choices(heading: &'static str, buttons: [Stateful<Div>; 2]) -> Div {
     )
 }
 
-/// A small glyph button in a pane header.
+/// A 26 px square glyph button in a pane header.
 fn header_button(
     pane_id: &str,
     action: &str,
@@ -1259,12 +1426,39 @@ fn header_button(
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
-        .px(px(4.0))
-        .rounded(px(3.0))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(HEADER_BUTTON_SIZE))
+        .rounded(px(HEADER_BUTTON_RADIUS))
+        .text_color(gpui::rgb(TEXT_2))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+        .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
         .tooltip(tooltip(tip))
         .child(glyph)
+}
+
+/// The gutter between two pane cards: transparent until hovered or
+/// dragged, when it shows [`HOVER`]. A vertical line between side-by-side
+/// panes, a horizontal one between stacked panes.
+fn gutter_handle(id: ElementId, vertical_line: bool, active: bool) -> Stateful<Div> {
+    let handle = div()
+        .id(id)
+        .flex_none()
+        .hover(|style| style.bg(gpui::rgb(HOVER)))
+        .when(active, |handle| handle.bg(gpui::rgb(HOVER)));
+    if vertical_line {
+        handle
+            .w(px(PANE_GUTTER))
+            .h_full()
+            .cursor(CursorStyle::ResizeLeftRight)
+    } else {
+        handle
+            .h(px(PANE_GUTTER))
+            .w_full()
+            .cursor(CursorStyle::ResizeUpDown)
+    }
 }
 
 /// An invisible layer that records where the grid was laid out, for the
