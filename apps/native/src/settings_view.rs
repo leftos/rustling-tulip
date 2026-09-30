@@ -20,7 +20,7 @@ use crate::appearance_view::{Level, close_footer};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::session_menu::{backdrop, dialog_button};
-use crate::sidebar::SidebarView;
+use crate::sidebar::{LeafDensity, SidebarView};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
 };
@@ -99,11 +99,15 @@ impl SettingsTab {
 /// The General tab's Default view choices, in the order they show.
 const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView::Tabs];
 
+/// The General tab's Leaf density choices, in the order they show.
+const LEAF_DENSITY_CHOICES: [LeafDensity; 2] = [LeafDensity::Comfortable, LeafDensity::Compact];
+
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
     KeepAwake,
     SidebarView(SidebarView),
+    LeafDensity(LeafDensity),
     CopyOnSelect,
     TitleCount,
     TitleSuffix,
@@ -127,6 +131,8 @@ impl SettingsControl {
             Self::KeepAwake => "settings-keep-awake-toggle",
             Self::SidebarView(SidebarView::Repos) => "settings-sidebar-view-repos",
             Self::SidebarView(SidebarView::Tabs) => "settings-sidebar-view-tabs",
+            Self::LeafDensity(LeafDensity::Comfortable) => "settings-leaf-density-comfortable",
+            Self::LeafDensity(LeafDensity::Compact) => "settings-leaf-density-compact",
             Self::CopyOnSelect => "settings-terminal-copy-on-selection",
             Self::TitleCount => "settings-title-busy-count",
             Self::TitleSuffix => "settings-title-product-suffix",
@@ -280,6 +286,7 @@ impl RootView {
                 keep_awake
                     .into_iter()
                     .chain(SIDEBAR_VIEW_CHOICES.map(SettingsControl::SidebarView))
+                    .chain(LEAF_DENSITY_CHOICES.map(SettingsControl::LeafDensity))
                     .chain([SettingsControl::CopyOnSelect])
                     .collect()
             }
@@ -391,6 +398,7 @@ impl RootView {
         match control {
             SettingsControl::KeepAwake => self.toggle_keep_awake(),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
+            SettingsControl::LeafDensity(density) => self.set_leaf_density(density, cx),
             SettingsControl::CopyOnSelect => self.toggle_copy_on_select(cx),
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
@@ -764,6 +772,15 @@ impl RootView {
                 enabled: !state.enabled,
             });
         }
+    }
+
+    /// Sets how much room each session leaf takes, saving it when it
+    /// changed.
+    fn set_leaf_density(&mut self, density: LeafDensity, cx: &mut Context<Self>) {
+        if self.sidebar.set_leaf_density(density) {
+            self.save_ui();
+        }
+        cx.notify();
     }
 
     fn toggle_copy_on_select(&mut self, cx: &mut Context<Self>) {
@@ -1175,8 +1192,21 @@ impl RootView {
             };
             (SettingsControl::SidebarView(choice), text, choice == view)
         });
-        let sidebar =
-            section("Sidebar").child(choice_row("Default view", &choices, None, focused, cx));
+        let density = self.sidebar.leaf_density();
+        let densities = LEAF_DENSITY_CHOICES.map(|choice| {
+            let text = match choice {
+                LeafDensity::Comfortable => "Comfortable",
+                LeafDensity::Compact => "Compact",
+            };
+            (
+                SettingsControl::LeafDensity(choice),
+                text,
+                choice == density,
+            )
+        });
+        let sidebar = section("Sidebar")
+            .child(choice_row("Default view", &choices, None, focused, cx))
+            .child(choice_row("Leaf density", &densities, None, focused, cx));
         let copy = toggle(
             SettingsControl::CopyOnSelect,
             self.sidebar.ui_state().general.copy_on_select,

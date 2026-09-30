@@ -3,7 +3,7 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
+    Agent, AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
     PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
     WorkspaceEntry,
 };
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
@@ -72,13 +73,31 @@ pub enum SidebarView {
     Repos,
 }
 
+/// How much room a session leaf takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LeafDensity {
+    /// One line, the subline moved into the hover text.
+    Compact,
+    /// The label line over the subline, with a chip row when the chips do
+    /// not fit beside the subline; also what a value this build does not
+    /// know loads as (`serde(other)` must be the last variant).
+    #[default]
+    #[serde(other)]
+    Comfortable,
+}
+
 /// One session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leaf {
     pub id: String,
     pub status: SessionStatus,
     pub mode: SessionMode,
+    pub agent: Agent,
     pub label: String,
+    /// The line under the label: the branch, the members' repos and
+    /// branches, or a shell's folder.
+    pub subline: Option<String>,
     pub runtime: Option<String>,
     pub attention: bool,
     /// The agent's last turn ended while this client looked elsewhere.
@@ -126,7 +145,8 @@ impl LeafState {
     }
 
     /// The state's tag and its hover text; `None` for a live session.
-    fn tag(&self) -> Option<(String, String)> {
+    #[must_use]
+    pub fn tag(&self) -> Option<(String, String)> {
         let (tag, tip) = match self {
             Self::Live => return None,
             Self::Orphan => (
@@ -160,17 +180,34 @@ impl Leaf {
     /// orphan, abandoned or parked state.
     #[must_use]
     pub fn tags(&self) -> Vec<(String, String)> {
-        let mut tags = Vec::new();
-        if let Some(runtime) = &self.runtime {
-            let tip = if self.trusted {
-                format!("Running {runtime}; approval prompts were bypassed")
-            } else {
-                format!("Running {runtime}")
-            };
-            tags.push((runtime.clone(), tip));
-        }
+        let mut tags: Vec<(String, String)> = self.runtime_tag().into_iter().collect();
         tags.extend(self.state.tag());
         tags
+    }
+
+    /// The runtime tag and its hover text; `None` for a shell with no
+    /// known program.
+    #[must_use]
+    pub fn runtime_tag(&self) -> Option<(String, String)> {
+        let runtime = self.runtime.as_ref()?;
+        let tip = if self.trusted {
+            format!("Running {runtime}; approval prompts were bypassed")
+        } else {
+            format!("Running {runtime}")
+        };
+        Some((runtime.clone(), tip))
+    }
+
+    /// The hover text at `density`: Compact adds the subline it does not
+    /// draw, except on a shell, whose hover already ends with its folder.
+    #[must_use]
+    pub fn hover(&self, density: LeafDensity) -> String {
+        match (&self.subline, density) {
+            (Some(subline), LeafDensity::Compact) if self.mode != SessionMode::PlainShell => {
+                format!("{}\n{subline}", self.tooltip)
+            }
+            _ => self.tooltip.clone(),
+        }
     }
 }
 
@@ -348,12 +385,15 @@ impl NotificationSettings {
 pub struct GeneralSettings {
     /// Whether a mouse selection in a terminal is copied on release.
     pub copy_on_select: bool,
+    /// How much room each session leaf takes.
+    pub leaf_density: LeafDensity,
 }
 
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
             copy_on_select: true,
+            leaf_density: LeafDensity::Comfortable,
         }
     }
 }
@@ -722,6 +762,21 @@ impl SidebarModel {
         self.ui.general.copy_on_select = on;
     }
 
+    /// How much room each session leaf takes.
+    pub fn leaf_density(&self) -> LeafDensity {
+        self.ui.general.leaf_density
+    }
+
+    /// Records how much room each session leaf takes; returns whether it
+    /// changed.
+    pub fn set_leaf_density(&mut self, density: LeafDensity) -> bool {
+        if self.ui.general.leaf_density == density {
+            return false;
+        }
+        self.ui.general.leaf_density = density;
+        true
+    }
+
     /// Whether the window title shows the active tab's busy/total count.
     pub fn set_title_show_count(&mut self, on: bool) {
         self.ui.title.show_count = on;
@@ -1076,7 +1131,7 @@ fn container(
     sessions.sort_by(|a, b| cmp_ci(&a.label, &b.label));
     let leaves: Vec<Leaf> = apply_session_order(sessions, inputs.session_order.get(id))
         .into_iter()
-        .map(|s| leaf(s, inputs.attention, inputs.unseen))
+        .map(|s| leaf(s, inputs.attention, inputs.unseen, false))
         .collect();
     let key = container_key(kind, id);
     Container {
@@ -1091,12 +1146,25 @@ fn container(
     }
 }
 
-fn leaf(s: &SessionSnapshot, attention: &HashSet<String>, unseen: &HashSet<String>) -> Leaf {
+/// The user's home folder, which a shell's subline shows as `~`.
+static HOME: LazyLock<Option<String>> =
+    LazyLock::new(|| std::env::home_dir().map(|home| home.to_string_lossy().into_owned()));
+
+/// Session `s`'s leaf; `tabs_view` names the repo beside a single repo's
+/// branch, since no repo container above it does.
+fn leaf(
+    s: &SessionSnapshot,
+    attention: &HashSet<String>,
+    unseen: &HashSet<String>,
+    tabs_view: bool,
+) -> Leaf {
     Leaf {
         id: s.id.clone(),
         status: s.status,
         mode: s.mode,
+        agent: s.agent,
         label: display_label(s),
+        subline: subline(s, HOME.as_deref(), tabs_view),
         runtime: runtime_label(s),
         attention: attention.contains(&s.id),
         unseen: unseen.contains(&s.id),
@@ -1146,7 +1214,7 @@ pub fn build_tab_containers(
             .filter_map(|id| by_id.get(id).copied())
             .map(|s| {
                 shown.insert(s.id.as_str());
-                leaf(s, attention, unseen)
+                leaf(s, attention, unseen, true)
             })
             .collect();
         out.push(tab_view_container(
@@ -1165,7 +1233,7 @@ pub fn build_tab_containers(
         unbound.sort_by(|a, b| cmp_ci(&a.label, &b.label));
         let leaves = unbound
             .into_iter()
-            .map(|s| leaf(s, attention, unseen))
+            .map(|s| leaf(s, attention, unseen, true))
             .collect();
         out.push(tab_view_container(
             ContainerKind::Unbound,
@@ -1357,6 +1425,54 @@ pub fn label_tooltip(s: &SessionSnapshot) -> String {
         lines.push(format!("Cwd: {cwd}"));
     }
     lines.join("\n")
+}
+
+/// The line under a leaf's label: a plain shell's folder with `home` shown
+/// as `~`; a single repo's branch, as `repo:branch` when `with_repo`; every
+/// member as `repo:branch`, joined by ` · `, for a workspace. A blank repo
+/// name or branch is left out, and a member with both blank is skipped.
+/// `None` when there is nothing to show.
+pub fn subline(s: &SessionSnapshot, home: Option<&str>, with_repo: bool) -> Option<String> {
+    if s.mode == SessionMode::PlainShell {
+        return non_empty(s.current_cwd.as_deref()).map(|cwd| home_as_tilde(cwd, home));
+    }
+    let parts: Vec<String> = match s.members.as_slice() {
+        [only] if !with_repo && s.workspace_id.is_none() => non_empty(Some(&only.branch))
+            .map(str::to_owned)
+            .into_iter()
+            .collect(),
+        members => members
+            .iter()
+            .filter_map(|m| repo_and_branch(&m.repo_name, &m.branch))
+            .collect(),
+    };
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// `repo:branch`, or whichever of the two is not blank; `None` when both are.
+fn repo_and_branch(repo: &str, branch: &str) -> Option<String> {
+    match (non_empty(Some(repo)), non_empty(Some(branch))) {
+        (Some(repo), Some(branch)) => Some(format!("{repo}:{branch}")),
+        (Some(part), None) | (None, Some(part)) => Some(part.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// `path` normalised, with a leading `home` folder written as `~`.
+fn home_as_tilde(path: &str, home: Option<&str>) -> String {
+    let path = normalize_fs_path(path);
+    let Some(home) = home.map(normalize_fs_path).filter(|home| !home.is_empty()) else {
+        return path;
+    };
+    let under_home = path.get(..home.len()).is_some_and(|head| {
+        let rest = &path[home.len()..];
+        head.eq_ignore_ascii_case(&home) && (rest.is_empty() || rest.starts_with(['\\', '/']))
+    });
+    if under_home {
+        format!("~{}", &path[home.len()..])
+    } else {
+        path
+    }
 }
 
 /// The runtime tag: the agent for agent sessions, the program for plain
@@ -2278,6 +2394,7 @@ mod tests {
             window: None,
             general: GeneralSettings {
                 copy_on_select: false,
+                leaf_density: LeafDensity::Compact,
             },
             title: TitleSettings {
                 show_count: false,
@@ -2357,6 +2474,175 @@ mod tests {
         let loaded = load_ui_state(&dir.0);
         assert!(loaded.title.show_count, "a group missing a field fills it");
         assert!(!loaded.title.suffix);
+    }
+
+    #[test]
+    fn leaf_density_round_trips_and_loads_comfortable_when_missing_or_unknown() {
+        let dir = TestDir::new("leaf-density");
+        let mut model = SidebarModel::new(UiState::default());
+        assert_eq!(
+            model.leaf_density(),
+            LeafDensity::Comfortable,
+            "the default"
+        );
+        assert!(model.set_leaf_density(LeafDensity::Compact));
+        assert!(!model.set_leaf_density(LeafDensity::Compact), "unchanged");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(saved["general"]["leaf_density"], "compact");
+        assert_eq!(
+            load_ui_state(&dir.0).general.leaf_density,
+            LeafDensity::Compact
+        );
+
+        for older in [
+            r#"{ "sidebar_collapsed": true }"#,
+            r#"{ "general": { "copy_on_select": false } }"#,
+        ] {
+            std::fs::write(dir.0.join(UI_FILE), older).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert_eq!(
+                loaded.general.leaf_density,
+                LeafDensity::Comfortable,
+                "{older}"
+            );
+        }
+
+        let unknown = r#"{ "general": { "copy_on_select": false, "leaf_density": "dense" } }"#;
+        std::fs::write(dir.0.join(UI_FILE), unknown).expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.general.leaf_density, LeafDensity::Comfortable);
+        assert!(
+            !loaded.general.copy_on_select,
+            "the rest of the group loads"
+        );
+    }
+
+    fn member(repo: &str, branch: &str) -> SessionMember {
+        SessionMember {
+            repo_id: format!("id-{repo}"),
+            repo_name: repo.to_owned(),
+            branch: branch.to_owned(),
+            worktree_path: String::new(),
+        }
+    }
+
+    #[test]
+    fn subline_of_a_single_repo_is_its_branch_prefixed_by_the_repo_in_the_tabs_view() {
+        let mut s = session("s1");
+        s.members = vec![member("tulip", "feat/petal")];
+        assert_eq!(subline(&s, None, false).as_deref(), Some("feat/petal"));
+        assert_eq!(subline(&s, None, true).as_deref(), Some("tulip:feat/petal"));
+        s.members = vec![member("tulip", " ")];
+        assert_eq!(subline(&s, None, false), None, "no branch to show");
+        assert_eq!(
+            subline(&s, None, true).as_deref(),
+            Some("tulip"),
+            "the repo alone when the branch is blank"
+        );
+        s.members = vec![member("", "main")];
+        assert_eq!(
+            subline(&s, None, true).as_deref(),
+            Some("main"),
+            "the branch alone when the repo name is blank"
+        );
+        s.members = vec![member(" ", " ")];
+        assert_eq!(subline(&s, None, true), None, "nothing left to show");
+    }
+
+    #[test]
+    fn subline_of_a_workspace_drops_blank_parts_and_blank_members() {
+        let mut s = session("s1");
+        s.kind = SessionKind::Workspace;
+        s.workspace_id = Some("ws1".to_owned());
+        s.members = vec![
+            member("repo-a", "main"),
+            member("repo-b", ""),
+            member(" ", "feat/x"),
+            member("", " "),
+        ];
+        assert_eq!(
+            subline(&s, None, false).as_deref(),
+            Some("repo-a:main · repo-b · feat/x")
+        );
+        s.members = vec![member("", ""), member(" ", " ")];
+        assert_eq!(subline(&s, None, false), None, "every member blank");
+    }
+
+    #[test]
+    fn subline_of_a_workspace_lists_every_member_as_repo_and_branch() {
+        let mut s = session("s1");
+        s.kind = SessionKind::Workspace;
+        s.workspace_id = Some("ws1".to_owned());
+        s.members = vec![
+            member("deck-server", "proto-v24"),
+            member("deck-client", "main"),
+        ];
+        let expected = Some("deck-server:proto-v24 · deck-client:main");
+        assert_eq!(subline(&s, None, false).as_deref(), expected);
+        assert_eq!(subline(&s, None, true).as_deref(), expected, "tabs view");
+
+        s.members.truncate(1);
+        assert_eq!(
+            subline(&s, None, false).as_deref(),
+            Some("deck-server:proto-v24"),
+            "a one-member workspace still names its repo"
+        );
+    }
+
+    #[test]
+    fn subline_of_an_agent_with_no_members_is_none() {
+        assert_eq!(subline(&session("s1"), Some("C:\\Users\\me"), true), None);
+    }
+
+    #[test]
+    fn subline_of_a_shell_is_its_folder_with_home_as_tilde() {
+        let home = Some("C:\\Users\\me");
+        let sh = |cwd: Option<&str>| shell("sh", cwd, SessionKind::Standalone);
+        assert_eq!(subline(&sh(None), home, false), None, "no folder");
+        assert_eq!(
+            subline(&sh(Some("  ")), home, false),
+            None,
+            "a blank folder"
+        );
+        assert_eq!(
+            subline(&sh(Some("D:/scratch/dir")), home, false).as_deref(),
+            Some("D:\\scratch\\dir")
+        );
+        assert_eq!(
+            subline(&sh(Some("c:/users/me/src/tulip/")), home, true).as_deref(),
+            Some("~\\src\\tulip"),
+            "home matched whatever the case and separators"
+        );
+        assert_eq!(
+            subline(&sh(Some("C:\\Users\\me")), home, false).as_deref(),
+            Some("~")
+        );
+        assert_eq!(
+            subline(&sh(Some("C:\\Users\\meg\\src")), home, false).as_deref(),
+            Some("C:\\Users\\meg\\src"),
+            "a sibling that shares the home's prefix"
+        );
+        assert_eq!(
+            subline(&sh(Some("/home/me/src")), Some("/home/me"), false).as_deref(),
+            Some("~/src")
+        );
+    }
+
+    #[test]
+    fn compact_hover_adds_the_subline_except_on_a_shell() {
+        let mut s = in_repo("s1", "r1");
+        s.members[0].branch = "feat/x".to_owned();
+        let agent = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(agent.hover(LeafDensity::Comfortable), agent.tooltip);
+        assert_eq!(
+            agent.hover(LeafDensity::Compact),
+            format!("{}\nfeat/x", agent.tooltip)
+        );
+        let sh = shell("sh", Some("D:/work"), SessionKind::Standalone);
+        let sh = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(sh.hover(LeafDensity::Compact), sh.tooltip, "Cwd: says it");
     }
 
     #[test]

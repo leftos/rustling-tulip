@@ -12,32 +12,51 @@ use crate::assets::{
     SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
-use crate::connection::DotKind;
-use crate::fonts::DEFAULT_FAMILY;
+use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
 use crate::palette::{
-    ASKING, HOVER, LILAC, LINE, ON_ACCENT, ON_ASKING, RAISED, SELECTED_BG, SUBTLE, TEXT_2,
+    ACCENT, ASKING, CHIP, HOVER, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING, RAISED, SUBTLE,
+    TEXT_2,
 };
 use crate::session_actions::inline_actions;
 use crate::session_menu::{menu_frame, menu_item};
-use crate::sidebar::{Activity, Container, ContainerKind, Leaf, SidebarView, can_attach};
+use crate::sidebar::{
+    Activity, Container, ContainerKind, Leaf, LeafDensity, SidebarView, can_attach,
+};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
 use crate::tabs::{TabPill, tab_pills};
-use crate::{
-    BORDER, Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, dot_color,
-    drag_handle, tooltip,
-};
+use crate::{Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip};
 use gpui::{
     AnyElement, ClickEvent, Context, Corner, Div, FontWeight, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Svg, Window, anchored, deferred, div, point, prelude::*, px, svg,
+    SharedString, Stateful, Svg, TextRun, Window, anchored, deferred, div, font, point, prelude::*,
+    px, svg,
 };
+use protocol::{Agent, SessionMode, SessionStatus};
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
 pub(crate) const ROW_PADDING: f32 = 8.0;
 const LEAF_INDENT: f32 = 22.0;
 const TAG_TEXT_SIZE: f32 = 10.0;
 const ACCENT_STRIPE_WIDTH: f32 = 3.0;
+/// How far the stripe sits from the leaf's left, top and bottom edges.
+const STRIPE_LEFT: f32 = 3.0;
+const STRIPE_INSET_Y: f32 = 7.0;
+/// The sessions body's inset: 8 px at the sides, 2 px at the top and
+/// bottom.
+const BODY_INSET_X: f32 = 8.0;
+const BODY_INSET_Y: f32 = 2.0;
+/// A leaf's left padding, before its glyph.
+const LEAF_PAD_LEFT: f32 = 12.0;
+/// A Compact leaf's one line.
+const COMPACT_LEAF_HEIGHT: f32 = 26.0;
+/// The subline's and chip row's indent under the label, past the glyph.
+const SUBLINE_INDENT: f32 = 20.0;
+const SUBLINE_TEXT_SIZE: f32 = 11.5;
+/// The gap between the subline's text and chips.
+const SUBLINE_GAP: f32 = 8.0;
+/// The widest a `T:<name>` chip grows before its name truncates.
+const PILL_MAX_WIDTH: f32 = 96.0;
 
 impl RootView {
     /// The rail, the panel it picks with its divider, and the terminal pane
@@ -55,7 +74,7 @@ impl RootView {
             let width = self.sidebar.width(window.viewport_size().width / px(1.0));
             let active = matches!(self.drag, Some(Drag::Sidebar));
             let panel = match self.sidebar.activity() {
-                Activity::Sessions => self.sidebar_panel(width, cx),
+                Activity::Sessions => self.sidebar_panel(width, window, cx),
                 Activity::SourceControl => self.source_control_view(width, cx),
                 Activity::NeedsYou => self.needs_you_view(width, cx),
             };
@@ -73,7 +92,7 @@ impl RootView {
         )
     }
 
-    fn sidebar_panel(&self, width: f32, cx: &mut Context<Self>) -> Div {
+    fn sidebar_panel(&self, width: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let attached = self.focused_session();
         let containers = self.sidebar_containers();
         let body = div()
@@ -82,6 +101,8 @@ impl RootView {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .px(px(BODY_INSET_X))
+            .py(px(BODY_INSET_Y))
             .overflow_y_scroll();
         let body = if containers.is_empty() {
             body.child(
@@ -103,10 +124,16 @@ impl RootView {
                     .filter(|s| !can_attach(s))
                     .map(|s| s.id.as_str())
                     .collect(),
+                density: self.sidebar.leaf_density(),
+                subline_room: width
+                    - 2.0 * BODY_INSET_X
+                    - LEAF_PAD_LEFT
+                    - ROW_PADDING
+                    - SUBLINE_INDENT,
             };
             let groups: Vec<AnyElement> = containers
                 .iter()
-                .map(|container| container_rows(container, &rows, cx))
+                .map(|container| container_rows(container, &rows, window, cx))
                 .collect();
             body.children(groups)
         };
@@ -385,6 +412,7 @@ fn divider(active: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
 fn container_rows(
     container: &Container,
     ctx: &LeafRows<'_>,
+    window: &Window,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let mut rows = vec![container_row(container, cx).into_any_element()];
@@ -393,18 +421,7 @@ fn container_rows(
             rows.push(unbound_banner().into_any_element());
         }
         for leaf in &container.leaves {
-            let id = leaf.id.as_str();
-            let selected = ctx.attached == Some(id);
-            let accent = ctx
-                .accents
-                .get(id)
-                .copied()
-                .unwrap_or(appearance::BUILTIN_ACCENT);
-            let pill = ctx.pills.as_ref().map(|pills| {
-                let pill = pills.get(id).cloned().unwrap_or(TabPill::Unbound);
-                leaf_pill(pill, id, accent, !ctx.headless.contains(id), cx)
-            });
-            rows.push(leaf_row(leaf, selected, accent, pill, cx).into_any_element());
+            rows.push(leaf_row(leaf, ctx, window, cx).into_any_element());
         }
     }
     div()
@@ -457,69 +474,203 @@ struct LeafRows<'a> {
     pills: Option<HashMap<String, TabPill>>,
     /// The sessions that cannot be shown in a pane.
     headless: HashSet<&'a str>,
+    density: LeafDensity,
+    /// The width a Comfortable subline's text and chips share, in px.
+    subline_room: f32,
+}
+
+impl LeafRows<'_> {
+    /// Session `id`'s tab pill; `None` until the tab list is in.
+    fn pill(&self, id: &str) -> Option<TabPill> {
+        self.pills
+            .as_ref()
+            .map(|pills| pills.get(id).cloned().unwrap_or(TabPill::Unbound))
+    }
+
+    /// Whether session `id` can be shown in a pane.
+    fn attachable(&self, id: &str) -> bool {
+        !self.headless.contains(id)
+    }
 }
 
 /// The hover of an unbound pill on a session that cannot be shown in a pane.
 const HEADLESS_PILL_TIP: &str =
     "Headless sessions run without a terminal, so they can't be opened in a tab";
 
+/// A leaf chip's size: at the subline's end, or in the chip row and a
+/// Compact line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipSize {
+    Subline,
+    Row,
+}
+
+impl ChipSize {
+    const fn height(self) -> f32 {
+        match self {
+            Self::Subline => 17.0,
+            Self::Row => 20.0,
+        }
+    }
+
+    const fn padding(self) -> f32 {
+        match self {
+            Self::Subline => 5.0,
+            Self::Row => 7.0,
+        }
+    }
+
+    const fn text_size(self) -> f32 {
+        match self {
+            Self::Subline => 10.0,
+            Self::Row => 11.0,
+        }
+    }
+}
+
+/// An outlined Geist Mono chip of `size`, lettered in [`SUBTLE`].
+fn chip<E: Styled>(element: E, size: ChipSize) -> E {
+    element
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(size.height()))
+        .px(px(size.padding()))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(gpui::rgb(LINE_STRONG))
+        .font_family(DEFAULT_FAMILY)
+        .text_size(px(size.text_size()))
+        .text_color(gpui::rgb(SUBTLE))
+}
+
+/// A chip's lettering, truncated when the chip is capped.
+fn chip_text(text: String) -> Div {
+    div().min_w(px(0.0)).truncate().child(text)
+}
+
+/// A tab pill's lettering.
+fn pill_text(pill: &TabPill) -> String {
+    match pill {
+        TabPill::Unbound => "unbound".to_owned(),
+        TabPill::One { name, .. } => format!("T:{name}"),
+        TabPill::Many(names) => format!("T:×{}", names.len()),
+    }
+}
+
 /// A leaf's tab pill: `unbound` opens the session in a new tab when it can
 /// be shown in a pane; `T:<name>` and `T:×N` say where it is shown and do
 /// nothing of their own.
 fn leaf_pill(
-    pill: TabPill,
+    pill: &TabPill,
     session_id: &str,
-    accent: u32,
     attachable: bool,
+    size: ChipSize,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let selector = format!("leaf-pill-{session_id}");
-    let base = div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector);
+    let base = chip(
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector),
+        size,
+    )
+    .child(chip_text(pill_text(pill)));
     let tip = pill.hover();
     match pill {
-        TabPill::Unbound if !attachable => unbound_pill_look(base)
-            .tooltip(tooltip(HEADLESS_PILL_TIP))
-            .child("unbound")
-            .into_any_element(),
+        TabPill::Unbound if !attachable => {
+            base.tooltip(tooltip(HEADLESS_PILL_TIP)).into_any_element()
+        }
         TabPill::Unbound => {
             let id = session_id.to_owned();
-            unbound_pill_look(base)
-                .cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            base.cursor_pointer()
+                .hover(|style| style.bg(gpui::rgb(HOVER)))
                 .tooltip(tooltip(tip))
-                .child("unbound")
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.open_in_new_tab(&id);
                     cx.stop_propagation();
                 }))
                 .into_any_element()
         }
-        TabPill::One { name, .. } => bordered_pill(base, (MUTED << 8) | 0x80, MUTED)
+        TabPill::One { .. } => base
+            .max_w(px(PILL_MAX_WIDTH))
             .tooltip(tooltip(tip))
-            .child(format!("T:{name}"))
             .into_any_element(),
-        TabPill::Many(names) => bordered_pill(base, (accent << 8) | 0xff, accent)
-            .bg(gpui::rgba((accent << 8) | 0x33))
+        TabPill::Many(_) => base
+            .bg(gpui::rgb(RAISED))
+            .border_color(gpui::rgb(RAISED))
+            .text_color(gpui::rgb(TEXT_2))
             .tooltip(tooltip(tip))
-            .child(format!("T:×{}", names.len()))
             .into_any_element(),
     }
 }
 
-/// A pill in a `border` (`0xRRGGBBAA`) outline with `text` (`0xRRGGBB`)
-/// lettering.
-fn bordered_pill(pill: Stateful<Div>, border: u32, text: u32) -> Stateful<Div> {
-    pill.flex_none()
-        .max_w(px(96.0))
-        .truncate()
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(gpui::rgba(border))
-        .text_size(px(TAG_TEXT_SIZE))
-        .text_color(gpui::rgb(text))
+/// The leaf's chips: its tab pill, when the tab list is in, then its
+/// orphan, abandoned or parked tag.
+fn leaf_chips(
+    leaf: &Leaf,
+    pill: Option<TabPill>,
+    attachable: bool,
+    size: ChipSize,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let mut chips: Vec<AnyElement> = pill
+        .map(|pill| leaf_pill(&pill, &leaf.id, attachable, size, cx))
+        .into_iter()
+        .collect();
+    if let Some((text, tip)) = leaf.state.tag() {
+        chips.push(
+            chip(
+                div().id(SharedString::from(format!("leaf-state-{}", leaf.id))),
+                size,
+            )
+            .tooltip(tooltip(tip))
+            .child(chip_text(text))
+            .into_any_element(),
+        );
+    }
+    chips
+}
+
+/// The width `text` takes in `family` at `size` px, in px.
+fn text_width(window: &Window, text: &str, family: &'static str, size: f32) -> f32 {
+    let run = TextRun {
+        len: text.len(),
+        font: font(family),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_owned()),
+        px(size),
+        &[run],
+        None,
+    );
+    line.width / px(1.0)
+}
+
+/// Whether the subline's `text` and the subline-sized `chips` (their
+/// lettering) fit side by side in `room` px.
+fn chips_fit(window: &Window, text: Option<&str>, chips: &[String], room: f32) -> bool {
+    if chips.is_empty() {
+        return true;
+    }
+    let size = ChipSize::Subline;
+    let chip_frame = 2.0 * size.padding() + 2.0;
+    let chips_width: f32 = chips
+        .iter()
+        .map(|chip| {
+            let width = text_width(window, chip, DEFAULT_FAMILY, size.text_size()) + chip_frame;
+            width.min(PILL_MAX_WIDTH) + SUBLINE_GAP
+        })
+        .sum::<f32>()
+        - SUBLINE_GAP;
+    let text_width = text.map_or(0.0, |text| {
+        text_width(window, text, UI_FAMILY, SUBLINE_TEXT_SIZE) + SUBLINE_GAP
+    });
+    text_width + chips_width <= room
 }
 
 /// The chevron before a container's name: right while folded, down while
@@ -673,108 +824,84 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
         }))
 }
 
-/// How a leaf row shows that its session needs attention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeafHighlight {
-    None,
-    /// A soft amber fill and an amber border.
-    Attention,
-    /// As [`Self::Attention`], with a deeper fill and an amber stripe in
-    /// place of the accent, on the selected leaf.
-    AttentionSelected,
-}
-
-impl LeafHighlight {
-    const fn of(attention: bool, selected: bool) -> Self {
-        match (attention, selected) {
-            (false, _) => Self::None,
-            (true, false) => Self::Attention,
-            (true, true) => Self::AttentionSelected,
+/// A session's leaf at the panel's density: a stripe in its accent down
+/// its left edge, the label line, and in Comfortable the subline and, when
+/// the chips do not fit beside it, the chip row.
+fn leaf_row(
+    leaf: &Leaf,
+    ctx: &LeafRows<'_>,
+    window: &Window,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let id = leaf.id.as_str();
+    let selected = ctx.attached == Some(id);
+    let accent = ctx
+        .accents
+        .get(id)
+        .copied()
+        .unwrap_or(appearance::BUILTIN_ACCENT);
+    let row = leaf_frame(leaf, selected, accent, ctx.density, cx);
+    match ctx.density {
+        LeafDensity::Compact => {
+            let chips = leaf_chips(leaf, ctx.pill(id), ctx.attachable(id), ChipSize::Row, cx);
+            row.flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .h(px(COMPACT_LEAF_HEIGHT))
+                .children(label_head(leaf))
+                .children(inline_buttons(leaf, cx))
+                .children(chips)
+        }
+        LeafDensity::Comfortable => {
+            let label_line = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .children(label_head(leaf))
+                .children(inline_buttons(leaf, cx));
+            let lower = comfortable_lower(leaf, ctx, window, cx);
+            row.flex_col().py(px(6.0)).child(label_line).children(lower)
         }
     }
 }
 
-/// [`WARNING`] at `alpha`, as `0xRRGGBBAA`.
-const fn warning_alpha(alpha: u32) -> u32 {
-    (WARNING << 8) | alpha
-}
-
-impl RootView {
-    /// How leaf `id` is highlighted for attention; `None` when it is not
-    /// listed or needs none.
-    #[must_use]
-    pub fn leaf_highlight(&self, id: &str) -> LeafHighlight {
-        let attention = self
-            .sidebar
-            .containers()
-            .iter()
-            .flat_map(|container| &container.leaves)
-            .any(|leaf| leaf.id == id && leaf.attention);
-        LeafHighlight::of(attention, self.focused_session().as_deref() == Some(id))
-    }
-}
-
-/// A session's row, with a stripe in its accent down its left edge; a
-/// session needing attention is filled and bordered in amber.
-fn leaf_row(
+/// The leaf's box: selection and hover grounds, its hover text, the accent
+/// stripe, and the clicks.
+fn leaf_frame(
     leaf: &Leaf,
     selected: bool,
     accent: u32,
-    pill: Option<AnyElement>,
+    density: LeafDensity,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let id = leaf.id.clone();
     let menu_id = leaf.id.clone();
     let name = format!("leaf-{}", leaf.id);
-    let highlight = LeafHighlight::of(leaf.attention, selected);
-    let (background, border, stripe) = match highlight {
-        LeafHighlight::None => (None, 0, accent),
-        LeafHighlight::Attention => (Some(warning_alpha(0x24)), warning_alpha(0x61), accent),
-        LeafHighlight::AttentionSelected => {
-            (Some(warning_alpha(0x38)), warning_alpha(0x61), WARNING)
-        }
-    };
     div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
         .relative()
         .flex()
-        .items_center()
-        .gap(px(6.0))
-        .h(px(ROW_HEIGHT))
-        .pl(px(LEAF_INDENT))
+        .flex_none()
+        .my(px(1.0))
+        .pl(px(LEAF_PAD_LEFT))
         .pr(px(ROW_PADDING))
+        .rounded(px(6.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .when(selected, |row| row.bg(gpui::rgb(SELECTED_BG)))
-        .when_some(background, |row, fill| row.bg(gpui::rgba(fill)))
-        .border_1()
-        .border_color(gpui::rgba(border))
-        .tooltip(tooltip(leaf.tooltip.clone()))
-        .child(glyph_view(
-            glyph(leaf.status, leaf.mode, leaf.unseen),
-            GlyphSize::Leaf,
-            &format!("leaf-glyph-{}", leaf.id),
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .child(leaf.label.clone()),
-        )
-        .children(leaf_tags(leaf))
-        .children(inline_buttons(leaf, cx))
-        .when(leaf.attention, |row| row.child(attention_mark()))
-        .children(pill)
+        .when(selected, |row| row.bg(gpui::rgb(CHIP)))
+        .when(!selected, |row| {
+            row.hover(|style| style.bg(gpui::rgb(RAISED)))
+        })
+        .tooltip(tooltip(leaf.hover(density)))
         .child(
             div()
                 .absolute()
-                .left(px(-1.0))
-                .top(px(-1.0))
-                .bottom(px(-1.0))
+                .left(px(STRIPE_LEFT))
+                .top(px(STRIPE_INSET_Y))
+                .bottom(px(STRIPE_INSET_Y))
                 .w(px(ACCENT_STRIPE_WIDTH))
-                .bg(gpui::rgb(stripe)),
+                .rounded(px(2.0))
+                .bg(gpui::rgb(accent)),
         )
         .on_mouse_down(
             MouseButton::Right,
@@ -788,22 +915,142 @@ fn leaf_row(
         }))
 }
 
-/// The leaf's runtime and state tags, each with its hover text.
-fn leaf_tags(leaf: &Leaf) -> Vec<AnyElement> {
-    leaf.tags()
-        .into_iter()
-        .enumerate()
-        .map(|(i, (text, tip))| {
+/// The label line's start: the status glyph, the label (dimmed once an
+/// idle session's turn has been seen), the `!` badge and the runtime tag.
+fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
+    let seen_idle = leaf.status == SessionStatus::Idle && !leaf.unseen;
+    let mut parts = vec![
+        glyph_view(
+            glyph(leaf.status, leaf.mode, leaf.unseen),
+            GlyphSize::Leaf,
+            &format!("leaf-glyph-{}", leaf.id),
+        ),
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .text_size(px(13.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(gpui::rgb(if seen_idle { TEXT_2 } else { TEXT }))
+            .child(leaf.label.clone())
+            .into_any_element(),
+    ];
+    if leaf.attention {
+        parts.push(container_badge(format!("leaf-badge-{}", leaf.id)).into_any_element());
+    }
+    if let Some((text, tip)) = leaf.runtime_tag() {
+        parts.push(
             div()
-                .id(SharedString::from(format!("leaf-tag-{}-{i}", leaf.id)))
+                .id(SharedString::from(format!("leaf-runtime-{}", leaf.id)))
                 .flex_none()
-                .text_size(px(TAG_TEXT_SIZE))
-                .text_color(gpui::rgb(MUTED))
+                .font_family(DEFAULT_FAMILY)
+                .text_size(px(10.5))
+                .text_color(gpui::rgb(runtime_color(leaf)))
                 .child(text)
                 .tooltip(tooltip(tip))
-                .into_any_element()
-        })
-        .collect()
+                .into_any_element(),
+        );
+    }
+    parts
+}
+
+/// The runtime tag's colour: the agent's, or [`SUBTLE`] for a shell's
+/// program.
+fn runtime_color(leaf: &Leaf) -> u32 {
+    if leaf.mode == SessionMode::PlainShell {
+        return SUBTLE;
+    }
+    match leaf.agent {
+        Agent::Claude => ACCENT,
+        Agent::Codex => LILAC,
+        Agent::Cursor => TEXT_2,
+    }
+}
+
+/// A Comfortable leaf's subline, with the chips at its end when they fit
+/// beside its text, else the chip row under it, where an `unbound` pill is
+/// left out.
+fn comfortable_lower(
+    leaf: &Leaf,
+    ctx: &LeafRows<'_>,
+    window: &Window,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let pill = ctx.pill(&leaf.id);
+    let attachable = ctx.attachable(&leaf.id);
+    let texts: Vec<String> = pill
+        .iter()
+        .map(pill_text)
+        .chain(leaf.state.tag().map(|(text, _)| text))
+        .collect();
+    let fits = chips_fit(window, leaf.subline.as_deref(), &texts, ctx.subline_room);
+    let (inline, below) = if fits {
+        (
+            leaf_chips(leaf, pill, attachable, ChipSize::Subline, cx),
+            Vec::new(),
+        )
+    } else {
+        let pill = pill.filter(|pill| *pill != TabPill::Unbound);
+        (
+            Vec::new(),
+            leaf_chips(leaf, pill, attachable, ChipSize::Row, cx),
+        )
+    };
+    let mut lower = Vec::new();
+    if leaf.subline.is_some() || !inline.is_empty() {
+        let selector = format!("leaf-subline-{}", leaf.id);
+        lower.push(
+            div()
+                .debug_selector(|| selector)
+                .flex()
+                .items_center()
+                .gap(px(SUBLINE_GAP))
+                .mt(px(1.0))
+                .pl(px(SUBLINE_INDENT))
+                .text_size(px(SUBLINE_TEXT_SIZE))
+                .text_color(gpui::rgb(SUBTLE))
+                .children(
+                    leaf.subline
+                        .clone()
+                        .map(|text| div().min_w(px(0.0)).truncate().child(text)),
+                )
+                .children(inline)
+                .into_any_element(),
+        );
+    }
+    if !below.is_empty() {
+        let selector = format!("leaf-chips-{}", leaf.id);
+        lower.push(
+            div()
+                .debug_selector(|| selector)
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.0))
+                .mt(px(3.0))
+                .pl(px(SUBLINE_INDENT))
+                .children(below)
+                .into_any_element(),
+        );
+    }
+    lower
+}
+
+/// An inline action's 20 px chip, outlined in [`LINE_STRONG`].
+fn action_chip(element: Stateful<Div>) -> Stateful<Div> {
+    element
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(20.0))
+        .px(px(7.0))
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(gpui::rgb(LINE_STRONG))
+        .text_size(px(11.0))
+        .text_color(gpui::rgb(TEXT))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER)))
 }
 
 /// The leaf's Resume and Dismiss. They act on the press and keep it from
@@ -814,28 +1061,21 @@ fn inline_buttons(leaf: &Leaf, cx: &mut Context<RootView>) -> Vec<AnyElement> {
         .map(|inline| {
             let selector = format!("leaf-{}-{}", inline.key, leaf.id);
             let id = leaf.id.clone();
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(|| selector)
-                .flex_none()
-                .px(px(4.0))
-                .rounded(px(3.0))
-                .border_1()
-                .border_color(gpui::rgb(BORDER))
-                .text_size(px(TAG_TEXT_SIZE))
-                .text_color(gpui::rgb(TEXT))
-                .cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-                .child(inline.action.label(false, false))
-                .tooltip(tooltip(inline.tip))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        this.choose_action(&id, inline.action, window, cx);
-                    }),
-                )
-                .into_any_element()
+            action_chip(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(|| selector),
+            )
+            .child(inline.action.label(false, false))
+            .tooltip(tooltip(inline.tip))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.choose_action(&id, inline.action, window, cx);
+                }),
+            )
+            .into_any_element()
         })
         .collect()
 }
@@ -858,6 +1098,14 @@ impl RootView {
             .unwrap_or_default()
     }
 
+    /// Leaf `id`'s hover text at the chosen density. `None` when it is not
+    /// listed.
+    #[must_use]
+    pub fn leaf_hover(&self, id: &str) -> Option<String> {
+        self.listed_leaf(id)
+            .map(|leaf| leaf.hover(self.sidebar.leaf_density()))
+    }
+
     /// Leaf `id`'s inline buttons: selector and hover text.
     #[must_use]
     pub fn leaf_buttons(&self, id: &str) -> Vec<(String, String)> {
@@ -868,12 +1116,4 @@ impl RootView {
                 .collect()
         })
     }
-}
-
-fn attention_mark() -> Div {
-    div()
-        .flex_none()
-        .font_weight(FontWeight::BOLD)
-        .text_color(gpui::rgb(dot_color(DotKind::Pending)))
-        .child("!")
 }

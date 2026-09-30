@@ -174,7 +174,6 @@ pub use crate::sidebar::{
     Activity, Container, ContainerKind, DEFAULT_WIDTH as SIDEBAR_DEFAULT_WIDTH, Leaf, LeafState,
     SidebarView,
 };
-pub use crate::sidebar_view::LeafHighlight;
 pub use crate::source_control::{Bucket, ScKey};
 pub use crate::source_control_view::{ScContext, ScPanel, ScPickerRow, ScSectionRow};
 pub use crate::spawns::{OpenIn, PaneAim};

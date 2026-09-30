@@ -357,6 +357,37 @@ fn window_title_follows_a_local_tab_switch(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn leaf_density_choice_switches_the_leaves_saves_and_is_reached_by_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    let leaf_height = |h: &mut Harness<'_>| h.bounds("leaf-s1").size.height;
+    assert!(leaf_height(&mut h) > px(26.0), "Comfortable at first");
+
+    h.keys("ctrl-,");
+    h.click_on("settings-leaf-density-compact");
+    assert_eq!(saved_ui(&dir)["general"]["leaf_density"], "compact");
+    assert_eq!(leaf_height(&mut h), px(26.0), "one line");
+    h.keys("escape");
+
+    h.keys("ctrl-,");
+    assert_eq!(settings_focus(&mut h), Some("list"));
+    h.keys("tab tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-leaf-density-comfortable"),
+        "after the two Default view choices"
+    );
+    h.keys("space");
+    assert_eq!(saved_ui(&dir)["general"]["leaf_density"], "comfortable");
+    assert!(leaf_height(&mut h) > px(26.0), "two lines again");
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-leaf-density-compact")
+    );
+}
+
+#[gpui::test]
 fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
@@ -377,11 +408,11 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         "Space presses the keep-awake button"
     );
 
-    h.keys("tab tab tab");
+    h.keys("tab tab tab tab tab");
     assert_eq!(
         settings_focus(&mut h),
         Some("settings-terminal-copy-on-selection"),
-        "past the two Default view choices"
+        "past the two Default view and the two Leaf density choices"
     );
     h.keys("space");
     assert_eq!(saved_ui(&dir)["general"]["copy_on_select"], false);
@@ -400,7 +431,7 @@ fn tab_walks_general_controls_and_space_toggles(cx: &mut TestAppContext) {
         Some("settings-terminal-copy-on-selection"),
         "Shift+Tab walks back"
     );
-    h.keys("shift-tab shift-tab shift-tab shift-tab");
+    h.keys("shift-tab shift-tab shift-tab shift-tab shift-tab shift-tab");
     assert_eq!(settings_focus(&mut h), Some("list"));
     assert_eq!(shown_tab(&mut h), "General");
 
@@ -470,7 +501,8 @@ fn general_tab_ring_includes_the_default_view_choices(cx: &mut TestAppContext) {
     h.keys("tab");
     assert_eq!(
         settings_focus(&mut h),
-        Some("settings-terminal-copy-on-selection")
+        Some("settings-leaf-density-comfortable"),
+        "the Leaf density choices follow"
     );
     h.keys("shift-tab shift-tab");
     assert_eq!(

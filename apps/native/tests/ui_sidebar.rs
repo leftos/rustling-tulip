@@ -11,7 +11,7 @@ mod support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{AttentionReason, ClientMessage, DaemonMessage, SessionSnapshot, SplitDirection};
-use rustling_tulip_native::{LeafHighlight, SidebarView, TabPill};
+use rustling_tulip_native::{SidebarView, TabPill};
 use support::{Fixture, Harness, TestDir, pane, repo, session, split, tab, workspace};
 
 /// The keys of the sidebar's containers, in the order it shows them.
@@ -198,34 +198,38 @@ fn sidebar_divider_clamps_persists_and_restores(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn attention_leaf_is_highlighted(cx: &mut TestAppContext) {
+fn attention_leaf_draws_its_badge_and_asking_glyph(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut fixture = Fixture::single(session("s1").build());
     fixture.sessions.push(session("s2").build());
     let mut h = Harness::with(cx, &dir, &fixture);
     h.answer_scrollback("s1", b"");
-    let highlight = |h: &mut Harness<'_>, id: &str| h.root(|root, _| root.leaf_highlight(id));
-    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::None);
+    let leaf_attention = |h: &mut Harness<'_>, id: &str| home_of(h, id).map(|home| home.2);
+    assert_eq!(leaf_attention(&mut h, "s2"), Some(false));
+    assert!(!drawn(&mut h, "leaf-badge-s2"), "no badge yet");
 
     for id in ["s1", "s2"] {
+        h.send(DaemonMessage::SessionUpdated {
+            session: session(id).status("awaiting_input").build(),
+            request_id: None,
+        });
         h.send(DaemonMessage::Attention {
             session_id: id.to_owned(),
             reason: AttentionReason::AwaitingInput,
         });
     }
-    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::Attention);
-    assert_eq!(
-        highlight(&mut h, "s1"),
-        LeafHighlight::AttentionSelected,
-        "s1 is the shown session"
-    );
-    assert!(h.bounds("leaf-s2").origin.x >= px(0.0), "painted");
+    for id in ["s1", "s2"] {
+        assert_eq!(leaf_attention(&mut h, id), Some(true), "{id}");
+        assert!(drawn(&mut h, &format!("leaf-badge-{id}")), "{id} badged");
+        assert!(leaf_glyph(&mut h, id, "asking"), "{id} asks");
+    }
 
     h.send(DaemonMessage::SessionUpdated {
         session: session("s2").status("working").build(),
         request_id: None,
     });
-    assert_eq!(highlight(&mut h, "s2"), LeafHighlight::None, "calm again");
+    assert_eq!(leaf_attention(&mut h, "s2"), Some(false), "calm again");
+    assert!(leaf_glyph(&mut h, "s2", "working"));
 }
 
 #[gpui::test]
@@ -778,6 +782,128 @@ fn more_menu_opens_the_shell_dialog_and_closes_on_escape_or_outside(cx: &mut Tes
     assert!(
         h.root(|root, _| root.shell_dialog_open()),
         "Shell… opens the dialog"
+    );
+}
+
+/// A branch too long to share the subline with a chip.
+const LONG_BRANCH: &str = "feat/a-branch-name-long-enough-that-no-chip-fits-beside-it-at-all";
+
+/// Repo `r1` holding `short` (on `main`) and `long` (on [`LONG_BRANCH`]),
+/// both shown in tab `t1`, and `loose` (on [`LONG_BRANCH`]) in no tab.
+fn density_fixture() -> Fixture {
+    let grid = split(
+        SplitDirection::Horizontal,
+        pane("p1", Some("short")),
+        pane("p2", Some("long")),
+    );
+    Fixture {
+        repos: vec![repo("r1", "D:/src/r1")],
+        sessions: vec![
+            session("short").in_repo("r1").build(),
+            session("long").members(&[("r1", LONG_BRANCH, "")]).build(),
+            session("loose").members(&[("r1", LONG_BRANCH, "")]).build(),
+        ],
+        tabs: vec![tab("t1", &grid)],
+        ..Fixture::default()
+    }
+}
+
+/// Leaf `id`'s subline, as the model builds it.
+fn subline(h: &mut Harness<'_>, id: &str) -> Option<String> {
+    h.root(|root, _| {
+        root.sidebar_containers()
+            .into_iter()
+            .flat_map(|c| c.leaves)
+            .find(|leaf| leaf.id == id)
+            .and_then(|leaf| leaf.subline)
+    })
+}
+
+/// Whether `inner`'s bounds lie inside `outer`'s, top to bottom.
+fn within(h: &mut Harness<'_>, inner: &str, outer: &str) -> bool {
+    let (inner, outer) = (h.bounds(inner), h.bounds(outer));
+    inner.top() >= outer.top() && inner.bottom() <= outer.bottom()
+}
+
+#[gpui::test]
+fn comfortable_leaf_shows_its_subline_and_a_chip_row_only_for_chips_that_do_not_fit(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &density_fixture());
+
+    assert_eq!(subline(&mut h, "short").as_deref(), Some("main"));
+    assert_eq!(subline(&mut h, "long").as_deref(), Some(LONG_BRANCH));
+    for id in ["short", "long", "loose"] {
+        assert!(drawn(&mut h, &format!("leaf-subline-{id}")), "{id}");
+    }
+    assert!(!drawn(&mut h, "leaf-chips-short"), "its pill fits");
+    assert!(
+        within(&mut h, "leaf-pill-short", "leaf-subline-short"),
+        "at the subline's end"
+    );
+    assert!(drawn(&mut h, "leaf-chips-long"), "the pill moved below");
+    assert!(within(&mut h, "leaf-pill-long", "leaf-chips-long"));
+    assert!(
+        !drawn(&mut h, "leaf-chips-loose"),
+        "an unbound pill that does not fit leaves no chips"
+    );
+    assert!(!drawn(&mut h, "leaf-pill-loose"));
+    assert!(h.bounds("leaf-short").size.height > px(26.0), "two lines");
+    assert_eq!(
+        h.root(|root, _| root.leaf_hover("short")).as_deref(),
+        Some("short"),
+        "the hover leaves the drawn subline out"
+    );
+
+    h.click_on("sidebar-view-tabs");
+    assert_eq!(
+        subline(&mut h, "short").as_deref(),
+        Some("r1:main"),
+        "the tabs view names the repo"
+    );
+}
+
+#[gpui::test]
+fn compact_leaf_is_one_line_and_its_hover_holds_the_subline(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    std::fs::write(
+        dir.path().join("native-ui.json"),
+        r#"{ "general": { "leaf_density": "compact" } }"#,
+    )
+    .expect("write the layout");
+    let mut fixture = density_fixture();
+    fixture.sessions.push(
+        session("sh")
+            .shell("D:/src/app")
+            .program_name("pwsh")
+            .build(),
+    );
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for id in ["short", "long", "sh"] {
+        assert_eq!(
+            h.bounds(&format!("leaf-{id}")).size.height,
+            px(26.0),
+            "{id}"
+        );
+        assert!(!drawn(&mut h, &format!("leaf-subline-{id}")), "{id}");
+        assert!(!drawn(&mut h, &format!("leaf-chips-{id}")), "{id}");
+    }
+    assert!(drawn(&mut h, "leaf-pill-long"), "chips stay inline");
+    let hover = |h: &mut Harness<'_>, id: &str| {
+        let id = id.to_owned();
+        h.root(move |root, _| root.leaf_hover(&id))
+    };
+    assert_eq!(
+        hover(&mut h, "long"),
+        Some(format!("long\n{LONG_BRANCH}")),
+        "the hover gains the subline"
+    );
+    assert_eq!(
+        hover(&mut h, "sh").as_deref(),
+        Some("app\nSession: sh\nCwd: D:/src/app"),
+        "a shell's hover already names its folder"
     );
 }
 
