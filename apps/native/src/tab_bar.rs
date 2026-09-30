@@ -253,6 +253,7 @@ impl RootView {
         if self.tabs.tab(tab_id).is_none() {
             return;
         }
+        self.close_more_menu(window, cx);
         self.menu = None;
         self.pane_ui.menu = None;
         self.tab_menu = Some(TabMenu {

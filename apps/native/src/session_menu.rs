@@ -281,6 +281,7 @@ impl RootView {
         if self.sidebar.session(session_id).is_none() {
             return;
         }
+        self.close_more_menu(window, cx);
         self.menu = Some(SessionMenu {
             session_id: session_id.to_owned(),
             at,
@@ -364,6 +365,7 @@ impl RootView {
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
+        self.close_more_menu(window, cx);
         self.container_menu = Some(ContainerMenu { level, at });
         self.menu_focus.focus(window);
         cx.notify();
@@ -1626,6 +1628,7 @@ impl RootView {
         };
         self.close_session_menu(window, cx);
         self.close_tab_menu(window, cx);
+        self.close_more_menu(window, cx);
         self.shell_menu = Some(ShellMenu {
             pane_id: pane_id.to_owned(),
             session_id: self.pane_session(pane_id),

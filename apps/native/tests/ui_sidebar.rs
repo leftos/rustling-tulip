@@ -946,6 +946,25 @@ fn ctrl_comma_closes_the_more_menu_and_opens_settings(cx: &mut TestAppContext) {
     );
 }
 
+/// A right press outside the ⋯ menu gives way like a left one, and reaches
+/// nothing under it: the tab it was aimed at opens no menu of its own.
+#[gpui::test]
+fn a_right_click_outside_closes_the_more_menu(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = more_menu_open_with_a_repo(cx, &dir);
+
+    h.right_click_on("tab-t1");
+
+    assert!(
+        !h.root(|root, _| root.sidebar_more_open()),
+        "the menu gave way"
+    );
+    assert!(
+        h.root(|root, _| root.tab_menu().is_none()),
+        "and opened nothing under it"
+    );
+}
+
 #[gpui::test]
 fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppContext) {
     let dir = TestDir::new();
