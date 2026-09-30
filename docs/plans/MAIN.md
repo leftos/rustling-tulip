@@ -1,5 +1,5 @@
 # rustling-tulip: main plan
-<!-- plan-doc-hygiene: 2026-09-29 7970fec -->
+<!-- plan-doc-hygiene: 2026-09-29 2d1aefd -->
 
 Entry point for anyone, human or agent, continuing this project. **Open work only**, in the order it is worked: [High priority](#high-priority), then the [Waves](#waves) top to bottom, then [Backlog and singles](#backlog-and-singles). The next item is the first line from the top.
 
@@ -31,7 +31,7 @@ The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boar
 - [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
 - [ ] **PT.8b Spawn dialog and Settings**.
-- [ ] **PT.10 Petal docs**: `docs/native-client.md` "Theme and fonts", CLAUDE.md's `native-ui.json` line, the README glossary.
+- [ ] **PT.10 Petal docs, the leaf-density half**: `docs/native-client.md` "Theme and fonts" names the leaf density and CLAUDE.md's `native-ui.json` line gains `general.leaf_density`; lands with PT.6b (the palette, face, glyph and glossary half is in).
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
 
@@ -146,7 +146,6 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Open questions and blocked items
 
-- [ ] **`--add-dir` hook and settings propagation**: does `claude --add-dir` load hooks and `settings.json` from each additional root, or only from the primary cwd? Not yet verified; it matters for workspace members with their own `CLAUDE.md` or hooks, and Wave 6's HS.0 spike is the natural place to check it.
 - [ ] **Auto-update for the native client**: blocked until its installer (Wave 11) and a signed release pipeline exist (no Actions pipeline, no signing cert, no hosted manifest).
 
 ### Ideas needing a design pass
