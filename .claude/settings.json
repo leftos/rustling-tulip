@@ -1,3 +1,16 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json"
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "basicMemory": {
+    "primaryProject": "rustling-tulip",
+    "secondaryProjects": [],
+    "captureFolder": "sessions",
+    "rememberFolder": "bm-remember",
+    "recallTimeframe": "3d",
+    "preCompactCapture": "extractive",
+    "sessionProfile": "coding",
+    "repository": "leftos/rustling-tulip",
+    "captureEvents": true,
+    "placementConventions": "sessions/ holds coding-session checkpoints (PreCompact and deliberate). decisions/ holds one Decision note per genuine choice not already recorded in the repo's docs/plans. tasks/ holds in-flight Task notes. bm-remember/ holds /bm-remember captures. Durable project knowledge belongs in the repo (docs/plans/MAIN.md, subplans, the README glossary), not here; notes link to those files by path.",
+    "teamProjects": {}
+  }
 }
