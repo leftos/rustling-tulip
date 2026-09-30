@@ -3942,6 +3942,7 @@ async fn spawn_plain_shell_session(
     match &cfg.agent_options {
         AgentOptions::Claude {
             permission_mode: Some(_),
+            ..
         } => {
             return Err(anyhow!(
                 "plain shell sessions do not accept a permission_mode"
@@ -8182,9 +8183,7 @@ mod tests {
             mode,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env,
             prompt_injector: None,
@@ -8319,12 +8318,7 @@ mod tests {
     async fn standalone_target_refuses_headless() {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
         for (mode, agent_options) in [
-            (
-                SessionMode::Headless,
-                AgentOptions::Claude {
-                    permission_mode: None,
-                },
-            ),
+            (SessionMode::Headless, AgentOptions::claude(None)),
             (SessionMode::Headless, AgentOptions::Codex { sandbox: None }),
             (
                 SessionMode::Headless,

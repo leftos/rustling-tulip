@@ -515,9 +515,7 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     assert_eq!(request.model.as_deref(), Some("sonnet"));
     assert_eq!(
         request.agent_options,
-        AgentOptions::Claude {
-            permission_mode: Some(PermissionMode::AcceptEdits)
-        }
+        AgentOptions::claude(Some(PermissionMode::AcceptEdits))
     );
     assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
 }

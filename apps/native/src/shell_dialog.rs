@@ -238,9 +238,7 @@ pub(crate) fn standalone_shell_request(cwd: Option<String>) -> SpawnRequest {
         mode: SessionMode::PlainShell,
         initial_prompt: None,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::Claude {
-            permission_mode: None,
-        },
+        agent_options: AgentOptions::claude(None),
         model: None,
         extra_env: Vec::new(),
         prompt_injector: None,
@@ -490,12 +488,7 @@ mod tests {
         assert_eq!(request.mode, SessionMode::PlainShell);
         assert_eq!(request.initial_prompt, None);
         assert!(!request.dangerously_skip_permissions);
-        assert_eq!(
-            request.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None,
-            }
-        );
+        assert_eq!(request.agent_options, AgentOptions::claude(None));
         assert_eq!(request.model, None);
         assert!(request.extra_env.is_empty());
         assert!(request.prompt_injector.is_none());
