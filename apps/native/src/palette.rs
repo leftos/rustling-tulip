@@ -68,16 +68,22 @@ pub const ON_ASKING: u32 = 0x002a_1b00;
 pub const WAITING: u32 = 0x004f_c89d;
 /// Something that failed, as `0xRRGGBB`.
 pub const DANGER: u32 = 0x00f2_6d6d;
-/// The Codex runtime tag, as `0xRRGGBB`.
+/// The Codex runtime tag, a renamed file's letter and a diff's strings, as
+/// `0xRRGGBB`.
 pub const LILAC: u32 = 0x00c9_b8ff;
+/// A modified file's letter, a mixed hunk's ruler marker, and a diff's
+/// types and numbers, as `0xRRGGBB`.
+pub const OCHRE: u32 = 0x00d9_a15c;
+/// A diff's keywords, as `0xRRGGBB`.
+pub const ROSE: u32 = 0x00e7_849b;
+/// A diff's function names, as `0xRRGGBB`.
+pub const PERIWINKLE: u32 = 0x008f_b3f0;
+/// A deleted file's letter in the source-control tree, as `0xRRGGBB`.
+pub const CHANGE_DELETED: u32 = 0x00e5_8a8a;
 
 /// A deleted diff line's wash, as `0xRRGGBB`, at
 /// [`DIFF_DELETE_WASH_ALPHA`].
 pub const DIFF_DELETE: u32 = 0x00e5_6a6a;
-/// The text of a removed diff line, as `0xRRGGBB`.
-pub const DIFF_REMOVED_TEXT: u32 = 0x00e5_8a8a;
-/// The text of an added diff line, as `0xRRGGBB`.
-pub const DIFF_ADDED_TEXT: u32 = 0x007f_d3ae;
 /// The half of a diff row whose side has no line, as `0xRRGGBB`, at
 /// [`DIFF_FILLER_ALPHA`].
 pub const DIFF_FILLER: u32 = 0x00ff_ffff;
@@ -88,6 +94,9 @@ pub const DIFF_DELETE_WASH_ALPHA: f32 = 0.13;
 pub const DIFF_INSERT_WASH_ALPHA: f32 = 0.12;
 /// The share of [`DIFF_FILLER`]'s white the fill covers.
 pub const DIFF_FILLER_ALPHA: f32 = 0.025;
+/// The share of its line's hue a changed word's wash covers: the delete
+/// colour on the old side, [`WAITING`] on the new.
+pub const DIFF_WORD_WASH_ALPHA: f32 = 0.30;
 
 /// The sidebar's and panels' background, which is [`SURFACE`], as
 /// `0xRRGGBB`.
@@ -133,36 +142,6 @@ pub(crate) const SPAWN_BADGE_OK: u32 = 0x004e_c9b0;
 
 /// The rail's badge text, dark on the accent, as `0xRRGGBB`.
 pub(crate) const RAIL_BADGE_TEXT: u32 = 0x000f_1014;
-
-/// A modified file in the source-control tree, as `0xRRGGBB`.
-pub(crate) const CHANGES_MODIFIED: u32 = 0x00d4_a72c;
-/// An added file in the source-control tree, as `0xRRGGBB`.
-pub(crate) const CHANGES_ADDED: u32 = 0x004e_c9b0;
-/// A renamed file in the source-control tree, as `0xRRGGBB`.
-pub(crate) const CHANGES_RENAMED: u32 = 0x0056_9cd6;
-/// An untracked file in the source-control tree, as `0xRRGGBB`.
-pub(crate) const CHANGES_UNTRACKED: u32 = 0x006a_9955;
-
-/// A deleted line's half, and the old half of a modified row, as
-/// `0xRRGGBBAA`.
-pub(crate) const DIFF_DELETE_BG: u32 = 0xf851_4926;
-/// An inserted line's half, and the new half of a modified row, as
-/// `0xRRGGBBAA`.
-pub(crate) const DIFF_INSERT_BG: u32 = 0x3fb9_5026;
-/// A changed word on the old side, as `0xRRGGBBAA`.
-pub(crate) const DIFF_DELETE_WORD_BG: u32 = 0xf851_4959;
-/// A changed word on the new side, as `0xRRGGBBAA`.
-pub(crate) const DIFF_INSERT_WORD_BG: u32 = 0x3fb9_5059;
-/// The half of a diff row whose side has no line, as `0xRRGGBBAA`.
-pub(crate) const DIFF_FILLER_BG: u32 = 0x8080_800f;
-/// A diff line's text, as `0xRRGGBBAA`.
-pub(crate) const DIFF_TEXT: u32 = 0xcccc_ccff;
-/// A diff gutter's line number, as `0xRRGGBBAA`.
-pub(crate) const DIFF_GUTTER_TEXT: u32 = 0x6e76_81ff;
-/// The bar left of the current hunk's rows, as `0xRRGGBBAA`.
-pub(crate) const DIFF_CURRENT_BAR: u32 = 0x4c8d_ffcc;
-/// The line between a diff's two halves, as `0xRRGGBBAA`.
-pub(crate) const DIFF_DIVIDER: u32 = 0x2022_2aff;
 
 /// The border of a pane's shell-mark dot, as `0xRRGGBBAA`.
 pub(crate) const SHELL_MARK_BORDER: u32 = 0x0000_0059;
@@ -232,13 +211,16 @@ mod tests {
         assert_eq!(WAITING, 0x004f_c89d);
         assert_eq!(DANGER, 0x00f2_6d6d);
         assert_eq!(LILAC, 0x00c9_b8ff);
+        assert_eq!(OCHRE, 0x00d9_a15c);
+        assert_eq!(ROSE, 0x00e7_849b);
+        assert_eq!(PERIWINKLE, 0x008f_b3f0);
+        assert_eq!(CHANGE_DELETED, 0x00e5_8a8a);
         assert_eq!(DIFF_DELETE, 0x00e5_6a6a);
-        assert_eq!(DIFF_REMOVED_TEXT, 0x00e5_8a8a);
-        assert_eq!(DIFF_ADDED_TEXT, 0x007f_d3ae);
         assert_eq!(DIFF_FILLER, 0x00ff_ffff);
         assert!((DIFF_DELETE_WASH_ALPHA - 0.13).abs() < f32::EPSILON);
         assert!((DIFF_INSERT_WASH_ALPHA - 0.12).abs() < f32::EPSILON);
         assert!((DIFF_FILLER_ALPHA - 0.025).abs() < f32::EPSILON);
+        assert!((DIFF_WORD_WASH_ALPHA - 0.30).abs() < f32::EPSILON);
         assert_eq!(DANGER_BG, 0x003a_1c1f);
         assert_eq!(STATUS_OK, 0x003f_b96a);
         assert_eq!(STATUS_IDLE, 0x0083_8a96);
@@ -246,19 +228,6 @@ mod tests {
         assert_eq!(SPAWN_BADGE_OK, 0x004e_c9b0);
         assert_eq!(INPUT_SELECTION, 0xf07a_624d);
         assert_eq!(RAIL_BADGE_TEXT, 0x000f_1014);
-        assert_eq!(CHANGES_MODIFIED, 0x00d4_a72c);
-        assert_eq!(CHANGES_ADDED, 0x004e_c9b0);
-        assert_eq!(CHANGES_RENAMED, 0x0056_9cd6);
-        assert_eq!(CHANGES_UNTRACKED, 0x006a_9955);
-        assert_eq!(DIFF_DELETE_BG, 0xf851_4926);
-        assert_eq!(DIFF_INSERT_BG, 0x3fb9_5026);
-        assert_eq!(DIFF_DELETE_WORD_BG, 0xf851_4959);
-        assert_eq!(DIFF_INSERT_WORD_BG, 0x3fb9_5059);
-        assert_eq!(DIFF_FILLER_BG, 0x8080_800f);
-        assert_eq!(DIFF_TEXT, 0xcccc_ccff);
-        assert_eq!(DIFF_GUTTER_TEXT, 0x6e76_81ff);
-        assert_eq!(DIFF_CURRENT_BAR, 0x4c8d_ffcc);
-        assert_eq!(DIFF_DIVIDER, 0x2022_2aff);
         assert_eq!(SHELL_MARK_BORDER, 0x0000_0059);
         assert_eq!(SHELL_MARK_OK, 0x004e_c9b0);
         assert_eq!(SHELL_MARK_FAIL, 0x00f4_8771);

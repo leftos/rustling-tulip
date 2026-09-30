@@ -3,33 +3,125 @@
 //! line-number gutter and its line in the terminal font; long lines are not
 //! wrapped but scroll sideways together, and only the part of a line the
 //! text column shows is laid out. Tokens take their syntax class's colour
-//! once the tab hands the view each side's classes.
+//! once the tab hands the view each side's classes. An overview ruler down
+//! the right edge marks where each hunk sits in the whole diff.
 
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use alacritty_terminal::vte::ansi::Rgb;
 use gpui::{
     Context, DispatchPhase, Div, FocusHandle, HighlightStyle, Hsla, KeyDownEvent, ScrollStrategy,
     ScrollWheelEvent, SharedString, StyledText, UniformListScrollHandle, Window, canvas,
-    combine_highlights, div, font, prelude::*, px, rgba, uniform_list,
+    combine_highlights, div, font, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::diff_model::{DiffModel, Row, RowKind, Side};
 use crate::fonts::{self, FontSettings};
 use crate::palette::{
-    DIFF_CURRENT_BAR, DIFF_DELETE_BG, DIFF_DELETE_WORD_BG, DIFF_DIVIDER, DIFF_FILLER_BG,
-    DIFF_GUTTER_TEXT, DIFF_INSERT_BG, DIFF_INSERT_WORD_BG, DIFF_TEXT,
+    ACCENT, DIFF_DELETE, DIFF_DELETE_WASH_ALPHA, DIFF_FILLER, DIFF_FILLER_ALPHA,
+    DIFF_INSERT_WASH_ALPHA, DIFF_WORD_WASH_ALPHA, LINE, OCHRE, SUBTLE, TERMINAL_GROUND, TEXT,
+    WAITING,
 };
-use crate::syntax::{self, Highlighted, TokenClass};
-use crate::theme;
+use crate::syntax::{Highlighted, TokenClass};
 
 const CURRENT_BAR_WIDTH: f32 = 2.0;
+/// The least width of a half's line-number gutter.
+const GUTTER_MIN_WIDTH: f32 = 48.0;
 /// The space between a gutter's number and its line.
-const GUTTER_PAD: f32 = 8.0;
+const GUTTER_PAD: f32 = 12.0;
+/// The size of a gutter's line numbers.
+const GUTTER_TEXT_SIZE: f32 = 11.0;
 const DIVIDER_WIDTH: f32 = 1.0;
+/// The overview ruler's width, its left border included.
+const RULER_WIDTH: f32 = 10.0;
+/// How far a ruler marker sits in from the ruler's sides.
+const RULER_MARK_INSET: f32 = 2.0;
+/// A ruler marker's least height, so a one-row hunk in a long diff shows.
+const RULER_MARK_MIN_HEIGHT: f32 = 2.0;
+const RULER_MARK_RADIUS: f32 = 2.0;
+
+/// What a hunk changes, as its overview-ruler marker shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HunkKind {
+    /// Lines both removed and added.
+    Mixed,
+    /// Only added lines.
+    Insert,
+    /// Only removed lines.
+    Delete,
+}
+
+impl HunkKind {
+    /// The kind of a hunk made of `rows`; `None` when none of them changes.
+    fn of(rows: &[Row]) -> Option<Self> {
+        let removes = rows
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::Delete | RowKind::Modify));
+        let adds = rows
+            .iter()
+            .any(|row| matches!(row.kind, RowKind::Insert | RowKind::Modify));
+        match (removes, adds) {
+            (true, true) => Some(Self::Mixed),
+            (false, true) => Some(Self::Insert),
+            (true, false) => Some(Self::Delete),
+            (false, false) => None,
+        }
+    }
+
+    /// The marker's colour, as `0xRRGGBB`.
+    const fn color(self) -> u32 {
+        match self {
+            Self::Mixed => OCHRE,
+            Self::Insert => WAITING,
+            Self::Delete => DIFF_DELETE,
+        }
+    }
+}
+
+/// One hunk's marker on the overview ruler, in pixels from the ruler's top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RulerMark {
+    top: f32,
+    height: f32,
+    kind: HunkKind,
+}
+
+/// The overview ruler's markers for `model`'s hunks on a ruler `height`
+/// pixels tall. Each sits at its first row's share of all the rows and is as
+/// tall as its rows' share, but at least [`RULER_MARK_MIN_HEIGHT`] and never
+/// past the ruler's foot. None for an empty diff or a ruler not yet laid out.
+fn ruler_marks(model: &DiffModel, height: f32) -> Vec<RulerMark> {
+    let rows = model.rows();
+    if rows.is_empty() || height <= 0.0 {
+        return Vec::new();
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a diff's row count is far below f32's exact range"
+    )]
+    let row_height = height / rows.len() as f32;
+    model
+        .hunks()
+        .iter()
+        .filter_map(|hunk| {
+            let kind = HunkKind::of(rows.get(hunk.clone())?)?;
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a diff's row count is far below f32's exact range"
+            )]
+            let (start, len) = (hunk.start as f32, hunk.len() as f32);
+            let mark_height = (len * row_height).max(RULER_MARK_MIN_HEIGHT);
+            let top = (start * row_height).min(height - mark_height).max(0.0);
+            Some(RulerMark {
+                top,
+                height: mark_height,
+                kind,
+            })
+        })
+        .collect()
+}
 
 /// Where [`DiffView::go`] moves the current hunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +138,21 @@ struct Metrics {
     family: SharedString,
     char_width: f32,
     line_height: f32,
+    /// The advance of one digit of a gutter's line number, drawn in the
+    /// same family at [`GUTTER_TEXT_SIZE`].
+    gutter_digit_width: f32,
+}
+
+/// The width of a half's line-number gutter for line numbers of `digits`
+/// digits: room for them in the gutter's text and the pad after them, but
+/// at least [`GUTTER_MIN_WIDTH`].
+fn gutter_width(digits: usize, metrics: &Metrics) -> f32 {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a line number has a handful of digits"
+    )]
+    let digits = digits as f32;
+    (digits * metrics.gutter_digit_width + GUTTER_PAD).max(GUTTER_MIN_WIDTH)
 }
 
 /// Which side of a row a half draws.
@@ -104,6 +211,8 @@ pub struct DiffView {
     shown: Vec<(Option<SharedString>, Option<SharedString>)>,
     /// The width of one half's text column, in pixels, recorded at paint.
     column_width: Rc<Cell<f32>>,
+    /// The overview ruler's height, in pixels, recorded at paint.
+    ruler_height: Rc<Cell<f32>>,
     /// The digits of the largest line number.
     gutter_digits: usize,
     /// The characters of the longest line on either side.
@@ -119,9 +228,7 @@ impl DiffView {
     /// A view of `model` in `font`, the app's terminal font.
     pub fn new(model: DiffModel, font: FontSettings, cx: &mut Context<Self>) -> Self {
         let (gutter_digits, longest_line) = measure(&model);
-        let background = theme::DEFAULT_BACKGROUND;
-        let palette = theme::build_theme(background).ansi;
-        let class_colors = syntax::class_colors(&palette, background).map(hsla);
+        let class_colors = TokenClass::ALL.map(|class| Hsla::from(rgb(class.color())));
         Self {
             model,
             font: font.normalized(),
@@ -133,6 +240,7 @@ impl DiffView {
             rendered: 0..0,
             shown: Vec::new(),
             column_width: Rc::new(Cell::new(0.0)),
+            ruler_height: Rc::new(Cell::new(0.0)),
             gutter_digits,
             longest_line,
             old_syntax: None,
@@ -418,14 +526,34 @@ impl DiffView {
         (chars * self.char_width() - self.column_width.get()).max(0.0)
     }
 
-    /// The width of a half's line-number gutter.
+    /// The width of a half's line-number gutter, for the largest line
+    /// number; see [`gutter_width`].
     fn gutter_width(&self, metrics: &Metrics) -> f32 {
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a line number has a handful of digits"
-        )]
-        let digits = self.gutter_digits as f32;
-        digits * metrics.char_width + GUTTER_PAD
+        gutter_width(self.gutter_digits, metrics)
+    }
+
+    /// The overview ruler down the right edge, a marker for each hunk.
+    fn ruler(&self) -> Div {
+        let marks = ruler_marks(&self.model, self.ruler_height.get());
+        div()
+            .debug_selector(|| "diff-ruler".to_owned())
+            .relative()
+            .flex_none()
+            .w(px(RULER_WIDTH))
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(LINE))
+            .children(marks.into_iter().enumerate().map(|(index, mark)| {
+                div()
+                    .debug_selector(move || format!("diff-ruler-mark-{index}"))
+                    .absolute()
+                    .left(px(RULER_MARK_INSET))
+                    .right(px(RULER_MARK_INSET))
+                    .top(px(mark.top))
+                    .h(px(mark.height))
+                    .rounded(px(RULER_MARK_RADIUS))
+                    .bg(rgb(mark.kind.color()))
+            }))
     }
 
     /// The font metrics, resolved on the first draw.
@@ -441,12 +569,16 @@ impl DiffView {
         let char_width = text
             .advance(font_id, size, 'm')
             .map_or(self.font.size * 0.6, |s| s.width / px(1.0));
+        let gutter_digit_width = text
+            .advance(font_id, px(GUTTER_TEXT_SIZE), '0')
+            .map_or(GUTTER_TEXT_SIZE * 0.6, |s| s.width / px(1.0));
         let ascent = text.ascent(font_id, size) / px(1.0);
         let descent = text.descent(font_id, size) / px(1.0);
         let metrics = Metrics {
             family,
             char_width,
             line_height: fonts::line_height(ascent, descent, self.font.size),
+            gutter_digit_width,
         };
         self.metrics = Some(metrics.clone());
         metrics
@@ -482,7 +614,7 @@ impl DiffView {
                             .w(px(CURRENT_BAR_WIDTH))
                             .h_full()
                             .flex_none()
-                            .when(current, |bar| bar.bg(rgba(DIFF_CURRENT_BAR))),
+                            .when(current, |bar| bar.bg(rgb(ACCENT))),
                     )
                     .child(old)
                     .child(
@@ -490,7 +622,7 @@ impl DiffView {
                             .w(px(DIVIDER_WIDTH))
                             .h_full()
                             .flex_none()
-                            .bg(rgba(DIFF_DIVIDER)),
+                            .bg(rgb(LINE)),
                     )
                     .child(new)
             })
@@ -511,20 +643,16 @@ impl DiffView {
     ) -> (Div, Option<SharedString>) {
         let cell = div().flex_1().min_w(px(0.0)).h_full().flex().flex_row();
         let Some(side) = side_of(row, half) else {
-            return (cell.bg(rgba(DIFF_FILLER_BG)), None);
+            return (cell.bg(wash(DIFF_FILLER, DIFF_FILLER_ALPHA)), None);
         };
         let changed = row.kind != RowKind::Equal;
-        let (line_text, tint, word_tint) = match half {
+        let (line_text, hue, line_alpha) = match half {
             Half::Old => (
                 self.model.old_text(side),
-                DIFF_DELETE_BG,
-                DIFF_DELETE_WORD_BG,
+                DIFF_DELETE,
+                DIFF_DELETE_WASH_ALPHA,
             ),
-            Half::New => (
-                self.model.new_text(side),
-                DIFF_INSERT_BG,
-                DIFF_INSERT_WORD_BG,
-            ),
+            Half::New => (self.model.new_text(side), WAITING, DIFF_INSERT_WASH_ALPHA),
         };
         let words = self.model.inline(index).map(|spans| match half {
             Half::Old => spans.left.as_slice(),
@@ -532,7 +660,7 @@ impl DiffView {
         });
         let shown = visible_range(line_text, columns.start, columns.len);
         let word_style = HighlightStyle {
-            background_color: Some(Hsla::from(rgba(word_tint))),
+            background_color: Some(Hsla::from(wash(hue, DIFF_WORD_WASH_ALPHA))),
             ..HighlightStyle::default()
         };
         let words = words
@@ -555,15 +683,16 @@ impl DiffView {
         let line =
             StyledText::new(text.clone()).with_highlights(combine_highlights(classes, words));
         let cell = cell
-            .when(changed, |cell| cell.bg(rgba(tint)))
+            .when(changed, |cell| cell.bg(wash(hue, line_alpha)))
             .child(
                 div()
                     .w(px(self.gutter_width(metrics)))
                     .h_full()
                     .flex_none()
-                    .pr(px(GUTTER_PAD / 2.0))
+                    .pr(px(GUTTER_PAD))
                     .text_right()
-                    .text_color(rgba(DIFF_GUTTER_TEXT))
+                    .text_size(px(GUTTER_TEXT_SIZE))
+                    .text_color(rgb(SUBTLE))
                     .child(side.line_no.to_string()),
             )
             .child(
@@ -650,23 +779,12 @@ fn clip(text: &str, shown: &Range<usize>, span: &Range<usize>) -> Option<Range<u
     Some(span_start - shown.start..span_end - shown.start)
 }
 
-/// `color` as a gpui colour.
-fn gpui_rgba(color: Rgb) -> gpui::Rgba {
+/// The `0xRRGGBB` `color` at `alpha`, as a gpui colour.
+fn wash(color: u32, alpha: f32) -> gpui::Rgba {
     gpui::Rgba {
-        r: f32::from(color.r) / 255.0,
-        g: f32::from(color.g) / 255.0,
-        b: f32::from(color.b) / 255.0,
-        a: 1.0,
+        a: alpha,
+        ..rgb(color)
     }
-}
-
-fn hsla(color: Rgb) -> Hsla {
-    Hsla::from(gpui_rgba(color))
-}
-
-/// The theme's background as a gpui colour.
-fn background() -> gpui::Rgba {
-    gpui_rgba(theme::DEFAULT_BACKGROUND)
 }
 
 impl Render for DiffView {
@@ -686,19 +804,26 @@ impl Render for DiffView {
         .size_full();
         let gutter = self.gutter_width(&metrics);
         let column_width = self.column_width.clone();
+        let ruler_height = self.ruler_height.clone();
         // Registered in the capture phase, so a Shift+wheel reaches this
         // view before the list turns it into a vertical scroll. Painting it
         // records the width of a half's text column, which bounds how far
-        // the lines scroll sideways; a new width redraws the view, so its
-        // render clamps the scroll against it. gpui drops a notify sent
+        // the lines scroll sideways, and the ruler's height, which places
+        // its markers; a change to either redraws the view, so its render
+        // clamps the scroll and moves the markers. gpui drops a notify sent
         // while a frame is drawn, so the redraw is deferred past it.
         let wheel = canvas(
             |_, _, _| {},
             move |bounds, (), window, cx| {
-                let half = (bounds.size.width / px(1.0) - CURRENT_BAR_WIDTH - DIVIDER_WIDTH) / 2.0;
+                let fixed = CURRENT_BAR_WIDTH + DIVIDER_WIDTH + RULER_WIDTH;
+                let half = (bounds.size.width / px(1.0) - fixed) / 2.0;
                 let width = (half - gutter).max(0.0);
-                if (column_width.get() - width).abs() > f32::EPSILON {
+                let height = bounds.size.height / px(1.0);
+                let resized = (column_width.get() - width).abs() > f32::EPSILON
+                    || (ruler_height.get() - height).abs() > f32::EPSILON;
+                if resized {
                     column_width.set(width);
+                    ruler_height.set(height);
                     let redraw = view.clone();
                     cx.defer(move |cx| redraw.update(cx, |_, cx| cx.notify()));
                 }
@@ -719,12 +844,15 @@ impl Render for DiffView {
             .on_key_down(cx.listener(Self::on_key_down))
             .relative()
             .size_full()
-            .bg(background())
-            .text_color(rgba(DIFF_TEXT))
+            .flex()
+            .flex_row()
+            .bg(rgb(TERMINAL_GROUND))
+            .text_color(rgb(TEXT))
             .font_family(metrics.family)
             .text_size(px(self.font.size))
             .line_height(px(metrics.line_height))
-            .child(list)
+            .child(div().flex_1().min_w(px(0.0)).h_full().child(list))
+            .child(self.ruler())
             .child(wheel)
     }
 }
@@ -732,6 +860,37 @@ impl Render for DiffView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mono font's metrics at `size` px: a 0.6 em advance, as the
+    /// gutter's text has at [`GUTTER_TEXT_SIZE`].
+    fn mono(size: f32) -> Metrics {
+        Metrics {
+            family: SharedString::from(fonts::DEFAULT_FAMILY),
+            char_width: size * 0.6,
+            line_height: size * 1.3,
+            gutter_digit_width: GUTTER_TEXT_SIZE * 0.6,
+        }
+    }
+
+    #[test]
+    fn the_gutter_fits_its_digits_at_the_gutter_size_under_a_small_terminal_font() {
+        let small = mono(10.0);
+        let needed = 6.0 * small.gutter_digit_width + GUTTER_PAD;
+        let width = gutter_width(6, &small);
+        assert!(
+            width >= needed,
+            "six 11 px digits and the pad need {needed}, got {width}"
+        );
+    }
+
+    #[test]
+    fn the_gutter_follows_its_own_text_not_the_terminal_font() {
+        assert!(
+            (gutter_width(3, &mono(24.0)) - GUTTER_MIN_WIDTH).abs() < f32::EPSILON,
+            "a large terminal font leaves three digits at the least width"
+        );
+        assert!((gutter_width(1, &mono(10.0)) - GUTTER_MIN_WIDTH).abs() < f32::EPSILON);
+    }
 
     fn slice(
         text: &str,
@@ -796,6 +955,74 @@ mod tests {
     fn an_offset_past_the_end_shows_nothing() {
         assert_eq!(slice("abc", &one(0..3), 10, 5), (String::new(), vec![]));
         assert_eq!(slice("abc", &one(0..3), 3, 5), (String::new(), vec![]));
+    }
+
+    fn model(old: &str, new: &str) -> DiffModel {
+        DiffModel::build(old, new, crate::diff_model::DiffOptions::default())
+    }
+
+    /// Each marker's (top, height, kind), with the pixels rounded to tenths.
+    fn marks(model: &DiffModel, height: f32) -> Vec<(f32, f32, HunkKind)> {
+        ruler_marks(model, height)
+            .into_iter()
+            .map(|mark| {
+                let tenths = |value: f32| (value * 10.0).round() / 10.0;
+                (tenths(mark.top), tenths(mark.height), mark.kind)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ruler_marks_sit_at_each_hunks_share_of_the_rows() {
+        // Rows: a, b|B, c, d, e|-, f, g, -|h: eight rows, 10 px each.
+        let diff = model("a\nb\nc\nd\ne\nf\ng\n", "a\nB\nc\nd\nf\ng\nh\n");
+        assert_eq!(diff.rows().len(), 8, "{:?}", diff.rows());
+        assert_eq!(
+            marks(&diff, 80.0),
+            [
+                (10.0, 10.0, HunkKind::Mixed),
+                (40.0, 10.0, HunkKind::Delete),
+                (70.0, 10.0, HunkKind::Insert),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hunk_of_several_rows_is_as_tall_as_its_share() {
+        let diff = model("a\nb\nc\nd\n", "a\nb\nc\nd\nx\ny\nz\nw\n");
+        assert_eq!(marks(&diff, 160.0), [(80.0, 80.0, HunkKind::Insert)]);
+    }
+
+    #[test]
+    fn a_tiny_hunk_keeps_the_least_height_inside_the_ruler() {
+        let lines: Vec<String> = (0..1000).map(|i| format!("line {i}")).collect();
+        let old = lines.join("\n") + "\n";
+        let new = format!("{old}added\n");
+        let diff = model(&old, &new);
+        let shown = marks(&diff, 100.0);
+        assert_eq!(
+            shown,
+            [(98.0, 2.0, HunkKind::Insert)],
+            "at the foot, not past it"
+        );
+        let first = format!(
+            "changed\n{}",
+            old.split_once('\n').map_or("", |(_, rest)| rest)
+        );
+        assert_eq!(
+            marks(&model(&old, &first), 100.0),
+            [(0.0, 2.0, HunkKind::Mixed)]
+        );
+    }
+
+    #[test]
+    fn no_marks_for_an_empty_diff_or_an_unlaid_ruler() {
+        assert!(ruler_marks(&model("", ""), 100.0).is_empty());
+        assert!(ruler_marks(&model("a\n", "b\n"), 0.0).is_empty());
+        assert!(
+            ruler_marks(&model("a\n", "a\n"), 100.0).is_empty(),
+            "no hunks"
+        );
     }
 
     #[test]

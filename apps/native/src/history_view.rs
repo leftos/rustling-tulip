@@ -10,6 +10,7 @@ use gpui::{
 };
 use protocol::DaemonMessage;
 
+use crate::changes_view::{HEAD_HEIGHT, count_pill, head_title};
 use crate::history::{
     Applied, CommitRow, DetailPane, ForgeButton, HistoryBlock, HistoryBody, MIN_CHANGES_SIDE,
     MIN_LIST_SIDE, MoreRow, ScLayout, changes_height, clamp_split, list_height,
@@ -367,12 +368,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
         .gap(px(6.0))
         .cursor_pointer()
         .child(div().flex_none().text_color(gpui::rgb(MUTED)).child(caret))
-        .child(
-            div()
-                .flex_none()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(HISTORY_LABEL),
-        )
+        .child(head_title(HISTORY_LABEL).flex_none())
         .when_some(block.title.clone(), |toggle, title| {
             toggle.child(
                 div()
@@ -382,14 +378,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
                     .child(title),
             )
         })
-        .when_some(block.count, |toggle, count| {
-            toggle.child(
-                div()
-                    .flex_none()
-                    .text_color(gpui::rgb(MUTED))
-                    .child(count.to_string()),
-            )
-        })
+        .when_some(block.count, |toggle, count| toggle.child(count_pill(count)))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.toggle_history(&toggle_key);
             cx.notify();
@@ -399,7 +388,7 @@ fn history_header(key: &ScKey, block: &HistoryBlock, cx: &mut Context<RootView>)
         .flex_none()
         .items_center()
         .gap(px(6.0))
-        .h(px(ROW_HEIGHT))
+        .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .child(toggle)
         .child(forge_button(&block.id, block.forge.clone(), cx))

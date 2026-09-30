@@ -10,7 +10,9 @@ use gpui::{
 use protocol::{ClientMessage, SessionMember};
 
 use crate::assets::REFRESH_ICON;
-use crate::changes_view::{ScBucketRow, ScChanges, ScCommit, caret, changes_body};
+use crate::changes_view::{
+    HEAD_HEIGHT, ScBucketRow, ScChanges, ScCommit, caret, changes_body, count_pill, head_title,
+};
 use crate::history::section_title;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
@@ -30,7 +32,11 @@ pub const NO_REPOS_HINT: &str =
 /// The context line's tooltip when nothing focused names a repo.
 pub const NO_ACTIVE_PANE_TIP: &str = "No pane is focused right now — falling back to the first registered repo. Pick a session in the sidebar to follow it, or pin a repo from the picker above.";
 const REFRESH_TIP: &str = "Refresh status and history";
-const HEADER_HEIGHT: f32 = 26.0;
+const HEADER_HEIGHT: f32 = 44.0;
+/// The panel header's title size.
+const HEADER_TEXT_SIZE: f32 = 13.0;
+/// The panel header's padding left of its title.
+const HEADER_PAD_LEFT: f32 = 14.0;
 const PICKER_HEIGHT: f32 = 20.0;
 const ROW_PADDING: f32 = 8.0;
 const REFRESH_ICON_SIZE: f32 = 14.0;
@@ -500,14 +506,17 @@ impl RootView {
             .justify_between()
             .gap(px(6.0))
             .h(px(HEADER_HEIGHT))
-            .px(px(ROW_PADDING))
+            .pl(px(HEADER_PAD_LEFT))
+            .pr(px(ROW_PADDING))
             .border_b_1()
             .border_color(gpui::rgb(BORDER))
             .text_color(gpui::rgb(MUTED))
             .child(
                 div()
                     .flex_none()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(HEADER_TEXT_SIZE))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(gpui::rgb(TEXT))
                     .child(SC_TITLE),
             )
             .child(actions)
@@ -635,7 +644,7 @@ fn section_view(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .h(px(22.0))
+        .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
@@ -655,22 +664,8 @@ fn section_view(
             this.toggle_sc_changes(&key, window, cx);
         }))
         .child(caret(row.collapsed))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(row.title.clone()),
-        )
-        .when_some(row.count, |header, count| {
-            header.child(
-                div()
-                    .flex_none()
-                    .text_color(gpui::rgb(MUTED))
-                    .child(count.to_string()),
-            )
-        });
+        .child(head_title(&row.title).flex_1().min_w(px(0.0)).truncate())
+        .when_some(row.count, |header, count| header.child(count_pill(count)));
     let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()
             .id(SharedString::from(body_name.clone()))

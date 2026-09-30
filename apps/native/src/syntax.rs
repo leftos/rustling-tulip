@@ -1,6 +1,7 @@
 //! Syntax highlighting for the diff view: the daemon's language id to a
 //! grammar, a text parsed top to bottom into per-line token classes, and each
-//! class's colour from the terminal palette.
+//! class's colour. The classes take the client's own diff colours, not the
+//! terminal's ANSI palette.
 //!
 //! The grammars are two-face's extra set, loaded once on first use; callers
 //! reach it from the background executor, never the UI thread. Classes come
@@ -11,11 +12,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::vte::ansi::Rgb;
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-use crate::theme;
+use crate::palette::{LILAC, OCHRE, PERIWINKLE, ROSE, SUBTLE};
 
 /// A text with more lines than this is left uncoloured.
 pub const MAX_LINES: usize = 20_000;
@@ -47,19 +47,19 @@ impl TokenClass {
         Self::Function,
     ];
 
-    /// The ANSI palette entry the class is drawn in.
-    const fn ansi_index(self) -> usize {
+    /// The colour the class is drawn in, as `0xRRGGBB`.
+    #[must_use]
+    pub const fn color(self) -> u32 {
         match self {
-            Self::Comment => 8,
-            Self::String => 2,
-            Self::Keyword => 5,
-            Self::Constant => 3,
-            Self::Type => 6,
-            Self::Function => 4,
+            Self::Comment => SUBTLE,
+            Self::String => LILAC,
+            Self::Keyword => ROSE,
+            Self::Constant | Self::Type => OCHRE,
+            Self::Function => PERIWINKLE,
         }
     }
 
-    /// The class's place in [`TokenClass::ALL`] and in [`class_colors`].
+    /// The class's place in [`TokenClass::ALL`].
     #[must_use]
     pub const fn index(self) -> usize {
         self as usize
@@ -227,17 +227,6 @@ pub fn highlight(
     Ok(highlighted)
 }
 
-/// Each class's colour, in [`TokenClass::ALL`] order: its entry in `palette`
-/// (the 16 ANSI colours) moved away from `background` until it reaches
-/// [`MIN_CONTRAST`].
-#[must_use]
-pub fn class_colors(palette: &[Rgb; 16], background: Rgb) -> [Rgb; 6] {
-    TokenClass::ALL.map(|class| {
-        let color = palette[class.ansi_index()];
-        theme::ensure_contrast(color, background, MIN_CONTRAST)
-    })
-}
-
 /// A line's length without its `\n` or a `\r` before it, as the diff model
 /// cuts its lines.
 fn content_len(line: &str) -> usize {
@@ -291,6 +280,8 @@ fn push(spans: &mut LineSpans, range: Range<usize>, class: Option<TokenClass>) {
 )]
 mod tests {
     use super::*;
+    use crate::theme;
+    use alacritty_terminal::vte::ansi::Rgb;
 
     /// Room for a debug build to parse a text at a cutoff's limit.
     const SLOW: Duration = Duration::from_secs(120);
@@ -511,36 +502,24 @@ mod tests {
     }
 
     #[test]
-    fn a_palette_override_changes_the_class_colour() {
-        let background = theme::DEFAULT_BACKGROUND;
-        let palette = theme::build_theme(background).ansi;
-        let mut custom = palette;
-        custom[5] = Rgb {
-            r: 0xff,
-            g: 0x40,
-            b: 0x40,
-        };
-        let base = class_colors(&palette, background);
-        let changed = class_colors(&custom, background);
-        let keyword = TokenClass::Keyword.index();
-        assert_ne!(base[keyword], changed[keyword]);
-        assert_eq!(changed[keyword], custom[5], "already legible, kept as is");
-        for class in TokenClass::ALL {
-            if class != TokenClass::Keyword {
-                assert_eq!(base[class.index()], changed[class.index()], "{class:?}");
-            }
-        }
+    fn each_class_takes_its_diff_colour() {
+        let colors = TokenClass::ALL.map(TokenClass::color);
+        assert_eq!(colors, [SUBTLE, LILAC, ROSE, OCHRE, OCHRE, PERIWINKLE]);
+        assert_ne!(
+            TokenClass::Keyword.color(),
+            TokenClass::Function.color(),
+            "a keyword and a function differ"
+        );
+        assert_ne!(TokenClass::String.color(), TokenClass::Comment.color());
     }
 
     #[test]
     fn every_class_colour_clears_the_contrast_minimum() {
         let background = theme::DEFAULT_BACKGROUND;
-        let dark = Rgb { r: 0, g: 0, b: 0 };
-        for palette in [theme::build_theme(background).ansi, [dark; 16]] {
-            for color in class_colors(&palette, background) {
-                let ratio = theme::contrast_ratio(color, background);
-                assert!(ratio >= MIN_CONTRAST, "{color:?}: {ratio}");
-            }
+        for class in TokenClass::ALL {
+            let [_, r, g, b] = class.color().to_be_bytes();
+            let ratio = theme::contrast_ratio(Rgb { r, g, b }, background);
+            assert!(ratio >= MIN_CONTRAST, "{class:?}: {ratio}");
         }
     }
 }

@@ -1,5 +1,10 @@
 //! Diff view specs: the side-by-side view on a window of its own, its rows
-//! and line numbers, the change keys, and sideways scrolling.
+//! and line numbers, the change keys, sideways scrolling and the overview
+//! ruler.
+#![expect(
+    clippy::expect_used,
+    reason = "specs assert preconditions with expect; failure messages aid debugging"
+)]
 
 use std::time::{Duration, Instant};
 
@@ -329,6 +334,45 @@ fn f7_goes_to_the_next_change_below_the_drawn_rows(cx: &mut TestAppContext) {
         read(cx, &view, DiffView::current_hunk),
         Some(1),
         "F7 goes to the change at or below the drawn rows, not the first"
+    );
+}
+
+#[gpui::test]
+fn the_overview_ruler_marks_every_hunk_down_the_right_edge(cx: &mut TestAppContext) {
+    let (old, new) = numbered(100, &[10, 50, 90]);
+    let (_view, cx) = mount(cx, &old, &new);
+    let window = cx.update(|window, _| window.viewport_size());
+    let ruler = cx.debug_bounds("diff-ruler").expect("the ruler is drawn");
+    assert_eq!(ruler.size.width, gpui::px(10.0), "a 10 px column");
+    assert_eq!(ruler.right(), window.width, "at the right edge");
+    assert_eq!(ruler.size.height, window.height, "the diff's full height");
+    let marks: Vec<_> = [
+        "diff-ruler-mark-0",
+        "diff-ruler-mark-1",
+        "diff-ruler-mark-2",
+    ]
+    .into_iter()
+    .map(|mark| cx.debug_bounds(mark).expect("a marker a hunk"))
+    .collect();
+    assert!(
+        cx.debug_bounds("diff-ruler-mark-3").is_none(),
+        "no more markers than hunks"
+    );
+    for mark in &marks {
+        assert!(
+            mark.left() > ruler.left() && mark.right() < ruler.right(),
+            "inset inside the ruler: {mark:?} in {ruler:?}"
+        );
+        assert!(mark.size.height >= gpui::px(2.0), "at least 2 px: {mark:?}");
+    }
+    assert!(
+        marks[0].top() < marks[1].top() && marks[1].top() < marks[2].top(),
+        "in the hunks' order: {marks:?}"
+    );
+    let share = (marks[1].top() - ruler.top()) / ruler.size.height;
+    assert!(
+        (0.45..0.55).contains(&share),
+        "the middle hunk sits half way down: {share}"
     );
 }
 

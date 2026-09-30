@@ -15,6 +15,7 @@ use gpui::{
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
+use crate::buttons::{ButtonSize, outlined_button};
 use crate::diff_model::{DiffModel, DiffOptions};
 use crate::diff_tab::{
     Built, DiffTabBody, DiffTabHeader, DiffTabState, DiffTarget, HIGHLIGHT_LABEL, HIGHLIGHT_TIP,
@@ -23,11 +24,15 @@ use crate::diff_tab::{
 use crate::diff_view::{DiffView, Nav};
 use crate::fonts::FontSettings;
 use crate::notices::ToastKind;
+use crate::palette::{LINE, SURFACE};
 use crate::source_control::ScKey;
 use crate::syntax::{self, Highlighted};
-use crate::{BAR_BG, BORDER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
+use crate::{HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, tooltip};
 
-const HEADER_HEIGHT: f32 = 24.0;
+/// The header's height: room for the compact change buttons.
+const HEADER_HEIGHT: f32 = 42.0;
+const HEADER_PAD_LEFT: f32 = 14.0;
+const HEADER_PAD_RIGHT: f32 = 10.0;
 /// The change buttons, left to right: where each moves, its selector, glyph
 /// and tooltip.
 const NAV_BUTTONS: [(Nav, &str, &str, &str); 4] = [
@@ -416,10 +421,11 @@ impl DiffTabView {
             .items_center()
             .gap(px(8.0))
             .h(px(HEADER_HEIGHT))
-            .px(px(8.0))
-            .bg(gpui::rgb(BAR_BG))
+            .pl(px(HEADER_PAD_LEFT))
+            .pr(px(HEADER_PAD_RIGHT))
+            .bg(gpui::rgb(SURFACE))
             .border_b_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(LINE))
             .child(path)
             .child(mode)
             .child(div().flex_1())
@@ -463,20 +469,13 @@ fn nav_button(
     enabled: bool,
     cx: &mut Context<DiffTabView>,
 ) -> Stateful<Div> {
-    let base = div()
-        .id(selector)
-        .debug_selector(move || selector.to_owned())
+    outlined_button(selector, ButtonSize::Compact, enabled)
         .flex_none()
-        .px(px(4.0))
-        .rounded(px(3.0))
         .child(glyph)
-        .tooltip(tooltip(tip));
-    if !enabled {
-        return base.opacity(0.5);
-    }
-    base.cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .on_click(cx.listener(move |tab, _: &ClickEvent, _, cx| tab.go(nav, cx)))
+        .tooltip(tooltip(tip))
+        .when(enabled, |button| {
+            button.on_click(cx.listener(move |tab, _: &ClickEvent, _, cx| tab.go(nav, cx)))
+        })
 }
 
 /// The text standing in for the diff, centred, with a muted line under it.

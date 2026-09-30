@@ -11,9 +11,12 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, GitStash};
 use std::collections::{HashMap, HashSet};
 
-use crate::changes_view::{LOADING_TEXT, caret};
+use crate::buttons::{ButtonSize, outlined_button};
+use crate::changes_view::{HEAD_HEIGHT, LOADING_TEXT, caret, count_pill, head_title};
+use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
+use crate::palette::{SUBTLE, SURFACE};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::source_control::{Part, ScKey};
 use crate::source_control_view::ScSectionRow;
@@ -34,7 +37,9 @@ pub const STASH_LIST_CHANGED: &str = "Stash list changed";
 const STASH_LABEL: &str = "Stash";
 const STASHING_LABEL: &str = "Stashing…";
 const ROW_PADDING: f32 = 8.0;
-const ROW_HEIGHT: f32 = 20.0;
+const ROW_HEIGHT: f32 = 28.0;
+/// The size of a stash row's id.
+const ID_TEXT_SIZE: f32 = 11.0;
 
 /// What a stash row's button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,26 +632,14 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
         .debug_selector(|| name)
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .h(px(ROW_HEIGHT))
+        .gap(px(6.0))
+        .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .child(caret(part.collapsed))
-        .child(
-            div()
-                .flex_none()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(STASHES_TITLE),
-        )
-        .when_some(part.count, |header, count| {
-            header.child(
-                div()
-                    .flex_none()
-                    .text_color(gpui::rgb(MUTED))
-                    .child(count.to_string()),
-            )
-        })
+        .child(head_title(STASHES_TITLE).flex_1().min_w(px(0.0)).truncate())
+        .when_some(part.count, |header, count| header.child(count_pill(count)))
         .on_mouse_down(MouseButton::Left, {
             let key = key.clone();
             cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -680,27 +673,15 @@ fn push_row(
         .border_color(gpui::rgb(BORDER))
         .when(!push.enabled, |field| field.opacity(0.5))
         .children(input);
-    let name = push.selector.clone();
-    let button = div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+    let key = key.clone();
+    let button = outlined_button(&push.selector, ButtonSize::Compact, push.enabled)
         .flex_none()
-        .px(px(6.0))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .child(push.label);
-    let button = if push.enabled {
-        let key = key.clone();
-        button
-            .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        .child(push.label)
+        .when(push.enabled, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.push_stash(&key, cx);
             }))
-    } else {
-        button.opacity(0.5)
-    };
+        });
     div()
         .flex()
         .items_center()
@@ -733,12 +714,15 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
         .h(px(ROW_HEIGHT))
         .pl(px(ROW_PADDING * 2.0))
         .pr(px(ROW_PADDING))
+        .bg(gpui::rgb(SURFACE))
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .tooltip(tooltip(stash.tooltip.clone()))
         .child(
             div()
                 .flex_none()
-                .text_color(gpui::rgb(MUTED))
+                .font_family(DEFAULT_FAMILY)
+                .text_size(px(ID_TEXT_SIZE))
+                .text_color(gpui::rgb(SUBTLE))
                 .child(stash.id.clone()),
         )
         .child(

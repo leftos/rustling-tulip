@@ -13,10 +13,12 @@ use gpui::{
 use protocol::{ClientMessage, DaemonMessage, GitFileChange};
 use std::collections::HashMap;
 
+use crate::buttons::{ButtonSize, primary_button};
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
+use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
-use crate::palette::{CHANGES_ADDED, CHANGES_MODIFIED, CHANGES_RENAMED, CHANGES_UNTRACKED};
+use crate::palette::{CHANGE_DELETED, CHIP, LILAC, OCHRE, SUBTLE, TEXT_2, WAITING, WORKING};
 use crate::sc_writes::{
     ScWrites, WriteOp, bucket_paths, commit_box_shown, commit_enabled, row_paths,
 };
@@ -24,7 +26,7 @@ use crate::session_menu::{backdrop, dialog_button, menu_frame, menu_item, menu_s
 use crate::source_control::{Bucket, Folder, Part, ScKey, ScModel, Status, build_tree};
 use crate::source_control_view::ScSectionRow;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, tooltip};
+use crate::{BORDER, DANGER, DANGER_BG, HOVER_BG, MUTED, RootView, TEXT, tooltip};
 
 /// A section body before its status arrives.
 pub const LOADING_TEXT: &str = "loading…";
@@ -46,8 +48,21 @@ const ROW_PADDING: f32 = 8.0;
 const ROW_HEIGHT: f32 = 20.0;
 const INDENT_STEP: f32 = 12.0;
 const STATUS_WIDTH: f32 = 14.0;
+/// The size of a file's change letter.
+const STATUS_TEXT_SIZE: f32 = 11.0;
 const CARET_WIDTH: f32 = 10.0;
 const PATHS_MAX_HEIGHT: f32 = 200.0;
+/// The height of a section head: a bucket's, the Stashes', History's and a
+/// repo section's.
+pub(crate) const HEAD_HEIGHT: f32 = 30.0;
+/// The size of a head's title and of its buttons' labels.
+const HEAD_TEXT_SIZE: f32 = 11.0;
+/// The height of a head's text buttons.
+const HEAD_BUTTON_HEIGHT: f32 = 20.0;
+/// A count pill's height and least width.
+const PILL_SIZE: f32 = 18.0;
+const PILL_TEXT_SIZE: f32 = 10.5;
+const PILL_PAD: f32 = 5.0;
 
 /// What a changes-view button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,8 +192,6 @@ pub struct ScCommit {
     pub enabled: bool,
     /// A commit is out, so the input is read-only.
     pub committing: bool,
-    /// The app accent, `0xRRGGBB`, the enabled button is drawn in.
-    pub accent: u32,
 }
 
 /// An expanded section's body.
@@ -352,16 +365,44 @@ fn push_tree_rows(ctx: &TreeCtx<'_>, folder: &Folder, depth: usize, rows: &mut V
     }
 }
 
+/// The colour of a file's change letter.
 fn status_color(status: &str) -> u32 {
     match status {
-        "M" => CHANGES_MODIFIED,
-        "A" => CHANGES_ADDED,
-        "D" => DANGER,
-        "R" => CHANGES_RENAMED,
-        "?" => CHANGES_UNTRACKED,
-        "U" => MUTED,
+        "M" => OCHRE,
+        "A" => WAITING,
+        "D" => CHANGE_DELETED,
+        "U" => WORKING,
+        "R" => LILAC,
+        "?" => SUBTLE,
         _ => TEXT,
     }
+}
+
+/// A section head's title, uppercased: 11 px bold in the secondary text
+/// colour. The caller sizes it in its head.
+pub(crate) fn head_title(title: &str) -> Div {
+    div()
+        .text_size(px(HEAD_TEXT_SIZE))
+        .font_weight(FontWeight::BOLD)
+        .text_color(gpui::rgb(TEXT_2))
+        .child(title.to_uppercase())
+}
+
+/// A section head's count, in a pill.
+pub(crate) fn count_pill(count: usize) -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .min_w(px(PILL_SIZE))
+        .h(px(PILL_SIZE))
+        .px(px(PILL_PAD))
+        .rounded(px(PILL_SIZE / 2.0))
+        .bg(gpui::rgb(CHIP))
+        .text_size(px(PILL_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT_2))
+        .child(count.to_string())
 }
 
 /// The left padding of a tree row at `depth`.
@@ -861,21 +902,34 @@ fn file_menu_item(item: &ScButton, menu: &ScFileMenu, cx: &mut Context<RootView>
 }
 
 /// A small text button that runs its action on `paths` of the tree `key`. A
-/// disabled one is dimmed and takes no click.
+/// disabled one is dimmed and takes no click. A `head` one sits in a
+/// bucket's head: 20 px tall, in 11 px subtle text.
 fn action_button(
     button: &ScButton,
     key: &ScKey,
     paths: Vec<String>,
+    head: bool,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let name = button.selector.clone();
+    let (pad, radius, color) = match (head, button.danger) {
+        (true, _) => (6.0, 4.0, SUBTLE),
+        (false, true) => (4.0, 3.0, DANGER),
+        (false, false) => (4.0, 3.0, TEXT),
+    };
     let base = div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
         .flex_none()
-        .px(px(4.0))
-        .rounded(px(3.0))
-        .text_color(gpui::rgb(if button.danger { DANGER } else { TEXT }))
+        .px(px(pad))
+        .rounded(px(radius))
+        .text_color(gpui::rgb(color))
+        .when(head, |base| {
+            base.flex()
+                .items_center()
+                .h(px(HEAD_BUTTON_HEIGHT))
+                .text_size(px(HEAD_TEXT_SIZE))
+        })
         .child(button.label)
         .when_some(button.tooltip, |base, tip| base.tooltip(tooltip(tip)));
     if !button.enabled {
@@ -913,7 +967,6 @@ impl RootView {
             },
             enabled: commit_enabled(staged, draft, pending),
             committing,
-            accent: self.sidebar.appearance(None).accent.value,
         })
     }
 
@@ -1071,9 +1124,9 @@ impl RootView {
     }
 }
 
-/// The commit box: the input, then the accent Commit button right-aligned
-/// under it. A disabled button is greyed and takes no click; the input is
-/// dimmed while a commit is out.
+/// The commit box: the input, then the primary Commit button across the
+/// full width under it. A disabled button is dimmed and takes no click; the
+/// input is dimmed while a commit is out.
 fn commit_box(
     key: &ScKey,
     commit: &ScCommit,
@@ -1090,29 +1143,16 @@ fn commit_box(
         .border_color(gpui::rgb(BORDER))
         .when(commit.committing, |field| field.opacity(0.5))
         .children(input);
-    let name = commit.selector.clone();
-    let button = div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
-        .flex_none()
-        .px(px(10.0))
-        .py(px(1.0))
-        .rounded(px(3.0))
-        .child(commit.label);
-    let button = if commit.enabled {
-        let key = key.clone();
-        button
-            .bg(gpui::rgb(commit.accent))
-            .text_color(gpui::rgb(PANEL_BG))
-            .cursor_pointer()
-            .hover(|style| style.opacity(0.85))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+    let key = key.clone();
+    let button = primary_button(&commit.selector, ButtonSize::Regular, commit.enabled)
+        .w_full()
+        .child(commit.label)
+        .when(commit.enabled, |button| {
+            button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 cx.stop_propagation();
                 this.commit_changes(&key, cx);
             }))
-    } else {
-        button.bg(gpui::rgb(BORDER)).text_color(gpui::rgb(MUTED))
-    };
+        });
     div()
         .flex()
         .flex_col()
@@ -1121,7 +1161,7 @@ fn commit_box(
         .pt(px(2.0))
         .pb(px(6.0))
         .child(field)
-        .child(div().flex().justify_end().child(button))
+        .child(button)
 }
 
 /// An expanded section's body elements: the commit box, the banner, the
@@ -1200,30 +1240,19 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
     let actions: Vec<Stateful<Div>> = bucket
         .actions
         .iter()
-        .map(|button| action_button(button, key, bucket.paths.clone(), cx))
+        .map(|button| action_button(button, key, bucket.paths.clone(), true, cx))
         .collect();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .h(px(ROW_HEIGHT))
+        .gap(px(6.0))
+        .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
-        .child(
-            div()
-                .flex_none()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(bucket.title),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_color(gpui::rgb(MUTED))
-                .child(bucket.count.to_string()),
-        )
+        .child(head_title(bucket.title).flex_1().min_w(px(0.0)).truncate())
         .children(actions)
+        .child(count_pill(bucket.count))
 }
 
 fn tree_row(
@@ -1289,7 +1318,7 @@ fn file_row_view(
     let buttons: Vec<Stateful<Div>> = file
         .buttons
         .iter()
-        .map(|button| action_button(button, key, file.paths.clone(), cx))
+        .map(|button| action_button(button, key, file.paths.clone(), false, cx))
         .collect();
     let menu_key = key.clone();
     let menu_path = file.path.clone();
@@ -1314,17 +1343,21 @@ fn file_row_view(
         .tooltip(tooltip(file.tooltip.clone()))
         .child(
             div()
-                .flex_none()
-                .w(px(STATUS_WIDTH))
-                .text_color(gpui::rgb(status_color(&file.status)))
-                .child(file.status.clone()),
-        )
-        .child(
-            div()
                 .flex_1()
                 .min_w(px(0.0))
                 .truncate()
                 .child(file.name.clone()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(STATUS_WIDTH))
+                .text_center()
+                .font_family(DEFAULT_FAMILY)
+                .text_size(px(STATUS_TEXT_SIZE))
+                .font_weight(FontWeight::BOLD)
+                .text_color(gpui::rgb(status_color(&file.status)))
+                .child(file.status.clone()),
         )
         .child(
             div()
