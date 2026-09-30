@@ -1,6 +1,6 @@
 # Gate dashboard in the client
 
-Design for the "Gate dashboard in the client" line in [MAIN.md](./MAIN.md) (Backlog and singles). The source it reads is the user-level gate, whose canonical copy is `~/.claude/tools/gate/gate.ps1` (this repo's `tools/gate.ps1` is a synced copy), and the localhost page it replaces for this purpose is `~/.claude/tools/gate/gate-dashboard.ps1`. Step ids are `GD.n`.
+Design for the "Gate dashboard in the client" line in [MAIN.md](./MAIN.md) (Backlog and singles). The source it reads is the user-level gate, `~/.claude/tools/gate/gate.ps1` (this repo's `tools/gate.ps1` is a launcher for it), and the localhost page it replaces for this purpose is `~/.claude/tools/gate/gate-dashboard.ps1`. Step ids are `GD.n`.
 
 ## Problem
 
