@@ -122,7 +122,8 @@ pub struct CommonSpawnFields<'a> {
     /// backends.
     pub add_dirs: &'a [String],
     /// The session's working directory, which the Codex backend passes as
-    /// `-C` when it resumes a conversation and the Cursor backend as
+    /// `-C <cwd>` with a `-c` override marking it trusted on every
+    /// interactive spawn and resume, and the Cursor backend as
     /// `--workspace <cwd> --trust` on every spawn. Ignored by the Claude
     /// backend.
     pub cwd: Option<&'a str>,

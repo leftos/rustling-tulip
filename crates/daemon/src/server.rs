@@ -3226,7 +3226,7 @@ pub(crate) async fn spawn_session(
     );
     if matches!(&target, SpawnTarget::Standalone { .. }) && !standalone_supports(mode, agent) {
         return Err(anyhow!(
-            "standalone targets only support plain_shell sessions and interactive Claude"
+            "standalone targets only support plain_shell and interactive sessions"
         ));
     }
     reject_pin_without_worktree(&target)?;
@@ -5138,12 +5138,12 @@ fn spawn_standalone_shell(cwd: Option<&str>) -> anyhow::Result<SpawnResolution> 
 }
 
 /// Whether a standalone (no repo) target can run `mode` for `agent`: a plain
-/// shell, or Claude interactively in a folder. Codex and Cursor still need a
-/// repo or workspace.
+/// shell, or any agent interactively in the folder, with no worktree.
+/// Headless sessions still need a repo or workspace.
 fn standalone_supports(mode: SessionMode, agent: Agent) -> bool {
     match mode {
         SessionMode::PlainShell => true,
-        SessionMode::Interactive => agent == Agent::Claude,
+        SessionMode::Interactive => matches!(agent, Agent::Claude | Agent::Codex | Agent::Cursor),
         SessionMode::Headless => false,
     }
 }
@@ -5161,10 +5161,10 @@ fn resolve_standalone_cwd(cwd: Option<&str>) -> anyhow::Result<PathBuf> {
         None => default_standalone_cwd()?,
     };
     let metadata = std::fs::metadata(&path)
-        .with_context(|| format!("reading standalone shell directory: {}", path.display()))?;
+        .with_context(|| format!("reading the standalone folder: {}", path.display()))?;
     if !metadata.is_dir() {
         return Err(anyhow!(
-            "standalone shell path is not a directory: {}",
+            "standalone path is not a folder: {}",
             path.display()
         ));
     }
@@ -8316,17 +8316,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_target_refuses_codex_and_headless() {
+    async fn standalone_target_refuses_headless() {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
         for (mode, agent_options) in [
-            (
-                SessionMode::Interactive,
-                AgentOptions::Codex { sandbox: None },
-            ),
             (
                 SessionMode::Headless,
                 AgentOptions::Claude {
                     permission_mode: None,
+                },
+            ),
+            (SessionMode::Headless, AgentOptions::Codex { sandbox: None }),
+            (
+                SessionMode::Headless,
+                AgentOptions::Cursor {
+                    plan_mode: false,
+                    sandbox: None,
                 },
             ),
         ] {
@@ -8354,12 +8358,167 @@ mod tests {
                 "{err:#}"
             );
         }
-        assert!(standalone_supports(SessionMode::Interactive, Agent::Claude));
-        assert!(standalone_supports(SessionMode::PlainShell, Agent::Codex));
-        assert!(!standalone_supports(
+        for &agent in Agent::all() {
+            assert!(standalone_supports(SessionMode::Interactive, agent));
+            assert!(standalone_supports(SessionMode::PlainShell, agent));
+            assert!(!standalone_supports(SessionMode::Headless, agent));
+        }
+    }
+
+    /// Where an interactive `agent_options` spawn in `folder` stops on the
+    /// spawnless hub, as the error's whole chain.
+    async fn standalone_agent_spawn_error(
+        hub: &Hub,
+        agent_options: AgentOptions,
+        folder: &Path,
+    ) -> String {
+        let mut req = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                add_dirs: Vec::new(),
+            },
             SessionMode::Interactive,
-            Agent::Cursor
-        ));
+            Vec::new(),
+            None,
+        );
+        req.agent_options = agent_options;
+        let err = spawn_session(hub, req, None)
+            .await
+            .expect_err("the spawnless hub launches nothing");
+        format!("{err:#}")
+    }
+
+    /// A standalone agent in `folder` runs there, with no members and so no
+    /// worktree.
+    fn assert_standalone_agent_runs_in(folder: &Path) {
+        let (kind, members, cwd, label, workspace_id) =
+            spawn_standalone_agent(Some(&folder.to_string_lossy())).expect("resolve the folder");
+        let canonical = std::fs::canonicalize(folder).expect("canonicalize the folder");
+        assert_eq!(kind, SessionKind::Standalone);
+        assert!(members.is_empty(), "{members:?}");
+        assert_eq!(cwd, crate::paths::simplify_path(&canonical));
+        assert_eq!(label, path_leaf_label(folder));
+        assert_eq!(workspace_id, None);
+    }
+
+    #[tokio::test]
+    async fn standalone_target_spawns_interactive_codex_in_the_folder() {
+        let (hub, scratch) = spawnless_test_hub("standalone-codex");
+        let folder = scratch.path().join("plain-codex");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let error =
+            standalone_agent_spawn_error(&hub, AgentOptions::Codex { sandbox: None }, &folder)
+                .await;
+        assert!(error.contains("spawning codex via tracer"), "{error}");
+        assert_standalone_agent_runs_in(&folder);
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn standalone_target_spawns_interactive_cursor_in_the_folder() {
+        let (hub, scratch) = spawnless_test_hub("standalone-cursor");
+        let folder = scratch.path().join("plain-cursor");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let options = AgentOptions::Cursor {
+            plan_mode: false,
+            sandbox: None,
+        };
+        let error = standalone_agent_spawn_error(&hub, options, &folder).await;
+        assert!(error.contains("spawning cursor via tracer"), "{error}");
+        assert_standalone_agent_runs_in(&folder);
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    async fn standalone_codex_in_a_missing_folder_fails_with_folder_not_found() {
+        let (hub, scratch) = spawnless_test_hub("standalone-codex-missing");
+        let folder = scratch.path().join("gone");
+        let error =
+            standalone_agent_spawn_error(&hub, AgentOptions::Codex { sandbox: None }, &folder)
+                .await;
+        assert!(error.contains("reading the standalone folder"), "{error}");
+        assert!(error.contains(&*folder.to_string_lossy()), "{error}");
+    }
+
+    /// A Codex history entry `id` whose one member ran in `folder` as repo
+    /// `r1`, spawned at `target`; the hub registers no repo or workspace.
+    fn unregistered_codex_entry(hub: &Hub, id: &str, folder: &str, target: SpawnTarget) {
+        let mut record = history::test_support::record(id, SessionMode::Interactive);
+        record.agent = Agent::Codex;
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: folder.to_owned(),
+        }];
+        let mut request = env_spawn(target, SessionMode::Interactive, Vec::new(), None);
+        request.agent_options = AgentOptions::Codex { sandbox: None };
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry =
+            history::entry_from_record(&record, SessionEnd::TracerLost, chrono::Utc::now());
+        entry.primary_cwd = Some(folder.to_owned());
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+    }
+
+    #[tokio::test]
+    async fn own_agent_recovery_of_an_unregistered_repo_entry_spawns_standalone() {
+        let gone_workspace = SpawnTarget::Workspace {
+            workspace_id: "gone-ws".to_owned(),
+            branch_name: "wt/x".to_owned(),
+            base_branch: None,
+            use_worktree: true,
+            worktree_reuse: protocol::WorktreeReusePolicy::Reuse,
+            existing_worktrees: Vec::new(),
+        };
+        assert_own_agent_recovers_standalone("recover-own-standalone", &gone_workspace).await;
+    }
+
+    #[tokio::test]
+    async fn own_agent_recovery_of_a_removed_single_repo_entry_spawns_standalone() {
+        let removed_repo = single_target(true, None);
+        assert_own_agent_recovers_standalone("recover-own-single", &removed_repo).await;
+    }
+
+    /// Own-agent recovery of two Codex entries spawned at `target` on a hub
+    /// that registers nothing: one whose recorded folder exists reaches the
+    /// Codex spawn, and one whose folder is gone fails naming that folder.
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn assert_own_agent_recovers_standalone(tag: &str, target: &SpawnTarget) {
+        let (hub, scratch) = spawnless_test_hub(tag);
+        let folder = scratch.path().join("recorded");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let missing = scratch.path().join("recorded-gone");
+        unregistered_codex_entry(&hub, "codex", &folder.to_string_lossy(), target.clone());
+        unregistered_codex_entry(
+            &hub,
+            "codex-missing",
+            &missing.to_string_lossy(),
+            target.clone(),
+        );
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: ["codex", "codex-missing"]
+                    .map(|id| protocol::RecoverItem {
+                        history_id: id.to_owned(),
+                        conversation_id: None,
+                        how: protocol::RecoverAs::OwnAgent,
+                    })
+                    .to_vec(),
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        assert_eq!(results.len(), 2);
+        let spawned = results[0].error.as_deref().unwrap_or_default();
+        assert!(spawned.contains("spawning codex via tracer"), "{spawned}");
+        let gone = results[1].error.as_deref().unwrap_or_default();
+        assert!(gone.contains("reading the standalone folder"), "{gone}");
+        assert!(gone.contains(&*missing.to_string_lossy()), "{gone}");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
     }
 
     fn accent(color: &str) -> AppearanceOverrides {

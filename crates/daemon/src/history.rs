@@ -1004,8 +1004,9 @@ fn entry_members(entry: &HistoryEntry, folder: &str, repos: &[RepoEntry]) -> Vec
 }
 
 /// The recorded `target` with every member pinned to the folder it ran in,
-/// or `None` when some member can't be: a Single with other than one member,
-/// or a workspace that is gone or whose members no longer match.
+/// or `None` when some member can't be: a Single with other than one member
+/// or whose repo is no longer registered, or a workspace that is gone or
+/// whose members no longer match.
 fn pin_recorded(
     target: &SpawnTarget,
     members: &[SessionMember],
@@ -1022,7 +1023,8 @@ fn pin_recorded(
             let [only] = members else {
                 return None;
             };
-            (only.repo_id == *repo_id).then(|| SpawnTarget::Single {
+            let registered_repo = registered.repos.iter().any(|r| r.id == *repo_id);
+            (registered_repo && only.repo_id == *repo_id).then(|| SpawnTarget::Single {
                 repo_id: repo_id.clone(),
                 branch_name: branch_name.clone(),
                 base_branch: base_branch.clone(),
@@ -2296,6 +2298,39 @@ mod recovery_tests {
 
     fn codex_plan(entry: &HistoryEntry, item: &RecoverItem) -> Result<RecoveryPlan, String> {
         plan_in(entry, item, &[repo("r1", r"D:\repo")], &[])
+    }
+
+    #[test]
+    fn claude_recovery_of_a_removed_single_repo_entry_runs_standalone() {
+        let mut entry = folder_only(vec![member("r1", CODEX_FOLDER)]);
+        entry.spawn_config = Some(SpawnConfig {
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+            },
+            ..codex_config()
+        });
+        let recover = item(RecoverAs::Claude, Some(CONV));
+
+        let removed = plan(&entry, &recover).expect("plan").request;
+        assert_eq!(
+            removed.target,
+            SpawnTarget::Standalone {
+                cwd: Some(CODEX_FOLDER.to_owned()),
+                add_dirs: Vec::new(),
+            }
+        );
+        assert_eq!(removed.agent(), Agent::Claude);
+        assert_eq!(removed.resume_conversation.as_deref(), Some(CONV));
+
+        let registered = plan_in(&entry, &recover, &[repo("r1", r"D:\repo")], &[])
+            .expect("plan")
+            .request;
+        assert!(
+            matches!(&registered.target, SpawnTarget::Single { repo_id, .. } if repo_id == "r1"),
+            "{:?}",
+            registered.target
+        );
+        assert_every_member_pinned(&registered.target, 1);
     }
 
     #[test]

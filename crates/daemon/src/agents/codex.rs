@@ -208,6 +208,8 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 /// Pure arg construction lifted out as a free fn for unit testing.
 ///
 /// Layout:
+/// - `-C <cwd> -c projects={'<cwd>'={trust_level='trusted'}}` when
+///   [`CommonSpawnFields::cwd`] is set (see [`push_cwd_and_trust`])
 /// - `--add-dir <path>` for every extra member after the primary cwd
 /// - `--model <id>` when [`CommonSpawnFields::model`] is set
 /// - permission/sandbox: `--yolo` overrides everything; otherwise
@@ -219,10 +221,11 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 ///   the prelude rides along on the user's first message slot.
 ///
 /// With [`CommonSpawnFields::resume_conversation`] set, the form is
-/// `resume -C <cwd> [--add-dir P]... [--model M]
+/// `resume -C <cwd> -c <trust> [--add-dir P]... [--model M]
 /// [--dangerously-bypass-approvals-and-sandbox | --sandbox S] <id>`: no
-/// prompt or prelude (the conversation already holds them), `-C` only when
-/// [`CommonSpawnFields::cwd`] is set, and the flags always re-passed.
+/// prompt or prelude (the conversation already holds them), `-C` and the
+/// trust override only when [`CommonSpawnFields::cwd`] is set, and the flags
+/// always re-passed.
 fn build_args(
     common: &CommonSpawnFields<'_>,
     sandbox: Option<CodexSandbox>,
@@ -233,6 +236,7 @@ fn build_args(
         return build_resume_args(common, sandbox, members, id);
     }
     let mut args: Vec<String> = Vec::new();
+    push_cwd_and_trust(&mut args, common.cwd);
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
@@ -271,10 +275,7 @@ fn build_resume_args(
     id: &str,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["resume".to_string()];
-    if let Some(cwd) = common.cwd {
-        args.push("-C".to_string());
-        args.push(cwd.to_string());
-    }
+    push_cwd_and_trust(&mut args, common.cwd);
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
@@ -291,6 +292,28 @@ fn build_resume_args(
     }
     args.push(id.to_string());
     args
+}
+
+/// `-C <cwd>` plus the config override that marks `<cwd>` trusted, so Codex
+/// skips its "trust this folder?" screen (which `--yolo` does not skip) and
+/// the Windows sandbox chooser that follows a trust decision. The path goes
+/// in the value as a TOML literal string: `-c` keys split on every `.`.
+/// A path containing `'` cannot be a literal string, so it gets no override.
+fn push_cwd_and_trust(args: &mut Vec<String>, cwd: Option<&str>) {
+    let Some(cwd) = cwd else {
+        return;
+    };
+    args.push("-C".to_string());
+    args.push(cwd.to_string());
+    if cwd.contains('\'') {
+        debug!(
+            cwd,
+            "codex folder path contains a quote; not pre-trusting it"
+        );
+        return;
+    }
+    args.push("-c".to_string());
+    args.push(format!("projects={{'{cwd}'={{trust_level='trusted'}}}}"));
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +539,8 @@ mod tests {
                 "resume",
                 "-C",
                 "X:/dev/a",
+                "-c",
+                "projects={'X:/dev/a'={trust_level='trusted'}}",
                 "--model",
                 "gpt-5",
                 "--sandbox",
@@ -542,6 +567,8 @@ mod tests {
                 "resume",
                 "-C",
                 "X:/dev/a",
+                "-c",
+                "projects={'X:/dev/a'={trust_level='trusted'}}",
                 "--dangerously-bypass-approvals-and-sandbox",
                 RESUME_ID
             ]
@@ -563,6 +590,8 @@ mod tests {
                 "resume",
                 "-C",
                 "X:/dev/a",
+                "-c",
+                "projects={'X:/dev/a'={trust_level='trusted'}}",
                 "--add-dir",
                 "X:/dev/b",
                 RESUME_ID
@@ -642,6 +671,107 @@ mod tests {
                 .any(|w| w == ["--sandbox", "danger-full-access"])
         );
         assert_eq!(args.last(), Some(&"go".to_string()));
+    }
+
+    fn in_folder(skip: bool, cwd: &str) -> CommonSpawnFields<'_> {
+        CommonSpawnFields {
+            cwd: Some(cwd),
+            ..common(skip, None, false)
+        }
+    }
+
+    fn value_after<'a>(args: &'a [String], flag: &str) -> &'a str {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+            .expect("flag missing from args")
+    }
+
+    #[test]
+    fn interactive_args_pre_trust_the_cwd() {
+        let cwd = r"X:\dev\a";
+        let m = members(&[cwd]);
+        for (skip, sandbox) in [
+            (true, None),
+            (false, Some(CodexSandbox::WorkspaceWrite)),
+            (false, None),
+        ] {
+            let args = build_args(&in_folder(skip, cwd), sandbox, &m, Some("go"));
+            let cd = value_after(&args, "-C");
+            assert_eq!(cd, cwd, "{args:?}");
+            assert_eq!(
+                value_after(&args, "-c"),
+                format!("projects={{'{cd}'={{trust_level='trusted'}}}}"),
+                "{args:?}"
+            );
+            assert_eq!(args.contains(&"--yolo".to_string()), skip, "{args:?}");
+            assert_eq!(args.last(), Some(&"go".to_string()));
+        }
+    }
+
+    #[test]
+    fn resume_args_pre_trust_and_pass_cwd() {
+        let m = members(&[r"X:\dev\a"]);
+        let args = build_args(&resuming(false, None, Some(r"X:\dev\a")), None, &m, None);
+        assert_eq!(
+            args,
+            [
+                "resume",
+                "-C",
+                r"X:\dev\a",
+                "-c",
+                r"projects={'X:\dev\a'={trust_level='trusted'}}",
+                RESUME_ID
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cwd_with_a_quote_gets_no_trust_override() {
+        let cwd = r"X:\dev\o'brien";
+        let m = members(&[cwd]);
+        let fresh = build_args(&in_folder(true, cwd), None, &m, None);
+        assert_eq!(fresh, ["-C", cwd, "--yolo"]);
+        let resumed = build_args(&resuming(true, None, Some(cwd)), None, &m, None);
+        assert_eq!(
+            resumed,
+            [
+                "resume",
+                "-C",
+                cwd,
+                "--dangerously-bypass-approvals-and-sandbox",
+                RESUME_ID
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_args_are_unchanged() {
+        let m = members(&[r"X:\dev\a", r"X:\dev\b"]);
+        let opts = AgentOptions::Codex {
+            sandbox: Some(CodexSandbox::ReadOnly),
+        };
+        let common = CommonSpawnFields {
+            model: Some("gpt-5"),
+            ..in_folder(false, r"X:\dev\a")
+        };
+        let args = CodexBackend.build_headless_args(&opts, &common, &m, "go");
+        let prompt = args.last().expect("prompt").clone();
+        assert!(prompt.ends_with("\ngo"), "{args:?}");
+        assert_eq!(
+            args,
+            [
+                "exec",
+                "--json",
+                "--model",
+                "gpt-5",
+                "--sandbox",
+                "read-only",
+                "--add-dir",
+                r"X:\dev\b",
+                prompt.as_str()
+            ]
+        );
     }
 
     #[test]
