@@ -121,6 +121,8 @@ Review: `code-review`, and a security read of the credential handling and the lo
 
 Items that share no files with a wave, what waits on something outside the repo, and ideas that need a design pass before they are brief-sized.
 
+- [ ] `docs/architecture.md` lacks two sections of the user-level architecture entry point (`~/.claude/docs/templates/ARCHITECTURE.md`): Integration Footguns (CLAUDE.md's "Architecture invariants" and "Wire-protocol gotchas" hold them) and Test locations (CLAUDE.md's "E2E tests" tiers).
+
 ### Build tooling
 
 - [ ] **`smoke_posted_keys_reach_the_shell` failed once, then passed unchanged** (seen in PT.5's smoke run): no `rt-smoke-marker` in the shell's scrollback within 30 s (`apps/native/tests/smoke_window.rs` ~785). Rule out PT.5's `pane_area` change (its left edge moved past the 52 px rail) first, then look for a race in posting keys before the shell's prompt.
