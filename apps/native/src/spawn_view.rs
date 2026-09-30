@@ -10,11 +10,18 @@ use gpui::{
     AnyElement, Bounds, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
     Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, ScrollHandle, SharedString,
     Stateful, Subscription, Task, Window, canvas, deferred, div, point, prelude::*, px, relative,
+    svg,
 };
 use protocol::{Agent, DaemonMessage};
 
+use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
+use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
-use crate::palette::{SELECTED_BG, SPAWN_BADGE_OK};
+use crate::notice_view::{MODAL_RADIUS, modal_panel};
+use crate::palette::{
+    ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
+    TEXT_2, TRANSPARENT,
+};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
@@ -27,11 +34,44 @@ use crate::spawn_preview::{
 };
 use crate::spawns::PaneAim;
 use crate::text_input::{NavKey, TextChanged, TextInput, TextInputEvent};
-use crate::{
-    BORDER, DANGER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip,
-};
+use crate::{DANGER, MUTED, RootView, TEXT, WARNING, tooltip};
 
-const DIALOG_WIDTH: f32 = 520.0;
+/// The spawn dialog's width, as on the Spawn board.
+const DIALOG_WIDTH: f32 = 640.0;
+/// The padding at the sides of a dialog's header, body and footer.
+const DIALOG_PAD_X: f32 = 18.0;
+/// The size of a dialog's title.
+const TITLE_SIZE: f32 = 16.0;
+/// The side of a dialog's close button.
+const CLOSE_SIZE: f32 = 28.0;
+/// The corner radius of a dialog's close button.
+const CLOSE_RADIUS: f32 = 6.0;
+/// The size of a field's label.
+const LABEL_SIZE: f32 = 12.0;
+/// The size of a checkbox's label, and of a note under it.
+const CHECK_LABEL_SIZE: f32 = 13.0;
+const NOTE_SIZE: f32 = 12.0;
+/// The side of a checkbox's box and of a radio's ring.
+const CHECK_SIZE: f32 = 16.0;
+/// The corner radius of a checkbox's box.
+const CHECK_RADIUS: f32 = 4.0;
+/// The side of a chosen radio's dot.
+const RADIO_DOT: f32 = 7.0;
+/// The least outer height of a segment of a segmented control.
+const SEGMENT_HEIGHT: f32 = 32.0;
+/// The corner radius of a segment, and of the control round the segments.
+const SEGMENT_RADIUS: f32 = 6.0;
+const SEGMENTED_RADIUS: f32 = 8.0;
+/// The size of a segment's label.
+const SEGMENT_TEXT_SIZE: f32 = 12.5;
+/// The dialog's ordinary buttons: outlined, regular.
+const OUTLINED: (ButtonKind, ButtonSize) = (ButtonKind::Outlined, ButtonSize::Regular);
+/// The opacity of a disabled control, as `buttons.rs` dims a button.
+const DISABLED_OPACITY: f32 = 0.45;
+/// The corner radius of a notice box in the dialog.
+const NOTICE_RADIUS: f32 = 8.0;
+/// The corner radius of a branch list, as a popover's.
+const LIST_RADIUS: f32 = 10.0;
 /// The dialog's greatest height, as a share of the window's; the body
 /// scrolls past it.
 const PANEL_MAX_HEIGHT: f32 = 0.9;
@@ -955,28 +995,37 @@ impl RootView {
         };
         let form = &dialog.form;
         let focus = form.focused();
+        let placement = group()
+            .child(target_field(form, &focus, cx))
+            .child(runtime_field(form, &focus, cx))
+            .child(open_in_field(form, &focus, cx));
+        let run = divided()
+            .children(run_rows(dialog, &focus, cx))
+            .children(trusted_rows(form, &focus, cx))
+            .child(advanced_section(dialog, &focus, cx));
         let body = div()
             .id("spawn-body")
             .debug_selector(|| "spawn-body".to_owned())
             .flex()
             .flex_col()
-            .gap(px(10.0))
+            .gap(px(16.0))
+            .px(px(DIALOG_PAD_X))
+            .py(px(16.0))
             .min_h(px(0.0))
             .overflow_y_scroll()
             .track_scroll(&dialog.scroll)
-            .child(target_field(form, &focus, cx))
-            .child(runtime_field(form, &focus, cx))
-            .child(open_in_field(form, &focus, cx))
-            .children(self.worktree_rows(dialog, &focus, cx))
-            .children(run_rows(dialog, &focus, cx))
-            .children(trusted_rows(form, &focus, cx))
-            .child(advanced_section(dialog, &focus, cx));
-        let panel = panel("spawn-panel")
+            .child(placement)
+            .child(divided().children(self.worktree_rows(dialog, &focus, cx)))
+            .child(run);
+        let close = close_button("spawn-close", focus == Control::Close).on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
+        );
+        let panel = dialog_card("spawn-panel", DIALOG_WIDTH)
             .max_h(relative(PANEL_MAX_HEIGHT))
             .when(form.share_confirm().is_none(), |panel| {
                 panel.track_focus(&self.spawn_focus)
             })
-            .child(dialog_header(focus == Control::Close, cx))
+            .child(dialog_title_bar(DIALOG_TITLE, close))
             .child(body)
             .child(footer(form, &focus, cx))
             .child(measurer(Measured::Panel, cx));
@@ -1034,7 +1083,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let panel = panel("spawn-share-panel")
+        let panel = modal_panel("spawn-share-panel")
             .track_focus(&self.spawn_focus)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(SHARE_TITLE))
             .child(div().child(SHARE_BODY))
@@ -1068,33 +1117,99 @@ pub(crate) fn now_unix() -> i64 {
         })
 }
 
-/// A dialog card.
-fn panel(id: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .w(px(DIALOG_WIDTH))
-        .p(px(14.0))
-        .bg(gpui::rgb(PANEL_BG))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(6.0))
-        .text_size(px(UI_TEXT_SIZE))
-        .text_color(gpui::rgb(TEXT))
+/// A dialog's card, `width` wide and tagged `id`: the modal card, its
+/// header, body and footer bands drawn edge to edge.
+pub(crate) fn dialog_card(id: &'static str, width: f32) -> Stateful<Div> {
+    modal_panel(id)
+        .debug_selector(move || id.to_owned())
+        .w(px(width))
+        .p(px(0.0))
+        .gap(px(0.0))
 }
 
-fn dialog_header(close_focused: bool, cx: &mut Context<RootView>) -> Div {
-    let close = dialog_button("spawn-close", "✕".to_owned(), false, close_focused, true).on_click(
-        cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
-    );
+/// A dialog's header band: the bold title, then `close` at the right, over
+/// a divider.
+pub(crate) fn dialog_title_bar(title: impl Into<SharedString>, close: impl IntoElement) -> Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
-        .justify_between()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(DIALOG_TITLE))
+        .gap(px(10.0))
+        .pl(px(DIALOG_PAD_X))
+        .pr(px(12.0))
+        .py(px(11.0))
+        .border_b_1()
+        .border_color(gpui::rgb(LINE))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_size(px(TITLE_SIZE))
+                .font_weight(FontWeight::BOLD)
+                .child(title.into()),
+        )
         .child(close)
+}
+
+/// A dialog's footer band, on the raised ground under a divider; the caller
+/// adds its buttons, which sit at the right.
+pub(crate) fn dialog_footer() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_end()
+        .gap(px(10.0))
+        .px(px(DIALOG_PAD_X))
+        .py(px(14.0))
+        .border_t_1()
+        .border_color(gpui::rgb(LINE))
+        .bg(gpui::rgb(RAISED))
+        .rounded_b(px(MODAL_RADIUS - 1.0))
+}
+
+/// A dialog's close button, tagged `selector`: a borderless 28 px square
+/// holding the ✕, ringed while `focused`; the caller adds the handler.
+pub(crate) fn close_button(selector: &str, focused: bool) -> Stateful<Div> {
+    let name = selector.to_owned();
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(CLOSE_SIZE))
+        .rounded(px(CLOSE_RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(TRANSPARENT))
+        .text_color(gpui::rgb(TEXT_2))
+        .cursor_pointer()
+        .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+        .child("✕")
+        .when(focused, |close| close.child(focus_ring(CLOSE_RADIUS)))
+}
+
+/// The dialog's first rows, which stand under no divider.
+fn group() -> Div {
+    div().flex().flex_col().gap(px(14.0))
+}
+
+/// A group of the dialog's rows under a divider.
+fn divided() -> Div {
+    group()
+        .pt(px(14.0))
+        .border_t_1()
+        .border_color(gpui::rgb(LINE))
+}
+
+/// A field's label: small, semibold and secondary.
+pub(crate) fn field_label(label: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(LABEL_SIZE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(gpui::rgb(TEXT_2))
+        .child(label.into())
 }
 
 /// A labelled field.
@@ -1102,48 +1217,220 @@ pub(crate) fn field(label: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .child(div().text_color(gpui::rgb(MUTED)).child(label.into()))
+        .gap(px(7.0))
+        .child(field_label(label))
 }
 
-/// A row of choices that wraps.
+/// A segmented control: its segments on the ground inside a thin edge,
+/// wrapping onto more lines when they do not fit.
 pub(crate) fn segmented(buttons: Vec<AnyElement>) -> Div {
-    div().flex().flex_wrap().gap(px(4.0)).children(buttons)
+    div()
+        .flex()
+        .flex_wrap()
+        .gap(px(2.0))
+        .p(px(3.0))
+        .rounded(px(SEGMENTED_RADIUS))
+        .bg(gpui::rgb(GROUND))
+        .border_1()
+        .border_color(gpui::rgb(LINE))
+        .children(buttons)
 }
 
 fn muted(text: impl Into<SharedString>) -> Div {
     div().text_color(gpui::rgb(MUTED)).child(text.into())
 }
 
-/// A choice or a plain button: filled when chosen, outlined when focused,
-/// dimmed and inert when disabled. The Settings modal's Spawn defaults rows
-/// are built from it too, so both places look the same.
+/// A note under a checkbox's or a radio's label.
+fn note(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(NOTE_SIZE))
+        .text_color(gpui::rgb(SUBTLE))
+        .child(text.into())
+}
+
+/// A segment of a [`segmented`] control: filled and bold when chosen,
+/// ringed when focused, dimmed and inert when disabled. The Settings
+/// modal's choice rows are built from it too, so both places look the same.
 pub(crate) fn choice_button(
     name: String,
     label: impl IntoElement,
     look: Look,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Stateful<Div> {
+    let (text, weight) = if look.selected {
+        (TEXT, FontWeight::SEMIBOLD)
+    } else {
+        (TEXT_2, FontWeight::MEDIUM)
+    };
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(move || name)
         .flex()
+        .flex_grow()
         .items_center()
+        .justify_center()
         .gap(px(6.0))
-        .px(px(8.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
+        .min_h(px(SEGMENT_HEIGHT))
+        .px(px(12.0))
+        .rounded(px(SEGMENT_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(if look.focused { TEXT } else { BORDER }))
-        .when(look.selected, |button| button.bg(gpui::rgb(SELECTED_BG)))
-        .when(look.enabled, |button| {
-            button
+        .border_color(gpui::rgba(TRANSPARENT))
+        .text_size(px(SEGMENT_TEXT_SIZE))
+        .font_weight(weight)
+        .text_color(gpui::rgb(text))
+        .when(look.selected, |segment| segment.bg(gpui::rgb(HOVER)))
+        .when(look.enabled, |segment| {
+            segment
                 .cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+                .hover(|style| style.text_color(gpui::rgb(TEXT)))
                 .on_click(on_click)
         })
-        .when(!look.enabled, |button| button.opacity(0.5))
+        .when(!look.enabled, |segment| {
+            segment.opacity(DISABLED_OPACITY).cursor_default()
+        })
+        .when(look.focused, |segment| {
+            segment.child(focus_ring(SEGMENT_RADIUS))
+        })
         .child(label)
+}
+
+/// A checkbox row tagged `selector`: its box, the accent with a tick when
+/// `checked` and a strong outline when not, ringed while `focused`, then
+/// `label`. The caller adds the handler.
+pub(crate) fn checkbox_row(
+    selector: &str,
+    checked: bool,
+    focused: bool,
+    label: impl IntoElement,
+) -> Stateful<Div> {
+    let name = selector.to_owned();
+    let mark = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .mt(px(1.0))
+        .size(px(CHECK_SIZE))
+        .rounded(px(CHECK_RADIUS))
+        .border_1()
+        .text_size(px(11.0))
+        .font_weight(FontWeight::BOLD)
+        .when(checked, |mark| {
+            mark.bg(gpui::rgb(ACCENT))
+                .border_color(gpui::rgb(ACCENT))
+                .text_color(gpui::rgb(ON_ACCENT))
+                .child("✓")
+        })
+        .when(!checked, |mark| mark.border_color(gpui::rgb(LINE_STRONG)))
+        .when(focused, |mark| mark.child(focus_ring(CHECK_RADIUS)));
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .text_size(px(CHECK_LABEL_SIZE))
+        .cursor_pointer()
+        .child(mark)
+        .child(label)
+}
+
+/// A checkbox's or a radio's label: its text, and a note under it.
+fn check_label(text: impl Into<SharedString>, under: Option<Div>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(div().child(text.into()))
+        .children(under)
+}
+
+/// A radio row tagged `selector`: its ring, the accent with a dot when
+/// `chosen`, ringed while `focused`, then `label`.
+fn radio_row(
+    selector: &str,
+    chosen: bool,
+    focused: bool,
+    label: impl IntoElement,
+) -> Stateful<Div> {
+    let name = selector.to_owned();
+    let ring = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .mt(px(1.0))
+        .size(px(CHECK_SIZE))
+        .rounded_full()
+        .border_1()
+        .border_color(gpui::rgb(if chosen { ACCENT } else { LINE_STRONG }))
+        .when(chosen, |ring| {
+            ring.child(
+                div()
+                    .size(px(RADIO_DOT))
+                    .rounded_full()
+                    .bg(gpui::rgb(ACCENT)),
+            )
+        })
+        .when(focused, |ring| ring.child(focus_ring(CHECK_SIZE / 2.0)));
+    div()
+        .id(ElementId::Name(SharedString::from(name.clone())))
+        .debug_selector(|| name)
+        .flex()
+        .items_start()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .child(ring)
+        .child(label)
+}
+
+/// A dialog control of `kind` and `size` holding `label`: it presses its
+/// control, wears the ring while focused and is revealed into view then.
+fn spawn_button(
+    control: &Control,
+    (kind, size): (ButtonKind, ButtonSize),
+    label: impl IntoElement,
+    enabled: bool,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    let focused = focus == control;
+    let base = button(&control.selector(), kind, size, enabled)
+        .flex_none()
+        .child(label)
+        .when(focused, |button| button.child(focus_ring(size.radius())));
+    let base = if enabled {
+        base.on_click(press_control(control, cx))
+    } else {
+        base
+    };
+    reveal_when_focused(base, control, focused, cx)
+}
+
+/// `element` with the reveal marker while it is the focused control of the
+/// scrolling body.
+fn reveal_when_focused(
+    element: Stateful<Div>,
+    control: &Control,
+    focused: bool,
+    cx: &mut Context<RootView>,
+) -> Stateful<Div> {
+    if focused && in_body(control) {
+        element.child(reveal_marker(cx))
+    } else {
+        element
+    }
+}
+
+/// The listener that presses `control`.
+fn press_control(
+    control: &Control,
+    cx: &mut Context<RootView>,
+) -> impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static {
+    let pressed = control.clone();
+    cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.press_spawn_control(&pressed, window, cx);
+    })
 }
 
 /// A dialog control's choice button, revealed into view when focused.
@@ -1153,21 +1440,8 @@ fn option_button(
     look: Look,
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
-    let name = control.selector();
-    let pressed = control.clone();
-    let button = choice_button(
-        name,
-        label,
-        look,
-        cx.listener(move |this, _: &ClickEvent, window, cx| {
-            this.press_spawn_control(&pressed, window, cx);
-        }),
-    );
-    if look.focused && in_body(control) {
-        button.child(reveal_marker(cx))
-    } else {
-        button
-    }
+    let button = choice_button(control.selector(), label, look, press_control(control, cx));
+    reveal_when_focused(button, control, look.focused, cx)
 }
 
 /// Whether a control sits in the scrolling body, not the header or footer.
@@ -1301,7 +1575,7 @@ fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
     field("Open in").child(segmented(buttons))
 }
 
-/// A checkbox: its box, its label and a muted note.
+/// A checkbox of the dialog: its box and `label`, pressing its control.
 fn checkbox(
     control: &Control,
     checked: bool,
@@ -1309,16 +1583,12 @@ fn checkbox(
     label: Div,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
-    let look = Look {
-        selected: false,
-        focused: focus == control,
-        enabled: true,
-    };
-    let mark = if checked { "☑" } else { "☐" };
-    let row = div().flex().gap(px(6.0)).child(mark).child(label);
+    let focused = focus == control;
+    let row = checkbox_row(&control.selector(), checked, focused, label)
+        .on_click(press_control(control, cx));
     div()
         .flex()
-        .child(option_button(control, row, look, cx))
+        .child(reveal_when_focused(row, control, focused, cx))
         .into_any_element()
 }
 
@@ -1327,11 +1597,7 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
         return Vec::new();
     }
     let flag = form.trusted_flag();
-    let label = div()
-        .flex()
-        .gap(px(4.0))
-        .child("Trusted launch")
-        .child(muted(format!("({flag})")));
+    let label = check_label("Trusted launch", Some(note(flag)));
     let mut rows = vec![checkbox(
         &Control::Trusted,
         form.trusted(),
@@ -1340,15 +1606,9 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
         cx,
     )];
     if form.trusted() {
-        let warning = div()
+        let warning = warning_box()
             .debug_selector(|| "spawn-trusted-launch-warning".to_owned())
-            .flex()
-            .flex_col()
             .gap(px(2.0))
-            .p(px(8.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(gpui::rgb(WARNING))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -1361,23 +1621,18 @@ fn trusted_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -
 }
 
 fn worktree_checkbox(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> AnyElement {
-    let (text, note) = if form.is_workspace() {
+    let (text, unchecked) = if form.is_workspace() {
         (
             "Create worktrees",
-            "(unchecked: check out the branch in each member's main directory)",
+            "Unchecked: check out the branch in each member's main directory",
         )
     } else {
         (
             "Create a worktree",
-            "(unchecked: run claude in the repo's main directory)",
+            "Unchecked: run claude in the repo's main directory",
         )
     };
-    let label = div()
-        .flex()
-        .flex_wrap()
-        .gap(px(4.0))
-        .child(text)
-        .child(muted(note));
+    let label = check_label(text, Some(note(unchecked)));
     checkbox(&Control::UseWorktree, form.use_worktree(), focus, label, cx)
 }
 
@@ -1423,7 +1678,9 @@ fn existing_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>)
         .map(|text| div().text_color(gpui::rgb(WARNING)).child(text));
     field(label)
         .children(placeholder)
-        .child(div().flex().flex_col().gap(px(4.0)).children(options))
+        .when(!options.is_empty(), |field| {
+            field.child(segmented(options).flex_col())
+        })
         .children(note)
         .children(warning)
         .into_any_element()
@@ -1438,15 +1695,10 @@ fn input_box(
 ) -> Div {
     let selector = control.selector();
     let focused = focus == control;
-    div()
+    field_frame(focused)
         .debug_selector(move || selector)
-        .flex()
         .flex_1()
-        .px(px(6.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(if focused { TEXT } else { BORDER }))
+        .min_w(px(0.0))
         .child(input.clone())
         .when(focused, |field| field.child(reveal_marker(cx)))
 }
@@ -1544,11 +1796,11 @@ fn branch_list(dialog: &SpawnDialog, list: ListField, cx: &mut Context<RootView>
         .overflow_y_scroll()
         .flex()
         .flex_col()
-        .py(px(2.0))
-        .bg(gpui::rgb(PANEL_BG))
+        .p(px(4.0))
+        .bg(gpui::rgb(CHIP))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .rounded(px(4.0))
+        .border_color(gpui::rgb(LINE_STRONG))
+        .rounded(px(LIST_RADIUS))
         .occlude()
         .children(items);
     deferred(panel).with_priority(1).into_any_element()
@@ -1573,9 +1825,10 @@ fn list_row(
         .justify_between()
         .gap(px(6.0))
         .px(px(8.0))
-        .py(px(3.0))
+        .py(px(4.0))
+        .rounded(px(SEGMENT_RADIUS))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(gpui::rgb(SELECTED_BG)))
+        .when(highlighted, |row| row.bg(gpui::rgb(HOVER)))
         .on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
             this.hover_spawn_list(list, index, cx);
         }))
@@ -1611,16 +1864,12 @@ fn branch_field(
         input_box(&Control::Branch, &dialog.branch_input, focus, cx)
     };
     let random = form.use_worktree().then(|| {
-        let look = Look {
-            selected: false,
-            focused: *focus == Control::Random,
-            enabled: true,
-        };
-        option_button(&Control::Random, "Random", look, cx).tooltip(tooltip(RANDOM_TIP))
+        spawn_button(&Control::Random, OUTLINED, "Random", true, focus, cx)
+            .tooltip(tooltip(RANDOM_TIP))
     });
     let pending = (form.use_worktree() && form.suggestion_pending(now)).then(|| muted(SUGGESTING));
     field(label)
-        .child(div().flex().gap(px(6.0)).child(input).children(random))
+        .child(div().flex().gap(px(8.0)).child(input).children(random))
         .children(pending)
         .into_any_element()
 }
@@ -1640,12 +1889,8 @@ fn base_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>)
 fn preview_rows(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Vec<AnyElement> {
     let mut rows = Vec::new();
     if form.is_workspace() {
-        let look = Look {
-            selected: false,
-            focused: *focus == Control::Preview,
-            enabled: form.preview_enabled(),
-        };
-        let button = option_button(&Control::Preview, "Preview", look, cx);
+        let enabled = form.preview_enabled();
+        let button = spawn_button(&Control::Preview, OUTLINED, "Preview", enabled, focus, cx);
         rows.push(div().flex().child(button).into_any_element());
         if !form.preview_members().is_empty() {
             rows.push(preview_table(form));
@@ -1669,9 +1914,10 @@ fn warning_box() -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .p(px(8.0))
-        .rounded(px(4.0))
+        .gap(px(6.0))
+        .px(px(11.0))
+        .py(px(9.0))
+        .rounded(px(NOTICE_RADIUS))
         .border_1()
         .border_color(gpui::rgb(WARNING))
 }
@@ -1698,22 +1944,18 @@ fn collision_box(
     .into_iter()
     .map(|(choice, label, note)| {
         let control = Control::Reuse(choice);
-        let look = Look {
-            selected: false,
-            focused: *focus == control,
-            enabled: true,
-        };
-        let mark = if choice == chosen { "◉" } else { "○" };
-        let row = div()
+        let focused = *focus == control;
+        let text = div()
             .flex()
             .flex_wrap()
             .gap(px(6.0))
-            .child(mark)
             .child(label)
             .child(note);
+        let row = radio_row(&control.selector(), choice == chosen, focused, text)
+            .on_click(press_control(&control, cx));
         div()
             .flex()
-            .child(option_button(&control, row, look, cx))
+            .child(reveal_when_focused(row, &control, focused, cx))
             .into_any_element()
     });
     warning_box()
@@ -1804,14 +2046,12 @@ fn run_rows(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -
                     .into_any_element()
             })
             .collect();
-        rows.push(
-            field("Run mode")
-                .child(segmented(buttons))
-                .into_any_element(),
-        );
+        rows.push(field("Mode").child(segmented(buttons)).into_any_element());
     }
     if form.run_mode() == RunMode::Headless {
-        let input = input_box(&Control::Prompt, &dialog.prompt_input, focus, cx);
+        let input = input_box(&Control::Prompt, &dialog.prompt_input, focus, cx)
+            .items_start()
+            .py(px(7.0));
         rows.push(field("Prompt").child(input).into_any_element());
     }
     rows
@@ -1837,23 +2077,42 @@ fn agent_options_chosen(form: &SpawnForm) -> Vec<Control> {
 fn advanced_section(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) -> Div {
     let form = &dialog.form;
     let open = form.advanced_open();
-    let arrow = if open { "▾" } else { "▸" };
-    let look = Look {
-        selected: false,
-        focused: *focus == Control::AdvancedToggle,
-        enabled: true,
+    let control = Control::AdvancedToggle;
+    let focused = *focus == control;
+    let chevron = if open {
+        SIDEBAR_CHEVRON_DOWN_ICON
+    } else {
+        SIDEBAR_CHEVRON_RIGHT_ICON
     };
-    let toggle = option_button(
-        &Control::AdvancedToggle,
-        format!("{arrow} Advanced"),
-        look,
-        cx,
-    );
-    let section = div()
+    let toggle = div()
+        .id("spawn-advanced")
+        .debug_selector(|| "spawn-advanced".to_owned())
         .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .child(div().flex().child(toggle));
+        .items_center()
+        .gap(px(6.0))
+        .px(px(2.0))
+        .rounded(px(CHECK_RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(TRANSPARENT))
+        .text_size(px(SEGMENT_TEXT_SIZE))
+        .text_color(gpui::rgb(TEXT_2))
+        .cursor_pointer()
+        .hover(|style| style.text_color(gpui::rgb(TEXT)))
+        .on_click(press_control(&control, cx))
+        .child(
+            svg()
+                .path(chevron)
+                .flex_none()
+                .size(px(12.0))
+                .text_color(gpui::rgb(TEXT_2)),
+        )
+        .child("Advanced")
+        .when(focused, |toggle| toggle.child(focus_ring(CHECK_RADIUS)));
+    let section = div().flex().flex_col().gap(px(14.0)).child(
+        div()
+            .flex()
+            .child(reveal_when_focused(toggle, &control, focused, cx)),
+    );
     if !open {
         return section;
     }
@@ -1885,7 +2144,13 @@ fn model_field(
     } else {
         Vec::new()
     };
-    let row = div().flex().gap(px(6.0)).child(input).children(chips);
+    let row = div()
+        .flex()
+        .gap(px(8.0))
+        .child(input)
+        .when(!chips.is_empty(), |row| {
+            row.child(div().flex().flex_none().child(segmented(chips)))
+        });
     Some(field("Model").child(row).into_any_element())
 }
 
@@ -1983,20 +2248,18 @@ fn cursor_plan_checkbox(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let control = Control::CursorPlan;
-    let look = Look {
-        selected: false,
-        focused: *focus == control,
-        enabled: true,
-    };
-    let mark = if form.cursor_plan() { "☑" } else { "☐" };
-    let row = div()
-        .flex()
-        .gap(px(6.0))
-        .child(mark)
-        .child(CURSOR_PLAN_LABEL);
+    let focused = *focus == control;
+    let row = checkbox_row(
+        &control.selector(),
+        form.cursor_plan(),
+        focused,
+        CURSOR_PLAN_LABEL,
+    )
+    .tooltip(tooltip(CURSOR_PLAN_TIP))
+    .on_click(press_control(&control, cx));
     div()
         .flex()
-        .child(option_button(&control, row, look, cx).tooltip(tooltip(CURSOR_PLAN_TIP)))
+        .child(reveal_when_focused(row, &control, focused, cx))
         .into_any_element()
 }
 
@@ -2009,12 +2272,7 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         .map(|(index, inputs)| env_row(&dialog.form, index, inputs, focus, cx))
         .collect();
     let empty = rows.is_empty().then(|| muted(NO_ENV));
-    let look = Look {
-        selected: false,
-        focused: *focus == Control::EnvAdd,
-        enabled: true,
-    };
-    let add = option_button(&Control::EnvAdd, "+ Add env var", look, cx);
+    let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
     field("Extra environment variables")
         .children(empty)
         .children(rows)
@@ -2034,13 +2292,8 @@ fn env_row(
             key.border_color(gpui::rgb(WARNING))
         });
     let value = input_box(&Control::EnvValue(index), &inputs.value, focus, cx);
-    let remove_control = Control::EnvRemove(index);
-    let look = Look {
-        selected: false,
-        focused: *focus == remove_control,
-        enabled: true,
-    };
-    let remove = option_button(&remove_control, "✕", look, cx).tooltip(tooltip(REMOVE_ENV_TIP));
+    let remove = spawn_button(&Control::EnvRemove(index), OUTLINED, "✕", true, focus, cx)
+        .tooltip(tooltip(REMOVE_ENV_TIP));
     let message = problem.map(|problem| {
         div()
             .debug_selector(move || format!("spawn-env-problem-{index}"))
@@ -2060,7 +2313,7 @@ fn env_row(
         .child(
             div()
                 .flex()
-                .gap(px(6.0))
+                .gap(px(8.0))
                 .child(key)
                 .child(value)
                 .child(remove),
@@ -2070,23 +2323,27 @@ fn env_row(
         .into_any_element()
 }
 
+/// Cancel and Spawn, the footer's large buttons.
 fn footer(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {
-    let cancel = Look {
-        selected: false,
-        focused: *focus == Control::Cancel,
-        enabled: true,
-    };
-    let submit = Look {
-        selected: true,
-        focused: *focus == Control::Submit,
-        enabled: form.can_submit(),
-    };
-    div()
-        .flex()
-        .justify_end()
-        .gap(px(6.0))
-        .child(option_button(&Control::Cancel, "Cancel", cancel, cx))
-        .child(option_button(&Control::Submit, "Spawn", submit, cx))
+    let cancel = (ButtonKind::Outlined, ButtonSize::Large);
+    let submit = (ButtonKind::Primary, ButtonSize::Large);
+    dialog_footer()
+        .child(spawn_button(
+            &Control::Cancel,
+            cancel,
+            "Cancel",
+            true,
+            focus,
+            cx,
+        ))
+        .child(spawn_button(
+            &Control::Submit,
+            submit,
+            "Spawn",
+            form.can_submit(),
+            focus,
+            cx,
+        ))
 }
 
 #[cfg(test)]

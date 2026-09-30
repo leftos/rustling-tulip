@@ -5,8 +5,8 @@
 //! the Settings modal's Appearance tab ([`crate::settings_view`]).
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    Keystroke, SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
+    SharedString, Stateful, Subscription, Window, div, prelude::*, px,
 };
 use protocol::{AppearanceOverrides, ClientMessage};
 
@@ -14,19 +14,28 @@ use crate::appearance::{
     self, ACCENT_PRESETS, AppLevel, AppearanceChange, BACKGROUND_PRESETS, Field, Preset, Resolved,
     Source,
 };
+use crate::buttons::{ButtonSize, field_frame, outlined_button};
 use crate::fonts::{self, BUNDLED_FAMILIES};
 use crate::notices::ToastKind;
+use crate::palette::{GROUND, HOVER, LINE_STRONG};
 use crate::session_menu::{backdrop, dialog_button, muted_row};
-use crate::text_input::{TextChanged, TextInput, TextInputEvent};
-use crate::{
-    APPEARANCE_FAILED_TITLE, BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE,
-    font_size_to_u16, tooltip,
+use crate::spawn_view::{
+    checkbox_row, close_button, dialog_card, dialog_footer, dialog_title_bar, field_label,
 };
+use crate::text_input::{TextChanged, TextInput, TextInputEvent};
+use crate::{APPEARANCE_FAILED_TITLE, MUTED, RootView, TEXT, font_size_to_u16, tooltip};
 
 const EDITOR_WIDTH: f32 = 700.0;
 const COLUMN_WIDTH: f32 = 320.0;
 const FAMILY_LIST_HEIGHT: f32 = 200.0;
-const SWATCH_SIZE: f32 = 16.0;
+/// A colour swatch's side and corner radius.
+const SWATCH_SIZE: f32 = 18.0;
+const SWATCH_RADIUS: f32 = 5.0;
+/// The family list's corner radius, a text field's.
+const LIST_RADIUS: f32 = 7.0;
+/// The padding round the editor's rows.
+const BODY_PAD_X: f32 = 18.0;
+const BODY_PAD_Y: f32 = 16.0;
 const HEX_PLACEHOLDER: &str = "#rrggbb";
 const HEX_HINT: &str = "Use #RRGGBB";
 const BOLD_LABEL: &str = "Render terminal text in bold";
@@ -667,33 +676,19 @@ impl RootView {
             return None;
         }
         let title = self.appearance_editor_title()?;
-        let close = dialog_button("appearance-close", "×".to_owned(), false, false, true).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| {
+        let close = close_button("appearance-close", false).on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
-            }),
-        );
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(close);
-        let panel = div()
-            .id("appearance-panel")
+            },
+        ));
+        let body = div()
+            .px(px(BODY_PAD_X))
+            .py(px(BODY_PAD_Y))
+            .children(self.appearance_body(cx));
+        let panel = dialog_card("appearance-panel", EDITOR_WIDTH)
             .track_focus(&self.appearance_focus)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .w(px(EDITOR_WIDTH))
-            .p(px(14.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .child(header)
-            .children(self.appearance_body(cx))
+            .child(dialog_title_bar(title, close))
+            .child(body)
             .child(close_footer("appearance-footer-close", cx));
         Some(backdrop("appearance-editor", panel))
     }
@@ -737,9 +732,11 @@ impl RootView {
             .overflow_y_scroll()
             .flex()
             .flex_col()
+            .p(px(3.0))
+            .bg(gpui::rgb(GROUND))
             .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(4.0))
+            .border_color(gpui::rgb(LINE_STRONG))
+            .rounded(px(LIST_RADIUS))
             .children(rows);
         section("Font family")
             .child(input_box("appearance-family-filter", &editor.family_filter))
@@ -753,8 +750,8 @@ fn section(label: &'static str) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
+        .gap(px(7.0))
+        .child(field_label(label))
 }
 
 /// A row's reset link: its selector, its text and the change it makes.
@@ -860,7 +857,7 @@ impl RootView {
                 .into_any_element()
             })
             .collect();
-        let label = div().font_weight(FontWeight::SEMIBOLD).child(row.label());
+        let label = field_label(row.label());
         let reset_selector = match row {
             ColorRow::Accent => "appearance-accent-reset",
             ColorRow::Background => "appearance-background-reset",
@@ -868,7 +865,7 @@ impl RootView {
         div()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(7.0))
             .child(header_with_reset(
                 label,
                 Reset {
@@ -923,9 +920,9 @@ fn hex_line(
         .debug_selector(|| preview_name)
         .flex_none()
         .size(px(SWATCH_SIZE))
-        .rounded(px(3.0))
+        .rounded(px(SWATCH_RADIUS))
         .border_1()
-        .border_color(gpui::rgb(BORDER))
+        .border_color(gpui::rgb(LINE_STRONG))
         .when_some(
             parsed.as_deref().and_then(appearance::parse_color),
             |swatch, color| swatch.bg(gpui::rgb(color)),
@@ -941,7 +938,7 @@ fn hex_line(
     div()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(8.0))
         .child(input_box(
             match row {
                 ColorRow::Accent => "appearance-accent-hex",
@@ -962,49 +959,36 @@ fn hex_line(
         })
 }
 
-/// Apply, shaped like the dialog buttons; a disabled one is dimmed, with
-/// the default cursor and no hover.
+/// Apply, an outlined dialog button; a disabled one is dimmed, with the
+/// default cursor and no hover.
 fn apply_button(selector: &str, enabled: bool) -> Stateful<Div> {
-    let name = selector.to_owned();
-    let button = div()
-        .id(ElementId::Name(SharedString::from(name.clone())))
-        .debug_selector(|| name)
+    outlined_button(selector, ButtonSize::Regular, enabled)
         .flex_none()
-        .px(px(10.0))
-        .py(px(4.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(TEXT))
-        .child("Apply");
-    if enabled {
-        button
-            .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-    } else {
-        button.opacity(0.5).cursor_default()
-    }
+        .child("Apply")
 }
 
 /// A line of colour swatches that wraps.
 fn swatch_line(swatches: Vec<AnyElement>) -> Div {
-    div().flex().flex_wrap().gap(px(4.0)).children(swatches)
+    div().flex().flex_wrap().gap(px(6.0)).children(swatches)
 }
 
 /// A clickable colour swatch with its tooltip; the level's own colour is
-/// outlined.
+/// outlined in the text colour, two pixels wide.
 fn swatch(selector: String, color: u32, tip: String, chosen: bool) -> Stateful<Div> {
-    div()
+    let swatch = div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .debug_selector(|| selector)
         .flex_none()
         .size(px(SWATCH_SIZE))
-        .rounded(px(3.0))
-        .border_1()
-        .border_color(gpui::rgb(if chosen { TEXT } else { BORDER }))
+        .rounded(px(SWATCH_RADIUS))
         .bg(gpui::rgb(color))
         .cursor_pointer()
-        .tooltip(tooltip(tip))
+        .tooltip(tooltip(tip));
+    if chosen {
+        swatch.border_2().border_color(gpui::rgb(TEXT))
+    } else {
+        swatch.border_1().border_color(gpui::rgb(LINE_STRONG))
+    }
 }
 
 /// One line of the family list: the reset row, a group header, or a
@@ -1051,8 +1035,9 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
         .gap(px(6.0))
         .px(px(6.0))
         .py(px(2.0))
+        .rounded(px(4.0))
         .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+        .hover(|style| style.bg(gpui::rgb(HOVER)))
         .child(
             div()
                 .flex_none()
@@ -1080,11 +1065,11 @@ fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
                 .child(value),
         )
         .child(up);
-    let label = div().font_weight(FontWeight::SEMIBOLD).child("Font size");
+    let label = field_label("Font size");
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
+        .gap(px(7.0))
         .child(header_with_reset(
             label,
             Reset {
@@ -1101,28 +1086,17 @@ fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
 
 /// The bold checkbox, ticked while the level resolves to bold.
 fn bold_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView>) -> Div {
-    let mark = if view.resolved.font_bold.value {
-        "☑"
-    } else {
-        "☐"
-    };
-    let checkbox = div()
-        .id("appearance-bold")
-        .debug_selector(|| "appearance-bold".to_owned())
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .rounded(px(4.0))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(mark)
-        .child(BOLD_LABEL)
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_bold(cx)));
+    let checkbox = checkbox_row(
+        "appearance-bold",
+        view.resolved.font_bold.value,
+        false,
+        BOLD_LABEL,
+    )
+    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_bold(cx)));
     div()
         .flex()
         .flex_col()
-        .gap(px(4.0))
+        .gap(px(7.0))
         .child(header_with_reset(
             checkbox,
             Reset {
@@ -1136,18 +1110,12 @@ fn bold_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
         .child(hint_line("appearance-bold-hint", view.bold_hint()))
 }
 
-/// A text field in its box.
+/// A text field in its frame.
 fn input_box(selector: &'static str, input: &Entity<TextInput>) -> Div {
-    div()
+    field_frame(false)
         .debug_selector(move || selector.to_owned())
-        .flex()
         .flex_1()
         .min_w(px(0.0))
-        .px(px(6.0))
-        .py(px(3.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(BORDER))
         .child(input.clone())
 }
 
@@ -1171,15 +1139,15 @@ fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<
         .child(label);
     if enabled {
         link.cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+            .hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
     } else {
         link.opacity(0.5).cursor_default()
     }
 }
 
-/// The footer with its Close button, tagged `selector`.
+/// The footer band with its Close button, tagged `selector`.
 pub(crate) fn close_footer(selector: &'static str, cx: &mut Context<RootView>) -> Div {
-    div().flex().justify_end().child(
+    dialog_footer().child(
         dialog_button(selector, "Close".to_owned(), false, false, true).on_click(cx.listener(
             |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);

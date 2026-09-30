@@ -45,10 +45,6 @@ pub(crate) enum ButtonSize {
     /// 28 px tall: a toast's, an empty pane's and an overlay's buttons.
     Compact,
     /// 36 px tall: a wide dialog's footer.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the boards' large size; no view draws it")
-    )]
     Large,
     /// 30 px tall: the sessions panel's toolbar.
     Toolbar,

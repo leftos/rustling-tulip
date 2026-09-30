@@ -17,23 +17,44 @@ use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
 
 use crate::appearance;
 use crate::appearance_view::{Level, close_footer};
+use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
+use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
 use crate::session_menu::{backdrop, dialog_button};
 use crate::sidebar::{LeafDensity, SidebarView};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
 };
-use crate::spawn_view::{CLAUDE_LOCKED, CODEX_LOCKED, Look, choice_button, field, segmented};
+use crate::spawn_view::{
+    CLAUDE_LOCKED, CODEX_LOCKED, Look, checkbox_row, choice_button, close_button, dialog_card,
+    dialog_title_bar, field, segmented,
+};
 use crate::tabs::tab_session_counts;
 use crate::text_input::{TextChanged, TextInput, TextInputEvent};
 use crate::window_title::compute_title;
-use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE};
+use crate::{RootView, TEXT};
 
-const TAB_LIST_WIDTH: f32 = 120.0;
+/// The tab list's width, its padding and edge included.
+const TAB_LIST_WIDTH: f32 = 150.0;
+/// A tab row's height and corner radius, as on the Settings board.
+const TAB_ROW_HEIGHT: f32 = 34.0;
+const TAB_ROW_RADIUS: f32 = 7.0;
 /// As wide as the Appearance tab's two columns, so the modal keeps its size
 /// from tab to tab.
 const CONTENT_WIDTH: f32 = 656.0;
+/// The padding round the shown tab's rows.
+const CONTENT_PAD_X: f32 = 18.0;
+const CONTENT_PAD_Y: f32 = 16.0;
+/// The modal's width: the tab list, the content and its padding, and the
+/// card's 1 px edges.
+const PANEL_WIDTH: f32 = TAB_LIST_WIDTH + CONTENT_WIDTH + 2.0 * CONTENT_PAD_X + 2.0;
+/// The size of a section's head, and of a hint.
+const SECTION_HEAD_SIZE: f32 = 14.0;
+const HINT_SIZE: f32 = 12.5;
+/// The corner radius of a text link, and of the title preview's chip.
+const LINK_RADIUS: f32 = 4.0;
+const CHIP_RADIUS: f32 = 5.0;
 /// How long the window title waits for its inputs to settle, so a session
 /// flickering between working and idle does not flicker the taskbar.
 const TITLE_DEBOUNCE: Duration = Duration::from_millis(350);
@@ -863,69 +884,65 @@ impl RootView {
         if !self.settings_open() {
             return None;
         }
-        let close = dialog_button("settings-close", "×".to_owned(), false, false, true).on_click(
-            cx.listener(|this, _: &ClickEvent, window, cx| {
+        let close = close_button("settings-close", false).on_click(cx.listener(
+            |this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
-            }),
-        );
-        let header = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings"))
-            .child(close);
+            },
+        ));
         let body = div()
             .flex()
-            .gap(px(12.0))
             .child(self.settings_tab_list(window, cx))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(CONTENT_WIDTH))
+                    .flex_none()
+                    .w(px(CONTENT_WIDTH + 2.0 * CONTENT_PAD_X))
+                    .px(px(CONTENT_PAD_X))
+                    .py(px(CONTENT_PAD_Y))
                     .children(self.settings_content(window, cx)),
             );
-        let panel = div()
-            .id("settings-panel")
+        let panel = dialog_card("settings-panel", PANEL_WIDTH)
             .track_focus(&self.appearance_focus)
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(14.0))
-            .bg(gpui::rgb(PANEL_BG))
-            .border_1()
-            .border_color(gpui::rgb(BORDER))
-            .rounded(px(6.0))
-            .text_size(px(UI_TEXT_SIZE))
-            .text_color(gpui::rgb(TEXT))
-            .child(header)
+            .child(dialog_title_bar("Settings", close))
             .child(body)
             .child(close_footer("settings-footer-close", cx));
         Some(backdrop("settings", panel))
     }
 
-    /// The tab list; the shown tab is filled, and outlined while the list
-    /// has the keyboard.
+    /// The tab list on the raised ground; the shown tab is filled and bold,
+    /// and ringed while the list has the keyboard.
     fn settings_tab_list(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let list_focused = self.settings_tabs_focus.is_focused(window);
         let tabs = SettingsTab::ALL.map(|tab| {
             let shown = tab == self.settings_tab;
             let selector = tab.selector();
+            let (text, weight) = if shown {
+                (TEXT, FontWeight::SEMIBOLD)
+            } else {
+                (TEXT_2, FontWeight::MEDIUM)
+            };
             div()
                 .id(selector)
                 .debug_selector(|| selector.to_owned())
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(4.0))
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(TAB_ROW_HEIGHT))
+                .px(px(12.0))
+                .rounded(px(TAB_ROW_RADIUS))
                 .border_1()
-                .border_color(gpui::rgb(if shown && list_focused {
-                    TEXT
-                } else {
-                    PANEL_BG
-                }))
+                .border_color(gpui::rgba(TRANSPARENT))
+                .font_weight(weight)
+                .text_color(gpui::rgb(text))
                 .cursor_pointer()
-                .when(shown, |row| row.bg(gpui::rgb(HOVER_BG)))
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+                .when(shown, |row| row.bg(gpui::rgb(CHIP)))
+                .when(!shown, |row| {
+                    row.hover(|style| style.bg(gpui::rgb(HOVER)).text_color(gpui::rgb(TEXT)))
+                })
+                .when(shown && list_focused, |row| {
+                    row.child(focus_ring(TAB_ROW_RADIUS))
+                })
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.select_settings_tab(tab, window, cx);
                 }))
@@ -937,10 +954,13 @@ impl RootView {
             .flex()
             .flex_col()
             .flex_none()
+            .gap(px(2.0))
             .w(px(TAB_LIST_WIDTH))
-            .pr(px(8.0))
+            .px(px(10.0))
+            .py(px(12.0))
+            .bg(gpui::rgb(RAISED))
             .border_r_1()
-            .border_color(gpui::rgb(BORDER))
+            .border_color(gpui::rgb(LINE))
             .children(tabs)
     }
 
@@ -971,14 +991,10 @@ impl RootView {
             return Vec::new();
         };
         let path = SettingsControl::WorktreesPath;
-        let field = div()
+        let field = field_frame(focused == Some(path))
             .debug_selector(|| path.selector().to_owned())
             .flex_1()
-            .px(px(6.0))
-            .py(px(2.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(gpui::rgb(if focused == Some(path) { TEXT } else { BORDER }))
+            .min_w(px(0.0))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -1002,7 +1018,7 @@ impl RootView {
             .child(browse);
         let active = div()
             .debug_selector(|| "settings-worktrees-active".to_owned())
-            .text_color(gpui::rgb(MUTED))
+            .text_color(gpui::rgb(TEXT_2))
             .child(self.worktrees_active_line());
         let (save_label, save_enabled) = self.worktrees_save_button();
         let buttons = div()
@@ -1104,17 +1120,16 @@ impl RootView {
             .id(selector)
             .debug_selector(|| selector.to_owned())
             .px(px(4.0))
-            .rounded(px(4.0))
+            .rounded(px(LINK_RADIUS))
             .border_1()
-            .border_color(gpui::rgb(if focused == Some(link) {
-                TEXT
-            } else {
-                PANEL_BG
-            }))
+            .border_color(gpui::rgba(TRANSPARENT))
             .text_color(gpui::rgb(appearance::BUILTIN_ACCENT))
             .cursor_pointer()
-            .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
+            .hover(|style| style.bg(gpui::rgb(HOVER)))
             .on_click(press(link, cx))
+            .when(focused == Some(link), |open| {
+                open.child(focus_ring(LINK_RADIUS))
+            })
             .child("Open Windows notification settings");
         let state = div()
             .debug_selector(|| "settings-notify-state".to_owned())
@@ -1248,9 +1263,10 @@ impl RootView {
         let preview = div().flex().gap(px(10.0)).child("Preview").child(
             div()
                 .debug_selector(|| "settings-title-preview".to_owned())
-                .px(px(6.0))
-                .rounded(px(3.0))
-                .bg(gpui::rgb(HOVER_BG))
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(CHIP_RADIUS))
+                .bg(gpui::rgb(CHIP))
                 .child(self.title_preview()),
         );
         let section = section("App title")
@@ -1275,17 +1291,20 @@ impl RootView {
 
 /// A titled group of rows.
 fn section(title: &'static str) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .pb(px(12.0))
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+    div().flex().flex_col().gap(px(10.0)).pb(px(18.0)).child(
+        div()
+            .text_size(px(SECTION_HEAD_SIZE))
+            .font_weight(FontWeight::BOLD)
+            .child(title),
+    )
 }
 
-/// A muted line under or beside a control.
+/// A quiet line under or beside a control.
 fn hint(text: &'static str) -> Div {
-    div().text_color(gpui::rgb(MUTED)).child(text)
+    div()
+        .text_size(px(HINT_SIZE))
+        .text_color(gpui::rgb(SUBTLE))
+        .child(text)
 }
 
 /// A click handler that presses `control`.
@@ -1321,36 +1340,18 @@ fn settings_button(
     }
 }
 
-/// `control`'s checkbox row, ticked when `checked` and outlined when it
-/// has the keyboard.
+/// `control`'s checkbox row, ticked when `checked` and ringed when it has
+/// the keyboard.
 fn toggle(
     control: SettingsControl,
     checked: bool,
     label: &'static str,
     focused: Option<SettingsControl>,
     cx: &mut Context<RootView>,
-) -> Stateful<Div> {
-    let selector = control.selector();
-    div()
-        .id(selector)
-        .debug_selector(|| selector.to_owned())
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(4.0))
-        .py(px(2.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(gpui::rgb(if focused == Some(control) {
-            TEXT
-        } else {
-            PANEL_BG
-        }))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .on_click(press(control, cx))
-        .child(if checked { "☑" } else { "☐" })
-        .child(label)
+) -> Div {
+    let row = checkbox_row(control.selector(), checked, focused == Some(control), label)
+        .on_click(press(control, cx));
+    div().flex().child(row)
 }
 
 /// A labelled row of segmented choices, laid out as the spawn dialog's;
@@ -1383,7 +1384,7 @@ fn choice_row(
     let note =
         locked_note.map(|(text, selector)| hint(text).debug_selector(move || selector.to_owned()));
     field(label)
-        .child(segmented(buttons))
+        .child(div().flex().child(segmented(buttons)))
         .children(note)
         .into_any_element()
 }

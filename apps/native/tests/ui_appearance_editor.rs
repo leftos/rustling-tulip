@@ -11,7 +11,7 @@
 #[expect(dead_code, reason = "each spec file uses its own share of the helper")]
 mod support;
 
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, Pixels, TestAppContext, px};
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, WorkspaceEntry,
 };
@@ -709,4 +709,33 @@ fn the_editor_blocks_the_spawn_dialog(cx: &mut TestAppContext) {
         !h.root(|root, _| root.settings_open()),
         "the spawn dialog blocks Settings"
     );
+}
+
+#[gpui::test]
+fn settings_appearance_shows_the_six_petal_accent_swatches(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+
+    let presets = ["coral", "rose", "ochre", "periwinkle", "sky", "lilac"];
+    let lefts: Vec<Pixels> = presets
+        .iter()
+        .map(|name| {
+            let bounds = h.bounds(&format!("appearance-accent-preset-{name}"));
+            assert_eq!(
+                (bounds.size.width, bounds.size.height),
+                (px(18.0), px(18.0)),
+                "{name} is an 18 px swatch"
+            );
+            bounds.left()
+        })
+        .collect();
+    assert!(
+        lefts.windows(2).all(|pair| pair[0] < pair[1]),
+        "the presets run left to right in the board's order: {lefts:?}"
+    );
+    let apply = h.bounds("appearance-accent-apply").size.height;
+    assert_eq!(apply, px(32.0), "Apply is a regular button");
 }

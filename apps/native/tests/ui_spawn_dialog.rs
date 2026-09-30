@@ -498,6 +498,7 @@ fn headless_is_disabled_for_cursor(cx: &mut TestAppContext) {
 fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
+    show_whole_dialog(&mut h);
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
     h.click_on("spawn-advanced");
@@ -522,6 +523,12 @@ fn advanced_opens_and_sends_model_approval_and_env(cx: &mut TestAppContext) {
     assert_eq!(request.extra_env, [("FOO".to_owned(), "bar".to_owned())]);
 }
 
+/// Makes the window tall enough that the dialog shows whole with Advanced
+/// open, so a click on any control reaches it without scrolling.
+fn show_whole_dialog(h: &mut Harness<'_>) {
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(1400.0)));
+}
+
 /// Whether `selector` is drawn at all.
 fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
     h.bounds(selector).size.height > px(0.0)
@@ -529,6 +536,7 @@ fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
 
 /// Opens Advanced and adds one env row with `key` and `value`, pasted.
 fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
+    show_whole_dialog(h);
     h.click_on("spawn-advanced");
     h.click_on("spawn-env-add");
     h.set_clipboard(key);
@@ -590,6 +598,7 @@ fn an_env_reference_hides_the_plaintext_warning_and_is_sent_verbatim(cx: &mut Te
 fn invalid_env_key_blocks_spawn(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
+    show_whole_dialog(&mut h);
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
     h.click_on("spawn-advanced");
@@ -698,5 +707,54 @@ fn tab_scrolls_the_focused_control_into_view(cx: &mut TestAppContext) {
         "Shift+Tab scrolled back up to the branch: {:?} in {:?}",
         h.bounds("spawn-branch"),
         h.bounds("spawn-body")
+    );
+}
+
+#[gpui::test]
+fn dialog_takes_the_spawn_boards_sizes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+
+    assert_eq!(
+        h.bounds("spawn-panel").size.width,
+        px(640.0),
+        "a 640 px card"
+    );
+    let close = h.bounds("spawn-close").size;
+    assert_eq!(
+        (close.width, close.height),
+        (px(28.0), px(28.0)),
+        "a 28 px close"
+    );
+    for selector in ["spawn-cancel", "spawn-submit"] {
+        assert_eq!(
+            h.bounds(selector).size.height,
+            px(36.0),
+            "{selector} is a large footer button"
+        );
+    }
+    for selector in [
+        "spawn-agent-codex",
+        "spawn-placement-new-tab",
+        "spawn-worktree-mode-new",
+    ] {
+        assert_eq!(
+            h.bounds(selector).size.height,
+            px(32.0),
+            "{selector} is a 32 px segment"
+        );
+    }
+    assert_eq!(
+        h.bounds("spawn-branch").size.height,
+        px(34.0),
+        "a 34 px field"
+    );
+    let submit = h.bounds("spawn-submit");
+    let cancel = h.bounds("spawn-cancel");
+    assert!(
+        cancel.right() < submit.left() && submit.right() <= h.bounds("spawn-panel").right(),
+        "Cancel, then Spawn at the right: {cancel:?} {submit:?}"
     );
 }

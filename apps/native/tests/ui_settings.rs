@@ -135,6 +135,42 @@ fn settings_opens_on_general_with_tab_order(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_takes_the_dialog_frames_sizes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = opened(cx, &dir);
+    h.keys("ctrl-,");
+    for selector in TAB_SELECTORS {
+        assert_eq!(
+            h.bounds(selector).size.height,
+            px(34.0),
+            "{selector} is a 34 px row"
+        );
+    }
+    let close = h.bounds("settings-close").size;
+    assert_eq!(
+        (close.width, close.height),
+        (px(28.0), px(28.0)),
+        "a 28 px close"
+    );
+    for selector in [
+        "settings-sidebar-view-repos",
+        "settings-leaf-density-compact",
+    ] {
+        assert_eq!(
+            h.bounds(selector).size.height,
+            px(32.0),
+            "{selector} is a 32 px segment"
+        );
+    }
+    let panel = h.bounds("settings-panel");
+    let footer_close = h.bounds("settings-footer-close");
+    assert!(
+        footer_close.right() < panel.right() && footer_close.bottom() < panel.bottom(),
+        "Close sits in the footer: {footer_close:?} in {panel:?}"
+    );
+}
+
+#[gpui::test]
 fn down_moves_to_next_tab(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);

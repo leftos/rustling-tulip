@@ -24,10 +24,9 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 
 Review: `code-review`; a person compares the running client with the boards. Verification: the gates with `-p rustling-tulip-native`, the OS tier (its pixel probes read the new colours); hand-test against the canvas.
 
-The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.7 and PT.8b are free to start side by side. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
+The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.7 is the last Petal step. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
 
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
-- [ ] **PT.8b Spawn dialog and Settings**.
 - [ ] **`native-shot` can't show Compact leaves** (found in PT.6b): `apps/native/examples/shot.rs` `Shot::prepare` deletes `native-ui.json` before each run and has no knob for `general.leaf_density`; add a way to seed it (a view such as `main-compact`) so a density change can be shot.
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
@@ -66,7 +65,7 @@ Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-t
 Review: `code-review`; UI hand-test of each converted form. Verification: the gates with `-p rustling-tulip-native` (the existing `ui_settings`, `ui_appearance_editor`, `ui_spawn_dialog`, `ui_shell`, `ui_diff_tab` specs hold).
 
 - [ ] **One shared checkbox-row helper**: five near-identical copies exist (`settings_view.rs` `toggle`, `appearance_view.rs` bold row, `diff_tab_view.rs`, `shell_view.rs`, `spawn_view.rs` `checkbox`), and `section` exists three times with different styling (`settings_view.rs`, `appearance_view.rs`, `lib.rs`).
-- [ ] **Keyboard focus ring through the Settings Appearance tab's body** (swatches, font list, size steppers), which only the mouse reaches (found in P4.2a). `appearance_view.rs`, `settings_view.rs`.
+- [ ] **Keyboard focus ring through the Settings Appearance tab's body** (swatches, font list, size steppers), which only the mouse reaches (found in P4.2a); the appearance editor's hex and filter fields draw no ring either, since `appearance_body` has no `Window` to ask focus from (found in PT.8b). `appearance_view.rs`, `settings_view.rs`.
 
 ### Wave 6 — Hook-reported agent status (`crates/daemon/src/hook_status.rs`, `pty_state.rs`, `server.rs`, `agents/claude.rs`, `crates/tracer/src/hook.rs`)
 
@@ -129,6 +128,7 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
+- [ ] **Speed up the `rustling-tulip-native` test suite** (user asked): measured in PT.8b's tree on a loaded machine: an edit to `lib.rs` rebuilds and relinks 40 test binaries (70 s wall; the 34 `tests/ui_*.rs` files are one binary each, about 33 MB each, 1.1 GB together), the run is 36 s of test time summed over those binaries, which cargo runs one after another, and the doc-test pass costs about 12 s for no doctests. Candidates, unmeasured: `doctest = false` on the lib target; one `tests/ui/main.rs` binary with a module per spec file (one link, one process); `rust-lld` as the linker; `debug = "line-tables-only"` for the test profile. Measure each against the same edit before keeping it. `apps/native/Cargo.toml`, `apps/native/tests/`, `.cargo/config.toml`.
 - [ ] **`smoke_posted_keys_reach_the_shell` failed once, then passed unchanged** (seen in PT.5's smoke run): no `rt-smoke-marker` in the shell's scrollback within 30 s (`apps/native/tests/smoke_window.rs` ~785). Rule out PT.5's `pane_area` change (its left edge moved past the 52 px rail) first, then look for a race in posting keys before the shell's prompt.
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
