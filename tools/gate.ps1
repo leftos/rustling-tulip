@@ -70,18 +70,27 @@ ceiling can no longer be told, and only the backstop, which needs nothing but a 
 anywhere else after the command has started terminates the job, adds the error to the log and ends the gate with it.
 
 At most a few gates run at once across the machine, one to a slot, and a slot is heavy or light, as -Slot says. The
-heavy slots are the named mutexes Local\gate-slot-0 to Local\gate-slot-<n-1>, n being $env:GATE_HEAVY_SLOTS or, unset,
-a quarter of the logical processors after one is left for the user (at least one): a heavy gate is taken to keep about
-four threads busy through its own parallelism. The light slots are Local\gate-light-slot-0 to
-Local\gate-light-slot-<m-1>, m being $env:GATE_LIGHT_SLOTS or, unset, half the logical processors after one is left for
-the user (at least one): a light gate is taken to keep one or two threads busy. The two pools are independent: a gate
-takes one slot of its own kind and never waits on the other kind, so a serial test run does not queue behind builds,
-nor builds behind it. The heavy slots bear the names a copy of the gate without -Slot takes, so such a copy shares the
-heavy pool. A gate that finds every slot of its kind held says `gate: waiting for a heavy slot` (or a light one), tries
-again every 2 s, and says `gate: still waiting for a heavy slot (<n> s)` every 30 s after, so a gate around it, whose
-stall window reads that line as output, does not kill it for waiting; its clocks start once it holds one. Mutexes
-rather than a counting semaphore because a killed gate abandons its mutex, which the next gate then takes, saying so,
-where a semaphore's count would be lost for good.
+heavy slots are the named mutexes Local\gate-slot-0 to Local\gate-slot-<n-1>, n being the heavy count in the counts
+file (below) or, when it sets none, a quarter of the logical processors after one is left for the user (at least one): a
+heavy gate is taken to keep about four threads busy through its own parallelism. The light slots are
+Local\gate-light-slot-0 to Local\gate-light-slot-<m-1>, m being the light count in that file or, when it sets none, half
+the logical processors after one is left for the user (at least one): a light gate is taken to keep one or two threads
+busy. The two pools are independent: a gate takes one slot of its own kind and never waits on the other kind, so a
+serial test run does not queue behind builds, nor builds behind it. The heavy slots bear the names a copy of the gate
+without -Slot takes, so such a copy shares the heavy pool. A gate that finds every slot of its kind held says
+`gate: waiting for a heavy slot` (or a light one), tries again every 2 s, and says
+`gate: still waiting for a heavy slot (<n> s)` every 30 s after, so a gate around it, whose stall window reads that line
+as output, does not kill it for waiting; its clocks start once it holds one. Mutexes rather than a counting semaphore
+because a killed gate abandons its mutex, which the next gate then takes, saying so, where a semaphore's count would be
+lost for good.
+
+The slot counts live in $env:LOCALAPPDATA\gate\slot-counts.json, which every gate re-reads on each try for a slot: a
+JSON object with an optional heavy and an optional light key, each a whole number 1 to 64, such as
+{"heavy":4,"light":6}. A count changed while a gate waits is taken up by its next pass, two seconds later, so no running
+app has to be restarted to change one; a gate already holding a slot whose index the count no longer covers keeps it to
+its own end. A missing file, or a key the file omits, means the default given above. A file that cannot be read, is not
+a JSON object, or holds a key whose value is not a whole number 1 to 64 is ignored for that kind, which then uses its
+default, with one line: `gate: ignored <path>: <reason>; using <n> <kind> slots`.
 The command is started with GATE_SLOT_HELD=<kind>:<pid>:<ticks>: the kind of slot its gate runs under, that gate's pid,
 and that process's start time as UTC ticks. A gate started with it (a gate inside a gate, such as a build hook's gate
 under a gated `git commit`) takes no slot when the slot named covers its own -Slot, heavy covering heavy and light and
@@ -98,7 +107,8 @@ GATE_SAMPLE_SECONDS sets the sampling interval, 5 s when unset.
 GATE_TEST_SAMPLER_FAIL=1 is for the self-test only: it makes every sample throw, to prove the path above.
 GATE_TEST_SLOT_PREFIX is for the self-test only: up to 32 letters, digits and dashes put in front of both pools' mutex
 names (Local\<prefix>gate-slot-<i>, Local\<prefix>gate-light-slot-<i>), so its slot cases use slots no other session
-holds. GATE_TEST_NATIVE_CACHE is for the self-test only: the folder used in place of the native cache below.
+holds. GATE_TEST_SLOT_COUNTS is for the self-test only: the path to read in place of the counts file above.
+GATE_TEST_NATIVE_CACHE is for the self-test only: the folder used in place of the native cache below.
 GATE_TEST_HEARTBEAT_SECONDS is for the self-test only: the seconds between two `still waiting` lines, 30 when unset.
 
 The gate's native calls are C# compiled with Add-Type into a class named after a hash of their source. The compiled
@@ -207,11 +217,11 @@ $usage = @(
     '       pwsh tools/gate.ps1 -StopTree <pid>'
 )
 $requiredLine = 'all four of -Log, -TimeoutSeconds, -Slot and the command are required.'
-# The two pools of slots: the mutex names' prefix, the variable that sets the count, and the threads a gate of the kind
-# is taken to keep busy, which divide the logical processors left after one for the user into the default count.
+# The two pools of slots: the mutex names' prefix and the threads a gate of the kind is taken to keep busy, which divide
+# the logical processors left after one for the user into the default count.
 $slotPools = [ordered]@{
-    heavy = @{ Prefix = 'gate-slot-'; Variable = 'GATE_HEAVY_SLOTS'; Threads = 4 }
-    light = @{ Prefix = 'gate-light-slot-'; Variable = 'GATE_LIGHT_SLOTS'; Threads = 2 }
+    heavy = @{ Prefix = 'gate-slot-'; Threads = 4 }
+    light = @{ Prefix = 'gate-light-slot-'; Threads = 2 }
 }
 # The kinds of gate that a held slot of each kind lets run under it without a slot of their own.
 $slotCovers = @{ heavy = @('heavy', 'light'); light = @('light') }
@@ -1192,12 +1202,6 @@ function Get-SlotProblem {
 }
 
 function Get-EnvironmentProblem {
-    foreach ($pool in $slotPools.Values) {
-        $value = [Environment]::GetEnvironmentVariable($pool.Variable)
-        if ($value -and -not (Test-WholeNumber $value)) {
-            "gate: $($pool.Variable) must be a whole number above 0, got '$value'"
-        }
-    }
     if ($env:GATE_SAMPLE_SECONDS -and -not (Test-Duration $env:GATE_SAMPLE_SECONDS)) {
         "gate: GATE_SAMPLE_SECONDS must be a number of seconds above 0, got '$env:GATE_SAMPLE_SECONDS'"
     }
@@ -1209,12 +1213,83 @@ function Get-EnvironmentProblem {
     }
 }
 
+# The file every gate reads for its slot counts: the per-user one the dashboard writes, or the one GATE_TEST_SLOT_COUNTS
+# names, for the self-test only.
+function Get-SlotCountPath {
+    if ($env:GATE_TEST_SLOT_COUNTS) { return $env:GATE_TEST_SLOT_COUNTS }
+    return Join-Path $env:LOCALAPPDATA 'gate\slot-counts.json'
+}
+
+# Text as one line, so a problem line stays one line of the log however the message it quotes was wrapped.
+function Format-Prose {
+    param([string]$Text)
+    return ([string]$Text -replace '\s+', ' ').Trim()
+}
+
+# The counts file parsed, or $null and why it was ignored: the file missing is no problem (the caller uses its default),
+# while one that cannot be read, is not valid JSON, or holds something other than a JSON object is.
+function Read-SlotCountJson {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ Counts = $null; Problem = $null } }
+    try { $text = [System.IO.File]::ReadAllText($Path) }
+    catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return [pscustomobject]@{ Counts = $null; Problem = $null }
+    }
+    catch {
+        return [pscustomobject]@{ Counts = $null; Problem = "it could not be read: $(Format-Prose $_.Exception.Message)" }
+    }
+    try { $counts = ConvertFrom-Json -InputObject $text }
+    catch { return [pscustomobject]@{ Counts = $null; Problem = "it is not valid JSON: $(Format-Prose $_.Exception.Message)" } }
+    if ($counts -isnot [System.Management.Automation.PSCustomObject]) {
+        return [pscustomobject]@{ Counts = $null; Problem = 'it is not a JSON object' }
+    }
+    return [pscustomobject]@{ Counts = $counts; Problem = $null }
+}
+
+# True when a parsed value is a whole number 1 to 64, the only count the file may carry for a kind.
+function Test-SlotCountValue {
+    param($Value)
+    if ($Value -isnot [int] -and $Value -isnot [long] -and $Value -isnot [double] -and $Value -isnot [decimal]) {
+        return $false
+    }
+    $number = [double]$Value
+    return $number -eq [math]::Floor($number) -and $number -ge 1 -and $number -le 64
+}
+
+# A value the problem line names, in the file's own JSON: a string is quoted, so '4' reads as the string it is.
+function Format-CountValue {
+    param($Value)
+    if ($null -eq $Value) { return 'null' }
+    return "'$Value'"
+}
+
+# The one line a gate writes for a counts file it could not use, or for a value it ignored in one.
+function Get-IgnoredLine {
+    param([string]$Path, [string]$Kind, [int]$Count, [string]$Reason)
+    return "gate: ignored ${Path}: ${Reason}; using $Count $Kind slots"
+}
+
+# The kind's slot count from the counts file, read afresh on every call so a change takes effect without a restart; the
+# line to say when the file's value for the kind was ignored, and $null when it was not. Count is the kind's default in
+# the ignored case, the file's whole number 1 to 64 otherwise.
 function Get-SlotCount {
     param([string]$Kind)
-    $pool = $slotPools[$Kind]
-    $set = [Environment]::GetEnvironmentVariable($pool.Variable)
-    if ($set) { return [int]$set }
-    return [math]::Max(1, [math]::Floor(([Environment]::ProcessorCount - 1) / $pool.Threads))
+    $default = [math]::Max(1, [math]::Floor(([Environment]::ProcessorCount - 1) / $slotPools[$Kind].Threads))
+    $path = Get-SlotCountPath
+    $read = Read-SlotCountJson $path
+    if ($read.Problem) {
+        return [pscustomobject]@{ Count = $default
+            Problem = (Get-IgnoredLine -Path $path -Kind $Kind -Count $default -Reason $read.Problem) }
+    }
+    if (-not $read.Counts) { return [pscustomobject]@{ Count = $default; Problem = $null } }
+    $property = $read.Counts.PSObject.Properties[$Kind]
+    if (-not $property) { return [pscustomobject]@{ Count = $default; Problem = $null } }
+    if (-not (Test-SlotCountValue $property.Value)) {
+        $reason = "$Kind must be a whole number 1 to 64, got $(Format-CountValue $property.Value)"
+        return [pscustomobject]@{ Count = $default
+            Problem = (Get-IgnoredLine -Path $path -Kind $Kind -Count $default -Reason $reason) }
+    }
+    return [pscustomobject]@{ Count = [int]$property.Value; Problem = $null }
 }
 
 # True when this thread now owns the mutex. A gate killed while holding a slot abandons its mutex, and the wait that
@@ -1234,10 +1309,11 @@ function Request-Mutex {
 }
 
 # Holds one of the machine's slots of the kind given, waiting for one when all of that kind are held; returns the mutex
-# and the lines for the log. A waiting gate says so once, then again every heartbeat on standard error only.
+# and the lines for the log. The counts file is read on every pass, so a count changed while the gate waits is taken up
+# by the next pass two seconds later, and a file the gate cannot use is said once, not on every pass. A waiting gate
+# says so once, then again every heartbeat on standard error only.
 function Enter-Slot {
     param([string]$Kind)
-    $count = Get-SlotCount $Kind
     $prefix = "Local\$($env:GATE_TEST_SLOT_PREFIX)$($slotPools[$Kind].Prefix)"
     $notes = [System.Collections.Generic.List[string]]::new()
     $heartbeat = if ($env:GATE_TEST_HEARTBEAT_SECONDS) {
@@ -1245,7 +1321,15 @@ function Enter-Slot {
     }
     else { 30.0 }
     $waited = $null
+    $said = $null
     while ($true) {
+        $counts = Get-SlotCount $Kind
+        $count = $counts.Count
+        if ($counts.Problem -and $counts.Problem -ne $said) {
+            $said = $counts.Problem
+            Write-Gate $said
+            $notes.Add($said)
+        }
         for ($slot = 0; $slot -lt $count; $slot++) {
             $name = "$prefix$slot"
             $mutex = [System.Threading.Mutex]::new($false, $name)

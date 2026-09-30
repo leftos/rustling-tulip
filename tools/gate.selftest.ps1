@@ -74,7 +74,7 @@ $cpuCases = @('Test-CpuProgress', 'Test-OrphanProgress', 'Test-PackagedProgress'
 # how busy the machine was, so it has no skip to fall back on, and by then the waiting cases' processes have ended.
 $slotCases = @(
     'Test-Slot', 'Test-SlotPool', 'Test-SlotClaim', 'Test-Nesting', 'Test-NestingCovered', 'Test-NestingLightOuter', 'Test-StaleMarker',
-    'Test-WaitHeartbeat', 'Test-SamplerFailure'
+    'Test-WaitHeartbeat', 'Test-SlotCountLive', 'Test-SlotCountInvalid', 'Test-SamplerFailure'
 )
 # The prefix every slot case's gates put in front of their mutex names (GATE_TEST_SLOT_PREFIX), so that no other
 # session's gate holds the slots they use, and slot 0 of each kind under it, the one a gate of the kind takes first.
@@ -629,24 +629,36 @@ function Test-Usage {
     }
 }
 
-# Starts a gate that takes a slot of this run's own: GATE_SLOT_HELD set to $Held (unset when empty),
-# GATE_TEST_SLOT_PREFIX set and each variable of $Counts set to its value while the process is created, which is when
-# it takes its environment, and this session's put back straight after.
+# Starts a gate that takes a slot of this run's own: GATE_SLOT_HELD set to $Held (unset when empty), GATE_TEST_SLOT_PREFIX
+# set, GATE_TEST_SLOT_COUNTS pointing at a counts file of this run's own holding $Counts, and each variable of
+# $Environment set to its value, all while the process is created, which is when it takes its environment, with this
+# session's put back straight after. $Counts writes "{}" when it is empty, so no slot case reads the machine's own counts
+# file, and an entry of $Environment is set last, so a case can point the gate at a counts file of its own instead. The
+# started object carries that file as CountsFile.
 function Start-SlotGate {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
         Justification = 'Starts a gate of this run''s own; the environment it changes is put back before it returns.')]
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][hashtable]$Counts,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Counts,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$Environment,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Held
     )
-    $saved = @{ GATE_SLOT_HELD = $env:GATE_SLOT_HELD; GATE_TEST_SLOT_PREFIX = $env:GATE_TEST_SLOT_PREFIX }
-    foreach ($name in $Counts.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
+    $countsFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        (Join-Path $dir "counts-$([guid]::NewGuid().ToString('n')).json"))
+    $json = if ($Counts.Count -eq 0) { '{}' } else { $Counts | ConvertTo-Json -Compress }
+    [System.IO.File]::WriteAllText($countsFile, $json, [System.Text.UTF8Encoding]::new($false))
+    $saved = @{ GATE_SLOT_HELD = $env:GATE_SLOT_HELD; GATE_TEST_SLOT_PREFIX = $env:GATE_TEST_SLOT_PREFIX
+        GATE_TEST_SLOT_COUNTS = $env:GATE_TEST_SLOT_COUNTS }
+    foreach ($name in $Environment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
     try {
         $env:GATE_SLOT_HELD = if ($Held) { $Held } else { $null }
         $env:GATE_TEST_SLOT_PREFIX = $slotPrefix
-        foreach ($name in $Counts.Keys) { [Environment]::SetEnvironmentVariable($name, $Counts[$name]) }
-        return Start-Gate -Arguments $Arguments
+        $env:GATE_TEST_SLOT_COUNTS = $countsFile
+        foreach ($name in $Environment.Keys) { [Environment]::SetEnvironmentVariable($name, $Environment[$name]) }
+        $started = Start-Gate -Arguments $Arguments
+        $started | Add-Member -NotePropertyName CountsFile -NotePropertyValue $countsFile
+        return $started
     }
     finally {
         foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, ($saved[$name] ?? [NullString]::Value)) }
@@ -677,16 +689,15 @@ function Test-SlotOverlap {
 # other sessions keep busy, and costs nothing when the gates finish sooner.
 function Test-SlotKind {
     param([string]$Kind)
-    $variable = "GATE_$($Kind.ToUpperInvariant())_SLOTS"
     $script = '1..4 | ForEach-Object { [Console]::Out.WriteLine([DateTime]::UtcNow.Ticks); Start-Sleep 1 }'
     $cases = @("slot-$Kind-a", "slot-$Kind-b")
     $started = @(foreach ($case in $cases) {
             $arguments = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '60', '-Slot', $Kind, '--', 'pwsh', '-NoProfile', '-c', $script)
-            Start-SlotGate -Arguments $arguments -Counts @{ $variable = '1' } -Held ''
+            Start-SlotGate -Arguments $arguments -Counts @{ $Kind = 1 } -Environment @{} -Held ''
         })
     $runs = @($started | ForEach-Object { Complete-Pwsh -Started $_ -Seconds 90 })
     $why = if (@($runs | Where-Object { $_.TimedOut }).Count -gt 0) {
-        "a gate did not finish within 90 s with $variable=1 and $($slotZero[$Kind]) this run's own"
+        "a gate did not finish within 90 s with one $Kind slot and $($slotZero[$Kind]) this run's own"
     }
     elseif ($runs[0].Status -ne 0 -or $runs[1].Status -ne 0) {
         "exits $($runs[0].Status) and $($runs[1].Status), expected 0 and 0"
@@ -726,8 +737,8 @@ function Test-OtherPoolHeld {
     if (-not $held) { Write-Result $label "could not take $Other, which only this run uses, within 10 s"; return }
     try {
         $arguments = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '30', '-Slot', $Kind, '--', 'pwsh', '-NoProfile', '-c', 'exit 0')
-        $counts = @{ GATE_HEAVY_SLOTS = '1'; GATE_LIGHT_SLOTS = '1' }
-        $run = Complete-Pwsh -Started (Start-SlotGate -Arguments $arguments -Counts $counts -Held '') -Seconds 60
+        $counts = @{ heavy = 1; light = 1 }
+        $run = Complete-Pwsh -Started (Start-SlotGate -Arguments $arguments -Counts $counts -Environment @{} -Held '') -Seconds 60
     }
     finally {
         $held.ReleaseMutex()
@@ -753,7 +764,7 @@ function Test-SlotClaim {
     $claim = Join-Path $env:LOCALAPPDATA "gate\slots\${slotPrefix}gate-light-slot-0.json"
     $arguments = @('-Log', "$dir/slot-claim.log", '-TimeoutSeconds', '30', '-Slot', 'light', '--',
         'pwsh', '-NoProfile', '-c', 'Start-Sleep 4; exit 0')
-    $started = Start-SlotGate -Arguments $arguments -Counts @{ GATE_LIGHT_SLOTS = '1' } -Held ''
+    $started = Start-SlotGate -Arguments $arguments -Counts @{ light = 1 } -Environment @{} -Held ''
     $seen = $null
     while (-not $seen -and -not $started.Process.HasExited) {
         if (Test-Path -LiteralPath $claim) { $seen = Get-Content -LiteralPath $claim -Raw | ConvertFrom-Json }
@@ -806,7 +817,7 @@ function Test-Nesting {
     $inner = @('pwsh', '-NoProfile', '-File', $gate, '-Log', "$dir/nest-inner.log", '-TimeoutSeconds', '20', '-Slot', 'light', '--',
         'pwsh', '-NoProfile', '-c', 'Start-Sleep 5; exit 0')
     $outer = @('-Log', "$dir/nest.log", '-TimeoutSeconds', '20', '-Slot', 'light', '--') + $inner
-    $run = Complete-Gate (Start-SlotGate -Arguments $outer -Counts @{ GATE_LIGHT_SLOTS = '1' } -Held '')
+    $run = Complete-Gate (Start-SlotGate -Arguments $outer -Counts @{ light = 1 } -Environment @{} -Held '')
     $why = Get-RunProblem -Case 'nest' -Run $run -Expected 0
     if (-not $why -and $run.Seconds -ge 25) { $why = "took $([math]::Round($run.Seconds)) s, expected under 25 s" }
     Write-TimedResult -Case 'a gate inside a gate does not wait on its parent''s slot' -LogCase 'nest' -Why $why
@@ -824,8 +835,8 @@ function Test-NestingCovered {
             $inner = @('pwsh', '-NoProfile', '-File', $gate, '-Log', "$dir/$case-inner.log", '-TimeoutSeconds', '20', '-Slot', $kind, '--',
                 'pwsh', '-NoProfile', '-c', 'exit 0')
             $outer = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '30', '-StallSeconds', '10', '-Slot', 'heavy', '--') + $inner
-            $counts = @{ GATE_HEAVY_SLOTS = '1'; GATE_LIGHT_SLOTS = '1' }
-            $run = Complete-Gate (Start-SlotGate -Arguments $outer -Counts $counts -Held '')
+            $counts = @{ heavy = 1; light = 1 }
+            $run = Complete-Gate (Start-SlotGate -Arguments $outer -Counts $counts -Environment @{} -Held '')
             $why = Get-RunProblem -Case $case -Run $run -Expected 0 -Holds 'gate: running under the heavy slot of gate \d+'
             Write-Result "an inner $kind gate runs under its parent's heavy slot" $why
         }
@@ -854,15 +865,20 @@ function Test-FileText {
 }
 
 # While this run holds a slot the gate under test needs: waits up to $Seconds for the gate's command to write the
-# sentinel (it ran without the slot) or for one of the files to say a gate is waiting for a slot; returns 'ran',
-# 'waiting' or 'quiet'.
+# sentinel (it ran without the slot) or for one of the files to match $Pattern, a line saying a gate is waiting;
+# returns 'ran', 'waiting' or 'quiet'.
 function Watch-HeldSlot {
-    param([string]$Sentinel, [string[]]$Files, [int]$Seconds)
+    param(
+        [Parameter(Mandatory)][string]$Sentinel,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Files,
+        [Parameter(Mandatory)][string]$Pattern,
+        [Parameter(Mandatory)][int]$Seconds
+    )
     $clock = [System.Diagnostics.Stopwatch]::StartNew()
     while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
         if (Test-Path -LiteralPath $Sentinel) { return 'ran' }
         foreach ($file in $Files) {
-            if (Test-FileText -Path $file -Pattern 'waiting for a \w+ slot') { return 'waiting' }
+            if (Test-FileText -Path $file -Pattern $Pattern) { return 'waiting' }
         }
         Start-Sleep -Milliseconds 200
     }
@@ -885,11 +901,12 @@ function Test-NestingLightOuter {
     $inner = @('pwsh', '-NoProfile', '-File', $gate, '-Log', "$dir/$case-inner.log", '-TimeoutSeconds', '30', '-Slot', 'heavy', '--') +
         (Get-SentinelCommand $sentinel)
     $outer = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '60', '-Slot', 'light', '--') + $inner
+    Remove-Item -LiteralPath "$dir/$case.log", "$dir/$case.log.err" -ErrorAction SilentlyContinue
     $held = Get-HeldMutex -Name $slotZero['heavy'] -Seconds 10
     if (-not $held) { Write-Result $label "could not take $($slotZero['heavy']) within 10 s"; return }
     try {
-        $started = Start-SlotGate -Arguments $outer -Counts @{ GATE_HEAVY_SLOTS = '1'; GATE_LIGHT_SLOTS = '1' } -Held ''
-        $seen = Watch-HeldSlot -Sentinel $sentinel -Files @("$dir/$case.log.err", "$dir/$case.log") -Seconds 30
+        $started = Start-SlotGate -Arguments $outer -Counts @{ heavy = 1; light = 1 } -Environment @{} -Held ''
+        $seen = Watch-HeldSlot -Sentinel $sentinel -Files @("$dir/$case.log.err", "$dir/$case.log") -Pattern 'waiting for a \w+ slot' -Seconds 30
     }
     finally {
         $held.ReleaseMutex()
@@ -925,8 +942,8 @@ function Test-StaleMarker {
         $held = Get-HeldMutex -Name $slotZero['heavy'] -Seconds 10
         if (-not $held) { Write-Result "a marker $label is ignored" "could not take $($slotZero['heavy']) within 10 s"; continue }
         try {
-            $started = Start-SlotGate -Arguments $arguments -Counts @{ GATE_HEAVY_SLOTS = '1' } -Held $markers[$label]
-            $seen = Watch-HeldSlot -Sentinel $sentinel -Files @() -Seconds 8
+            $started = Start-SlotGate -Arguments $arguments -Counts @{ heavy = 1 } -Environment @{} -Held $markers[$label]
+            $seen = Watch-HeldSlot -Sentinel $sentinel -Files @() -Pattern 'waiting for a \w+ slot' -Seconds 8
         }
         finally {
             $held.ReleaseMutex()
@@ -941,16 +958,25 @@ function Test-StaleMarker {
 }
 
 # A gate waiting for a slot says so again every heartbeat (1 s here), so a gate around it sees output while it waits.
+# The waiting heavy gate runs inside an outer light gate, whose <log>.err shows the inner gate's standard error as it is
+# written, and this run holds the only heavy slot until the heartbeat line shows there, however long the gate took to
+# start.
 function Test-WaitHeartbeat {
     $label = 'a gate waiting for a slot prints a heartbeat'
     $case = 'wait-heartbeat'
     $sentinel = "$dir/$case.started"
-    $arguments = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '30', '-Slot', 'heavy', '--') + (Get-SentinelCommand $sentinel)
+    $inner = @('pwsh', '-NoProfile', '-File', $gate, '-Log', "$dir/$case-inner.log", '-TimeoutSeconds', '30', '-Slot', 'heavy', '--') +
+        (Get-SentinelCommand $sentinel)
+    $outer = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '60', '-Slot', 'light', '--') + $inner
+    # A log left by an earlier run holds the lines watched for, and the gate replaces it only once it has started.
+    Remove-Item -LiteralPath "$dir/$case.log", "$dir/$case.log.err" -ErrorAction SilentlyContinue
     $held = Get-HeldMutex -Name $slotZero['heavy'] -Seconds 10
     if (-not $held) { Write-Result $label "could not take $($slotZero['heavy']) within 10 s"; return }
     try {
-        $started = Start-SlotGate -Arguments $arguments -Counts @{ GATE_HEAVY_SLOTS = '1'; GATE_TEST_HEARTBEAT_SECONDS = '1' } -Held ''
-        $seen = Watch-HeldSlot -Sentinel $sentinel -Files @() -Seconds 8
+        $counts = @{ heavy = 1; light = 1 }
+        $started = Start-SlotGate -Arguments $outer -Counts $counts -Environment @{ GATE_TEST_HEARTBEAT_SECONDS = '1' } -Held ''
+        $heartbeat = 'gate: still waiting for a heavy slot \(\d+ s\)'
+        $seen = Watch-HeldSlot -Sentinel $sentinel -Files @("$dir/$case.log.err", "$dir/$case.log") -Pattern $heartbeat -Seconds 30
     }
     finally {
         $held.ReleaseMutex()
@@ -958,8 +984,71 @@ function Test-WaitHeartbeat {
     }
     $run = Complete-Gate $started
     $why = if ($seen -eq 'ran') { 'the command ran while this run held the only heavy slot' }
+    elseif ($seen -eq 'quiet') { "the inner gate printed no heartbeat within 30 s; see $dir/$case.log" }
     else { Get-RunProblem -Case $case -Run $run -Expected 0 }
-    if (-not $why -and $run.Err -notmatch 'gate: still waiting for a heavy slot \(\d+ s\)') { $why = "no heartbeat line: $($run.Err)" }
+    Write-Result $label $why
+}
+
+# The counts file is read on every pass of a gate's wait, not once when it starts: with the only heavy slot held by this
+# run, an inner heavy gate under an outer light one says it is waiting, and takes a slot the moment the file adds one,
+# without the run being restarted.
+function Test-SlotCountLive {
+    $label = 'a waiting gate takes a slot the counts file adds'
+    $case = 'slot-count-live'
+    $sentinel = "$dir/$case.started"
+    $inner = @('pwsh', '-NoProfile', '-File', $gate, '-Log', "$dir/$case-inner.log", '-TimeoutSeconds', '30', '-Slot', 'heavy', '--') +
+        (Get-SentinelCommand $sentinel)
+    $outer = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '60', '-Slot', 'light', '--') + $inner
+    # A log left by an earlier run holds the lines watched for, and the gate replaces it only once it has started.
+    Remove-Item -LiteralPath "$dir/$case.log", "$dir/$case.log.err" -ErrorAction SilentlyContinue
+    $held = Get-HeldMutex -Name $slotZero['heavy'] -Seconds 10
+    if (-not $held) { Write-Result $label "could not take $($slotZero['heavy']) within 10 s"; return }
+    try {
+        $started = Start-SlotGate -Arguments $outer -Counts @{ heavy = 1; light = 1 } `
+            -Environment @{ GATE_TEST_HEARTBEAT_SECONDS = '1' } -Held ''
+        $waiting = Watch-HeldSlot -Sentinel $sentinel -Files @("$dir/$case.log.err", "$dir/$case.log") `
+            -Pattern 'waiting for a heavy slot' -Seconds 30
+        $added = 'no'
+        if ($waiting -eq 'waiting') {
+            [System.IO.File]::WriteAllText($started.CountsFile, '{"heavy":2,"light":1}', [System.Text.UTF8Encoding]::new($false))
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path -LiteralPath $sentinel) -and $clock.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 200 }
+            $added = if (Test-Path -LiteralPath $sentinel) { 'ran' } else { 'quiet' }
+        }
+    }
+    finally {
+        $held.ReleaseMutex()
+        $held.Dispose()
+    }
+    $run = Complete-Gate $started
+    $why = if ($waiting -eq 'ran') { 'the inner heavy gate ran its command while this run held the only heavy slot' }
+    elseif ($waiting -eq 'quiet') { "the inner gate neither ran nor said it was waiting within 30 s; see $dir/$case.log" }
+    elseif ($added -eq 'quiet') { "the inner gate did not take the heavy slot the counts file added within 30 s; see $dir/$case.log" }
+    else { Get-RunProblem -Case $case -Run $run -Expected 0 }
+    Write-Result $label $why
+}
+
+# A counts file the gate cannot use is ignored: the kind uses its default and one line says which file and why, so a
+# file hand-edited into an invalid state cannot keep every gate on the machine from running.
+function Test-SlotCountInvalid {
+    $label = 'a gate ignores a bad counts file'
+    $why = $null
+    $index = 0
+    foreach ($content in 'not json', '{"light":0}') {
+        $index++
+        $case = "slot-count-invalid-$index"
+        $file = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+            (Join-Path $dir "counts-$([guid]::NewGuid().ToString('n')).json"))
+        [System.IO.File]::WriteAllText($file, $content, [System.Text.UTF8Encoding]::new($false))
+        $arguments = @('-Log', "$dir/$case.log", '-TimeoutSeconds', '30', '-Slot', 'light', '--', 'pwsh', '-NoProfile', '-c', 'exit 0')
+        $run = Complete-Gate (Start-SlotGate -Arguments $arguments -Counts @{} `
+            -Environment @{ GATE_TEST_SLOT_COUNTS = $file } -Held '')
+        $why = Get-RunProblem -Case $case -Run $run -Expected 0
+        if (-not $why -and "$($run.Err)$(Get-LogText $case)" -notmatch 'gate: ignored .*; using \d+ light slots') {
+            $why = "the gate said nothing about ignoring '$content'; see $dir/$case.log"
+        }
+        if ($why) { break }
+    }
     Write-Result $label $why
 }
 
@@ -1233,7 +1322,7 @@ function Invoke-All {
 }
 
 $saved = @{}
-$names = 'GATE_SAMPLE_SECONDS', 'GATE_SLOT_HELD', 'GATE_HEAVY_SLOTS', 'GATE_LIGHT_SLOTS', 'GATE_TEST_SAMPLER_FAIL',
+$names = 'GATE_SAMPLE_SECONDS', 'GATE_SLOT_HELD', 'GATE_TEST_SLOT_COUNTS', 'GATE_TEST_SAMPLER_FAIL',
 'GATE_TEST_SLOT_PREFIX', 'GATE_TEST_NATIVE_CACHE', 'GATE_TEST_HEARTBEAT_SECONDS', 'MSBUILDDISABLENODEREUSE', 'DOTNET_CLI_USE_MSBUILD_SERVER'
 foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
