@@ -6,10 +6,12 @@
 //!
 //! `cargo run -p rustling-tulip-native --example shot -- [<view>] [<out.png>]`
 //!
-//! Views: `main` (the default: the sidebar and a split tab), `source-control`,
-//! `diff`, `settings` and `spawn`. The PNG goes to `.tmp/shots/<view>.png`
-//! under the repo root unless `<out.png>` is given; the window's layout file
-//! is kept beside it in `.ui/` and cleared on every run.
+//! Views: `main` (the default: the sidebar and a split tab), `main-compact`
+//! (the same window with the sidebar's leaves one line each),
+//! `source-control`, `diff`, `settings` and `spawn`. The PNG goes to
+//! `.tmp/shots/<view>.png` under the repo root unless `<out.png>` is given;
+//! the window's layout file is kept beside it in `.ui/` and cleared on every
+//! run.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -94,6 +96,7 @@ fn main() -> Result<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Main,
+    MainCompact,
     SourceControl,
     Diff,
     Settings,
@@ -101,8 +104,9 @@ enum View {
 }
 
 impl View {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Main,
+        Self::MainCompact,
         Self::SourceControl,
         Self::Diff,
         Self::Settings,
@@ -112,6 +116,7 @@ impl View {
     fn name(self) -> &'static str {
         match self {
             Self::Main => "main",
+            Self::MainCompact => "main-compact",
             Self::SourceControl => "source-control",
             Self::Diff => "diff",
             Self::Settings => "settings",
@@ -132,7 +137,9 @@ impl View {
     /// Whether `root` shows this view.
     fn reached(self, root: &RootView) -> bool {
         match self {
-            Self::Main => !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty(),
+            Self::Main | Self::MainCompact => {
+                !root.sidebar_containers().is_empty() && !root.tab_ids().is_empty()
+            }
             Self::SourceControl => root.activity() == Activity::SourceControl,
             Self::Diff => root.active_tab_id() == Some(DIFF_TAB),
             Self::Settings => root.settings_open(),
@@ -168,18 +175,32 @@ impl Shot {
     }
 
     /// Creates the output folders and clears the layout an earlier run saved,
-    /// so every run starts from the same state.
+    /// so every run starts from the same state; a `main-compact` shot then
+    /// seeds the sidebar's compact leaf density, which no keystroke in a
+    /// cloaked window can reach.
     fn prepare(&self) -> Result<()> {
         std::fs::create_dir_all(&self.ui_dir)
             .with_context(|| format!("creating {}", self.ui_dir.display()))?;
         let saved = self.ui_dir.join("native-ui.json");
-        match std::fs::remove_file(&saved) {
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                Err(err).with_context(|| format!("clearing {}", saved.display()))
-            }
-            _ => Ok(()),
+        if let Err(err) = std::fs::remove_file(&saved)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(err).with_context(|| format!("clearing {}", saved.display()));
         }
+        if self.view != View::MainCompact {
+            return Ok(());
+        }
+        let layout = serde_json::to_vec_pretty(&compact_ui_state())
+            .with_context(|| format!("serializing the layout for {}", saved.display()))?;
+        std::fs::write(&saved, layout).with_context(|| format!("writing {}", saved.display()))
     }
+}
+
+/// The layout a `main-compact` shot starts from: the sidebar's leaves one
+/// line each. A file holding the general section alone loads as the layout
+/// defaults everywhere else, which is what a missing file loads as.
+fn compact_ui_state() -> Value {
+    json!({ "general": { "leaf_density": "compact" } })
 }
 
 /// `.tmp/shots` under the repo root.
@@ -313,7 +334,7 @@ async fn drive_and_capture(
 /// or, where no key opens it, a click posted to the window at `address`.
 fn drive(view: View, address: usize, window: &mut Window, cx: &mut App) -> Result<()> {
     match view {
-        View::Main => Ok(()),
+        View::Main | View::MainCompact => Ok(()),
         View::SourceControl => {
             let y = (SOURCE_CONTROL_ITEM + 0.5) * RAIL_ITEM_HEIGHT;
             #[expect(
@@ -1286,6 +1307,10 @@ mod win32 {
 /// The fixture is parsed before the window opens, so a change to the wire
 /// shape fails here rather than in a PNG nobody looks at.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests assert preconditions with expect; failure messages aid debugging"
+)]
 mod tests {
     use super::*;
 
@@ -1309,5 +1334,56 @@ mod tests {
             malformed.is_err(),
             "a repos message without its repos field parsed"
         );
+    }
+
+    #[test]
+    fn main_compact_seeds_compact_density() {
+        let dir = scratch_dir("main-compact");
+        shot(View::MainCompact, dir.clone())
+            .prepare()
+            .expect("preparing the main-compact shot");
+        let file = dir.join("native-ui.json");
+        let text = std::fs::read_to_string(&file).expect("the layout the shot saved");
+        let layout: Value = serde_json::from_str(&text).expect("the saved layout parses");
+        assert_eq!(
+            layout
+                .pointer("/general/leaf_density")
+                .and_then(Value::as_str),
+            Some("compact"),
+            "the shot saved {text}"
+        );
+    }
+
+    #[test]
+    fn main_clears_saved_ui_state() {
+        let dir = scratch_dir("main-clears");
+        shot(View::MainCompact, dir.clone())
+            .prepare()
+            .expect("preparing the main-compact shot");
+        let file = dir.join("native-ui.json");
+        assert!(file.exists(), "the main-compact shot saved no layout");
+        shot(View::Main, dir.clone())
+            .prepare()
+            .expect("preparing the main shot");
+        assert!(!file.exists(), "the main shot left a saved layout behind");
+    }
+
+    /// A shot whose layout file lands in a `.ui` folder of its own under the
+    /// repo's `.tmp/`, named after the test that asked for it.
+    fn shot(view: View, ui_dir: PathBuf) -> Shot {
+        Shot {
+            view,
+            out: ui_dir.join("shot.png"),
+            ui_dir,
+        }
+    }
+
+    /// `.tmp/shot-tests/<name>/.ui` under the repo root.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the native client's folder has no repo root two levels up");
+        root.join(".tmp").join("shot-tests").join(name).join(".ui")
     }
 }

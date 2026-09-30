@@ -25,7 +25,6 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 Review: `code-review`; a person looks at the shots. Verification: the gates with `-p rustling-tulip-native`; `.\rt.ps1 native-shot main` before and after. The look's settled design is `docs/native-client.md` "Petal chrome"; its canvas is saved in [canvases/petal/](./canvases/petal/).
 
 - [ ] **A pane title that runs out of room is clipped mid-letter, with no `…`** (found in PT.7; user: land, then fix): `grid_view.rs`'s pane header truncates its `repo:branch` chip first with an ellipsis, then clips the title. GPUI 0.2.2's `StyledText` keeps its first measurement for nowrap text (`elements/text.rs` ~370–386), and the wrap-plus-one-line-clamp that ellipsizes the chip made every title vanish in the real window (the spec harness's fake text layout hides it). A `debugger` run in a real window first: measure the title's layout and find a form that draws `…`.
-- [ ] **`native-shot` can't show Compact leaves** (found in PT.6b): `apps/native/examples/shot.rs` `Shot::prepare` deletes `native-ui.json` before each run and has no knob for `general.leaf_density`; add a way to seed it (a view such as `main-compact`) so a density change can be shot.
 
 ### Wave 2 — Session labels, menus and busy tracking (`session_menu.rs`, `session_actions.rs`, `sidebar.rs`, `sidebar_view.rs`, `grid_view.rs`)
 

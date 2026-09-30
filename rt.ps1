@@ -46,8 +46,9 @@
                  reach the shell.
       native-shot
                  Write a PNG of the native client's window showing one view
-                 (`main`, `source-control`, `diff`, `settings` or `spawn`;
-                 default `main`) over a fake daemon with fixed content, via
+                 (`main`, `main-compact`, `source-control`, `diff`, `settings`
+                 or `spawn`; default `main`) over a fake daemon with fixed
+                 content, via
                  `cargo run --example shot`. No daemon starts; the window
                  stays cloaked and never takes focus. Writes
                  `.tmp\shots\<view>.png` unless a second argument or -Out
@@ -690,7 +691,8 @@ Commands:
              connects and that posted keys reach the shell.
   native-shot [<view>] [<out.png>] [-Out <path>]
              Write a PNG of the native client's window showing <view>
-             (main, source-control, diff, settings, spawn; default main)
+             (main, main-compact, source-control, diff, settings, spawn;
+             default main)
              over a fake daemon with fixed content, then print its path.
              <out.png> is the PNG to write; -Out says the same thing.
              Default: .tmp\shots\<view>.png. No daemon starts; the window
