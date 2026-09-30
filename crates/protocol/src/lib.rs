@@ -101,13 +101,17 @@ impl AgentOptions {
             Self::Cursor { .. } => Agent::Cursor,
         }
     }
+
+    /// Constructs [`AgentOptions::Claude`] with `permission_mode`.
+    #[must_use]
+    pub fn claude(permission_mode: Option<PermissionMode>) -> Self {
+        Self::Claude { permission_mode }
+    }
 }
 
 impl Default for AgentOptions {
     fn default() -> Self {
-        Self::Claude {
-            permission_mode: None,
-        }
+        Self::claude(None)
     }
 }
 
@@ -903,9 +907,7 @@ impl<'de> Deserialize<'de> for SpawnConfig {
             helper
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::Claude {
-                        permission_mode: helper.permission_mode,
-                    },
+                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
                     },
@@ -1805,9 +1807,7 @@ impl<'de> Deserialize<'de> for PresetEntry {
             helper
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::Claude {
-                        permission_mode: helper.permission_mode,
-                    },
+                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
                     },
@@ -4155,9 +4155,7 @@ mod tests {
             default_use_worktree: Some(true),
             dangerously_skip_permissions: true,
             model: None,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             tab_grouping: TabGroupingConfig::NewTab {
                 layout: TabLayout::BalancedHorizontal,
                 max_panes_per_tab: Some(6),
@@ -4446,12 +4444,7 @@ mod tests {
         assert_eq!(preset.variables, Vec::<PresetVariable>::new());
         assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
-        assert_eq!(
-            preset.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None,
-            }
-        );
+        assert_eq!(preset.agent_options, AgentOptions::claude(None));
     }
 
     #[test]
@@ -4470,9 +4463,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             prompt_injector: Some(PromptInjector {
@@ -4591,9 +4582,7 @@ mod tests {
             mode: SessionMode::PlainShell,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             secret_env_keys: Vec::new(),
@@ -4613,9 +4602,7 @@ mod tests {
             target,
             mode: SessionMode::PlainShell,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: Some("sonnet-4".to_string()),
             extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
         }
@@ -5168,12 +5155,7 @@ mod tests {
             "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
         }"#;
         let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
-        assert_eq!(
-            preset.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None,
-            }
-        );
+        assert_eq!(preset.agent_options, AgentOptions::claude(None));
     }
 
     #[test]
@@ -5372,9 +5354,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             secret_env_keys: Vec::new(),

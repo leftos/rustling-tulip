@@ -2748,9 +2748,7 @@ impl SpawnForm {
         let suppress = plain || self.trusted();
         let advanced = &self.advanced;
         match self.runtime.agent {
-            Agent::Claude => AgentOptions::Claude {
-                permission_mode: advanced.permission_mode.filter(|_| !suppress),
-            },
+            Agent::Claude => AgentOptions::claude(advanced.permission_mode.filter(|_| !suppress)),
             Agent::Codex => AgentOptions::Codex {
                 sandbox: advanced.codex_sandbox.filter(|_| !suppress),
             },
@@ -3942,12 +3940,7 @@ mod tests {
         assert_eq!(request.mode, SessionMode::PlainShell);
         assert_eq!(request.initial_prompt, None);
         assert_eq!(request.model, None);
-        assert_eq!(
-            request.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None
-            }
-        );
+        assert_eq!(request.agent_options, AgentOptions::claude(None));
         assert_eq!(request.extra_env, env(&[("FOO", "1")]));
 
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));
@@ -3966,17 +3959,10 @@ mod tests {
             &mut form,
             &Control::Approval(Some(PermissionMode::AcceptEdits)),
         );
-        let accept = AgentOptions::Claude {
-            permission_mode: Some(PermissionMode::AcceptEdits),
-        };
+        let accept = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
         assert_eq!(request_of(&form).agent_options, accept);
         press(&mut form, &Control::Trusted);
-        assert_eq!(
-            request_of(&form).agent_options,
-            AgentOptions::Claude {
-                permission_mode: None
-            }
-        );
+        assert_eq!(request_of(&form).agent_options, AgentOptions::claude(None));
         assert!(!form.controls().contains(&Control::Approval(None)));
         assert_eq!(
             form.permission_mode(),
@@ -4573,9 +4559,7 @@ mod tests {
         assert_eq!(request.model.as_deref(), Some("m"));
         assert_eq!(
             request.agent_options,
-            AgentOptions::Claude {
-                permission_mode: Some(PermissionMode::Plan)
-            }
+            AgentOptions::claude(Some(PermissionMode::Plan))
         );
         assert_eq!(request.extra_env, env(&[("A", "1")]));
         press(&mut form, &Control::Runtime(Runtime::Agent(Agent::Codex)));

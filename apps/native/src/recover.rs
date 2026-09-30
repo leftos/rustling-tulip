@@ -1121,9 +1121,7 @@ mod tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: Vec::new(),
         }

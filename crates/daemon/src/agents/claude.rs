@@ -33,7 +33,9 @@ impl AgentBackend for ClaudeBackend {
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
         let permission_mode = match opts {
-            AgentOptions::Claude { permission_mode } => *permission_mode,
+            AgentOptions::Claude {
+                permission_mode, ..
+            } => *permission_mode,
             AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
                 debug_assert!(false, "claude backend invoked with non-claude options");
                 None
@@ -88,7 +90,9 @@ impl AgentBackend for ClaudeBackend {
         initial_prompt: &str,
     ) -> Vec<String> {
         let permission_mode = match opts {
-            AgentOptions::Claude { permission_mode } => *permission_mode,
+            AgentOptions::Claude {
+                permission_mode, ..
+            } => *permission_mode,
             AgentOptions::Codex { .. } | AgentOptions::Cursor { .. } => {
                 debug_assert!(false, "claude backend invoked with non-claude options");
                 None
@@ -279,9 +283,7 @@ mod tests {
     #[test]
     fn resume_replaces_session_id_and_drops_the_prompt() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let common = CommonSpawnFields {
             resume_conversation: Some(RESUME_ID),
             ..with_session_id(true, None, false)
@@ -303,9 +305,7 @@ mod tests {
     #[test]
     fn standalone_add_dirs_follow_member_add_dirs() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let extra = vec!["X:/dev/b".to_string(), "X:/dev/c".to_string()];
         let common = CommonSpawnFields {
             add_dirs: &extra,
@@ -342,9 +342,7 @@ mod tests {
     #[test]
     fn interactive_args_include_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_interactive_args(
             &opts,
             &with_session_id(false, Some("opus"), false),
@@ -357,9 +355,7 @@ mod tests {
     #[test]
     fn interactive_args_with_prompt_include_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_interactive_args(
             &opts,
             &with_session_id(false, None, false),
@@ -381,9 +377,7 @@ mod tests {
     #[test]
     fn headless_args_have_no_session_id() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_headless_args(
             &opts,
             &with_session_id(false, None, false),
@@ -397,9 +391,7 @@ mod tests {
     #[test]
     fn interactive_single_repo_with_model() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: Some(PermissionMode::AcceptEdits),
-        };
+        let opts = AgentOptions::claude(Some(PermissionMode::AcceptEdits));
         let args = ClaudeBackend.build_interactive_args(
             &opts,
             &common(false, Some("opus"), false),
@@ -422,9 +414,7 @@ mod tests {
     #[test]
     fn interactive_skip_perms_overrides_permission_mode() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: Some(PermissionMode::Plan),
-        };
+        let opts = AgentOptions::claude(Some(PermissionMode::Plan));
         let args =
             ClaudeBackend.build_interactive_args(&opts, &common(true, None, false), &m, Some("hi"));
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
@@ -434,9 +424,7 @@ mod tests {
     #[test]
     fn interactive_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args =
             ClaudeBackend.build_interactive_args(&opts, &common(false, None, false), &m, None);
         // --add-dir for the second member only (first is cwd).
@@ -453,9 +441,7 @@ mod tests {
     #[test]
     fn interactive_with_injector_omits_prompt_flag() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_interactive_args(
             &opts,
             &common(false, None, true),
@@ -469,9 +455,7 @@ mod tests {
     #[test]
     fn headless_args_include_print_and_stream_json() {
         let m = members(&["X:/dev/a"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_headless_args(
             &opts,
             &common(false, Some("sonnet"), false),
@@ -491,9 +475,7 @@ mod tests {
     #[test]
     fn headless_workspace_emits_add_dir_and_prelude() {
         let m = members(&["X:/dev/a", "X:/dev/b"]);
-        let opts = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        let opts = AgentOptions::claude(None);
         let args = ClaudeBackend.build_headless_args(&opts, &common(false, None, false), &m, "go");
         assert!(args.windows(2).any(|w| w == ["--add-dir", "X:/dev/b"]));
         assert!(args.iter().any(|a| a == "--append-system-prompt"));
