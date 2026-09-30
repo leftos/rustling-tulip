@@ -14,7 +14,7 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 
 ## High priority
 
-Nothing is ahead of the waves.
+- [ ] **Speed up the `rustling-tulip-native` test suite** (user asked): measured in PT.8b's tree on a loaded machine: an edit to `lib.rs` rebuilds and relinks 40 test binaries (70 s wall; the 34 `tests/ui_*.rs` files are one binary each, about 33 MB each, 1.1 GB together), the run is 36 s of test time summed over those binaries, which cargo runs one after another, and the doc-test pass costs about 12 s for no doctests. Candidates, unmeasured: `doctest = false` on the lib target; one `tests/ui/main.rs` binary with a module per spec file (one link, one process); `rust-lld` as the linker; `debug = "line-tables-only"` for the test profile. Measure each against the same edit before keeping it. `apps/native/Cargo.toml`, `apps/native/tests/`, `.cargo/config.toml`.
 
 ## Waves
 
@@ -123,7 +123,6 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 ### Build tooling
 
-- [ ] **Speed up the `rustling-tulip-native` test suite** (user asked): measured in PT.8b's tree on a loaded machine: an edit to `lib.rs` rebuilds and relinks 40 test binaries (70 s wall; the 34 `tests/ui_*.rs` files are one binary each, about 33 MB each, 1.1 GB together), the run is 36 s of test time summed over those binaries, which cargo runs one after another, and the doc-test pass costs about 12 s for no doctests. Candidates, unmeasured: `doctest = false` on the lib target; one `tests/ui/main.rs` binary with a module per spec file (one link, one process); `rust-lld` as the linker; `debug = "line-tables-only"` for the test profile. Measure each against the same edit before keeping it. `apps/native/Cargo.toml`, `apps/native/tests/`, `.cargo/config.toml`.
 - [ ] **`smoke_posted_keys_reach_the_shell` failed once, then passed unchanged** (seen in PT.5's smoke run): no `rt-smoke-marker` in the shell's scrollback within 30 s (`apps/native/tests/smoke_window.rs` ~785). Rule out PT.5's `pane_area` change (its left edge moved past the 52 px rail) first, then look for a race in posting keys before the shell's prompt.
 - [ ] **`proc-macro-error2` future-incompatibility warning**: the chain is `gpui` 0.2.2 → `stacksafe` 0.1.4 → `stacksafe-macro` 0.1.4 → `proc-macro-error2`; `stacksafe` 1.0 drops it and zed's main already uses it, and a `[patch]` can't cross from 0.1 to 1.0. Bump gpui when a release after 0.2.2 ships. `apps/native/Cargo.toml`.
 - [ ] **`tracer_protocol` incremental-session note**: every rebuild prints `did not finalize incremental compilation session directory … Access is denied (os error 5)` (harmless; recurs after `cargo clean -p tracer-protocol`; a hand rename seconds later succeeds). Find the brief holder (Defender, a still-mapped `dep-graph.bin` / `query-cache.bin`, or other) and why only this crate.
