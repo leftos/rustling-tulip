@@ -1201,10 +1201,13 @@ impl<'a> Harness<'a> {
             } else if selector.starts_with("shell-") {
                 root.shell_dialog_open()
             } else if selector == "sidebar-add-session"
+                || selector == "sidebar-session-hint"
                 || selector == "sidebar-add-shell"
-                || selector == "sidebar-shell-dialog"
+                || selector == "sidebar-more"
             {
                 sessions_shown
+            } else if selector == "sidebar-more-menu" || selector == "sidebar-more-shell-dialog" {
+                sessions_shown && root.sidebar_more_open()
             } else if let Some(id) = selector
                 .strip_prefix("empty-pane-new-session-")
                 .or_else(|| selector.strip_prefix("empty-pane-shell-"))
@@ -1256,6 +1259,12 @@ impl<'a> Harness<'a> {
     pub fn click_on(&mut self, selector: &str) {
         let at = self.center(selector);
         self.click(at, Modifiers::none());
+    }
+
+    /// Opens the Shell… folder dialog through the sessions toolbar's ⋯ menu.
+    pub fn open_shell_dialog_from_more(&mut self) {
+        self.click_on("sidebar-more");
+        self.click_on("sidebar-more-shell-dialog");
     }
 
     /// A right-button press and release on the element tagged `selector`.

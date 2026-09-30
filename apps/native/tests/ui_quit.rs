@@ -515,7 +515,7 @@ fn closing_the_window_closes_the_appearance_editor_settings_and_container_menu(
 fn closing_the_window_closes_the_shell_dialog(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = loaded(cx, &dir, vec![session("s1").in_repo("r1").build()]);
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(h.root(|root, _| root.shell_dialog_open()));
     h.sent();
 

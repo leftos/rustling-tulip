@@ -64,7 +64,7 @@ fn containers_render_workspace_repo_shell_dir_detached_in_order(cx: &mut TestApp
             .map(|c| c.kind.tag())
             .collect()
     });
-    assert_eq!(tags, ["WS", "REPO", "SH", "DIR", "Detached"]);
+    assert_eq!(tags, ["WS", "REPO", "SH", "DIR", "DET"]);
     for id in ["ws", "repo", "sh", "dir", "gone"] {
         assert!(h.in_model(&format!("leaf-{id}")), "leaf {id} is listed");
     }
@@ -724,5 +724,123 @@ fn unseen_session_rebound_into_the_focused_pane_is_seen(cx: &mut TestAppContext)
         leaf_unseen(&mut h, "s2"),
         Some(false),
         "the focused pane shows s2 now"
+    );
+}
+
+/// Whether the element tagged `selector` is laid out on screen.
+fn drawn(h: &mut Harness<'_>, selector: &str) -> bool {
+    h.bounds(selector).origin.x >= px(0.0)
+}
+
+#[gpui::test]
+fn session_button_draws_its_hint_even_with_no_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    assert!(
+        !h.root(|root, _| root.has_repos()),
+        "the button is disabled"
+    );
+
+    assert!(drawn(&mut h, "sidebar-add-session"));
+    assert!(drawn(&mut h, "sidebar-session-hint"), "Ctrl N still shows");
+}
+
+#[gpui::test]
+fn more_menu_opens_the_shell_dialog_and_closes_on_escape_or_outside(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    assert!(
+        !drawn(&mut h, "sidebar-more-shell-dialog"),
+        "closed at first"
+    );
+
+    h.click_on("sidebar-more");
+    assert!(h.root(|root, _| root.sidebar_more_open()));
+    assert!(drawn(&mut h, "sidebar-more-shell-dialog"));
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.sidebar_more_open()), "Esc closes it");
+
+    h.click_on("sidebar-more");
+    let panel = h.bounds("sidebar-panel");
+    h.click(
+        point(panel.center().x, panel.bottom() - px(10.0)),
+        Modifiers::none(),
+    );
+    assert!(
+        !h.root(|root, _| root.sidebar_more_open()),
+        "a click outside closes it"
+    );
+    assert!(!h.root(|root, _| root.shell_dialog_open()));
+
+    h.click_on("sidebar-more");
+    h.click_on("sidebar-more-shell-dialog");
+    assert!(!h.root(|root, _| root.sidebar_more_open()));
+    assert!(
+        h.root(|root, _| root.shell_dialog_open()),
+        "Shell… opens the dialog"
+    );
+}
+
+/// A harness with `s1` in registered repo `r1`, so the spawn dialog can
+/// open, and the ⋯ menu open.
+fn more_menu_open_with_a_repo<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.click_on("sidebar-more");
+    assert!(h.root(|root, _| root.sidebar_more_open()));
+    h
+}
+
+#[gpui::test]
+fn ctrl_n_closes_the_more_menu_and_opens_the_spawn_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = more_menu_open_with_a_repo(cx, &dir);
+
+    h.keys("ctrl-n");
+
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    assert!(
+        !h.root(|root, _| root.sidebar_more_open()),
+        "the menu gave way"
+    );
+}
+
+#[gpui::test]
+fn ctrl_comma_closes_the_more_menu_and_opens_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = more_menu_open_with_a_repo(cx, &dir);
+
+    h.keys("ctrl-,");
+
+    assert!(h.root(|root, _| root.settings_open()));
+    assert!(
+        !h.root(|root, _| root.sidebar_more_open()),
+        "the menu gave way"
+    );
+}
+
+#[gpui::test]
+fn repo_container_draws_its_icon_tag_count_and_attention_badge(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut fixture = Fixture::single(session("s1").in_repo("r1").build());
+    fixture.repos = vec![repo("r1", "D:/src/r1")];
+    let mut h = Harness::with(cx, &dir, &fixture);
+
+    for part in ["icon-repo", "tag", "count"] {
+        assert!(
+            drawn(&mut h, &format!("container-repo:r1-{part}")),
+            "{part}"
+        );
+    }
+    assert!(!drawn(&mut h, "container-repo:r1-badge"), "no badge yet");
+
+    h.send(DaemonMessage::Attention {
+        session_id: "s1".to_owned(),
+        reason: AttentionReason::AwaitingInput,
+    });
+    assert!(
+        drawn(&mut h, "container-repo:r1-badge"),
+        "attention badges it"
     );
 }

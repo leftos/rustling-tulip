@@ -161,7 +161,7 @@ fn quick_shell_uses_the_remembered_folder(cx: &mut TestAppContext) {
 fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(is_open(&mut h), "the dialog opened");
     assert_eq!(
         folder(&mut h).as_deref(),
@@ -209,7 +209,7 @@ fn shell_dialog_submit_sends_standalone_spawn_and_saves_default(cx: &mut TestApp
 fn successful_shell_spawn_saves_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     type_text(&mut h, "C:/work");
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
@@ -226,7 +226,7 @@ fn successful_shell_spawn_saves_default(cx: &mut TestAppContext) {
 fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     type_text(&mut h, "C:/work");
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
@@ -242,7 +242,7 @@ fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
 
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     type_text(&mut h, "C:/work");
     h.click_on("shell-submit");
     let request = the_spawn(&h.sent());
@@ -262,7 +262,7 @@ fn failed_shell_spawn_does_not_save_default(cx: &mut TestAppContext) {
 fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     type_text(&mut h, "work");
     assert_eq!(folder(&mut h).as_deref(), Some("work"));
     assert!(!can_submit(&mut h), "a relative folder opens nothing");
@@ -273,7 +273,7 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
     assert!(spawns(&h.sent()).is_empty());
 
     h.keys("escape");
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert_eq!(focus(&mut h), Some("shell-folder"), "the field anew");
     type_text(&mut h, "C:/work");
     assert!(can_submit(&mut h), "a drive path can go");
@@ -294,7 +294,7 @@ fn clear_default_returns_plus_shell_to_home(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     seed_ui(&dir, Some("C:\\work"));
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(
         h.in_model("shell-clear-default"),
         "the link shows with a remembered folder"
@@ -323,7 +323,7 @@ fn clear_default_returns_plus_shell_to_home(cx: &mut TestAppContext) {
 fn clicking_the_checkbox_then_space_toggles_it(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(saves_default(&mut h));
 
     h.click_on("shell-save-default");
@@ -354,7 +354,7 @@ fn shell_dialog_unticked_does_not_save_default(cx: &mut TestAppContext) {
         "the seed stands"
     );
 
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert_eq!(
         folder(&mut h).as_deref(),
         Some("C:\\old"),
@@ -383,7 +383,7 @@ fn shell_dialog_unticked_does_not_save_default(cx: &mut TestAppContext) {
 fn shell_dialog_blank_folder_cannot_submit(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(!can_submit(&mut h));
     assert_eq!(hint(&mut h), None, "an empty field asks for nothing");
 
@@ -396,7 +396,7 @@ fn shell_dialog_blank_folder_cannot_submit(cx: &mut TestAppContext) {
 fn shell_dialog_escape_closes_and_backdrop_does_not(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     let backdrop = h.bounds("shell-dialog");
     h.click(
         point(backdrop.origin.x + px(4.0), backdrop.origin.y + px(4.0)),
@@ -409,7 +409,7 @@ fn shell_dialog_escape_closes_and_backdrop_does_not(cx: &mut TestAppContext) {
     h.keys("escape");
     assert!(!is_open(&mut h), "Esc on a button closes");
 
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert_eq!(focus(&mut h), Some("shell-folder"));
     h.keys("escape");
     assert!(!is_open(&mut h), "Esc in the folder field closes");
@@ -420,7 +420,7 @@ fn shell_dialog_escape_closes_and_backdrop_does_not(cx: &mut TestAppContext) {
 fn shell_browse_uses_the_picker_seam(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     h.set_picked_folder(None);
     h.click_on("shell-browse");
     assert_eq!(h.folder_asks(), 1, "Browse asks the picker");
@@ -436,7 +436,7 @@ fn shell_browse_uses_the_picker_seam(cx: &mut TestAppContext) {
 fn shell_dialog_closes_on_reconnect(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(is_open(&mut h));
     h.lose_connection();
     assert!(!is_open(&mut h));
@@ -456,7 +456,7 @@ fn shell_buttons_work_without_repos(cx: &mut TestAppContext) {
         "a shell needs no repo"
     );
 
-    h.click_on("sidebar-shell-dialog");
+    h.open_shell_dialog_from_more();
     assert!(is_open(&mut h), "the dialog opens with no repo either");
 }
 

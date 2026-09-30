@@ -415,6 +415,7 @@ impl RootView {
         self.renaming = None;
         self.close_flyout();
         self.close_tab_menu(window, cx);
+        self.close_more_menu(window, cx);
         let branch_input = cx.new(|cx| TextInput::new(form.branch().to_owned(), "", cx));
         let base_input = cx.new(|cx| TextInput::new(form.base().to_owned(), "", cx));
         let prompt_input = cx.new(|cx| {

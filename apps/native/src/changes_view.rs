@@ -664,6 +664,7 @@ impl RootView {
         self.close_shell_menu(window, cx);
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
+        self.close_more_menu(window, cx);
         self.changes.file_menu = Some(menu);
         self.menu_focus.focus(window);
         cx.notify();

@@ -695,9 +695,9 @@ fn the_editor_blocks_the_spawn_dialog(cx: &mut TestAppContext) {
         Some("Session appearance"),
         "Settings does not replace it"
     );
-    h.click_on("sidebar-shell-dialog");
+    h.click_on("sidebar-more");
     assert!(
-        !h.root(|root, _| root.shell_dialog_open()),
+        !h.root(|root, _| root.sidebar_more_open() || root.shell_dialog_open()),
         "the backdrop takes the click"
     );
 

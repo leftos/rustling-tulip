@@ -50,6 +50,8 @@ pub(crate) enum ButtonSize {
         expect(dead_code, reason = "the boards' large size; no view draws it")
     )]
     Large,
+    /// 30 px tall: the sessions panel's toolbar.
+    Toolbar,
 }
 
 impl ButtonSize {
@@ -60,6 +62,7 @@ impl ButtonSize {
             Self::Regular => (32.0, 14.0, 7.0, 12.5),
             Self::Compact => (28.0, 12.0, 6.0, 12.0),
             Self::Large => (36.0, 16.0, 8.0, 13.0),
+            Self::Toolbar => (30.0, 10.0, 6.0, 12.5),
         }
     }
 
@@ -299,7 +302,12 @@ mod tests {
         }
     }
 
-    const SIZES: [ButtonSize; 3] = [ButtonSize::Regular, ButtonSize::Compact, ButtonSize::Large];
+    const SIZES: [ButtonSize; 4] = [
+        ButtonSize::Regular,
+        ButtonSize::Compact,
+        ButtonSize::Large,
+        ButtonSize::Toolbar,
+    ];
 
     #[test]
     fn outlined_button_is_line_strong_on_transparent() {
@@ -352,6 +360,7 @@ mod tests {
                 (32.0, 14.0, 7.0, 12.5),
                 (28.0, 12.0, 6.0, 12.0),
                 (36.0, 16.0, 8.0, 13.0),
+                (30.0, 10.0, 6.0, 12.5),
             ]
         );
     }

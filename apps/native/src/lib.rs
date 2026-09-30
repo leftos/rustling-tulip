@@ -413,6 +413,8 @@ pub struct RootView {
     menu_focus: FocusHandle,
     /// The repo or workspace context menu, while open.
     container_menu: Option<ContainerMenu>,
+    /// The sessions toolbar's ⋯ menu.
+    more_menu: sidebar_view::MoreMenu,
     /// The appearance editor, or the Settings modal holding it at the app
     /// level, while open.
     appearance_editor: Option<AppearanceEditor>,
@@ -714,6 +716,7 @@ impl RootView {
             shell_menu: None,
             menu_focus: cx.focus_handle(),
             container_menu: None,
+            more_menu: sidebar_view::MoreMenu::Closed,
             appearance_editor: None,
             appearance_focus: cx.focus_handle(),
             settings_tab: settings_view::SettingsTab::default(),
@@ -1135,6 +1138,7 @@ impl RootView {
     /// active tab's focused pane, since the sidebar may have held it.
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_shell_menu(window, cx);
+        self.close_more_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
         self.sidebar.toggle_sidebar();
@@ -1848,6 +1852,8 @@ impl RootView {
             self.close_session_menu(window, cx);
         } else if self.container_menu.is_some() && ks.key == "escape" {
             self.close_container_menu(window, cx);
+        } else if self.sidebar_more_open() && ks.key == "escape" {
+            self.close_more_menu(window, cx);
         } else if self.shell_menu.is_some() && ks.key == "escape" {
             self.close_shell_menu(window, cx);
         } else if self.sc_picker_open && ks.key == "escape" {
@@ -2127,6 +2133,7 @@ impl Render for RootView {
             .children(self.tab_menu_layer(cx).into_iter().flatten())
             .children(self.empty_pane_menu_layer(cx).into_iter().flatten())
             .children(self.container_menu_layer(cx).into_iter().flatten())
+            .children(self.more_menu_layer())
             .children(self.sc_picker_layer())
             .children(self.sc_file_menu_layer(cx).into_iter().flatten())
             .children(flyout.into_iter().flatten())

@@ -149,6 +149,7 @@ impl RootView {
         self.close_container_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
+        self.close_more_menu(window, cx);
         // The menu's delete confirm and the spawn and Shell… dialogs have
         // sent nothing yet, so they can go; the appearance editor and
         // Settings have already applied every change.

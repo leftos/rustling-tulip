@@ -579,6 +579,7 @@ impl RootView {
         self.close_tab_menu(window, cx);
         self.close_sc_picker(window, cx);
         self.close_sc_file_menu(window, cx);
+        self.close_more_menu(window, cx);
         self.close_delete_dialog(window, cx);
     }
 

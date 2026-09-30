@@ -48,7 +48,7 @@ impl ContainerKind {
             Self::Repo => "REPO",
             Self::Shell => "SH",
             Self::Dir => "DIR",
-            Self::Detached => "Detached",
+            Self::Detached => "DET",
             Self::Tab => "TAB",
             Self::Unbound => "UNB",
         }

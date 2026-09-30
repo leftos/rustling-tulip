@@ -102,6 +102,7 @@ impl RootView {
             || self.delete_dialog.is_some()
             || self.menu.is_some()
             || self.container_menu.is_some()
+            || self.sidebar_more_open()
             || self.shell_menu.is_some()
             || self.sc_picker_open
             || self.changes.file_menu.is_some()

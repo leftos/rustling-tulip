@@ -6,10 +6,20 @@ use std::collections::{HashMap, HashSet};
 
 use crate::appearance;
 use crate::appearance_view::Level;
+use crate::assets::{
+    SIDEBAR_BRANCH_ICON, SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON,
+    SIDEBAR_FOLDER_ICON, SIDEBAR_MORE_ICON, SIDEBAR_PLUS_ICON, SIDEBAR_SHELL_ICON,
+    SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
+};
+use crate::buttons::{ButtonSize, outlined_button, primary_button};
 use crate::connection::DotKind;
+use crate::fonts::DEFAULT_FAMILY;
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
-use crate::palette::SELECTED_BG;
+use crate::palette::{
+    ASKING, HOVER, LILAC, LINE, ON_ACCENT, ON_ASKING, RAISED, SELECTED_BG, SUBTLE, TEXT_2,
+};
 use crate::session_actions::inline_actions;
+use crate::session_menu::{menu_frame, menu_item};
 use crate::sidebar::{Activity, Container, ContainerKind, Leaf, SidebarView, can_attach};
 use crate::spawn_view::SpawnEntry;
 use crate::status_glyph::{GlyphSize, glyph, glyph_view};
@@ -19,8 +29,8 @@ use crate::{
     drag_handle, tooltip,
 };
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Window, div, prelude::*, px,
+    AnyElement, ClickEvent, Context, Corner, Div, FontWeight, MouseButton, MouseDownEvent,
+    SharedString, Stateful, Svg, Window, anchored, deferred, div, point, prelude::*, px, svg,
 };
 
 pub(crate) const ROW_HEIGHT: f32 = 22.0;
@@ -112,69 +122,180 @@ impl RootView {
             .text_size(px(UI_TEXT_SIZE))
             .text_color(gpui::rgb(TEXT))
             .child(header(self.sidebar.sidebar_view(), cx))
-            .child(toolbar(
-                self.has_repos(),
-                self.sidebar.quick_shell_dir(),
-                cx,
-            ))
+            .child(self.toolbar(cx))
             .child(body)
+    }
+
+    /// The spawns under the header, in one row: Session, Shell and the ⋯
+    /// menu.
+    fn toolbar(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.0))
+            .pt(px(10.0))
+            .px(px(10.0))
+            .pb(px(8.0))
+            .child(add_session(self.has_repos(), cx))
+            .child(add_shell(self.sidebar.quick_shell_dir(), cx))
+            .child(self.more_button(cx))
+    }
+
+    /// The ⋯ button, with its menu under it while open.
+    fn more_button(&self, cx: &mut Context<Self>) -> Div {
+        let button = div()
+            .id(MORE_BUTTON)
+            .debug_selector(|| MORE_BUTTON.to_owned())
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(MORE_BUTTON_SIZE))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(gpui::rgb(HOVER)))
+            .tooltip(tooltip(MORE_TIP))
+            .child(icon(SIDEBAR_MORE_ICON, 15.0, TEXT_2))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_more_menu(window, cx);
+            }));
+        let menu = self.sidebar_more_open().then(|| {
+            let row = menu_item(MORE_SHELL_ROW, "Shell…", false).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| {
+                    this.close_more_menu(window, cx);
+                    this.open_shell_dialog(window, cx);
+                },
+            ));
+            let frame = menu_frame(
+                "sidebar-more-menu",
+                &self.menu_focus,
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.close_more_menu(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(row);
+            let panel = anchored()
+                .anchor(Corner::TopRight)
+                .offset(point(px(MORE_BUTTON_SIZE), px(MORE_BUTTON_SIZE + 2.0)))
+                .snap_to_window()
+                .child(frame);
+            deferred(panel).with_priority(1)
+        });
+        div().relative().flex_none().child(button).children(menu)
+    }
+
+    /// Whether the toolbar's ⋯ menu is open.
+    #[must_use]
+    pub fn sidebar_more_open(&self) -> bool {
+        self.more_menu == MoreMenu::Open
+    }
+
+    /// Opens the ⋯ menu, taking the keyboard so Esc reaches it; any other
+    /// menu gives way.
+    fn open_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_session_menu(window, cx);
+        self.close_shell_menu(window, cx);
+        self.close_tab_menu(window, cx);
+        self.close_container_menu(window, cx);
+        self.close_sc_picker(window, cx);
+        self.close_sc_file_menu(window, cx);
+        self.more_menu = MoreMenu::Open;
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    /// Closes the ⋯ menu and hands the keyboard back to the active pane.
+    pub(crate) fn close_more_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.more_menu, MoreMenu::Closed) == MoreMenu::Open {
+            self.focus_active_pane(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The layer under the open ⋯ menu that keeps a click outside it from
+    /// reaching what lies beneath.
+    pub(crate) fn more_menu_layer(&self) -> Option<AnyElement> {
+        self.sidebar_more_open().then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .occlude()
+                .into_any_element()
+        })
     }
 }
 
-/// "+ Session", which opens the spawn dialog; disabled with no repo.
-fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
-    let tip = if has_repos { SPAWN_TIP } else { NO_REPOS_TIP };
-    div()
-        .id("sidebar-add-session")
-        .debug_selector(|| "sidebar-add-session".to_owned())
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .child("+ Session")
-        .tooltip(tooltip(tip))
-        .when(has_repos, |button| {
-            button
-                .cursor_pointer()
-                .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
-                }))
-        })
-        .when(!has_repos, |button| button.opacity(0.5))
+/// Whether the toolbar's ⋯ menu is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoreMenu {
+    Closed,
+    Open,
 }
 
-/// "+ Shell", a standalone shell in the remembered folder; enabled even
-/// with no repo.
+/// The ⋯ button's selector.
+const MORE_BUTTON: &str = "sidebar-more";
+/// The ⋯ menu's one row, which opens the shell folder dialog.
+const MORE_SHELL_ROW: &str = "sidebar-more-shell-dialog";
+/// The ⋯ button's hover text.
+const MORE_TIP: &str = "More: Shell…";
+/// The ⋯ button's side, in px.
+const MORE_BUTTON_SIZE: f32 = 30.0;
+
+/// A `size` px square icon from `path`, drawn in `color`.
+fn icon(path: &'static str, size: f32, color: u32) -> Svg {
+    svg()
+        .path(path)
+        .flex_none()
+        .size(px(size))
+        .text_color(gpui::rgb(color))
+}
+
+/// Session, which opens the spawn dialog, with its `Ctrl N` hint; disabled
+/// with no repo, when the hint still shows.
+fn add_session(has_repos: bool, cx: &mut Context<RootView>) -> Stateful<Div> {
+    let tip = if has_repos { SPAWN_TIP } else { NO_REPOS_TIP };
+    let hint = div()
+        .debug_selector(|| "sidebar-session-hint".to_owned())
+        .flex_none()
+        .ml(px(2.0))
+        .font_family(DEFAULT_FAMILY)
+        .text_size(px(10.0))
+        .opacity(0.7)
+        .child("Ctrl N");
+    primary_button("sidebar-add-session", ButtonSize::Toolbar, has_repos)
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .gap(px(6.0))
+        .child(icon(SIDEBAR_PLUS_ICON, 14.0, ON_ACCENT))
+        .child("Session")
+        .child(hint)
+        .tooltip(tooltip(tip))
+        .when(has_repos, |button| {
+            button.on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                this.open_spawn_dialog(SpawnEntry::Toolbar, window, cx);
+            }))
+        })
+}
+
+/// Shell, a standalone shell in the remembered folder; enabled even with no
+/// repo.
 fn add_shell(quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Stateful<Div> {
     let tip = match quick_shell_dir {
         Some(dir) => format!("Open a standalone shell in {dir}"),
         None => "Open a standalone shell in your home folder".to_owned(),
     };
-    div()
-        .id("sidebar-add-shell")
-        .debug_selector(|| "sidebar-add-shell".to_owned())
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .child("+ Shell")
+    outlined_button("sidebar-add-shell", ButtonSize::Toolbar, true)
+        .flex_none()
+        .gap(px(6.0))
+        .child(icon(SIDEBAR_SHELL_ICON, 14.0, TEXT))
+        .child("Shell")
         .tooltip(tooltip(tip))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.quick_shell(cx)))
-}
-
-/// "Shell…", which opens the folder dialog; enabled even with no repo.
-fn add_shell_dialog(cx: &mut Context<RootView>) -> Stateful<Div> {
-    div()
-        .id("sidebar-shell-dialog")
-        .debug_selector(|| "sidebar-shell-dialog".to_owned())
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .child("Shell…")
-        .tooltip(tooltip("Choose a folder for a standalone shell"))
-        .cursor_pointer()
-        .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.open_shell_dialog(window, cx);
-        }))
 }
 
 /// The panel's title and the Repos / Tabs grouping toggle.
@@ -193,23 +314,29 @@ fn header(view: SidebarView, cx: &mut Context<RootView>) -> Div {
             "sidebar-view-tabs",
         ),
     ];
-    let buttons = choices.map(|(choice, label, tip, selector)| {
+    let segments = choices.map(|(choice, label, tip, selector)| {
         let active = choice == view;
         div()
             .id(selector)
             .debug_selector(|| selector.to_owned())
-            .px(px(6.0))
+            .flex()
+            .items_center()
+            .h(px(22.0))
+            .px(px(9.0))
             .rounded(px(4.0))
-            .text_size(px(TAG_TEXT_SIZE + 1.0))
+            .text_size(px(11.5))
             .cursor_pointer()
             .tooltip(tooltip(tip))
-            .when(active, |button| {
-                button
-                    .bg(gpui::rgb(SELECTED_BG))
+            .when(active, |segment| {
+                segment
+                    .bg(gpui::rgb(HOVER))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(gpui::rgb(TEXT))
             })
-            .when(!active, |button| {
-                button.hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
+            .when(!active, |segment| {
+                segment
+                    .text_color(gpui::rgb(TEXT_2))
+                    .hover(|style| style.text_color(gpui::rgb(TEXT)))
             })
             .child(label)
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -220,37 +347,29 @@ fn header(view: SidebarView, cx: &mut Context<RootView>) -> Div {
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(2.0))
-        .h(px(ROW_HEIGHT + 4.0))
-        .px(px(ROW_PADDING))
+        .gap(px(8.0))
+        .h(px(44.0))
+        .pl(px(14.0))
+        .pr(px(10.0))
         .border_b_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(MUTED))
+        .border_color(gpui::rgb(LINE))
         .child(
             div()
                 .flex_1()
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(13.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(gpui::rgb(TEXT))
                 .child("Sessions"),
         )
-        .children(buttons)
-}
-
-/// The spawns, under the header; the row wraps when the sidebar is too
-/// narrow to hold them in one line.
-fn toolbar(has_repos: bool, quick_shell_dir: Option<&str>, cx: &mut Context<RootView>) -> Div {
-    div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(4.0))
-        .px(px(ROW_PADDING))
-        .py(px(4.0))
-        .border_b_1()
-        .border_color(gpui::rgb(BORDER))
-        .text_color(gpui::rgb(MUTED))
-        .child(add_session(has_repos, cx))
-        .child(add_shell(quick_shell_dir, cx))
-        .child(add_shell_dialog(cx))
+        .child(
+            div()
+                .flex()
+                .flex_none()
+                .p(px(2.0))
+                .rounded(px(6.0))
+                .bg(gpui::rgb(RAISED))
+                .children(segments),
+        )
 }
 
 /// The drag handle; a press starts a resize the root follows until release.
@@ -403,17 +522,115 @@ fn bordered_pill(pill: Stateful<Div>, border: u32, text: u32) -> Stateful<Div> {
         .text_color(gpui::rgb(text))
 }
 
+/// The chevron before a container's name: right while folded, down while
+/// open, none (an empty slot) for a tab with no sessions.
+fn chevron(container: &Container) -> AnyElement {
+    let path = if container.kind == ContainerKind::Tab && container.leaves.is_empty() {
+        None
+    } else if container.collapsed {
+        Some(SIDEBAR_CHEVRON_RIGHT_ICON)
+    } else {
+        Some(SIDEBAR_CHEVRON_DOWN_ICON)
+    };
+    match path {
+        Some(path) => icon(path, 13.0, SUBTLE).into_any_element(),
+        None => div().flex_none().size(px(13.0)).into_any_element(),
+    }
+}
+
+/// A container kind's icon, the selector suffix naming it and its colour;
+/// none for Unbound.
+fn kind_icon(kind: ContainerKind) -> Option<(&'static str, &'static str, u32)> {
+    match kind {
+        ContainerKind::Workspace => Some((SIDEBAR_WORKSPACE_ICON, "ws", LILAC)),
+        ContainerKind::Repo => Some((SIDEBAR_BRANCH_ICON, "repo", TEXT_2)),
+        ContainerKind::Shell => Some((SIDEBAR_SHELL_ICON, "shell", TEXT_2)),
+        ContainerKind::Dir | ContainerKind::Detached => {
+            Some((SIDEBAR_FOLDER_ICON, "folder", TEXT_2))
+        }
+        ContainerKind::Tab => Some((SIDEBAR_TABS_ICON, "tabs", TEXT_2)),
+        ContainerKind::Unbound => None,
+    }
+}
+
+/// A container row's parts after the chevron: the kind icon, the name, the
+/// attention badge, the kind tag and the session count, each tagged
+/// `container-<key>-<part>`.
+fn container_parts(container: &Container) -> Vec<AnyElement> {
+    let part = |suffix: &str| format!("container-{}-{suffix}", container.key);
+    let mut parts = Vec::new();
+    if let Some((path, suffix, color)) = kind_icon(container.kind) {
+        let selector = part(&format!("icon-{suffix}"));
+        parts.push(
+            div()
+                .debug_selector(|| selector)
+                .flex()
+                .flex_none()
+                .child(icon(path, 14.0, color))
+                .into_any_element(),
+        );
+    }
+    parts.push(
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .truncate()
+            .text_size(px(12.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::rgb(TEXT))
+            .child(container.name.clone())
+            .into_any_element(),
+    );
+    if container.attention {
+        parts.push(container_badge(part("badge")).into_any_element());
+    }
+    let tag = part("tag");
+    parts.push(
+        div()
+            .debug_selector(|| tag)
+            .flex_none()
+            .font_family(DEFAULT_FAMILY)
+            .text_size(px(TAG_TEXT_SIZE))
+            .text_color(gpui::rgb(SUBTLE))
+            .child(container.kind.tag())
+            .into_any_element(),
+    );
+    let count = part("count");
+    parts.push(
+        div()
+            .debug_selector(|| count)
+            .flex_none()
+            .min_w(px(14.0))
+            .text_right()
+            .text_size(px(11.0))
+            .text_color(gpui::rgb(SUBTLE))
+            .child(container.leaves.len().to_string())
+            .into_any_element(),
+    );
+    parts
+}
+
+/// The `!` badge of a container holding a session that needs attention.
+fn container_badge(selector: String) -> Div {
+    div()
+        .debug_selector(|| selector)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(16.0))
+        .rounded(px(4.0))
+        .bg(gpui::rgb(ASKING))
+        .text_color(gpui::rgb(ON_ASKING))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::BOLD)
+        .child("!")
+}
+
 /// A container row: a click folds it; a right-click on a repo or
-/// workspace opens its menu. A tab with no sessions shows no fold chip.
+/// workspace opens its menu.
 fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<Div> {
     let key = container.key.clone();
-    let chip = if container.kind == ContainerKind::Tab && container.leaves.is_empty() {
-        ""
-    } else if container.collapsed {
-        "▸"
-    } else {
-        "▾"
-    };
     let name = format!("container-{}", container.key);
     let level = match container.kind {
         ContainerKind::Repo => Some(Level::Repo(container.id.clone())),
@@ -428,41 +645,16 @@ fn container_row(container: &Container, cx: &mut Context<RootView>) -> Stateful<
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)
         .flex()
+        .flex_none()
         .items_center()
-        .gap(px(6.0))
-        .h(px(ROW_HEIGHT))
-        .px(px(ROW_PADDING))
+        .gap(px(7.0))
+        .h(px(30.0))
+        .pl(px(4.0))
+        .pr(px(8.0))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
-        .child(
-            div()
-                .flex_none()
-                .w(px(10.0))
-                .text_color(gpui::rgb(MUTED))
-                .child(chip),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(TAG_TEXT_SIZE))
-                .text_color(gpui::rgb(MUTED))
-                .child(container.kind.tag()),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(container.name.clone()),
-        )
-        .when(container.attention, |row| row.child(attention_mark()))
-        .child(
-            div()
-                .flex_none()
-                .text_color(gpui::rgb(MUTED))
-                .child(container.leaves.len().to_string()),
-        )
+        .child(chevron(container))
+        .children(container_parts(container))
         .when_some(container.hover.clone(), |row, tip| {
             row.tooltip(tooltip(tip))
         })
