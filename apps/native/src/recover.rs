@@ -591,10 +591,9 @@ pub struct RecoverDialog {
     groups: Vec<Group>,
     rows: HashMap<String, Row>,
     ticked: HashSet<String>,
-    /// The ticked rows whose tick the pre-tick rule made, so a refresh can
-    /// withdraw a tick the rule no longer makes while the user's own ticks
-    /// and untickings stand.
-    from_pre_tick: HashSet<String>,
+    /// The rows whose tick or untick the user made, so a refresh leaves them
+    /// as the user left them and applies the pre-tick rule only to the rest.
+    user_set: HashSet<String>,
     other_expanded: bool,
     focus: Option<Control>,
     in_flight: Option<InFlight>,
@@ -628,7 +627,7 @@ impl RecoverDialog {
         let mut dialog = Self {
             groups: groups(items, now),
             rows,
-            from_pre_tick: ticked.clone(),
+            user_set: HashSet::new(),
             ticked,
             other_expanded: false,
             focus: None,
@@ -666,16 +665,23 @@ impl RecoverDialog {
                 keep_choices(old, row);
             }
         }
-        let user_ticked = |id: &str| self.ticked.contains(id) && !self.from_pre_tick.contains(id);
         let ticked: HashSet<String> = fresh
             .rows
             .iter()
-            .filter(|(id, row)| row.enabled() && (user_ticked(id) || fresh.ticked.contains(*id)))
+            .filter(|(id, row)| {
+                row.enabled()
+                    && if self.user_set.contains(*id) {
+                        self.ticked.contains(*id)
+                    } else {
+                        fresh.ticked.contains(*id)
+                    }
+            })
             .map(|(id, _)| id.clone())
             .collect();
-        fresh.from_pre_tick = ticked
+        fresh.user_set = self
+            .user_set
             .iter()
-            .filter(|id| !user_ticked(id))
+            .filter(|id| fresh.rows.contains_key(*id))
             .cloned()
             .collect();
         fresh.ticked = ticked;
@@ -776,7 +782,7 @@ impl RecoverDialog {
         if !self.ticked.remove(id) {
             self.ticked.insert(id.to_owned());
         }
-        self.from_pre_tick.remove(id);
+        self.user_set.insert(id.to_owned());
     }
 
     /// Ticks every shown row that can be recovered.
@@ -791,7 +797,7 @@ impl RecoverDialog {
             .map(str::to_owned)
             .collect();
         for id in &ids {
-            self.from_pre_tick.remove(id);
+            self.user_set.insert(id.clone());
         }
         self.ticked.extend(ids);
     }
@@ -1026,7 +1032,7 @@ impl RecoverDialog {
         }
         self.groups.retain(|g| !g.rows.is_empty());
         self.ticked = self.rows.keys().cloned().collect();
-        self.from_pre_tick.clear();
+        self.user_set = self.rows.keys().cloned().collect();
         self.failed_only = true;
         self.other_expanded = self.other_expanded || self.has_other();
         self.focus = self.focus_order().into_iter().next();
@@ -1962,6 +1968,40 @@ mod tests {
         dialog.toggle("x");
         dialog.refresh(&[codex], &Names::default(), &now());
         assert!(dialog.is_ticked("x"), "the user's tick stands");
+    }
+
+    #[test]
+    fn refresh_keeps_a_user_untick_on_a_preticked_loss() {
+        let loss = lost("b", "2026-09-28T09:00:00Z");
+        let mut dialog = dialog(std::slice::from_ref(&loss));
+        assert!(dialog.is_ticked("b"), "a loss is pre-ticked");
+        dialog.toggle("b");
+        dialog.refresh(&[loss], &Names::default(), &now());
+        assert!(!dialog.is_ticked("b"), "the user's untick stands");
+        assert_eq!(dialog.recover_label(), "Recover 0");
+    }
+
+    #[test]
+    fn refresh_keeps_a_user_untick_on_a_failed_row() {
+        let items = [
+            lost("a", "2026-09-28T09:00:00Z"),
+            lost("b", "2026-09-28T09:00:30Z"),
+        ];
+        let mut dialog = dialog(&items);
+        dialog
+            .recover_message("q1", Instant::now())
+            .expect("a request");
+        dialog.on_result(Some("q1"), &[ok("b"), failed("a", "worktree gone")]);
+        assert!(dialog.is_ticked("a"), "the failed row is re-ticked");
+        dialog.toggle("a");
+        assert!(!dialog.is_ticked("a"), "the user unticked it");
+        dialog.refresh(
+            &[lost("a", "2026-09-28T09:00:00Z")],
+            &Names::default(),
+            &now(),
+        );
+        assert!(!dialog.is_ticked("a"), "the user's untick stands");
+        assert_eq!(dialog.recover_label(), "Recover 0");
     }
 
     #[test]
