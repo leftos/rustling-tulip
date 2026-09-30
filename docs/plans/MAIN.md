@@ -26,7 +26,7 @@ Review: `code-review`; a person compares the running client with the boards. Ver
 
 The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boards saved in [canvases/petal/](./canvases/petal/) (briefs and explorers read that copy); every step's rulings and files are in [petal.md](./petal.md). Order: PT.5 and PT.6b are free to start side by side (PT.6b's only `lib.rs` edit is one re-export line); PT.7 follows PT.5 (both edit `lib.rs`); PT.8b needs PT.6b. Every brief runs `.\rt.ps1 native-shot` on the views it changes (petal.md, "Look before landing").
 
-- [ ] **The diff tab's header clips its title from the left** (seen in a `native-shot diff` after PT.9): at the 1000 px shot width the title reads "oter.rs worktree vs index" beside the toggles and the four nav buttons; it should truncate at its end, or the header should give the title the room first. `apps/native/src/diff_tab_view.rs` (the 42 px header). A visual fix: shots before and after go to the user before it lands.
+- [ ] **The diff tab's header clips its title from the left** (seen in a `native-shot diff` after PT.9): at the 1000 px shot width the title reads "oter.rs worktree vs index" beside the toggles and the four nav buttons; ruled (user): the file name first and the folder dimmed after it, the folder truncating, and the Whitespace / Highlight toggles dropping to icons when the header is narrow (petal.md, "Diff header"). `apps/native/src/diff_tab_view.rs` (the 42 px header). A visual fix: shots before and after go to the user before it lands.
 - [ ] **PT.5 Rail, tab bar and footer**, with the footer's status counts.
 - [ ] **PT.6b Leaves in two densities**: Comfortable (the board's two-line leaf, default) and Compact, set in Settings → General.
 - [ ] **PT.7 Pane cards and headers**: 8 px rounded frames, per-session accent borders.
@@ -37,7 +37,7 @@ The user's canvas is https://claude.ai/artifact/B5hxrVTyyR635CQecEpG2N, its boar
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`, plus `-p protocol -p daemon` for P4.16's field; hand-test the chips, tags and overlay colours.
 
-- [ ] **Claude sessions on DeepSeek** (user; after Wave 1): a Claude provider (Anthropic / DeepSeek) routing a session the way `~/.claude/bin/claude-deepseek.ps1` does, the key from `DEEPSEEK_API_KEY` never stored, carried through Recover, Restart, Resume, Duplicate and Launch last, a `DeepSeek` chip, a default in Spawn defaults; steps DK.1–DK.13, the dialog and chip steps after PT.6b / PT.7 / PT.8b. Design and answered questions: [deepseek-sessions.md](./deepseek-sessions.md).
+- [ ] **Claude sessions on DeepSeek** (user; after Wave 1; `branch: feat/deepseek-sessions`): a Claude provider (Anthropic / DeepSeek) routing a session the way `~/.claude/bin/claude-deepseek.ps1` does, the key from `DEEPSEEK_API_KEY` never stored, carried through Recover, Restart, Resume, Duplicate and Launch last, a `DeepSeek` chip, a default in Spawn defaults; steps DK.1–DK.13, the dialog and chip steps after PT.6b / PT.7 / PT.8b. Design and answered questions: [deepseek-sessions.md](./deepseek-sessions.md).
 - [ ] **Recover brings a Codex or Cursor session back as Claude** (found drafting reboot-resume): `plan_recovery`'s `claude_request` swaps the agent options and offers the folder's Claude transcripts. Ruled (user): recover it as its own agent in the same folder, resumed when that CLI can resume, else a fresh run. Ruled (user): research each CLI's resume support from its own docs or source and capture its conversation id at spawn now; the dialog asks for it with an additive `RecoverAs::OwnAgent`. Settled: a fresh run carries no first prompt; a non-Claude entry offers no Claude transcripts; one without spawn settings is disabled with a reason. `crates/daemon/src/history.rs`, `server.rs`, `agents/codex.rs`, `agents/cursor.rs`, `crates/protocol/src/lib.rs`, `apps/native/src/recover.rs`. Steps RA.0 and CR.0 (spikes) to RA.11; RA.0, CR.0 and RA.1 to RA.8 have landed. Design and answered questions: [recover-own-agent.md](./recover-own-agent.md).
 - [ ] **Own-agent recovery of an entry whose repo is no longer registered fails at spawn** (found in RA.7): `folder_target` (`crates/daemon/src/history.rs`) falls back to `SpawnTarget::Standalone`, which `spawn_session` refuses for Codex and Cursor ("standalone targets only support plain_shell sessions and interactive Claude", `server.rs` `standalone_supports`). Either let a standalone target run Codex and Cursor in the recorded folder, or disable the row in the Recover dialog with a reason. See [recover-own-agent.md](./recover-own-agent.md).
 - [ ] **Codex sessions stop on a trust screen, and on a sandbox chooser the first time** (found in the Recover spike RA.0): Codex shows its trust screen even with `--yolo`, and saves trust under the lower-cased, `subst`-resolved path, so a repo opened through a `subst` drive asks again on every spawn and resume; its first run on Windows also asks which sandbox to set up. Find a per-spawn way to pre-trust the folder and skip the chooser (a `-c` config override or the trust key Codex actually reads). `crates/daemon/src/agents/codex.rs`. See [recover-own-agent.md](./recover-own-agent.md).
@@ -75,7 +75,7 @@ Review: `code-review`; UI hand-test of each converted form. Verification: the ga
 
 Review: `code-review`. Verification: the gates with `-p protocol -p daemon -p tracer`, then the live tier (fake-claude runs the injected hooks, HS.9); HS.0 is a spike with a real `claude`, recorded by hand.
 
-- [ ] **Hook-reported agent status** (borrowed from VelaTerm): Claude Code hooks injected through `--settings` report working / asking / waiting / idle, with the `pty_state.rs` heuristic as the fallback; steps HS.0 (a spike of the CLI behaviour it relies on) through HS.11. Design, answered questions and steps: [hook-status.md](./hook-status.md).
+- [ ] **Hook-reported agent status** (borrowed from VelaTerm; `branch: feat/hook-status`): Claude Code hooks injected through `--settings` report working / asking / waiting / idle, with the `pty_state.rs` heuristic as the fallback; steps HS.0 (a spike of the CLI behaviour it relies on) through HS.11. Design, answered questions and steps: [hook-status.md](./hook-status.md).
 
 ### Wave 7 — Alerts, Dashboard and Needs You (`crates/daemon/src/summarizer/`, `apps/native/src/alerts.rs`, `speech.rs`, `dashboard.rs`, `dashboard_view.rs`, `settings_view.rs`, `activity_bar.rs`)
 
@@ -102,9 +102,9 @@ Review: `code-review`; UI hand-test with a real dispatch. Verification: the gate
 
 Review: `code-review`; UI hand-test (multi-window and drag can't be fully specced). Verification: the gates with `-p rustling-tulip-native`, the OS tier.
 
-- [ ] **Phase 5 — windows and drag-and-drop**: pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. Split into P5.1–P5.12 in `native-client.md`'s Phase 5 section, its questions answered. See [native-client.md](./native-client.md#phase-5--windows-and-drag-and-drop).
+- [ ] **Phase 5 — windows and drag-and-drop** (`branch: feat/windows-dnd`): pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. Split into P5.1–P5.12 in `native-client.md`'s Phase 5 section, its questions answered. See [native-client.md](./native-client.md#phase-5--windows-and-drag-and-drop).
 
-### Wave 11 — Remote, cutover and the shared client core (new client-core crate, `apps/native/src/net.rs`, `connection.rs`, `links.rs`, `open.rs`, the installer)
+### Wave 11 — Remote, cutover and the shared client core (new client-core crate, `apps/native/src/net.rs`, `connection.rs`, `links.rs`, `open.rs`, the installer; `branch: feat/remote-cutover`)
 
 Review: `code-review`, and a security read of the pinned-TLS and pairing code. Verification: the gates with `-p rustling-tulip-native -p daemon-client` and the new crate, the live tier; hand-test pairing and a fetch against a second machine, and an install and uninstall.
 
@@ -118,7 +118,7 @@ Review: `code-review`, and a security read of the pinned-TLS and pairing code. V
 
 Review: `code-review`, and a security read of the relay and per-device credentials. Verification: the gates for the Rust crates; the phone builds and a session answered from the phone by hand.
 
-- [ ] **Mobile app MA2–MA10** (user; after Wave 11): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, accounts screen, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
+- [ ] **Mobile app MA2–MA10** (user; after Wave 11; `branch: feat/mobile-app`): relay, per-device credentials, Flutter shell and pairing, iOS pipeline, monitor and respond, push, full terminal, conversation view, accounts screen, each split into items when it comes up. Phases, rulings and open questions: [mobile-app.md](./mobile-app.md).
 
 ### Wave 13 — Claude accounts (new `crates/daemon/src/accounts/`, `server.rs`, `crates/protocol`, `apps/native/src/footer.rs`, new `accounts.rs` and `accounts_view.rs`, `settings_view.rs`, `notify.rs`)
 
