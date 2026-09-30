@@ -491,28 +491,22 @@ mod tests {
     use super::*;
     use tokio::sync::broadcast;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sufficient_output_then_quiescence_exits_early() {
         // 1500 bytes (above MIN_OUTPUT_BYTES) arrive immediately, then
-        // silence. We should exit after STARTUP_MIN_WAIT (the floor),
-        // well before the cap.
+        // silence. We should exit at STARTUP_MIN_WAIT (the floor), well
+        // before the cap. The paused clock makes the wake instant exact.
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(vec![b'.'; 1500]).is_ok());
         let cap = Duration::from_secs(20);
-        let started = Instant::now();
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
-        let elapsed = started.elapsed();
-        assert!(
-            waited >= STARTUP_MIN_WAIT,
-            "should wait at least the floor; waited {waited:?}"
-        );
-        assert!(
-            elapsed < cap,
-            "should exit well before cap; elapsed {elapsed:?}"
+        assert_eq!(
+            waited, STARTUP_MIN_WAIT,
+            "should exit at the floor once quiet and the byte gate are met; waited {waited:?}"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn min_output_bytes_blocks_early_exit() {
         // Only 200 bytes seen (below MIN_OUTPUT_BYTES). Without this
         // gate, the silence + floor would trigger early exit; with it,
@@ -520,44 +514,35 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(vec![b'.'; 200]).is_ok());
         let cap = Duration::from_millis(500);
-        let started = Instant::now();
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
-        let elapsed = started.elapsed();
-        // With a sub-floor cap and insufficient bytes, we should hit the
-        // cap. Tolerate some scheduler jitter on either side.
-        assert!(
-            waited >= cap.saturating_sub(Duration::from_millis(100)),
+        // With a sub-floor cap and insufficient bytes, the deadline is
+        // the only wake left: exactly the cap, never an early exit.
+        assert_eq!(
+            waited, cap,
             "should hit cap when output is below MIN_OUTPUT_BYTES; waited {waited:?}"
-        );
-        assert!(
-            elapsed < cap + Duration::from_millis(300),
-            "shouldn't overrun cap by much; elapsed {elapsed:?}"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn no_output_hits_cap() {
         // No output at all: total_bytes stays at 0 forever, MIN_OUTPUT_BYTES
         // gate blocks quiescence exit, we hit the cap.
         let (_tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let cap = Duration::from_millis(500);
-        let started = Instant::now();
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
-        let elapsed = started.elapsed();
-        assert!(
-            waited >= cap.saturating_sub(Duration::from_millis(100)),
+        assert_eq!(
+            waited, cap,
             "should hit cap with no output; waited {waited:?}"
-        );
-        assert!(
-            elapsed < cap + Duration::from_millis(300),
-            "shouldn't overrun cap by much; elapsed {elapsed:?}"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cap_hit_when_output_never_settles() {
         // Continuous output keeps refreshing last_activity, so we should
-        // hit the ceiling instead of declaring ready.
+        // hit the ceiling instead of declaring ready. The 32-byte sends
+        // keep the byte gate shut for the whole window, so the deadline is
+        // the only exit. Under the paused clock the producer's sleeps
+        // auto-advance and the deadline is reached exactly.
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let cap = Duration::from_millis(800);
         let producer = tokio::spawn(async move {
@@ -568,17 +553,11 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         });
-        let started = Instant::now();
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::AGENT_TUI).await;
-        let elapsed_under_test = started.elapsed();
         producer.abort();
-        assert!(
-            waited >= cap.saturating_sub(Duration::from_millis(100)),
+        assert_eq!(
+            waited, cap,
             "should hit cap when output never settles; waited {waited:?}"
-        );
-        assert!(
-            elapsed_under_test < cap + Duration::from_millis(300),
-            "shouldn't overrun cap by much; elapsed {elapsed_under_test:?}"
         );
     }
 
@@ -605,30 +584,31 @@ mod tests {
         assert_eq!(rule.min_wait, Duration::ZERO);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shell_prompt_is_ready_shortly_after_the_prompt_prints() {
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(b"D:\\proj>".repeat(8)).is_ok());
         let cap = Duration::from_secs(2);
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::SHELL_PROMPT).await;
-        assert!(
-            waited >= SHELL_PROMPT_QUIET_FOR,
-            "should wait for the quiet period; waited {waited:?}"
-        );
-        assert!(
-            waited < Duration::from_secs(1),
-            "should not wait for the cap once the prompt printed; waited {waited:?}"
+        // The prompt's quiet period is the only gate left once the bytes
+        // have printed (min_wait is zero for a shell), so we wake exactly
+        // then, never at the cap.
+        assert_eq!(
+            waited, SHELL_PROMPT_QUIET_FOR,
+            "should wait exactly the quiet period once the prompt printed; waited {waited:?}"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shell_prompt_is_not_ready_on_a_lone_terminal_query() {
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         assert!(tx.send(b"\x1b[6n".to_vec()).is_ok());
         let cap = Duration::from_millis(800);
         let waited = wait_until_ready_or_timeout(&mut rx, cap, &StartupRule::SHELL_PROMPT).await;
-        assert!(
-            waited >= cap.saturating_sub(Duration::from_millis(100)),
+        // Four bytes stay below the shell byte gate forever, so the cap is
+        // the only exit.
+        assert_eq!(
+            waited, cap,
             "a cursor query alone is not a prompt; waited {waited:?}"
         );
     }
@@ -660,10 +640,11 @@ mod tests {
         assert!(matches!(outcome, MarkerOutcome::Found));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn marker_absent_times_out() {
         // Stream emits noise but never the marker; expect Timeout within
-        // VERIFY_WINDOW (plus a little jitter).
+        // VERIFY_WINDOW. The producer ends after its sends, closing the
+        // channel, so the wait returns then — but never past the window.
         let (tx, mut rx) = broadcast::channel::<Vec<u8>>(16);
         let producer = tokio::spawn(async move {
             for _ in 0..5 {
@@ -678,8 +659,8 @@ mod tests {
         producer.abort();
         assert!(matches!(outcome, MarkerOutcome::Timeout));
         assert!(
-            elapsed < VERIFY_WINDOW + Duration::from_millis(300),
-            "shouldn't overrun window by much; elapsed {elapsed:?}"
+            elapsed <= VERIFY_WINDOW,
+            "the wait never overruns the verify window; elapsed {elapsed:?}"
         );
     }
 
