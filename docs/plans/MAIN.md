@@ -139,6 +139,8 @@ Items that share no files with a wave, what waits on something outside the repo,
 
 - [ ] **Self-update an agent CLI before launching it** (user): every Claude, Codex or Cursor spawn first tries to update that CLI to its latest version, then launches it. Ruled (user): each CLI's own update command only, a spawn waits up to 20 s, one update per CLI reused for an hour, an `agent_updates` setting, overrides skip it. `crates/daemon/src/agent_update.rs` (new), `server.rs`, `state.rs`, `crates/protocol/src/lib.rs`, the Settings General view. Steps AU.1 (a spike) to AU.8. Design and answered questions: [agent-cli-update.md](./agent-cli-update.md).
 
+- [ ] **A runtime dropdown of every popular agent harness** (user): the spawn dialog's runtime choice grows from Claude / Codex / Cursor / shell into a dropdown of the popular agent CLIs (Google Antigravity, Pi and the like), each with its own backend in `crates/daemon/src/agents/`. Needs a design pass: which harnesses, what each CLI supports (resume, add-dir, headless, conversation id for Recover), and how the dropdown scales. `crates/daemon/src/agents/`, `crates/protocol/src/lib.rs`, `apps/native/src/spawn_form.rs`, `spawn_view.rs`.
+
 ### Open questions and blocked items
 
 - [ ] **Auto-update for the native client**: blocked until its installer (Wave 11) and a signed release pipeline exist (no Actions pipeline, no signing cert, no hosted manifest).
