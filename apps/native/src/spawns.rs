@@ -126,7 +126,8 @@ impl PendingSpawns {
     /// the session and the focus, with every other pane showing the session
     /// it replaces, and that session is discarded last. Otherwise the
     /// session goes to the aimed tab (else the active one) and nothing is
-    /// discarded.
+    /// discarded. A closing tab is never activated and never takes the
+    /// session: it opens a tab of its own, like one that is gone.
     pub(crate) fn place(
         &mut self,
         request_id: &str,
@@ -136,6 +137,7 @@ impl PendingSpawns {
     ) -> Option<SpawnPlaced> {
         let open_in = self.pending.remove(request_id)?.open_in;
         if let OpenIn::Pane(aim) = &open_in
+            && !tabs.closing().contains(&aim.tab_id)
             && pane_shows(tabs, aim)
         {
             return Some(into_pane(aim, session, tabs));
@@ -143,11 +145,15 @@ impl PendingSpawns {
         let placement = match &open_in {
             OpenIn::NewTab => Placement::NewTab,
             OpenIn::CurrentTab(tab_id) | OpenIn::Tab(tab_id) => {
-                tabs.activate(tab_id);
+                if !tabs.closing().contains(tab_id) {
+                    tabs.activate(tab_id);
+                }
                 tabs.place_in(tab_id, session, sessions)
             }
             OpenIn::Pane(aim) if tabs.tab(&aim.tab_id).is_some() => {
-                tabs.activate(&aim.tab_id);
+                if !tabs.closing().contains(&aim.tab_id) {
+                    tabs.activate(&aim.tab_id);
+                }
                 tabs.place_in(&aim.tab_id, session, sessions)
             }
             OpenIn::Pane(_) => tabs.place(session, sessions),
@@ -836,6 +842,62 @@ mod tests {
         assert!(matches!(only(&placed), ClientMessage::CreateTab { .. }));
         assert!(tabs.apply(&updated(&tab("t9", &pane("n", Some("new"))))));
         assert_eq!(tabs.active_id(), Some("t9"));
+    }
+
+    #[test]
+    fn a_spawn_aimed_at_a_closing_tab_opens_a_new_tab() {
+        let mut tabs = model_with(&[
+            tab("t0", &pane("z", Some("s0"))),
+            tab("t1", &pane("a", Some("s1"))),
+        ]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(request(true), "q1".to_owned(), OpenIn::Tab("t1".to_owned()));
+        tabs.mark_closing("t1");
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::CreateTab { .. }),
+            "not into the closing tab: {:?}",
+            placed.messages
+        );
+        assert_eq!(
+            tabs.active_id(),
+            Some("t0"),
+            "the closing tab is not made active"
+        );
+        assert!(tabs.apply(&updated(&tab("t9", &pane("n", Some("new"))))));
+        assert_eq!(tabs.active_id(), Some("t9"), "the create is armed");
+    }
+
+    #[test]
+    fn a_spawn_aimed_at_a_pane_of_a_closing_tab_opens_a_new_tab() {
+        let mut tabs = model_with(&[
+            tab("t0", &pane("z", Some("s0"))),
+            tab("t1", &pane("a", Some("s1"))),
+        ]);
+        let mut spawns = PendingSpawns::default();
+        spawns.start(
+            request(true),
+            "q1".to_owned(),
+            aim_at("t1", "a", Some("s1")),
+        );
+        tabs.mark_closing("t1");
+
+        let placed = spawns
+            .place("q1", &session("new", None, None), &mut tabs, &[])
+            .expect("placed");
+        assert!(
+            matches!(only(&placed), ClientMessage::CreateTab { .. }),
+            "not into the pane nor the active tab: {:?}",
+            placed.messages
+        );
+        assert_eq!(
+            tabs.active_id(),
+            Some("t0"),
+            "the closing tab is not made active"
+        );
     }
 
     #[test]

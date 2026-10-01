@@ -1624,6 +1624,32 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_aimed_at_a_closing_tab_opens_a_new_tab() {
+        let mut tabs = model_with(&[
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("a", Some("s9"))),
+        ]);
+        tabs.mark_closing("t2");
+        let mut dups = Duplicates::default();
+        dups.request(
+            "s1",
+            "req".to_owned(),
+            DuplicateTarget::Tab("t2".to_owned()),
+        );
+
+        let placed = dups.place("req", &named("s2"), &tabs, &[]).expect("placed");
+        assert_eq!(placed.focus, PlacedFocus::NewTab);
+        assert!(
+            matches!(
+                placed.messages.as_slice(),
+                [ClientMessage::CreateTab { .. }]
+            ),
+            "not into the closing tab: {:?}",
+            placed.messages
+        );
+    }
+
+    #[test]
     fn actions_restart_still_replaces_and_discards() {
         let tabs = model_with(&[tab("t1", &pane("p1", Some("s1")))]);
         let mut dups = Duplicates::default();

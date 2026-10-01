@@ -1081,13 +1081,16 @@ impl TabsModel {
     }
 
     /// Where `session` goes in `tab_id` by [`pane_target_for_session`], or
-    /// a new tab when `tab_id` is gone or holds no grid.
+    /// a new tab when `tab_id` is gone, closing, or holds no grid.
     pub fn place_in(
         &self,
         tab_id: &str,
         session: &SessionSnapshot,
         sessions: &[SessionSnapshot],
     ) -> Placement {
+        if self.closing.contains(tab_id) {
+            return Placement::NewTab;
+        }
         let Some(tab) = self.tab(tab_id) else {
             return Placement::NewTab;
         };
@@ -1632,6 +1635,30 @@ pub(crate) mod tests {
         let model = model_with(&[tab("t1", &pane("a", None)), diff_tab("d")]);
         assert_eq!(model.place_in("gone", &new, &[]), Placement::NewTab);
         assert_eq!(model.place_in("d", &new, &[]), Placement::NewTab);
+    }
+
+    #[test]
+    fn place_in_a_closing_tab_is_a_new_tab() {
+        let new = session("new", Some("q"), None);
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        assert_eq!(
+            model.place_in("t1", &new, &[]),
+            Placement::Pane {
+                tab_id: "t1".to_owned(),
+                target: replace("a"),
+            }
+        );
+        model.mark_closing("t1");
+        assert_eq!(model.place_in("t1", &new, &[]), Placement::NewTab);
+    }
+
+    #[test]
+    fn place_with_a_closing_active_tab_is_a_new_tab() {
+        let new = session("new", Some("q"), None);
+        let mut model = model_with(&[tab("t1", &pane("a", None))]);
+        assert_eq!(model.active_id(), Some("t1"));
+        model.mark_closing("t1");
+        assert_eq!(model.place(&new, &[]), Placement::NewTab);
     }
 
     #[test]
