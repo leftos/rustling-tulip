@@ -10,6 +10,7 @@
 //! Decoupled from Claude Code's own `~/.claude/projects/<encoded-cwd>/*.jsonl`
 //! files so we don't depend on the undocumented log layout.
 
+use crate::env_secrets::{self, SealOutcome};
 use crate::paths::Dirs;
 use anyhow::{Context as _, anyhow};
 use chrono::{DateTime, Utc};
@@ -176,12 +177,14 @@ fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
 /// Write `bytes` to `path` through a sibling `.tmp` file and a rename, so a
 /// reader never sees a half-written file. Each write gets its own temp name,
 /// so two writers of the same file never write into or rename each other's
-/// temp file.
+/// temp file. Written owner-only (`secret::write_private`), like every other
+/// file a session's spawn config reaches.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
     static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
     let n = NEXT_TMP.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    crate::secret::write_private(&tmp, bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
     if let Err(err) = std::fs::rename(&tmp, path) {
         if let Err(cleanup) = std::fs::remove_file(&tmp) {
             warn!(?cleanup, path = %tmp.display(), "failed to remove temp file after a failed rename");
@@ -209,10 +212,17 @@ pub fn load_meta(dirs: &Dirs, session_id: &str) -> anyhow::Result<OrphanMeta> {
 }
 
 pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
+    Ok(scan_sidecars(dirs)?.0)
+}
+
+/// Every sidecar the sessions dir holds, plus the paths the scan could not turn
+/// into a meta — already warned about by the scan itself.
+fn scan_sidecars(dirs: &Dirs) -> anyhow::Result<(Vec<OrphanMeta>, Vec<PathBuf>)> {
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     let entries = match std::fs::read_dir(&dirs.sessions_dir) {
         Ok(e) => e,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((out, skipped)),
         Err(err) => return Err(err).context("reading sessions dir"),
     };
     for entry in entries {
@@ -220,6 +230,7 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
             Ok(e) => e,
             Err(err) => {
                 warn!(?err, "skipping unreadable session dir entry");
+                skipped.push(dirs.sessions_dir.clone());
                 continue;
             }
         };
@@ -232,6 +243,7 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
                 warn!(?err, path = %path.display(), "skipping unreadable meta.json");
+                skipped.push(path);
                 continue;
             }
         };
@@ -247,16 +259,64 @@ pub fn read_all_metas(dirs: &Dirs) -> anyhow::Result<Vec<OrphanMeta>> {
             Err(err) => {
                 warn!(?err, path = %path.display(), "quarantining corrupt meta.json (not valid JSON)");
                 quarantine_meta(&path);
+                skipped.push(path);
             }
             Ok(value) => match migrate_sidecar(value) {
                 Ok(meta) => out.push(meta),
                 Err(err) => {
                     warn!(?err, path = %path.display(), "skipping malformed meta.json");
+                    skipped.push(path);
                 }
             },
         }
     }
-    Ok(out)
+    Ok((out, skipped))
+}
+
+/// Every sidecar the sessions dir holds, or the path the scan could not read —
+/// the folder itself, or a sidecar it could not turn into a meta (a corrupt
+/// one, or one from a future daemon version, which is kept on purpose for a
+/// later upgrade). A startup sweep that must not miss a secret reference
+/// declines to act rather than read a skipped file as "nothing".
+///
+/// # Errors
+///
+/// The path of the folder or sidecar that could not be read.
+pub fn read_all_metas_for_references(dirs: &Dirs) -> Result<Vec<OrphanMeta>, PathBuf> {
+    let (metas, skipped) = scan_sidecars(dirs).map_err(|_| dirs.sessions_dir.clone())?;
+    match skipped.into_iter().next() {
+        Some(path) => Err(path),
+        None => Ok(metas),
+    }
+}
+
+/// Seal every secret literal row in every session sidecar's spawn config,
+/// rewriting each sidecar that changed and leaving the rest byte-identical.
+///
+/// Run at startup before orphan recovery reads the sidecars, so a reattached
+/// or abandoned session's config already carries references. A sidecar that
+/// cannot be read or parsed is skipped with a warning, as orphan recovery
+/// treats it; a store refusal leaves that sidecar as it was and the next start
+/// tries again.
+pub fn seal_sidecar_secrets(dirs: &Dirs) {
+    let metas = read_all_metas(dirs).unwrap_or_else(|err| {
+        warn!(?err, "sidecar secret seal: failed to read session sidecars");
+        Vec::new()
+    });
+    for mut meta in metas {
+        let path = meta_path(dirs, &meta.session_id);
+        let Some(config) = meta.spawn_config.as_mut() else {
+            continue;
+        };
+        let SealOutcome::Sealed(rows) = env_secrets::seal_stored_rows(&config.extra_env, &path)
+        else {
+            continue;
+        };
+        config.extra_env = rows;
+        if let Err(err) = write_meta(dirs, &meta) {
+            warn!(?err, path = %path.display(), "sidecar secret seal: could not rewrite the sidecar");
+        }
+    }
 }
 
 /// Move an undecodable sidecar aside as `meta.json.corrupt`, replacing any

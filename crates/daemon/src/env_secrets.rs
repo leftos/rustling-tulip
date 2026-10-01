@@ -22,10 +22,11 @@ use crate::secret;
 use crate::spawn_plan::SpawnFailure;
 use crate::user_env::Secret;
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use keyring_core::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -67,6 +68,11 @@ fn index_lock() -> MutexGuard<'static, ()> {
 /// credential's blob: `CRED_MAX_CREDENTIAL_BLOB_SIZE` (2,560) bytes of UTF-16,
 /// which `windows-native-keyring-store` encodes the value as.
 const MAX_VALUE_UNITS: usize = 1280;
+
+/// How long an unreferenced secret is kept before a startup cleanup may delete
+/// it: long enough to cover a spawn sealed by an older daemon instance moments
+/// before a restart, so a value a config still needs is never swept.
+const UNREFERENCED_GRACE: TimeDelta = TimeDelta::hours(1);
 
 /// Install Windows Credential Manager as the process's credential store.
 ///
@@ -172,6 +178,63 @@ fn is_secret_row(key: &str, value: &str, secret_keys: &[String]) -> bool {
             || secret_keys.iter().any(|listed| listed == key))
 }
 
+/// What sealing one stored file's spawn-config rows at startup did.
+pub(crate) enum SealOutcome {
+    /// No row needed sealing; the file is left as it is.
+    Unchanged,
+    /// The rows, with each secret literal the store took replaced by the
+    /// `${secret:<id>}` reference standing for it.
+    Sealed(Vec<(String, String)>),
+}
+
+/// Seal every secret literal row of `rows` — one stored file's spawn config —
+/// so an older file's plain-text secrets move into the store at startup.
+///
+/// Only the name pattern applies: a file written before the dialog's per-row
+/// toggle carries no toggle, so a row is sealed when
+/// [`protocol::env_rows::is_secret_key`] matches its key.
+///
+/// One row at a time: a value the store refuses stays in plain text with a
+/// warning naming `file` and the key, never the value, and every other row is
+/// still sealed.
+pub(crate) fn seal_stored_rows(rows: &[(String, String)], file: &Path) -> SealOutcome {
+    let mut sealed = rows.to_vec();
+    let mut changed = false;
+    for (key, value) in &mut sealed {
+        if !is_secret_row(key, value, &[]) {
+            continue;
+        }
+        match seal(key, value) {
+            Ok(id) => {
+                *value = format!("${{secret:{id}}}");
+                changed = true;
+            }
+            Err(failure) => warn!(
+                file = %file.display(),
+                key = %key,
+                error = %failure.detail,
+                "env_secrets: could not seal a secret row; leaving it in plain text"
+            ),
+        }
+    }
+    if changed {
+        SealOutcome::Sealed(sealed)
+    } else {
+        SealOutcome::Unchanged
+    }
+}
+
+/// Add every id `rows` references through `${secret:<id>}` to `into`.
+pub(crate) fn referenced_ids(rows: &[(String, String)], into: &mut HashSet<String>) {
+    for (_, value) in rows {
+        if let Some(protocol::env_rows::Reference::Secret(id)) =
+            protocol::env_rows::reference(value)
+        {
+            into.insert(id);
+        }
+    }
+}
+
 /// The refusals a secret value must pass before it can be stored: it fits the
 /// store's size limit, and the store is installed (see [`init`]). Shared by
 /// [`seal`] and [`check_sealable`], so a row is refused for the same reasons
@@ -228,14 +291,6 @@ pub fn open(id: &str) -> Option<Secret> {
 /// Fails when the index cannot be read or rewritten, or when the store refuses
 /// to remove the value. A refusal leaves the line in place: the value is still
 /// in the store, so it has to stay findable for a later cleanup to retry.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the startup cleanup of unreferenced ids is its production caller; only \
-                  this module's tests call it so far"
-    )
-)]
 pub fn delete(id: &str) -> anyhow::Result<()> {
     let _guard = index_lock();
     let context = context()?;
@@ -249,6 +304,51 @@ pub fn delete(id: &str) -> anyhow::Result<()> {
     remove_stored(&context.service, &key, id)?;
     entries.remove(position);
     write_index(&context.index, &entries)
+}
+
+/// Delete every indexed value `referenced` does not name and that was saved
+/// more than [`UNREFERENCED_GRACE`] before `now`, from the store and the
+/// index. Returns how many were deleted.
+///
+/// A spawn that failed after sealing, a history entry pruned since it was
+/// written, and a `last_spawn_config` a later spawn replaced all leave an id
+/// nothing points at; this is the startup sweep that removes them. Each
+/// removal goes through [`delete`], so a store refusal keeps that id's index
+/// line for the next start and an id whose credential the user already
+/// cleared loses its line. Call it before the daemon serves connections —
+/// `delete` takes the index lock per id, not across the whole sweep.
+#[must_use]
+pub fn collect_unreferenced(referenced: &HashSet<String>, now: DateTime<Utc>) -> usize {
+    let context = match context() {
+        Ok(context) => context,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "env_secrets: no config dir to clean up from");
+            return 0;
+        }
+    };
+    let entries = match read_index(&context.index) {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "env_secrets: unreadable index; skipping cleanup");
+            return 0;
+        }
+    };
+    let mut removed = 0_usize;
+    for entry in entries {
+        if referenced.contains(&entry.id) || now - entry.created_at <= UNREFERENCED_GRACE {
+            continue;
+        }
+        match delete(&entry.id) {
+            Ok(()) => removed += 1,
+            Err(err) => warn!(
+                key = %entry.key,
+                id = %entry.id,
+                error = %format!("{err:#}"),
+                "env_secrets: could not remove an unreferenced secret; keeping it for the next start"
+            ),
+        }
+    }
+    removed
 }
 
 /// The service name and index path every operation here needs.
@@ -328,13 +428,6 @@ fn store_value(service: &str, key: &str, id: &str, value: &str) -> anyhow::Resul
     Ok(())
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called by `delete`, whose production caller is the startup cleanup"
-    )
-)]
 fn remove_stored(service: &str, key: &str, id: &str) -> anyhow::Result<()> {
     let entry = Entry::new(service, &user(key, id))
         .with_context(|| format!("opening the credential entry for {key}"))?;
@@ -472,6 +565,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{mock_store, scratch};
     use super::*;
+    use crate::{history, orphan};
     use std::sync::Arc;
 
     /// A value no index file may ever contain.
@@ -742,5 +836,702 @@ mod tests {
 
         delete(&id).expect("an already-gone value counts as removed");
         assert!(!index_text().contains(&id));
+    }
+
+    // --- The startup passes over stored files (ES.4, ES.5) -------------------
+
+    /// The `${secret:<id>}` reference standing for `id`.
+    fn secret_ref(id: &str) -> String {
+        format!("${{secret:{id}}}")
+    }
+
+    /// A spawn config whose env rows are `rows`, for a fixture file.
+    fn fixture_config(rows: &[(&str, &str)]) -> protocol::SpawnConfig {
+        protocol::SpawnConfig {
+            target: protocol::SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            mode: protocol::SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent_options: protocol::AgentOptions::Claude {
+                permission_mode: None,
+            },
+            model: None,
+            extra_env: rows
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    /// A registered repo whose last spawn config carries `config`.
+    fn repo_with_config(id: &str, config: protocol::SpawnConfig) -> protocol::RepoEntry {
+        protocol::RepoEntry {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            path: format!("C:/fixture/{id}"),
+            default_branch: None,
+            default_use_worktree: false,
+            appearance: protocol::AppearanceOverrides::default(),
+            last_agent: None,
+            last_spawn_config: Some(config),
+        }
+    }
+
+    /// A `Dirs` rooted at `root`, with its sessions and history dirs created.
+    fn fixture_dirs(root: &std::path::Path) -> paths::Dirs {
+        let config = root.join("config");
+        let dirs = paths::Dirs {
+            config: config.clone(),
+            state_file: config.join("state.json"),
+            handshake_file: config.join("daemon.json"),
+            lan_config_file: config.join("lan.json"),
+            lan_cert_file: config.join("lan-cert.pem"),
+            lan_key_file: config.join("lan-key.pem"),
+            sessions_dir: config.join("sessions"),
+            worktrees_dir: root.join("worktrees"),
+            binaries_dir: root.join("binaries"),
+        };
+        std::fs::create_dir_all(&dirs.sessions_dir).expect("create the sessions dir");
+        std::fs::create_dir_all(dirs.history_dir()).expect("create the history dir");
+        dirs
+    }
+
+    /// A scratch root unique to `label`.
+    fn fixture_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "rt-startup-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    /// Write the sidecar a spawn would leave: `id`'s meta carrying `config`.
+    fn write_sidecar(dirs: &paths::Dirs, id: &str, config: &protocol::SpawnConfig) {
+        let config = serde_json::to_value(config).expect("serialize the fixture config");
+        let meta: orphan::OrphanMeta = serde_json::from_value(serde_json::json!({
+            "session_id": id,
+            "pid": 4242,
+            "label": id,
+            "kind": "standalone",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2026-01-01T00:00:00Z",
+            "spawn_config": config,
+        }))
+        .expect("the sidecar fixture parses");
+        orphan::write_meta(dirs, &meta).expect("write the fixture sidecar");
+    }
+
+    /// Write the history entry a stop would leave: `id`'s entry carrying
+    /// `config`, ended just now so the startup prune keeps it.
+    fn write_history(dirs: &paths::Dirs, id: &str, config: &protocol::SpawnConfig) {
+        write_history_at(dirs, id, Utc::now(), config);
+    }
+
+    /// The same, with an explicit end time, so a test can put an entry past the
+    /// retention window.
+    fn write_history_at(
+        dirs: &paths::Dirs,
+        id: &str,
+        ended_at: DateTime<Utc>,
+        config: &protocol::SpawnConfig,
+    ) {
+        let config = serde_json::to_value(config).expect("serialize the fixture config");
+        let entry: protocol::HistoryEntry = serde_json::from_value(serde_json::json!({
+            "session_id": id,
+            "label": id,
+            "kind": "standalone",
+            "mode": "interactive",
+            "agent": "claude",
+            "members": [],
+            "ended_at": ended_at.to_rfc3339(),
+            "end": { "type": "stopped_by_user" },
+            "source": "record",
+            "spawn_config": config,
+        }))
+        .expect("the history fixture parses");
+        history::write_if_absent(dirs, &entry).expect("write the fixture history entry");
+    }
+
+    /// `state.json`'s repo, a sidecar and a history entry whose
+    /// `ANTHROPIC_API_KEY` row holds the sentinel literal, each beside a plain
+    /// `RUST_LOG=debug` row. Returns the loaded state.
+    fn seed_startup_fixtures(dirs: &paths::Dirs) -> crate::state::AppState {
+        let state = crate::state::AppState::load_or_default(dirs).expect("load the fixture state");
+        let rows = [("ANTHROPIC_API_KEY", VALUE_SENTINEL), ("RUST_LOG", "debug")];
+        state
+            .mutate(|persisted| {
+                persisted
+                    .repos
+                    .push(repo_with_config("r1", fixture_config(&rows)));
+            })
+            .expect("seed state.json");
+        write_sidecar(dirs, "sidecar-seal", &fixture_config(&rows));
+        write_history(dirs, "history-seal", &fixture_config(&rows));
+        state
+    }
+
+    /// Startup's file passes in order: `state.json` and the sidecars before
+    /// orphan recovery reads them, then the history pass after its prune.
+    fn run_startup_secret_passes(dirs: &paths::Dirs, state: &crate::state::AppState) {
+        crate::seal_stored_secrets(dirs, state);
+        crate::prune_and_seal_history(dirs, Utc::now());
+    }
+
+    /// The three fixture files a startup pass visits.
+    fn startup_files(dirs: &paths::Dirs) -> [std::path::PathBuf; 3] {
+        [
+            dirs.state_file.clone(),
+            dirs.sessions_dir.join("sidecar-seal").join("meta.json"),
+            dirs.history_dir().join("history-seal.json"),
+        ]
+    }
+
+    /// `text` holds no copy of the sentinel and does carry a reference.
+    fn assert_sealed(text: &str, what: &str) {
+        assert!(!text.contains(VALUE_SENTINEL), "{what}: {text}");
+        assert!(text.contains("${secret:"), "{what}: {text}");
+    }
+
+    /// The id of the first `${secret:<id>}` reference in `text`.
+    fn sealed_id(text: &str) -> String {
+        let rest = text
+            .split("${secret:")
+            .nth(1)
+            .expect("a reference is present");
+        rest.split('}')
+            .next()
+            .expect("the reference closes")
+            .to_owned()
+    }
+
+    fn read_text(path: &std::path::Path) -> String {
+        std::fs::read_to_string(path).expect("the file reads")
+    }
+
+    /// `path`'s modification time.
+    fn modified(path: &std::path::Path) -> std::time::SystemTime {
+        std::fs::metadata(path)
+            .expect("the file exists")
+            .modified()
+            .expect("the file has a modification time")
+    }
+
+    /// How many values the index holds.
+    fn index_len() -> usize {
+        read_index(&context().expect("the config dir resolves").index)
+            .expect("the index reads")
+            .len()
+    }
+
+    /// Captures the process's `tracing` output into a buffer, so a test can
+    /// assert what a warning line does and does not carry.
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.0.lock().expect("the log buffer is not poisoned");
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the log buffer is not poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Leaves the credential store unset for the guard's lifetime and restores
+    /// the mock store on drop, so a panicking assertion cannot strand every
+    /// other test without one.
+    struct StoreUnset;
+
+    impl StoreUnset {
+        fn unset() -> Self {
+            keyring_core::unset_default_store();
+            Self
+        }
+    }
+
+    impl Drop for StoreUnset {
+        fn drop(&mut self) {
+            let store: Arc<keyring_core::CredentialStore> = mock_store();
+            keyring_core::set_default_store(store);
+        }
+    }
+
+    #[test]
+    fn the_startup_pass_seals_state_sidecar_and_history_files() {
+        let (_lock, _config_dir) = scratch("startup-seal");
+        let dirs = fixture_dirs(&fixture_root("seal"));
+        let state = seed_startup_fixtures(&dirs);
+
+        run_startup_secret_passes(&dirs, &state);
+
+        let state_text = read_text(&dirs.state_file);
+        assert_sealed(&state_text, "state.json");
+        assert!(
+            state_text.contains("RUST_LOG"),
+            "the plain row stays: {state_text}"
+        );
+        assert!(
+            state_text.contains("debug"),
+            "the plain value stays: {state_text}"
+        );
+        let sidecar_text = read_text(&dirs.sessions_dir.join("sidecar-seal").join("meta.json"));
+        assert_sealed(&sidecar_text, "the sidecar");
+        assert!(
+            sidecar_text.contains("debug"),
+            "the plain row stays: {sidecar_text}"
+        );
+        let history_text = read_text(&dirs.history_dir().join("history-seal.json"));
+        assert_sealed(&history_text, "the history entry");
+        assert!(
+            history_text.contains("debug"),
+            "the plain row stays: {history_text}"
+        );
+
+        let id = sealed_id(&state_text);
+        assert_eq!(
+            open(&id).expect("the sealed value opens").expose(),
+            VALUE_SENTINEL,
+            "the store holds the literal the file used to carry"
+        );
+    }
+
+    #[test]
+    fn a_second_startup_pass_rewrites_nothing() {
+        let (_lock, _config_dir) = scratch("startup-again");
+        let dirs = fixture_dirs(&fixture_root("again"));
+        let state = seed_startup_fixtures(&dirs);
+        run_startup_secret_passes(&dirs, &state);
+
+        let files = startup_files(&dirs);
+        let before: Vec<(std::time::SystemTime, Vec<u8>)> = files
+            .iter()
+            .map(|path| {
+                let modified = std::fs::metadata(path)
+                    .expect("the file exists")
+                    .modified()
+                    .expect("the file has a modification time");
+                (modified, std::fs::read(path).expect("the file reads"))
+            })
+            .collect();
+
+        run_startup_secret_passes(&dirs, &state);
+
+        for (path, (modified, bytes)) in files.iter().zip(before) {
+            let meta = std::fs::metadata(path).expect("the file exists");
+            assert_eq!(
+                meta.modified().expect("the file has a modification time"),
+                modified,
+                "{} was rewritten",
+                path.display()
+            );
+            assert_eq!(
+                std::fs::read(path).expect("the file reads"),
+                bytes,
+                "{} changed",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_store_that_refuses_leaves_every_file_untouched_and_logs_no_value() {
+        let (_lock, _config_dir) = scratch("startup-refused");
+        let dirs = fixture_dirs(&fixture_root("refused"));
+        let state = seed_startup_fixtures(&dirs);
+
+        let files = startup_files(&dirs);
+        let before: Vec<Vec<u8>> = files
+            .iter()
+            .map(|path| std::fs::read(path).expect("the file reads"))
+            .collect();
+
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        let _store = StoreUnset::unset();
+        tracing::subscriber::with_default(subscriber, || {
+            run_startup_secret_passes(&dirs, &state);
+        });
+
+        for (path, bytes) in files.iter().zip(before) {
+            assert_eq!(
+                std::fs::read(path).expect("the file reads"),
+                bytes,
+                "{} was rewritten after the store refused",
+                path.display()
+            );
+        }
+        let logs = capture.text();
+        assert!(
+            !logs.contains(VALUE_SENTINEL),
+            "the warning line carries the value: {logs}"
+        );
+        assert!(
+            logs.contains("ANTHROPIC_API_KEY"),
+            "no warning named the key: {logs}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_history_file_is_skipped() {
+        let (_lock, _config_dir) = scratch("startup-broken");
+        let dirs = fixture_dirs(&fixture_root("broken"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let broken = dirs.history_dir().join("broken.json");
+        std::fs::write(&broken, b"{ this is not json").expect("write the broken entry");
+        let before = std::fs::read(&broken).expect("the file reads");
+
+        run_startup_secret_passes(&dirs, &state);
+
+        assert_eq!(
+            std::fs::read(&broken).expect("the file reads"),
+            before,
+            "the unreadable file is left as it is"
+        );
+    }
+
+    #[test]
+    fn an_id_a_history_entry_references_is_kept() {
+        let (_lock, _config_dir) = scratch("collect-history");
+        let dirs = fixture_dirs(&fixture_root("collect-history"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        write_history(
+            &dirs,
+            "kept",
+            &fixture_config(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+        );
+
+        let referenced = crate::referenced_secret_ids(&dirs, &state).expect("every file reads");
+        assert!(referenced.contains(&id), "{referenced:?}");
+        assert_eq!(
+            collect_unreferenced(&referenced, Utc::now() + TimeDelta::hours(2)),
+            0,
+            "a referenced value is never swept"
+        );
+        assert!(open(&id).is_some(), "the value survives the sweep");
+    }
+
+    #[test]
+    fn an_id_a_sidecar_or_last_spawn_config_references_is_kept() {
+        let (_lock, _config_dir) = scratch("collect-files");
+        let dirs = fixture_dirs(&fixture_root("collect-files"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let sidecar_id = seal("GH_TOKEN", VALUE_SENTINEL).expect("seals");
+        let state_id = seal("MY_SECRET", "another-value").expect("seals");
+        write_sidecar(
+            &dirs,
+            "kept",
+            &fixture_config(&[("GH_TOKEN", &secret_ref(&sidecar_id))]),
+        );
+        state
+            .mutate(|persisted| {
+                persisted.repos.push(repo_with_config(
+                    "r1",
+                    fixture_config(&[("MY_SECRET", &secret_ref(&state_id))]),
+                ));
+            })
+            .expect("seed state.json");
+
+        let referenced = crate::referenced_secret_ids(&dirs, &state).expect("every file reads");
+        assert!(
+            referenced.contains(&sidecar_id) && referenced.contains(&state_id),
+            "{referenced:?}"
+        );
+        assert_eq!(
+            collect_unreferenced(&referenced, Utc::now() + TimeDelta::hours(2)),
+            0
+        );
+        assert!(open(&sidecar_id).is_some() && open(&state_id).is_some());
+    }
+
+    #[test]
+    fn an_unreferenced_id_two_hours_old_is_deleted_from_the_store_and_index() {
+        let (_lock, _dir) = scratch("collect-old");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+
+        let removed = collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::hours(2));
+
+        assert_eq!(removed, 1);
+        assert!(open(&id).is_none(), "the value is gone from the store");
+        assert!(!index_text().contains(&id), "and its line from the index");
+    }
+
+    #[test]
+    fn an_unreferenced_id_five_minutes_old_is_kept() {
+        let (_lock, _dir) = scratch("collect-young");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+
+        assert_eq!(
+            collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::minutes(5)),
+            0,
+            "the grace period covers a spawn sealed moments before a restart"
+        );
+        assert!(open(&id).is_some(), "the value is still in the store");
+        assert!(index_text().contains(&id), "and its line in the index");
+    }
+
+    #[test]
+    fn collect_unreferenced_drops_a_line_whose_credential_is_gone() {
+        let (_lock, _dir) = scratch("collect-gone");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let service = service_for(&paths::config_dir().expect("the config dir resolves"));
+        Entry::new(&service, &user("ANTHROPIC_API_KEY", &id))
+            .expect("the credential is built")
+            .delete_credential()
+            .expect("the store removes it");
+
+        assert_eq!(
+            collect_unreferenced(&HashSet::new(), Utc::now() + TimeDelta::hours(2)),
+            1,
+            "a line whose credential is already gone is dropped"
+        );
+        assert!(!index_text().contains(&id));
+    }
+
+    #[test]
+    fn collect_unreferenced_keeps_a_line_whose_removal_fails() {
+        let (_lock, _dir) = scratch("collect-failure");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        inject_store_error(
+            "ANTHROPIC_API_KEY",
+            &id,
+            KeyringError::Invalid("injected".to_owned(), "the store refused".to_owned()),
+        );
+        let later = Utc::now() + TimeDelta::hours(2);
+
+        assert_eq!(collect_unreferenced(&HashSet::new(), later), 0);
+        assert!(
+            index_text().contains(&id),
+            "the line survives for the next start"
+        );
+        assert!(open(&id).is_some(), "and so does the value");
+
+        // The mock clears its injected error once it has returned it, so the
+        // next start's sweep finds the value and the removal goes through.
+        assert_eq!(collect_unreferenced(&HashSet::new(), later), 1);
+        assert!(!index_text().contains(&id));
+    }
+
+    /// A sweep with every stored file readable still deletes what nothing
+    /// references: the guard is about an unread file, not about never acting.
+    #[test]
+    fn a_sweep_with_every_file_readable_still_deletes() {
+        let (_lock, _config_dir) = scratch("sweep-clean");
+        let dirs = fixture_dirs(&fixture_root("sweep-clean"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+
+        crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
+
+        assert!(open(&id).is_none(), "an unreferenced id is swept");
+        assert!(!index_text().contains(&id));
+    }
+
+    /// A history file the loader cannot parse may hold the only reference to
+    /// an id, so the sweep cannot prove it unreferenced and deletes nothing.
+    #[test]
+    fn an_id_only_an_unparseable_history_file_references_is_kept() {
+        let (_lock, _config_dir) = scratch("sweep-broken-history");
+        let dirs = fixture_dirs(&fixture_root("sweep-broken-history"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        // Invalid JSON (the object is never closed) that still holds the
+        // reference text, so only a parse can tell what it pointed at.
+        std::fs::write(
+            dirs.history_dir().join("broken.json"),
+            format!(
+                "{{\"spawn_config\": {{\"extra_env\": [[\"K\", \"{}\"]]}}",
+                secret_ref(&id)
+            ),
+        )
+        .expect("write the broken entry");
+
+        crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
+
+        assert!(
+            open(&id).is_some(),
+            "an id survives a sweep that cannot read every file"
+        );
+    }
+
+    /// A sidecar from a newer daemon is left in place on purpose, so the id it
+    /// alone references must survive the sweep.
+    #[test]
+    fn an_id_only_a_future_version_sidecar_references_is_kept() {
+        let (_lock, _config_dir) = scratch("sweep-future-sidecar");
+        let dirs = fixture_dirs(&fixture_root("sweep-future-sidecar"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        let dir = dirs.sessions_dir.join("future");
+        std::fs::create_dir_all(&dir).expect("create the session dir");
+        let config =
+            serde_json::to_value(fixture_config(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]))
+                .expect("serialize the fixture config");
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "on_disk_version": orphan::MAX_KNOWN_SIDECAR_VERSION + 1,
+                "session_id": "future",
+                "pid": 1,
+                "label": "future",
+                "kind": "standalone",
+                "mode": "interactive",
+                "members": [],
+                "started_at": "2026-01-01T00:00:00Z",
+                "spawn_config": config,
+            })
+            .to_string(),
+        )
+        .expect("write the future sidecar");
+
+        crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
+
+        assert!(
+            open(&id).is_some(),
+            "an id survives a sweep that skipped a sidecar"
+        );
+    }
+
+    /// A folder the walk cannot list hides whatever its files referenced, so
+    /// the sweep deletes nothing. The sessions folder is replaced by a file of
+    /// the same name, which cannot be listed.
+    #[test]
+    fn a_sweep_after_a_folder_read_error_deletes_nothing() {
+        let (_lock, _config_dir) = scratch("sweep-folder");
+        let dirs = fixture_dirs(&fixture_root("sweep-folder"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+        std::fs::remove_dir_all(&dirs.sessions_dir).expect("remove the sessions dir");
+        std::fs::write(&dirs.sessions_dir, b"not a folder").expect("replace it with a file");
+
+        crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
+
+        assert!(
+            open(&id).is_some(),
+            "nothing is deleted when a folder cannot be read"
+        );
+    }
+
+    /// A `state.json` that failed to parse leaves the walk with no
+    /// `last_spawn_config`s to read, so the sweep deletes nothing either.
+    #[test]
+    fn a_sweep_after_a_corrupt_state_file_deletes_nothing() {
+        let (_lock, _config_dir) = scratch("sweep-corrupt-state");
+        let dirs = fixture_dirs(&fixture_root("sweep-corrupt-state"));
+        std::fs::write(&dirs.state_file, b"{ this is not json").expect("write a corrupt state");
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        assert!(
+            state.state_file_corrupt(),
+            "the fixture loaded as a default"
+        );
+        let id = seal("ANTHROPIC_API_KEY", VALUE_SENTINEL).expect("seals");
+
+        crate::sweep_unreferenced_secrets(&dirs, &state, Utc::now() + TimeDelta::hours(2));
+
+        assert!(
+            open(&id).is_some(),
+            "nothing is deleted when state.json could not be read"
+        );
+    }
+
+    /// An entry past the retention window is deleted before it is sealed, so
+    /// the value it alone named never reaches the credential store.
+    #[test]
+    fn an_entry_past_retention_is_never_sealed() {
+        let (_lock, _config_dir) = scratch("startup-pruned");
+        let dirs = fixture_dirs(&fixture_root("pruned"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        write_history_at(
+            &dirs,
+            "expired",
+            Utc::now() - TimeDelta::days(8),
+            &fixture_config(&[("ANTHROPIC_API_KEY", VALUE_SENTINEL)]),
+        );
+
+        run_startup_secret_passes(&dirs, &state);
+
+        assert!(
+            !dirs.history_dir().join("expired.json").exists(),
+            "the expired entry was pruned"
+        );
+        assert_eq!(index_len(), 0, "nothing was sealed for a pruned entry");
+    }
+
+    /// One refused row does not cost the whole file: the rows the store takes
+    /// are sealed, and only the refused one stays in plain text.
+    #[test]
+    fn a_refused_row_in_state_json_leaves_the_other_rows_sealed() {
+        let (_lock, _config_dir) = scratch("state-one-bad-row");
+        let dirs = fixture_dirs(&fixture_root("one-bad-row"));
+        let state = crate::state::AppState::load_or_default(&dirs).expect("load state");
+        let too_long = "a".repeat(MAX_VALUE_UNITS + 1);
+        state
+            .mutate(|persisted| {
+                persisted.repos.push(repo_with_config(
+                    "r-long",
+                    fixture_config(&[("RT_TEST_LONG_TOKEN", &too_long)]),
+                ));
+                persisted.repos.push(repo_with_config(
+                    "r-good",
+                    fixture_config(&[("ANTHROPIC_API_KEY", VALUE_SENTINEL)]),
+                ));
+            })
+            .expect("seed state.json");
+
+        crate::seal_stored_secrets(&dirs, &state);
+
+        let text = read_text(&dirs.state_file);
+        assert!(
+            text.contains("${secret:"),
+            "the sealable row was sealed: {text}"
+        );
+        assert!(
+            !text.contains(VALUE_SENTINEL),
+            "the sealed row's literal is gone: {text}"
+        );
+        assert!(
+            text.contains(&too_long),
+            "the refused row stays in plain text: {text}"
+        );
+        assert_eq!(index_len(), 1, "only the sealable row took an id");
+
+        // A later start seals nothing more: the refused value never reaches the
+        // store, and state.json is not rewritten.
+        let before = modified(&dirs.state_file);
+        let second = crate::state::AppState::load_or_default(&dirs).expect("reload state");
+        crate::seal_stored_secrets(&dirs, &second);
+
+        assert_eq!(index_len(), 1, "no id was added for the refused value");
+        assert_eq!(
+            modified(&dirs.state_file),
+            before,
+            "state.json was rewritten for a row that changed nothing"
+        );
+        assert_eq!(read_text(&dirs.state_file), text);
     }
 }
