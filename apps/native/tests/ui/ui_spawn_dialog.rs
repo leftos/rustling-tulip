@@ -14,8 +14,8 @@ use crate::support;
 
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
-    AgentOptions, ClientMessage, DaemonMessage, PermissionMode, RootWorktreeStatus, SessionMode,
-    SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
+    AgentOptions, ClientMessage, DaemonMessage, EnvName, EnvScope, PermissionMode,
+    RootWorktreeStatus, SessionMode, SpawnRequest, SpawnTarget, SuggestTarget, WorktreeInfo,
 };
 use rustling_tulip_native::RootView;
 use support::{Fixture, Harness, TestDir, repo, session};
@@ -590,6 +590,136 @@ fn an_env_reference_hides_the_plaintext_warning_and_is_sent_verbatim(cx: &mut Te
             "ANTHROPIC_API_KEY".to_owned(),
             "${env:ANTHROPIC_API_KEY}".to_owned()
         )]
+    );
+}
+
+/// The `request_id` of the `list_env_names` among `sent`.
+fn env_names_request(sent: &[ClientMessage]) -> Option<String> {
+    sent.iter().find_map(|m| match m {
+        ClientMessage::ListEnvNames { request_id } => request_id.clone(),
+        _ => None,
+    })
+}
+
+/// The daemon's names, answering `request_id`.
+fn answer_env_names(h: &mut Harness<'_>, request_id: &str) {
+    h.send(DaemonMessage::EnvNames {
+        names: vec![
+            EnvName {
+                name: "DEEPSEEK_API_KEY".to_owned(),
+                scopes: vec![EnvScope::User],
+            },
+            EnvName {
+                name: "Path".to_owned(),
+                scopes: vec![EnvScope::User, EnvScope::System],
+            },
+        ],
+        request_id: Some(request_id.to_owned()),
+    });
+}
+
+fn env_name_rows(h: &mut Harness<'_>) -> Option<Vec<(String, String)>> {
+    h.root(|root, _| root.spawn_env_name_rows(0))
+}
+
+/// Opens the dialog, answers its names request, and types `$` into a new
+/// env row's value under `key`.
+fn open_env_name_list(h: &mut Harness<'_>, key: &str) {
+    let sent = open(h);
+    let request_id = env_names_request(&sent).expect("the dialog asked for env names");
+    suggest(h, "r1", "wt/brave-fox");
+    answer_env_names(h, &request_id);
+    add_env_row(h, key, "$");
+}
+
+#[gpui::test]
+fn the_spawn_dialog_asks_for_env_names_on_open(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    let sent = open(&mut h);
+    let first = env_names_request(&sent).expect("list_env_names with a request_id");
+    h.keys("escape");
+    assert!(!is_open(&mut h));
+    let again = env_names_request(&open(&mut h)).expect("a dialog opened again asks again");
+    assert_ne!(first, again, "each dialog's own request");
+}
+
+#[gpui::test]
+fn typing_dollar_offers_env_names_with_their_scopes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    let sent = open(&mut h);
+    let request_id = env_names_request(&sent).expect("the dialog asked for env names");
+    suggest(&mut h, "r1", "wt/brave-fox");
+    add_env_row(&mut h, "DEEPSEEK_API_KEY", "$");
+    assert_eq!(env_name_rows(&mut h), None, "no names yet, no list");
+    answer_env_names(&mut h, &request_id);
+    assert_eq!(
+        env_name_rows(&mut h),
+        Some(vec![
+            ("DEEPSEEK_API_KEY".to_owned(), "user".to_owned()),
+            ("Path".to_owned(), "user · system".to_owned()),
+        ])
+    );
+    assert!(drawn(&mut h, "spawn-env-value-0-list"), "the list is drawn");
+    assert!(drawn(&mut h, "spawn-env-value-0-option-1-scopes"));
+    h.keys("p a");
+    assert_eq!(
+        env_name_rows(&mut h),
+        Some(vec![("Path".to_owned(), "user · system".to_owned())]),
+        "filtered as typed"
+    );
+}
+
+#[gpui::test]
+fn enter_on_a_name_writes_the_reference_and_closes_the_list(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_env_name_list(&mut h, "DEEPSEEK_API_KEY");
+    assert!(env_name_rows(&mut h).is_some(), "the list shows");
+    h.keys("down enter");
+    assert_eq!(env_name_rows(&mut h), None, "the list closed");
+    assert!(is_open(&mut h), "the dialog stays open");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![(
+            "DEEPSEEK_API_KEY".to_owned(),
+            "${env:Path}".to_owned()
+        )])
+    );
+    assert_eq!(
+        h.root(|root, _| root.spawn_dialog_env_plaintext_warning(0)),
+        None,
+        "a reference is not a plain-text secret"
+    );
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [("DEEPSEEK_API_KEY".to_owned(), "${env:Path}".to_owned())]
+    );
+}
+
+#[gpui::test]
+fn escape_closes_the_name_list_not_the_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_env_name_list(&mut h, "K");
+    assert!(env_name_rows(&mut h).is_some(), "the list shows");
+    h.keys("escape");
+    assert_eq!(env_name_rows(&mut h), None, "the list closed");
+    assert!(is_open(&mut h), "the dialog stays open");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![("K".to_owned(), "$".to_owned())]),
+        "the value is kept"
+    );
+    h.keys("down");
+    assert!(env_name_rows(&mut h).is_some(), "Down opens it again");
+    h.keys("escape escape");
+    assert!(
+        !is_open(&mut h),
+        "Esc with the list closed closes the dialog"
     );
 }
 

@@ -2627,6 +2627,10 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 }
             }
         }
+        ClientMessage::ListEnvNames { request_id } => {
+            let names = env_names().await;
+            let _ = out_tx.send(DaemonMessage::EnvNames { names, request_id });
+        }
         ClientMessage::ListSessionHistory { request_id } => {
             let items = session_history_items(hub).await;
             let _ = out_tx.send(DaemonMessage::SessionHistory { request_id, items });
@@ -5417,6 +5421,17 @@ async fn register_repo(
     Ok(entry)
 }
 
+/// The names of the variables an `${env:NAME}` reference can read, never
+/// their values, listed off the async runtime because it reads the registry.
+async fn env_names() -> Vec<protocol::EnvName> {
+    tokio::task::spawn_blocking(user_env::names)
+        .await
+        .unwrap_or_else(|err| {
+            warn!(?err, "listing the environment variable names failed");
+            Vec::new()
+        })
+}
+
 /// The session history as the client lists it, read off the async runtime.
 /// A session still in the Abandoned group is listed too: recovering it from
 /// the history removes it from that group.
@@ -6800,7 +6815,7 @@ pub(crate) fn resolve_env_refs(
                     return Err(spawn_plan::SpawnFailure {
                         title: "Environment variable not set".to_owned(),
                         detail: format!(
-                            "`{name}` isn't set in the daemon's environment or your user environment."
+                            "`{name}` isn't set in the daemon's environment, your user environment or the system environment."
                         ),
                         hint: Some(
                             "Set it as a user environment variable, then spawn again.".to_owned(),
@@ -7726,6 +7741,37 @@ mod tests {
 
     #[tokio::test]
     #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn list_env_names_replies_with_names_and_no_values() {
+        const NAME: &str = "RT_TEST_LIST_ENV_NAMES_7C21";
+        const SENTINEL: &str = "rt-sentinel-value-5d9a0e";
+        // SAFETY: the name is unique to this test and nothing else reads or
+        // writes it; std serializes environment access on Windows.
+        unsafe { std::env::set_var(NAME, SENTINEL) };
+        let (hub, _scratch) = test_hub("list-env-names");
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::ListEnvNames {
+                request_id: Some("r1".to_owned()),
+            },
+        )
+        .await;
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(NAME) };
+        let json = serde_json::to_string(&reply).expect("the reply serializes");
+        let DaemonMessage::EnvNames { names, request_id } = reply else {
+            panic!("expected env_names, got {reply:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("r1"));
+        let entry = names
+            .iter()
+            .find(|entry| entry.name == NAME)
+            .expect("the process variable is listed");
+        assert!(entry.scopes.contains(&protocol::EnvScope::Process));
+        assert!(!json.contains(SENTINEL), "no value on the wire");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
     async fn history_lists_abandoned_tracer_lost_session() {
         use crate::history::test_support::record;
         let (hub, _scratch) = spawnless_test_hub("history-abandoned");
@@ -8126,7 +8172,12 @@ mod tests {
 
     /// A lookup that knows only `A` (as `va`) in the process scope.
     fn lookup_a(name: &str) -> Option<(user_env::Secret, user_env::Origin)> {
-        user_env::resolve_with(name, |n| (n == "A").then(|| "va".to_owned()), |_| None)
+        user_env::resolve_with(
+            name,
+            |n| (n == "A").then(|| "va".to_owned()),
+            |_| None,
+            |_| None,
+        )
     }
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -8164,7 +8215,7 @@ mod tests {
         assert_eq!(failure.title, "Environment variable not set");
         assert_eq!(
             failure.detail,
-            "`MISSING_1` isn't set in the daemon's environment or your user environment."
+            "`MISSING_1` isn't set in the daemon's environment, your user environment or the system environment."
         );
         assert_eq!(
             failure.hint.as_deref(),

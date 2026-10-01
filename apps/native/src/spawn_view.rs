@@ -92,6 +92,7 @@ const CURSOR_LOCKED: &str = "Ignored while trusted launch is on. Cursor will run
 const CURSOR_PLAN_LABEL: &str = "Plan mode (read-only / planning)";
 const CURSOR_PLAN_TIP: &str = "Start cursor in --plan mode (read-only / planning)";
 const NO_ENV: &str = "No extra env vars.";
+const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
 /// The tallest a branch list grows before it scrolls.
 const LIST_MAX_HEIGHT: f32 = 200.0;
@@ -400,6 +401,20 @@ impl RootView {
         self.spawn_list_rows(ListField::Base)
     }
 
+    /// The rows env row `index`'s variable-name list shows, each a name and
+    /// its scopes (`user · system`), or `None` while it is closed.
+    #[must_use]
+    pub fn spawn_env_name_rows(&self, index: usize) -> Option<Vec<(String, String)>> {
+        let form = &self.spawn_dialog.as_ref()?.form;
+        let field = ListField::EnvValue(index);
+        form.list_shown(field).then(|| {
+            form.list_rows(field)
+                .iter()
+                .map(|row| (row.label(), row.detail().unwrap_or_default().to_owned()))
+                .collect()
+        })
+    }
+
     fn spawn_list_rows(&self, field: ListField) -> Option<Vec<String>> {
         let form = &self.spawn_dialog.as_ref()?.form;
         form.list_shown(field)
@@ -525,7 +540,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> EnvInputs {
         let key = cx.new(|cx| TextInput::new(row.key.clone(), "KEY", cx));
-        let value = cx.new(|cx| TextInput::new(row.value.clone(), "value", cx));
+        let value = cx.new(|cx| TextInput::new(row.value.clone(), ENV_VALUE_PLACEHOLDER, cx));
         let mut subscriptions = Self::watch_field(&key, Field::EnvKey(index), window, cx);
         subscriptions.extend(Self::watch_field(
             &value,
@@ -813,6 +828,14 @@ impl RootView {
             MODEL_PLACEHOLDER.to_owned(),
             cx,
         );
+        for (row, inputs) in form.env_rows().iter().zip(&dialog.env_inputs) {
+            sync_field(
+                &inputs.value,
+                &row.value,
+                ENV_VALUE_PLACEHOLDER.to_owned(),
+                cx,
+            );
+        }
         dialog.timer = form
             .suggestion_deadline()
             .filter(|deadline| *deadline > now)
@@ -1846,6 +1869,10 @@ fn list_row(
     let name = format!("{prefix}-option-{index}");
     let tag_name = format!("{name}-current");
     let tag = current.then(|| muted(CURRENT_TAG).debug_selector(move || tag_name));
+    let detail_name = format!("{name}-scopes");
+    let detail = row
+        .detail()
+        .map(|detail| muted(detail.to_owned()).debug_selector(move || detail_name));
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -1868,7 +1895,13 @@ fn list_row(
                 this.pick_spawn_list(list, index, cx);
             }),
         )
-        .child(row.label())
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .child(row.label())
+                .children(detail),
+        )
         .children(tag)
         .into_any_element()
 }
@@ -2297,7 +2330,7 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
         .env_inputs
         .iter()
         .enumerate()
-        .map(|(index, inputs)| env_row(&dialog.form, index, inputs, focus, cx))
+        .map(|(index, inputs)| env_row(dialog, index, inputs, focus, cx))
         .collect();
     let empty = rows.is_empty().then(|| muted(NO_ENV));
     let add = spawn_button(&Control::EnvAdd, OUTLINED, "+ Add env var", true, focus, cx);
@@ -2308,18 +2341,19 @@ fn env_field(dialog: &SpawnDialog, focus: &Control, cx: &mut Context<RootView>) 
 }
 
 fn env_row(
-    form: &SpawnForm,
+    dialog: &SpawnDialog,
     index: usize,
     inputs: &EnvInputs,
     focus: &Control,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let form = &dialog.form;
     let problem = form.env_problem(index);
     let key = input_box(&Control::EnvKey(index), &inputs.key, focus, cx)
         .when(problem.is_some(), |key| {
             key.border_color(gpui::rgb(WARNING))
         });
-    let value = input_box(&Control::EnvValue(index), &inputs.value, focus, cx);
+    let value = list_input(dialog, ListField::EnvValue(index), focus, cx);
     let remove = spawn_button(&Control::EnvRemove(index), OUTLINED, "✕", true, focus, cx)
         .tooltip(tooltip(REMOVE_ENV_TIP));
     let message = problem.map(|problem| {

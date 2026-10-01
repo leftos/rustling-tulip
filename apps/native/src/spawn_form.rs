@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage,
-    MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry, RootWorktreeEntry,
-    RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest, SpawnTarget,
-    SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
+    Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage, EnvName,
+    EnvScope, MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry,
+    RootWorktreeEntry, RootWorktreeStatus, SessionMode, SessionSnapshot, SpawnConfig, SpawnRequest,
+    SpawnTarget, SuggestTarget, TabEntry, WorkspaceEntry, WorktreeInfo, WorktreeLaunchTarget,
     WorktreeReusePolicy,
 };
 
@@ -288,11 +288,13 @@ pub(crate) enum WorktreeMode {
     Existing,
 }
 
-/// A text field with a branch list under it.
+/// A text field with a list under it: a branch list, or the variable-name
+/// list under an env row's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ListField {
     Branch,
     Base,
+    EnvValue(usize),
 }
 
 impl ListField {
@@ -300,6 +302,7 @@ impl ListField {
         match self {
             Self::Branch => Control::Branch,
             Self::Base => Control::Base,
+            Self::EnvValue(index) => Control::EnvValue(index),
         }
     }
 
@@ -308,9 +311,53 @@ impl ListField {
         match control {
             Control::Branch => Some(Self::Branch),
             Control::Base => Some(Self::Base),
+            Control::EnvValue(index) => Some(Self::EnvValue(*index)),
             _ => None,
         }
     }
+}
+
+/// The rows an env row's value field offers from `names`: each name usable
+/// in a reference (a valid key) that contains the filter, case-insensitively
+/// (every such name for an empty filter). The filter is the field's text
+/// without a leading `${env:`, `${` or `$`, or a trailing `}`.
+pub(crate) fn env_name_rows(value: &str, names: &[EnvName]) -> Vec<ComboRow> {
+    let needle = env_name_filter(value).to_lowercase();
+    names
+        .iter()
+        .filter(|entry| valid_env_key(&entry.name))
+        .filter(|entry| entry.name.to_lowercase().contains(&needle))
+        .map(|entry| ComboRow::EnvName {
+            name: entry.name.clone(),
+            reference: format!("${{env:{}}}", entry.name),
+            scopes: scopes_label(&entry.scopes),
+        })
+        .collect()
+}
+
+/// The part of an env value the name list filters by.
+fn env_name_filter(value: &str) -> &str {
+    let trimmed = value.trim();
+    let rest = ["${env:", "${", "$"]
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .unwrap_or(trimmed);
+    rest.strip_suffix('}').unwrap_or(rest)
+}
+
+/// `process`, `user` and `system` for the scopes a name is set in, joined by
+/// ` · `.
+fn scopes_label(scopes: &[EnvScope]) -> String {
+    scopes
+        .iter()
+        .filter_map(|scope| match scope {
+            EnvScope::Process => Some("process"),
+            EnvScope::User => Some("user"),
+            EnvScope::System => Some("system"),
+            EnvScope::Unknown => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// A focusable control of the dialog.
@@ -736,6 +783,15 @@ pub(crate) struct SpawnForm {
     /// The branch field's list, which offers a "Create branch" row.
     branch_list: Combobox,
     base_list: Combobox,
+    /// The variable names the daemon can read for a reference, offered
+    /// under an env row's value; empty until its reply arrives.
+    env_names: Vec<EnvName>,
+    /// The `ListEnvNames` request whose reply is this dialog's.
+    env_names_request: String,
+    /// The name list, shared by the env rows: one value field has focus.
+    env_list: Combobox,
+    /// The env row the name list is on.
+    env_list_row: Option<usize>,
     refs: Refs,
     existing: Existing,
     /// Where a new worktree would fork from, and what to do on a collision.
@@ -827,6 +883,10 @@ impl SpawnForm {
             base: BaseField::default(),
             branch_list: Combobox::new(true),
             base_list: Combobox::new(false),
+            env_names: Vec::new(),
+            env_names_request: crate::new_request_id(),
+            env_list: Combobox::new(false),
+            env_list_row: None,
             refs: Refs::default(),
             existing: Existing::default(),
             preview: Preview::default(),
@@ -842,6 +902,9 @@ impl SpawnForm {
             submitted: false,
         };
         let mut messages = form.load_target(target, cache, now);
+        messages.push(ClientMessage::ListEnvNames {
+            request_id: Some(form.env_names_request.clone()),
+        });
         form.focus = if form.controls().contains(&Control::Branch) {
             Control::Branch
         } else {
@@ -1296,6 +1359,11 @@ impl SpawnForm {
                     return None;
                 }
             }
+            DaemonMessage::EnvNames { names, request_id }
+                if request_id.as_deref() == Some(self.env_names_request.as_str()) =>
+            {
+                self.env_names.clone_from(names);
+            }
             _ => return None,
         }
         Some(Vec::new())
@@ -1446,15 +1514,22 @@ impl SpawnForm {
     }
 
     /// Whether `field` has a list: the base always, the branch for a repo
-    /// (a workspace's branch is a plain field).
+    /// (a workspace's branch is a plain field), an env row's value while
+    /// the row exists.
     pub(crate) fn has_list(&self, field: ListField) -> bool {
-        field == ListField::Base || !self.is_workspace()
+        match field {
+            ListField::Branch => !self.is_workspace(),
+            ListField::Base => true,
+            ListField::EnvValue(index) => index < self.advanced.env.len(),
+        }
     }
 
     /// The branches `field`'s list offers: the known ones for the branch;
-    /// the remote ones, then the local ones, each once, for the base.
+    /// the remote ones, then the local ones, each once, for the base; none
+    /// for an env value, whose list offers variable names.
     pub(crate) fn list_options(&self, field: ListField) -> Vec<String> {
         match field {
+            ListField::EnvValue(_) => Vec::new(),
             ListField::Branch => self.refs.known.clone(),
             ListField::Base => {
                 let mut options = self.refs.remote.clone();
@@ -1472,6 +1547,12 @@ impl SpawnForm {
         match field {
             ListField::Branch => self.branch.value.clone(),
             ListField::Base => self.base.value.clone(),
+            ListField::EnvValue(index) => self
+                .advanced
+                .env
+                .get(index)
+                .map(|row| row.value.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1479,6 +1560,7 @@ impl SpawnForm {
         match field {
             ListField::Branch => &self.branch_list,
             ListField::Base => &self.base_list,
+            ListField::EnvValue(_) => &self.env_list,
         }
     }
 
@@ -1486,13 +1568,22 @@ impl SpawnForm {
         match field {
             ListField::Branch => &mut self.branch_list,
             ListField::Base => &mut self.base_list,
+            ListField::EnvValue(_) => &mut self.env_list,
         }
     }
 
-    /// The rows `field`'s list offers for what the field holds.
+    /// The rows `field`'s list offers for what the field holds. An env
+    /// value's list offers the daemon's variable names, and only under the
+    /// row the list is on.
     pub(crate) fn list_rows(&self, field: ListField) -> Vec<ComboRow> {
         if !self.has_list(field) {
             return Vec::new();
+        }
+        if let ListField::EnvValue(index) = field {
+            if self.env_list_row != Some(index) {
+                return Vec::new();
+            }
+            return env_name_rows(&self.list_value(field), &self.env_names);
         }
         let options = self.list_options(field);
         self.combobox(field).rows(&self.list_value(field), &options)
@@ -1513,29 +1604,60 @@ impl SpawnForm {
         self.refs.current.as_deref()
     }
 
-    /// A click in `field` opens its list.
+    /// A click in `field` opens its list. An env value's list opens only on
+    /// `$` or Down, so a click there opens nothing.
     pub(crate) fn open_list(&mut self, field: ListField) {
-        if self.has_list(field) {
+        if self.has_list(field) && !matches!(field, ListField::EnvValue(_)) {
             self.combobox_mut(field).open();
         }
     }
 
     /// An edit in `field` opens its list on the row of the branch it names
-    /// exactly, else on the first row.
+    /// exactly, else on the first row. An edit in an env value refilters
+    /// the name list where it is open, and opens nothing.
     pub(crate) fn list_edited(&mut self, field: ListField) {
-        if self.has_list(field) {
-            let (value, options) = (self.list_value(field), self.list_options(field));
-            self.combobox_mut(field).edited(&value, &options);
+        if !self.has_list(field) {
+            return;
         }
+        if let ListField::EnvValue(index) = field {
+            if self.env_list_row == Some(index) {
+                let (rows, value) = (self.list_rows(field), self.list_value(field));
+                self.env_list.refiltered(&rows, &value);
+            }
+            return;
+        }
+        let (value, options) = (self.list_value(field), self.list_options(field));
+        self.combobox_mut(field).edited(&value, &options);
     }
 
+    /// Closes `field`'s list; an env value closes the name list only when
+    /// it is on that row.
     pub(crate) fn close_list(&mut self, field: ListField) {
+        if let ListField::EnvValue(index) = field
+            && self.env_list_row != Some(index)
+        {
+            return;
+        }
         self.combobox_mut(field).close();
     }
 
     /// Up or Down (`down`) in `field`.
     pub(crate) fn list_nav(&mut self, field: ListField, down: bool) {
         if !self.has_list(field) {
+            return;
+        }
+        if let ListField::EnvValue(index) = field {
+            self.env_list_to(index);
+            if down {
+                let rows = self.list_rows(field);
+                if !self.env_list.is_open() {
+                    let value = self.list_value(field);
+                    self.env_list.refiltered(&rows, &value);
+                }
+                self.env_list.down_in(rows.len());
+            } else {
+                self.env_list.up();
+            }
             return;
         }
         let (value, options) = (self.list_value(field), self.list_options(field));
@@ -1555,6 +1677,10 @@ impl SpawnForm {
 
     /// Esc in `field`: closes its list if it shows, and says whether it did.
     pub(crate) fn escape_list(&mut self, field: ListField) -> bool {
+        if let ListField::EnvValue(_) = field {
+            let count = self.list_rows(field).len();
+            return self.env_list.escape_in(count);
+        }
         let (value, options) = (self.list_value(field), self.list_options(field));
         self.has_list(field) && self.combobox_mut(field).escape(&value, &options)
     }
@@ -1565,15 +1691,25 @@ impl SpawnForm {
         if !self.has_list(field) {
             return false;
         }
-        let (value, options) = (self.list_value(field), self.list_options(field));
-        let picked = self.combobox_mut(field).enter(&value, &options);
+        let picked = if let ListField::EnvValue(_) = field {
+            let rows = self.list_rows(field);
+            self.env_list.enter_in(rows)
+        } else {
+            let (value, options) = (self.list_value(field), self.list_options(field));
+            self.combobox_mut(field).enter(&value, &options)
+        };
         self.commit_list(field, picked, cache)
     }
 
     /// Row `index` of `field`'s list was pressed.
     pub(crate) fn pick_list(&mut self, field: ListField, index: usize, cache: &mut BranchCache) {
-        let (value, options) = (self.list_value(field), self.list_options(field));
-        let picked = self.combobox_mut(field).pick(&value, &options, index);
+        let picked = if let ListField::EnvValue(_) = field {
+            let rows = self.list_rows(field);
+            self.env_list.pick_in(rows, index)
+        } else {
+            let (value, options) = (self.list_value(field), self.list_options(field));
+            self.combobox_mut(field).pick(&value, &options, index)
+        };
         self.commit_list(field, picked, cache);
     }
 
@@ -1589,6 +1725,7 @@ impl SpawnForm {
         match field {
             ListField::Branch => self.edit_branch(&text, cache),
             ListField::Base => self.edit_base(&text),
+            ListField::EnvValue(index) => self.edit_env_value(index, &text),
         }
         true
     }
@@ -1790,10 +1927,28 @@ impl SpawnForm {
         }
     }
 
-    /// The user typed in row `index`'s value field.
+    /// The user typed in row `index`'s value field. A `$` typed into an
+    /// empty value opens the variable-name list under it.
     pub(crate) fn edit_env_value(&mut self, index: usize, text: &str) {
-        if let Some(row) = self.advanced.env.get_mut(index) {
-            text.clone_into(&mut row.value);
+        let Some(row) = self.advanced.env.get_mut(index) else {
+            return;
+        };
+        let opens = row.value.is_empty() && text == "$";
+        text.clone_into(&mut row.value);
+        if opens {
+            self.env_list_to(index);
+            self.env_list.open();
+            let rows = self.list_rows(ListField::EnvValue(index));
+            self.env_list.refiltered(&rows, text);
+        }
+    }
+
+    /// Points the name list at env row `index`, closing it first when it
+    /// was on another row.
+    fn env_list_to(&mut self, index: usize) {
+        if self.env_list_row != Some(index) {
+            self.env_list.close();
+            self.env_list_row = Some(index);
         }
     }
 
@@ -2274,6 +2429,8 @@ impl SpawnForm {
                 if *index < self.advanced.env.len() {
                     self.advanced.env.remove(*index);
                 }
+                self.env_list.close();
+                self.env_list_row = None;
                 self.focus = Control::EnvAdd;
             }
             _ => {}
@@ -3803,6 +3960,161 @@ mod tests {
         );
         assert_eq!(form.env_problem(0), None, "a warning is not a problem");
         assert_eq!(form.env_plaintext_warning(rows.len()), None);
+    }
+
+    /// A ready form with one env row and the daemon's names answered.
+    fn env_names_form() -> SpawnForm {
+        let mut form = ready_form();
+        press(&mut form, &Control::EnvAdd);
+        let reply = DaemonMessage::EnvNames {
+            names: vec![
+                EnvName {
+                    name: "DEEPSEEK_API_KEY".to_owned(),
+                    scopes: vec![EnvScope::User],
+                },
+                EnvName {
+                    name: "Path".to_owned(),
+                    scopes: vec![EnvScope::Process, EnvScope::User, EnvScope::System],
+                },
+                EnvName {
+                    name: "ProgramFiles(x86)".to_owned(),
+                    scopes: vec![EnvScope::System],
+                },
+            ],
+            request_id: Some(form.env_names_request.clone()),
+        };
+        assert!(form.on_message(&reply).is_some(), "the dialog's reply");
+        form
+    }
+
+    fn env_list_labels(form: &SpawnForm, index: usize) -> Vec<(String, String)> {
+        form.list_rows(ListField::EnvValue(index))
+            .iter()
+            .map(|row| (row.label(), row.detail().unwrap_or_default().to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn dollar_in_an_empty_env_value_opens_the_name_list() {
+        let mut form = env_names_form();
+        let field = ListField::EnvValue(0);
+        assert!(!form.list_shown(field), "closed until asked");
+        form.open_list(field);
+        assert!(!form.list_shown(field), "a click opens nothing");
+        form.edit_env_value(0, "x");
+        form.edit_env_value(0, "x$");
+        assert!(!form.list_shown(field), "`$` after text opens nothing");
+        form.edit_env_value(0, "");
+        form.edit_env_value(0, "$");
+        assert!(form.list_shown(field), "`$` into an empty value opens it");
+        assert_eq!(
+            env_list_labels(&form, 0),
+            [
+                ("DEEPSEEK_API_KEY".to_owned(), "user".to_owned()),
+                ("Path".to_owned(), "process · user · system".to_owned()),
+            ],
+            "every referable name, each with its scopes"
+        );
+        assert!(form.escape_list(field), "Esc closes the list");
+        assert!(!form.list_shown(field));
+        assert!(
+            !form.escape_list(field),
+            "a closed list leaves Esc to the dialog"
+        );
+        form.list_nav(field, true);
+        assert!(form.list_shown(field), "Down opens it");
+        let mut stale = env_names_form();
+        let other = DaemonMessage::EnvNames {
+            names: Vec::new(),
+            request_id: Some("another-dialog".to_owned()),
+        };
+        assert!(
+            stale.on_message(&other).is_none(),
+            "another request's reply"
+        );
+        stale.edit_env_value(0, "$");
+        assert_eq!(env_list_labels(&stale, 0).len(), 2, "names kept");
+    }
+
+    #[test]
+    fn the_name_filter_strips_the_reference_prefix() {
+        let mut form = env_names_form();
+        form.edit_env_value(0, "$");
+        for (typed, wanted) in [
+            ("$", 2),
+            ("$deep", 1),
+            ("${dEeP", 1),
+            ("${env:PATH", 1),
+            ("${env:Path}", 1),
+            ("${env:", 2),
+            ("$zzz", 0),
+        ] {
+            form.edit_env_value(0, typed);
+            form.list_edited(ListField::EnvValue(0));
+            assert_eq!(env_list_labels(&form, 0).len(), wanted, "{typed}");
+        }
+        form.edit_env_value(0, "$path");
+        assert_eq!(env_list_labels(&form, 0)[0].0, "Path");
+        assert!(env_list_labels(&form, 1).is_empty(), "no row 1");
+    }
+
+    #[test]
+    fn picking_a_name_writes_an_env_reference() {
+        let mut cache = BranchCache::default();
+        let mut form = env_names_form();
+        let field = ListField::EnvValue(0);
+        form.edit_env_value(0, "$");
+        form.list_nav(field, true);
+        assert_eq!(form.list_highlight(field), 1);
+        assert!(form.enter_list(field, &mut cache), "Enter commits");
+        assert_eq!(form.env_rows()[0].value, "${env:Path}");
+        assert!(!form.list_shown(field), "and closes the list");
+        assert!(
+            !form.enter_list(field, &mut cache),
+            "then Enter is the dialog's"
+        );
+        form.edit_env_value(0, "");
+        form.edit_env_value(0, "$");
+        form.pick_list(field, 0, &mut cache);
+        assert_eq!(form.env_rows()[0].value, "${env:DEEPSEEK_API_KEY}");
+        assert!(!form.list_shown(field));
+    }
+
+    #[test]
+    fn down_in_another_row_starts_at_the_first_name() {
+        let mut cache = BranchCache::default();
+        let mut form = env_names_form();
+        form.edit_env_value(0, "$");
+        form.list_nav(ListField::EnvValue(0), true);
+        form.list_nav(ListField::EnvValue(0), true);
+        assert!(form.enter_list(ListField::EnvValue(0), &mut cache));
+        assert_eq!(form.env_rows()[0].value, "${env:Path}");
+        press(&mut form, &Control::EnvAdd);
+        let field = ListField::EnvValue(1);
+        form.list_nav(field, true);
+        assert!(form.list_shown(field), "Down opens the list");
+        assert_eq!(form.list_highlight(field), 0, "on the first name");
+        assert!(form.enter_list(field, &mut cache));
+        assert_eq!(form.env_rows()[1].value, "${env:DEEPSEEK_API_KEY}");
+        let back = ListField::EnvValue(0);
+        form.list_nav(back, true);
+        let highlighted = form.list_rows(back)[form.list_highlight(back)].label();
+        assert_eq!(
+            highlighted, "Path",
+            "reopened on the name the value references"
+        );
+    }
+
+    #[test]
+    fn a_picked_row_has_no_plaintext_warning() {
+        let mut cache = BranchCache::default();
+        let mut form = env_names_form();
+        form.edit_env_key(0, "DEEPSEEK_API_KEY");
+        form.edit_env_value(0, "$");
+        assert!(form.enter_list(ListField::EnvValue(0), &mut cache));
+        assert_eq!(form.env_rows()[0].value, "${env:DEEPSEEK_API_KEY}");
+        assert_eq!(form.env_plaintext_warning(0), None);
+        assert_eq!(form.env_problem(0), None);
     }
 
     #[test]

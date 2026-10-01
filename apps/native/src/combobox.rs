@@ -1,7 +1,8 @@
-//! A branch picker's list: which branches a typed value offers, the
-//! "Create branch" row, the highlighted row, and whether the list is open.
-//! Pure state; `spawn_view` draws it under its field and feeds it keys and
-//! clicks.
+//! A picker's list under a text field: which branches a typed value offers,
+//! the "Create branch" row, the highlighted row, and whether the list is
+//! open. The same open/highlight state serves a list of rows built
+//! elsewhere (an env row's variable names). Pure state; `spawn_view` draws
+//! it under its field and feeds it keys and clicks.
 
 use std::ops::Range;
 
@@ -17,6 +18,16 @@ pub(crate) enum ComboRow {
     Branch(String),
     /// Start a new branch with the typed name.
     Create(String),
+    /// An environment variable on offer for an env row's value.
+    EnvName {
+        /// The variable's name, what the row reads.
+        name: String,
+        /// The text the field takes: `${env:NAME}`.
+        reference: String,
+        /// The scopes it is set in, as the row shows them muted
+        /// (`user · system`).
+        scopes: String,
+    },
 }
 
 impl ComboRow {
@@ -24,14 +35,23 @@ impl ComboRow {
     pub(crate) fn value(&self) -> &str {
         match self {
             Self::Branch(name) | Self::Create(name) => name,
+            Self::EnvName { reference, .. } => reference,
         }
     }
 
     /// What the row reads.
     pub(crate) fn label(&self) -> String {
         match self {
-            Self::Branch(name) => name.clone(),
+            Self::Branch(name) | Self::EnvName { name, .. } => name.clone(),
             Self::Create(name) => format!("Create branch “{name}”"),
+        }
+    }
+
+    /// The muted text after the label: an env name's scopes.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        match self {
+            Self::EnvName { scopes, .. } => Some(scopes),
+            Self::Branch(_) | Self::Create(_) => None,
         }
     }
 }
@@ -77,11 +97,6 @@ impl Combobox {
         self.open
     }
 
-    /// Whether the list shows: open, with a row to show.
-    pub(crate) fn shown(&self, value: &str, branches: &[String]) -> bool {
-        self.open && !self.rows(value, branches).is_empty()
-    }
-
     /// The highlighted row, within the `count` rows there are.
     pub(crate) fn highlight(&self, count: usize) -> usize {
         self.highlight.min(count.saturating_sub(1))
@@ -96,11 +111,17 @@ impl Combobox {
     /// trimmed value names exactly, else on its first row.
     pub(crate) fn edited(&mut self, value: &str, branches: &[String]) {
         self.open = true;
+        self.refiltered(&self.rows(value, branches), value);
+    }
+
+    /// The field's text became `value` while `rows` are on offer: the
+    /// highlight moves to the row committing the trimmed value exactly,
+    /// else to the first row. Whether the list is open is left as it is.
+    pub(crate) fn refiltered(&mut self, rows: &[ComboRow], value: &str) {
         let trimmed = value.trim();
-        self.highlight = self
-            .rows(value, branches)
+        self.highlight = rows
             .iter()
-            .position(|row| matches!(row, ComboRow::Branch(name) if name == trimmed))
+            .position(|row| !matches!(row, ComboRow::Create(_)) && row.value() == trimmed)
             .unwrap_or(0);
     }
 
@@ -111,8 +132,12 @@ impl Combobox {
     /// Down opens a closed list, else highlights the next row, stopping at
     /// the last.
     pub(crate) fn down(&mut self, value: &str, branches: &[String]) {
+        self.down_in(self.rows(value, branches).len());
+    }
+
+    /// [`Self::down`] over a list of `count` rows.
+    pub(crate) fn down_in(&mut self, count: usize) {
         if self.open {
-            let count = self.rows(value, branches).len();
             self.highlight = (self.highlight + 1).min(count.saturating_sub(1));
         } else {
             self.open = true;
@@ -135,7 +160,12 @@ impl Combobox {
     /// Esc closes a list that shows; returns whether it did, so Esc goes no
     /// further.
     pub(crate) fn escape(&mut self, value: &str, branches: &[String]) -> bool {
-        let shown = self.shown(value, branches);
+        self.escape_in(self.rows(value, branches).len())
+    }
+
+    /// [`Self::escape`] over a list of `count` rows.
+    pub(crate) fn escape_in(&mut self, count: usize) -> bool {
+        let shown = self.open && count > 0;
         if shown {
             self.open = false;
         }
@@ -145,12 +175,16 @@ impl Combobox {
     /// Enter commits the highlighted row while the list shows: the text the
     /// field takes, the list closed. `None` leaves Enter to the dialog.
     pub(crate) fn enter(&mut self, value: &str, branches: &[String]) -> Option<String> {
-        if !self.shown(value, branches) {
+        self.enter_in(self.rows(value, branches))
+    }
+
+    /// [`Self::enter`] over `rows`.
+    pub(crate) fn enter_in(&mut self, rows: Vec<ComboRow>) -> Option<String> {
+        if !self.open || rows.is_empty() {
             return None;
         }
-        let rows = self.rows(value, branches);
         let index = self.highlight(rows.len());
-        self.pick(value, branches, index)
+        self.pick_in(rows, index)
     }
 
     /// Row `index` was pressed: the text the field takes, the list closed.
@@ -160,7 +194,12 @@ impl Combobox {
         branches: &[String],
         index: usize,
     ) -> Option<String> {
-        let row = self.rows(value, branches).into_iter().nth(index)?;
+        self.pick_in(self.rows(value, branches), index)
+    }
+
+    /// [`Self::pick`] over `rows`.
+    pub(crate) fn pick_in(&mut self, rows: Vec<ComboRow>, index: usize) -> Option<String> {
+        let row = rows.into_iter().nth(index)?;
         self.open = false;
         Some(row.value().to_owned())
     }
@@ -253,7 +292,7 @@ mod tests {
         assert!(labels(&combo, "zzz").is_empty());
         combo.edited("zzz", &branches());
         assert!(combo.is_open());
-        assert!(!combo.shown("zzz", &branches()), "no empty box");
+        assert!(combo.rows("zzz", &branches()).is_empty(), "no empty box");
         assert_eq!(
             combo.enter("zzz", &branches()),
             None,
