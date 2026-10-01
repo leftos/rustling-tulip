@@ -13,6 +13,8 @@ mod branch_names;
 mod codex_rollout;
 mod detach;
 mod discovery;
+#[expect(dead_code, reason = "wired into spawns by ES.3")]
+mod env_secrets;
 mod file_fetch;
 mod git;
 mod git_inspect;

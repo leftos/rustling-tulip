@@ -2366,6 +2366,7 @@ impl SpawnForm {
             agent_options: self.agent_options(),
             model: self.wire_model(),
             extra_env: self.extra_env(),
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
