@@ -1,6 +1,6 @@
 # Hook-reported agent status
 
-Take a Claude session's working / awaiting input / idle status from Claude Code's own hooks instead of guessing it from PTY output, and keep `crates/daemon/src/pty_state.rs`'s heuristic as the fallback. Index line: [MAIN.md](./MAIN.md), Wave 6. Background and VelaTerm's prior art: [borrowed-ideas.md](./borrowed-ideas.md), first item.
+Take a Claude session's working / awaiting input / idle status from Claude Code's own hooks instead of guessing it from PTY output, and keep `crates/daemon/src/pty_state.rs`'s heuristic as the fallback. Index line: [MAIN.md](./MAIN.md), Wave 5. Background and VelaTerm's prior art: [borrowed-ideas.md](./borrowed-ideas.md), first item.
 
 Items that build on this one: "Spoken alerts when an agent waits" ([spoken-alerts.md](./spoken-alerts.md)) needs the waiting signal plus the pending `AskUserQuestion` questions and permission prompts on the daemon; the "Needs You" view ([borrowed-ideas.md](./borrowed-ideas.md)) groups sessions by this status; the mobile app's MA6 ([mobile-app.md](./mobile-app.md)) shows live status and answers prompts.
 

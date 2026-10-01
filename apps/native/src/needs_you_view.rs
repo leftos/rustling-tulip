@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use gpui::{
-    ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful, div,
-    prelude::*, px,
+    ClickEvent, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful,
+    StyledText, div, prelude::*, px,
 };
 use protocol::{DaemonMessage, SessionMode, SessionStatus};
 
 use crate::activity_bar::badge_text;
+use crate::ellipsis::{ellipsized, truncating};
 use crate::needs_you::{self, NeedsYouRow, Reason};
 use crate::sidebar::Activity;
 use crate::sidebar_view::{ROW_HEIGHT, ROW_PADDING};
@@ -270,21 +271,24 @@ fn needs_you_row(
                 )
                 .child(div().flex_none().text_color(gpui::rgb(MUTED)).child("·"))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .child(row.label.clone()),
+                    truncating(&format!("{name}-label"), StyledText::new(row.label.clone()))
+                        .flex_1(),
                 ),
         )
         .when_some(waited, |line, waited| {
             line.child(div().flex_none().text_color(gpui::rgb(MUTED)).child(waited))
         });
     let second = div()
+        .relative()
         .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
         .text_color(gpui::rgb(MUTED))
-        .truncate()
-        .child(row.detail.clone());
+        .children(ellipsized(
+            &format!("{name}-detail"),
+            SharedString::from(row.detail.clone()),
+            StyledText::new(row.detail.clone()),
+        ));
     div()
         .id(SharedString::from(name.clone()))
         .debug_selector(|| name)

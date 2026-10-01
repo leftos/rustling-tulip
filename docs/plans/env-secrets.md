@@ -1,6 +1,6 @@
 # Secrets in the spawn dialog's environment rows
 
-Design for the "Environment rows are stored and sent in plain text" line in [MAIN.md](./MAIN.md) (Wave 2). Found in [deepseek-sessions.md](./deepseek-sessions.md#findings-outside-this-item). Builds on env references (`${env:NAME}` rows, commit `caa7c0d`: `resolve_env_refs` in `crates/daemon/src/server.rs`, `crates/daemon/src/user_env.rs`, the dialog's plain-text warning in `apps/native/src/spawn_form.rs`) and on the key store spoken alerts settled for SA.2 ([spoken-alerts.md](./spoken-alerts.md): Windows Credential Manager through `keyring-core`). Step ids are `ES.n`.
+Design for the "Environment rows are stored and sent in plain text" line in [MAIN.md](./MAIN.md) (Wave 1). Found in [deepseek-sessions.md](./deepseek-sessions.md#findings-outside-this-item). Builds on env references (`${env:NAME}` rows, commit `caa7c0d`: `resolve_env_refs` in `crates/daemon/src/server.rs`, `crates/daemon/src/user_env.rs`, the dialog's plain-text warning in `apps/native/src/spawn_form.rs`) and on the key store spoken alerts settled for SA.2 ([spoken-alerts.md](./spoken-alerts.md): Windows Credential Manager through `keyring-core`). Step ids are `ES.n`.
 
 ## Problem
 
@@ -28,7 +28,7 @@ Clients today: the native client neither sends `GetSpawnConfig` nor prefills env
 
 ## Settled
 
-- Plan it and draft the options before the DeepSeek steps (Wave 2) (user).
+- Plan it and draft the options before the DeepSeek steps (Wave 1) (user).
 - Env references stand: `${env:NAME}` is resolved from the daemon's environment, then `HKCU\Environment`, at spawn, and only the reference is stored and echoed; a secret-like literal gets a warning in the dialog (user, the earlier ruling this builds on).
 - Existing variables are reused, not only new values typed (user): an env row can name any variable already set at user level or system level, and the dialog offers those names, so a key already in the environment never has to be typed or sealed. Today `user_env::resolve` reads the daemon's process environment and `HKCU\Environment` only; ES.9 adds the system scope and the names list.
 

@@ -3,9 +3,13 @@
 
 use std::collections::HashSet;
 
-use gpui::{AnyElement, ClickEvent, Context, ElementId, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, ElementId, SharedString, StyledText, Window, div, prelude::*,
+    px,
+};
 
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::ellipsis::truncating;
 use crate::notice_view::{CLOSE_SIZE, toast_frame};
 use crate::undo::{self, TabSnapshot, UndoEntry};
 use crate::{FOOTER_HEIGHT, RootView, tooltip};
@@ -205,11 +209,11 @@ fn undo_card(entry: &UndoEntry, cx: &mut Context<RootView>) -> AnyElement {
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
             this.dismiss_undo(id, cx);
         }));
-    let message = div()
-        .flex_1()
-        .min_w(px(0.0))
-        .truncate()
-        .child(entry.message.clone());
+    let message = truncating(
+        &format!("undo-entry-{id}-message"),
+        StyledText::new(entry.message.clone()),
+    )
+    .flex_1();
     let name = format!("undo-entry-{id}");
     toast_frame(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)

@@ -132,7 +132,7 @@ Note: the Tauri app, with `autostart.rs` and its macOS arm, is no longer on `mai
 
 ## 4. Build, bundle, packaging
 
-- The shipped client is `apps/native` (GPUI); its installer is Phase 6 (Wave 11 in `MAIN.md`), Windows-first.
+- The shipped client is `apps/native` (GPUI); its installer is Phase 6 (Wave 10 in `MAIN.md`), Windows-first.
 - [ ] Add a macOS bundle for `apps/native` (an `.app` carrying `rustling-tulipd` and `rt-tracer`, then a `.dmg`) beside the Windows installer that Phase 6 builds.
 - [ ] Code-signing + notarization (Developer ID cert, `entitlements.plist`,
       `notarytool`). Build-machine/CI concern, not source. Needed for distribution

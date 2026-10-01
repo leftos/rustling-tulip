@@ -12,6 +12,7 @@ use crate::assets::{
     SIDEBAR_TABS_ICON, SIDEBAR_WORKSPACE_ICON,
 };
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
+use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
 use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
 use crate::palette::{
@@ -29,8 +30,8 @@ use crate::tabs::{TabPill, tab_pills};
 use crate::{Drag, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, drag_handle, tooltip};
 use gpui::{
     AnyElement, ClickEvent, Context, Corner, Div, FontWeight, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Svg, TextRun, Window, anchored, deferred, div, font, point, prelude::*,
-    px, svg,
+    SharedString, Stateful, StyledText, Svg, TextRun, Window, anchored, deferred, div, font, point,
+    prelude::*, px, svg,
 };
 use protocol::{Agent, SessionMode, SessionStatus};
 
@@ -544,9 +545,24 @@ fn chip<E: Styled>(element: E, size: ChipSize) -> E {
         .text_color(gpui::rgb(SUBTLE))
 }
 
-/// A chip's lettering, truncated when the chip is capped.
-fn chip_text(text: String) -> Div {
-    div().min_w(px(0.0)).truncate().child(text)
+/// A chip's lettering, ending in `…` when the chip is capped. `id` names it
+/// for the ellipsis probe.
+fn chip_text(id: &str, text: String) -> Div {
+    ellipsized_box().children(ellipsized(
+        id,
+        SharedString::from(text.clone()),
+        StyledText::new(text),
+    ))
+}
+
+/// The box a content-sized text sits in when it may shrink: the invisible
+/// copy sizes it and the drawn copy lies over it.
+fn ellipsized_box() -> Div {
+    div()
+        .relative()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .whitespace_nowrap()
 }
 
 /// A tab pill's lettering.
@@ -569,13 +585,14 @@ fn leaf_pill(
     cx: &mut Context<RootView>,
 ) -> AnyElement {
     let selector = format!("leaf-pill-{session_id}");
+    let text = chip_text(&selector, pill_text(pill));
     let base = chip(
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector),
         size,
     )
-    .child(chip_text(pill_text(pill)));
+    .child(text);
     let tip = pill.hover();
     match pill {
         TabPill::Unbound if !attachable => {
@@ -619,14 +636,12 @@ fn leaf_chips(
         .into_iter()
         .collect();
     if let Some((text, tip)) = leaf.state.tag() {
+        let name = format!("leaf-state-{}", leaf.id);
         chips.push(
-            chip(
-                div().id(SharedString::from(format!("leaf-state-{}", leaf.id))),
-                size,
-            )
-            .tooltip(tooltip(tip))
-            .child(chip_text(text))
-            .into_any_element(),
+            chip(div().id(SharedString::from(name.clone())), size)
+                .tooltip(tooltip(tip))
+                .child(chip_text(&name, text))
+                .into_any_element(),
         );
     }
     chips
@@ -722,14 +737,11 @@ fn container_parts(container: &Container) -> Vec<AnyElement> {
         );
     }
     parts.push(
-        div()
+        truncating(&part("name"), StyledText::new(container.name.clone()))
             .flex_1()
-            .min_w(px(0.0))
-            .truncate()
             .text_size(px(12.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(gpui::rgb(TEXT))
-            .child(container.name.clone())
             .into_any_element(),
     );
     if container.attention {
@@ -925,15 +937,15 @@ fn label_head(leaf: &Leaf) -> Vec<AnyElement> {
             GlyphSize::Leaf,
             &format!("leaf-glyph-{}", leaf.id),
         ),
-        div()
-            .flex_1()
-            .min_w(px(0.0))
-            .truncate()
-            .text_size(px(13.0))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(gpui::rgb(if seen_idle { TEXT_2 } else { TEXT }))
-            .child(leaf.label.clone())
-            .into_any_element(),
+        truncating(
+            &format!("leaf-{}-label", leaf.id),
+            StyledText::new(leaf.label.clone()),
+        )
+        .flex_1()
+        .text_size(px(13.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(gpui::rgb(if seen_idle { TEXT_2 } else { TEXT }))
+        .into_any_element(),
     ];
     if leaf.attention {
         parts.push(container_badge(format!("leaf-badge-{}", leaf.id)).into_any_element());
@@ -999,6 +1011,7 @@ fn comfortable_lower(
     let mut lower = Vec::new();
     if leaf.subline.is_some() || !inline.is_empty() {
         let selector = format!("leaf-subline-{}", leaf.id);
+        let text_id = format!("{selector}-label");
         lower.push(
             div()
                 .debug_selector(|| selector)
@@ -1009,11 +1022,13 @@ fn comfortable_lower(
                 .pl(px(SUBLINE_INDENT))
                 .text_size(px(SUBLINE_TEXT_SIZE))
                 .text_color(gpui::rgb(SUBTLE))
-                .children(
-                    leaf.subline
-                        .clone()
-                        .map(|text| div().min_w(px(0.0)).truncate().child(text)),
-                )
+                .children(leaf.subline.clone().map(|text| {
+                    ellipsized_box().children(ellipsized(
+                        &text_id,
+                        SharedString::from(text.clone()),
+                        StyledText::new(text),
+                    ))
+                }))
                 .children(inline)
                 .into_any_element(),
         );

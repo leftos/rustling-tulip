@@ -5,7 +5,8 @@
 
 use gpui::{
     AnyElement, ClickEvent, Context, Div, Entity, FontWeight, MouseButton, MouseDownEvent,
-    SharedString, Stateful, Window, anchored, deferred, div, point, prelude::*, px, svg,
+    SharedString, Stateful, StyledText, Window, anchored, deferred, div, point, prelude::*, px,
+    svg,
 };
 use protocol::{ClientMessage, SessionMember};
 
@@ -13,7 +14,7 @@ use crate::assets::REFRESH_ICON;
 use crate::changes_view::{
     HEAD_HEIGHT, ScBucketRow, ScChanges, ScCommit, caret, changes_body, count_pill, head_title,
 };
-use crate::history::section_title;
+use crate::ellipsis::truncating;
 use crate::session_menu::menu_frame;
 use crate::session_menu::menu_item;
 use crate::sidebar::{Activity, display_label};
@@ -24,6 +25,8 @@ use crate::{BORDER, HOVER_BG, MUTED, PANEL_BG, RootView, TEXT, UI_TEXT_SIZE, too
 
 /// The panel's title.
 pub const SC_TITLE: &str = "Source control";
+/// The space above and below a section head's repo and branch lines.
+const HEAD_PAD_Y: f32 = 3.0;
 /// The picker's row that follows the active pane.
 pub const AUTO_LABEL: &str = "Auto · follow active pane";
 /// The panel's text with no repo registered.
@@ -54,8 +57,10 @@ pub struct ScSectionRow {
     pub key: ScKey,
     /// The section's key id, which its selectors end in.
     pub id: String,
-    /// The repo name, then ` · <branch>` when a branch is known.
-    pub title: String,
+    /// The repo name, the head's first line.
+    pub repo: String,
+    /// The branch, the head's second line, when one is known.
+    pub branch: Option<String>,
     /// The distinct changed paths, when loaded and not zero.
     pub count: Option<usize>,
     /// Whether its Changes part is folded, which hides the body below.
@@ -279,7 +284,6 @@ impl RootView {
     }
 
     fn sc_row(&self, section: &Section) -> ScSectionRow {
-        let title = section_title(section);
         let loaded = self.sc.is_loaded(&section.key);
         let count = self.sc.badge_total(std::slice::from_ref(&section.key));
         let collapsed = self.sidebar.source_control().is_collapsed(
@@ -297,7 +301,8 @@ impl RootView {
         ScSectionRow {
             key: section.key.clone(),
             id: section.key.id(),
-            title,
+            repo: section.repo_name.clone(),
+            branch: section.branch.clone(),
             count: (loaded && count > 0).then_some(count),
             collapsed,
             commit: changes.commit,
@@ -493,6 +498,7 @@ impl RootView {
     fn sc_header(&self, panel: &ScPanel, cx: &mut Context<Self>) -> Div {
         let actions = div()
             .flex()
+            .min_w(px(0.0))
             .items_center()
             .gap(px(4.0))
             .when(panel.refresh, |row| row.child(refresh_button(cx)))
@@ -528,6 +534,7 @@ impl RootView {
             .id("sc-picker")
             .debug_selector(|| "sc-picker".to_owned())
             .flex()
+            .min_w(px(0.0))
             .items_center()
             .h(px(PICKER_HEIGHT))
             .px(px(6.0))
@@ -536,7 +543,7 @@ impl RootView {
             .border_color(gpui::rgb(BORDER))
             .cursor_pointer()
             .hover(|style| style.bg(gpui::rgb(HOVER_BG)).text_color(gpui::rgb(TEXT)))
-            .child(div().truncate().child(label))
+            .child(truncating("sc-picker-label", StyledText::new(label)))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.open_sc_picker(window, cx);
             }));
@@ -617,8 +624,7 @@ fn context_line(context: ScContext) -> Stateful<Div> {
         .border_b_1()
         .border_color(gpui::rgb(BORDER))
         .text_color(gpui::rgb(MUTED))
-        .truncate()
-        .child(context.text)
+        .child(truncating("sc-context", StyledText::new(context.text)))
         .when_some(context.tooltip, |line, tip| line.tooltip(tooltip(tip)))
 }
 
@@ -637,6 +643,17 @@ fn section_view(
 ) -> AnyElement {
     let name = format!("sc-section-{}", row.id);
     let body_name = format!("sc-section-body-{}", row.id);
+    let title = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .child(head_title(&format!("{name}-repo"), &row.repo))
+        .children(
+            row.branch
+                .as_deref()
+                .map(|branch| head_title(&format!("{name}-branch"), branch)),
+        );
     let key = row.key.clone();
     let header = div()
         .id(SharedString::from(name.clone()))
@@ -644,7 +661,8 @@ fn section_view(
         .flex()
         .items_center()
         .gap(px(6.0))
-        .h(px(HEAD_HEIGHT))
+        .min_h(px(HEAD_HEIGHT))
+        .py(px(HEAD_PAD_Y))
         .px(px(ROW_PADDING))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
@@ -664,7 +682,7 @@ fn section_view(
             this.toggle_sc_changes(&key, window, cx);
         }))
         .child(caret(row.collapsed))
-        .child(head_title(&row.title).flex_1().min_w(px(0.0)).truncate())
+        .child(title)
         .when_some(row.count, |header, count| header.child(count_pill(count)));
     let body = (!row.collapsed || row.stashes.is_some()).then(|| {
         div()

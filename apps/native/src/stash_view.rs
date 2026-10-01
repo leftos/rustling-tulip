@@ -5,14 +5,15 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
-    FontWeight, Keystroke, MouseButton, MouseDownEvent, SharedString, Stateful, Subscription,
-    Window, div, prelude::*, px,
+    FontWeight, Keystroke, MouseButton, MouseDownEvent, SharedString, Stateful, StyledText,
+    Subscription, Window, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, GitStash};
 use std::collections::{HashMap, HashSet};
 
 use crate::buttons::{ButtonSize, outlined_button};
 use crate::changes_view::{HEAD_HEIGHT, LOADING_TEXT, caret, count_pill, head_title};
+use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
@@ -626,6 +627,7 @@ pub(crate) fn stashes_part(
 
 fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> Stateful<Div> {
     let name = part.selector.clone();
+    let title_id = format!("{name}-title");
     let key = key.clone();
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
@@ -638,7 +640,7 @@ fn stashes_header(key: &ScKey, part: &ScStashes, cx: &mut Context<RootView>) -> 
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .child(caret(part.collapsed))
-        .child(head_title(STASHES_TITLE).flex_1().min_w(px(0.0)).truncate())
+        .child(head_title(&title_id, STASHES_TITLE).flex_1())
         .when_some(part.count, |header, count| header.child(count_pill(count)))
         .on_mouse_down(MouseButton::Left, {
             let key = key.clone();
@@ -695,6 +697,7 @@ fn push_row(
 
 fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Stateful<Div> {
     let name = stash.selector.clone();
+    let subject_id = format!("{name}-subject");
     let shown = GitStash {
         id: stash.id.clone(),
         subject: stash.subject.clone(),
@@ -725,13 +728,7 @@ fn stash_row(key: &ScKey, stash: &ScStashRow, cx: &mut Context<RootView>) -> Sta
                 .text_color(gpui::rgb(SUBTLE))
                 .child(stash.id.clone()),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .child(stash.subject.clone()),
-        )
+        .child(truncating(&subject_id, StyledText::new(stash.subject.clone())).flex_1())
         .child(div().flex().flex_none().gap(px(2.0)).children(buttons))
 }
 

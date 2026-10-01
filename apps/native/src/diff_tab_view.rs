@@ -11,7 +11,8 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, KeyDownEvent,
-    Pixels, Stateful, Subscription, Task, Window, canvas, div, prelude::*, px, relative, svg,
+    Pixels, SharedString, Stateful, StyledText, Subscription, Task, Window, canvas, div,
+    prelude::*, px, relative, svg,
 };
 use protocol::{ClientMessage, DaemonMessage, TabContent};
 
@@ -27,6 +28,7 @@ use crate::diff_tab::{
     split_path,
 };
 use crate::diff_view::{DiffView, Nav};
+use crate::ellipsis::ellipsized;
 use crate::fonts::FontSettings;
 use crate::notices::ToastKind;
 use crate::palette::{LINE, SUBTLE, SURFACE};
@@ -483,19 +485,34 @@ impl DiffTabView {
     }
 }
 
+/// The path box's file name and folder, as their selectors and ellipsis
+/// probe ids.
+const PATH_NAME: &str = "diff-path-name";
+const PATH_FOLDER: &str = "diff-path-folder";
+
 /// The file name, then its folder, which gives up its end to an ellipsis as
 /// room runs out; the full path is the tooltip. The name keeps its width
 /// until the folder is gone, then is cut at its end the same way, as it
 /// never grows past the box.
 fn path_box(path: &str) -> Stateful<Div> {
     let (name, folder) = split_path(path);
-    let name = div()
-        .debug_selector(|| "diff-path-name".to_owned())
+    let ellipsis_box = || {
+        div()
+            .relative()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .whitespace_nowrap()
+    };
+    let name = ellipsis_box()
+        .debug_selector(|| PATH_NAME.to_owned())
         .flex_none()
         .max_w(relative(1.0))
-        .truncate()
         .text_color(gpui::rgb(TEXT))
-        .child(name.to_owned());
+        .children(ellipsized(
+            PATH_NAME,
+            SharedString::from(name.to_owned()),
+            StyledText::new(name.to_owned()),
+        ));
     div()
         .id("diff-path")
         .debug_selector(|| "diff-path".to_owned())
@@ -507,12 +524,14 @@ fn path_box(path: &str) -> Stateful<Div> {
         .child(name)
         .when(!folder.is_empty(), |path| {
             path.child(
-                div()
-                    .debug_selector(|| "diff-path-folder".to_owned())
-                    .min_w(px(0.0))
-                    .truncate()
+                ellipsis_box()
+                    .debug_selector(|| PATH_FOLDER.to_owned())
                     .text_color(gpui::rgb(SUBTLE))
-                    .child(folder.to_owned()),
+                    .children(ellipsized(
+                        PATH_FOLDER,
+                        SharedString::from(folder.to_owned()),
+                        StyledText::new(folder.to_owned()),
+                    )),
             )
         })
         .tooltip(tooltip(path.to_owned()))

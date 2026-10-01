@@ -46,7 +46,7 @@ The generic loop is the user-level `nextup` skill; this file supplies only what 
 
 - Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default; a Tauri fix is cut from and lands on `tauri`).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
-- Depends on, where file lists hide it: the dependencies a line or its subplan names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 6 → Wave 7); a protocol message one item adds and another item's view consumes.
+- Depends on, where file lists hide it: the dependencies a line or its subplan names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 5 → Wave 6); a protocol message one item adds and another item's view consumes.
 - Context: read the status bar's figure at every landing (`jq .context_window.used_percentage <scratchpad>/statusline.json`); past 40% the loop stops refilling, per the user-level `nextup`.
 
 ## Docs map

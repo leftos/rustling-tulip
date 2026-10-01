@@ -66,6 +66,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change daemon startup or supervision | `crates/daemon/src/main.rs`, `instance_lock.rs`, `binary_cache.rs`, `orphan.rs`, `crates/daemon-client/src/supervisor.rs` |
 | Add a native client view or dialog | a plain-Rust model module in `apps/native/src/` → its `*_view.rs` → mounted and routed in `apps/native/src/lib.rs` (`RootView`) → a spec in `apps/native/tests/ui_*.rs` over `tests/support/mod.rs` |
 | Change the sidebar or activity rail | `apps/native/src/sidebar.rs`, `sidebar_view.rs`, `activity_bar.rs`; the Needs You panel: `needs_you.rs`, `needs_you_view.rs` |
+| End one-line text in `…` in the native client | `docs/native-client.md` ("Truncating text with `…`"), `apps/native/src/ellipsis.rs` (`ellipsized`, `truncating`, the debug probe), the view that draws the text, `tests/ui_ellipsis.rs` |
 | Change the client's colours | `apps/native/src/palette.rs` (every UI colour), `theme.rs` (the terminal palette), `appearance.rs` (accent and background presets) |
 | Change tabs or panes | `apps/native/src/tabs.rs`, `tab_bar.rs`, `tab_menu.rs`, `grid_view.rs`, `pane_menu.rs`, daemon `crates/daemon/src/tabs.rs` |
 | Change the terminal pane | `apps/native/src/term_view.rs`, `term.rs`, `term_input.rs`, `keys.rs`, `mouse.rs`, `links.rs`, `shell_marks.rs` |

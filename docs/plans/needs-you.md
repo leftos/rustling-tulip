@@ -1,6 +1,6 @@
 # The "Needs You" view
 
-Design for the "Needs You" item in [MAIN.md](./MAIN.md) (Wave 7). Origin and the user's placement ruling: [borrowed-ideas.md](./borrowed-ideas.md). Status source: [hook-status.md](./hook-status.md) (Wave 6). Summaries: [spoken-alerts.md](./spoken-alerts.md) (Wave 7, including the Dashboard it sits beside).
+Design for the "Needs You" item in [MAIN.md](./MAIN.md) (Wave 6). Origin and the user's placement ruling: [borrowed-ideas.md](./borrowed-ideas.md). Status source: [hook-status.md](./hook-status.md) (Wave 5). Summaries: [spoken-alerts.md](./spoken-alerts.md) (Wave 6, including the Dashboard it sits beside).
 
 ## Problem
 
@@ -20,8 +20,8 @@ A session is listed when any of these holds, checked in this order (the first ma
 
 | Reason | Condition | Source | Leaves the list when |
 | - | - | - | - |
-| **Asking** | `status == AwaitingInput` | today's heuristic, or hook status once Wave 6 lands | the status changes (answered, interrupted, ended) |
-| **Answer** | `status == Idle`, `summary.kind == NeedsAnswer`, and `summary.updated_at >= status_since` (the summary is about this stop, not an older one) | Wave 7 summarizer (SA.6) | the status changes (a new prompt makes it `Working`) |
+| **Asking** | `status == AwaitingInput` | today's heuristic, or hook status once Wave 5 lands | the status changes (answered, interrupted, ended) |
+| **Answer** | `status == Idle`, `summary.kind == NeedsAnswer`, and `summary.updated_at >= status_since` (the summary is about this stop, not an older one) | Wave 6 summarizer (SA.6) | the status changes (a new prompt makes it `Working`) |
 | **Ended** | `status` is `Error` or `Stopped`, and the session is in the client's attention set | today's `Attention { Error / Stopped }` | the user clicks the row or its leaf (the attention clears), or the session is discarded |
 
 A row's membership comes from the snapshot, not from the attention set, for Asking and Answer: clicking an Asking row focuses the pane and clears the leaf's "!", but the row stays until the question is answered, since the session still needs you. Ended rows are the one kind a look dismisses.
@@ -34,8 +34,8 @@ Two lines, the panel's width, no card chrome:
 
 - Line 1: the status shape (the leaf's dot today; Petal's asking diamond), the container name in its accent colour, " · ", the session's display label (the same label the leaf shows), and right-aligned the time waited ("12s", "4m", "1h 5m") since `status_since`.
 - Line 2, muted, one line with an ellipsis, the full text in the tooltip: what it wants, from the best source present:
-  - `pending_input` (Wave 6): Question → its `header` and first `question` ("Migration: keep newest, merge oldest, or skip?"), with "+2 more" when there are several; Permission → "Allow `<tool_name>`: `<summary>`"; PlanApproval → "Approve plan: " and the plan's first line; Other → its `message`.
-  - `summary.headline` (Wave 7), for Answer rows and for Asking rows without `pending_input`.
+  - `pending_input` (Wave 5): Question → its `header` and first `question` ("Migration: keep newest, merge oldest, or skip?"), with "+2 more" when there are several; Permission → "Allow `<tool_name>`: `<summary>`"; PlanApproval → "Approve plan: " and the plan's first line; Other → its `message`.
+  - `summary.headline` (Wave 6), for Answer rows and for Asking rows without `pending_input`.
   - Degraded (neither): Asking → "Waiting for input" plus the session's `terminal_title` when it has one (Claude titles the terminal with its task); Ended → "Error" or "Exited with code N" (`exit_code`).
 - Hover: the row highlights; the tooltip carries line 2 in full.
 
@@ -71,13 +71,13 @@ No new message. `pending_input` (HS.2) and `summary` (SA.1) arrive on the existi
 
 ### Degraded mode and what each wave adds
 
-- **Before Wave 6**: Asking rows from the `pty_state.rs` heuristic (a prompt regex match: permission prompts, numbered choices, `AskUserQuestion` framing); its idle check reclassifies the scrollback tail, so the state holds while the prompt is still on screen. Line 2 is "Waiting for input" plus the terminal title. Ended rows from today's attention events. A question asked in prose at the end of a turn is invisible (the session is just `Idle`).
-- **With Wave 6**: Asking becomes reliable for hook-driven Claude sessions, and line 2 carries the real question, permission or plan. Codex, Cursor and hook-less sessions stay on the heuristic.
-- **With Wave 7**: Answer rows appear (prose questions at a stop), and headlines fill line 2 where no `pending_input` exists.
+- **Before Wave 5**: Asking rows from the `pty_state.rs` heuristic (a prompt regex match: permission prompts, numbered choices, `AskUserQuestion` framing); its idle check reclassifies the scrollback tail, so the state holds while the prompt is still on screen. Line 2 is "Waiting for input" plus the terminal title. Ended rows from today's attention events. A question asked in prose at the end of a turn is invisible (the session is just `Idle`).
+- **With Wave 5**: Asking becomes reliable for hook-driven Claude sessions, and line 2 carries the real question, permission or plan. Codex, Cursor and hook-less sessions stay on the heuristic.
+- **With Wave 6**: Answer rows appear (prose questions at a stop), and headlines fill line 2 where no `pending_input` exists.
 
 ## Steps
 
-NY.1 to NY.3 need neither Wave 6 nor Wave 7 and land now, ahead of Wave 6, as the reduced view (Q1); NY.4 needs HS.2; NY.5 needs SA.1 (and shows Answer rows only once SA.6 fills summaries).
+NY.1 to NY.3 need neither Wave 5 nor Wave 6 and land now, ahead of Wave 5, as the reduced view (Q1); NY.4 needs HS.2; NY.5 needs SA.1 (and shows Answer rows only once SA.6 fills summaries).
 
 - [x] **NY.1 `status_since` on the snapshot.** `crates/protocol/src/lib.rs`: the field. `crates/daemon/src/session.rs`: stamp in `update_from` when `status` differs from before the closure, and at record creation; audit the direct `rec.status =` writes outside `update_from` (`rg -n "\.status = " crates/daemon/src`) and route any that bypass it. Proof: a protocol round-trip test with and without the field, `cargo test -p protocol v22_compat`; a daemon unit test that a status change stamps a new time, a same-status update keeps the old one, and a new record has one. Gates: `-p protocol -p daemon`.
 - [x] **NY.2 The list model.** New `apps/native/src/needs_you.rs` (plain Rust, no GPUI): `NeedsYouRow { session_id, container_name, accent, label, reason: Reason, since, detail: String }`, `enum Reason { Asking, Answer, Ended }`, `fn rows(model: &SidebarModel) -> Vec<NeedsYouRow>` built from `containers()` (sidebar order, display labels, the attention flag) and the snapshots; the membership table, the order, the degraded line-2 text, and `fn waited(now, since) -> String`. Proof: unit tests for each membership row (including parked and abandoned excluded, and an Asking row that survives a cleared attention), the order (oldest first, no-`since` after, Ended last, sidebar order on ties), line 2 with and without a terminal title and for each Ended form, and `waited` at 0 s, 59 s, 60 s, 1 h 5 m. Gates: `-p rustling-tulip-native`. Needs NY.1.
@@ -88,5 +88,5 @@ NY.1 to NY.3 need neither Wave 6 nor Wave 7 and land now, ahead of Wave 6, as th
 
 ## Open questions
 
-Answered (user): Q1 (a) NY.1–NY.3 land now, ahead of Wave 6, as the reduced view, and NY.4 and NY.5 follow their waves; Q2 (a) `Error` and attention-flagged `Stopped` rows are listed after the waiting ones and dismissed by a click; Q3 (a) no answer buttons in the compact rows; Q4 (a) sessions excluded from busy tracking are listed like any other; Q5 (a) no shortcut to the longest-waiting session. NY.3's details (user): the rail icon is an inbox tray; the panel has a header row in the panels' header style reading "NEEDS YOU · N" (N the row count); an Ended row's time slot shows the time since it ended, in the same format.
+Answered (user): Q1 (a) NY.1–NY.3 land now, ahead of Wave 5, as the reduced view, and NY.4 and NY.5 follow their waves; Q2 (a) `Error` and attention-flagged `Stopped` rows are listed after the waiting ones and dismissed by a click; Q3 (a) no answer buttons in the compact rows; Q4 (a) sessions excluded from busy tracking are listed like any other; Q5 (a) no shortcut to the longest-waiting session. NY.3's details (user): the rail icon is an inbox tray; the panel has a header row in the panels' header style reading "NEEDS YOU · N" (N the row count); an Ended row's time slot shows the time since it ended, in the same format.
 

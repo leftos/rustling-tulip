@@ -8,13 +8,14 @@
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, Focusable,
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful,
-    Subscription, Window, anchored, deferred, div, prelude::*, px,
+    StyledText, Subscription, Window, anchored, deferred, div, prelude::*, px,
 };
 use protocol::{ClientMessage, DaemonMessage, GitFileChange};
 use std::collections::HashMap;
 
 use crate::buttons::{ButtonSize, primary_button};
 use crate::discard_confirm::{DiscardButton, DiscardConfirm};
+use crate::ellipsis::truncating;
 use crate::fonts::DEFAULT_FAMILY;
 use crate::notice_view::modal_panel;
 use crate::notices::ToastKind;
@@ -379,13 +380,13 @@ fn status_color(status: &str) -> u32 {
 }
 
 /// A section head's title, uppercased: 11 px bold in the secondary text
-/// colour. The caller sizes it in its head.
-pub(crate) fn head_title(title: &str) -> Div {
-    div()
+/// colour, ending in `…` when its head narrows it. The caller sizes it in
+/// its head; `id` names it for the ellipsis probe.
+pub(crate) fn head_title(id: &str, title: &str) -> Div {
+    truncating(id, StyledText::new(title.to_uppercase()))
         .text_size(px(HEAD_TEXT_SIZE))
         .font_weight(FontWeight::BOLD)
         .text_color(gpui::rgb(TEXT_2))
-        .child(title.to_uppercase())
 }
 
 /// A section head's count, in a pill.
@@ -1237,6 +1238,7 @@ fn banner_view(key: &ScKey, id: &str, text: String, cx: &mut Context<RootView>) 
 
 fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) -> Stateful<Div> {
     let name = bucket.selector.clone();
+    let title_id = format!("{name}-title");
     let actions: Vec<Stateful<Div>> = bucket
         .actions
         .iter()
@@ -1250,7 +1252,7 @@ fn bucket_header(key: &ScKey, bucket: &ScBucketRow, cx: &mut Context<RootView>) 
         .gap(px(6.0))
         .h(px(HEAD_HEIGHT))
         .px(px(ROW_PADDING))
-        .child(head_title(bucket.title).flex_1().min_w(px(0.0)).truncate())
+        .child(head_title(&title_id, bucket.title).flex_1())
         .children(actions)
         .child(count_pill(bucket.count))
 }
@@ -1276,6 +1278,7 @@ fn folder_row(
     let name = folder.selector.clone();
     let key = key.clone();
     let full_path = folder.full_path.clone();
+    let label_id = format!("{name}-label");
     div()
         .id(ElementId::Name(SharedString::from(name.clone())))
         .debug_selector(|| name)
@@ -1288,13 +1291,7 @@ fn folder_row(
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER_BG)))
         .child(caret(folder.collapsed))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .child(folder.label.clone()),
-        )
+        .child(truncating(&label_id, StyledText::new(folder.label.clone())).flex_1())
         .child(
             div()
                 .flex_none()
@@ -1314,6 +1311,7 @@ fn file_row_view(
     cx: &mut Context<RootView>,
 ) -> Stateful<Div> {
     let name = file.selector.clone();
+    let name_id = format!("{name}-name");
     let group = SharedString::from(file.selector.clone());
     let buttons: Vec<Stateful<Div>> = file
         .buttons
@@ -1341,13 +1339,7 @@ fn file_row_view(
             cx.notify();
         }))
         .tooltip(tooltip(file.tooltip.clone()))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .truncate()
-                .child(file.name.clone()),
-        )
+        .child(truncating(&name_id, StyledText::new(file.name.clone())).flex_1())
         .child(
             div()
                 .flex_none()

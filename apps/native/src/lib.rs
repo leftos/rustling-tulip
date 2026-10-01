@@ -22,6 +22,7 @@ mod diff_tab;
 mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
+pub mod ellipsis;
 pub mod fonts;
 mod footer;
 mod grid_view;
@@ -97,8 +98,9 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
     CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
     InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, SharedString, Stateful, Task,
-    Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
+    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, SharedString, Stateful,
+    StyledText, Task, Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px,
+    size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, TabEntry,
@@ -2250,13 +2252,10 @@ impl RootView {
             .child(pill)
             .children(counts.spans().into_iter().map(footer_count))
             .child(
-                div()
+                ellipsis::truncating("footer-status", StyledText::new(self.footer_status()))
                     .debug_selector(|| "footer-status".to_owned())
                     .flex_1()
-                    .min_w(px(0.0))
-                    .text_right()
-                    .truncate()
-                    .child(self.footer_status()),
+                    .text_right(),
             )
     }
 

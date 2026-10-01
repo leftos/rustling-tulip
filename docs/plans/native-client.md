@@ -71,7 +71,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Size driver: "only one pane per session (its size driver) answers terminal queries" (`docs/native-client.md`, Terminal). A pop-out's terminal takes part in `tabs::size_drivers`.
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive and keep protocol 22 decodable (CLAUDE.md, Architecture invariants).
-- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (MAIN.md, Wave 10); "a visible result no test can prove lands on green gates and is listed for a hand-test" (MAIN.md, Gates).
+- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (MAIN.md, Wave 9); "a visible result no test can prove lands on green gates and is listed for a hand-test" (MAIN.md, Gates).
 
 ### P5.1 Drag model: payloads, drop edges, reorder
 
@@ -87,7 +87,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - **Files**: `grid_view.rs` (header `on_drag`, pane `on_drag_move` / `on_drop`, overlay); `lib.rs` (`RootView.pane_drop: Option<(String, PaneDropEdge)>`, cleared on drop, Esc and mouse up); `undo.rs` (`SWAPPED_PANES`); `pane_menu.rs` (the Move to ▸ send and its undo become one helper both paths call); new `tests/ui_pane_drag.rs`; `tests/support/mod.rs` (a `drag(from, to)` helper over the simulated mouse).
 - **Core / view**: the edge, the message and the undo label come from `drag.rs`; the view hit-tests the pointer against each pane's bounds and draws the overlay.
 - **Proof**: `cargo test -p rustling-tulip-native --test ui_pane_drag`, red first: `drop_on_right_half_moves_the_pane_right`, `drop_on_centre_swaps_and_offers_undo`, `drop_in_the_outer_band_splits_at_the_top_level`, `drop_on_itself_sends_nothing`, `overlay_follows_the_pointer_and_clears_on_release`, `esc_cancels_the_drag`; `ui_panes` and `ui_tabs` stay green.
-- **Needs**: P5.1; Wave 3's stale-closing-mark item (drags make a rolled-back `MovePane` common); Wave 1's PT.7 (the header it drags); Q8, Q12, Q14.
+- **Needs**: P5.1; Wave 2's stale-closing-mark item (drags make a rolled-back `MovePane` common); Petal's PT.7 (landed; the header it drags); Q8, Q12, Q14.
 
 ### P5.3 Tab strip drag
 
@@ -95,7 +95,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - **Files**: `tab_bar.rs`; `tabs.rs` (`TabsModel::reorder` callable for the local apply); new `tests/ui_tab_drag.rs`.
 - **Core / view**: `drag::reorder`, `TabsModel::reorder`, `pick_balanced_drop_target`; the view draws the mark and routes the drops.
 - **Proof**: `cargo test -p rustling-tulip-native --test ui_tab_drag`, red first: `pill_dropped_after_another_reorders_the_tabs`, `reorder_shows_before_the_daemon_echo`, `pane_over_a_pill_activates_that_tab`, `pane_dropped_on_a_pill_moves_it_balanced_with_undo`, `diff_pill_refuses_a_pane`.
-- **Needs**: P5.2; Wave 3 (its `tab_bar.rs` and `tabs.rs` items land first); Q10.
+- **Needs**: P5.2; Wave 2 (its `tab_bar.rs` and `tabs.rs` items land first); Q10.
 
 ### P5.4 Sidebar drag-to-reorder
 
@@ -103,7 +103,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - **Files**: `sidebar.rs` (local apply of container and session order); `sidebar_view.rs`; `tab_bar.rs` (the pill accepts a tab-container drop); new `tests/ui_sidebar_drag.rs`.
 - **Core / view**: `drag::reorder` and `SidebarModel`'s local order, unit-tested in `sidebar.rs`; the view draws the line.
 - **Proof**: `cargo test -p rustling-tulip-native --lib sidebar::tests::local_order` and `--test ui_sidebar_drag`, red first: `container_dropped_before_another_sends_the_full_order`, `shell_and_dir_containers_do_not_drag`, `tab_container_reorders_the_strip`, `leaf_reorders_within_its_repo`, `leaf_dropped_in_another_container_does_nothing`, `local_order_holds_until_the_echo`.
-- **Needs**: P5.1; P5.3 (the shared tab payload); Wave 1's PT.6a / PT.6b and Wave 4's P4.10 / P4.11 (they reshape the rows it drags).
+- **Needs**: P5.1; P5.3 (the shared tab payload); Petal's PT.6a / PT.6b (landed) and Wave 3's P4.10 / P4.11 (they reshape the rows it drags).
 
 ### P5.5 Drag a leaf onto a pane or a tab pill
 

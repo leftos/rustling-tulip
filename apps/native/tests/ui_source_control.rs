@@ -251,7 +251,10 @@ fn a_focused_worktree_session_requests_its_worktree_status(cx: &mut TestAppConte
     let sections = panel(&mut h).sections;
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].id, "r1::C:/wt/x");
-    assert_eq!(sections[0].title, "r1 · wt/x");
+    assert_eq!(
+        (sections[0].repo.as_str(), sections[0].branch.as_deref()),
+        ("r1", Some("wt/x"))
+    );
 }
 
 #[gpui::test]
@@ -328,7 +331,10 @@ fn sections_show_loading_then_clean_then_count(cx: &mut TestAppContext) {
         let sections = panel(h).sections;
         assert_eq!(sections.len(), 1, "one section");
         let row = sections.into_iter().next().expect("the section");
-        assert_eq!((row.id.as_str(), row.title.as_str()), ("r1::", "r1"));
+        assert_eq!(
+            (row.id.as_str(), row.repo.as_str(), row.branch.as_deref()),
+            ("r1::", "r1", None)
+        );
         (row.count, row.collapsed, row.body, row.buckets.len())
     };
 

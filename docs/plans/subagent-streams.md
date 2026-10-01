@@ -1,6 +1,6 @@
 # View subagent streams as clickable sessions
 
-Design for the `docs/plans/MAIN.md` item (Wave 8) "View subagent streams as clickable sessions". A Claude session's running subagents appear as a foldable set of rows under its sidebar leaf (agent type and description); a click opens a read-only view of that subagent's transcript in a pane; a row goes when its subagent finishes. Viewing is read-only: no interception, messaging or stopping (those stay out of scope, `docs/architecture.md` non-goals).
+Design for the `docs/plans/MAIN.md` item (Wave 7) "View subagent streams as clickable sessions". A Claude session's running subagents appear as a foldable set of rows under its sidebar leaf (agent type and description); a click opens a read-only view of that subagent's transcript in a pane; a row goes when its subagent finishes. Viewing is read-only: no interception, messaging or stopping (those stay out of scope, `docs/architecture.md` non-goals).
 
 ## Terms
 
