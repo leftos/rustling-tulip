@@ -1515,6 +1515,7 @@ async fn spawn_one(
         agent_options: plan.preset.agent_options.clone(),
         model: plan.preset.model.clone(),
         extra_env: Vec::new(),
+        secret_env_keys: Vec::new(),
         prompt_injector: Some(injector),
         request_id: None,
         resume_conversation: None,

@@ -25,8 +25,8 @@ use crate::state::AppState;
 use crate::tabs;
 use crate::tracer_client;
 use crate::{
-    git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan, user_env,
-    vscode, workspace as ws,
+    env_secrets, git, git_inspect, git_write, headless, inject, osc_title, pty_state, spawn_plan,
+    user_env, vscode, workspace as ws,
 };
 use anyhow::{Context as _, anyhow};
 use axum::Json;
@@ -1628,10 +1628,12 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
             });
         }
         ClientMessage::SpawnSession(req) => {
-            // An unset env reference refuses the spawn before the user is
-            // asked to confirm a checkout it would never make. This is a
-            // lookup only; `spawn_session` resolves again for the child.
-            if let Err(failure) = resolve_env_refs(&req.extra_env, user_env::resolve) {
+            // An unresolvable reference — an unset env variable, or a saved
+            // secret that is no longer in the store — or a secret row that
+            // could not be sealed refuses the spawn before the user is asked to
+            // confirm a checkout it would never make. This writes nothing;
+            // `spawn_session` seals and resolves again for the child.
+            if let Err(failure) = check_env_rows(&req.extra_env, &req.secret_env_keys) {
                 send_spawn_failure(out_tx, &failure.into(), req.request_id.as_deref());
             } else if let Some(confirm) = in_place_checkout_confirm(hub, &req).await {
                 let _ = out_tx.send(confirm);
@@ -3189,7 +3191,7 @@ fn checkout_confirm_reply(
 )]
 pub(crate) async fn spawn_session(
     hub: &Hub,
-    req: SpawnRequest,
+    mut req: SpawnRequest,
     origin: Option<UpdateOrigin>,
 ) -> anyhow::Result<protocol::SessionSnapshot> {
     // Phase-level timing for the spawn pipeline so we can tell at a glance
@@ -3197,6 +3199,12 @@ pub(crate) async fn spawn_session(
     // or something on the registry side. Logged at info so users debugging
     // perceived slowness can read them without flipping log filters.
     let t_total = std::time::Instant::now();
+    // A secret row's literal moves into the credential store and becomes a
+    // `${secret:<id>}` reference before anything captures the request, so the
+    // session record, the sidecar, `state.json`, the `Repos`/`Workspaces`
+    // broadcast, the `GetSpawnConfig` reply and the history entry all hold the
+    // reference and never the value.
+    env_secrets::seal_rows(&mut req.extra_env, &req.secret_env_keys)?;
     // Capture the persist-able config before destructuring so duplicates
     // can be reconstructed verbatim from the session record / sidecar.
     let stored_config = protocol::SpawnConfig::from_request(&req);
@@ -3209,6 +3217,7 @@ pub(crate) async fn spawn_session(
         agent_options,
         model,
         extra_env,
+        secret_env_keys: _,
         prompt_injector,
         request_id: _,
         resume_conversation,
@@ -5498,6 +5507,15 @@ async fn recover_one(
         .ok_or_else(|| ALREADY_RECOVERING.to_owned())?;
     let entry = history::read_one(&hub.dirs, &item.history_id)
         .ok_or_else(|| format!("no history entry {}", item.history_id))?;
+    // A row the recovery would spawn with that can't be resolved — an unset env
+    // variable, or a saved secret no longer in the store — or that couldn't be
+    // sealed refuses it here, before the registration and branch lookup below:
+    // registering a repo writes `state.json` and broadcasts `Repos`, and a
+    // recovery that then failed would leave a repo the user never asked for
+    // behind a spawn that never happened.
+    if let Err(failure) = check_env_rows(history::recorded_env(&entry), &[]) {
+        return Err(format!("{failure}"));
+    }
     let (repos, workspaces) = hub
         .state
         .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
@@ -6762,46 +6780,68 @@ fn passthrough_env() -> Vec<(String, String)> {
     out
 }
 
-/// The `NAME` of a spawn env value written exactly `${env:NAME}`, where `NAME`
-/// is `[A-Za-z_][A-Za-z0-9_]*`. Anything else, including a reference embedded
-/// in longer text, is a literal and has no name.
-fn env_reference(value: &str) -> Option<&str> {
-    let name = value.strip_prefix("${env:")?.strip_suffix('}')?;
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    let valid = (first.is_ascii_alphabetic() || first == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
-    valid.then_some(name)
-}
-
-/// The spawn's `extra_env` with each env reference (see [`env_reference`])
-/// replaced by the value `lookup` finds for it; literals pass through as-is.
-/// A reference `lookup` can't resolve refuses the spawn, naming the variable.
+/// The spawn's `extra_env` with each reference (see
+/// [`protocol::env_rows::reference`]) replaced by the value it stands for: an
+/// env reference by the value `lookup` finds for it, a secret reference by the
+/// value saved under its id in Windows Credential Manager. Literals pass
+/// through as-is.
+///
+/// A reference that can't be resolved refuses the spawn, naming the row's key
+/// and never the value.
 pub(crate) fn resolve_env_refs(
     extra_env: &[(String, String)],
     mut lookup: impl FnMut(&str) -> Option<(user_env::Secret, user_env::Origin)>,
 ) -> Result<Vec<(String, String)>, spawn_plan::SpawnFailure> {
     extra_env
         .iter()
-        .map(|(key, value)| {
-            let Some(name) = env_reference(value) else {
-                return Ok((key.clone(), value.clone()));
-            };
-            let Some((secret, origin)) = lookup(name) else {
-                return Err(spawn_plan::SpawnFailure {
-                    title: "Environment variable not set".to_owned(),
-                    detail: format!(
-                        "`{name}` isn't set in the daemon's environment or your user environment."
-                    ),
-                    hint: Some(
-                        "Set it as a user environment variable, then spawn again.".to_owned(),
-                    ),
-                });
-            };
-            debug!(key = %key, name, ?origin, "spawn env reference resolved");
-            Ok((key.clone(), secret.expose().to_owned()))
+        .map(|(key, value)| match protocol::env_rows::reference(value) {
+            Some(protocol::env_rows::Reference::Env(name)) => {
+                let Some((secret, origin)) = lookup(&name) else {
+                    return Err(spawn_plan::SpawnFailure {
+                        title: "Environment variable not set".to_owned(),
+                        detail: format!(
+                            "`{name}` isn't set in the daemon's environment or your user environment."
+                        ),
+                        hint: Some(
+                            "Set it as a user environment variable, then spawn again.".to_owned(),
+                        ),
+                    });
+                };
+                debug!(key = %key, name = %name, ?origin, "spawn env reference resolved");
+                Ok((key.clone(), secret.expose().to_owned()))
+            }
+            Some(protocol::env_rows::Reference::Secret(id)) => {
+                let Some(secret) = env_secrets::open(&id) else {
+                    return Err(spawn_plan::SpawnFailure {
+                        title: "A saved secret is missing".to_owned(),
+                        detail: format!(
+                            "`{key}`'s saved value is no longer in Windows Credential Manager."
+                        ),
+                        hint: Some(
+                            "Open the spawn dialog, type the value again, and spawn.".to_owned(),
+                        ),
+                    });
+                };
+                debug!(key = %key, id = %id, "spawn secret reference resolved");
+                Ok((key.clone(), secret.expose().to_owned()))
+            }
+            None => Ok((key.clone(), value.clone())),
         })
         .collect()
+}
+
+/// Everything the daemon can check about a spawn's env rows before it does
+/// work it can't undo: every secret row must be sealable (see
+/// [`env_secrets::check_sealable`]) and every reference resolvable. The
+/// dispatcher runs it before a checkout confirm, and recovery before it
+/// registers a repo; `spawn_session` seals and resolves again for the child.
+pub(crate) fn check_env_rows(
+    rows: &[(String, String)],
+    secret_keys: &[String],
+) -> Result<(), spawn_plan::SpawnFailure> {
+    env_secrets::check_sealable(rows, secret_keys)?;
+    resolve_env_refs(rows, user_env::resolve)?;
+    Ok(())
 }
 
 /// Build the env list for a spawn: the daemon's keep-list plus the spawn's
@@ -8187,6 +8227,7 @@ mod tests {
             },
             model: None,
             extra_env,
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: request_id.map(str::to_owned),
             resume_conversation: None,
@@ -8315,6 +8356,648 @@ mod tests {
         );
     }
 
+    /// A value no stored copy of a sealed row may ever hold.
+    const SECRET_SENTINEL: &str = "rt-secret-sentinel-3d8f1a";
+
+    /// A syntactically valid secret id (32 lower-case hex) the store has never
+    /// seen, so a row written `${secret:…}` with it resolves nowhere.
+    const MISSING_SECRET_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// The `${secret:<id>}` reference standing for `id`.
+    fn secret_ref(id: &str) -> String {
+        format!("${{secret:{id}}}")
+    }
+
+    /// `key`'s value in a child env built by [`merged_env`].
+    fn child_value(child: &[(String, String)], key: &str) -> Option<String> {
+        child.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// `text` holds no copy of the sentinel and does carry a reference.
+    fn assert_sealed_only(text: &str, what: &str) {
+        assert!(!text.contains(SECRET_SENTINEL), "{what}: {text}");
+        assert!(text.contains("${secret:"), "{what}: {text}");
+    }
+
+    /// The `Repos` list of the next `StateEvent::Repos` on `rx`.
+    #[expect(clippy::panic, reason = "a wrong event fails the test loudly")]
+    fn next_repos(rx: &mut broadcast::Receiver<StateEvent>) -> Vec<protocol::RepoEntry> {
+        loop {
+            match rx.try_recv() {
+                Ok(StateEvent::Repos(repos)) => return repos,
+                Ok(_) => {}
+                Err(err) => panic!("no repos broadcast arrived: {err}"),
+            }
+        }
+    }
+
+    /// An interactive spawn onto `target` whose `ANTHROPIC_API_KEY` row is the
+    /// literal sentinel.
+    fn secret_literal_spawn(target: SpawnTarget) -> SpawnRequest {
+        env_spawn(
+            target,
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", SECRET_SENTINEL)]),
+            None,
+        )
+    }
+
+    /// Register `id` as an interactive session whose record and sidecar carry
+    /// `stored`, exactly as the spawn path's constructors leave them, and write
+    /// the history entry its stop would.
+    ///
+    /// A spawn cannot run to completion under a test hub — it needs a real
+    /// tracer — so a test that would otherwise read the record, the sidecar or
+    /// the history off a live spawn feeds the config the pipeline captured
+    /// (which is what the spawn hands these constructors) to the same
+    /// constructors here.
+    fn record_stopped_session(hub: &Hub, id: &str, stored: &protocol::SpawnConfig) {
+        let conversation = crate::agents::SpawnConversation::new(Agent::Claude, None, None);
+        let record = interactive_record(
+            NewInteractive {
+                session_id: id.to_owned(),
+                label: id.to_owned(),
+                kind: SessionKind::Standalone,
+                members: Vec::new(),
+                workspace_id: None,
+                agent: Agent::Claude,
+                cwd: hub.dirs.config.to_string_lossy().into_owned(),
+                stored_config: stored.clone(),
+                last_prompt: None,
+                claude_session_id: None,
+                started_at: Utc::now(),
+            },
+            &conversation,
+            None,
+        );
+        let meta = interactive_meta(
+            &record,
+            4242,
+            TracerSidecar {
+                pid: 4243,
+                pipe: r"\\.\pipe\rt-tracer-sidecar".to_owned(),
+                exe_path: "rt-tracer.exe".to_owned(),
+            },
+        )
+        .expect("sidecar meta");
+        let entry = history::entry_from_record(&record, SessionEnd::StoppedByUser, Utc::now());
+        hub.sessions.insert(record);
+        hub.sessions.write_sidecar(&meta);
+        history::write_if_absent(&hub.dirs, &entry).expect("write the history entry");
+    }
+
+    /// A spawn whose dialog row holds a literal secret. The spawnless hub
+    /// cannot stage a tracer, so the spawn stops after the config is captured —
+    /// which is the part this test is about.
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_literal_secret_row_is_stored_as_a_reference_everywhere() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("seal-everywhere").await;
+        let (hub, _scratch, _repo) = env_ref_repo_hub("seal-everywhere");
+        let mut repos_rx = hub.state_events.subscribe();
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        spawn_session(&hub, secret_literal_spawn(target), None)
+            .await
+            .expect_err("no tracer can start");
+
+        let repos = serde_json::to_string(&next_repos(&mut repos_rx)).expect("serialize repos");
+        assert_sealed_only(&repos, "the Repos broadcast");
+        let state = std::fs::read_to_string(&hub.dirs.state_file).expect("state.json written");
+        assert_sealed_only(&state, "state.json");
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        assert_eq!(stored.extra_env[0].0, "ANTHROPIC_API_KEY");
+        record_stopped_session(&hub, "sealed", &stored);
+        let recorded = hub
+            .sessions
+            .get("sealed")
+            .and_then(|rec| crate::sync::lock(&rec).spawn_config.clone())
+            .expect("the record carries the config");
+        assert_sealed_only(
+            &serde_json::to_string(&recorded).expect("serialize config"),
+            "the record's config",
+        );
+
+        let meta = std::fs::read_to_string(hub.dirs.sessions_dir.join("sealed").join("meta.json"))
+            .expect("meta.json written");
+        assert_sealed_only(&meta, "meta.json");
+        let entry = std::fs::read_to_string(hub.dirs.history_dir().join("sealed.json"))
+            .expect("the history entry written");
+        assert_sealed_only(&entry, "the history entry");
+
+        let reply = dispatch_one(
+            &hub,
+            ClientMessage::GetSpawnConfig {
+                session_id: "sealed".to_owned(),
+            },
+        )
+        .await;
+        let DaemonMessage::SpawnConfigReply { config, .. } = reply else {
+            panic!("expected spawn_config_reply, got {reply:?}");
+        };
+        assert_sealed_only(
+            &serde_json::to_string(&config.expect("the record has a config")).expect("serialize"),
+            "the GetSpawnConfig reply",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_child_gets_the_sealed_value() {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-child").await;
+        let (hub, _scratch, _repo) = env_ref_repo_hub("seal-child");
+        let id = env_secrets::seal("ANTHROPIC_API_KEY", SECRET_SENTINEL).expect("seal the row");
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        let req = env_spawn(
+            target,
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+            None,
+        );
+        let _ = child_env_probe::take();
+        spawn_session(&hub, req, None)
+            .await
+            .expect_err("no tracer can start");
+        let child = child_env_probe::take().expect("a spawn spec's env was built");
+        assert_eq!(
+            child_value(&child, "ANTHROPIC_API_KEY").as_deref(),
+            Some(SECRET_SENTINEL),
+            "a secret reference resolves to the value it stands for"
+        );
+    }
+
+    /// A literal under a key that names no credential is left exactly as sent,
+    /// and reaches the child unchanged. Nothing here seals, so this passes
+    /// before ES.3 too: it pins the harm the pattern must not do.
+    #[tokio::test]
+    async fn a_plain_literal_row_is_stored_verbatim() {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-plain").await;
+        let (hub, _scratch, _repo) = env_ref_repo_hub("seal-plain");
+        let rows = env(&[("RUST_LOG", "debug"), ("RT_PLAIN", "not-a-secret")]);
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        let _ = child_env_probe::take();
+        spawn_session(
+            &hub,
+            env_spawn(target, SessionMode::Interactive, rows.clone(), None),
+            None,
+        )
+        .await
+        .expect_err("no tracer can start");
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        assert_eq!(stored.extra_env, rows, "a plain literal is stored as sent");
+        let child = child_env_probe::take().expect("a spawn spec's env was built");
+        assert_eq!(
+            child_value(&child, "RT_PLAIN").as_deref(),
+            Some("not-a-secret")
+        );
+        assert_eq!(child_value(&child, "RUST_LOG").as_deref(), Some("debug"));
+    }
+
+    #[tokio::test]
+    async fn a_secret_env_keys_row_is_sealed_though_its_name_is_plain() {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-toggled").await;
+        let (hub, _scratch, _repo) = env_ref_repo_hub("seal-toggled");
+        let mut target = single_target(false, None);
+        if let SpawnTarget::Single { branch_name, .. } = &mut target {
+            "main".clone_into(branch_name);
+        }
+        let mut req = env_spawn(
+            target,
+            SessionMode::Interactive,
+            env(&[("GH_PAT", SECRET_SENTINEL)]),
+            None,
+        );
+        req.secret_env_keys = vec!["GH_PAT".to_owned()];
+        let _ = child_env_probe::take();
+        spawn_session(&hub, req, None)
+            .await
+            .expect_err("no tracer can start");
+
+        let stored = hub
+            .state
+            .with_persisted(|s| s.repos[0].last_spawn_config.clone())
+            .expect("last spawn config stored");
+        let (key, value) = &stored.extra_env[0];
+        assert_eq!(key, "GH_PAT");
+        assert!(value.starts_with("${secret:"), "{value}");
+        assert!(!value.contains(SECRET_SENTINEL), "{value}");
+        let child = child_env_probe::take().expect("a spawn spec's env was built");
+        assert_eq!(
+            child_value(&child, "GH_PAT").as_deref(),
+            Some(SECRET_SENTINEL),
+            "a toggled row is sealed and resolved like a pattern row"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_resume_and_recover_resolve_the_sealed_value() {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-replay").await;
+        let (hub, scratch) = spawnless_test_hub("seal-replay");
+        let folder = scratch.path().join("replay");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let folder = folder.to_string_lossy().into_owned();
+        let id = env_secrets::seal("ANTHROPIC_API_KEY", SECRET_SENTINEL).expect("seal the row");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(folder.clone()),
+            add_dirs: Vec::new(),
+        };
+        let request = env_spawn(
+            target.clone(),
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", &secret_ref(&id))]),
+            None,
+        );
+        let stored = protocol::SpawnConfig::from_request(&request);
+        let (out_tx, _out_rx) = mpsc::unbounded_channel::<DaemonMessage>();
+
+        let mut source = idle_record("source");
+        source.spawn_config = Some(stored.clone());
+        hub.sessions.insert(source);
+        let _ = child_env_probe::take();
+        duplicate_session(&hub, "source", None, 1, &out_tx).await;
+        assert_eq!(
+            child_value(
+                &child_env_probe::take().expect("the duplicate built an env"),
+                "ANTHROPIC_API_KEY"
+            )
+            .as_deref(),
+            Some(SECRET_SENTINEL),
+            "a duplicate resolves the reference the record holds"
+        );
+
+        let mut abandoned = idle_record("abandoned");
+        abandoned.spawn_config = Some(stored.clone());
+        abandoned.is_abandoned = true;
+        abandoned.status = protocol::SessionStatus::Stopped;
+        hub.sessions.insert(abandoned);
+        let _ = child_env_probe::take();
+        resume_abandoned(&hub, "abandoned", &out_tx)
+            .await
+            .expect_err("no tracer can start");
+        assert_eq!(
+            child_value(
+                &child_env_probe::take().expect("the resume built an env"),
+                "ANTHROPIC_API_KEY"
+            )
+            .as_deref(),
+            Some(SECRET_SENTINEL),
+            "a resume resolves the reference the record holds"
+        );
+
+        let mut record = history::test_support::record("codex", SessionMode::Interactive);
+        record.agent = Agent::Codex;
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: folder.clone(),
+        }];
+        let mut request = request.clone();
+        request.agent_options = AgentOptions::Codex { sandbox: None };
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
+        entry.primary_cwd = Some(folder);
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+
+        let _ = child_env_probe::take();
+        let error = recover_one(
+            &hub,
+            &protocol::RecoverItem {
+                history_id: "codex".to_owned(),
+                conversation_id: None,
+                how: protocol::RecoverAs::OwnAgent,
+            },
+            &out_tx,
+        )
+        .await
+        .expect_err("no tracer can start");
+        assert!(error.contains("spawning codex via tracer"), "{error}");
+        assert_eq!(
+            child_value(
+                &child_env_probe::take().expect("the recovery built an env"),
+                "ANTHROPIC_API_KEY"
+            )
+            .as_deref(),
+            Some(SECRET_SENTINEL),
+            "a recovery resolves the reference the history entry holds"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_missing_secret_refuses_before_any_git_work() {
+        let (_lock, _secrets_dir) = env_secrets::test_support::scratch_async("seal-missing").await;
+        let (hub, _scratch, repo) = env_ref_repo_hub("seal-missing");
+        let req = env_spawn(
+            single_target(true, None),
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
+            Some("rq-secret"),
+        );
+        // Straight into `spawn_session`, the path every replay takes, past the
+        // dispatcher's own early check.
+        let err = spawn_session(&hub, req, None)
+            .await
+            .expect_err("a missing saved secret refuses");
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        send_spawn_failure(&out_tx, &err, Some("rq-secret"));
+        let DaemonMessage::ActionFailed {
+            title,
+            detail,
+            hint,
+            request_id,
+        } = out_rx.try_recv().expect("a reply")
+        else {
+            panic!("expected action_failed");
+        };
+        assert_eq!(title, "A saved secret is missing");
+        assert!(detail.contains("`ANTHROPIC_API_KEY`"), "{detail}");
+        assert!(detail.contains("Windows Credential Manager"), "{detail}");
+        assert!(!detail.contains(SECRET_SENTINEL), "{detail}");
+        assert!(hint.is_some());
+        assert_eq!(request_id.as_deref(), Some("rq-secret"));
+
+        let worktrees = git_ok(&repo, &["worktree", "list", "--porcelain"]);
+        assert_eq!(
+            worktrees
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count(),
+            1,
+            "only the main worktree: {worktrees}"
+        );
+        assert_eq!(git_ok(&repo, &["branch", "--list", "wt/x"]).trim(), "");
+        let made = std::fs::read_dir(hub.state.worktrees_dir()).map_or(0, Iterator::count);
+        assert_eq!(made, 0, "nothing under the worktrees root");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+        assert!(
+            hub.state
+                .with_persisted(|s| s.repos[0].last_spawn_config.is_none()),
+            "no config was captured either"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn a_missing_secret_is_refused_before_the_checkout_confirm() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("seal-missing-confirm").await;
+        let (hub, _scratch, repo) = env_ref_repo_hub("seal-missing-confirm");
+        std::fs::write(repo.join("dirty.txt"), "x\n").expect("dirty the tree");
+        let req = env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", &secret_ref(MISSING_SECRET_ID))]),
+            Some("rq-secret"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
+        let DaemonMessage::ActionFailed { title, detail, .. } = reply else {
+            panic!("the missing secret is refused before the confirm, got {reply:?}");
+        };
+        assert_eq!(title, "A saved secret is missing");
+        assert!(detail.contains("`ANTHROPIC_API_KEY`"), "{detail}");
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn an_over_long_secret_is_refused_before_the_checkout_confirm() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("seal-too-long-confirm").await;
+        let (hub, _scratch, repo) = env_ref_repo_hub("seal-too-long-confirm");
+        std::fs::write(repo.join("dirty.txt"), "x\n").expect("dirty the tree");
+        // One UTF-16 code unit over what Windows Credential Manager takes in
+        // one credential blob.
+        let too_long = "a".repeat(1281);
+        let req = env_spawn(
+            single_target(false, None),
+            SessionMode::Interactive,
+            env(&[("ANTHROPIC_API_KEY", &too_long)]),
+            Some("rq-long"),
+        );
+        let reply = dispatch_one(&hub, ClientMessage::SpawnSession(req)).await;
+        let DaemonMessage::ActionFailed {
+            title,
+            detail,
+            hint,
+            request_id,
+        } = reply
+        else {
+            panic!("the over-long secret is refused before the confirm, got {reply:?}");
+        };
+        assert_eq!(title, "Could not save a secret");
+        assert!(detail.contains("ANTHROPIC_API_KEY"), "{detail}");
+        assert!(detail.contains("too long"), "{detail}");
+        assert!(
+            !detail.contains(&too_long),
+            "the refusal never carries the value: {detail}"
+        );
+        assert!(hint.is_none());
+        assert_eq!(request_id.as_deref(), Some("rq-long"));
+        assert!(hub.sessions.snapshots().is_empty(), "nothing was spawned");
+    }
+
+    /// The conversation the recovery-ordering entries record, with a transcript
+    /// Claude reads as still holding it.
+    const RECOVERY_CONVERSATION: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    /// Serialises the tests that point `CLAUDE_CONFIG_DIR` at a scratch home:
+    /// the variable is process-global and tests run on parallel threads.
+    static CLAUDE_HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A scratch Claude home `CLAUDE_CONFIG_DIR` points at while the guard
+    /// lives, so recovery's transcript check reads it and not the user's own.
+    struct ScratchClaudeHome {
+        path: PathBuf,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl ScratchClaudeHome {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("rt-claude-home-{label}"));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create scratch claude home");
+            let prior = std::env::var_os("CLAUDE_CONFIG_DIR");
+            // SAFETY: callers hold CLAUDE_HOME_LOCK for the guard's lifetime.
+            unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &path) };
+            Self { path, prior }
+        }
+
+        /// A transcript for `folder` and `id`, as Claude Code files one.
+        fn write_transcript(&self, folder: &str, id: &str) {
+            let dir = self
+                .path
+                .join("projects")
+                .join(crate::transcripts::encode_project_dir(folder));
+            std::fs::create_dir_all(&dir).expect("create the transcript folder");
+            std::fs::write(dir.join(format!("{id}.jsonl")), "{}\n").expect("write the transcript");
+        }
+    }
+
+    impl Drop for ScratchClaudeHome {
+        fn drop(&mut self) {
+            // SAFETY: as in `new` — CLAUDE_HOME_LOCK is still held.
+            unsafe {
+                match &self.prior {
+                    Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// The env lock and a scratch Claude home, for an async test.
+    async fn claude_home_scratch(
+        label: &str,
+    ) -> (tokio::sync::MutexGuard<'static, ()>, ScratchClaudeHome) {
+        let guard = CLAUDE_HOME_LOCK.lock().await;
+        (guard, ScratchClaudeHome::new(label))
+    }
+
+    /// A history entry for an unregistered Claude session that ran in `folder`
+    /// with `row` as its recorded env, which Claude still holds
+    /// [`RECOVERY_CONVERSATION`] for there.
+    fn unregistered_claude_entry(hub: &Hub, id: &str, folder: &str, row: (&str, String)) {
+        let mut record = history::test_support::record(id, SessionMode::Interactive);
+        record.agent = Agent::Claude;
+        record.members = vec![SessionMember {
+            repo_id: "r1".to_owned(),
+            repo_name: "r1".to_owned(),
+            branch: "main".to_owned(),
+            worktree_path: folder.to_owned(),
+        }];
+        let (key, value) = row;
+        let request = env_spawn(
+            SpawnTarget::Standalone {
+                cwd: Some(folder.to_owned()),
+                add_dirs: Vec::new(),
+            },
+            SessionMode::Interactive,
+            env(&[(key, &value)]),
+            None,
+        );
+        record.spawn_config = Some(protocol::SpawnConfig::from_request(&request));
+        let mut entry = history::entry_from_record(&record, SessionEnd::TracerLost, Utc::now());
+        entry.primary_cwd = Some(folder.to_owned());
+        entry.agent_conversation_id = Some(RECOVERY_CONVERSATION.to_owned());
+        history::write_if_absent(&hub.dirs, &entry).expect("write history entry");
+    }
+
+    /// Recover `id` as `RegisterRepoThenClaude` — the recovery that registers a
+    /// repo — and return the item's error.
+    #[expect(clippy::panic, reason = "a wrong reply fails the test loudly")]
+    async fn recover_registering(hub: &Hub, id: &str, folder: &str) -> String {
+        let reply = dispatch_one(
+            hub,
+            ClientMessage::RecoverSessions {
+                request_id: None,
+                items: vec![protocol::RecoverItem {
+                    history_id: id.to_owned(),
+                    conversation_id: Some(RECOVERY_CONVERSATION.to_owned()),
+                    how: protocol::RecoverAs::RegisterRepoThenClaude {
+                        path: folder.to_owned(),
+                    },
+                }],
+            },
+        )
+        .await;
+        let DaemonMessage::RecoverResult { results, .. } = reply else {
+            panic!("expected recover_result, got {reply:?}");
+        };
+        results[0].error.clone().expect("the recovery failed")
+    }
+
+    /// The registration a refused recovery must not have made: nothing in the
+    /// registry, no broadcast, and `state.json` byte-identical.
+    fn assert_nothing_registered(
+        hub: &Hub,
+        before: Option<&[u8]>,
+        events: &mut broadcast::Receiver<StateEvent>,
+    ) {
+        assert!(
+            hub.state.with_persisted(|s| s.repos.is_empty()),
+            "no repo was registered"
+        );
+        assert_eq!(
+            std::fs::read(&hub.dirs.state_file).ok().as_deref(),
+            before,
+            "state.json is untouched"
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "no state event was broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovering_with_a_missing_secret_registers_nothing() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("recover-missing-secret").await;
+        let (_home_lock, home) = claude_home_scratch("recover-missing-secret").await;
+        let (hub, scratch) = spawnless_test_hub("recover-missing-secret");
+        let folder = scratch.path().join("repo");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        git_init(&folder);
+        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
+        let folder = folder.to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        unregistered_claude_entry(
+            &hub,
+            "gone",
+            &folder,
+            ("ANTHROPIC_API_KEY", secret_ref(MISSING_SECRET_ID)),
+        );
+        let before = std::fs::read(&hub.dirs.state_file).ok();
+        let mut events = hub.state_events.subscribe();
+
+        let error = recover_registering(&hub, "gone", &folder).await;
+        assert!(error.contains("`ANTHROPIC_API_KEY`"), "{error}");
+        assert!(error.contains("A saved secret is missing"), "{error}");
+        assert_nothing_registered(&hub, before.as_deref(), &mut events);
+    }
+
+    #[tokio::test]
+    async fn recovering_with_an_unset_env_reference_registers_nothing() {
+        let (_lock, _secrets_dir) =
+            env_secrets::test_support::scratch_async("recover-unset-env").await;
+        let (_home_lock, home) = claude_home_scratch("recover-unset-env").await;
+        let (hub, scratch) = spawnless_test_hub("recover-unset-env");
+        let folder = scratch.path().join("repo");
+        std::fs::create_dir_all(&folder).expect("create the folder");
+        git_init(&folder);
+        git_ok(&folder, &["commit", "--allow-empty", "-m", "seed"]);
+        let folder = folder.to_string_lossy().into_owned();
+        home.write_transcript(&folder, RECOVERY_CONVERSATION);
+        unregistered_claude_entry(&hub, "gone", &folder, ("K", UNSET_REF.to_owned()));
+        let before = std::fs::read(&hub.dirs.state_file).ok();
+        let mut events = hub.state_events.subscribe();
+
+        let error = recover_registering(&hub, "gone", &folder).await;
+        assert!(error.contains("`RT_TEST_UNSET_ENV_REF_4C1D`"), "{error}");
+        assert!(error.contains("isn't set"), "{error}");
+        assert_nothing_registered(&hub, before.as_deref(), &mut events);
+    }
+
     #[tokio::test]
     async fn standalone_target_refuses_headless() {
         let (hub, _scratch) = spawnless_test_hub("standalone-agents");
@@ -8346,6 +9029,7 @@ mod tests {
                 agent_options,
                 model: None,
                 extra_env: Vec::new(),
+                secret_env_keys: Vec::new(),
                 prompt_injector: None,
                 request_id: None,
                 resume_conversation: None,

@@ -18,6 +18,12 @@ use tracing::warn;
 pub struct Secret(String);
 
 impl Secret {
+    /// Wrap a value read from somewhere other than the environment — the
+    /// secret store — so it redacts its text wherever it is printed.
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
     /// The value's text, for the one place that needs it: the environment a
     /// child process is spawned with.
     pub fn expose(&self) -> &str {

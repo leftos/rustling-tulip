@@ -9,6 +9,7 @@
 //! Startup prunes entries older than [`HISTORY_RETENTION`].
 
 use crate::codex_rollout;
+use crate::env_secrets::{self, SealOutcome};
 use crate::orphan;
 use crate::paths::{Dirs, normalize_path_key};
 use crate::pty::PtyExit;
@@ -140,12 +141,41 @@ pub fn write_if_absent(dirs: &Dirs, entry: &HistoryEntry) -> anyhow::Result<bool
 }
 
 fn write_entry(dirs: &Dirs, entry: &HistoryEntry) -> anyhow::Result<()> {
+    write_entry_to(dirs, &entry_path(dirs, &entry.session_id), entry)
+}
+
+/// Write `entry` to `path` and wake the history watch. The startup seal pass
+/// writes back the exact file it read, so a history file under a name the
+/// session id doesn't derive stays where it was.
+fn write_entry_to(dirs: &Dirs, path: &Path, entry: &HistoryEntry) -> anyhow::Result<()> {
     let dir = dirs.history_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let bytes = serde_json::to_vec_pretty(entry).context("serializing history entry")?;
-    orphan::write_atomic(&entry_path(dirs, &entry.session_id), &bytes)?;
+    orphan::write_atomic(path, &bytes)?;
     CHANGES.send_modify(|n| *n = n.wrapping_add(1));
     Ok(())
+}
+
+/// Seal every secret literal row in every history entry's spawn config,
+/// rewriting each entry that changed and leaving the rest byte-identical.
+///
+/// A file that cannot be read or parsed is skipped with a warning, as the
+/// history loader treats it; a store refusal leaves that entry as it was and
+/// the next start tries again.
+pub fn seal_history_secrets(dirs: &Dirs) {
+    for (path, mut entry) in scan(dirs).entries {
+        let Some(config) = entry.spawn_config.as_mut() else {
+            continue;
+        };
+        let SealOutcome::Sealed(rows) = env_secrets::seal_stored_rows(&config.extra_env, &path)
+        else {
+            continue;
+        };
+        config.extra_env = rows;
+        if let Err(err) = write_entry_to(dirs, &path, &entry) {
+            warn!(?err, path = %path.display(), "history secret seal: could not rewrite the entry");
+        }
+    }
 }
 
 /// A session id that is safe to use as a file stem: never a path.
@@ -237,24 +267,41 @@ fn read_entry(path: &std::path::Path) -> anyhow::Result<HistoryEntry> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// What one pass over the history dir saw.
+struct Scan {
+    /// The entries it could read, with their paths.
+    entries: Vec<(PathBuf, HistoryEntry)>,
+    /// Files it could not turn into an entry, already warned about.
+    unreadable: Vec<PathBuf>,
+    /// Whether the history dir itself could not be listed. A missing dir is
+    /// not a failure: a fresh install has none.
+    dir_unreadable: bool,
+}
+
 /// Every `.json` file in the history dir with the entry it holds. Unreadable
 /// and unparseable files are skipped with a warning.
-fn scan(dirs: &Dirs) -> Vec<(PathBuf, HistoryEntry)> {
+fn scan(dirs: &Dirs) -> Scan {
     let dir = dirs.history_dir();
+    let mut out = Scan {
+        entries: Vec::new(),
+        unreadable: Vec::new(),
+        dir_unreadable: false,
+    };
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return out,
         Err(err) => {
             warn!(?err, dir = %dir.display(), "failed to read session history dir");
-            return Vec::new();
+            out.dir_unreadable = true;
+            return out;
         }
     };
-    let mut out = Vec::new();
     for dir_entry in entries {
         let path = match dir_entry {
             Ok(dir_entry) => dir_entry.path(),
             Err(err) => {
                 warn!(?err, "skipping unreadable session history entry");
+                out.unreadable.push(dir.clone());
                 continue;
             }
         };
@@ -262,8 +309,11 @@ fn scan(dirs: &Dirs) -> Vec<(PathBuf, HistoryEntry)> {
             continue;
         }
         match read_entry(&path) {
-            Ok(entry) => out.push((path, entry)),
-            Err(err) => warn!(?err, "skipping unreadable session history file"),
+            Ok(entry) => out.entries.push((path, entry)),
+            Err(err) => {
+                warn!(?err, "skipping unreadable session history file");
+                out.unreadable.push(path);
+            }
         }
     }
     out
@@ -272,9 +322,26 @@ fn scan(dirs: &Dirs) -> Vec<(PathBuf, HistoryEntry)> {
 /// Every history entry, newest end first.
 #[must_use]
 pub fn read_all(dirs: &Dirs) -> Vec<HistoryEntry> {
-    let mut entries: Vec<HistoryEntry> = scan(dirs).into_iter().map(|(_, e)| e).collect();
+    let mut entries: Vec<HistoryEntry> = scan(dirs).entries.into_iter().map(|(_, e)| e).collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.ended_at));
     entries
+}
+
+/// Every history entry the dir holds, or the path the scan could not read —
+/// the folder itself, or a file it could not parse, which [`prune`] leaves in
+/// place on purpose. A startup sweep that must not miss a secret reference
+/// declines to act rather than read a skipped file as "nothing".
+///
+/// # Errors
+///
+/// The path of the folder or file that could not be read.
+pub fn read_all_for_references(dirs: &Dirs) -> Result<Vec<HistoryEntry>, PathBuf> {
+    let scan = scan(dirs);
+    match scan.unreadable.into_iter().next() {
+        Some(path) => Err(path),
+        None if scan.dir_unreadable => Err(dirs.history_dir()),
+        None => Ok(scan.entries.into_iter().map(|(_, entry)| entry).collect()),
+    }
 }
 
 /// Stamp the entry for `session_id` as recovered at `at`.
@@ -294,7 +361,7 @@ pub fn mark_recovered(dirs: &Dirs, session_id: &str, at: DateTime<Utc>) -> anyho
 pub fn prune(dirs: &Dirs, now: DateTime<Utc>, max_age: TimeDelta) -> usize {
     let _guard = lock(&WRITE_LOCK);
     let mut removed = 0;
-    for (path, entry) in scan(dirs) {
+    for (path, entry) in scan(dirs).entries {
         if now - entry.ended_at <= max_age {
             continue;
         }
@@ -888,7 +955,7 @@ pub fn plan_recovery(
             }
         }
         RecoverAs::Shell => RecoveryPlan {
-            request: shell_request(folder, item.conversation_id.as_deref()),
+            request: shell_request(entry, folder, item.conversation_id.as_deref()),
             register_repo: None,
         },
         RecoverAs::OwnAgent | RecoverAs::Unknown => {
@@ -1187,7 +1254,7 @@ fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarge
 }
 
 /// Claude resuming `conversation` in `target`, with the permission and model
-/// flags `entry` recorded.
+/// flags `entry` recorded and the env rows its spawn recorded.
 fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) -> SpawnRequest {
     SpawnRequest {
         label: None,
@@ -1199,7 +1266,8 @@ fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) 
             permission_mode: None,
         },
         model: entry.model.clone(),
-        extra_env: Vec::new(),
+        extra_env: recorded_env(entry).to_vec(),
+        secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
         resume_conversation: Some(conversation.to_owned()),
@@ -1207,8 +1275,8 @@ fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) 
 }
 
 /// A plain shell in `folder` that types `claude --resume <id>` once it is up,
-/// when a conversation was chosen.
-fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
+/// when a conversation was chosen, carrying the env rows `entry` recorded.
+fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>) -> SpawnRequest {
     let prompt_injector = conversation.map(|id| PromptInjector {
         steps: vec![
             InjectorStep::Delay {
@@ -1235,7 +1303,8 @@ fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
             permission_mode: None,
         },
         model: None,
-        extra_env: Vec::new(),
+        extra_env: recorded_env(entry).to_vec(),
+        secret_env_keys: Vec::new(),
         prompt_injector,
         request_id: None,
         resume_conversation: None,
@@ -2066,6 +2135,18 @@ mod recovery_tests {
         }
     }
 
+    /// The env rows a recovered session's spawn recorded: a plain value and a
+    /// secret reference, which stays a reference until the spawn resolves it.
+    fn recorded_env_rows() -> Vec<(String, String)> {
+        vec![
+            ("RT_PLAIN".to_owned(), "1".to_owned()),
+            (
+                "ANTHROPIC_API_KEY".to_owned(),
+                "${secret:0123456789abcdef0123456789abcdef}".to_owned(),
+            ),
+        ]
+    }
+
     fn item(how: RecoverAs, conversation: Option<&str>) -> RecoverItem {
         RecoverItem {
             history_id: "h1".to_owned(),
@@ -2762,6 +2843,21 @@ mod recovery_tests {
     }
 
     #[test]
+    fn register_repo_then_claude_carries_the_recorded_env_rows() {
+        let mut entry = folder_only(vec![member("", r"D:\foo"), member("", r"D:\bar")]);
+        let mut config = workspace_config();
+        config.extra_env = recorded_env_rows();
+        entry.spawn_config = Some(config);
+        let how = RecoverAs::RegisterRepoThenClaude {
+            path: "d:/FOO/".to_owned(),
+        };
+
+        let plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
+
+        assert_eq!(plan.request.extra_env, recorded_env_rows());
+    }
+
+    #[test]
     fn register_repo_then_claude_runs_pinned_in_the_new_repo() {
         let entry = folder_only(vec![imported("", r"D:\foo")]);
         let how = RecoverAs::RegisterRepoThenClaude {
@@ -2876,6 +2972,31 @@ mod recovery_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shell_recovery_carries_the_recorded_env_rows() {
+        let mut entry = folder_only(vec![member("", r"D:\yaat")]);
+        let mut config = workspace_config();
+        config.extra_env = recorded_env_rows();
+        entry.spawn_config = Some(config);
+
+        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.extra_env, recorded_env_rows());
+    }
+
+    #[test]
+    fn a_recovery_without_a_spawn_config_has_no_env_rows() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+
+        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert!(req.extra_env.is_empty(), "{:?}", req.extra_env);
     }
 
     #[test]

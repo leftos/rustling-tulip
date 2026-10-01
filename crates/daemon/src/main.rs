@@ -13,6 +13,7 @@ mod branch_names;
 mod codex_rollout;
 mod detach;
 mod discovery;
+mod env_secrets;
 mod file_fetch;
 mod git;
 mod git_inspect;
@@ -95,8 +96,23 @@ async fn main() -> anyhow::Result<()> {
         "claude binary override status"
     );
 
+    // Windows Credential Manager is the store secret environment rows are
+    // sealed into. Install it before anything can seal a value; a machine that
+    // cannot install it still starts, and a spawn carrying a secret row then
+    // refuses rather than writing the value to disk.
+    if let Err(err) = env_secrets::init() {
+        tracing::warn!(?err, "the secret store could not be installed");
+    }
+
     let state = state::AppState::load_or_default(&dirs).context("loading persisted state")?;
     let state = Arc::new(state);
+
+    // A file written before secrets were sealed may still hold a literal value
+    // under a secret-like key. Seal `state.json` and the sidecars now — before
+    // orphan recovery reads the sidecars — so a reattached or recovered
+    // session's config already carries references and the next start finds
+    // nothing to seal. The history pass follows its prune, further down.
+    seal_stored_secrets(&dirs, &state);
 
     let metas = orphan::read_all_metas(&dirs).unwrap_or_else(|err| {
         tracing::warn!(?err, "failed to read orphan metas; starting fresh");
@@ -128,11 +144,124 @@ async fn main() -> anyhow::Result<()> {
     // without the user losing their layout.
     prune_stale_tabs(&state, &live, &dead);
     import_tracer_logs(&dirs, &state, &live, &dead);
-    history::prune(&dirs, chrono::Utc::now(), history::HISTORY_RETENTION);
+    prune_and_seal_history(&dirs, chrono::Utc::now());
+
+    // The files just sealed and pruned are the only things that reference a
+    // saved secret. An id nothing references and older than the grace period
+    // is a value nothing can open again, so sweep it from the store and index.
+    sweep_unreferenced_secrets(&dirs, &state, chrono::Utc::now());
 
     let result = server::run(state, dirs, live, dead).await;
     info!(?result, "rustling-tulipd main returning");
     result
+}
+
+/// Seal the secret literal rows `state.json` and the session sidecars hold.
+/// Run before orphan recovery reads the sidecars, so a reattached or abandoned
+/// session's config already carries references instead of literals.
+fn seal_stored_secrets(dirs: &paths::Dirs, state: &state::AppState) {
+    if let Err(err) = state.seal_last_spawn_configs() {
+        tracing::warn!(?err, "sealing state.json's last spawn configs failed");
+    }
+    orphan::seal_sidecar_secrets(dirs);
+}
+
+/// Prune the ended-session history and then seal what survives. An entry past
+/// the retention window is deleted before it is sealed, so a value only it
+/// named never reaches the credential store and no id is swept an hour later.
+fn prune_and_seal_history(dirs: &paths::Dirs, now: chrono::DateTime<chrono::Utc>) {
+    history::prune(dirs, now, history::HISTORY_RETENTION);
+    history::seal_history_secrets(dirs);
+}
+
+/// A stored source the reference walk could not read in full, so the sweep
+/// cannot tell which secrets are still referenced from it.
+#[derive(Debug)]
+struct ReferenceGap {
+    /// What the source is, for the warning line.
+    source: &'static str,
+    /// The file or folder that could not be read.
+    path: String,
+}
+
+/// Every id the files a startup pass walks still reference through
+/// `${secret:<id>}`: `state.json`'s `last_spawn_config`s, every session sidecar
+/// and every history entry. Built after the history prune, so an id a pruned
+/// entry alone named no longer counts as referenced.
+///
+/// # Errors
+///
+/// The first source the walk could not read — a `state.json` that failed to
+/// parse, a session sidecar, a history entry, or a folder holding them.
+fn referenced_secret_ids(
+    dirs: &paths::Dirs,
+    state: &state::AppState,
+) -> Result<HashSet<String>, ReferenceGap> {
+    if state.state_file_corrupt() {
+        return Err(ReferenceGap {
+            source: "state.json",
+            path: dirs.state_file.display().to_string(),
+        });
+    }
+    let mut ids = HashSet::new();
+    state.with_persisted(|persisted| {
+        for config in persisted
+            .repos
+            .iter()
+            .filter_map(|repo| repo.last_spawn_config.as_ref())
+            .chain(
+                persisted
+                    .workspaces
+                    .iter()
+                    .filter_map(|workspace| workspace.last_spawn_config.as_ref()),
+            )
+        {
+            env_secrets::referenced_ids(&config.extra_env, &mut ids);
+        }
+    });
+    let metas = orphan::read_all_metas_for_references(dirs).map_err(|path| ReferenceGap {
+        source: "a session sidecar",
+        path: path.display().to_string(),
+    })?;
+    for config in metas.iter().filter_map(|meta| meta.spawn_config.as_ref()) {
+        env_secrets::referenced_ids(&config.extra_env, &mut ids);
+    }
+    let entries = history::read_all_for_references(dirs).map_err(|path| ReferenceGap {
+        source: "a session history entry",
+        path: path.display().to_string(),
+    })?;
+    for config in entries
+        .iter()
+        .filter_map(|entry| entry.spawn_config.as_ref())
+    {
+        env_secrets::referenced_ids(&config.extra_env, &mut ids);
+    }
+    Ok(ids)
+}
+
+/// Delete the saved secrets nothing stored references and older than the grace
+/// period. `now` is a parameter so a test can age an id past that period.
+///
+/// A source the walk could not read — a sidecar or history file it skipped, a
+/// folder it could not list, a `state.json` that failed to parse — may hold
+/// the only reference to an id, so the sweep is skipped for that start rather
+/// than deleting a value a later Recover would still need.
+fn sweep_unreferenced_secrets(
+    dirs: &paths::Dirs,
+    state: &state::AppState,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    match referenced_secret_ids(dirs, state) {
+        Ok(referenced) => {
+            let removed = env_secrets::collect_unreferenced(&referenced, now);
+            info!(removed, "swept unreferenced saved secrets");
+        }
+        Err(gap) => tracing::warn!(
+            source = gap.source,
+            path = %gap.path,
+            "a stored file could not be read; skipping the unreferenced-secret sweep"
+        ),
+    }
 }
 
 /// Add the sessions whose tracer logs predate the session history to it,
