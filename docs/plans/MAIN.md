@@ -25,7 +25,7 @@ A wave is one release-sized bundle of items sharing owning files, so one impleme
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`, plus `-p protocol -p daemon` for P4.16's field; hand-test the chips, tags and overlay colours.
 
 - [ ] **Claude sessions on DeepSeek** (user; `branch: feat/deepseek-sessions`, #8; DK.1–DK.2 landed on the branch): a Claude provider (Anthropic / DeepSeek) routing a session the way `~/.claude/bin/claude-deepseek.ps1` does, the key from `DEEPSEEK_API_KEY` never stored, carried through Recover, Restart, Resume, Duplicate and Launch last, a `DeepSeek` chip, a default in Spawn defaults; steps DK.1–DK.13, the dialog and chip steps after PT.6b / PT.7 / PT.8b. Design and answered questions: [deepseek-sessions.md](./deepseek-sessions.md).
-- [ ] **Environment rows are stored and sent in plain text** (found drafting deepseek-sessions): a literal value typed into the spawn dialog's environment rows (the `${env:NAME}` references and the key-like-row warning already exist) lands in `meta.json`, `history/<id>.json` and `state.json`'s `last_spawn_config`, and `SpawnConfigReply`, `Repos` / `Workspaces` and `SessionHistory` send it to every client. `branch: feat/env-secrets` (user), #9; steps ES.1–ES.9 land there; ES.1–ES.5, ES.7 (the live tier's sealed-secret spec) and ES.10 (every recovery kind carries the env rows) landed on feat/env-secrets, ships with #9; DK.5, which needs ES.3, stacks on the branch or waits for its merge. Ruled (user): plan it and draft the options before the DeepSeek steps. Design: [env-secrets.md](./env-secrets.md).
+- [ ] **Environment rows are stored and sent in plain text** (found drafting deepseek-sessions): a literal value typed into the spawn dialog's environment rows (the `${env:NAME}` references and the key-like-row warning already exist) lands in `meta.json`, `history/<id>.json` and `state.json`'s `last_spawn_config`, and `SpawnConfigReply`, `Repos` / `Workspaces` and `SessionHistory` send it to every client. `branch: feat/env-secrets` (user), #9; steps ES.1–ES.9 land there; ES.1–ES.5, ES.7 (the live tier's sealed-secret spec), ES.9 (system-scope references and the variable picker) and ES.10 (every recovery kind carries the env rows) landed on feat/env-secrets, ships with #9; DK.5, which needs ES.3, stacks on the branch or waits for its merge. Ruled (user): plan it and draft the options before the DeepSeek steps. Design: [env-secrets.md](./env-secrets.md).
 - [ ] **P4.16 Exclude a session from busy tracking** (user): a daemon-side per-session flag toggled by "Don't count as busy", leaving the title count, the tab badge and the attention highlight. `crates/protocol/src/lib.rs`, `crates/daemon/src/session.rs`, `apps/native/src/tabs.rs`, `window_title.rs`, `session_menu.rs`, `sidebar_view.rs`. See [native-client.md](./native-client.md#p416-exclude-a-session-from-busy-tracking).
 
 ### Wave 2 — Tabs, panes and tab state (`tabs.rs`, `tab_bar.rs`, `tab_menu.rs`, `pane_menu.rs`, `spawns.rs`, daemon `tabs.rs` and `state.rs`)
@@ -40,10 +40,15 @@ Review: `code-review`; UI hand-test of the shelf. Verification: the gates with `
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`; hand-test the real folder and `.code-workspace` pickers and a preset launch.
 
-- [ ] **P4.10 Repos and workspaces**: + Repo, + Workspace, remove with its confirm, the workspace creator, the "VS Code workspace detected" prompt, the DIR / SH container actions and the no-repos states. See [native-client.md](./native-client.md#p410-repos-and-workspaces).
-- [ ] **P4.11 Containers**: Launch last, the full container menu, the keyboard fold and last-launch summary, the Detached banner and stop all, "Resume all (N)", the spawn dialog's container entry points. See [native-client.md](./native-client.md#p411-containers).
+- [ ] **P4.10a Add repo, the folder picker and the no-repos states** (+ Repo in the `⋯` menu, an own Windows folder picker that opens at the last folder, the sidebar / main-area / spawn-dialog empty states). See [native-client.md](./native-client.md#p410-and-p411-repos-workspaces-and-containers) for this wave's split and rulings.
+- [ ] **P4.10b Remove repo / workspace** (two-click; a dialog when sessions are live). After P4.10a.
+- [ ] **P4.11a Container row**: keyboard fold, last-launch summary, the Detached banner, Resume all (N). After P4.10a; beside P4.10b.
+- [ ] **P4.10c Workspace creator and the "VS Code workspace detected" prompt**, + Workspace. Needs P4.10a.
+- [ ] **P4.10d DIR/SH container actions** (Add repo / Add workspace). Needs P4.10c.
+- [ ] **P4.11b Launch last again and Detached stop all**. Needs P4.11a, and ES.6 on `main` for `spawn_view.rs`.
+- [ ] **P4.11c Full container menu and spawn entry points**. Needs P4.10b, P4.11b.
 - [ ] **P4.15a Preset wizard: sources and variables**. See [native-client.md](./native-client.md#p415-preset-wizard).
-- [ ] **P4.15b Preset wizard: preview and launching**, with sticky progress and failure toasts; needs P4.11. See [native-client.md](./native-client.md#p415-preset-wizard).
+- [ ] **P4.15b Preset wizard: preview and launching**, with sticky progress and failure toasts; needs P4.11c. See [native-client.md](./native-client.md#p415-preset-wizard).
 
 ### Wave 4 — Shared form controls (`settings_view.rs`, `appearance_view.rs`, `diff_tab_view.rs`, `shell_view.rs`, `spawn_view.rs`, `lib.rs`)
 
