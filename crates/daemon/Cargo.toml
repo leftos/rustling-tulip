@@ -49,6 +49,10 @@ notify = "8"
 notify-debouncer-full = "0.7"
 regex = "1.11"
 sha2 = "0.10"
+# Cross-platform credential-store API. `crates/daemon/src/env_secrets.rs` files
+# sealed environment-row values under Windows Credential Manager; the platform
+# store itself is `windows-native-keyring-store` below.
+keyring-core = "1.0"
 
 # TLS for the opt-in LAN listener. Pinned to the `ring` crypto backend to match
 # the backend already resolved via reqwest (rustls-tls) — keeps `aws-lc-sys`
@@ -82,6 +86,10 @@ mdns-sd = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
+# Windows Credential Manager as the `keyring-core` store. Default features off
+# drops its regex-backed credential search, which the daemon never uses: the
+# index file in the config dir is how it knows which ids exist.
+windows-native-keyring-store = { version = "1.1", default-features = false }
 # Restart Manager API for locating processes holding handles inside the
 # worktrees directory after a `git worktree remove` fails, plus the Power
 # API (`SetThreadExecutionState`) backing the keep-awake hold that stops the

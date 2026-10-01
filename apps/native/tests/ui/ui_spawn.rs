@@ -47,6 +47,7 @@ fn request(use_worktree: bool) -> SpawnRequest {
         },
         model: None,
         extra_env: Vec::new(),
+        secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
         resume_conversation: None,

@@ -7,6 +7,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod env_rows;
+
 include!(concat!(env!("OUT_DIR"), "/protocol_version.rs"));
 
 /// mDNS service type the daemon advertises and clients browse for LAN
@@ -303,7 +305,8 @@ pub struct RepoEntry {
     /// Full spawn config captured from the last successful single-repo spawn
     /// against this repo. Drives "Launch last again" (double-click on the
     /// sidebar row, or the matching context-menu submenu). `None` for repos
-    /// that have never been launched.
+    /// that have never been launched. Its `extra_env` carries references,
+    /// never secret values.
     #[serde(default)]
     pub last_spawn_config: Option<SpawnConfig>,
 }
@@ -326,7 +329,8 @@ pub struct WorkspaceEntry {
     pub appearance: AppearanceOverrides,
     /// Full spawn config captured from the last successful workspace spawn.
     /// Drives "Launch last again" for the workspace row. `None` for
-    /// workspaces that have never been launched.
+    /// workspaces that have never been launched. Its `extra_env` carries
+    /// references, never secret values.
     #[serde(default)]
     pub last_spawn_config: Option<SpawnConfig>,
 }
@@ -573,6 +577,9 @@ pub struct HistoryEntry {
     pub kind: SessionKind,
     pub mode: SessionMode,
     pub agent: Agent,
+    /// The config this session was spawned with. Its `extra_env` carries
+    /// references, never secret values; a secret row's literal was sealed into
+    /// a `${secret:<id>}` reference at spawn.
     #[serde(default)]
     pub spawn_config: Option<SpawnConfig>,
     pub members: Vec<SessionMember>,
@@ -778,10 +785,27 @@ pub struct SpawnRequest {
     /// later entries override the keep-list on key collision. A value written
     /// exactly `${env:NAME}` is an env reference: the daemon reads `NAME` from
     /// its own environment (then, on Windows, the user's) at spawn, and only the
-    /// reference is stored and echoed. Put secrets such as `ANTHROPIC_API_KEY`
-    /// here as references, never as literal values.
+    /// reference is stored and echoed. A value written exactly `${secret:ID}` is
+    /// a secret reference: the daemon reads the value saved under `ID` in
+    /// Windows Credential Manager at spawn, again storing and echoing only the
+    /// reference. See [`env_rows::reference`].
+    ///
+    /// A *literal* value under a secret key — see
+    /// [`env_rows::is_secret_key`], plus any key this request lists in
+    /// [`Self::secret_env_keys`] — is sealed before the spawn config is
+    /// captured: the daemon moves the value into the store and replaces it with
+    /// a secret reference. A literal secret is never stored and never echoed
+    /// back, so a client that replays a config verbatim (the Tauri app) keeps
+    /// working.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+    /// Keys whose rows this client considers secret whatever their name, set by
+    /// the spawn dialog's per-row Secret toggle. The daemon seals the union of
+    /// these and the rows its own name pattern catches, so a secret under a
+    /// name the pattern misses is still sealed. Not part of [`SpawnConfig`]:
+    /// once a row is sealed, its reference marks it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env_keys: Vec<String>,
     /// Optional scripted PTY input fed to the child after the PTY comes up.
     /// When set on `SessionMode::Interactive`, the daemon omits the positional
     /// prompt arg (the injector is expected to deliver the prompt instead).
@@ -834,6 +858,10 @@ pub struct SpawnConfig {
     pub dangerously_skip_permissions: bool,
     pub agent_options: AgentOptions,
     pub model: Option<String>,
+    /// Extra environment variables for the child, as captured at spawn. Values
+    /// are literals or references (see [`SpawnRequest::extra_env`]); a secret
+    /// literal was sealed into a `${secret:<id>}` reference before this config
+    /// was built, so a stored or echoed config carries no secret values.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
 }
@@ -960,6 +988,7 @@ impl SpawnConfig {
             agent_options: self.agent_options.clone(),
             model: self.model.clone(),
             extra_env: self.extra_env.clone(),
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
@@ -3087,6 +3116,7 @@ pub enum DaemonMessage {
     /// the session no longer exists or pre-dates spawn-config persistence
     /// (orphan sidecars written before v13). UIs that prefilled a dialog
     /// optimistically should fall back to Settings defaults in that case.
+    /// The config's `extra_env` carries references, never secret values.
     SpawnConfigReply {
         session_id: String,
         config: Option<SpawnConfig>,
@@ -4328,6 +4358,7 @@ mod tests {
                 verify_mode_marker: None,
                 startup: InjectorStartup::AgentTui,
             }),
+            secret_env_keys: Vec::new(),
             request_id: None,
             resume_conversation: None,
         };
@@ -4369,6 +4400,7 @@ mod tests {
             },
             model: Some("gpt-5.1-codex".to_string()),
             extra_env: vec![],
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
@@ -4403,6 +4435,7 @@ mod tests {
             },
             model: Some("sonnet-4".to_string()),
             extra_env: vec![],
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
@@ -4432,6 +4465,7 @@ mod tests {
             },
             model: None,
             extra_env: vec![],
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
@@ -5212,6 +5246,7 @@ mod tests {
             },
             model: None,
             extra_env: vec![],
+            secret_env_keys: Vec::new(),
             prompt_injector: None,
             request_id: Some("req-1".to_string()),
             resume_conversation: None,
@@ -6047,6 +6082,30 @@ mod tests {
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
         assert_eq!(snapshot.status_since, None, "an absent stamp reads as None");
     }
+
+    #[test]
+    fn secret_env_keys_defaults_empty_and_is_not_serialized_when_empty() {
+        // A client that predates the field sends no `secret_env_keys`.
+        let req: SpawnRequest = serde_json::from_str(
+            r#"{"label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null}"#,
+        )
+        .expect("a request without secret_env_keys decodes");
+        assert!(req.secret_env_keys.is_empty(), "{req:?}");
+
+        let json = serde_json::to_value(&req).expect("encode");
+        assert!(
+            json.get("secret_env_keys").is_none(),
+            "an empty list stays off the wire: {json}"
+        );
+
+        // A non-empty one round-trips.
+        let req = SpawnRequest {
+            secret_env_keys: vec!["GH_PAT".to_owned()],
+            ..req
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        assert!(json.contains(r#""secret_env_keys":["GH_PAT"]"#), "{json}");
+    }
 }
 
 /// Protocol 22 is still in `supported` for installed clients that speak only
@@ -6126,6 +6185,24 @@ mod v22_compat {
             matches!(
                 &spawn,
                 ClientMessage::SpawnSession(SpawnRequest { request_id: Some(id), .. }) if id == "q1"
+            ),
+            "{spawn:?}"
+        );
+    }
+
+    #[test]
+    fn v22_spawn_session_with_a_literal_env_row_decodes() {
+        let spawn: ClientMessage = serde_json::from_str(
+            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null,"extra_env":[["ANTHROPIC_API_KEY","sk-ant-literal"]]}"#,
+        )
+        .expect("a v22 spawn_session with a literal env row decodes");
+        assert!(
+            matches!(
+                &spawn,
+                ClientMessage::SpawnSession(SpawnRequest { extra_env, secret_env_keys, .. })
+                    if extra_env.len() == 1
+                        && extra_env.first().is_some_and(|(key, value)| key == "ANTHROPIC_API_KEY" && value == "sk-ant-literal")
+                        && secret_env_keys.is_empty()
             ),
             "{spawn:?}"
         );

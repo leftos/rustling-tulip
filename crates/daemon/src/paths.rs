@@ -201,7 +201,7 @@ mod tests {
 
 impl Dirs {
     pub fn ensure() -> anyhow::Result<Self> {
-        let config = resolve_config_dir()?;
+        let config = config_dir()?;
         std::fs::create_dir_all(&config).context("creating config dir")?;
 
         let sessions_dir = config.join("sessions");
@@ -239,7 +239,9 @@ impl Dirs {
 /// runs never write to the user's real `%APPDATA%`. When unset (the
 /// production path), falls back to `ProjectDirs::from("dev", "leftos",
 /// "rustling-tulip").config_dir()`.
-fn resolve_config_dir() -> anyhow::Result<PathBuf> {
+///
+/// Callers that need the subdirectories too want [`Dirs::ensure`] instead.
+pub(crate) fn config_dir() -> anyhow::Result<PathBuf> {
     if let Ok(value) = std::env::var("RUSTLING_TULIP_CONFIG_DIR")
         && !value.is_empty()
     {
