@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use protocol::env_rows::{self, Reference, is_secret_key};
 use protocol::{
     Agent, AgentOptions, ClientMessage, CodexSandbox, CursorSandbox, DaemonMessage, EnvName,
     EnvScope, MemberSpawnPreview, PermissionMode, PinnedMemberWorktree, RepoEntry,
@@ -208,11 +209,100 @@ pub(crate) fn cursor_sandbox_label(sandbox: Option<CursorSandbox>) -> &'static s
     }
 }
 
-/// One extra environment variable, as typed.
+/// One extra environment variable, as typed, and how its value is kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct EnvRow {
     pub key: String,
     pub value: String,
+    /// The row's Secret toggle: a literal value is saved in Windows
+    /// Credential Manager at spawn. It follows the key's name pattern
+    /// ([`is_secret_key`]) until the user touches it.
+    pub secret: bool,
+    /// The user pressed the Secret toggle or Replace, so the key no longer
+    /// sets the toggle.
+    pub secret_touched: bool,
+    /// The user revealed the masked value.
+    pub revealed: bool,
+    /// Where the value came from: a prefilled `${secret:…}` value shows as
+    /// a read-only saved secret until Replace.
+    pub origin: EnvOrigin,
+}
+
+/// Where an env row's value came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum EnvOrigin {
+    /// Typed in the dialog, or emptied by Replace.
+    #[default]
+    Typed,
+    /// Copied from a stored spawn config (a Shift-duplicate's prefill).
+    Prefill,
+}
+
+impl EnvRow {
+    /// A row holding `key` and `value`, its Secret toggle following the key.
+    pub(crate) fn new(key: &str, value: &str) -> Self {
+        Self {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            secret: is_secret_key(key.trim()),
+            ..Self::default()
+        }
+    }
+
+    /// A prefilled row: as [`Self::new`], and a saved secret when `value`
+    /// is a `${secret:…}` reference.
+    pub(crate) fn prefilled(key: &str, value: &str) -> Self {
+        Self {
+            origin: EnvOrigin::Prefill,
+            ..Self::new(key, value)
+        }
+    }
+
+    /// The value is an exact `${env:…}` or `${secret:…}` reference.
+    fn is_reference(&self) -> bool {
+        env_rows::reference(&self.value).is_some()
+    }
+
+    /// The value is a non-empty literal, which the Secret toggle applies to.
+    fn is_literal(&self) -> bool {
+        !self.value.is_empty() && !self.is_reference()
+    }
+
+    /// A prefilled `${secret:…}` reference, a value saved earlier. A
+    /// reference the user typed stays an editable row.
+    pub(crate) fn is_saved_secret(&self) -> bool {
+        self.origin == EnvOrigin::Prefill
+            && matches!(env_rows::reference(&self.value), Some(Reference::Secret(_)))
+    }
+}
+
+/// The line under an env row saying where its literal value is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnvRowNote {
+    /// The Secret toggle is on: the value goes to Credential Manager.
+    Saved,
+    /// The toggle is off, but the key's name still has the daemon save the
+    /// value securely.
+    PatternKeepsSecret,
+}
+
+pub(crate) const ENV_SAVED_NOTE: &str =
+    "Saved in Windows Credential Manager; only a reference is kept.";
+pub(crate) const ENV_PATTERN_KEEPS_SECRET: &str =
+    "Still saved securely: the name looks like a secret.";
+
+impl EnvRowNote {
+    pub(crate) fn text(self) -> &'static str {
+        match self {
+            Self::Saved => ENV_SAVED_NOTE,
+            Self::PatternKeepsSecret => ENV_PATTERN_KEEPS_SECRET,
+        }
+    }
+
+    /// Drawn as a warning rather than a muted note.
+    pub(crate) fn is_warning(self) -> bool {
+        self == Self::PatternKeepsSecret
+    }
 }
 
 /// Why an environment variable row blocks Spawn.
@@ -385,6 +475,12 @@ pub(crate) enum Control {
     CursorSandbox(Option<CursorSandbox>),
     EnvKey(usize),
     EnvValue(usize),
+    /// A secret row's Show / Hide button beside its masked value.
+    EnvReveal(usize),
+    /// An env row's Secret toggle.
+    EnvSecret(usize),
+    /// A saved secret row's Replace button.
+    EnvReplace(usize),
     EnvRemove(usize),
     EnvAdd,
     /// A workspace's Preview button.
@@ -443,6 +539,9 @@ impl Control {
             ),
             Self::EnvKey(index) => format!("spawn-env-key-{index}"),
             Self::EnvValue(index) => format!("spawn-env-value-{index}"),
+            Self::EnvReveal(index) => format!("spawn-env-value-{index}-reveal"),
+            Self::EnvSecret(index) => format!("spawn-env-secret-{index}"),
+            Self::EnvReplace(index) => format!("spawn-env-replace-{index}"),
             Self::EnvRemove(index) => format!("spawn-env-remove-{index}"),
             Self::EnvAdd => "spawn-env-add".to_owned(),
             _ => String::new(),
@@ -987,10 +1086,7 @@ impl SpawnForm {
         self.advanced.env = config
             .extra_env
             .iter()
-            .map(|(key, value)| EnvRow {
-                key: key.clone(),
-                value: value.clone(),
-            })
+            .map(|(key, value)| EnvRow::prefilled(key, value))
             .collect();
         self.advanced.open =
             options_set || !self.advanced.model.is_empty() || !self.advanced.env.is_empty();
@@ -1920,10 +2016,16 @@ impl SpawnForm {
         &self.advanced.env
     }
 
-    /// The user typed in row `index`'s key field.
+    /// The user typed in row `index`'s key field. Until the user touches
+    /// the row's Secret toggle, it follows the key's name pattern.
     pub(crate) fn edit_env_key(&mut self, index: usize, text: &str) {
         if let Some(row) = self.advanced.env.get_mut(index) {
             text.clone_into(&mut row.key);
+            let secret = is_secret_key(row.key.trim());
+            if !row.secret_touched && row.secret != secret {
+                row.secret = secret;
+                row.revealed = false;
+            }
         }
     }
 
@@ -1974,27 +2076,95 @@ impl SpawnForm {
         (0..self.advanced.env.len()).all(|index| self.env_problem(index).is_none())
     }
 
-    /// The warning for env row `index` when it looks like a secret typed as
-    /// plain text: a non-empty literal value (not an exact `${env:NAME}`
-    /// reference) under a key with a whole `_`-delimited segment of `KEY`,
-    /// `TOKEN`, `SECRET` or `PASSWORD`, in any case. It never blocks Spawn.
-    pub(crate) fn env_plaintext_warning(&self, index: usize) -> Option<String> {
-        const SECRET_WORDS: [&str; 4] = ["KEY", "TOKEN", "SECRET", "PASSWORD"];
+    /// The line under env row `index` about where its value is kept, for a
+    /// non-empty literal value only: [`EnvRowNote::Saved`] while its Secret
+    /// toggle is on, [`EnvRowNote::PatternKeepsSecret`] when the user turned
+    /// it off but the key's name still has the daemon save the value
+    /// securely. A reference, or a plain row with the toggle off, has none.
+    /// It never blocks Spawn.
+    pub(crate) fn env_row_note(&self, index: usize) -> Option<EnvRowNote> {
         let row = self.advanced.env.get(index)?;
-        let key = row.key.trim();
-        let is_reference = row
-            .value
-            .strip_prefix("${env:")
-            .and_then(|rest| rest.strip_suffix('}'))
-            .is_some_and(valid_env_key);
-        let secret_like = key
-            .split('_')
-            .any(|segment| SECRET_WORDS.iter().any(|w| segment.eq_ignore_ascii_case(w)));
-        (secret_like && !is_reference && !row.value.trim().is_empty()).then(|| {
-            format!(
-                "Stored in plain text. Use ${{env:{key}}} to read it from your environment instead."
-            )
-        })
+        if !row.is_literal() {
+            return None;
+        }
+        if row.secret {
+            Some(EnvRowNote::Saved)
+        } else {
+            is_secret_key(row.key.trim()).then_some(EnvRowNote::PatternKeepsSecret)
+        }
+    }
+
+    /// Whether env row `index` shows its Secret toggle: not while its value
+    /// is a reference.
+    pub(crate) fn env_secret_shown(&self, index: usize) -> bool {
+        self.advanced
+            .env
+            .get(index)
+            .is_some_and(|row| !row.is_reference())
+    }
+
+    /// Whether env row `index` shows its Show / Hide button: a row whose
+    /// Secret toggle is on and shows.
+    pub(crate) fn env_reveal_shown(&self, index: usize) -> bool {
+        self.advanced
+            .env
+            .get(index)
+            .is_some_and(|row| row.secret && !row.is_reference())
+    }
+
+    /// Whether env row `index`'s value field draws dots for its text: a
+    /// secret row the user has not revealed.
+    pub(crate) fn env_value_masked(&self, index: usize) -> bool {
+        self.env_reveal_shown(index)
+            && self
+                .advanced
+                .env
+                .get(index)
+                .is_some_and(|row| !row.revealed)
+    }
+
+    /// Whether env row `index` was revealed: its Show / Hide button reads
+    /// Hide.
+    pub(crate) fn env_revealed(&self, index: usize) -> bool {
+        self.advanced.env.get(index).is_some_and(|row| row.revealed)
+    }
+
+    /// The keys of the non-empty literal rows whose Secret toggle is on, for
+    /// the daemon to save securely.
+    fn secret_env_keys(&self) -> Vec<String> {
+        self.advanced
+            .env
+            .iter()
+            .filter(|row| row.secret && row.is_literal() && !row.key.trim().is_empty())
+            .map(|row| row.key.trim().to_owned())
+            .collect()
+    }
+
+    /// The Secret toggle on env row `index` was pressed: the key no longer
+    /// sets it, and a row turned secret again starts masked.
+    fn toggle_env_secret(&mut self, index: usize) {
+        if let Some(row) = self.advanced.env.get_mut(index) {
+            row.secret = !row.secret;
+            row.secret_touched = true;
+            row.revealed = false;
+        }
+    }
+
+    /// Replace on a saved secret row: the value empties for typing a new
+    /// secret, and the value field takes the focus.
+    fn replace_env_secret(&mut self, index: usize) {
+        let Some(row) = self.advanced.env.get_mut(index) else {
+            return;
+        };
+        if !row.is_saved_secret() {
+            return;
+        }
+        row.value.clear();
+        row.origin = EnvOrigin::Typed;
+        row.secret = true;
+        row.secret_touched = true;
+        row.revealed = false;
+        self.focus = Control::EnvValue(index);
     }
 
     pub(crate) fn tabs(&self) -> &TabChoices {
@@ -2246,14 +2416,35 @@ impl SpawnForm {
         }
         ring.extend(self.agent_option_controls());
         for index in 0..self.advanced.env.len() {
-            ring.extend([
-                Control::EnvKey(index),
-                Control::EnvValue(index),
-                Control::EnvRemove(index),
-            ]);
+            ring.extend(self.env_row_controls(index));
         }
         ring.push(Control::EnvAdd);
         ring
+    }
+
+    /// Env row `index`'s controls in Tab order: its key; its Replace button
+    /// while it holds a saved secret, else its value, Show / Hide and Secret
+    /// toggle where they show; its remove button.
+    fn env_row_controls(&self, index: usize) -> Vec<Control> {
+        let mut controls = vec![Control::EnvKey(index)];
+        if self
+            .advanced
+            .env
+            .get(index)
+            .is_some_and(EnvRow::is_saved_secret)
+        {
+            controls.push(Control::EnvReplace(index));
+        } else {
+            controls.push(Control::EnvValue(index));
+            if self.env_reveal_shown(index) {
+                controls.push(Control::EnvReveal(index));
+            }
+            if self.env_secret_shown(index) {
+                controls.push(Control::EnvSecret(index));
+            }
+        }
+        controls.push(Control::EnvRemove(index));
+        controls
     }
 
     /// The agent's own options; those trusted launch overrides are
@@ -2400,6 +2591,9 @@ impl SpawnForm {
             | Control::CodexSandbox(_)
             | Control::CursorPlan
             | Control::CursorSandbox(_)
+            | Control::EnvReveal(_)
+            | Control::EnvSecret(_)
+            | Control::EnvReplace(_)
             | Control::EnvRemove(_)
             | Control::EnvAdd => {
                 self.press_option(control);
@@ -2433,6 +2627,13 @@ impl SpawnForm {
                 self.env_list_row = None;
                 self.focus = Control::EnvAdd;
             }
+            Control::EnvSecret(index) => self.toggle_env_secret(*index),
+            Control::EnvReveal(index) => {
+                if let Some(row) = self.advanced.env.get_mut(*index) {
+                    row.revealed = !row.revealed;
+                }
+            }
+            Control::EnvReplace(index) => self.replace_env_secret(*index),
             _ => {}
         }
     }
@@ -2523,7 +2724,7 @@ impl SpawnForm {
             agent_options: self.agent_options(),
             model: self.wire_model(),
             extra_env: self.extra_env(),
-            secret_env_keys: Vec::new(),
+            secret_env_keys: self.secret_env_keys(),
             prompt_injector: None,
             request_id: None,
             resume_conversation: None,
@@ -3912,54 +4113,255 @@ mod tests {
         assert_eq!(form.focused(), Control::EnvAdd);
     }
 
-    #[test]
-    fn env_plaintext_warning_flags_secret_like_keys_with_literal_values() {
+    /// A ready form with Advanced open and one env row per `(key, value)`.
+    fn env_form(rows: &[(&str, &str)]) -> SpawnForm {
         let mut form = ready_form();
-        let rows = [
-            ("ANTHROPIC_API_KEY", "sk-ant-x", true),
-            ("github_token", "ghp_x", true),
-            ("DB_PASSWORD", "hunter2", true),
-            ("MONKEY", "x", false),
-            ("TOKENIZER_PATH", "x", false),
-            ("APIKEY", "x", false),
-            ("KEYS", "x", false),
-            ("ANTHROPIC_API_KEY", "${env:ANTHROPIC_API_KEY}", false),
-            ("MY_SECRET", "", false),
-            ("MY_SECRET", "${env:1BAD}", true),
-            ("MY_SECRET", "${env:}", true),
-            ("MY_SECRET", "x${env:A}", true),
-        ];
-        for _ in &rows {
+        press(&mut form, &Control::AdvancedToggle);
+        for (i, (key, value)) in rows.iter().enumerate() {
             press(&mut form, &Control::EnvAdd);
-        }
-        for (i, (key, value, _)) in rows.iter().enumerate() {
             form.edit_env_key(i, key);
             form.edit_env_value(i, value);
         }
-        for (i, (key, value, warns)) in rows.iter().enumerate() {
-            assert_eq!(
-                form.env_plaintext_warning(i).is_some(),
-                *warns,
-                "{key} = {value:?}"
-            );
+        form
+    }
+
+    const SEALED: &str = "${secret:0123456789abcdef0123456789abcdef}";
+
+    #[test]
+    fn the_secret_toggle_follows_the_key_until_touched() {
+        let mut form = env_form(&[("", "")]);
+        assert!(!form.env_rows()[0].secret, "an empty key is not a secret");
+        for (key, secret) in [
+            ("API", false),
+            ("API_TOKEN", true),
+            (" db_password ", true),
+            ("TOKENIZER_PATH", false),
+            ("KEYBOARD", false),
+        ] {
+            form.edit_env_key(0, key);
+            assert_eq!(form.env_rows()[0].secret, secret, "{key:?}");
         }
+        form.edit_env_key(0, "API_TOKEN");
+        assert!(form.env_secret_shown(0), "a literal row shows the toggle");
+        assert!(form.controls().contains(&Control::EnvSecret(0)));
+        press(&mut form, &Control::EnvSecret(0));
+        assert!(!form.env_rows()[0].secret, "the press turns it off");
+        form.edit_env_key(0, "API_TOKEN_2");
+        assert!(!form.env_rows()[0].secret, "a touched toggle stays off");
+        form.edit_env_key(0, "PLAIN");
+        press(&mut form, &Control::EnvSecret(0));
+        form.edit_env_key(0, "STILL_PLAIN");
+        assert!(form.env_rows()[0].secret, "and stays on once ticked");
         assert_eq!(
-            form.env_plaintext_warning(0).as_deref(),
-            Some(
-                "Stored in plain text. Use ${env:ANTHROPIC_API_KEY} to read it from your \
-                 environment instead."
-            )
+            Control::EnvSecret(0).selector(),
+            "spawn-env-secret-0",
+            "its selector"
         );
-        form.edit_env_key(1, " github_token ");
+    }
+
+    #[test]
+    fn a_ticked_row_key_is_in_secret_env_keys() {
+        let mut form = env_form(&[
+            (" API_TOKEN ", "t0k"),
+            ("GH_PAT", "ghp_x"),
+            ("LEVEL", "3"),
+            ("EMPTY_KEY", ""),
+            ("REF_TOKEN", "${env:REF_TOKEN}"),
+        ]);
+        press(&mut form, &Control::EnvSecret(1));
+        let request = request_of(&form);
         assert_eq!(
-            form.env_plaintext_warning(1).as_deref(),
-            Some(
-                "Stored in plain text. Use ${env:github_token} to read it from your environment instead."
-            ),
-            "the key is trimmed"
+            request.secret_env_keys,
+            ["API_TOKEN".to_owned(), "GH_PAT".to_owned()],
+            "ticked non-empty literal rows only, keys trimmed, in row order"
         );
+        assert_eq!(request.extra_env.len(), 5, "every row is still sent");
+        press(&mut form, &Control::EnvSecret(1));
+        assert_eq!(request_of(&form).secret_env_keys, ["API_TOKEN".to_owned()]);
+    }
+
+    #[test]
+    fn an_unticked_pattern_row_is_not_listed_but_warned() {
+        let mut form = env_form(&[("ANTHROPIC_API_KEY", "sk-ant-x")]);
+        assert_eq!(form.env_row_note(0), Some(EnvRowNote::Saved));
+        press(&mut form, &Control::EnvSecret(0));
+        assert!(request_of(&form).secret_env_keys.is_empty(), "not listed");
+        assert_eq!(
+            form.env_row_note(0),
+            Some(EnvRowNote::PatternKeepsSecret),
+            "the daemon still seals it by its name"
+        );
+        assert!(EnvRowNote::PatternKeepsSecret.is_warning());
+        assert!(!form.env_value_masked(0), "a row turned off unmasks");
+        assert!(!form.controls().contains(&Control::EnvReveal(0)));
         assert_eq!(form.env_problem(0), None, "a warning is not a problem");
-        assert_eq!(form.env_plaintext_warning(rows.len()), None);
+        assert!(form.can_submit());
+    }
+
+    #[test]
+    fn env_row_notes_by_kind() {
+        let mut form = env_form(&[
+            ("API_TOKEN", "t0k"),
+            ("DB_PASSWORD", "hunter2"),
+            ("LEVEL", "3"),
+            ("API_TOKEN_REF", "${env:API_TOKEN}"),
+            ("SEALED_KEY", SEALED),
+            ("MY_SECRET", ""),
+            ("MY_SECRET_2", "x${env:A}"),
+        ]);
+        press(&mut form, &Control::EnvSecret(1));
+        let notes: Vec<_> = (0..7).map(|i| form.env_row_note(i)).collect();
+        assert_eq!(
+            notes,
+            [
+                Some(EnvRowNote::Saved),
+                Some(EnvRowNote::PatternKeepsSecret),
+                None,
+                None,
+                None,
+                None,
+                Some(EnvRowNote::Saved),
+            ],
+            "a ticked literal, an un-ticked pattern literal, a plain literal, two \
+             references, an empty value, an embedded reference (a literal)"
+        );
+        assert_eq!(
+            EnvRowNote::Saved.text(),
+            "Saved in Windows Credential Manager; only a reference is kept."
+        );
+        assert_eq!(
+            EnvRowNote::PatternKeepsSecret.text(),
+            "Still saved securely: the name looks like a secret."
+        );
+        assert!(!EnvRowNote::Saved.is_warning(), "a muted note");
+        assert_eq!(form.env_row_note(7), None, "no such row");
+    }
+
+    #[test]
+    fn a_secret_reference_counts_as_a_reference() {
+        let form = duplicated(stored_config(&json!({
+            "extra_env": [["API_TOKEN", SEALED], ["NAME", "${secret:short}"]],
+        })));
+        let row = &form.env_rows()[0];
+        assert!(row.is_saved_secret());
+        assert!(!form.env_secret_shown(0), "no Secret toggle");
+        assert!(!form.env_value_masked(0));
+        assert_eq!(form.env_row_note(0), None);
+        assert_eq!(
+            form.env_row_controls(0),
+            [
+                Control::EnvKey(0),
+                Control::EnvReplace(0),
+                Control::EnvRemove(0)
+            ],
+            "Replace in place of the value"
+        );
+        assert!(
+            !form.env_rows()[1].is_saved_secret(),
+            "a malformed id is a literal"
+        );
+        assert!(form.env_secret_shown(1));
+        let request = request_of(&form);
+        assert!(
+            request.secret_env_keys.is_empty(),
+            "{:?}",
+            request.secret_env_keys
+        );
+        assert_eq!(
+            request.extra_env[0],
+            ("API_TOKEN".to_owned(), SEALED.to_owned()),
+            "the reference goes unchanged"
+        );
+    }
+
+    #[test]
+    fn a_typed_secret_reference_stays_an_editable_row() {
+        let mut form = env_form(&[("API_TOKEN", "")]);
+        form.edit_env_value(0, SEALED);
+        let row = &form.env_rows()[0];
+        assert_eq!(row.origin, EnvOrigin::Typed, "typed, not prefilled");
+        assert!(!row.is_saved_secret());
+        assert_eq!(
+            form.env_row_controls(0),
+            [
+                Control::EnvKey(0),
+                Control::EnvValue(0),
+                Control::EnvRemove(0)
+            ],
+            "the value field stays; no toggle, no Show"
+        );
+        assert!(!form.env_value_masked(0), "a reference shows");
+        assert_eq!(form.env_row_note(0), None);
+        let request = request_of(&form);
+        assert_eq!(
+            request.extra_env,
+            env(&[("API_TOKEN", SEALED)]),
+            "sent verbatim"
+        );
+        assert!(request.secret_env_keys.is_empty());
+        press(&mut form, &Control::EnvReplace(0));
+        assert_eq!(
+            form.env_rows()[0].value,
+            SEALED,
+            "Replace does nothing here"
+        );
+    }
+
+    #[test]
+    fn a_key_edit_that_turns_secret_on_masks_again() {
+        let mut form = env_form(&[("API_TOKEN", "t0k")]);
+        press(&mut form, &Control::EnvReveal(0));
+        assert!(!form.env_value_masked(0), "revealed");
+        form.edit_env_key(0, "API_TOKENX");
+        assert!(!form.env_rows()[0].secret, "the key turned it off");
+        assert!(!form.env_rows()[0].revealed, "and the reveal with it");
+        form.edit_env_key(0, "API_TOKEN");
+        assert!(form.env_rows()[0].secret);
+        assert!(form.env_value_masked(0), "back on, masked again");
+        press(&mut form, &Control::EnvReveal(0));
+        form.edit_env_key(0, "API_TOKEN ");
+        assert!(
+            !form.env_value_masked(0),
+            "an edit that leaves the toggle as it was keeps the reveal"
+        );
+    }
+
+    #[test]
+    fn replace_clears_a_saved_secret_row_to_a_secret_literal() {
+        let mut form = duplicated(stored_config(&json!({
+            "extra_env": [["NAME", SEALED]],
+        })));
+        assert!(form.env_rows()[0].is_saved_secret());
+        assert!(!form.env_rows()[0].secret, "a plain name");
+        press(&mut form, &Control::EnvReplace(0));
+        let row = &form.env_rows()[0];
+        assert_eq!(row.value, "", "the value empties");
+        assert!(row.secret && row.secret_touched, "a secret literal now");
+        assert_eq!(form.focused(), Control::EnvValue(0), "ready for typing");
+        assert!(form.env_value_masked(0), "typed masked");
+        assert_eq!(
+            form.env_row_controls(0),
+            [
+                Control::EnvKey(0),
+                Control::EnvValue(0),
+                Control::EnvReveal(0),
+                Control::EnvSecret(0),
+                Control::EnvRemove(0),
+            ]
+        );
+        form.edit_env_value(0, "new-value");
+        assert_eq!(request_of(&form).secret_env_keys, ["NAME".to_owned()]);
+        press(&mut form, &Control::EnvReveal(0));
+        assert!(!form.env_value_masked(0), "Show unmasks");
+        assert!(form.env_revealed(0));
+        press(&mut form, &Control::EnvReveal(0));
+        assert!(form.env_value_masked(0), "Hide masks again");
+        press(&mut form, &Control::EnvReplace(0));
+        assert_eq!(
+            form.env_rows()[0].value,
+            "new-value",
+            "Replace does nothing on a literal"
+        );
     }
 
     /// A ready form with one env row and the daemon's names answered.
@@ -4106,15 +4508,22 @@ mod tests {
     }
 
     #[test]
-    fn a_picked_row_has_no_plaintext_warning() {
+    fn a_picked_row_is_a_reference_row() {
         let mut cache = BranchCache::default();
         let mut form = env_names_form();
+        press(&mut form, &Control::AdvancedToggle);
         form.edit_env_key(0, "DEEPSEEK_API_KEY");
         form.edit_env_value(0, "$");
+        assert!(form.env_value_masked(0), "a secret row masks the $ too");
+        assert!(form.list_shown(ListField::EnvValue(0)), "the list opens");
         assert!(form.enter_list(ListField::EnvValue(0), &mut cache));
         assert_eq!(form.env_rows()[0].value, "${env:DEEPSEEK_API_KEY}");
-        assert_eq!(form.env_plaintext_warning(0), None);
+        assert_eq!(form.env_row_note(0), None);
         assert_eq!(form.env_problem(0), None);
+        assert!(!form.env_secret_shown(0), "no Secret toggle");
+        assert!(!form.env_value_masked(0), "a reference shows");
+        assert!(!form.controls().contains(&Control::EnvSecret(0)));
+        assert!(request_of(&form).secret_env_keys.is_empty());
     }
 
     #[test]
@@ -4461,14 +4870,8 @@ mod tests {
         assert_eq!(
             form.env_rows(),
             [
-                EnvRow {
-                    key: "API_TOKEN".to_owned(),
-                    value: "${env:API_TOKEN}".to_owned(),
-                },
-                EnvRow {
-                    key: "LEVEL".to_owned(),
-                    value: "3".to_owned(),
-                },
+                EnvRow::prefilled("API_TOKEN", "${env:API_TOKEN}"),
+                EnvRow::prefilled("LEVEL", "3"),
             ]
         );
         let cursor = duplicated(stored_config(&json!({
