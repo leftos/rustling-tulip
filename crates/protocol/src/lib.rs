@@ -1882,6 +1882,31 @@ pub enum PairingEndReason {
     Unknown,
 }
 
+/// An environment variable's name and the scopes it is set in, as
+/// [`DaemonMessage::EnvNames`] lists it. It never carries the value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvName {
+    pub name: String,
+    /// The scopes holding a non-empty value, highest priority first.
+    pub scopes: Vec<EnvScope>,
+}
+
+/// Where an environment variable is set.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvScope {
+    /// The daemon's own process environment.
+    Process,
+    /// The user's persistent environment (`HKCU\Environment` on Windows).
+    User,
+    /// The machine's environment (`HKLM\...\Session Manager\Environment` on
+    /// Windows).
+    System,
+    /// A scope from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Daemon
 // ---------------------------------------------------------------------------
@@ -2641,6 +2666,14 @@ pub enum ClientMessage {
         #[serde(default)]
         request_id: Option<String>,
         items: Vec<RecoverItem>,
+    },
+    /// Ask for the names of the environment variables the daemon can read
+    /// for an `${env:NAME}` reference. The daemon replies to the requester
+    /// only with [`DaemonMessage::EnvNames`] carrying this `request_id`; the
+    /// reply carries names, never values.
+    ListEnvNames {
+        #[serde(default)]
+        request_id: Option<String>,
     },
 }
 
@@ -3470,6 +3503,15 @@ pub enum DaemonMessage {
         request_id: Option<String>,
         results: Vec<RecoverItemResult>,
     },
+    /// The answer to [`ClientMessage::ListEnvNames`], sent to the requester
+    /// only with its `request_id`: every variable set to a non-empty value in
+    /// the daemon's environment, the user environment or the system
+    /// environment, with the scopes it is set in. Names only, never values.
+    EnvNames {
+        names: Vec<EnvName>,
+        #[serde(default)]
+        request_id: Option<String>,
+    },
 }
 
 /// Parse-time wrapper around [`ClientMessage`] that captures unknown message
@@ -3862,6 +3904,72 @@ mod tests {
             back,
             ClientMessage::RepoStatus { request_id: Some(id), .. } if id == "q1"
         ));
+    }
+
+    #[test]
+    fn env_names_round_trips() {
+        let decoded: ClientMessage = serde_json::from_str(r#"{"type":"list_env_names"}"#)
+            .expect("a list_env_names without request_id decodes");
+        assert!(matches!(
+            decoded,
+            ClientMessage::ListEnvNames { request_id: None }
+        ));
+        let request = ClientMessage::ListEnvNames {
+            request_id: Some("r1".to_owned()),
+        };
+        let json = serde_json::to_string(&request).expect("serializes");
+        assert!(json.contains(r#""type":"list_env_names""#), "{json}");
+        let back: ClientMessage = serde_json::from_str(&json).expect("round-trips");
+        assert!(matches!(
+            back,
+            ClientMessage::ListEnvNames { request_id: Some(id) } if id == "r1"
+        ));
+
+        let names = vec![
+            EnvName {
+                name: "DEEPSEEK_API_KEY".to_owned(),
+                scopes: vec![EnvScope::User],
+            },
+            EnvName {
+                name: "Path".to_owned(),
+                scopes: vec![EnvScope::Process, EnvScope::User, EnvScope::System],
+            },
+        ];
+        for request_id in [None, Some("r2".to_owned())] {
+            let reply = DaemonMessage::EnvNames {
+                names: names.clone(),
+                request_id: request_id.clone(),
+            };
+            let json = serde_json::to_string(&reply).expect("serializes");
+            assert!(json.contains(r#""type":"env_names""#), "{json}");
+            assert!(
+                json.contains(r#""scopes":["process","user","system"]"#),
+                "{json}"
+            );
+            let back: DaemonMessage = serde_json::from_str(&json).expect("round-trips");
+            let DaemonMessage::EnvNames {
+                names: back_names,
+                request_id: back_id,
+            } = back
+            else {
+                panic!("decoded as another message: {json}");
+            };
+            assert_eq!(back_names, names);
+            assert_eq!(back_id, request_id);
+        }
+        let bare: DaemonMessage = serde_json::from_str(r#"{"type":"env_names","names":[]}"#)
+            .expect("an env_names without request_id decodes");
+        assert!(matches!(
+            bare,
+            DaemonMessage::EnvNames { request_id: None, ref names } if names.is_empty()
+        ));
+    }
+
+    #[test]
+    fn an_unknown_env_scope_decodes_as_unknown() {
+        let name: EnvName = serde_json::from_str(r#"{"name":"A","scopes":["user","volatile"]}"#)
+            .expect("an unknown scope decodes in place");
+        assert_eq!(name.scopes, [EnvScope::User, EnvScope::Unknown]);
     }
 
     fn sample_tab() -> TabEntry {

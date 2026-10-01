@@ -20,7 +20,8 @@ const SECRET_ID_LEN: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reference {
     /// `${env:NAME}`: at spawn the daemon reads `NAME` from its own
-    /// environment, then (on Windows) from the user's persistent environment.
+    /// environment, then (on Windows) from the user's persistent environment,
+    /// then from the system environment.
     Env(String),
     /// `${secret:ID}`: at spawn the daemon reads the value saved under `ID` in
     /// Windows Credential Manager.

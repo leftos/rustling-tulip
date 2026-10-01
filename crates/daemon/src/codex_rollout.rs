@@ -1041,6 +1041,7 @@ mod tests {
                 name,
                 |n| (n == "RT_CODEX_HOME").then(|| r"D:\resolved-codex".to_owned()),
                 |_| None,
+                |_| None,
             )
         });
         assert_eq!(resolved, Some(PathBuf::from(r"D:\resolved-codex")));
