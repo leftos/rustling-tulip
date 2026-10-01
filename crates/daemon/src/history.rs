@@ -969,9 +969,7 @@ fn claude_request(
     // A plain shell's record says Claude while its stored config may carry
     // the spawn dialog's options for another agent.
     if request.mode == SessionMode::PlainShell {
-        request.agent_options = AgentOptions::Claude {
-            permission_mode: None,
-        };
+        request.agent_options = AgentOptions::claude(None);
     }
     request.mode = SessionMode::Interactive;
     request.resume_conversation = Some(conversation.to_owned());
@@ -1195,9 +1193,7 @@ fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) 
         mode: SessionMode::Interactive,
         initial_prompt: None,
         dangerously_skip_permissions: entry.skip_permissions.unwrap_or(false),
-        agent_options: AgentOptions::Claude {
-            permission_mode: None,
-        },
+        agent_options: AgentOptions::claude(None),
         model: entry.model.clone(),
         extra_env: Vec::new(),
         prompt_injector: None,
@@ -1231,9 +1227,7 @@ fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
         mode: SessionMode::PlainShell,
         initial_prompt: None,
         dangerously_skip_permissions: false,
-        agent_options: AgentOptions::Claude {
-            permission_mode: None,
-        },
+        agent_options: AgentOptions::claude(None),
         model: None,
         extra_env: Vec::new(),
         prompt_injector,
@@ -2058,9 +2052,7 @@ mod recovery_tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: Some("opus".to_owned()),
             extra_env: Vec::new(),
         }
@@ -2304,9 +2296,7 @@ mod recovery_tests {
     fn claude_recovery_of_a_removed_single_repo_entry_runs_standalone() {
         let mut entry = folder_only(vec![member("r1", CODEX_FOLDER)]);
         entry.spawn_config = Some(SpawnConfig {
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             ..codex_config()
         });
         let recover = item(RecoverAs::Claude, Some(CONV));

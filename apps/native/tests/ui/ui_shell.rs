@@ -129,12 +129,7 @@ fn quick_shell_spawns_standalone_in_home_when_no_default(cx: &mut TestAppContext
         "no remembered folder: the daemon picks the home directory"
     );
     assert_eq!(request.mode, SessionMode::PlainShell);
-    assert_eq!(
-        request.agent_options,
-        AgentOptions::Claude {
-            permission_mode: None,
-        }
-    );
+    assert_eq!(request.agent_options, AgentOptions::claude(None));
     assert_eq!(request.label, None);
     assert_eq!(request.initial_prompt, None);
     assert!(!request.dangerously_skip_permissions);

@@ -2478,9 +2478,7 @@ mod tests {
                 default_use_worktree: Some(false),
                 dangerously_skip_permissions: false,
                 model: None,
-                agent_options: protocol::AgentOptions::Claude {
-                    permission_mode: None,
-                },
+                agent_options: protocol::AgentOptions::claude(None),
                 tab_grouping: TabGroupingConfig::None,
                 injector: InjectorTemplate {
                     startup_delay_ms: 0,
