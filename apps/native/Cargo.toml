@@ -9,6 +9,11 @@ repository.workspace = true
 description = "rustling-tulip native client: GPUI + alacritty_terminal view of a daemon session"
 publish = false
 
+[lib]
+name = "rustling_tulip_native"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "rustling-tulip-native"
 path = "src/main.rs"

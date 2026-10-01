@@ -64,7 +64,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change persisted host state | `crates/daemon/src/state.rs`, `crates/daemon/src/paths.rs` |
 | Change session history or recovery | `crates/daemon/src/history.rs`, `transcripts.rs`, `tracer_log.rs`, `codex_rollout.rs` (a Codex session's conversation id); the dialog: `apps/native/src/recover.rs`, `recover_view.rs`, `spawns.rs` (`place_several`) |
 | Change daemon startup or supervision | `crates/daemon/src/main.rs`, `instance_lock.rs`, `binary_cache.rs`, `orphan.rs`, `crates/daemon-client/src/supervisor.rs` |
-| Add a native client view or dialog | a plain-Rust model module in `apps/native/src/` → its `*_view.rs` → mounted and routed in `apps/native/src/lib.rs` (`RootView`) → a spec in `apps/native/tests/ui_*.rs` over `tests/support/mod.rs` |
+| Add a native client view or dialog | a plain-Rust model module in `apps/native/src/` → its `*_view.rs` → mounted and routed in `apps/native/src/lib.rs` (`RootView`) → a spec module `apps/native/tests/ui/ui_<name>.rs` (with its `mod` line in `tests/ui/main.rs`) over `tests/support/mod.rs` |
 | Change the sidebar or activity rail | `apps/native/src/sidebar.rs`, `sidebar_view.rs`, `activity_bar.rs`; the Needs You panel: `needs_you.rs`, `needs_you_view.rs` |
 | End one-line text in `…` in the native client | `docs/native-client.md` ("Truncating text with `…`"), `apps/native/src/ellipsis.rs` (`ellipsized`, `truncating`, the debug probe), the view that draws the text, `tests/ui_ellipsis.rs` |
 | Change the client's colours | `apps/native/src/palette.rs` (every UI colour), `theme.rs` (the terminal palette), `appearance.rs` (accent and background presets) |
@@ -76,7 +76,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change session actions and menus | `apps/native/src/session_menu.rs`, `session_actions.rs`, `branch_fate.rs`, `discard_confirm.rs` |
 | Change Settings | `apps/native/src/settings_view.rs`, `appearance.rs`, `appearance_view.rs`, `sidebar.rs` (`UiState` in native-ui.json) |
 | Change source control or diffs | `apps/native/src/source_control.rs`, `source_control_view.rs`, `changes_view.rs`, `sc_writes.rs`, `stashes.rs`, `history.rs`, `diff_model.rs`, `diff_view.rs`, `diff_tab.rs`, `syntax.rs` |
-| Run the tests | UI specs: `cargo test -p rustling-tulip-native --test ui_<name>`; live e2e: `.\rt.ps1 native-e2e` (`tests/e2e_live.rs`, `tests/e2e_recover.rs`); OS smoke: `.\rt.ps1 native-smoke` (`tests/smoke_window.rs`) |
+| Run the tests | UI specs: `cargo test -p rustling-tulip-native --test ui ui_<name>` (`tests/ui/`); live e2e: `.\rt.ps1 native-e2e` (`tests/e2e_live.rs`, `tests/e2e_recover.rs`); OS smoke: `.\rt.ps1 native-smoke` (`tests/smoke_window.rs`) |
 | Look at a UI change, or show before and after shots | `.\rt.ps1 native-shot <view>` (`apps/native/examples/shot.rs`: views `main`, `main-compact`, `source-control`, `diff`, `settings`, `spawn` over a scripted fake daemon); read the PNG it prints. A new view is a fixture plus the keys or rail click that reach it in that file |
 
 ## Non-goals

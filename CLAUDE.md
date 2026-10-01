@@ -14,7 +14,7 @@ crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry,
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
-apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui_*.rs drive RootView::with_transport against a scripted fake daemon
+apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
 tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
@@ -62,7 +62,7 @@ cargo test -p daemon <test_name>
 cargo test -p protocol
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
-cargo test -p rustling-tulip-native --test ui_terminal   # also ui_sidebar, ui_tabs, ui_session_actions
+cargo test -p rustling-tulip-native --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
 # e2e_live.rs, e2e_recover.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 
@@ -72,7 +72,7 @@ The native client auto-spawns the daemon on first connect via `daemon_client::en
 
 The native client has three test tiers:
 
-- **UI specs** — `cargo test -p rustling-tulip-native --test ui_*` (`ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon.
+- **UI specs** — `cargo test -p rustling-tulip-native --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon. Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
 - **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer and runs `tests/e2e_live.rs` and `tests/e2e_recover.rs` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude shim.
 - **OS smoke** — `.\rt.ps1 native-smoke`: launches the native client exe in a cloaked window that never takes focus (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell.
 

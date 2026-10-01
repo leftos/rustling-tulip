@@ -74,63 +74,63 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 ### P5.2 Pane drag-and-drop in the shown tab
 
 - **Does**: drag a pane by its header (Q8) with a ghost of its label; while a pane drag is over a pane, that pane draws the edge overlay (the half, the centre box or the outer strip, tinted with the accent); the release sends P5.1's `MovePane`, records its undo entry and marks a one-pane source tab closing; Esc cancels. Parity: "**(hard)** Pane drag and drop from the header or ⠿ handle: edge overlay for splits, centre swap, outer band splits at the top level, across tabs" (Tabs & panes; "across tabs" completes in P5.3), and the swap gesture "Undo shelf…" waits for.
-- **Files**: `grid_view.rs` (header `on_drag`, pane `on_drag_move` / `on_drop`, overlay); `lib.rs` (`RootView.pane_drop: Option<(String, PaneDropEdge)>`, cleared on drop, Esc and mouse up); `undo.rs` (`SWAPPED_PANES`); `pane_menu.rs` (the Move to ▸ send and its undo become one helper both paths call); new `tests/ui_pane_drag.rs`; `tests/support/mod.rs` (a `drag(from, to)` helper over the simulated mouse).
+- **Files**: `grid_view.rs` (header `on_drag`, pane `on_drag_move` / `on_drop`, overlay); `lib.rs` (`RootView.pane_drop: Option<(String, PaneDropEdge)>`, cleared on drop, Esc and mouse up); `undo.rs` (`SWAPPED_PANES`); `pane_menu.rs` (the Move to ▸ send and its undo become one helper both paths call); new `tests/ui/ui_pane_drag.rs`; `tests/support/mod.rs` (a `drag(from, to)` helper over the simulated mouse).
 - **Core / view**: the edge, the message and the undo label come from `drag.rs`; the view hit-tests the pointer against each pane's bounds and draws the overlay.
-- **Proof**: `cargo test -p rustling-tulip-native --test ui_pane_drag`, red first: `drop_on_right_half_moves_the_pane_right`, `drop_on_centre_swaps_and_offers_undo`, `drop_in_the_outer_band_splits_at_the_top_level`, `drop_on_itself_sends_nothing`, `overlay_follows_the_pointer_and_clears_on_release`, `esc_cancels_the_drag`; `ui_panes` and `ui_tabs` stay green.
+- **Proof**: `cargo test -p rustling-tulip-native --test ui ui_pane_drag`, red first: `drop_on_right_half_moves_the_pane_right`, `drop_on_centre_swaps_and_offers_undo`, `drop_in_the_outer_band_splits_at_the_top_level`, `drop_on_itself_sends_nothing`, `overlay_follows_the_pointer_and_clears_on_release`, `esc_cancels_the_drag`; `ui_panes` and `ui_tabs` stay green.
 - **Needs**: P5.1; Wave 2's stale-closing-mark item (drags make a rolled-back `MovePane` common); Petal's PT.7 (landed; the header it drags); Q8, Q12, Q14.
 
 ### P5.3 Tab strip drag
 
 - **Does**: drag a pill to reorder, with an insertion mark before or after the hovered pill by its half, applied locally at once and sent as `ReorderTabs` (the daemon's `TabsReordered` reconciles); a pane drag over a pill activates that tab (Q10), so the pane can drop on a pane there; a pane dropped on a pill goes where `pick_balanced_drop_target` says, with "Moved pane" undo; a diff tab's pill takes no pane. Parity: "Drag to reorder; a pane dragged over a pill activates that tab; dropping on a pill places the pane automatically" (Tabs & panes), and "across tabs" of the pane drag line.
-- **Files**: `tab_bar.rs`; `tabs.rs` (`TabsModel::reorder` callable for the local apply); new `tests/ui_tab_drag.rs`.
+- **Files**: `tab_bar.rs`; `tabs.rs` (`TabsModel::reorder` callable for the local apply); new `tests/ui/ui_tab_drag.rs`.
 - **Core / view**: `drag::reorder`, `TabsModel::reorder`, `pick_balanced_drop_target`; the view draws the mark and routes the drops.
-- **Proof**: `cargo test -p rustling-tulip-native --test ui_tab_drag`, red first: `pill_dropped_after_another_reorders_the_tabs`, `reorder_shows_before_the_daemon_echo`, `pane_over_a_pill_activates_that_tab`, `pane_dropped_on_a_pill_moves_it_balanced_with_undo`, `diff_pill_refuses_a_pane`.
+- **Proof**: `cargo test -p rustling-tulip-native --test ui ui_tab_drag`, red first: `pill_dropped_after_another_reorders_the_tabs`, `reorder_shows_before_the_daemon_echo`, `pane_over_a_pill_activates_that_tab`, `pane_dropped_on_a_pill_moves_it_balanced_with_undo`, `diff_pill_refuses_a_pane`.
 - **Needs**: P5.2; Wave 2 (its `tab_bar.rs` and `tabs.rs` items land first); Q10.
 
 ### P5.4 Sidebar drag-to-reorder
 
 - **Does**: in the Repos view, drag workspace and repo containers (sent as `ReorderContainers` with every workspace and repo in the new order; SH, DIR and Detached neither drag nor take drops); in the Tabs view, drag tab containers, which reorder the tabs with the strip's own `Tab` payload, so a pill and a tab container drop on each other; drag a leaf within its workspace, repo or tab container (`ReorderSessions`; leaves in cwd containers, and a leaf dropped in another container, do not reorder). An insertion line before or after by the row's half; the order applies locally until the daemon's broadcast. Parity: "Drag-reorder containers, tab containers (shared with the TabBar) and leaves, saved on the daemon" (Sidebar).
-- **Files**: `sidebar.rs` (local apply of container and session order); `sidebar_view.rs`; `tab_bar.rs` (the pill accepts a tab-container drop); new `tests/ui_sidebar_drag.rs`.
+- **Files**: `sidebar.rs` (local apply of container and session order); `sidebar_view.rs`; `tab_bar.rs` (the pill accepts a tab-container drop); new `tests/ui/ui_sidebar_drag.rs`.
 - **Core / view**: `drag::reorder` and `SidebarModel`'s local order, unit-tested in `sidebar.rs`; the view draws the line.
-- **Proof**: `cargo test -p rustling-tulip-native --lib sidebar::tests::local_order` and `--test ui_sidebar_drag`, red first: `container_dropped_before_another_sends_the_full_order`, `shell_and_dir_containers_do_not_drag`, `tab_container_reorders_the_strip`, `leaf_reorders_within_its_repo`, `leaf_dropped_in_another_container_does_nothing`, `local_order_holds_until_the_echo`.
+- **Proof**: `cargo test -p rustling-tulip-native --lib sidebar::tests::local_order` and `--test ui ui_sidebar_drag`, red first: `container_dropped_before_another_sends_the_full_order`, `shell_and_dir_containers_do_not_drag`, `tab_container_reorders_the_strip`, `leaf_reorders_within_its_repo`, `leaf_dropped_in_another_container_does_nothing`, `local_order_holds_until_the_echo`.
 - **Needs**: P5.1; P5.3 (the shared tab payload); Petal's PT.6a / PT.6b (landed) and Wave 3's P4.10 / P4.11 (they reshape the rows it drags).
 
 ### P5.5 Drag a leaf onto a pane or a tab pill
 
 - **Does**: a leaf dragged over the grid draws the same overlay and drops per Q9: a bound leaf moves its pane (the one in the active tab, else its first binding); an unbound leaf is placed with `SplitPane { new_session_id }` or `ReplacePaneSession`; onto a pill, it goes where `tabs::pane_target_for_session` says in that tab. Parity: "Drag a leaf onto a pane or a tab pill" (Sidebar).
-- **Files**: `drag.rs` (`leaf_drop` mapping); `sidebar_view.rs` (the leaf's payload); `grid_view.rs` and `tab_bar.rs` (accept `Leaf`); `tests/ui_sidebar_drag.rs`.
+- **Files**: `drag.rs` (`leaf_drop` mapping); `sidebar_view.rs` (the leaf's payload); `grid_view.rs` and `tab_bar.rs` (accept `Leaf`); `tests/ui/ui_sidebar_drag.rs`.
 - **Core / view**: `leaf_drop` is plain Rust with its tests; the views accept the payload.
-- **Proof**: `drag::tests` red first: `bound_leaf_moves_its_active_tab_pane`, `unbound_leaf_on_a_half_splits_with_the_session`, `unbound_leaf_on_the_centre_replaces`; `--test ui_sidebar_drag`: `leaf_dropped_on_a_pane_edge_places_it`, `leaf_dropped_on_a_pill_places_it_in_that_tab`.
+- **Proof**: `drag::tests` red first: `bound_leaf_moves_its_active_tab_pane`, `unbound_leaf_on_a_half_splits_with_the_session`, `unbound_leaf_on_the_centre_replaces`; `--test ui ui_sidebar_drag`: `leaf_dropped_on_a_pane_edge_places_it`, `leaf_dropped_on_a_pill_places_it_in_that_tab`.
 - **Needs**: P5.2, P5.3, P5.4; Q9.
 
 ### P5.6 Pop-out model and a second window
 
 - **Does**: `popouts.rs`: the pop-outs (`Pane { tab_id, pane_id }`, `Tab(tab_id)`, `Session(session_id)`), keyed so opening one twice focuses the first; `prune(tabs, sessions)`, the pop-outs to close (a pane pop-out when its pane or session goes, a tab pop-out when its tab goes; a session pop-out stays after its session stops and shows "not found" once the daemon removes it); titles (the session's display label, the tab name); the window options (1100×720, min 700×400, opened cloaked through `offscreen::show_cloaked` under `RUSTLING_TULIP_OFFSCREEN_WINDOW`). `popout_view.rs`: `PopoutView`, the root of each pop-out window, holding a `WeakEntity<RootView>` and drawing from it (Q1), with no app-shortcut `capture_key_down`. `RootView::open_popout` / `dock_back` move a pane's `TerminalPane` entity into the pop-out and back, and a pop-out's `on_window_should_close` docks it back. No menu entry yet; specs call `open_popout`. This proves the risky part first: a `TerminalPane` keeps keys, IME and focus when drawn in a second window. Parity: groundwork for Pop-out windows.
-- **Files**: new `popouts.rs`; new `popout_view.rs`; `lib.rs`; `grid_view.rs` (draw a pane slot outside the grid); new `tests/ui_popout.rs`; `tests/support/mod.rs` (reach the second window).
+- **Files**: new `popouts.rs`; new `popout_view.rs`; `lib.rs`; `grid_view.rs` (draw a pane slot outside the grid); new `tests/ui/ui_popout.rs`; `tests/support/mod.rs` (reach the second window).
 - **Core / view**: `popouts.rs` holds the rules and titles; the view draws and forwards.
-- **Proof**: `cargo test -p rustling-tulip-native --lib popouts::` red first: `opening_twice_focuses_the_first`, `pane_popout_closes_when_its_pane_goes`, `pane_popout_closes_when_its_session_goes`, `session_popout_outlives_a_stop`, `tab_popout_closes_with_its_tab`; `--test ui_popout`: `popped_pane_takes_keys_in_its_window`, `closing_the_popout_docks_the_pane_back`, `app_shortcuts_do_nothing_in_a_popout`. The OS tier stays green.
+- **Proof**: `cargo test -p rustling-tulip-native --lib popouts::` red first: `opening_twice_focuses_the_first`, `pane_popout_closes_when_its_pane_goes`, `pane_popout_closes_when_its_session_goes`, `session_popout_outlives_a_stop`, `tab_popout_closes_with_its_tab`; `--test ui ui_popout`: `popped_pane_takes_keys_in_its_window`, `closing_the_popout_docks_the_pane_back`, `app_shortcuts_do_nothing_in_a_popout`. The OS tier stays green.
 - **Needs**: Q1. It shares no model with P5.1–P5.5 but follows them, to avoid rebasing `grid_view.rs` and `lib.rs`.
 
 ### P5.7 Pane pop-out
 
 - **Does**: "Pop out" in the pane header and in the session menu (a session with a pane pops the pane in the active tab, else its first; with none, P5.8's session pop-out); the main grid keeps the pane's slot as a card with the session label, Focus window and Dock back (Q3); the pop-out's toolbar: status glyph, label, the tab it is docked in, member chips, runtime and trusted chips, two-step Stop, Dock back; the terminal takes focus when the window opens. A popped pane that is moved in the main window keeps its pop-out, since the daemon keeps the pane id. Parity: "**(hard)** Pane pop-out…" and "Pop-outs have no app shortcuts…" (Pop-out windows); Pop out in "Pane header…" and "Session context menu…" (Sessions); "Focus goes to the terminal after spawn and when a pop-out opens" (Terminal).
-- **Files**: `popout_view.rs`; `grid_view.rs` (the card, the header button); `session_menu.rs` (the row); `popouts.rs` (`pane_to_pop(session, tabs, active)`); `lib.rs`; `tests/ui_popout.rs`.
+- **Files**: `popout_view.rs`; `grid_view.rs` (the card, the header button); `session_menu.rs` (the row); `popouts.rs` (`pane_to_pop(session, tabs, active)`); `lib.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: `pane_to_pop` and the toolbar's parts (reusing `grid_view::header_parts`) are plain Rust; the view draws.
-- **Proof**: `popouts::tests::pane_to_pop_prefers_the_active_tab` red first; `--test ui_popout`: `header_pop_out_opens_a_window_and_leaves_a_card`, `dock_back_from_the_card_closes_the_window`, `focus_window_raises_the_open_popout`, `session_menu_pops_the_active_tab_pane`, `popout_stop_asks_twice`, `popout_closes_when_its_session_is_removed`, `focused_popout_clears_the_unseen_turn`.
+- **Proof**: `popouts::tests::pane_to_pop_prefers_the_active_tab` red first; `--test ui ui_popout`: `header_pop_out_opens_a_window_and_leaves_a_card`, `dock_back_from_the_card_closes_the_window`, `focus_window_raises_the_open_popout`, `session_menu_pops_the_active_tab_pane`, `popout_stop_asks_twice`, `popout_closes_when_its_session_is_removed`, `focused_popout_clears_the_unseen_turn`.
 - **Needs**: P5.6; the session menu rows it sits beside (landed with P4.12b); Q3, Q6, Q13.
 
 ### P5.8 Session pop-out
 
 - **Does**: a session with no pane opens in its own window: a terminal attached for it alone (scrollback first, as a pane attaches; counted by `tabs::size_drivers`, so only one view answers queries), Stop and Close window; it stays open after the session stops and shows "not found" once the session is gone; a leaf click on its session acts per Q13. Parity: "Session pop-out (session with no pane)…" and the "not found" state of "**(hard)** Opening an existing pop-out focuses it…" (Pop-out windows).
-- **Files**: `popout_view.rs`; `grid_view.rs` (a terminal slot outside the grid, keyed `popout:<session id>`); `tabs.rs` (`size_drivers` counts pop-out terminals); `lib.rs`; `tests/ui_popout.rs`.
+- **Files**: `popout_view.rs`; `grid_view.rs` (a terminal slot outside the grid, keyed `popout:<session id>`); `tabs.rs` (`size_drivers` counts pop-out terminals); `lib.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: `size_drivers` and `popouts.rs`'s rules, unit-tested; the view hosts the terminal.
-- **Proof**: `tabs::tests::size_drivers_count_a_session_popout` red first; `--test ui_popout`: `session_popout_loads_scrollback_and_takes_keys`, `session_popout_stays_after_stop`, `session_popout_shows_not_found_when_removed`, `leaf_click_on_a_popped_session` (Q13).
+- **Proof**: `tabs::tests::size_drivers_count_a_session_popout` red first; `--test ui ui_popout`: `session_popout_loads_scrollback_and_takes_keys`, `session_popout_stays_after_stop`, `session_popout_shows_not_found_when_removed`, `leaf_click_on_a_popped_session` (Q13).
 - **Needs**: P5.6, P5.7 (the menu row); Q13.
 
 ### P5.9 Grids in any window
 
 - **Does**: the split tree, divider drags, pane drops and the pane-level menus and dialogs work in whichever window draws the tab: `grid_bounds` and the `Drag` state keyed by window, and the pane-close dialog, empty-pane menu, session menu and toasts drawn where Q6 says. The main window looks and behaves as before. This is what "Tab pop-out: full grid (split, drag, close)" needs.
-- **Files**: `lib.rs`; `grid_view.rs`; `pane_menu.rs`; `pane_close_view.rs`; `popout_view.rs`; `tests/ui_popout.rs`.
+- **Files**: `lib.rs`; `grid_view.rs`; `pane_menu.rs`; `pane_close_view.rs`; `popout_view.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: a window-keyed layout and overlay-owner map in plain Rust, unit-tested; the views look up their window's entry.
 - **Proof**: red first: `divider_drag_in_a_second_window_sets_its_ratio`, `pane_close_dialog_opens_in_the_window_that_asked` (Q6); `ui_panes`, `ui_pane_drag` and `ui_tabs` stay green.
 - **Needs**: P5.6; Q6.
@@ -138,7 +138,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 ### P5.10 Tab pop-out
 
 - **Does**: "Pop out" in the tab menu opens the tab in its own window: the full grid (split, drag within it, close) or a diff tab (its `DiffSlot` moves over), Close window, spawn buttons disabled with a hint that spawning happens in the main window, closed when the tab is removed; the main strip shows the tab per Q2. Parity: "Tab pop-out…" (Pop-out windows) and Pop out in "Tab menu…" (Tabs & panes).
-- **Files**: `tab_menu.rs`; `tab_bar.rs`; `popout_view.rs`; `diff_tab_view.rs`; `lib.rs`; `tests/ui_popout.rs`.
+- **Files**: `tab_menu.rs`; `tab_bar.rs`; `popout_view.rs`; `diff_tab_view.rs`; `lib.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: the menu line and the strip's marker come from `tab_menu.rs` / `tabs.rs` models; the view draws.
 - **Proof**: red first: `tab_popout_shows_its_grid_and_splits`, `diff_tab_pops_out`, `spawn_is_disabled_in_a_tab_popout`, `removing_the_tab_closes_its_popout`, `main_strip_shows_a_popped_tab` (Q2), `tab_menu_offers_pop_out`.
 - **Needs**: P5.9, P5.3; Q2, Q11.
@@ -146,9 +146,9 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 ### P5.11 Pop-outs across restarts
 
 - **Does** (as Q4 (a) and Q5 (a) recommend): the open pop-outs saved in native-ui.json (kind, id, rect and monitor through `window_state.rs`), saved on move and resize with the layout's 500 ms debounce, reopened once the tabs and sessions arrive, and dropped when their pane, tab or session is gone. With Q4 (b) this item shrinks to docking everything back on quit, folded into P5.6.
-- **Files**: `sidebar.rs` (`UiState.popouts`); `window_state.rs`; `popouts.rs`; `lib.rs`; `tests/ui_popout.rs`.
+- **Files**: `sidebar.rs` (`UiState.popouts`); `window_state.rs`; `popouts.rs`; `lib.rs`; `tests/ui/ui_popout.rs`.
 - **Core / view**: `popouts::restore_plan(saved, tabs, sessions)` and `window_state::restore_options`, unit-tested.
-- **Proof**: red first: `popouts::tests::restore_skips_a_gone_pane`, `popouts::tests::restore_waits_for_tabs_and_sessions`; `--test ui_popout`: `popouts_reopen_after_the_layout_arrives`, `a_popout_on_a_missing_monitor_opens_on_the_primary`.
+- **Proof**: red first: `popouts::tests::restore_skips_a_gone_pane`, `popouts::tests::restore_waits_for_tabs_and_sessions`; `--test ui ui_popout`: `popouts_reopen_after_the_layout_arrives`, `a_popout_on_a_missing_monitor_opens_on_the_primary`.
 - **Needs**: P5.7, P5.8, P5.10; Q4, Q5.
 
 ### P5.12 Phase 5 docs

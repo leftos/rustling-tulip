@@ -74,13 +74,13 @@ The native client uses the Rust types from `crates/protocol` directly; there is 
 
 - A `DaemonMessage` variant reaches the view through `net.rs` (`on_daemon_message` emits `NetEvent::Message`) and is dispatched in `RootView::on_message` (`apps/native/src/lib.rs`). Add the arm there that updates state or surfaces it. A variant the client should act on but has no arm for is silently ignored.
 - A `ClientMessage` variant is sent from the view with `self.send(ClientMessage::YourNewMessage { .. })`, which forwards it to the network thread as `NetCommand::Send`.
-- Add a UI spec (`apps/native/tests/ui_*.rs`) that drives the round trip against the scripted fake daemon.
+- Add a UI spec module (`apps/native/tests/ui/ui_<name>.rs`, with its `mod` line in `tests/ui/main.rs`) that drives the round trip against the scripted fake daemon.
 
 ## After the edits
 
 1. Run `cargo build` to confirm the workspace compiles.
 2. Run `cargo test -p protocol v22_compat` to confirm the change keeps protocol 22 decodable.
-3. Run `cargo test -p protocol` and the native client's UI spec that covers the message (`cargo test -p rustling-tulip-native --test ui_<name>`).
+3. Run `cargo test -p protocol` and the native client's UI spec that covers the message (`cargo test -p rustling-tulip-native --test ui ui_<name>`).
 4. Run `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Common mistakes to catch

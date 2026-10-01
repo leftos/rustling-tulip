@@ -14,7 +14,7 @@ Reference: [architecture.md](../architecture.md) (components, what the product d
 
 ## High priority
 
-- [ ] **Speed up the `rustling-tulip-native` test suite** (user asked): measured in PT.8b's tree on a loaded machine: an edit to `lib.rs` rebuilds and relinks 40 test binaries (70 s wall; the 34 `tests/ui_*.rs` files are one binary each, about 33 MB each, 1.1 GB together), the run is 36 s of test time summed over those binaries, which cargo runs one after another, and the doc-test pass costs about 12 s for no doctests. Candidates, unmeasured: `doctest = false` on the lib target; one `tests/ui/main.rs` binary with a module per spec file (one link, one process); `rust-lld` as the linker; `debug = "line-tables-only"` for the test profile. Measure each against the same edit before keeping it. `apps/native/Cargo.toml`, `apps/native/tests/`, `.cargo/config.toml`.
+None open.
 
 ## Waves
 
