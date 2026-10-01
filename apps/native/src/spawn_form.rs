@@ -942,7 +942,9 @@ impl SpawnForm {
     /// defaults'; returns whether the source set any of them.
     fn apply_agent_options(&mut self, options: &AgentOptions) -> bool {
         match options {
-            AgentOptions::Claude { permission_mode } => {
+            AgentOptions::Claude {
+                permission_mode, ..
+            } => {
                 self.advanced.permission_mode = *permission_mode;
                 permission_mode.is_some()
             }
