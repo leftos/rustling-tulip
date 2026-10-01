@@ -24,9 +24,9 @@ use crate::palette::{
 };
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
-    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
-    ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, Prefill, RunMode, Runtime, ShareButton,
-    SpawnForm, TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label,
+    APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, EnvRowNote,
+    FormInputs, ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, Prefill, RunMode, Runtime,
+    ShareButton, SpawnForm, TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label,
     cursor_sandbox_label,
 };
 use crate::spawn_preview::{
@@ -94,6 +94,13 @@ const CURSOR_PLAN_TIP: &str = "Start cursor in --plan mode (read-only / planning
 const NO_ENV: &str = "No extra env vars.";
 const ENV_VALUE_PLACEHOLDER: &str = "value";
 const REMOVE_ENV_TIP: &str = "Remove env var";
+/// A saved secret row's read-only value, and its button.
+const SAVED_SECRET: &str = "Saved secret";
+const REPLACE_SECRET: &str = "Replace";
+/// A secret row's reveal button, while masked and while revealed.
+const SHOW_SECRET: &str = "Show";
+const HIDE_SECRET: &str = "Hide";
+const SECRET_TOGGLE: &str = "Secret";
 /// The tallest a branch list grows before it scrolls.
 const LIST_MAX_HEIGHT: f32 = 200.0;
 const CURRENT_TAG: &str = "current";
@@ -276,6 +283,11 @@ impl RootView {
         );
         chosen.extend(agent_options_chosen(form));
         chosen.extend(
+            (0..form.env_rows().len())
+                .filter(|&index| form.env_secret_shown(index) && form.env_rows()[index].secret)
+                .map(Control::EnvSecret),
+        );
+        chosen.extend(
             form.collision()
                 .map(|_| Control::Reuse(form.reuse_choice())),
         );
@@ -364,14 +376,21 @@ impl RootView {
         )
     }
 
-    /// The plain-text warning env row `index` shows, while the dialog is
-    /// open and the row warns.
+    /// The note env row `index` shows about where its value is kept, while
+    /// the dialog is open and the row has one.
     #[must_use]
-    pub fn spawn_dialog_env_plaintext_warning(&self, index: usize) -> Option<String> {
-        self.spawn_dialog
-            .as_ref()?
-            .form
-            .env_plaintext_warning(index)
+    pub fn spawn_dialog_env_note(&self, index: usize) -> Option<&'static str> {
+        let form = &self.spawn_dialog.as_ref()?.form;
+        form.env_row_note(index).map(EnvRowNote::text)
+    }
+
+    /// Whether env row `index`'s value field is masked, while the dialog is
+    /// open and the row exists.
+    #[must_use]
+    pub fn spawn_dialog_env_masked(&self, index: usize, cx: &gpui::App) -> Option<bool> {
+        let dialog = self.spawn_dialog.as_ref()?;
+        let inputs = dialog.env_inputs.get(index)?;
+        Some(inputs.value.read(cx).is_masked())
     }
 
     /// The text of the branch field, while the dialog is open.
@@ -828,13 +847,17 @@ impl RootView {
             MODEL_PLACEHOLDER.to_owned(),
             cx,
         );
-        for (row, inputs) in form.env_rows().iter().zip(&dialog.env_inputs) {
+        for (index, (row, inputs)) in form.env_rows().iter().zip(&dialog.env_inputs).enumerate() {
             sync_field(
                 &inputs.value,
                 &row.value,
                 ENV_VALUE_PLACEHOLDER.to_owned(),
                 cx,
             );
+            let masked = form.env_value_masked(index);
+            inputs
+                .value
+                .update(cx, |input, cx| input.set_masked(masked, cx));
         }
         dialog.timer = form
             .suggestion_deadline()
@@ -2353,7 +2376,6 @@ fn env_row(
         .when(problem.is_some(), |key| {
             key.border_color(gpui::rgb(WARNING))
         });
-    let value = list_input(dialog, ListField::EnvValue(index), focus, cx);
     let remove = spawn_button(&Control::EnvRemove(index), OUTLINED, "✕", true, focus, cx)
         .tooltip(tooltip(REMOVE_ENV_TIP));
     let message = problem.map(|problem| {
@@ -2362,11 +2384,12 @@ fn env_row(
             .text_color(gpui::rgb(WARNING))
             .child(problem.message())
     });
-    let plaintext = form.env_plaintext_warning(index).map(|warning| {
+    let note = form.env_row_note(index).map(|note| {
+        let color = if note.is_warning() { WARNING } else { MUTED };
         div()
-            .debug_selector(move || format!("spawn-env-plaintext-{index}"))
-            .text_color(gpui::rgb(WARNING))
-            .child(warning)
+            .debug_selector(move || format!("spawn-env-note-{index}"))
+            .text_color(gpui::rgb(color))
+            .child(note.text())
     });
     div()
         .flex()
@@ -2377,12 +2400,70 @@ fn env_row(
                 .flex()
                 .gap(px(8.0))
                 .child(key)
-                .child(value)
+                .children(env_value_cells(dialog, index, focus, cx))
                 .child(remove),
         )
         .children(message)
-        .children(plaintext)
+        .children(note)
         .into_any_element()
+}
+
+/// Env row `index`'s value part: a saved secret's read-only text and its
+/// Replace button; else the value field, then the Show / Hide button and
+/// the Secret toggle where they show.
+fn env_value_cells(
+    dialog: &SpawnDialog,
+    index: usize,
+    focus: &Control,
+    cx: &mut Context<RootView>,
+) -> Vec<AnyElement> {
+    let form = &dialog.form;
+    let saved = form
+        .env_rows()
+        .get(index)
+        .is_some_and(EnvRow::is_saved_secret);
+    if saved {
+        let text = field_frame(false)
+            .debug_selector(move || format!("spawn-env-saved-{index}"))
+            .flex_1()
+            .min_w(px(0.0))
+            .text_color(gpui::rgb(MUTED))
+            .child(SAVED_SECRET);
+        let replace = spawn_button(
+            &Control::EnvReplace(index),
+            OUTLINED,
+            REPLACE_SECRET,
+            true,
+            focus,
+            cx,
+        );
+        return vec![text.into_any_element(), replace.into_any_element()];
+    }
+    let mut cells =
+        vec![list_input(dialog, ListField::EnvValue(index), focus, cx).into_any_element()];
+    if form.env_reveal_shown(index) {
+        let label = if form.env_revealed(index) {
+            HIDE_SECRET
+        } else {
+            SHOW_SECRET
+        };
+        let reveal = spawn_button(&Control::EnvReveal(index), OUTLINED, label, true, focus, cx);
+        cells.push(reveal.into_any_element());
+    }
+    if form.env_secret_shown(index) {
+        let checked = form.env_rows().get(index).is_some_and(|row| row.secret);
+        let label = div().child(SECRET_TOGGLE);
+        let toggle = checkbox(&Control::EnvSecret(index), checked, focus, label, cx);
+        cells.push(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .child(toggle)
+                .into_any_element(),
+        );
+    }
+    cells
 }
 
 /// Cancel and Spawn, the footer's large buttons.

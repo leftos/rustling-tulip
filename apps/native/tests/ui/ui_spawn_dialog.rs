@@ -544,44 +544,167 @@ fn add_env_row(h: &mut Harness<'_>, key: &str, value: &str) {
     h.keys("ctrl-v");
 }
 
+const SAVED_NOTE: &str = "Saved in Windows Credential Manager; only a reference is kept.";
+const SEALED: &str = "${secret:0123456789abcdef0123456789abcdef}";
+
+fn env_note(h: &mut Harness<'_>) -> Option<&'static str> {
+    h.root(|root, _| root.spawn_dialog_env_note(0))
+}
+
+fn env_masked(h: &mut Harness<'_>) -> Option<bool> {
+    h.root(|root, cx| root.spawn_dialog_env_masked(0, cx))
+}
+
+fn secret_ticked(h: &mut Harness<'_>) -> bool {
+    selected(h).contains(&"spawn-env-secret-0".to_owned())
+}
+
 #[gpui::test]
-fn a_secret_like_literal_env_value_warns_but_still_spawns(cx: &mut TestAppContext) {
+fn a_secret_row_shows_the_saved_note_and_sends_its_key(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
-    add_env_row(&mut h, "ANTHROPIC_API_KEY", "sk-ant-x");
-    assert!(drawn(&mut h, "spawn-env-plaintext-0"));
+    add_env_row(&mut h, "API_TOKEN", "t0k-value");
+    assert!(drawn(&mut h, "spawn-env-note-0"));
+    assert_eq!(env_note(&mut h), Some(SAVED_NOTE));
+    assert!(drawn(&mut h, "spawn-env-secret-0"), "the toggle is drawn");
+    assert!(secret_ticked(&mut h), "and ticked by the key's name");
     assert!(
         !drawn(&mut h, "spawn-env-problem-0"),
-        "a warning, not a problem"
+        "a note, not a problem"
     );
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(
         request.extra_env,
-        [("ANTHROPIC_API_KEY".to_owned(), "sk-ant-x".to_owned())]
+        [("API_TOKEN".to_owned(), "t0k-value".to_owned())]
+    );
+    assert_eq!(request.secret_env_keys, ["API_TOKEN".to_owned()]);
+}
+
+/// Shift-duplicates `s1` into a new tab and answers with a stored config
+/// whose one env row is `API_TOKEN` sealed; the dialog opens prefilled.
+fn open_sealed_duplicate(h: &mut Harness<'_>) {
+    show_whole_dialog(h);
+    h.right_click_on("leaf-s1");
+    h.click_on("session-menu-duplicate");
+    let at = h.center("duplicate-new-tab");
+    h.click(
+        at,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    let config = serde_json::json!({
+        "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+            "base_branch": "origin/dev", "use_worktree": true },
+        "mode": "interactive",
+        "dangerously_skip_permissions": false,
+        "agent_options": { "kind": "claude", "permission_mode": null },
+        "model": null,
+        "extra_env": [["API_TOKEN", SEALED]],
+    });
+    h.send(DaemonMessage::SpawnConfigReply {
+        session_id: "s1".to_owned(),
+        config: Some(serde_json::from_value(config).expect("spawn config fixture")),
+    });
+    assert!(is_open(h), "the prefilled dialog opened");
+    suggest(h, "r1", "wt/brave-fox");
+    h.sent();
+}
+
+#[gpui::test]
+fn a_prefilled_sealed_row_shows_saved_secret(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_sealed_duplicate(&mut h);
+    assert!(drawn(&mut h, "spawn-env-saved-0"), "Saved secret is drawn");
+    assert!(drawn(&mut h, "spawn-env-replace-0"), "with Replace");
+    assert!(
+        !drawn(&mut h, "spawn-env-value-0"),
+        "the id is not shown in a field"
+    );
+    assert!(!secret_ticked(&mut h), "a reference row has no toggle");
+    assert_eq!(env_note(&mut h), None);
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [("API_TOKEN".to_owned(), SEALED.to_owned())],
+        "the reference goes unchanged"
+    );
+    assert!(request.secret_env_keys.is_empty());
+
+    open_sealed_duplicate(&mut h);
+    h.click_on("spawn-env-replace-0");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![("API_TOKEN".to_owned(), String::new())]),
+        "Replace empties the value"
+    );
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-env-value-0"));
+    assert_eq!(env_masked(&mut h), Some(true), "typed masked");
+    assert!(secret_ticked(&mut h), "a secret literal now");
+    h.keys("n e w");
+    assert_eq!(env_note(&mut h), Some(SAVED_NOTE));
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [("API_TOKEN".to_owned(), "new".to_owned())]
+    );
+    assert_eq!(request.secret_env_keys, ["API_TOKEN".to_owned()]);
+}
+
+#[gpui::test]
+fn a_secret_value_is_masked_until_revealed(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open(&mut h);
+    suggest(&mut h, "r1", "wt/brave-fox");
+    add_env_row(&mut h, "API_TOKEN", "t0k");
+    assert_eq!(env_masked(&mut h), Some(true), "a secret row is masked");
+    h.click_on("spawn-env-value-0-reveal");
+    assert_eq!(env_masked(&mut h), Some(false), "Show reveals it");
+    h.click_on("spawn-env-value-0-reveal");
+    assert_eq!(env_masked(&mut h), Some(true), "Hide masks it again");
+    h.click_on("spawn-env-secret-0");
+    assert!(!secret_ticked(&mut h));
+    assert_eq!(env_masked(&mut h), Some(false), "un-ticking unmasks");
+    assert_eq!(
+        env_note(&mut h),
+        Some("Still saved securely: the name looks like a secret.")
+    );
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert_eq!(
+        request.extra_env,
+        [("API_TOKEN".to_owned(), "t0k".to_owned())]
+    );
+    assert!(
+        request.secret_env_keys.is_empty(),
+        "an un-ticked row is not listed"
     );
 }
 
 #[gpui::test]
-fn an_env_reference_hides_the_plaintext_warning_and_is_sent_verbatim(cx: &mut TestAppContext) {
+fn an_env_reference_hides_the_note_and_is_sent_verbatim(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
     open(&mut h);
     suggest(&mut h, "r1", "wt/brave-fox");
     add_env_row(&mut h, "ANTHROPIC_API_KEY", "sk-ant-x");
-    assert!(drawn(&mut h, "spawn-env-plaintext-0"));
+    assert!(drawn(&mut h, "spawn-env-note-0"));
     h.set_clipboard("${env:ANTHROPIC_API_KEY}");
     h.keys(
         "backspace backspace backspace backspace backspace backspace backspace backspace ctrl-v",
     );
     // Bounds outlive a line that stops being drawn, so its absence is read
     // from the model.
-    assert_eq!(
-        h.root(|root, _| root.spawn_dialog_env_plaintext_warning(0)),
-        None
-    );
+    assert_eq!(env_note(&mut h), None);
+    assert_eq!(env_masked(&mut h), Some(false), "a reference shows");
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(
@@ -687,17 +810,36 @@ fn enter_on_a_name_writes_the_reference_and_closes_the_list(cx: &mut TestAppCont
             "${env:Path}".to_owned()
         )])
     );
-    assert_eq!(
-        h.root(|root, _| root.spawn_dialog_env_plaintext_warning(0)),
-        None,
-        "a reference is not a plain-text secret"
-    );
+    assert_eq!(env_note(&mut h), None, "a reference has no note");
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
     assert_eq!(
         request.extra_env,
         [("DEEPSEEK_API_KEY".to_owned(), "${env:Path}".to_owned())]
     );
+}
+
+#[gpui::test]
+fn the_name_picker_still_works_on_a_secret_row(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &fixture());
+    open_env_name_list(&mut h, "DEEPSEEK_API_KEY");
+    assert_eq!(env_masked(&mut h), Some(true), "the $ is typed masked");
+    assert!(env_name_rows(&mut h).is_some(), "the list shows");
+    h.keys("down enter");
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![(
+            "DEEPSEEK_API_KEY".to_owned(),
+            "${env:Path}".to_owned()
+        )])
+    );
+    assert_eq!(env_masked(&mut h), Some(false), "a reference shows");
+    assert!(!secret_ticked(&mut h), "and has no toggle");
+    assert_eq!(env_note(&mut h), None);
+    h.click_on("spawn-submit");
+    let request = the_spawn(&h.sent());
+    assert!(request.secret_env_keys.is_empty());
 }
 
 #[gpui::test]

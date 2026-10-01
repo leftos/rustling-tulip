@@ -9,6 +9,8 @@
 //! [`TextInputEvent::Cancel`] in both. Every edit the user
 //! makes emits [`TextChanged`], and [`TextInput::set_text`] replaces the text
 //! without it. A read-only input ([`TextInput::set_read_only`]) ignores edits.
+//! A masked input ([`TextInput::set_masked`]) draws a dot for each character
+//! and refuses copy and cut.
 
 use std::ops::Range;
 
@@ -31,6 +33,8 @@ const CONTEXT: &str = "TextInput";
 const MULTI_LINE_CONTEXT: &str = "TextInputMultiLine";
 const DEFAULT_MIN_ROWS: usize = 2;
 const DEFAULT_MAX_ROWS: usize = 6;
+/// What a masked input draws in place of each character.
+const MASK: char = '•';
 
 actions!(
     text_input,
@@ -123,12 +127,21 @@ pub struct TextInput {
     is_selecting: bool,
     mode: Mode,
     read_only: bool,
+    draws: Draws,
     /// The x a run of Up and Down aims for, so a short row passed on the way
     /// does not pull the caret left for good.
     goal_x: Option<Pixels>,
     /// How far a multi-line input's rows are scrolled up to keep the caret's
     /// row in view.
     scroll_y: Pixels,
+}
+
+/// What an input draws: its text, or while masked a [`MASK`] for each
+/// character, refusing copy and cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Draws {
+    Text,
+    Dots,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +225,7 @@ impl TextInput {
             is_selecting: false,
             mode,
             read_only: false,
+            draws: Draws::Text,
             goal_x: None,
             scroll_y: px(0.),
         }
@@ -253,8 +267,72 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Masks the input, or shows its text again. A masked input draws a `•`
+    /// for each character (a line break stays one), with the caret and the
+    /// selection where the hidden text puts them; copy and cut do nothing
+    /// while it is masked, and typing and paste still work.
+    pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
+        let draws = if masked { Draws::Dots } else { Draws::Text };
+        if self.draws != draws {
+            self.draws = draws;
+            cx.notify();
+        }
+    }
+
+    #[must_use]
+    pub fn is_masked(&self) -> bool {
+        self.draws == Draws::Dots
+    }
+
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// The text as drawn: the text itself, or while masked a [`MASK`] for
+    /// each character but a line break.
+    fn shown(&self) -> SharedString {
+        if self.is_masked() {
+            self.content
+                .chars()
+                .map(masked_char)
+                .collect::<String>()
+                .into()
+        } else {
+            self.content.clone()
+        }
+    }
+
+    /// The offset in the drawn text of the text's byte `offset`.
+    fn to_shown(&self, offset: usize) -> usize {
+        if !self.is_masked() {
+            return offset;
+        }
+        self.content
+            .char_indices()
+            .take_while(|(index, _)| *index < offset)
+            .map(|(_, c)| masked_char(c).len_utf8())
+            .sum()
+    }
+
+    /// The text's byte offset of the drawn text's offset `shown`: the start
+    /// of the character it falls in or after.
+    fn offset_of_shown(&self, shown: usize) -> usize {
+        if !self.is_masked() {
+            return shown;
+        }
+        let mut at = 0;
+        for (index, c) in self.content.char_indices() {
+            if at >= shown {
+                return index;
+            }
+            at += masked_char(c).len_utf8();
+        }
+        self.content.len()
+    }
+
+    /// The drawn text's range of the text's byte `range`.
+    fn range_to_shown(&self, range: &Range<usize>) -> Range<usize> {
+        self.to_shown(range.start)..self.to_shown(range.end)
     }
 
     /// Replaces the text, the cursor at its end, without [`TextChanged`]:
@@ -419,8 +497,9 @@ impl TextInput {
         }
     }
 
+    /// Copies the selection, unless the input is masked.
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.is_masked() && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_owned(),
             ));
@@ -428,8 +507,9 @@ impl TextInput {
     }
 
     /// Copies the selection and, unless the input is read-only, deletes it.
+    /// A masked input does neither.
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.is_masked() && !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_owned(),
             ));
@@ -467,7 +547,7 @@ impl TextInput {
         else {
             return (text_edge, None);
         };
-        let cursor = self.cursor_offset();
+        let cursor = self.to_shown(self.cursor_offset());
         let row = layout.row_ix(cursor);
         let goal_x = self.goal_x.unwrap_or_else(|| layout.position(cursor).x);
         let target_row = if down {
@@ -475,8 +555,9 @@ impl TextInput {
         } else {
             row.checked_sub(1)
         };
+        let shown = self.shown();
         let target = target_row.map_or(text_edge, |ix| {
-            layout.closest_in_row(ix, goal_x, &self.content)
+            self.offset_of_shown(layout.closest_in_row(ix, goal_x, &shown))
         });
         (self.clamp_offset(target), Some(goal_x))
     }
@@ -488,9 +569,14 @@ impl TextInput {
             return None;
         }
         let layout = self.last_layout.as_ref()?;
-        let row = layout.rows.get(layout.row_ix(self.cursor_offset()))?;
-        let end = Row::caret_end(row, &self.content);
-        Some((self.clamp_offset(row.start), self.clamp_offset(end)))
+        let row = layout
+            .rows
+            .get(layout.row_ix(self.to_shown(self.cursor_offset())))?;
+        let end = Row::caret_end(row, &self.shown());
+        Some((
+            self.clamp_offset(self.offset_of_shown(row.start)),
+            self.clamp_offset(self.offset_of_shown(end)),
+        ))
     }
 
     /// `offset` inside the text and on a character boundary: the drawn layout
@@ -527,7 +613,8 @@ impl TextInput {
             return self.content.len();
         }
         let row = layout.row_at_y(position.y - bounds.top() + self.scroll_y);
-        self.clamp_offset(layout.closest_in_row(row, position.x - bounds.left(), &self.content))
+        let shown = layout.closest_in_row(row, position.x - bounds.left(), &self.shown());
+        self.clamp_offset(self.offset_of_shown(shown))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -567,6 +654,12 @@ impl TextInput {
             (self.content[..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.goal_x = None;
     }
+}
+
+/// What a masked input draws for `c`: a line break stays, anything else is
+/// [`MASK`].
+fn masked_char(c: char) -> char {
+    if c == '\n' { '\n' } else { MASK }
 }
 
 /// Pasted text as one line: every line break, CRLF included, becomes one
@@ -845,7 +938,14 @@ impl EntityInputHandler for TextInput {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_owned())
+        let text = &self.content[range];
+        // A masked input's text never reaches the platform's input handler
+        // (prediction, a touch keyboard's learning): it reads the dots.
+        Some(if self.is_masked() {
+            text.chars().map(masked_char).collect()
+        } else {
+            text.to_owned()
+        })
     }
 
     fn selected_text_range(
@@ -930,8 +1030,8 @@ impl EntityInputHandler for TextInput {
         let layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         let origin = point(bounds.left(), bounds.top() - self.scroll_y);
-        let start = layout.position(range.start);
-        let end = layout.position(range.end);
+        let start = layout.position(self.to_shown(range.start));
+        let end = layout.position(self.to_shown(range.end));
         let right = if end.y == start.y {
             origin.x + end.x
         } else {
@@ -952,7 +1052,7 @@ impl EntityInputHandler for TextInput {
         let local = self.last_bounds?.localize(&point)?;
         let layout = self.last_layout.as_ref()?;
         let row = layout.row_at_y(local.y + self.scroll_y);
-        let utf8_index = layout.index_in_row(row, local.x)?;
+        let utf8_index = self.offset_of_shown(layout.index_in_row(row, local.x)?);
         Some(offset_to_utf16(&self.content, utf8_index))
     }
 }
@@ -1063,7 +1163,7 @@ impl Shaping {
         let (text, color) = if input.content.is_empty() {
             (input.placeholder.clone(), rgb(INPUT_PLACEHOLDER))
         } else {
-            (input.content.clone(), rgb(INPUT_TEXT))
+            (input.shown(), rgb(INPUT_TEXT))
         };
         // A single-line input draws one row: a line break its owner set draws
         // as a space, byte for byte, so the offsets still hold.
@@ -1080,7 +1180,11 @@ impl Shaping {
             underline: None,
             strikethrough: None,
         };
-        let runs = text_runs(run, text.len(), input.marked_range.as_ref());
+        let marked = input
+            .marked_range
+            .as_ref()
+            .map(|range| input.range_to_shown(range));
+        let runs = text_runs(run, text.len(), marked.as_ref());
         Self {
             font_size: style.font_size.to_pixels(window.rem_size()),
             text,
@@ -1183,8 +1287,8 @@ impl Element for TextElement {
             };
         };
         let layout = TextLayout::new(lines, line_height);
-        let caret = layout.position(input.cursor_offset());
-        let selected = input.selected_range.clone();
+        let caret = layout.position(input.to_shown(input.cursor_offset()));
+        let selected = input.range_to_shown(&input.selected_range);
         let scroll_y = if multi_line {
             let view_height = bounds.size.height;
             scroll_to_caret(
@@ -1459,6 +1563,82 @@ mod tests {
         assert_eq!(caret(&input, cx), (0, 4), "select-all still selects");
         let copied = cx.read_from_clipboard().and_then(|item| item.text());
         assert_eq!(copied.as_deref(), Some("seed"));
+    }
+
+    #[gpui::test]
+    fn masked_input_draws_dots_and_blocks_copy(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "sk-é1");
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(true, cx)));
+        cx.run_until_parked();
+        let (shown, drawn_end) = cx.update(|_, cx| {
+            let input = input.read(cx);
+            let end = input.last_layout.as_ref().map(|layout| layout.rows[0].end);
+            (input.shown().to_string(), end)
+        });
+        assert_eq!(shown, "•••••", "one dot a character, é included");
+        assert_eq!(drawn_end, Some("•••••".len()), "the dots are what is drawn");
+        let offsets = cx.update(|_, cx| {
+            let input = input.read(cx);
+            (
+                input.to_shown(5),
+                input.offset_of_shown(12),
+                input.offset_of_shown(13),
+            )
+        });
+        assert_eq!(offsets, (12, 5, 6), "offsets follow the hidden text");
+
+        cx.write_to_clipboard(ClipboardItem::new_string("zz".to_owned()));
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("zz"), "copy leaves the clipboard");
+        cx.simulate_keystrokes("ctrl-x");
+        let cut = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(cut.as_deref(), Some("zz"), "cut leaves the clipboard");
+        assert_eq!(text_of(&input, cx), "sk-é1", "and the text");
+        cx.simulate_keystrokes("end left");
+        assert_eq!(caret(&input, cx), (5, 5), "the caret steps over é's bytes");
+        cx.simulate_keystrokes("ctrl-v");
+        assert_eq!(text_of(&input, cx), "sk-ézz1", "paste still inserts");
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(false, cx)));
+        cx.run_until_parked();
+        let shown = cx.update(|_, cx| input.read(cx).shown().to_string());
+        assert_eq!(shown, "sk-ézz1", "unmasked, the text shows");
+        cx.simulate_keystrokes("ctrl-a ctrl-c");
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied.as_deref(), Some("sk-ézz1"), "and copies");
+    }
+
+    #[gpui::test]
+    fn masked_input_hides_text_from_the_input_handler(cx: &mut TestAppContext) {
+        let (input, cx) = open(cx, single, "sk-é1");
+        let handler_text = |input: &Entity<TextInput>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| {
+                    let whole = 0..offset_to_utf16(input.text(), input.text().len());
+                    let mut actual = None;
+                    let text = input.text_for_range(whole, &mut actual, window, cx);
+                    (text, actual)
+                })
+            })
+        };
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(true, cx)));
+        let (text, actual) = handler_text(&input, cx);
+        assert_eq!(text.as_deref(), Some("•••••"), "one dot a character");
+        assert_eq!(actual, Some(0..5), "the range is the hidden text's");
+        cx.simulate_input("x");
+        cx.write_to_clipboard(ClipboardItem::new_string("yz".to_owned()));
+        cx.simulate_keystrokes("ctrl-v backspace");
+        assert_eq!(
+            text_of(&input, cx),
+            "sk-é1xy",
+            "typing, paste and backspace work"
+        );
+        let (text, _) = handler_text(&input, cx);
+        assert_eq!(text.as_deref(), Some("•••••••"));
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_masked(false, cx)));
+        let (text, _) = handler_text(&input, cx);
+        assert_eq!(text.as_deref(), Some("sk-é1xy"), "unmasked, the text");
     }
 
     #[gpui::test]
