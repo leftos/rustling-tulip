@@ -955,7 +955,7 @@ pub fn plan_recovery(
             }
         }
         RecoverAs::Shell => RecoveryPlan {
-            request: shell_request(folder, item.conversation_id.as_deref()),
+            request: shell_request(entry, folder, item.conversation_id.as_deref()),
             register_repo: None,
         },
         RecoverAs::OwnAgent | RecoverAs::Unknown => {
@@ -1254,7 +1254,7 @@ fn pinned_single(repo_id: String, path: &str, branch_name: String) -> SpawnTarge
 }
 
 /// Claude resuming `conversation` in `target`, with the permission and model
-/// flags `entry` recorded.
+/// flags `entry` recorded and the env rows its spawn recorded.
 fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) -> SpawnRequest {
     SpawnRequest {
         label: None,
@@ -1266,7 +1266,7 @@ fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) 
             permission_mode: None,
         },
         model: entry.model.clone(),
-        extra_env: Vec::new(),
+        extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector: None,
         request_id: None,
@@ -1275,8 +1275,8 @@ fn folder_claude(entry: &HistoryEntry, target: SpawnTarget, conversation: &str) 
 }
 
 /// A plain shell in `folder` that types `claude --resume <id>` once it is up,
-/// when a conversation was chosen.
-fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
+/// when a conversation was chosen, carrying the env rows `entry` recorded.
+fn shell_request(entry: &HistoryEntry, folder: &str, conversation: Option<&str>) -> SpawnRequest {
     let prompt_injector = conversation.map(|id| PromptInjector {
         steps: vec![
             InjectorStep::Delay {
@@ -1303,7 +1303,7 @@ fn shell_request(folder: &str, conversation: Option<&str>) -> SpawnRequest {
             permission_mode: None,
         },
         model: None,
-        extra_env: Vec::new(),
+        extra_env: recorded_env(entry).to_vec(),
         secret_env_keys: Vec::new(),
         prompt_injector,
         request_id: None,
@@ -2135,6 +2135,18 @@ mod recovery_tests {
         }
     }
 
+    /// The env rows a recovered session's spawn recorded: a plain value and a
+    /// secret reference, which stays a reference until the spawn resolves it.
+    fn recorded_env_rows() -> Vec<(String, String)> {
+        vec![
+            ("RT_PLAIN".to_owned(), "1".to_owned()),
+            (
+                "ANTHROPIC_API_KEY".to_owned(),
+                "${secret:0123456789abcdef0123456789abcdef}".to_owned(),
+            ),
+        ]
+    }
+
     fn item(how: RecoverAs, conversation: Option<&str>) -> RecoverItem {
         RecoverItem {
             history_id: "h1".to_owned(),
@@ -2831,6 +2843,21 @@ mod recovery_tests {
     }
 
     #[test]
+    fn register_repo_then_claude_carries_the_recorded_env_rows() {
+        let mut entry = folder_only(vec![member("", r"D:\foo"), member("", r"D:\bar")]);
+        let mut config = workspace_config();
+        config.extra_env = recorded_env_rows();
+        entry.spawn_config = Some(config);
+        let how = RecoverAs::RegisterRepoThenClaude {
+            path: "d:/FOO/".to_owned(),
+        };
+
+        let plan = plan(&entry, &item(how, Some(CONV))).expect("plan");
+
+        assert_eq!(plan.request.extra_env, recorded_env_rows());
+    }
+
+    #[test]
     fn register_repo_then_claude_runs_pinned_in_the_new_repo() {
         let entry = folder_only(vec![imported("", r"D:\foo")]);
         let how = RecoverAs::RegisterRepoThenClaude {
@@ -2945,6 +2972,31 @@ mod recovery_tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn shell_recovery_carries_the_recorded_env_rows() {
+        let mut entry = folder_only(vec![member("", r"D:\yaat")]);
+        let mut config = workspace_config();
+        config.extra_env = recorded_env_rows();
+        entry.spawn_config = Some(config);
+
+        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert_eq!(req.extra_env, recorded_env_rows());
+    }
+
+    #[test]
+    fn a_recovery_without_a_spawn_config_has_no_env_rows() {
+        let entry = folder_only(vec![member("", r"D:\yaat")]);
+
+        let req = plan(&entry, &item(RecoverAs::Shell, Some(CONV)))
+            .expect("plan")
+            .request;
+
+        assert!(req.extra_env.is_empty(), "{:?}", req.extra_env);
     }
 
     #[test]
