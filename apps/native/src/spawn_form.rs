@@ -44,6 +44,18 @@ impl Target {
         }
     }
 
+    /// The repo or workspace a stored spawn target names; `None` for a
+    /// standalone one.
+    pub(crate) fn from_spawn(target: &SpawnTarget) -> Option<Self> {
+        match target {
+            SpawnTarget::Single { repo_id, .. } => Some(Self::Repo(repo_id.clone())),
+            SpawnTarget::Workspace { workspace_id, .. } => {
+                Some(Self::Workspace(workspace_id.clone()))
+            }
+            SpawnTarget::Standalone { .. } => None,
+        }
+    }
+
     /// The target a suggestion reply names, if it is one.
     pub(crate) fn from_suggest(target: &SuggestTarget) -> Option<Self> {
         match target {
@@ -583,6 +595,16 @@ impl Lock {
         }
     }
 
+    /// A lock on `target` alone, with no worktree pinned: the dialog a
+    /// Shift-duplicate opens.
+    pub(crate) fn for_target(target: Target) -> Self {
+        Self {
+            target,
+            pin: None,
+            share_confirmed: false,
+        }
+    }
+
     /// The same lock, marked as one the worktrees manager's share confirm
     /// already answered for.
     pub(crate) fn share_confirmed(mut self) -> Self {
@@ -706,6 +728,8 @@ pub(crate) struct SpawnForm {
     open_in: OpenChoice,
     trusted: bool,
     use_worktree: bool,
+    /// The user changed the worktree checkbox since the target loaded.
+    worktree_chosen: bool,
     mode: WorktreeMode,
     branch: BranchField,
     base: BaseField,
@@ -725,6 +749,15 @@ pub(crate) struct SpawnForm {
     /// on it does not ask again.
     share_confirmed: bool,
     submitted: bool,
+}
+
+/// What a Shift-duplicate fills the dialog with, over the Spawn defaults:
+/// the source session's stored spawn config, when the daemon had one, and
+/// the Open-in choice the clicked Duplicate target names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Prefill {
+    pub config: Option<SpawnConfig>,
+    pub open_in: Option<OpenChoice>,
 }
 
 /// What the dialog opens over.
@@ -788,6 +821,7 @@ impl SpawnForm {
             open_in,
             trusted: defaults.trusted,
             use_worktree: true,
+            worktree_chosen: false,
             mode: WorktreeMode::New,
             branch: BranchField::default(),
             base: BaseField::default(),
@@ -835,6 +869,153 @@ impl SpawnForm {
         self.locked
     }
 
+    /// Fills the open dialog from a Shift-duplicate's `prefill`. It runs
+    /// after the Spawn defaults and the target's own defaults, so what the
+    /// source session ran with wins, and the runtime and run mode count as
+    /// chosen.
+    /// Returns the requests it needs: a branch suggestion when it turned the
+    /// worktree on.
+    pub(crate) fn apply_prefill(
+        &mut self,
+        prefill: &Prefill,
+        cache: &BranchCache,
+        now: Instant,
+    ) -> Vec<ClientMessage> {
+        if let Some(choice) = &prefill.open_in {
+            self.choose_open_in(choice);
+        }
+        match &prefill.config {
+            Some(config) => self.apply_config(config, cache, now),
+            None => Vec::new(),
+        }
+    }
+
+    /// Picks `choice`: a named tab that is the current one picks the
+    /// current tab, and a tab Open in does not offer changes nothing.
+    fn choose_open_in(&mut self, choice: &OpenChoice) {
+        self.open_in = match choice {
+            OpenChoice::Tab(id) if self.tabs.current.as_ref().is_some_and(|t| &t.id == id) => {
+                OpenChoice::CurrentTab
+            }
+            OpenChoice::Tab(id) if !self.tabs.others.iter().any(|t| &t.id == id) => return,
+            other => other.clone(),
+        };
+    }
+
+    fn apply_config(
+        &mut self,
+        config: &SpawnConfig,
+        cache: &BranchCache,
+        now: Instant,
+    ) -> Vec<ClientMessage> {
+        self.runtime = RuntimeChoice {
+            agent: config.agent_options.agent(),
+            plain_shell: config.mode == SessionMode::PlainShell,
+            headless: config.mode == SessionMode::Headless,
+            touched: Touched {
+                agent: true,
+                run_mode: true,
+            },
+        };
+        self.snap_headless();
+        self.trusted = config.dangerously_skip_permissions;
+        let options_set = self.apply_agent_options(&config.agent_options);
+        self.advanced.model = config.model.clone().unwrap_or_default();
+        self.advanced.env = config
+            .extra_env
+            .iter()
+            .map(|(key, value)| EnvRow {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        self.advanced.open =
+            options_set || !self.advanced.model.is_empty() || !self.advanced.env.is_empty();
+        if Target::from_spawn(&config.target).as_ref() == Some(&self.target) {
+            self.apply_branch_fields(&config.target, cache, now)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The source agent's own approval or sandbox options, replacing the
+    /// defaults'; returns whether the source set any of them.
+    fn apply_agent_options(&mut self, options: &AgentOptions) -> bool {
+        match options {
+            AgentOptions::Claude { permission_mode } => {
+                self.advanced.permission_mode = *permission_mode;
+                permission_mode.is_some()
+            }
+            AgentOptions::Codex { sandbox } => {
+                self.advanced.codex_sandbox = *sandbox;
+                sandbox.is_some()
+            }
+            AgentOptions::Cursor { plan_mode, sandbox } => {
+                self.advanced.cursor_plan = *plan_mode;
+                self.advanced.cursor_sandbox = *sandbox;
+                *plan_mode || sandbox.is_some()
+            }
+        }
+    }
+
+    /// The source's worktree toggle and base, held against the branch lists
+    /// still on their way. The branch follows the daemon's duplicate rule
+    /// (`SpawnConfig::to_duplicate_request`): a worktree duplicate runs on
+    /// a fresh branch, so the field takes a suggestion as a fresh spawn's
+    /// does; an in-place one keeps the source's branch.
+    fn apply_branch_fields(
+        &mut self,
+        target: &SpawnTarget,
+        cache: &BranchCache,
+        now: Instant,
+    ) -> Vec<ClientMessage> {
+        let (SpawnTarget::Single {
+            branch_name,
+            base_branch,
+            use_worktree,
+            ..
+        }
+        | SpawnTarget::Workspace {
+            branch_name,
+            base_branch,
+            use_worktree,
+            ..
+        }) = target
+        else {
+            return Vec::new();
+        };
+        let had_worktree = self.use_worktree;
+        self.use_worktree = *use_worktree;
+        self.mode = WorktreeMode::New;
+        if let Some(base) = base_branch {
+            self.base = BaseField {
+                value: base.clone(),
+                touched: true,
+            };
+        }
+        if *use_worktree {
+            return if had_worktree {
+                Vec::new()
+            } else {
+                self.seed_suggestion(cache, now).into_iter().collect()
+            };
+        }
+        self.branch = if branch_name.trim().is_empty() {
+            BranchField {
+                value: self.in_place_default(),
+                auto: true,
+                pending_until: None,
+            }
+        } else {
+            BranchField {
+                value: branch_name.clone(),
+                auto: false,
+                pending_until: None,
+            }
+        };
+        Vec::new()
+    }
+
     /// Picks `target` and resets everything that belongs to the one before.
     fn load_target(
         &mut self,
@@ -845,6 +1026,7 @@ impl SpawnForm {
         self.target = target;
         self.apply_runtime_defaults();
         self.use_worktree = self.entry_default_use_worktree();
+        self.worktree_chosen = false;
         self.mode = WorktreeMode::New;
         self.existing = Existing::default();
         self.refs = Refs::default();
@@ -1706,6 +1888,7 @@ impl SpawnForm {
 
     fn toggle_use_worktree(&mut self, cache: &BranchCache, now: Instant) -> Vec<ClientMessage> {
         self.use_worktree = !self.use_worktree;
+        self.worktree_chosen = true;
         let mut messages = Vec::new();
         let in_place = self.in_place_default();
         if self.branch.auto {
@@ -2292,6 +2475,11 @@ impl SpawnForm {
     }
 
     fn worktree_default_change(&self) -> Option<ClientMessage> {
+        // Only the user's own change to the checkbox is saved, never what
+        // the target's default or a duplicate's prefill set.
+        if !self.worktree_chosen {
+            return None;
+        }
         let value = self.use_worktree;
         // A pin turned the worktree on; the user did not choose it.
         if value && self.existing.pinned.is_some() {
@@ -3852,6 +4040,207 @@ mod tests {
             )
             .is_none(),
             "an unregistered locked target opens nothing"
+        );
+    }
+
+    #[test]
+    fn a_pinless_lock_shows_only_its_target() {
+        let setup = locked_setup(Lock::for_target(Target::Repo("r2".to_owned())));
+        let form = setup.open(&mut BranchCache::default()).0;
+        assert!(form.target_locked());
+        assert_eq!(form.shown_targets(), [Target::Repo("r2".to_owned())]);
+        assert_eq!(form.mode(), WorktreeMode::New, "no worktree is pinned");
+        assert_eq!(form.existing_selected(), None);
+    }
+
+    /// A stored spawn config on `r1`, with `fields` laid over a claude,
+    /// interactive, untrusted launch on `feat/dup` from `origin/dev`.
+    fn stored_config(fields: &serde_json::Value) -> SpawnConfig {
+        let mut value = json!({
+            "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+                "base_branch": "origin/dev", "use_worktree": true },
+            "mode": "interactive",
+            "dangerously_skip_permissions": false,
+            "agent_options": { "kind": "claude", "permission_mode": null },
+            "model": null,
+        });
+        if let (Some(base), Some(more)) = (value.as_object_mut(), fields.as_object()) {
+            for (key, field) in more {
+                base.insert(key.clone(), field.clone());
+            }
+        }
+        serde_json::from_value(value).expect("spawn config fixture")
+    }
+
+    /// `setup`'s dialog with `config` applied as a Shift-duplicate's
+    /// prefill, and every request the two sent.
+    fn duplicate_on(setup: &Setup, config: SpawnConfig) -> (SpawnForm, Vec<ClientMessage>) {
+        let mut cache = BranchCache::default();
+        let (mut form, mut sent) = setup.open(&mut cache);
+        let prefill = Prefill {
+            config: Some(config),
+            open_in: None,
+        };
+        sent.extend(form.apply_prefill(&prefill, &cache, Instant::now()));
+        (form, sent)
+    }
+
+    /// A dialog held on `r1`, over every Spawn default set.
+    fn duplicate_setup(r1: RepoEntry) -> Setup {
+        let mut setup = Setup::repos(vec![r1, repo("r2")]).defaults(all_defaults());
+        setup.lock = Some(Lock::for_target(Target::Repo("r1".to_owned())));
+        setup
+    }
+
+    /// The dialog a Shift-duplicate opens on `r1`, over every Spawn default
+    /// set, with `config` applied.
+    fn duplicated(config: SpawnConfig) -> SpawnForm {
+        duplicate_on(&duplicate_setup(repo("r1")), config).0
+    }
+
+    #[test]
+    fn a_duplicate_prefill_beats_the_spawn_defaults() {
+        let claude = duplicated(stored_config(&json!({})));
+        assert!(!claude.trusted(), "the source was not trusted");
+        assert_eq!(claude.permission_mode(), None, "the source had no mode");
+        assert_eq!(claude.runtime(), Runtime::Agent(Agent::Claude));
+        assert!(
+            !claude.advanced_open(),
+            "the Codex sandbox default is not the claude source's own setting"
+        );
+        let planned = duplicated(stored_config(&json!({
+            "agent_options": { "kind": "claude", "permission_mode": "plan" },
+        })));
+        assert!(
+            planned.advanced_open(),
+            "the source's own approval mode shows"
+        );
+        let codex = duplicated(stored_config(&json!({
+            "agent_options": { "kind": "codex", "sandbox": "read-only" },
+        })));
+        assert!(codex.advanced_open(), "the source's own sandbox shows");
+        assert_eq!(codex.runtime(), Runtime::Agent(Agent::Codex));
+        assert_eq!(codex.codex_sandbox(), Some(CodexSandbox::ReadOnly));
+        let (request, _, _) = codex.build_request();
+        assert!(!request.dangerously_skip_permissions);
+        assert!(matches!(
+            request.agent_options,
+            AgentOptions::Codex {
+                sandbox: Some(CodexSandbox::ReadOnly)
+            }
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_prefill_carries_model_env_agent_and_run_mode() {
+        let form = duplicated(stored_config(&json!({
+            "mode": "headless",
+            "dangerously_skip_permissions": true,
+            "agent_options": { "kind": "codex", "sandbox": null },
+            "model": "gpt-5",
+            "extra_env": [["API_TOKEN", "${env:API_TOKEN}"], ["LEVEL", "3"]],
+        })));
+        assert_eq!(form.runtime(), Runtime::Agent(Agent::Codex));
+        assert_eq!(form.run_mode(), RunMode::Headless);
+        assert!(form.trusted());
+        assert_eq!(form.model(), "gpt-5");
+        assert!(form.advanced_open(), "the prefilled Advanced values show");
+        assert_eq!(
+            form.env_rows(),
+            [
+                EnvRow {
+                    key: "API_TOKEN".to_owned(),
+                    value: "${env:API_TOKEN}".to_owned(),
+                },
+                EnvRow {
+                    key: "LEVEL".to_owned(),
+                    value: "3".to_owned(),
+                },
+            ]
+        );
+        let cursor = duplicated(stored_config(&json!({
+            "agent_options": { "kind": "cursor", "plan_mode": true, "sandbox": "disabled" },
+        })));
+        assert_eq!(cursor.runtime(), Runtime::Agent(Agent::Cursor));
+        assert!(cursor.cursor_plan());
+        assert_eq!(cursor.cursor_sandbox(), Some(CursorSandbox::Disabled));
+        let shell = duplicated(stored_config(&json!({ "mode": "plain_shell" })));
+        assert_eq!(shell.runtime(), Runtime::PlainShell);
+    }
+
+    /// A stored in-place launch on `r1`'s `dev`.
+    fn in_place_config() -> SpawnConfig {
+        stored_config(&json!({
+            "target": { "kind": "single", "repo_id": "r1", "branch_name": "dev",
+                "base_branch": null, "use_worktree": false },
+        }))
+    }
+
+    #[test]
+    fn a_duplicate_prefill_keeps_base_and_worktree_after_load_target() {
+        let mut form = duplicated(stored_config(&json!({})));
+        assert_eq!(form.base(), "origin/dev");
+        assert!(form.use_worktree());
+        form.on_message(&branches("r1", Some("main"), &["main"], &["origin/main"]));
+        assert_eq!(form.base(), "origin/dev", "the branch list leaves it");
+        let in_place = duplicated(in_place_config());
+        assert!(!in_place.use_worktree());
+        assert_eq!(
+            in_place.branch(),
+            "dev",
+            "an in-place duplicate runs on the source's branch, as the daemon's does"
+        );
+    }
+
+    #[test]
+    fn a_shift_duplicate_never_reuses_the_source_branch() {
+        let mut form = duplicated(stored_config(&json!({})));
+        assert_ne!(form.branch(), "feat/dup");
+        form.on_suggestion(&Target::Repo("r1".to_owned()), "wt/fresh-owl");
+        assert_eq!(
+            form.branch(),
+            "wt/fresh-owl",
+            "the branch follows suggestions as a fresh spawn's does"
+        );
+        let (request, _, _) = form.build_request();
+        assert!(
+            matches!(&request.target, SpawnTarget::Single { branch_name, .. } if branch_name == "wt/fresh-owl"),
+            "{:?}",
+            request.target
+        );
+        let mut in_place_default = repo("r1");
+        in_place_default.default_use_worktree = false;
+        let (form, sent) = duplicate_on(
+            &duplicate_setup(in_place_default),
+            stored_config(&json!({})),
+        );
+        assert!(form.use_worktree());
+        assert_ne!(form.branch(), "feat/dup");
+        assert!(
+            has(
+                &sent,
+                &ClientMessage::SuggestBranchName {
+                    target: SuggestTarget::Repo {
+                        repo_id: "r1".to_owned()
+                    }
+                }
+            ),
+            "the worktree the prefill turned on asks for a fresh branch: sent {sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_prefilled_worktree_toggle_does_not_change_the_repo_default() {
+        let in_place = duplicated(in_place_config());
+        let (_, _, change) = in_place.build_request();
+        assert!(change.is_none(), "sent {change:?}");
+        let mut toggled = duplicated(in_place_config());
+        press(&mut toggled, &Control::UseWorktree);
+        press(&mut toggled, &Control::UseWorktree);
+        let (_, _, change) = toggled.build_request();
+        assert!(
+            matches!(&change, Some(ClientMessage::SetRepoWorktreeDefault { repo_id, value: false }) if repo_id == "r1"),
+            "the user's own choice is saved: sent {change:?}"
         );
     }
 

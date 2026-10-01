@@ -8,7 +8,7 @@ use gpui::{
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Pixels, Point, ScrollWheelEvent,
     SharedString, Stateful, Subscription, Task, Window, anchored, deferred, div, prelude::*, px,
 };
-use protocol::{MemberBranchFate, SessionSnapshot, TabEntry};
+use protocol::{MemberBranchFate, SessionSnapshot, SpawnConfig, TabEntry};
 
 use crate::appearance::{self, ACCENT_PRESETS, AppearanceChange};
 use crate::appearance_view::Level;
@@ -16,18 +16,20 @@ use crate::branch_fate::{DeleteWorktreeConfirm, DialogButton, confirm_messages};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring, outlined_button};
 use crate::grid_view::{NO_REPOS_TIP, PANE_PENDING_TIP};
 use crate::notice_view::modal_panel;
-use crate::notices::ToastKind;
+use crate::notices::{ActionFailedNotice, ToastKind};
 use crate::open::OpenJob;
 use crate::open_view::Then;
 use crate::palette::{CHIP, LINE_STRONG, SCRIM};
 use crate::session_actions::{
     ABANDONED_ACTIONS, ActionState, DuplicateTarget, MenuEntry, MenuMode, MoveTarget, OfferedRow,
-    PlacedFocus, SessionAction, SessionRow, Step, Submenu, SubmenuLine, abandoned_lines,
-    action_state, duplicate_lines, exit_code_label, exited_message, header_shows_exit_code,
-    menu_entries, move_lines, move_source, orphan_banner_text, overlay_actions, pane_shows_exit,
-    plan, rename_message, session_rows, worktree_to_reveal,
+    PendingPrefill, PlacedFocus, SessionAction, SessionRow, Step, Submenu, SubmenuLine,
+    abandoned_lines, action_state, duplicate_lines, exit_code_label, exited_message,
+    header_shows_exit_code, menu_entries, move_lines, move_source, orphan_banner_text,
+    overlay_actions, pane_shows_exit, plan, rename_message, session_rows, worktree_to_reveal,
 };
 use crate::sidebar::can_attach;
+use crate::spawn_form::{Lock, Prefill, Target};
+use crate::spawn_view::SpawnEntry;
 use crate::tabs::{collect_panes, find_tab_containing_session};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::{BORDER, DANGER, HOVER_BG, MUTED, RootView, TEXT, UI_TEXT_SIZE, WARNING, tooltip};
@@ -136,6 +138,9 @@ pub(crate) struct SessionMenu {
 
 /// The label of a submenu's row back to the menu's rows.
 const SUBMENU_BACK: &str = "‹ Back";
+
+/// The title of the notice a Shift-duplicate whose dialog cannot open shows.
+const SHIFT_DUPLICATE_FAILED_TITLE: &str = "Duplicate failed";
 
 /// The selectors of a submenu's `lines`, in the groups its separators
 /// divide.
@@ -390,6 +395,7 @@ impl RootView {
             return;
         }
         self.close_more_menu(window, cx);
+        self.prefills.clear();
         self.menu = Some(SessionMenu {
             session_id: session_id.to_owned(),
             at,
@@ -542,19 +548,76 @@ impl RootView {
     }
 
     /// Duplicates `session_id` to `target` and closes the menu; the reply
-    /// places the copy ([`Self::place_duplicate`]).
+    /// places the copy ([`Self::place_duplicate`]). With Shift, a session in
+    /// a repo or workspace asks for its spawn config instead, and the reply
+    /// opens the spawn dialog filled from it ([`Self::on_spawn_config`]); a
+    /// standalone session, which the dialog cannot target, duplicates
+    /// plainly.
     fn duplicate_to(
         &mut self,
         session_id: &str,
         target: DuplicateTarget,
+        shift: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let request_id = crate::new_request_id();
-        if let Some(request) = self.duplicates.request(session_id, request_id, target) {
+        let prefill = self
+            .sidebar
+            .session(session_id)
+            .filter(|_| shift)
+            .map(|session| PendingPrefill::of(session, target.clone()))
+            .filter(|pending| pending.source.is_some());
+        let request = if let Some(pending) = prefill {
+            Some(self.prefills.request(pending))
+        } else {
+            let request_id = crate::new_request_id();
+            self.duplicates.request(session_id, request_id, target)
+        };
+        if let Some(request) = request {
             self.send(request);
         }
         self.close_session_menu(window, cx);
+    }
+
+    /// The spawn config a Shift-duplicate asked for arrived: the dialog
+    /// opens held on the config's repo or workspace, else the source's,
+    /// filled from it over the Spawn defaults. When the dialog cannot open
+    /// (the repo left, another dialog is open), a notice says why. A reply
+    /// no Shift-duplicate waits for is dropped.
+    pub(crate) fn on_spawn_config(
+        &mut self,
+        session_id: &str,
+        config: Option<SpawnConfig>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.prefills.take(session_id) else {
+            return;
+        };
+        let lock = config
+            .as_ref()
+            .and_then(|config| Target::from_spawn(&config.target))
+            .or_else(|| pending.source.clone())
+            .map(Lock::for_target);
+        if let Some(reason) = self.spawn_dialog_blocker(lock.as_ref(), false) {
+            tracing::warn!(session = %session_id, "shift-duplicate: no spawn dialog: {reason}");
+            let notice = ActionFailedNotice {
+                title: SHIFT_DUPLICATE_FAILED_TITLE.to_owned(),
+                detail: format!("Couldn't open the spawn dialog: {reason}"),
+                hint: None,
+            };
+            self.on_action_failed(notice, None, window, cx);
+            return;
+        }
+        let prefill = Prefill {
+            config,
+            open_in: pending.open_in(),
+        };
+        let entry = SpawnEntry::Duplicate {
+            lock,
+            prefill: Box::new(prefill),
+        };
+        self.open_spawn_dialog(entry, window, cx);
     }
 
     /// Moves a pane showing `session_id` to `target` and closes the menu:
@@ -841,7 +904,16 @@ impl RootView {
         if let Some(lines) = self.move_menu_lines() {
             return lines
                 .into_iter()
-                .map(|line| Self::submenu_line(session_id, line, Self::move_to, cx))
+                .map(|line| {
+                    Self::submenu_line(
+                        session_id,
+                        line,
+                        |this, id, target, _shift, window, cx| {
+                            this.move_to(id, target, window, cx);
+                        },
+                        cx,
+                    )
+                })
                 .collect();
         }
         let offered = self.offered_rows();
@@ -877,11 +949,12 @@ impl RootView {
         .into_any_element()
     }
 
-    /// A line of a submenu of tabs for `session_id`; a choice runs `pick`.
+    /// A line of a submenu of tabs for `session_id`; a choice runs `pick`,
+    /// told whether Shift was held.
     fn submenu_line<T: Clone + 'static>(
         session_id: &str,
         line: SubmenuLine<T>,
-        pick: fn(&mut Self, &str, T, &mut Window, &mut Context<Self>),
+        pick: fn(&mut Self, &str, T, bool, &mut Window, &mut Context<Self>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match line {
@@ -898,8 +971,9 @@ impl RootView {
             } => {
                 let session_id = session_id.to_owned();
                 menu_item(&selector, label, false)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        pick(this, &session_id, choice.clone(), window, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        let shift = event.modifiers().shift;
+                        pick(this, &session_id, choice.clone(), shift, window, cx);
                     }))
                     .into_any_element()
             }

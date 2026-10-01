@@ -125,7 +125,7 @@ use crate::notify::{SilentNotifier, SystemNotifier};
 use crate::open::SystemOpener;
 use crate::quit_view::{ExitView, Quitter};
 use crate::run_confirm::RunConfirm;
-use crate::session_actions::{Duplicates, HeaderStopConfirm, self_exited};
+use crate::session_actions::{Duplicates, HeaderStopConfirm, Prefills, self_exited};
 use crate::session_menu::popover_frame;
 use crate::session_menu::{ContainerMenu, DeleteDialog, SessionMenu, ShellMenu};
 use crate::shell_dialog::PendingQuickShell;
@@ -478,6 +478,8 @@ pub struct RootView {
     confirm: HeaderStopConfirm,
     /// Restarts and resumes waiting for their duplicate.
     duplicates: Duplicates,
+    /// A Shift-duplicate waiting for its source's spawn config.
+    prefills: Prefills,
     /// The delete-worktree confirm, while open.
     delete_dialog: Option<DeleteDialog>,
     /// The confirm's keyboard focus, so Esc, Enter and Tab reach it.
@@ -751,6 +753,7 @@ impl RootView {
             ui_save_timer: None,
             confirm: HeaderStopConfirm::default(),
             duplicates: Duplicates::default(),
+            prefills: Prefills::default(),
             delete_dialog: None,
             dialog_focus: cx.focus_handle(),
             notices: Notices::default(),
@@ -1624,7 +1627,8 @@ impl RootView {
     }
 
     /// Hands the message to the cleanup-failed dialog, the worktrees
-    /// manager and the Recover dialog.
+    /// manager and the Recover dialog, and a spawn config to the
+    /// Shift-duplicate waiting for it.
     fn on_dialog_message(
         &mut self,
         msg: &DaemonMessage,
@@ -1634,6 +1638,9 @@ impl RootView {
         self.on_cleanup_failed_message(msg, window, cx);
         self.on_worktrees_message(msg, cx);
         self.on_recover_message(msg, window, cx);
+        if let DaemonMessage::SpawnConfigReply { session_id, config } = msg {
+            self.on_spawn_config(session_id, config.clone(), window, cx);
+        }
     }
 
     /// A new connection: fresh panes, nothing in flight, and every dialog,
@@ -1645,6 +1652,7 @@ impl RootView {
         self.container_sends.clear();
         self.status.clear();
         self.duplicates.clear();
+        self.prefills.clear();
         self.close_spawn_dialog(window, cx);
         self.close_shell_dialog(window, cx);
         self.close_appearance_editor(window, cx);

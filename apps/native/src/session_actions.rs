@@ -8,6 +8,7 @@ use protocol::{ClientMessage, SessionSnapshot, SessionStatus, TabEntry};
 
 use crate::headless;
 use crate::sidebar::{LeafState, can_attach, runtime_label};
+use crate::spawn_form::{OpenChoice, Target};
 use crate::tabs::{
     PaneBinding, PaneTarget, Placement, TabsModel, collect_panes, find_tab_containing_session,
 };
@@ -167,6 +168,75 @@ pub(crate) enum DuplicateTarget {
 struct PendingDuplicate {
     original: String,
     target: DuplicateTarget,
+}
+
+/// A Shift-duplicate waiting for its source's stored spawn config: the
+/// session it copies, that session's repo or workspace, and the Duplicate
+/// choice clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingPrefill {
+    pub(crate) session_id: String,
+    /// The source's workspace, else its first member's repo; `None` for a
+    /// session in neither.
+    pub(crate) source: Option<Target>,
+    pub(crate) target: DuplicateTarget,
+}
+
+impl PendingPrefill {
+    pub(crate) fn of(session: &SessionSnapshot, target: DuplicateTarget) -> Self {
+        let source = match (&session.workspace_id, session.members.first()) {
+            (Some(id), _) => Some(Target::Workspace(id.clone())),
+            (None, Some(member)) => Some(Target::Repo(member.repo_id.clone())),
+            (None, None) => None,
+        };
+        Self {
+            session_id: session.id.clone(),
+            source,
+            target,
+        }
+    }
+
+    /// The Open-in choice the clicked Duplicate target names; `None` for a
+    /// restart, which leaves the dialog's own.
+    pub(crate) fn open_in(&self) -> Option<OpenChoice> {
+        match &self.target {
+            DuplicateTarget::Restart => None,
+            DuplicateTarget::NewTab => Some(OpenChoice::NewTab),
+            DuplicateTarget::Tab(id) => Some(OpenChoice::Tab(id.clone())),
+        }
+    }
+}
+
+/// The one Shift-duplicate waiting for its `SpawnConfigReply`, keyed by its
+/// session id since the reply carries no request id.
+#[derive(Debug, Default)]
+pub(crate) struct Prefills {
+    pending: Option<PendingPrefill>,
+}
+
+impl Prefills {
+    /// Records `pending`, replacing any earlier one, and returns the
+    /// request for its source's spawn config.
+    pub(crate) fn request(&mut self, pending: PendingPrefill) -> ClientMessage {
+        let request = ClientMessage::GetSpawnConfig {
+            session_id: pending.session_id.clone(),
+        };
+        self.pending = Some(pending);
+        request
+    }
+
+    /// The pending prefill a reply for `session_id` answers, taken; `None`,
+    /// keeping it, when the reply is another session's.
+    pub(crate) fn take(&mut self, session_id: &str) -> Option<PendingPrefill> {
+        self.pending
+            .take_if(|pending| pending.session_id == session_id)
+    }
+
+    /// Forgets the pending prefill: another dialog or menu opened, or a new
+    /// connection began.
+    pub(crate) fn clear(&mut self) {
+        self.pending = None;
+    }
 }
 
 /// The sessions being duplicated, by the request id of their
@@ -822,11 +892,13 @@ fn restart_placement(original: String, new_id: &str, bindings: &[PaneBinding]) -
 mod tests {
     use super::{
         ActionState, DuplicateTarget, Duplicates, HEADLESS_DUPLICATE_TIP, HeaderStopConfirm,
-        MenuEntry, MenuMode, MoveTarget, OfferedRow, PlacedFocus, SessionAction, SessionRow, Step,
-        SubmenuLine, action_state, exit_code_label, exited_message, header_shows_exit_code,
-        menu_actions, menu_entries, move_lines, move_source, overlay_actions, pane_shows_exit,
-        plan, rename_message, self_exited, session_rows, worktree_to_reveal,
+        MenuEntry, MenuMode, MoveTarget, OfferedRow, PendingPrefill, PlacedFocus, Prefills,
+        SessionAction, SessionRow, Step, SubmenuLine, action_state, exit_code_label,
+        exited_message, header_shows_exit_code, menu_actions, menu_entries, move_lines,
+        move_source, overlay_actions, pane_shows_exit, plan, rename_message, self_exited,
+        session_rows, worktree_to_reveal,
     };
+    use crate::spawn_form::{OpenChoice, Target};
     use crate::tabs::TabsModel;
     use crate::tabs::tests::{model_with, pane, tab};
     use protocol::{
@@ -1674,5 +1746,62 @@ mod tests {
         assert!(dups.request("s1", "req-4".to_owned(), restart()).is_some());
         dups.clear();
         assert!(!dups.is_pending("s1") && !dups.is_pending("s2"));
+    }
+
+    fn prefill_of(session_id: &str) -> PendingPrefill {
+        PendingPrefill {
+            session_id: session_id.to_owned(),
+            source: Some(Target::Repo("r1".to_owned())),
+            target: DuplicateTarget::Tab("t2".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_pending_prefill_asks_for_the_spawn_config_and_its_own_reply_takes_it() {
+        let mut prefills = Prefills::default();
+        let request = prefills.request(prefill_of("s1"));
+        assert!(
+            matches!(&request, ClientMessage::GetSpawnConfig { session_id } if session_id == "s1"),
+            "sent {request:?}"
+        );
+        assert_eq!(prefills.take("s1"), Some(prefill_of("s1")));
+        assert_eq!(prefills.take("s1"), None, "a reply takes it once");
+    }
+
+    #[test]
+    fn a_pending_prefill_ignores_another_sessions_reply() {
+        let mut prefills = Prefills::default();
+        prefills.request(prefill_of("s1"));
+        assert_eq!(prefills.take("s2"), None);
+        assert_eq!(prefills.take("s1"), Some(prefill_of("s1")), "still pending");
+    }
+
+    #[test]
+    fn a_pending_prefill_is_gone_after_clear() {
+        let mut prefills = Prefills::default();
+        prefills.request(prefill_of("s1"));
+        prefills.clear();
+        assert_eq!(prefills.take("s1"), None);
+    }
+
+    #[test]
+    fn a_pending_prefill_names_its_source_and_open_in_choice() {
+        let session = session("idle");
+        let pending = PendingPrefill::of(&session, DuplicateTarget::NewTab);
+        assert_eq!(pending.session_id, "s1");
+        assert_eq!(pending.source, Some(Target::Repo("r1".to_owned())));
+        assert_eq!(pending.open_in(), Some(OpenChoice::NewTab));
+        let mut in_workspace = session;
+        in_workspace.workspace_id = Some("w1".to_owned());
+        let pending = PendingPrefill::of(&in_workspace, DuplicateTarget::Tab("t2".to_owned()));
+        assert_eq!(pending.source, Some(Target::Workspace("w1".to_owned())));
+        assert_eq!(pending.open_in(), Some(OpenChoice::Tab("t2".to_owned())));
+        let mut standalone = in_workspace;
+        standalone.workspace_id = None;
+        standalone.members.clear();
+        assert_eq!(
+            PendingPrefill::of(&standalone, DuplicateTarget::Restart).source,
+            None
+        );
     }
 }

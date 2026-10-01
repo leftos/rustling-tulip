@@ -16,16 +16,6 @@ The rulings the native client's open items need before they are briefed. Each it
 
 Launch last (▶, double-click, "Launch last again ▸" current / new / named tab / edit first; trusted configs open the dialog), the full container menu (spawn here / in tab, presets entry, Explorer, VS Code, copy path, Remove), the container row's keyboard fold and last-launch summary, the Detached banner and its stop all, "Resume all (N)", and the spawn dialog's container and tab-container entry points. Parity: "Container row", "Container context menu", "Launch last again", "Repos view" banner, "Detached container stop all", "Entry points".
 
-## P4.12 Sessions
-
-The session menu's Duplicate ▸ (Shift opens the prefilled dialog), Move to ▸, Add to current / new tab and Reveal worktree; the pane header's status dot, runtime, trusted and headless chips and repo:branch chips; the abandoned overlay (last prompt, Resume / Dismiss) and orphan banner; the leaf's tooltip, trusted marker and orphan / abandoned / inactive tags with inline Resume / Dismiss; the display-label order; auto-discard of worktree-less sessions that exit on their own. Parity: "Session context menu", "Pane header", "Abandoned overlay", "Session leaf", "Display label order", "Sessions without a worktree…".
-
-- Split (orchestrator): **P4.12a** labels everywhere through `display_label`, the label tooltip, leaf tags and inline buttons, pane header chips, abandoned overlay, orphan banner, auto-discard; **P4.12c** Shift-duplicate prefill, on the target lock P4.4b builds.
-- Rulings (user): Reveal opens the worktree folder itself (as Tauri does), shown only for sessions with their own worktree; auto-discard skips headless sessions, which stay so their stats can be read; with a diff tab active, "Add to current tab" becomes "Add to new tab" and opens one, as a leaf click does.
-- Settled (orchestrator): Duplicate into an existing tab places by `pane_target_for_session`; Duplicate and Move to list grid tabs only; submenus swap rows with ‹ Back; member chips get a second header row only for sessions with members; the orphan banner names the session's runtime instead of Tauri's fixed "claude"; auto-discard also skips abandoned sessions; the rename field keeps native's seed; a Shift-duplicate with no stored config opens the dialog with defaults on the source's repo.
-- P4.12c: `SpawnForm::open` seeds the Spawn defaults (trusted, approval mode, Codex sandbox) and has no prefill of those three fields yet; the duplicate prefill must beat the defaults.
-
-
 ## P4.15 Preset wizard
 
 Split in two. **P4.15a** sources (file, folder, inline, GitHub issue ranges) and variables (toggle, file, folder, text, required). **P4.15b** preview (grouped by tab, max panes per tab, script commands) and launching (progress, counts, Cancel, Select launched, Stop all), sticky progress and failure toasts one per job, the first tab created made active, preset-launched sessions highlighted; needs P4.11. Parity: "Preset wizard", "Sticky preset progress…", "Preset-launched sessions highlighted".

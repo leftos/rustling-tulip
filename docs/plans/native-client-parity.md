@@ -59,7 +59,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Sessions
 
-- [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10)
+- [ ] Session context menu: rename inline (blank restores the default), Duplicate ▸ new tab (Shift = prefilled dialog) or an existing tab, Move to ▸, Add to current / new tab, Pop out, Appearance…, Accent ▸ (presets / recent / custom / inherit), Reveal worktree — `SessionContextMenu.tsx`, `MoveToSubmenu.tsx`, `MenuSubmenu.tsx` (native: Appearance… and Accent ▸ landed in P2.10; Duplicate ▸, Move to ▸, Add to current / new tab and Reveal worktree in P4.12b; Shift on Duplicate ▸ in P4.12c)
 - [x] Actions by state: running → Stop (delete or keep worktree); stopped → Restart / park / remove (± worktree); inactive → Resume / remove (± worktree) — `SessionContextMenu.tsx`
 - [x] Stopping a session with no pane parks it or discards it — `SessionContextMenu.tsx`
 - [ ] Pane header: status dot, label, runtime chip, trusted chip, "· headless", one repo:branch chip per member (path in tooltip), Pop out, two-step Stop or "exit code N" — `SessionPane.tsx` (native: all but Pop out, which comes with Phase 5, landed in P4.12a; member chips sit on a second row)
@@ -74,7 +74,7 @@ Close behind: the paste and key quirks (native clipboard read, Shift+Enter bytes
 
 ## Spawn dialog & launch flows
 
-- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b)
+- [ ] Entry points: toolbar, Ctrl+N, container menu (target locked), empty pane (preselected), tab container (tab fixed), duplicate (prefilled), worktree manager (worktree pinned) — `SpawnDialog.tsx` (native: toolbar and Ctrl+N / Ctrl+Shift+N landed in P1.7c; worktree manager, worktree pinned, landed in P4.4b; duplicate, prefilled, landed in P4.12c)
 - [ ] Target picker ([REPO]/[WS]) or fixed label; "no repos" state with + Add repo — `SpawnDialog.tsx` (native: the picker landed in P1.7c; no "no repos" state, since native has no Add repo yet)
 - [x] Runtime radio: claude / codex / cursor / plain shell; defaults to the target's last spawn unless the user changed it — `SpawnDialog.tsx`
 - [x] "Open in": current tab / new tab / each other tab — `SpawnDialog.tsx`

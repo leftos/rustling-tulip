@@ -25,8 +25,9 @@ use crate::palette::{
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, FormInputs,
-    ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, RunMode, Runtime, ShareButton, SpawnForm,
-    TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label, cursor_sandbox_label,
+    ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, Prefill, RunMode, Runtime, ShareButton,
+    SpawnForm, TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label,
+    cursor_sandbox_label,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -112,6 +113,12 @@ pub(crate) enum SpawnEntry {
     /// Held on one target, pinned to an existing worktree when the lock
     /// names one: "Launch session here" in Manage worktrees.
     Locked(Lock),
+    /// A Shift-duplicate: held on the source's repo or workspace when it
+    /// has one, and filled from `prefill` over the Spawn defaults.
+    Duplicate {
+        lock: Option<Lock>,
+        prefill: Box<Prefill>,
+    },
 }
 
 /// The open spawn dialog: its form and its text fields.
@@ -342,6 +349,20 @@ impl RootView {
         Some(dialog.model_input.read(cx).text().to_owned())
     }
 
+    /// The key and value fields of every env row, while the dialog is open.
+    #[must_use]
+    pub fn spawn_dialog_env(&self, cx: &gpui::App) -> Option<Vec<(String, String)>> {
+        let dialog = self.spawn_dialog.as_ref()?;
+        let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
+        Some(
+            dialog
+                .env_inputs
+                .iter()
+                .map(|row| (text(&row.key), text(&row.value)))
+                .collect(),
+        )
+    }
+
     /// The plain-text warning env row `index` shows, while the dialog is
     /// open and the row warns.
     #[must_use]
@@ -431,11 +452,13 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (aim, preselect, lock) = match entry {
-            SpawnEntry::Toolbar => (None, None, None),
-            SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None),
-            SpawnEntry::Locked(lock) => (None, None, Some(lock)),
+        let (aim, preselect, lock, prefill) = match entry {
+            SpawnEntry::Toolbar => (None, None, None, None),
+            SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None, None),
+            SpawnEntry::Locked(lock) => (None, None, Some(lock), None),
+            SpawnEntry::Duplicate { lock, prefill } => (None, None, lock, Some(prefill)),
         };
+        self.prefills.clear();
         if self.spawn_dialog_blocker(lock.as_ref(), false).is_some() {
             return;
         }
@@ -449,9 +472,13 @@ impl RootView {
             lock,
         };
         let now = (self.now)();
-        let Some((form, messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now) else {
+        let Some((mut form, mut messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now)
+        else {
             return;
         };
+        if let Some(prefill) = &prefill {
+            messages.extend(form.apply_prefill(prefill, &self.branch_cache, now));
+        }
         self.renaming = None;
         self.close_flyout();
         self.close_tab_menu(window, cx);
@@ -484,6 +511,7 @@ impl RootView {
             panel_bounds: None,
             list_anchor: None,
         });
+        self.sync_env_inputs(window, cx);
         self.send_all(messages);
         self.after_spawn_change(cx);
         self.apply_spawn_focus(window, cx);

@@ -17,7 +17,8 @@ use gpui::{Modifiers, TestAppContext, px};
 use protocol::{
     CleanupAction, ClientMessage, DaemonMessage, PaneDropEdge, SessionSnapshot, SplitDirection,
 };
-use support::{Fixture, Harness, Opened, TestDir, pane, session, split, tab};
+use rustling_tulip_native::RootView;
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, split, tab};
 
 /// Whether the element tagged `selector` has been painted on screen. gpui
 /// keeps the bounds of an element that left the tree, so a `false` only
@@ -793,6 +794,191 @@ fn duplicate_new_tab_sends_duplicate_then_create_tab(cx: &mut TestAppContext) {
         ] if new == "s2"),
         "sent {placed:?}"
     );
+}
+
+/// `s1` in repo `in_repo` of two registered repos, alone in pane `p1` of
+/// tab `t1`, beside tab `t2` with an empty pane; nothing sent yet.
+fn two_repos<'a>(cx: &'a mut TestAppContext, dir: &TestDir, in_repo: &str) -> Harness<'a> {
+    let fixture = Fixture {
+        repos: vec![repo("r1", "C:/r1"), repo("r2", "C:/r2")],
+        sessions: vec![session("s1").in_repo(in_repo).build()],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", None)),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.sent();
+    h
+}
+
+/// Shift-clicks the Duplicate choice tagged `selector` in `s1`'s menu.
+fn shift_duplicate(h: &mut Harness<'_>, selector: &str) {
+    open_duplicate(h, "leaf-s1");
+    let at = h.center(selector);
+    h.click(
+        at,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+}
+
+fn config_reply(session_id: &str, config: Option<serde_json::Value>) -> DaemonMessage {
+    DaemonMessage::SpawnConfigReply {
+        session_id: session_id.to_owned(),
+        config: config.map(|value| serde_json::from_value(value).expect("spawn config fixture")),
+    }
+}
+
+fn dialog_selected(h: &mut Harness<'_>) -> Vec<String> {
+    h.root(|root, _| root.spawn_dialog_selected())
+}
+
+#[gpui::test]
+fn shift_duplicate_asks_for_the_spawn_config_and_sends_no_duplicate(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r1");
+
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    let sent = h.sent();
+    assert!(
+        matches!(sent.as_slice(), [ClientMessage::GetSpawnConfig { session_id }] if session_id == "s1"),
+        "sent {sent:?}"
+    );
+    assert_eq!(menu_of(&mut h), None, "a pick closes the menu");
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "the dialog waits for the reply"
+    );
+}
+
+#[gpui::test]
+fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r1");
+    shift_duplicate(&mut h, "duplicate-tab-t2");
+    h.sent();
+
+    h.send(config_reply("s9", None));
+    assert!(
+        !h.root(|root, _| root.spawn_dialog_open()),
+        "another session's reply opens nothing"
+    );
+    h.send(config_reply(
+        "s1",
+        Some(serde_json::json!({
+            "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+                "base_branch": "origin/dev", "use_worktree": true },
+            "mode": "interactive",
+            "dangerously_skip_permissions": false,
+            "agent_options": { "kind": "claude", "permission_mode": "plan" },
+            "model": "claude-sonnet-9",
+            "extra_env": [["LEVEL", "3"]],
+        })),
+    ));
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    assert_eq!(
+        h.root(RootView::spawn_dialog_model).as_deref(),
+        Some("claude-sonnet-9")
+    );
+    assert_ne!(
+        h.root(RootView::spawn_dialog_branch).as_deref(),
+        Some("feat/dup"),
+        "a duplicate's worktree runs on a fresh branch"
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_base).as_deref(),
+        Some("origin/dev")
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_env),
+        Some(vec![("LEVEL".to_owned(), "3".to_owned())])
+    );
+    let selected = dialog_selected(&mut h);
+    for chosen in [
+        "spawn-target-repo-r1",
+        "spawn-placement-tab-t2",
+        "spawn-approval-plan",
+    ] {
+        assert!(
+            selected.contains(&chosen.to_owned()),
+            "{chosen} in {selected:?}"
+        );
+    }
+    assert!(
+        !selected.contains(&"spawn-skip-perms".to_owned()),
+        "the source was not trusted: {selected:?}"
+    );
+    assert!(painted(&mut h, "spawn-target-repo-r1"));
+    assert!(
+        !painted(&mut h, "spawn-target-repo-r2"),
+        "the locked target shows alone"
+    );
+}
+
+#[gpui::test]
+fn shift_duplicate_with_no_stored_config_opens_defaults_on_the_source_repo(
+    cx: &mut TestAppContext,
+) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r2");
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    h.sent();
+
+    h.send(config_reply("s1", None));
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    let selected = dialog_selected(&mut h);
+    for chosen in ["spawn-target-repo-r2", "spawn-placement-new-tab"] {
+        assert!(
+            selected.contains(&chosen.to_owned()),
+            "{chosen} in {selected:?}"
+        );
+    }
+    assert_eq!(h.root(RootView::spawn_dialog_model).as_deref(), Some(""));
+    assert!(painted(&mut h, "spawn-target-repo-r2"));
+    assert!(
+        !painted(&mut h, "spawn-target-repo-r1"),
+        "the dialog is held on the source's repo"
+    );
+}
+
+#[gpui::test]
+fn shift_duplicate_on_a_removed_repo_says_why(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r1");
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    h.sent();
+
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r2", "C:/r2")],
+    });
+    h.send(config_reply("s1", None));
+    assert!(!h.root(|root, _| root.spawn_dialog_open()));
+    let notice = h.root(|root, _| {
+        root.action_failed()
+            .map(|n| (n.title.clone(), n.detail.clone()))
+    });
+    assert_eq!(
+        notice,
+        Some((
+            "Duplicate failed".to_owned(),
+            "Couldn't open the spawn dialog: the repo is no longer registered".to_owned()
+        ))
+    );
+}
+
+#[gpui::test]
+fn shift_duplicate_of_a_standalone_session_duplicates_it_plainly(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = single(cx, &dir, session("s1").shell("C:/tmp").build());
+
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    let id = duplicate_request(&h.sent(), "s1");
+    assert!(!id.is_empty());
+    assert!(!h.root(|root, _| root.spawn_dialog_open()));
 }
 
 #[gpui::test]
