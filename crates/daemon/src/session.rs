@@ -210,6 +210,13 @@ impl SessionRecord {
             .spawn_config
             .as_ref()
             .is_some_and(|cfg| cfg.dangerously_skip_permissions);
+        // A record with no stored spawn config (an orphan reattached from a
+        // pre-provider sidecar, or a plain shell) reports Anthropic.
+        let claude_provider = self
+            .spawn_config
+            .as_ref()
+            .and_then(|cfg| cfg.agent_options.claude_provider())
+            .unwrap_or_default();
         SessionSnapshot {
             id: self.id.clone(),
             label: self.label.clone(),
@@ -238,6 +245,7 @@ impl SessionRecord {
             worktree_paths: self.worktree_paths.clone(),
             claude_session_id: self.claude_session_id.clone(),
             busy_excluded: self.busy_excluded,
+            claude_provider,
         }
     }
 }
@@ -1043,6 +1051,37 @@ mod tests {
             agent_conversation_id: None,
             busy_excluded: false,
         }
+    }
+
+    #[test]
+    fn a_deepseek_spawn_config_snapshots_its_provider() {
+        let mut rec = record("s1");
+        rec.spawn_config = Some(SpawnConfig {
+            target: protocol::SpawnTarget::Standalone {
+                cwd: None,
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent_options: protocol::AgentOptions::Claude {
+                permission_mode: None,
+                provider: protocol::ClaudeProvider::Deepseek,
+            },
+            model: None,
+            extra_env: Vec::new(),
+        });
+        assert_eq!(
+            rec.snapshot().claude_provider,
+            protocol::ClaudeProvider::Deepseek
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_spawn_config_snapshots_anthropic() {
+        assert_eq!(
+            record("s1").snapshot().claude_provider,
+            protocol::ClaudeProvider::Anthropic
+        );
     }
 
     #[test]
