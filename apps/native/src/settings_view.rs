@@ -5,6 +5,7 @@
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -564,7 +565,17 @@ impl RootView {
             return;
         };
         let asked = tab.input.entity_id();
-        let picked = (self.pick_folder)(cx);
+        // The picker opens at the path in the field, else at the root the
+        // daemon uses.
+        let current = tab.input.read(cx).text().trim().to_owned();
+        let start = if current.is_empty() {
+            self.worktrees_root
+                .as_ref()
+                .map(|(root, _)| PathBuf::from(root))
+        } else {
+            Some(PathBuf::from(current))
+        };
+        let picked = (self.pick_folder)(cx, start);
         cx.spawn(async move |this, cx| {
             let Some(path) = picked.await else {
                 return;

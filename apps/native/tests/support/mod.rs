@@ -182,6 +182,8 @@ fn sidebar_part_shown(root: &RootView, selector: &str) -> Option<bool> {
         Some(containers().any(|c| c.kind == ContainerKind::Unbound))
     } else if selector.starts_with("sidebar-view-") {
         Some(true)
+    } else if selector == "sidebar-no-repos" || selector == "sidebar-add-repo" {
+        Some(root.no_repos_yet())
     } else if let Some(id) = selector.strip_prefix("leaf-pill-") {
         Some(root.leaf_tab_pill(id).is_some() && listed(id))
     } else if let Some(id) = selector
@@ -633,18 +635,20 @@ pub struct Harness<'a> {
 }
 
 /// A folder picker that answers with the folder a spec set, as the test
-/// platform cannot prompt, and counts the times it was asked.
+/// platform cannot prompt, and records the folder each ask opened at.
 #[derive(Default)]
 pub struct PickRecorder {
     next: std::cell::RefCell<Option<PathBuf>>,
     asks: Cell<usize>,
+    starts: std::cell::RefCell<Vec<Option<PathBuf>>>,
 }
 
 impl PickRecorder {
     fn picker(recorder: &Rc<Self>) -> FolderPicker {
         let recorder = Rc::clone(recorder);
-        Rc::new(move |_: &mut App| {
+        Rc::new(move |_: &mut App, start: Option<PathBuf>| {
             recorder.asks.set(recorder.asks.get() + 1);
+            recorder.starts.borrow_mut().push(start);
             let picked = recorder.next.borrow().clone();
             Box::pin(async move { picked })
         })
@@ -898,6 +902,11 @@ impl<'a> Harness<'a> {
     /// How many times the folder picker was asked.
     pub fn folder_asks(&self) -> usize {
         self.picker.asks.get()
+    }
+
+    /// The folder each ask of the folder picker opened at, oldest first.
+    pub fn folder_starts(&self) -> Vec<Option<PathBuf>> {
+        self.picker.starts.borrow().clone()
     }
 
     /// Reports `host` as behind a mapped network drive from now on.
@@ -1219,6 +1228,8 @@ impl<'a> Harness<'a> {
                 root.checkout_prompt().is_some()
             } else if selector.starts_with("spawn-share-") {
                 root.spawn_share_confirm_open()
+            } else if selector == "spawn-no-repos" || selector == "spawn-add-repo" {
+                root.spawn_dialog_no_repos()
             } else if selector.starts_with("spawn-") {
                 root.spawn_dialog_open()
             } else if let Some((pane, n)) = selector
@@ -1256,7 +1267,7 @@ impl<'a> Harness<'a> {
                 shown
             } else if selector == "empty-spawn-session" || selector == "empty-open-shell" {
                 root.no_tab_choices_shown()
-            } else if selector == "empty-repo-hint" {
+            } else if selector == "empty-repo-hint" || selector == "empty-add-repo" {
                 root.no_tab_choices_shown() && !root.has_repos()
             } else {
                 side_part_shown(root, &selector)

@@ -36,6 +36,8 @@ use crate::{
 
 /// Why a repo-tied spawn button is disabled.
 pub(crate) const NO_REPOS_TIP: &str = "Register a repo to spawn repo-tied sessions.";
+/// What an Add repo button does.
+pub(crate) const ADD_REPO_TIP: &str = "Pick a folder to register as a repo";
 /// Why a pane's spawn buttons are disabled while a spawn aimed at it waits.
 pub(crate) const PANE_PENDING_TIP: &str = "A new session is on its way to this pane";
 const PANE_SPAWN_TIP: &str = "Open the spawn dialog; the new session fills this pane";
@@ -739,7 +741,8 @@ impl RootView {
     }
 
     /// The main area with no tab open: "Spawn a session" and "Open shell",
-    /// and why the first is disabled when no repo is registered. Before the
+    /// and with no repo registered, "Add repo" and why the first is
+    /// disabled. Before the
     /// connection, the tabs and the repos are in, only "No tab open".
     fn no_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         if !self.no_tab_choices_shown() {
@@ -762,7 +765,17 @@ impl RootView {
             enabled: true,
         };
         let shell = bordered_button(shell, cx, |this, _, cx| this.quick_shell(cx));
-        spawn_choices("No tab open", [spawn, shell])
+        let mut buttons = vec![spawn, shell];
+        if !has_repos {
+            let add = BorderedButton {
+                selector: "empty-add-repo".to_owned(),
+                label: "Add repo",
+                tip: ADD_REPO_TIP,
+                enabled: true,
+            };
+            buttons.push(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)));
+        }
+        spawn_choices("No tab open", buttons)
             .when(!has_repos, |note| {
                 note.child(
                     div()
@@ -1400,7 +1413,7 @@ fn muted_note(text: &'static str) -> Div {
 
 /// A muted `heading` over a row of `buttons`, centred in the space it is
 /// given.
-fn spawn_choices(heading: &'static str, buttons: [Stateful<Div>; 2]) -> Div {
+fn spawn_choices(heading: &'static str, buttons: impl IntoIterator<Item = Stateful<Div>>) -> Div {
     muted_note(heading).flex_col().gap(px(8.0)).child(
         div()
             .flex()

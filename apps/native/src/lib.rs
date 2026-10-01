@@ -23,6 +23,7 @@ mod diff_tab_view;
 pub mod diff_view;
 mod discard_confirm;
 pub mod ellipsis;
+mod folder_picker;
 pub mod fonts;
 mod footer;
 mod grid_view;
@@ -54,6 +55,7 @@ mod quit;
 mod quit_view;
 mod recover;
 mod recover_view;
+mod repo_add;
 mod run_confirm;
 mod sc_writes;
 mod scrollback_load;
@@ -91,16 +93,15 @@ mod worktrees_manager;
 mod worktrees_manager_view;
 
 use alacritty_terminal::vte::ansi::CursorShape;
+use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::future::LocalBoxFuture;
-use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AnyView, App, Bounds, ClickEvent, Context,
     CursorStyle, DisplayId, Div, ElementId, ElementInputHandler, FocusHandle, FontWeight,
     InputHandler, KeyDownEvent, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, SharedString, Stateful,
-    StyledText, Task, Window, WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px,
-    size,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, StyledText, Task, Window,
+    WindowBounds, WindowOptions, div, prelude::*, pulsating_between, px, size,
 };
 use protocol::{
     AppearanceOverrides, ClientMessage, DaemonMessage, RepoEntry, SessionSnapshot, TabEntry,
@@ -133,7 +134,7 @@ use crate::shell_view::ShellDialog;
 use crate::sidebar::{SidebarModel, UiState, can_attach, load_ui_state, save_ui_state};
 use crate::source_control::ScModel;
 use crate::spawn_form::BranchCache;
-use crate::spawn_view::SpawnDialog;
+use crate::spawn_view::SpawnModal;
 use crate::spawns::PendingSpawns;
 use crate::stash_view::StashUi;
 use crate::status_glyph::{GlyphSize, glyph_view};
@@ -205,33 +206,10 @@ pub const LOG_FILE: &str = "native.log";
 /// Where the terminals read the time, for their scrollback timeouts.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
-/// Asks the user for one folder; resolves to `None` when they cancel or the
-/// picker fails.
-pub type FolderPicker = Rc<dyn Fn(&mut App) -> LocalBoxFuture<'static, Option<PathBuf>>>;
-
-/// The OS folder picker.
-fn system_folder_picker() -> FolderPicker {
-    Rc::new(|cx: &mut App| {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: None,
-        });
-        async move {
-            match picked.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                Ok(Err(err)) => {
-                    tracing::warn!("the folder picker failed: {err:#}");
-                    None
-                }
-                // Cancelled, or the picker's sender went before it answered.
-                Ok(Ok(None)) | Err(_) => None,
-            }
-        }
-        .boxed_local()
-    })
-}
+/// Asks the user for one folder, opening at the given folder when there is
+/// one; resolves to `None` when they cancel or the picker fails.
+pub type FolderPicker =
+    Rc<dyn Fn(&mut App, Option<PathBuf>) -> LocalBoxFuture<'static, Option<PathBuf>>>;
 
 /// What the root view talks to and where it keeps its files.
 pub struct RootDeps {
@@ -256,7 +234,7 @@ pub struct RootDeps {
     /// threads.
     pub notify: Arc<dyn Notifier>,
     /// Asks for a folder: the Shell… dialog's and the Worktrees tab's
-    /// Browse.
+    /// Browse, and Add repo.
     pub pick_folder: FolderPicker,
 }
 
@@ -496,8 +474,8 @@ pub struct RootView {
     undo_timer: Option<Task<()>>,
     /// Spawns waiting for the daemon's reply.
     spawns: PendingSpawns,
-    /// The spawn dialog, while open.
-    spawn_dialog: Option<SpawnDialog>,
+    /// The spawn dialog, while open: its form, or its no-repos state.
+    spawn_dialog: Option<SpawnModal>,
     /// The spawn dialog's keyboard focus when no text field of it holds it.
     spawn_focus: FocusHandle,
     /// The Shell… dialog, while open.
@@ -628,7 +606,7 @@ impl RootView {
             } else {
                 Arc::new(SystemNotifier)
             },
-            pick_folder: system_folder_picker(),
+            pick_folder: folder_picker::system_folder_picker(window),
         };
         let root = Self::with_transport(deps, window, cx);
         // The cloaked window neither restores nor saves its place.

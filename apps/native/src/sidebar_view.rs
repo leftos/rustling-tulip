@@ -3,6 +3,7 @@
 //! container rows with their session leaves.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::appearance;
 use crate::appearance_view::Level;
@@ -14,13 +15,14 @@ use crate::assets::{
 use crate::buttons::{ButtonSize, outlined_button, primary_button};
 use crate::ellipsis::{ellipsized, truncating};
 use crate::fonts::{DEFAULT_FAMILY, UI_FAMILY};
-use crate::grid_view::{NO_REPOS_TIP, SPAWN_TIP};
+use crate::grid_view::{ADD_REPO_TIP, NO_REPOS_TIP, SPAWN_TIP};
 use crate::palette::{
     ACCENT, ASKING, CHIP, HOVER, LILAC, LINE, LINE_STRONG, ON_ACCENT, ON_ASKING, RAISED, SUBTLE,
     TEXT_2,
 };
+use crate::repo_add::RepoAdd;
 use crate::session_actions::inline_actions;
-use crate::session_menu::{menu_frame, menu_item};
+use crate::session_menu::{BorderedButton, bordered_button, menu_frame, menu_item};
 use crate::sidebar::{
     Activity, Container, ContainerKind, Leaf, LeafDensity, SidebarView, can_attach,
 };
@@ -105,14 +107,21 @@ impl RootView {
             .px(px(BODY_INSET_X))
             .py(px(BODY_INSET_Y))
             .overflow_y_scroll();
+        // With no repo or workspace, the note leads and the folder and shell
+        // sessions still list under it; "No sessions" is for a registry
+        // with nothing to list.
+        let no_repos = self.no_repos_yet();
+        let body = body.when(no_repos, |body| body.child(no_repos_note(cx)));
         let body = if containers.is_empty() {
-            body.child(
-                div()
-                    .px(px(ROW_PADDING))
-                    .py(px(6.0))
-                    .text_color(gpui::rgb(MUTED))
-                    .child("No sessions"),
-            )
+            body.when(!no_repos, |body| {
+                body.child(
+                    div()
+                        .px(px(ROW_PADDING))
+                        .py(px(6.0))
+                        .text_color(gpui::rgb(MUTED))
+                        .child("No sessions"),
+                )
+            })
         } else {
             let rows = LeafRows {
                 attached: attached.as_deref(),
@@ -189,10 +198,16 @@ impl RootView {
                 this.open_more_menu(window, cx);
             }));
         let menu = self.sidebar_more_open().then(|| {
-            let row = menu_item(MORE_SHELL_ROW, "Shell…", false).on_click(cx.listener(
+            let shell = menu_item(MORE_SHELL_ROW, "Shell…", false).on_click(cx.listener(
                 |this, _: &ClickEvent, window, cx| {
                     this.close_more_menu(window, cx);
                     this.open_shell_dialog(window, cx);
+                },
+            ));
+            let add_repo = menu_item(MORE_ADD_REPO_ROW, "Add repo…", false).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| {
+                    this.close_more_menu(window, cx);
+                    this.add_repo(cx);
                 },
             ));
             let frame = menu_frame(
@@ -203,7 +218,8 @@ impl RootView {
                     cx.stop_propagation();
                 }),
             )
-            .child(row);
+            .child(shell)
+            .child(add_repo);
             let panel = anchored()
                 .anchor(Corner::TopRight)
                 .offset(point(px(MORE_BUTTON_SIZE), px(MORE_BUTTON_SIZE + 2.0)))
@@ -242,6 +258,42 @@ impl RootView {
         }
     }
 
+    /// Whether the daemon's registry is in and holds no repo or workspace,
+    /// which the sessions panel notes over an Add repo button.
+    #[must_use]
+    pub fn no_repos_yet(&self) -> bool {
+        self.sidebar.repos_loaded()
+            && self.sidebar.repos().is_empty()
+            && self.sidebar.workspaces().is_empty()
+    }
+
+    /// Add repo: the picker opens at the folder the last added repo sits
+    /// in, and the folder picked is registered with the daemon. A cancel
+    /// sends nothing; a refusal comes back as the daemon's error toast.
+    pub(crate) fn add_repo(&mut self, cx: &mut Context<Self>) {
+        let start = self.sidebar.last_repo_dir().map(PathBuf::from);
+        let picked = (self.pick_folder)(cx, start);
+        cx.spawn(async move |this, cx| {
+            let picked = picked.await;
+            // Fails only when the view is gone, and its window with it.
+            this.update(cx, |this, _| this.finish_add_repo(picked)).ok();
+        })
+        .detach();
+    }
+
+    /// The picker's answer: the folder beside it is remembered and the
+    /// folder registered.
+    fn finish_add_repo(&mut self, picked: Option<PathBuf>) {
+        let Some(add) = RepoAdd::from_pick(picked) else {
+            return;
+        };
+        if self.sidebar.set_last_repo_dir(&add.last_dir) {
+            self.save_ui();
+        }
+        tracing::info!("adding repo {} as {}", add.path, add.name);
+        self.send(add.message());
+    }
+
     /// The layer under the open ⋯ menu that keeps a click outside it from
     /// reaching what lies beneath.
     pub(crate) fn more_menu_layer(&self) -> Option<AnyElement> {
@@ -266,10 +318,34 @@ pub(crate) enum MoreMenu {
 
 /// The ⋯ button's selector.
 const MORE_BUTTON: &str = "sidebar-more";
-/// The ⋯ menu's one row, which opens the shell folder dialog.
+/// The ⋯ menu's row that opens the shell folder dialog.
 const MORE_SHELL_ROW: &str = "sidebar-more-shell-dialog";
+/// The ⋯ menu's row that picks a folder to register as a repo.
+const MORE_ADD_REPO_ROW: &str = "sidebar-more-add-repo";
 /// The ⋯ button's hover text.
-const MORE_TIP: &str = "More: Shell…";
+const MORE_TIP: &str = "More: Shell…, Add repo…";
+/// What the sessions panel says while no repo or workspace is registered.
+const NO_REPOS_NOTE: &str = "No repos or workspaces yet.";
+
+/// The note an empty registry shows, with the Add repo button under it.
+fn no_repos_note(cx: &mut Context<RootView>) -> Div {
+    let add = BorderedButton {
+        selector: "sidebar-add-repo".to_owned(),
+        label: "Add repo",
+        tip: ADD_REPO_TIP,
+        enabled: true,
+    };
+    div()
+        .debug_selector(|| "sidebar-no-repos".to_owned())
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(6.0))
+        .px(px(ROW_PADDING))
+        .py(px(6.0))
+        .child(div().text_color(gpui::rgb(MUTED)).child(NO_REPOS_NOTE))
+        .child(bordered_button(add, cx, |this, _, cx| this.add_repo(cx)))
+}
 /// The ⋯ button's side, in px.
 const MORE_BUTTON_SIZE: f32 = 30.0;
 

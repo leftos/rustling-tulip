@@ -40,10 +40,9 @@ Review: `code-review`; UI hand-test of the shelf. Verification: the gates with `
 
 Review: `code-review`; UI hand-test. Verification: the gates with `-p rustling-tulip-native`; hand-test the real folder and `.code-workspace` pickers and a preset launch.
 
-- [ ] **P4.10a Add repo, the folder picker and the no-repos states** (+ Repo in the `⋯` menu, an own Windows folder picker that opens at the last folder, the sidebar / main-area / spawn-dialog empty states). See [native-client.md](./native-client.md#p410-and-p411-repos-workspaces-and-containers) for this wave's split and rulings.
-- [ ] **P4.10b Remove repo / workspace** (two-click; a dialog when sessions are live). After P4.10a.
-- [ ] **P4.11a Container row**: keyboard fold, last-launch summary, the Detached banner, Resume all (N). After P4.10a; beside P4.10b.
-- [ ] **P4.10c Workspace creator and the "VS Code workspace detected" prompt**, + Workspace. Needs P4.10a.
+- [ ] **P4.10b Remove repo / workspace** (two-click; a dialog when sessions are live). See [native-client.md](./native-client.md#p410-and-p411-repos-workspaces-and-containers) for this wave's split and rulings.
+- [ ] **P4.11a Container row**: keyboard fold, last-launch summary, the Detached banner, Resume all (N). Beside P4.10b.
+- [ ] **P4.10c Workspace creator and the "VS Code workspace detected" prompt**, + Workspace.
 - [ ] **P4.10d DIR/SH container actions** (Add repo / Add workspace). Needs P4.10c.
 - [ ] **P4.11b Launch last again and Detached stop all**. Needs P4.11a, and ES.6 on `main` for `spawn_view.rs`.
 - [ ] **P4.11c Full container menu and spawn entry points**. Needs P4.10b, P4.11b.

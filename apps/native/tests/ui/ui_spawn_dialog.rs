@@ -145,13 +145,68 @@ fn plus_session_disabled_without_repos(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
     h.click_on("sidebar-add-session");
     assert!(!is_open(&mut h), "disabled with no repo");
-    h.keys("ctrl-shift-n");
-    assert!(!is_open(&mut h), "nor by the shortcut");
 
     h.send(DaemonMessage::Repos {
         repos: vec![repo("r1", "C:/r1")],
     });
     open(&mut h);
+}
+
+/// Whether the dialog shows its no-repos state.
+fn no_repos_shown(h: &mut Harness<'_>) -> bool {
+    h.in_model("spawn-no-repos") && h.bounds("spawn-no-repos").origin.x >= px(0.0)
+}
+
+#[gpui::test]
+fn with_no_repos_the_dialog_opens_and_offers_add_repo(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.sent();
+    h.keys("ctrl-shift-n");
+    assert!(no_repos_shown(&mut h), "the shortcut opens it, not refused");
+    assert_eq!(focus(&mut h), None, "no form to focus");
+
+    h.click_on("spawn-submit");
+    assert!(spawns(&h.sent()).is_empty(), "Spawn is disabled");
+    assert!(is_open(&mut h));
+
+    h.set_picked_folder(Some("C:/src/tulip"));
+    h.click_on("spawn-add-repo");
+    let sent = h.sent();
+    assert!(
+        sent.iter().any(|msg| matches!(msg,
+            ClientMessage::AddRepo { path, name: Some(name) }
+                if path == "C:/src/tulip" && name == "tulip")),
+        "Add repo registers the picked folder: {sent:?}"
+    );
+    assert!(no_repos_shown(&mut h), "the dialog waits for the repo");
+
+    h.keys("escape");
+    assert!(!is_open(&mut h), "Esc closes it");
+}
+
+#[gpui::test]
+fn the_first_repo_arriving_leaves_the_no_repos_state(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = Harness::with(cx, &dir, &Fixture::single(session("s1").build()));
+    h.keys("ctrl-shift-n");
+    assert!(no_repos_shown(&mut h));
+    h.sent();
+
+    h.send(DaemonMessage::Repos {
+        repos: vec![repo("r1", "C:/r1")],
+    });
+    assert!(is_open(&mut h), "the dialog stays open");
+    assert!(
+        selected(&mut h).contains(&"spawn-target-repo-r1".to_owned()),
+        "on the new repo: {:?}",
+        selected(&mut h)
+    );
+    assert_eq!(focus(&mut h).as_deref(), Some("spawn-branch"));
+    assert!(
+        lists_branches(&h.sent(), "r1"),
+        "the form asks for its branches"
+    );
 }
 
 #[gpui::test]

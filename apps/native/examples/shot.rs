@@ -254,7 +254,7 @@ fn deps(
     let started = Instant::now();
     let now: Clock = Arc::new(move || started);
     let pick_folder: FolderPicker =
-        Rc::new(|_: &mut App| futures::future::ready(None).boxed_local());
+        Rc::new(|_: &mut App, _: Option<PathBuf>| futures::future::ready(None).boxed_local());
     RootDeps {
         tx,
         events,

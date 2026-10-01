@@ -13,6 +13,8 @@
 
 use crate::support;
 
+use std::path::PathBuf;
+
 use gpui::{Modifiers, TestAppContext, point, px};
 use protocol::{
     AgentOptions, ClientMessage, DaemonMessage, SessionMode, SpawnRequest, SpawnTarget,
@@ -429,6 +431,33 @@ fn shell_browse_uses_the_picker_seam(cx: &mut TestAppContext) {
     h.click_on("shell-browse");
     assert_eq!(h.folder_asks(), 2);
     assert_eq!(folder(&mut h).as_deref(), Some("C:/picked"));
+}
+
+#[gpui::test]
+fn browse_opens_at_the_typed_folder(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    seed_ui(&dir, Some("C:/remembered"));
+    let mut h = Harness::with(cx, &dir, &fixture());
+    h.open_shell_dialog_from_more();
+    h.set_picked_folder(None);
+    h.keys("ctrl-a backspace");
+    assert_eq!(folder(&mut h).as_deref(), Some(""), "the field is empty");
+    h.click_on("shell-browse");
+    assert_eq!(
+        h.folder_starts(),
+        vec![Some(PathBuf::from("C:/remembered"))],
+        "an empty field opens the picker at the remembered folder"
+    );
+
+    h.click_on("shell-folder");
+    type_text(&mut h, "D:/typed");
+    assert_eq!(folder(&mut h).as_deref(), Some("D:/typed"));
+    h.click_on("shell-browse");
+    assert_eq!(
+        h.folder_starts().last(),
+        Some(&Some(PathBuf::from("D:/typed"))),
+        "the typed folder wins"
+    );
 }
 
 #[gpui::test]

@@ -17,6 +17,7 @@ use protocol::{Agent, DaemonMessage};
 use crate::assets::{SIDEBAR_CHEVRON_DOWN_ICON, SIDEBAR_CHEVRON_RIGHT_ICON};
 use crate::buttons::{ButtonKind, ButtonSize, button, field_frame, focus_ring};
 use crate::combobox::{ComboRow, list_placement};
+use crate::grid_view::ADD_REPO_TIP;
 use crate::notice_view::{MODAL_RADIUS, modal_panel};
 use crate::palette::{
     ACCENT, CHIP, GROUND, HOVER, LINE, LINE_STRONG, ON_ACCENT, RAISED, SPAWN_BADGE_OK, SUBTLE,
@@ -77,6 +78,8 @@ const LIST_RADIUS: f32 = 10.0;
 /// scrolls past it.
 const PANEL_MAX_HEIGHT: f32 = 0.9;
 const DIALOG_TITLE: &str = "Spawn session";
+/// What the dialog says while no repo is registered.
+const NO_REPOS_NOTE: &str = "No repos yet.";
 const SHARE_TITLE: &str = "Share this worktree?";
 const SHARE_BODY: &str = "A session is already running in the worktree you picked. Both agents will see each other's uncommitted edits, and concurrent writes to the same file will overwrite one another.";
 const RANDOM_TIP: &str = "Generate a random worktree branch name";
@@ -146,6 +149,26 @@ pub(crate) struct SpawnDialog {
     panel_bounds: Option<Bounds<Pixels>>,
     /// Where the field whose list shows was last laid out.
     list_anchor: Option<Bounds<Pixels>>,
+}
+
+/// The spawn dialog while open: its form, or the state it opens in while no
+/// repo is registered.
+pub(crate) enum SpawnModal {
+    Form(Box<SpawnDialog>),
+    /// "No repos yet." with Add repo, Spawn disabled; the first repo to
+    /// arrive opens the form from `entry`.
+    NoRepos(SpawnEntry),
+}
+
+impl SpawnEntry {
+    /// The target the dialog is held on, if any.
+    fn lock(&self) -> Option<&Lock> {
+        match self {
+            Self::Locked(lock) => Some(lock),
+            Self::Duplicate { lock, .. } => lock.as_ref(),
+            Self::Toolbar | Self::Pane { .. } => None,
+        }
+    }
 }
 
 /// Which of the dialog's laid-out bounds a measurement is.
@@ -231,11 +254,25 @@ impl RootView {
         self.spawn_dialog.is_some()
     }
 
+    /// Whether the dialog is open in its no-repos state.
+    #[must_use]
+    pub fn spawn_dialog_no_repos(&self) -> bool {
+        matches!(self.spawn_dialog, Some(SpawnModal::NoRepos(_)))
+    }
+
+    /// The open dialog's form side, unless it is in its no-repos state.
+    fn form_dialog(&self) -> Option<&SpawnDialog> {
+        match self.spawn_dialog.as_ref()? {
+            SpawnModal::Form(dialog) => Some(dialog),
+            SpawnModal::NoRepos(_) => None,
+        }
+    }
+
     /// The selector of the dialog's focused control, or of the focused
     /// button of its "Share this worktree?" confirm.
     #[must_use]
     pub fn spawn_dialog_focus(&self) -> Option<String> {
-        let form = &self.spawn_dialog.as_ref()?.form;
+        let form = &self.form_dialog()?.form;
         Some(match form.share_confirm() {
             Some(button) => button.selector().to_owned(),
             None => form.focused().selector(),
@@ -245,15 +282,14 @@ impl RootView {
     /// Whether the "Share this worktree?" confirm is open.
     #[must_use]
     pub fn spawn_share_confirm_open(&self) -> bool {
-        self.spawn_dialog
-            .as_ref()
+        self.form_dialog()
             .is_some_and(|dialog| dialog.form.share_confirm().is_some())
     }
 
     /// The selectors of the dialog's chosen options and ticked boxes.
     #[must_use]
     pub fn spawn_dialog_selected(&self) -> Vec<String> {
-        let Some(dialog) = &self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
             return Vec::new();
         };
         let form = &dialog.form;
@@ -285,7 +321,7 @@ impl RootView {
     /// repo's preview shows one.
     #[must_use]
     pub fn spawn_base_stale(&self) -> Option<String> {
-        let form = &self.spawn_dialog.as_ref()?.form;
+        let form = &self.form_dialog()?.form;
         if form.is_workspace() {
             return None;
         }
@@ -296,7 +332,7 @@ impl RootView {
     /// with its note.
     #[must_use]
     pub fn spawn_collision(&self) -> Option<Vec<String>> {
-        let form = &self.spawn_dialog.as_ref()?.form;
+        let form = &self.form_dialog()?.form;
         let notice = collision_notice(form.collision()?)?;
         Some(vec![
             notice.headline,
@@ -308,8 +344,7 @@ impl RootView {
     /// Whether the workspace's Preview button can be pressed.
     #[must_use]
     pub fn spawn_preview_enabled(&self) -> bool {
-        self.spawn_dialog
-            .as_ref()
+        self.form_dialog()
             .is_some_and(|dialog| dialog.form.preview_enabled())
     }
 
@@ -317,7 +352,7 @@ impl RootView {
     /// badges joined by " · ", and the path.
     #[must_use]
     pub fn spawn_preview_rows(&self) -> Vec<Vec<String>> {
-        let Some(dialog) = &self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
             return Vec::new();
         };
         let form = &dialog.form;
@@ -338,21 +373,21 @@ impl RootView {
     /// The text of the headless prompt field, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_prompt(&self, cx: &gpui::App) -> Option<String> {
-        let dialog = self.spawn_dialog.as_ref()?;
+        let dialog = self.form_dialog()?;
         Some(dialog.prompt_input.read(cx).text().to_owned())
     }
 
     /// The text of the model field, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_model(&self, cx: &gpui::App) -> Option<String> {
-        let dialog = self.spawn_dialog.as_ref()?;
+        let dialog = self.form_dialog()?;
         Some(dialog.model_input.read(cx).text().to_owned())
     }
 
     /// The key and value fields of every env row, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_env(&self, cx: &gpui::App) -> Option<Vec<(String, String)>> {
-        let dialog = self.spawn_dialog.as_ref()?;
+        let dialog = self.form_dialog()?;
         let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
         Some(
             dialog
@@ -367,23 +402,20 @@ impl RootView {
     /// open and the row warns.
     #[must_use]
     pub fn spawn_dialog_env_plaintext_warning(&self, index: usize) -> Option<String> {
-        self.spawn_dialog
-            .as_ref()?
-            .form
-            .env_plaintext_warning(index)
+        self.form_dialog()?.form.env_plaintext_warning(index)
     }
 
     /// The text of the branch field, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_branch(&self, cx: &gpui::App) -> Option<String> {
-        let dialog = self.spawn_dialog.as_ref()?;
+        let dialog = self.form_dialog()?;
         Some(dialog.branch_input.read(cx).text().to_owned())
     }
 
     /// The text of the base branch field, while the dialog is open.
     #[must_use]
     pub fn spawn_dialog_base(&self, cx: &gpui::App) -> Option<String> {
-        let dialog = self.spawn_dialog.as_ref()?;
+        let dialog = self.form_dialog()?;
         Some(dialog.base_input.read(cx).text().to_owned())
     }
 
@@ -401,14 +433,14 @@ impl RootView {
     }
 
     fn spawn_list_rows(&self, field: ListField) -> Option<Vec<String>> {
-        let form = &self.spawn_dialog.as_ref()?.form;
+        let form = &self.form_dialog()?.form;
         form.list_shown(field)
             .then(|| form.list_rows(field).iter().map(ComboRow::label).collect())
     }
 
     /// Why a spawn dialog cannot open for `lock` right now, if it cannot:
-    /// another overlay is up, there is nothing to spawn into, or the locked
-    /// target left the registry.
+    /// another overlay is up, or the locked target left the registry. With
+    /// no repo and no lock it opens in its no-repos state.
     ///
     /// `handoff` says the caller is the worktrees manager's launch, which
     /// closes the manager and Settings as part of the hand-off, so neither
@@ -437,21 +469,26 @@ impl RootView {
         {
             return Some("another dialog is open");
         }
-        match lock {
-            Some(lock) => lock.unregistered(self.sidebar.repos(), self.sidebar.workspaces()),
-            None => (!self.has_repos()).then_some("no repos are registered"),
-        }
+        lock.and_then(|lock| lock.unregistered(self.sidebar.repos(), self.sidebar.workspaces()))
     }
 
-    /// Opens the dialog from `entry`, unless there is no repo, the
-    /// connection is down or another dialog or menu is open. It starts on
-    /// the preselected session's repo or workspace, else the focused one's.
+    /// Opens the dialog from `entry`, unless the connection is down or
+    /// another dialog or menu is open. It starts on the preselected
+    /// session's repo or workspace, else the focused one's; with no repo it
+    /// opens in its no-repos state.
     pub(crate) fn open_spawn_dialog(
         &mut self,
         entry: SpawnEntry,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if entry.lock().is_none() && !self.has_repos() {
+            self.prefills.clear();
+            if self.spawn_dialog_blocker(None, false).is_none() {
+                self.open_no_repos_dialog(entry, window, cx);
+            }
+            return;
+        }
         let (aim, preselect, lock, prefill) = match entry {
             SpawnEntry::Toolbar => (None, None, None, None),
             SpawnEntry::Pane { aim, preselect } => (Some(aim), preselect, None, None),
@@ -495,7 +532,7 @@ impl RootView {
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
         subscriptions.extend(Self::watch_field(&prompt_input, Field::Prompt, window, cx));
         subscriptions.extend(Self::watch_field(&model_input, Field::Model, window, cx));
-        self.spawn_dialog = Some(SpawnDialog {
+        self.spawn_dialog = Some(SpawnModal::Form(Box::new(SpawnDialog {
             form,
             aim,
             branch_input,
@@ -510,11 +547,42 @@ impl RootView {
             reveal: true,
             panel_bounds: None,
             list_anchor: None,
-        });
+        })));
         self.sync_env_inputs(window, cx);
         self.send_all(messages);
         self.after_spawn_change(cx);
         self.apply_spawn_focus(window, cx);
+    }
+
+    /// The dialog in its no-repos state, waiting to open the form from
+    /// `entry` once a repo is registered.
+    fn open_no_repos_dialog(
+        &mut self,
+        entry: SpawnEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming = None;
+        self.close_flyout();
+        self.close_tab_menu(window, cx);
+        self.close_more_menu(window, cx);
+        self.spawn_dialog = Some(SpawnModal::NoRepos(entry));
+        self.apply_spawn_focus(window, cx);
+    }
+
+    /// A repo arrived while the dialog waited in its no-repos state: the
+    /// form opens from the entry it waited with, on that repo.
+    fn leave_no_repos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.spawn_dialog.take() {
+            Some(SpawnModal::NoRepos(entry)) => {
+                self.open_spawn_dialog(entry, window, cx);
+                if self.spawn_dialog.is_none() {
+                    self.focus_active_pane(window, cx);
+                    cx.notify();
+                }
+            }
+            other => self.spawn_dialog = other,
+        }
     }
 
     /// The fields of env row `index`, holding `row`.
@@ -543,7 +611,7 @@ impl RootView {
     /// A row added or removed: the env fields are made afresh from the
     /// form's rows, so each field's index matches its row again.
     fn sync_env_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &self.spawn_dialog else {
             return;
         };
         let rows = dialog.form.env_rows().to_vec();
@@ -555,7 +623,7 @@ impl RootView {
             .enumerate()
             .map(|(index, row)| Self::env_inputs(index, row, window, cx))
             .collect();
-        if let Some(dialog) = &mut self.spawn_dialog {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
             dialog.env_inputs = inputs;
         }
     }
@@ -590,7 +658,7 @@ impl RootView {
         );
         let edits = cx.subscribe_in(input, window, move |this, input, _: &TextChanged, _, cx| {
             let text = input.read(cx).text().to_owned();
-            if let Some(dialog) = &mut this.spawn_dialog {
+            if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                 let form = &mut dialog.form;
                 match field {
                     Field::Branch => form.edit_branch(&text, &mut this.branch_cache),
@@ -608,7 +676,7 @@ impl RootView {
         });
         let handle = input.read(cx).focus_handle(cx);
         let focus = cx.on_focus(&handle, window, move |this, _, cx| {
-            if let Some(dialog) = &mut this.spawn_dialog {
+            if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                 dialog.form.set_focus(field.control());
                 dialog.reveal = true;
             }
@@ -620,7 +688,7 @@ impl RootView {
                 input,
                 window,
                 move |this, _, key: &NavKey, _, cx| {
-                    if let Some(dialog) = &mut this.spawn_dialog {
+                    if let Some(SpawnModal::Form(dialog)) = &mut this.spawn_dialog {
                         dialog.form.list_nav(list, *key == NavKey::Down);
                     }
                     cx.notify();
@@ -636,7 +704,7 @@ impl RootView {
     /// Enter in `list`'s field: commits the highlighted row while the list
     /// shows; returns whether it did.
     fn enter_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) -> bool {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return false;
         };
         let committed = dialog.form.enter_list(list, &mut self.branch_cache);
@@ -649,10 +717,10 @@ impl RootView {
     /// Esc in `list`'s field: closes the list while it shows; returns
     /// whether it did.
     fn escape_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) -> bool {
-        let closed = self
-            .spawn_dialog
-            .as_mut()
-            .is_some_and(|dialog| dialog.form.escape_list(list));
+        let closed = match &mut self.spawn_dialog {
+            Some(SpawnModal::Form(dialog)) => dialog.form.escape_list(list),
+            _ => false,
+        };
         if closed {
             cx.notify();
         }
@@ -660,21 +728,21 @@ impl RootView {
     }
 
     fn open_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.spawn_dialog {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
             dialog.form.open_list(list);
             cx.notify();
         }
     }
 
     fn close_spawn_list(&mut self, list: ListField, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.spawn_dialog {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
             dialog.form.close_list(list);
             cx.notify();
         }
     }
 
     fn hover_spawn_list(&mut self, list: ListField, index: usize, cx: &mut Context<Self>) {
-        if let Some(dialog) = &mut self.spawn_dialog
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog
             && dialog.form.hover_list(list, index)
         {
             cx.notify();
@@ -682,7 +750,7 @@ impl RootView {
     }
 
     fn pick_spawn_list(&mut self, list: ListField, index: usize, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         dialog.form.pick_list(list, index, &mut self.branch_cache);
@@ -698,7 +766,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         let slot = match what {
@@ -726,7 +794,7 @@ impl RootView {
     }
 
     fn submit_spawn_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         let outcome = dialog.form.submit(&mut self.branch_cache);
@@ -740,7 +808,7 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         let now = (self.now)();
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         let outcome = dialog.form.press(control, &mut self.branch_cache, now);
@@ -748,7 +816,7 @@ impl RootView {
     }
 
     fn answer_share(&mut self, button: ShareButton, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         let outcome = dialog.form.answer_share(button, &mut self.branch_cache);
@@ -773,7 +841,10 @@ impl RootView {
                 if let Some(msg) = submission.default_change {
                     self.send(msg);
                 }
-                let aim = self.spawn_dialog.as_mut().and_then(|d| d.aim.take());
+                let aim = match &mut self.spawn_dialog {
+                    Some(SpawnModal::Form(dialog)) => dialog.aim.take(),
+                    _ => None,
+                };
                 let open_in = match aim {
                     Some(aim) => aim.open_in(submission.open_in),
                     None => submission.open_in,
@@ -788,7 +859,7 @@ impl RootView {
     /// preview follows the fields, a timer waiting out its debounce.
     fn after_spawn_change(&mut self, cx: &mut Context<Self>) {
         let now = (self.now)();
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         dialog.form.follow_preview(now);
@@ -830,10 +901,10 @@ impl RootView {
     /// The preview debounce ran out: its request goes to the daemon.
     fn send_due_preview(&mut self, cx: &mut Context<Self>) {
         let now = (self.now)();
-        let msg = self
-            .spawn_dialog
-            .as_mut()
-            .and_then(|dialog| dialog.form.take_due_preview(now));
+        let msg = match &mut self.spawn_dialog {
+            Some(SpawnModal::Form(dialog)) => dialog.form.take_due_preview(now),
+            _ => None,
+        };
         if let Some(msg) = msg {
             self.send(msg);
         }
@@ -843,7 +914,11 @@ impl RootView {
     /// The keyboard goes where the form's focus is: a text field, else the
     /// dialog itself. The body then scrolls the focused control into view.
     pub(crate) fn apply_spawn_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            if self.spawn_dialog.is_some() {
+                self.spawn_focus.focus(window);
+                cx.notify();
+            }
             return;
         };
         dialog.reveal = true;
@@ -869,7 +944,7 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(dialog) = &mut self.spawn_dialog else {
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         if !mem::take(&mut dialog.reveal) {
@@ -890,7 +965,7 @@ impl RootView {
 
     /// Whether a text field of the dialog holds the keyboard.
     fn spawn_field_focused(&self, window: &Window, cx: &Context<Self>) -> bool {
-        self.spawn_dialog.as_ref().is_some_and(|dialog| {
+        self.form_dialog().is_some_and(|dialog| {
             dialog
                 .inputs()
                 .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
@@ -907,7 +982,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> bool {
         let key = keystroke.key.as_str();
-        let Some(form) = self.spawn_dialog.as_ref().map(|dialog| &dialog.form) else {
+        if matches!(self.spawn_dialog, Some(SpawnModal::NoRepos(_))) {
+            match key {
+                "escape" => self.close_spawn_dialog(window, cx),
+                "enter" | "space" => self.add_repo(cx),
+                _ => {}
+            }
+            return true;
+        }
+        let Some(form) = self.form_dialog().map(|dialog| &dialog.form) else {
             return false;
         };
         if let Some(button) = form.share_confirm() {
@@ -917,7 +1000,7 @@ impl RootView {
         let focused = form.focused();
         match key {
             "tab" => {
-                if let Some(dialog) = &mut self.spawn_dialog {
+                if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
                     dialog.form.move_focus(!keystroke.modifiers.shift);
                 }
                 self.apply_spawn_focus(window, cx);
@@ -953,7 +1036,7 @@ impl RootView {
             "escape" => self.answer_share(ShareButton::Cancel, window, cx),
             "enter" | "space" => self.answer_share(focused, window, cx),
             "tab" => {
-                if let Some(dialog) = &mut self.spawn_dialog {
+                if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
                     dialog.form.toggle_share_focus();
                 }
                 cx.notify();
@@ -980,11 +1063,17 @@ impl RootView {
             && let Some(target) = Target::from_suggest(target)
         {
             self.branch_cache.insert(target.clone(), name.clone());
-            if let Some(dialog) = &mut self.spawn_dialog {
+            if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
                 dialog.form.on_suggestion(&target, name);
             }
         }
-        let Some(dialog) = &mut self.spawn_dialog else {
+        if matches!(self.spawn_dialog, Some(SpawnModal::NoRepos(_))) {
+            if registry && self.has_repos() {
+                self.leave_no_repos(window, cx);
+            }
+            return;
+        }
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
             return;
         };
         let messages = if registry {
@@ -1009,7 +1098,7 @@ impl RootView {
 
     /// The tabs changed: Open in follows them.
     pub(crate) fn refresh_spawn_tabs(&mut self) {
-        if let Some(dialog) = &mut self.spawn_dialog {
+        if let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog {
             let tabs = TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id());
             dialog.form.set_tabs(tabs);
         }
@@ -1018,8 +1107,10 @@ impl RootView {
     /// The dialog over a backdrop that takes every click beneath it, and the
     /// share confirm over it while open.
     pub(crate) fn spawn_dialog_layers(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let Some(dialog) = &self.spawn_dialog else {
-            return Vec::new();
+        let dialog = match &self.spawn_dialog {
+            None => return Vec::new(),
+            Some(SpawnModal::NoRepos(_)) => return vec![self.no_repos_layer(cx)],
+            Some(SpawnModal::Form(dialog)) => dialog,
         };
         let form = &dialog.form;
         let focus = form.focused();
@@ -1092,6 +1183,54 @@ impl RootView {
         } else {
             worktree.into_iter().chain(branch).chain(base).collect()
         }
+    }
+
+    /// The dialog with no repo to spawn into: "No repos yet." over Add repo,
+    /// and Spawn disabled.
+    fn no_repos_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let close = close_button("spawn-close", false).on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
+        );
+        let add = button("spawn-add-repo", OUTLINED.0, OUTLINED.1, true)
+            .flex_none()
+            .child("Add repo")
+            .tooltip(tooltip(ADD_REPO_TIP))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.add_repo(cx)));
+        let body = div()
+            .debug_selector(|| "spawn-no-repos".to_owned())
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(12.0))
+            .px(px(DIALOG_PAD_X))
+            .py(px(16.0))
+            .child(div().text_color(gpui::rgb(TEXT_2)).child(NO_REPOS_NOTE))
+            .child(add);
+        let cancel = button(
+            "spawn-cancel",
+            ButtonKind::Outlined,
+            ButtonSize::Large,
+            true,
+        )
+        .flex_none()
+        .child("Cancel")
+        .on_click(
+            cx.listener(|this, _: &ClickEvent, window, cx| this.close_spawn_dialog(window, cx)),
+        );
+        let submit = button(
+            "spawn-submit",
+            ButtonKind::Primary,
+            ButtonSize::Large,
+            false,
+        )
+        .flex_none()
+        .child("Spawn");
+        let panel = dialog_card("spawn-panel", DIALOG_WIDTH)
+            .track_focus(&self.spawn_focus)
+            .child(dialog_title_bar(DIALOG_TITLE, close))
+            .child(body)
+            .child(dialog_footer().child(cancel).child(submit));
+        backdrop("spawn-dialog", panel)
     }
 
     fn share_layer(&self, focused: ShareButton, cx: &mut Context<Self>) -> AnyElement {

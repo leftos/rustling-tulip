@@ -32,6 +32,7 @@ mod ui_pane_spawn;
 mod ui_panes;
 mod ui_quit;
 mod ui_recover;
+mod ui_repos;
 mod ui_session_actions;
 mod ui_settings;
 mod ui_shell;

@@ -285,6 +285,10 @@ pub struct UiState {
     /// The folder "+ Shell" opens in, when the user picked one.
     #[serde(default)]
     pub quick_shell_dir: Option<String>,
+    /// The folder Add repo's picker opens at: the parent of the folder it
+    /// last added.
+    #[serde(default)]
+    pub last_repo_dir: Option<String>,
     /// The font every new terminal pane starts from.
     #[serde(default)]
     pub terminal_font: FontSettings,
@@ -439,6 +443,7 @@ impl Default for UiState {
             collapsed_containers: BTreeSet::new(),
             active_tab_id: None,
             quick_shell_dir: None,
+            last_repo_dir: None,
             terminal_font: FontSettings::default(),
             tab_font_sizes: BTreeMap::new(),
             source_control: ScUiState::default(),
@@ -929,6 +934,21 @@ impl SidebarModel {
             return false;
         }
         self.ui.quick_shell_dir = dir.map(str::to_owned);
+        true
+    }
+
+    /// The folder Add repo's picker opens at, once a repo was added.
+    pub fn last_repo_dir(&self) -> Option<&str> {
+        self.ui.last_repo_dir.as_deref()
+    }
+
+    /// Records the folder Add repo's picker opens at next; returns whether
+    /// it changed, so the caller knows whether there is anything to save.
+    pub fn set_last_repo_dir(&mut self, dir: &str) -> bool {
+        if self.ui.last_repo_dir.as_deref() == Some(dir) {
+            return false;
+        }
+        self.ui.last_repo_dir = Some(dir.to_owned());
         true
     }
 }
@@ -2373,6 +2393,7 @@ mod tests {
             collapsed_containers: ["repo:r1".to_owned(), "detached".to_owned()].into(),
             active_tab_id: Some("t1".to_owned()),
             quick_shell_dir: Some("C:\\work".to_owned()),
+            last_repo_dir: Some("D:\\src".to_owned()),
             terminal_font: FontSettings {
                 family: Some("JetBrains Mono".to_owned()),
                 size: 15.0,
@@ -2692,6 +2713,37 @@ mod tests {
 
         assert!(model.set_quick_shell_dir(None));
         assert_eq!(model.quick_shell_dir(), None);
+    }
+
+    #[test]
+    fn last_repo_dir_round_trips_through_native_ui_json() {
+        let mut model = SidebarModel::default();
+        assert_eq!(model.last_repo_dir(), None);
+        assert!(model.set_last_repo_dir("D:\\src"));
+        assert!(!model.set_last_repo_dir("D:\\src"), "unchanged");
+
+        let dir = TestDir::new("last-repo-dir");
+        save_ui_state(&dir.0, model.ui_state()).expect("save");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.last_repo_dir.as_deref(), Some("D:\\src"));
+        assert_eq!(&loaded, model.ui_state());
+    }
+
+    #[test]
+    fn an_old_ui_file_without_last_repo_dir_loads() {
+        let dir = TestDir::new("no-last-repo-dir");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "sidebar_collapsed": true, "quick_shell_dir": "C:\\work" }"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert!(loaded.sidebar_collapsed, "the rest of the file still loads");
+        assert_eq!(loaded.quick_shell_dir.as_deref(), Some("C:\\work"));
+        assert_eq!(
+            loaded.last_repo_dir, None,
+            "an older file has no repo folder"
+        );
     }
 
     #[test]

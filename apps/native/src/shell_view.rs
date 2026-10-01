@@ -291,7 +291,14 @@ impl RootView {
         let generation = dialog.form.generation();
         let folder = shell_folder(dialog, cx).to_owned();
         dialog.form.begin_browse(&folder);
-        let picked = (self.pick_folder)(cx);
+        // The picker opens at the typed folder, else the remembered one.
+        let typed = folder.trim();
+        let start = if typed.is_empty() {
+            self.sidebar.quick_shell_dir().map(std::path::PathBuf::from)
+        } else {
+            Some(std::path::PathBuf::from(typed))
+        };
+        let picked = (self.pick_folder)(cx, start);
         cx.spawn(async move |this, cx| {
             let picked = picked.await.map(|path| path.to_string_lossy().into_owned());
             // Fails only when the view is gone, and its window with it.
