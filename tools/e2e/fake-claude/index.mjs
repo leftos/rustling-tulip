@@ -16,6 +16,9 @@
  *     (EOT survives ConPTY's raw-mode delivery; bracketed-paste markers don't).
  *   - Emits an OSC window-title update for "/rename <title>".
  *   - Emits deterministic streaming output for "/stream".
+ *   - Reports one environment variable for "/env <NAME>" as
+ *     "RT_ENV <NAME> unset" when unset or empty, "RT_ENV <NAME> sha256=<hex>"
+ *     when NAME ends in _KEY or _TOKEN, else "RT_ENV <NAME> <value>".
  *   - Exits cleanly on "/exit\n" or SIGTERM/SIGBREAK.
  *   - Acknowledges (but does not act on) the `--add-dir`, `-p`,
  *     `--model`, and `--permission-mode` flags the daemon may pass.
@@ -207,6 +210,10 @@ function handleLine(line) {
     emitStreamOutput();
     return;
   }
+  if (line.startsWith("/env ")) {
+    emitEnv(line.slice("/env ".length).trim());
+    return;
+  }
   process.stdout.write(`${TAG} echo: ${line}\r\n`);
   process.stdout.write(PROMPT);
 }
@@ -292,6 +299,28 @@ function resumableId(id) {
  */
 function pad2(value) {
   return String(value).padStart(2, "0");
+}
+
+/**
+ * Report what this process sees in environment variable `name`, so a spec can
+ * check a spawn's env reached the child. A credential-shaped name (ending in
+ * `_KEY` or `_TOKEN`) is reported as the SHA-256 of its value, never the value,
+ * so the value never lands in the session's scrollback.
+ *
+ * @param {string} name
+ */
+function emitEnv(name) {
+  const value = process.env[name];
+  let report;
+  if (value === undefined || value === "") {
+    report = "unset";
+  } else if (name.endsWith("_KEY") || name.endsWith("_TOKEN")) {
+    report = `sha256=${createHash("sha256").update(value, "utf8").digest("hex")}`;
+  } else {
+    report = value;
+  }
+  process.stdout.write(`\r\n${TAG} RT_ENV ${name} ${report}\r\n`);
+  process.stdout.write(PROMPT);
 }
 
 function emitStreamOutput() {
