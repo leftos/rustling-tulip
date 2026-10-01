@@ -54,6 +54,14 @@ const MOVED_ON: &str = "moved-on";
 const CODEX_THREAD_ID: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 /// The Cursor chat id `fake-claude`'s cursor mode prints for `create-chat`.
 const CURSOR_CHAT_ID: &str = "3f1c2b9e-7a4d-4e8f-9b2a-6c5d4e3f2a1b";
+/// A key the daemon seals by its name: it has a `KEY` segment.
+const SECRET_KEY: &str = "RT_TEST_API_KEY";
+/// The service the daemon files secrets under; an isolated daemon's carries a
+/// `:<hash>` suffix after it.
+const SECRET_SERVICE: &str = "rustling-tulip";
+/// How many hex characters of the config dir's hash an isolated service
+/// carries, as `crates/daemon/src/env_secrets.rs` cuts it.
+const SERVICE_HASH_LEN: usize = 8;
 
 /// Asserts the shim's runtime is on `PATH`: `fake-claude` runs under `node`.
 fn require_node() {
@@ -680,6 +688,300 @@ fn recover_cursor_session(
     });
     assert_eq!(recovered.agent, Agent::Cursor, "{recovered:?}");
     wait_scrollback_contains(h, client, &new_id, &format!("RT_RESUMED {CURSOR_CHAT_ID}"));
+}
+
+/// The lowercase hex SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// The Credential Manager service `daemon` files its secrets under:
+/// `rustling-tulip:` and the first hex of the SHA-256 of its config dir, made
+/// absolute as the daemon's `paths::config_dir` makes it.
+fn isolated_service(daemon: &LiveDaemon) -> String {
+    let config = std::path::absolute(daemon.config_dir()).expect("the config dir made absolute");
+    let mut hex = sha256_hex(config.to_string_lossy().as_bytes());
+    hex.truncate(SERVICE_HASH_LEN);
+    format!("{SECRET_SERVICE}:{hex}")
+}
+
+/// The generic credential `windows-native-keyring-store`'s default store files
+/// (`service`, `user`) under: `{user}.{service}`, the daemon's user being
+/// `env/<key>/<id>`.
+fn credential_target(service: &str, key: &str, id: &str) -> String {
+    format!("env/{key}/{id}.{service}")
+}
+
+/// The (key, id) of every value the daemon under `config` indexed as sealed.
+fn indexed_secrets(config: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(config.join("env-secrets.json")) else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let key = entry["key"].as_str()?;
+            let id = entry["id"].as_str()?;
+            Some((key.to_owned(), id.to_owned()))
+        })
+        .collect()
+}
+
+/// Whether Credential Manager lists a credential named `target`.
+fn credential_listed(target: &str) -> bool {
+    Command::new("cmdkey")
+        .arg(format!("/list:{target}"))
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout).contains(&format!("Target: {target}"))
+        })
+}
+
+/// Every generic credential target Credential Manager lists whose service part
+/// is exactly `service`: the target ends in `.{service}`.
+fn targets_of_service(service: &str) -> Vec<String> {
+    let Ok(out) = Command::new("cmdkey").arg("/list").output() else {
+        return Vec::new();
+    };
+    let suffix = format!(".{service}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Target: "))
+        .map(|target| {
+            target
+                .strip_prefix("LegacyGeneric:target=")
+                .unwrap_or(target)
+        })
+        .filter(|target| target.ends_with(&suffix))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Deletes, on drop, every Credential Manager entry filed under this run's
+/// isolated service, so a failed spec leaves none behind. A target it cannot
+/// delete fails the spec, or, when the spec is already failing, is named in
+/// `leftover-credentials.txt` in the run's kept dir.
+struct SealedSecretsCleanup {
+    root: PathBuf,
+    service: String,
+}
+
+impl SealedSecretsCleanup {
+    fn new(daemon: &LiveDaemon) -> Self {
+        let isolated = daemon
+            .envs()
+            .iter()
+            .any(|(key, value)| *key == "RUSTLING_TULIP_CONFIG_DIR" && !value.is_empty());
+        assert!(
+            isolated,
+            "the live daemon runs without RUSTLING_TULIP_CONFIG_DIR, so it files secrets \
+             under the user's own service; this spec never touches that store"
+        );
+        Self {
+            root: daemon.dir().to_path_buf(),
+            service: isolated_service(daemon),
+        }
+    }
+}
+
+impl Drop for SealedSecretsCleanup {
+    fn drop(&mut self) {
+        for target in targets_of_service(&self.service) {
+            // A failure shows as the target still listed below.
+            let _ = Command::new("cmdkey")
+                .arg(format!("/delete:{target}"))
+                .output();
+        }
+        let leftovers = targets_of_service(&self.service);
+        if leftovers.is_empty() {
+            return;
+        }
+        if std::thread::panicking() {
+            let mut names = leftovers.join("\n");
+            names.push('\n');
+            let _ = std::fs::write(self.root.join("leftover-credentials.txt"), names);
+        } else {
+            assert!(
+                leftovers.is_empty(),
+                "the teardown could not delete these test credentials: {leftovers:?}"
+            );
+        }
+    }
+}
+
+/// How many times a file the daemon is rewriting is read before the walk
+/// gives up on it.
+const READ_ATTEMPTS: u32 = 5;
+
+/// Reads `path`, retrying a `PermissionDenied` (the daemon replacing the file)
+/// up to [`READ_ATTEMPTS`] times, 100 ms apart. `None` when the file is gone.
+fn read_settled(path: &Path) -> Option<Vec<u8>> {
+    let mut attempt = 1;
+    let read = loop {
+        match std::fs::read(path) {
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < READ_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            read => break read,
+        }
+    };
+    match read {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        read => Some(
+            read.map_err(|err| format!("{}: {err}", path.display()))
+                .expect("read every file under the config dir"),
+        ),
+    }
+}
+
+/// Asserts no file under `dir` holds `needle`, naming the first that does.
+/// `daemon.lock` is skipped: the running daemon holds it locked, and it carries
+/// no spawn data. A file or folder the daemon removed mid-walk is skipped.
+fn assert_no_file_holds(dir: &Path, needle: &[u8]) {
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let entries = match std::fs::read_dir(&folder) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            listed => listed
+                .map_err(|err| format!("{}: {err}", folder.display()))
+                .expect("list a folder under the config dir"),
+        };
+        for entry in entries {
+            let path = entry.expect("read a config dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.file_name().is_some_and(|name| name == "daemon.lock") {
+                continue;
+            }
+            let Some(bytes) = read_settled(&path) else {
+                continue;
+            };
+            assert!(
+                !bytes.windows(needle.len()).any(|window| window == needle),
+                "{} holds the sealed secret's value",
+                path.display()
+            );
+        }
+    }
+}
+
+/// A Claude session spawned with a secret row sees its value, loses its
+/// tracer and, recovered as Claude, sees it again. Returns the ended session's
+/// id, which names its history entry.
+fn recover_sealed_session(
+    h: &mut Harness<'_>,
+    client: &LiveClient,
+    daemon: &LiveDaemon,
+    repo_id: &str,
+    sentinel: &str,
+) -> String {
+    let hash_line = format!(
+        "RT_ENV {SECRET_KEY} sha256={}",
+        sha256_hex(sentinel.as_bytes())
+    );
+    let ask = format!("/env {SECRET_KEY}");
+    client.send(spawn_agent_in_place(
+        repo_id,
+        &json!({ "kind": "claude" }),
+        &[(SECRET_KEY, sentinel)],
+    ));
+    let session = wait_snapshot(h, client, "the claude session's snapshot", |s| {
+        s.mode == SessionMode::Interactive
+    });
+    let conversation = session
+        .claude_session_id
+        .clone()
+        .expect("a spawned claude session carries its conversation id");
+    let cwd = &session
+        .members
+        .first()
+        .expect("an in-place session has a member")
+        .worktree_path;
+    write_transcript(daemon, cwd, &conversation);
+    wait_scrollback_contains(h, client, &session.id, "[fake-claude] ready");
+    type_line(client, &session.id, &ask);
+    wait_scrollback_contains(h, client, &session.id, &hash_line);
+
+    kill_session_tracer(h, daemon, &session.id);
+    wait_tracer_lost(h, daemon, &session.id);
+    let results = recover(
+        h,
+        client,
+        "recover-sealed",
+        RecoverItem {
+            history_id: session.id.clone(),
+            conversation_id: Some(conversation),
+            how: RecoverAs::Claude,
+        },
+    );
+    let new_id = recovered_session(&results, &session.id);
+    wait_snapshot(h, client, "the recovered claude's snapshot", |s| {
+        s.id == new_id
+    });
+    wait_scrollback_contains(h, client, &new_id, "[fake-claude] ready");
+    type_line(client, &new_id, &ask);
+    wait_scrollback_contains(h, client, &new_id, &hash_line);
+    session.id
+}
+
+/// Asserts the sealed value lives in Credential Manager and in no file under
+/// the config dir, whose stored files carry its reference instead.
+fn assert_sealed_on_disk(daemon: &LiveDaemon, history_id: &str, sentinel: &str) {
+    let config = daemon.config_dir();
+    assert_no_file_holds(&config, sentinel.as_bytes());
+    assert!(
+        config.join("env-secrets.json").is_file(),
+        "the daemon indexed the sealed value"
+    );
+    let entry_path = config.join("history").join(format!("{history_id}.json"));
+    let entry = std::fs::read_to_string(&entry_path).expect("read the history entry");
+    assert!(
+        entry.contains("${secret:"),
+        "{} carries a secret reference: {entry}",
+        entry_path.display()
+    );
+    let service = isolated_service(daemon);
+    let secrets = indexed_secrets(&config);
+    assert!(!secrets.is_empty(), "the index lists the sealed value");
+    for (key, id) in &secrets {
+        let target = credential_target(&service, key, id);
+        assert!(
+            credential_listed(&target),
+            "Credential Manager lists no {target}: the spec's service hash or target format \
+             is wrong"
+        );
+    }
+}
+
+#[gpui::test]
+#[ignore = "e2e: run via .\\rt.ps1 native-e2e"]
+fn live_a_sealed_secret_reaches_the_child_and_no_file(cx: &mut TestAppContext) {
+    require_node();
+    let daemon = LiveDaemon::start("sealed-secret");
+    let _cleanup = SealedSecretsCleanup::new(&daemon);
+    let repo = daemon.git_fixture();
+    let (mut h, client) = Harness::open_live(cx, &daemon);
+    wait_connected(&mut h, &client, &daemon);
+
+    let repo_id = register_repo(&mut h, &client, &daemon, &repo);
+    let sentinel = format!("rt-sentinel-{}", uuid::Uuid::new_v4().simple());
+    let history_id = recover_sealed_session(&mut h, &client, &daemon, &repo_id, &sentinel);
+    assert_sealed_on_disk(&daemon, &history_id, &sentinel);
 }
 
 #[gpui::test]
