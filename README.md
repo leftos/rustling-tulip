@@ -62,6 +62,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Needs You**: the native client's rail panel listing every session waiting on the user, longest wait first; see `docs/native-client.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
 - **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
+- **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code, Codex, Cursor, and the ones `docs/plans/agent-harnesses.md` adds); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
 - **Own-agent recovery**: recovering a Codex or Cursor history entry as a session of the same CLI in the same folder, resuming its recorded conversation when that CLI can, else a fresh run.
 - **Agent conversation id**: the id a Codex or Cursor session's own CLI resumes with, recorded on the session and its history entry (`agent_conversation_id`); Claude's stays in `claude_session_id`.
 - **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
