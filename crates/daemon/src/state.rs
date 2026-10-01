@@ -6,6 +6,7 @@
 //! per-session `meta.json` sidecars on startup (see `orphan.rs`), so the daemon
 //! can restart without a single fragile state blob.
 
+use crate::env_secrets::{self, SealOutcome};
 use crate::paths::{Dirs, simplify_path};
 use anyhow::Context as _;
 use protocol::{ContainerRef, RepoEntry, TabEntry, WorkspaceEntry};
@@ -102,18 +103,25 @@ impl Default for PersistedState {
 pub struct AppState {
     pub dirs: Dirs,
     inner: Mutex<PersistedState>,
+    /// True when `state.json` existed but could not be parsed, so `inner` is a
+    /// fresh default and this process does not know what the file referenced.
+    /// A startup sweep that must not miss a reference declines to act.
+    state_file_corrupt: bool,
 }
 
 impl AppState {
     pub fn load_or_default(dirs: &Dirs) -> anyhow::Result<Self> {
-        let mut inner = if dirs.state_file.exists() {
+        let (mut inner, state_file_corrupt) = if dirs.state_file.exists() {
             let bytes = std::fs::read(&dirs.state_file).context("reading state.json")?;
-            serde_json::from_slice::<PersistedState>(&bytes).unwrap_or_else(|err| {
-                tracing::warn!(?err, "state.json corrupt, starting fresh");
-                PersistedState::default()
-            })
+            match serde_json::from_slice::<PersistedState>(&bytes) {
+                Ok(state) => (state, false),
+                Err(err) => {
+                    tracing::warn!(?err, "state.json corrupt, starting fresh");
+                    (PersistedState::default(), true)
+                }
+            }
         } else {
-            PersistedState::default()
+            (PersistedState::default(), false)
         };
         // Migrate any Windows verbatim-prefixed paths persisted by an older
         // build that called `canonicalize` without simplifying. Without this
@@ -123,6 +131,7 @@ impl AppState {
         let state = Self {
             dirs: dirs.clone(),
             inner: Mutex::new(inner),
+            state_file_corrupt,
         };
         if migrated {
             // Best-effort: persist the simplified paths immediately so the
@@ -132,6 +141,34 @@ impl AppState {
             }
         }
         Ok(state)
+    }
+
+    /// Seal the secret literal rows every persisted `last_spawn_config` holds,
+    /// moving each plain-text secret into the credential store and leaving a
+    /// `${secret:<id>}` reference in its place. Returns whether anything
+    /// changed; `state.json` is rewritten only when something did.
+    ///
+    /// A store refusal leaves both the in-memory state and `state.json` exactly
+    /// as they were — a warning naming the file and the key is logged — so the
+    /// next start tries again.
+    ///
+    /// # Errors
+    ///
+    /// Fails only when the sealed state cannot be written back.
+    pub fn seal_last_spawn_configs(&self) -> anyhow::Result<bool> {
+        let mut guard = crate::sync::lock(&self.inner);
+        if !seal_secret_rows_in_place(&mut guard, &self.dirs.state_file) {
+            return Ok(false);
+        }
+        persist(&self.dirs, &guard)?;
+        Ok(true)
+    }
+
+    /// Whether `state.json` existed but could not be parsed, so this process
+    /// runs on a fresh default and does not know which repos, workspaces or
+    /// `last_spawn_config`s the file carried.
+    pub fn state_file_corrupt(&self) -> bool {
+        self.state_file_corrupt
     }
 
     pub fn with_persisted<R>(&self, f: impl FnOnce(&PersistedState) -> R) -> R {
@@ -338,13 +375,42 @@ impl AppState {
 }
 
 /// Serialize `state` and swap it in as `state.json` via a temporary file, so a
-/// reader never observes a partially-written file.
+/// reader never observes a partially-written file. Written owner-only, like
+/// the other files a spawn config reaches (`secret::write_private`).
 fn persist(dirs: &Dirs, state: &PersistedState) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(state).context("serializing state")?;
     let tmp = dirs.state_file.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes).context("writing state tmp")?;
+    crate::secret::write_private(&tmp, &bytes).context("writing state tmp")?;
     std::fs::rename(&tmp, &dirs.state_file).context("renaming state.json")?;
     Ok(())
+}
+
+/// Seal the secret literal rows in every persisted `last_spawn_config` (repos
+/// and workspaces), returning whether any row changed.
+///
+/// Row by row, like the sidecar and history passes go file by file: a value
+/// the store refuses stays in plain text — [`env_secrets::seal_stored_rows`]
+/// warns with the file and the key — and every other row is still sealed, so
+/// one over-long value never costs the rest of the file.
+fn seal_secret_rows_in_place(state: &mut PersistedState, file: &Path) -> bool {
+    let mut changed = false;
+    for config in state
+        .repos
+        .iter_mut()
+        .filter_map(|repo| repo.last_spawn_config.as_mut())
+        .chain(
+            state
+                .workspaces
+                .iter_mut()
+                .filter_map(|workspace| workspace.last_spawn_config.as_mut()),
+        )
+    {
+        if let SealOutcome::Sealed(rows) = env_secrets::seal_stored_rows(&config.extra_env, file) {
+            config.extra_env = rows;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Walk through every stored path and rewrite it to the simplified form (no
