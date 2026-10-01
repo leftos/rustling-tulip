@@ -20,7 +20,6 @@ pub struct Secret(String);
 impl Secret {
     /// Wrap a value read from somewhere other than the environment — the
     /// secret store — so it redacts its text wherever it is printed.
-    #[cfg_attr(not(test), expect(dead_code, reason = "wired into spawns by ES.3"))]
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }

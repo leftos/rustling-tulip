@@ -13,7 +13,6 @@ mod branch_names;
 mod codex_rollout;
 mod detach;
 mod discovery;
-#[expect(dead_code, reason = "wired into spawns by ES.3")]
 mod env_secrets;
 mod file_fetch;
 mod git;
@@ -96,6 +95,14 @@ async fn main() -> anyhow::Result<()> {
         rustling_tulip_claude = %std::env::var("RUSTLING_TULIP_CLAUDE").unwrap_or_else(|_| "(unset)".to_string()),
         "claude binary override status"
     );
+
+    // Windows Credential Manager is the store secret environment rows are
+    // sealed into. Install it before anything can seal a value; a machine that
+    // cannot install it still starts, and a spawn carrying a secret row then
+    // refuses rather than writing the value to disk.
+    if let Err(err) = env_secrets::init() {
+        tracing::warn!(?err, "the secret store could not be installed");
+    }
 
     let state = state::AppState::load_or_default(&dirs).context("loading persisted state")?;
     let state = Arc::new(state);

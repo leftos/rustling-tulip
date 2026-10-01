@@ -1,9 +1,10 @@
 //! The store for secret environment-row values.
 //!
 //! A spawn dialog row under a secret key holds a literal only until the daemon
-//! seals it: [`seal`] moves the value into Windows Credential Manager and
-//! returns the id of a `${secret:<id>}` reference that takes its place in every
-//! stored file and every echo. [`open`] reads a value back at spawn.
+//! seals it: [`seal_rows`] moves a spawn's secret values into Windows
+//! Credential Manager and leaves the id of a `${secret:<id>}` reference in
+//! their place in every stored file and every echo. [`open`] reads a value back
+//! at spawn.
 //!
 //! Values live in Credential Manager rather than in a file so a backup, or
 //! another user of the machine, never sees them. What this module keeps in the
@@ -101,6 +102,81 @@ pub fn init() -> anyhow::Result<()> {
 /// limit, or the store or the index could not be written. Neither message
 /// carries the value.
 pub fn seal(key: &str, value: &str) -> Result<String, SpawnFailure> {
+    check_sealable_value(key, value)?;
+    seal_value(key, value).map_err(|err| SpawnFailure {
+        title: "Could not save a secret".to_owned(),
+        detail: format!("{key}'s value could not be saved: {err:#}"),
+        hint: Some(format!(
+            "Try again, or set {key} in your environment and use ${{env:{key}}}."
+        )),
+    })
+}
+
+/// Seal every row in `extra_env` that carries a secret literal, replacing its
+/// value with the `${secret:<id>}` reference standing for it.
+///
+/// A row is sealed when its value is a literal (never a `${env:…}` or
+/// `${secret:…}` reference), non-empty, and its key either names a credential
+/// ([`protocol::env_rows::is_secret_key`]) or the client listed it in
+/// `secret_keys` (the dialog's per-row Secret toggle). Every other row is left
+/// exactly as sent.
+///
+/// # Errors
+///
+/// The [`seal`] refusal: the value is over the store's size limit, or the
+/// store or the index could not be written. The refusal names the key, never
+/// the value.
+pub fn seal_rows(
+    extra_env: &mut [(String, String)],
+    secret_keys: &[String],
+) -> Result<(), SpawnFailure> {
+    for (key, value) in extra_env.iter_mut() {
+        if !is_secret_row(key, value, secret_keys) {
+            continue;
+        }
+        let id = seal(key, value)?;
+        *value = format!("${{secret:{id}}}");
+    }
+    Ok(())
+}
+
+/// Refuse a spawn whose secret rows could not be sealed, without sealing
+/// anything: the selection and the refusals [`seal_rows`] applies, for a caller
+/// that must decide before it does work it cannot undo — the dispatcher's
+/// pre-check, which runs before the user is asked to confirm a checkout, and
+/// recovery, which runs before it registers a repo.
+///
+/// # Errors
+///
+/// The [`seal`] refusal for the first row that would be sealed: the value is
+/// over the store's size limit, or the store is not available. Neither message
+/// carries the value.
+pub fn check_sealable(
+    extra_env: &[(String, String)],
+    secret_keys: &[String],
+) -> Result<(), SpawnFailure> {
+    for (key, value) in extra_env {
+        if is_secret_row(key, value, secret_keys) {
+            check_sealable_value(key, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `value` is a secret literal under `key`: non-empty, not already a
+/// reference, and either the key names a credential or `secret_keys` lists it.
+fn is_secret_row(key: &str, value: &str, secret_keys: &[String]) -> bool {
+    !value.is_empty()
+        && protocol::env_rows::reference(value).is_none()
+        && (protocol::env_rows::is_secret_key(key)
+            || secret_keys.iter().any(|listed| listed == key))
+}
+
+/// The refusals a secret value must pass before it can be stored: it fits the
+/// store's size limit, and the store is installed (see [`init`]). Shared by
+/// [`seal`] and [`check_sealable`], so a row is refused for the same reasons
+/// whether the daemon checks it early or seals it.
+fn check_sealable_value(key: &str, value: &str) -> Result<(), SpawnFailure> {
     if value.encode_utf16().count() > MAX_VALUE_UNITS {
         return Err(SpawnFailure {
             title: "Could not save a secret".to_owned(),
@@ -110,13 +186,18 @@ pub fn seal(key: &str, value: &str) -> Result<String, SpawnFailure> {
             hint: None,
         });
     }
-    seal_value(key, value).map_err(|err| SpawnFailure {
-        title: "Could not save a secret".to_owned(),
-        detail: format!("{key}'s value could not be saved: {err:#}"),
-        hint: Some(format!(
-            "Try again, or set {key} in your environment and use ${{env:{key}}}."
-        )),
-    })
+    if keyring_core::get_default_store().is_none() {
+        return Err(SpawnFailure {
+            title: "Could not save a secret".to_owned(),
+            detail: format!(
+                "{key}'s value can't be saved right now: the credential store is not available."
+            ),
+            hint: Some(format!(
+                "Restart the daemon, or set {key} in your environment and use ${{env:{key}}}."
+            )),
+        });
+    }
+    Ok(())
 }
 
 /// Read the value saved under `id`. `None` when the index has no such id, or
@@ -147,6 +228,14 @@ pub fn open(id: &str) -> Option<Secret> {
 /// Fails when the index cannot be read or rewritten, or when the store refuses
 /// to remove the value. A refusal leaves the line in place: the value is still
 /// in the store, so it has to stay findable for a later cleanup to retry.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the startup cleanup of unreferenced ids is its production caller; only \
+                  this module's tests call it so far"
+    )
+)]
 pub fn delete(id: &str) -> anyhow::Result<()> {
     let _guard = index_lock();
     let context = context()?;
@@ -239,6 +328,13 @@ fn store_value(service: &str, key: &str, id: &str, value: &str) -> anyhow::Resul
     Ok(())
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called by `delete`, whose production caller is the startup cleanup"
+    )
+)]
 fn remove_stored(service: &str, key: &str, id: &str) -> anyhow::Result<()> {
     let entry = Entry::new(service, &user(key, id))
         .with_context(|| format!("opening the credential entry for {key}"))?;
@@ -292,22 +388,21 @@ fn write_index(path: &Path, entries: &[IndexEntry]) -> anyhow::Result<()> {
 
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use super::CONFIG_DIR_VAR;
     use std::ffi::OsString;
-    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+    use std::path::PathBuf;
+    use std::sync::{Arc, OnceLock};
 
     /// Serialises the tests that point `RUSTLING_TULIP_CONFIG_DIR` somewhere:
-    /// env vars are process-global and tests run on parallel threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// A value no index file may ever contain.
-    const VALUE_SENTINEL: &str = "sentinel-value-8c41f0d2";
+    /// env vars are process-global and tests run on parallel threads. An async
+    /// mutex, so an async test can hold it across its awaits.
+    pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A config dir under the temp root that `RUSTLING_TULIP_CONFIG_DIR` points
     /// at while the guard lives. Drop restores the var's prior value (unsetting
     /// it only when it was unset) and removes the dir.
-    struct ScratchConfigDir {
+    pub(crate) struct ScratchConfigDir {
         path: PathBuf,
         prior: Option<OsString>,
     }
@@ -341,7 +436,7 @@ mod tests {
 
     /// The in-memory store, installed as the process default on first use. Ids
     /// are unique per test, so the tests can share it.
-    fn mock_store() -> Arc<keyring_core::mock::Store> {
+    pub(crate) fn mock_store() -> Arc<keyring_core::mock::Store> {
         static STORE: OnceLock<Arc<keyring_core::mock::Store>> = OnceLock::new();
         STORE
             .get_or_init(|| {
@@ -352,6 +447,35 @@ mod tests {
             })
             .clone()
     }
+
+    /// The env lock, the mock store and a scratch config dir, for a
+    /// synchronous test. The guard must outlive the test body.
+    pub(crate) fn scratch(label: &str) -> (tokio::sync::MutexGuard<'static, ()>, ScratchConfigDir) {
+        let guard = ENV_LOCK.blocking_lock();
+        mock_store();
+        (guard, ScratchConfigDir::new(label))
+    }
+
+    /// The same as [`scratch`], for an async test: the async lock may be held
+    /// across awaits, where the std one would be `await_holding_lock`.
+    pub(crate) async fn scratch_async(
+        label: &str,
+    ) -> (tokio::sync::MutexGuard<'static, ()>, ScratchConfigDir) {
+        let guard = ENV_LOCK.lock().await;
+        mock_store();
+        (guard, ScratchConfigDir::new(label))
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests fail loudly on setup errors")]
+mod tests {
+    use super::test_support::{mock_store, scratch};
+    use super::*;
+    use std::sync::Arc;
+
+    /// A value no index file may ever contain.
+    const VALUE_SENTINEL: &str = "sentinel-value-8c41f0d2";
 
     /// Make the next call on `key`'s credential for `id` fail with `err`, the
     /// way a credential store that is busy or locked would. The mock clears the
@@ -371,12 +495,6 @@ mod tests {
                 .expect("the credential was built"),
         );
         cred.set_error(err);
-    }
-
-    fn scratch(label: &str) -> (std::sync::MutexGuard<'static, ()>, ScratchConfigDir) {
-        let lock = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        mock_store();
-        (lock, ScratchConfigDir::new(label))
     }
 
     fn index_text() -> String {
@@ -454,6 +572,55 @@ mod tests {
         );
         let index = index_text();
         assert!(!index.contains("ANTHROPIC_API_KEY"), "{index}");
+    }
+
+    /// The pre-check selects and refuses exactly what sealing does, and writes
+    /// nothing: no index line, no store entry.
+    #[test]
+    fn check_sealable_selects_and_refuses_without_writing_anything() {
+        let (_lock, _dir) = scratch("check-sealable");
+        let index = context().expect("the config dir resolves").index;
+        let stored = mock_store()
+            .inner
+            .lock()
+            .expect("the mock store is not poisoned")
+            .borrow()
+            .len();
+
+        let rows = vec![("ANTHROPIC_API_KEY".to_owned(), VALUE_SENTINEL.to_owned())];
+        check_sealable(&rows, &[]).expect("a sealable row passes");
+        // The same selection `seal_rows` applies: a plain row, a reference and
+        // an empty value are none of its business.
+        let untouched = vec![
+            ("RUST_LOG".to_owned(), "debug".to_owned()),
+            ("K".to_owned(), "${env:HOME}".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ];
+        check_sealable(&untouched, &[]).expect("nothing to seal");
+        assert!(!index.exists(), "the check writes no index line");
+        assert_eq!(
+            mock_store()
+                .inner
+                .lock()
+                .expect("the mock store is not poisoned")
+                .borrow()
+                .len(),
+            stored,
+            "the check stores no value"
+        );
+
+        let too_long = "a".repeat(MAX_VALUE_UNITS + 1);
+        let refusal = check_sealable(&[("ANTHROPIC_API_KEY".to_owned(), too_long)], &[])
+            .expect_err("an over-long value refuses");
+        assert!(refusal.detail.contains("ANTHROPIC_API_KEY"), "{refusal:?}");
+        assert!(refusal.detail.contains("too long"), "{refusal:?}");
+        assert!(refusal.hint.is_none(), "{refusal:?}");
+        assert!(!index.exists(), "a refusal writes nothing either");
+
+        // A key the dialog toggled is checked even though its name is plain.
+        let toggled = vec![("GH_PAT".to_owned(), VALUE_SENTINEL.to_owned())];
+        check_sealable(&toggled, &["GH_PAT".to_owned()]).expect("a toggled row passes");
+        assert!(!index.exists(), "a toggled row still writes nothing");
     }
 
     #[test]

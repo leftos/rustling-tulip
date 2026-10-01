@@ -1047,4 +1047,24 @@ mod tests {
         let unresolved = codex_home_with(&rows, |_| None);
         assert_ne!(unresolved, Some(PathBuf::from("${env:RT_CODEX_HOME}")));
     }
+
+    #[test]
+    fn codex_home_resolves_a_secret_reference_row() {
+        let (_lock, _dir) = crate::env_secrets::test_support::scratch("codex-secret-home");
+        let stored = crate::env_secrets::seal("CODEX_HOME", r"D:\sealed-codex").expect("seals");
+        let rows = vec![("CODEX_HOME".to_string(), format!("${{secret:{stored}}}"))];
+        // The lookup is the env one; a secret row is resolved from the store.
+        assert_eq!(
+            codex_home_with(&rows, |_| None),
+            Some(PathBuf::from(r"D:\sealed-codex"))
+        );
+        let unknown = vec![(
+            "CODEX_HOME".to_string(),
+            "${secret:0123456789abcdef0123456789abcdef}".to_string(),
+        )];
+        assert_ne!(
+            codex_home_with(&unknown, |_| None),
+            Some(PathBuf::from("${secret:0123456789abcdef0123456789abcdef}"))
+        );
+    }
 }
