@@ -66,7 +66,7 @@ Order: DK.1 → DK.2 → DK.3; DK.4 and DK.5 need nothing and may go in parallel
 
 - [x] **DK.1 Claude options constructor, daemon side (no behaviour change).** `AgentOptions::claude(permission_mode)` in `crates/protocol/src/lib.rs`, and every construction of `AgentOptions::Claude { … }` in the protocol and daemon crates switched to it, every pattern naming `permission_mode` given `..`, so DK.3's new field touches one file. Files: `crates/protocol/src/lib.rs`, `crates/daemon/src/agents/claude.rs`, `history.rs`, `presets.rs`, `server.rs`. Proof: `cargo test -p protocol -p daemon` unchanged and green, `cargo clippy` clean.
 - [x] **DK.2 Claude options constructor, native side (no behaviour change).** The same switch in the native crate. Files: `apps/native/src/shell_dialog.rs`, `spawn_form.rs`, `spawns.rs`, `tests/ui/ui_shell.rs`, `tests/ui/ui_spawn.rs`, `tests/ui/ui_spawn_dialog.rs`. Proof: `cargo test -p rustling-tulip-native` unchanged and green. Needs DK.1.
-- [ ] **DK.3 The provider field.** `ClaudeProvider` (Anthropic default, `deepseek`, `#[serde(other)] Unknown`), `provider` in `AgentOptions::Claude` (default, skipped when Anthropic), `AgentOptions::claude_provider()`, `SessionSnapshot.claude_provider` (default), derived in `SessionRecord::snapshot` from `spawn_config`. Files: `crates/protocol/src/lib.rs`, `crates/daemon/src/session.rs`.
+- [x] **DK.3 The provider field.** `ClaudeProvider` (Anthropic default, `deepseek`, `#[serde(other)] Unknown`), `provider` in `AgentOptions::Claude` (default, skipped when Anthropic), `AgentOptions::claude_provider()`, `SessionSnapshot.claude_provider` (default), derived in `SessionRecord::snapshot` from `spawn_config`. Files: `crates/protocol/src/lib.rs`, `crates/daemon/src/session.rs`.
 
   Proof, red first: protocol tests that an Anthropic `SpawnRequest` serializes with no `provider` key, a DeepSeek one round-trips, `"provider":"mistral"` decodes as `Unknown`, `SpawnConfig::from_request` → `to_clone_request` and `to_duplicate_request` keep DeepSeek, and a `SpawnSession` without `provider` decodes as Anthropic.
 
@@ -116,6 +116,7 @@ Answered (user): Q1 (a) a DeepSeek entry recovers as Claude only; Q2 (a) endpoin
 6. **Models on offer.**
    - (a) Recommended: `deepseek-flash` only, as the script does; the Model field stays free text for anyone who wants another DeepSeek model. Worst case: a user types a model id DeepSeek does not serve and sees the error on the first turn.
    - (b) The table lists DeepSeek's models and the dialog offers them as choices when DeepSeek is picked. Worst case: a list in code that goes stale when DeepSeek renames models.
+7. **A daemon older than DK.3 drops `provider`** (found in DK.3's review). The field is additive, so a still-running daemon built before DK.3 decodes a DeepSeek `SpawnSession` with the key ignored and spawns on Anthropic; the protocol version does not change, so `ensure_running` keeps that daemon. Tracer-backed daemons outlive client updates by design.
 
 ## Findings outside this item
 
