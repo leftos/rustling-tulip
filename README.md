@@ -61,7 +61,11 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
 - **Needs You**: the native client's rail panel listing every session waiting on the user, longest wait first; see `docs/native-client.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
-- **Recovery**: respawning a session from its history entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command.
+- **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
+- **Own-agent recovery**: recovering a Codex or Cursor history entry as a session of the same CLI in the same folder, resuming its recorded conversation when that CLI can, else a fresh run.
+- **Agent conversation id**: the id a Codex or Cursor session's own CLI resumes with, recorded on the session and its history entry (`agent_conversation_id`); Claude's stays in `claude_session_id`.
+- **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
+- **RA.1, CR.0**: step ids of the finished own-agent recovery design (RA recovery steps, CR the Cursor spike), named in commit messages.
 - **Folder-only entry**: a history entry with no spawn config (imported from a tracer log, or a standalone session); it is recovered by running claude in its folder with its `--add-dir` set, never by checking out a branch.
 - **MA1, MA2, …**: item ids in `docs/plans/mobile-app.md`, the iOS and Android app's phases (distinct from the macOS plan's M0–M4).
 - **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.

@@ -708,8 +708,9 @@ pub enum SpawnTarget {
         /// choose its platform default, usually the user's home directory.
         #[serde(default)]
         cwd: Option<String>,
-        /// Extra directories an interactive Claude session is given with
-        /// `--add-dir`. Plain shells ignore them.
+        /// Extra directories an interactive Claude or Codex session is given
+        /// with `--add-dir`; Cursor runs in `cwd` only. Plain shells ignore
+        /// them.
         #[serde(default)]
         add_dirs: Vec<String>,
     },

@@ -86,6 +86,7 @@ The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the
 |---|---|---|
 | `RUSTLING_TULIP_CLAUDE` | Path to `claude` binary | `claude` (PATH lookup) |
 | `RUSTLING_TULIP_CODEX` | Path to `codex` binary | `codex` (PATH lookup) |
+| `CODEX_HOME` | Codex's home; the daemon reads it (a spawn's own `CODEX_HOME` row first) to find a Codex session's rollout file and so its conversation id | `%USERPROFILE%\.codex` |
 | `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
 | `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
 | `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |
@@ -98,7 +99,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `state.json` — persisted repos + workspaces + tabs, plus daemon-side host settings (`worktrees_root_override`, `keep_awake`) that must apply with no window open (see `crates/daemon/src/state.rs`).
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
-- `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its Claude conversation id), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them with `claude --resume`.
+- `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its conversation id: Claude's `claude_session_id`, or the Codex or Cursor CLI's own `agent_conversation_id`), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them: a Claude entry with `claude --resume`, a Codex or Cursor entry as its own agent in the same folder, resuming its conversation (`codex resume`, `cursor-agent --resume`) when it can, else a fresh run.
 - `codex-contested.json` — Codex rollout ids found while two Codex sessions waited in one folder, which no session may claim as its conversation (`crates/daemon/src/codex_rollout.rs`); entries drop after 7 days.
 - `daemon.lock` — the single-instance lock; a second daemon on the same config dir exits without touching anything.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).

@@ -45,7 +45,7 @@ impl AgentBackend for CursorBackend {
         &self,
         opts: &AgentOptions,
         common: &CommonSpawnFields,
-        _members: &[SessionMember],
+        members: &[SessionMember],
         initial_prompt: Option<&str>,
     ) -> Vec<String> {
         let (plan_mode, sandbox) = match opts {
@@ -55,6 +55,21 @@ impl AgentBackend for CursorBackend {
                 (false, None)
             }
         };
+        // cursor-agent takes a single `--workspace` folder, so a workspace or
+        // standalone target spawns in the first folder only; name the folders
+        // this drops so a multi-folder recovery is not silent.
+        let dropped: Vec<&str> = members
+            .iter()
+            .skip(1)
+            .map(|m| m.worktree_path.as_str())
+            .chain(common.add_dirs.iter().map(String::as_str))
+            .collect();
+        if !dropped.is_empty() {
+            let cwd = common.cwd.unwrap_or_default();
+            warn!(
+                "cursor-agent takes one --workspace folder; running in {cwd} without {dropped:?}"
+            );
+        }
         build_args(common, plan_mode, sandbox, initial_prompt)
     }
 
@@ -95,9 +110,10 @@ impl AgentBackend for CursorBackend {
 ///   where cursor-agent's sandbox fails
 /// - trailing positional `<prompt>` when no prompt-injector is attached,
 ///   resumed or not.
-///   Cursor does not expose a system-prompt flag, but workspace mode is
-///   gated off (`supports_workspace = false`), so the prelude path doesn't
-///   apply.
+///   Cursor does not expose a system-prompt flag, so no workspace prelude is
+///   emitted. Cursor runs in the first folder only and is told nothing about
+///   the others: a multi-folder spawn drops the extra members and `add_dirs`
+///   with a warning.
 fn build_args(
     common: &CommonSpawnFields<'_>,
     plan_mode: bool,
@@ -369,6 +385,19 @@ mod tests {
             Some("x"),
         );
         assert_eq!(disabled, vec!["--sandbox", "disabled", "x"]);
+    }
+
+    #[test]
+    fn standalone_add_dirs_are_not_passed_to_cursor() {
+        let extra = vec!["X:/dev/b".to_string()];
+        let fields = CommonSpawnFields {
+            add_dirs: &extra,
+            cwd: Some("X:/dev/a"),
+            ..common(false, None, false)
+        };
+        let args = build_args(&fields, false, None, None);
+        assert!(!args.contains(&"--add-dir".to_string()), "{args:?}");
+        assert_eq!(args, ["--workspace", "X:/dev/a", "--trust"]);
     }
 
     fn common(skip: bool, model: Option<&str>, has_injector: bool) -> CommonSpawnFields<'_> {

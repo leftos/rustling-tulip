@@ -117,9 +117,11 @@ pub struct CommonSpawnFields<'a> {
     /// any initial prompt. The Cursor backend passes `--resume <id>` ahead of
     /// its other flags and keeps the initial prompt.
     pub resume_conversation: Option<&'a str>,
-    /// Directories the Claude backend adds with `--add-dir` after the extra
-    /// members' worktrees: a standalone target's `add_dirs`. Ignored by other
-    /// backends.
+    /// Directories a standalone target carries as extra folders. The Claude
+    /// backend adds them with `--add-dir` after the extra members' worktrees;
+    /// the Codex backend adds them the same way on interactive spawns and
+    /// resumes. The Cursor backend cannot pass them (it logs a warning naming
+    /// the folders it drops), and headless spawns ignore them.
     pub add_dirs: &'a [String],
     /// The session's working directory, which the Codex backend passes as
     /// `-C <cwd>` with a `-c` override marking it trusted on every

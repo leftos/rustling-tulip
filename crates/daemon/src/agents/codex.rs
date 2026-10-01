@@ -210,7 +210,9 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 /// Layout:
 /// - `-C <cwd> -c projects={'<cwd>'={trust_level='trusted'}}` when
 ///   [`CommonSpawnFields::cwd`] is set (see [`push_cwd_and_trust`])
-/// - `--add-dir <path>` for every extra member after the primary cwd
+/// - `--add-dir <path>` for every extra member after the primary cwd, then
+///   for every entry of [`CommonSpawnFields::add_dirs`] (a standalone target's
+///   extra folders)
 /// - `--model <id>` when [`CommonSpawnFields::model`] is set
 /// - permission/sandbox: `--yolo` overrides everything; otherwise
 ///   `--sandbox <value>` when a sandbox is set
@@ -225,7 +227,12 @@ fn handle_item(rec: &mut crate::session::SessionRecord, item: ThreadItem, is_ter
 /// [--dangerously-bypass-approvals-and-sandbox | --sandbox S] <id>`: no
 /// prompt or prelude (the conversation already holds them), `-C` and the
 /// trust override only when [`CommonSpawnFields::cwd`] is set, and the flags
-/// always re-passed.
+/// always re-passed. The `--add-dir` runs are the extra members' worktrees
+/// followed by [`CommonSpawnFields::add_dirs`], as in the fresh form.
+///
+/// The headless `exec` form does not pass `--add-dir`; a standalone target
+/// is interactive only (see `server::standalone_supports`), so a headless
+/// spawn never carries [`CommonSpawnFields::add_dirs`].
 fn build_args(
     common: &CommonSpawnFields<'_>,
     sandbox: Option<CodexSandbox>,
@@ -240,6 +247,10 @@ fn build_args(
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
+    }
+    for dir in common.add_dirs {
+        args.push("--add-dir".to_string());
+        args.push(dir.clone());
     }
     if let Some(model) = common.model {
         args.push("--model".to_string());
@@ -279,6 +290,10 @@ fn build_resume_args(
     for extra in members.iter().skip(1) {
         args.push("--add-dir".to_string());
         args.push(extra.worktree_path.clone());
+    }
+    for dir in common.add_dirs {
+        args.push("--add-dir".to_string());
+        args.push(dir.clone());
     }
     if let Some(model) = common.model {
         args.push("--model".to_string());
@@ -597,6 +612,28 @@ mod tests {
                 RESUME_ID
             ]
         );
+    }
+
+    #[test]
+    fn standalone_add_dirs_follow_member_add_dirs() {
+        let extra = vec!["X:/dev/b".to_string(), "X:/dev/c".to_string()];
+        let common = CommonSpawnFields {
+            add_dirs: &extra,
+            ..common(false, None, false)
+        };
+        let args = build_args(&common, None, &[], None);
+        assert_eq!(args, ["--add-dir", "X:/dev/b", "--add-dir", "X:/dev/c"]);
+    }
+
+    #[test]
+    fn resume_standalone_passes_add_dirs() {
+        let extra = vec!["X:/dev/b".to_string()];
+        let fields = CommonSpawnFields {
+            add_dirs: &extra,
+            ..resuming(false, None, None)
+        };
+        let args = build_args(&fields, None, &[], None);
+        assert_eq!(args, ["resume", "--add-dir", "X:/dev/b", RESUME_ID]);
     }
 
     #[test]
