@@ -96,7 +96,7 @@ Review: `code-review`, and a security read of the pinned-TLS and pairing code. V
 - [ ] **MA1 Shared client core**: a crate holding the pinned-TLS connect, host profiles and pairing, recovered from `remote.rs` on the `tauri-last` tag, which Phase 6 builds on and the mobile app reuses. See [mobile-app.md](./mobile-app.md).
 - [ ] **Phase 6 — remote and cutover**: connection picker, LAN pairing, pinned-TLS tunnel on MA1, autostart recovered from the tag; the installer ships the native client and deletes the `rustling-tulip-daemon` login `Run` value on uninstall; update CLAUDE.md. Ruled (user): split into items and put to the user when Wave 10 comes up, not before. See [native-client.md](./native-client.md#phase-6--remote-and-cutover).
 - [ ] **FT.2 Native download sink**: the per-host download folder, `.part` writes and rename, and the open hand-off with the `:line` rule, stripping the `\\?\` prefix from `resolved_path`. Needs Phase 6. See [remote-file-transfer.md](./remote-file-transfer.md).
-- [ ] **FT.3 Ctrl-click trigger**: in remote mode, terminal links send `FetchFile` with candidate readings. Needs FT.2. See [remote-file-transfer.md](./remote-file-transfer.md).
+- [ ] **FT.3 Link-click trigger** (user): in remote mode, clicking a terminal path link sends `FetchFile` with candidate readings and opens the saved file on the remote client. Needs FT.2. See [remote-file-transfer.md](./remote-file-transfer.md).
 - [ ] **FT.4 "Fetch file…" popup**: a path input scoped to the focused session's repo or worktree, with progress, cancel and inline errors. Needs FT.2. See [remote-file-transfer.md](./remote-file-transfer.md).
 
 ### Wave 11 — Mobile app (`crates/relay`, the Flutter app, the client core)
@@ -116,6 +116,7 @@ Review: `code-review`, and a security read of the credential handling and the lo
 Items that share no files with a wave, what waits on something outside the repo, and ideas that need a design pass before they are brief-sized.
 
 - [ ] `docs/architecture.md` lacks two sections of the user-level architecture entry point (`~/.claude/docs/templates/ARCHITECTURE.md`): Integration Footguns (CLAUDE.md's "Architecture invariants" and "Wire-protocol gotchas" hold them) and Test locations (CLAUDE.md's "E2E tests" tiers).
+- [ ] **Terminal links underlined always, opened by a plain click** (user): every detected URL and path in the viewport is underlined without Ctrl held, and a left click opens it, replacing Ctrl+hover / Ctrl+click (`apps/native/src/term_view.rs` `on_mouse_down` ~1079, `on_hover_move`, `set_link_mode`, `hovered_link`, `paint_link_underline`; `lib.rs` ~1070; `links.rs`). Today links are found per hovered line, so underlining all of them means detecting across the viewport on each content change. To put to the user when it comes up: a press-and-drag that starts on a link still selects (open on a release with no movement?), what a click on a link does in a program that asked for mouse reports (Ctrl+click wins over them today), and whether Ctrl+click stays as a way through. Update `docs/native-client.md`'s Links ruling and the parity line in `native-client-parity.md` ~132. Remote mode opens through FT.3.
 
 ### Build tooling
 
