@@ -16,8 +16,8 @@ tools/
 docs/
   architecture.md - components, what the product does, task index
   native-client.md - the native client's design decisions
-  plans/MAIN.md - the main plan: open work in waves
-  plans/        - subplans for open items (completed/ holds older finished designs)
+  plans/MAIN.md - the plan snapshot, generated from Linear: open work in waves
+  plans/        - design files for open items (archive/ holds older finished designs)
 ```
 
 ## Build
@@ -38,13 +38,14 @@ The native client auto-starts the daemon if it isn't already running. Daemon lis
 
 ## Docs
 
-Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit and what the product does, and [docs/plans/MAIN.md](docs/plans/MAIN.md) for the open work.
+Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit and what the product does, and [docs/plans/MAIN.md](docs/plans/MAIN.md) for a snapshot of the open work. The plan itself lives in Linear, synced two ways with this repo's GitHub issues.
 
 ## Glossary
 
-- **Main plan**: `docs/plans/MAIN.md`, the one index of open work, one line an item in working order; a landed line is deleted.
-- **Wave**: a release-sized bundle of main-plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave names its files, review and verification.
-- **Subplan**: a `docs/plans/*.md` file holding the design and rulings for open items, linked from the main plan and deleted once its last item lands and its durable text is promoted into `docs/`.
+- **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
+- **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
+- **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
+- **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
@@ -95,5 +96,6 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
 - **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
-- **Feature marker**: `branch: feat/<name>` on a `docs/plans/MAIN.md` line; every item under it lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
-- **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the marker and merged with `--rebase` by `/ship` once every line under the marker is ticked.
+- **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
+- **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
+- **Tracking issue**: the issue `Merge feat/<name> (#N)`, last in a feature marker's project, that stands for its feature PR until the PR merges.

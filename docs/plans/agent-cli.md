@@ -4,7 +4,7 @@ Design for the "Agents that drive rustling-tulip" line in [MAIN.md](./MAIN.md) (
 
 ## Problem
 
-An agent in one session can't start, instruct or read another session. A user who wants a task fanned out across worktrees spawns each session by hand, pastes each prompt, and carries results between panes. This design gives a session a small CLI for that. Splitting a task, reviewing the parts and merging them stay the agent's job: the user ruled out a built-in plan-then-execute feature, since an agent handles review and merging best, and the agent skill pack (MAIN.md) teaches that.
+An agent in one session can't start, instruct or read another session. A user who wants a task fanned out across worktrees spawns each session by hand, pastes each prompt, and carries results between panes. This design gives a session a small CLI for that. Splitting a task, reviewing the parts and merging them stay the agent's job: the user ruled out a built-in plan-then-execute feature, since an agent handles review and merging best, and the agent skill pack ([agent-skill-pack.md](./agent-skill-pack.md)) teaches that.
 
 ## Rulings
 
@@ -79,7 +79,7 @@ A second subcommand of the tracer, dispatched before `Cli::parse` like HS.3's `h
 
 ## Steps
 
-Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → AC.9 → AC.10. AC.4 builds on HS.4's router split and AC.7 on HS.3's HTTP client when those land first; otherwise each makes them. The gates are MAIN.md's.
+Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → AC.9 → AC.10. AC.4 builds on HS.4's router split and AC.7 on HS.3's HTTP client when those land first; otherwise each makes them. The gates are the nextup profile's (`.claude/skills/rustling-tulip-nextup/SKILL.md`, "Agents and gates").
 
 - [ ] **AC.1 Protocol.** `crates/protocol/src/lib.rs`: `SessionParent`, `SessionSnapshot.parent`, `AgentRequest`, `AgentRequestKind` (with `Unknown`), `DaemonMessage::AgentRequests`, `ClientMessage::AnswerAgentRequest`. Proof: round-trip tests for each, an unknown `kind` decoding as `Unknown`, a snapshot without `parent`; `cargo test -p protocol` (includes `v22_compat`).
 - [ ] **AC.2 Token and environment.** New `crates/daemon/src/agent_token.rs` (generate, hash, verify); `session.rs` (`agent_token_sha256`, `parent` on the record, snapshot fills `parent`); `orphan.rs` (`OrphanMeta` fields, `#[serde(default)]`); `server.rs` spawn paths, `tracer_client.rs`, `headless.rs` (the four variables; name-only `Debug`); revoke on end, park, discard. Proof: `agent_token` unit tests (verify, wrong token, revoked); a `tracer_client` test that `tracer_command`'s `get_envs()` has `RT_AGENT_TOKEN`; a meta round trip holding the hash and never the token; a `Debug` test with no token text; `cargo test -p daemon -- agent_token tracer_client orphan`.
@@ -90,7 +90,7 @@ Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → A
 - [ ] **AC.7 The CLI.** `crates/tracer/src/main.rs` dispatches a leading `agent`; new `agent_cli.rs` and `http.rs`. Proof: tests against a local `TcpListener` fake asserting each verb's path, bearer and body, `--file` and stdin input, `--json`, exit codes 2 to 5, a missing `RT_AGENT_TOKEN` naming the variable; `cargo test -p tracer agent_cli`.
 - [ ] **AC.8 Native client.** `apps/native/src/sidebar.rs`, `sidebar_view.rs` (the `↳` tag), `net.rs` (`AgentRequests`), new `agent_requests.rs` and `agent_requests_view.rs` (the cards), `lib.rs`, `tests/support/mod.rs` (`SessionBuilder::parent`, a request builder). Proof: new `tests/ui/ui_agent_requests.rs` (a card per request, Approve and Deny send `AnswerAgentRequest`, an edited prompt is sent, a card leaves when the list drops it) and a `ui_sidebar` case (the tag with a live and with a gone parent); `cargo test -p rustling-tulip-native --test ui ui_agent_requests --test ui ui_sidebar`.
 - [ ] **AC.9 Live tier.** `tools/e2e/fake-claude/index.mjs`: a `/rt <args>` cue that runs `$RT_CLI agent <args>` and prints its output; `apps/native/tests/e2e_live.rs`: session A spawns a child, the test approves it through `LiveClient`, the child appears with `parent`, A sends to it and reads its output back, and A's token stops working once A is stopped. Proof: `.\rt.ps1 native-e2e` through the gate (heavy).
-- [ ] **AC.10 Skill and docs.** Open question 11's choice; `docs/architecture.md` (component line, task-index row "Change the agent CLI": `agent_api.rs`, `agent_token.rs`, `crates/tracer/src/agent_cli.rs`); `docs/native-client.md` (the tag, the cards); CLAUDE.md (the `RT_*` variables, `agent_token_sha256` in the `sessions/<id>/` line); README glossary (below); the MAIN.md line, borrowed-ideas.md's entry and this doc deleted once promoted. Proof: the diff.
+- [ ] **AC.10 Skill and docs.** Open question 11's choice; `docs/architecture.md` (component line, task-index row "Change the agent CLI": `agent_api.rs`, `agent_token.rs`, `crates/tracer/src/agent_cli.rs`); `docs/native-client.md` (the tag, the cards); CLAUDE.md (the `RT_*` variables, `agent_token_sha256` in the `sessions/<id>/` line); README glossary (below); borrowed-ideas.md's entry and this doc deleted once promoted. Proof: the diff.
 
 ## Glossary terms this subplan coins
 

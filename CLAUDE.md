@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project shape
 
-**The client is the native GPUI app** (`apps/native`, design in `docs/native-client.md`, open work in `docs/plans/MAIN.md`). The earlier Tauri app is not on `main`: it lives on the `tauri` maintenance branch, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes land on `main` and are cherry-picked there, and the Tauri installer is built there.
+**The client is the native GPUI app** (`apps/native`, design in `docs/native-client.md`, open work in Linear team RT, snapshot in `docs/plans/MAIN.md`). The earlier Tauri app is not on `main`: it lives on the `tauri` maintenance branch, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes land on `main` and are cherry-picked there, and the Tauri installer is built there.
 
 `rustling-tulip` is a native desktop client + a long-lived Rust daemon that orchestrates many parallel `claude` CLI sessions across single repos and multi-repo "workspaces". The daemon owns all PTYs and child processes; the client is just a client. **No code in this repo calls the Anthropic API directly** — the daemon always shells out to the `claude` CLI, which is the stable boundary.
 
@@ -18,8 +18,8 @@ apps/native/            binary = rustling-tulip-native (thin main.rs over a lib,
 tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
-docs/plans/MAIN.md      the main plan: every open item, in working order, grouped into waves
-docs/plans/*.md         subplans: designs and rulings for open items, linked from MAIN.md
+docs/plans/MAIN.md      the plan snapshot, generated from Linear team RT: every open item by wave, in working order
+docs/plans/*.md         design files: designs and rulings for open items, linked from their Linear issues
 ```
 
 ## Common commands
@@ -154,12 +154,12 @@ Rust edition 2024 on the `stable` channel (`rust-toolchain.toml` pins the channe
 
 ## Plan files
 
-`docs/plans/MAIN.md` is the main plan: every open item is one line there, in working order (High priority, then the waves, then the backlog), and the next item is the first line from the top. A landed line is deleted in its landing commit; `git log` is the record. New designs go in `docs/plans/*.md` with `- [ ]` checklists for their steps and are linked from a MAIN.md line. When a subplan's last item lands, its durable decisions are promoted into `docs/` (`architecture.md`, `native-client.md`, or a doc of their own) and the subplan is deleted in that commit. `docs/plans/completed/` holds designs finished before this convention, kept for their rationale; nothing new moves there. A native feature also ticks the lines it delivered in `docs/plans/native-client-parity.md`.
+Every task is a Linear issue in team RT, grouped into one project per wave; the rules are in `~/.claude/docs/plan-operations.md`, and this repo's project order is in the `rustling-tulip-nextup` profile. `docs/plans/MAIN.md` is a generated snapshot of it: never edit it by hand; change Linear and regenerate it. A task, idea or steer that comes up mid-task gets an **add** first. New designs go in `docs/plans/*.md` with `- [ ]` checklists for their steps and are linked from their issue's description or their project's content. Once nothing open links a design file, its durable decisions are promoted into `docs/` (`architecture.md`, `native-client.md`, or a doc of their own) and the file is deleted in that commit. `docs/plans/archive/` holds designs finished before the plan moved to Linear, kept for their rationale; nothing new moves there. A native feature also ticks the lines it delivered in `docs/plans/native-client-parity.md`.
 
 ## Things that are deferred / not implemented
 
-Don't go looking for these — they're explicitly out of scope until the corresponding plan item is unchecked:
+Don't go looking for these — they're explicitly out of scope until their plan item comes up:
 
 - **Auto-update** for the native client — deferred until its installer (Phase 6) and a signed release pipeline exist.
 - **Code signing / notarization** of the native client's installer (Phase 6) and the binaries inside it — there is no signing cert, so an unsigned bundle trips SmartScreen.
-- **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync** — explicit non-goals. Viewing a subagent's transcript read-only is planned (`docs/plans/MAIN.md`, "View subagent streams"). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.
+- **Sub-agent / Task-tool interception**, **multi-machine attach**, **cloud sync** — explicit non-goals. Viewing a subagent's transcript read-only is planned (Wave 7, "View subagent streams"; design in `docs/plans/subagent-streams.md`). The mobile app is planned (`docs/plans/mobile-app.md`) but not started.

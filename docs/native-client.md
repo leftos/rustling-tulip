@@ -73,6 +73,10 @@ The window's restore rect, maximized flag and monitor are saved in native-ui.jso
 
 Closing a tab, closing a pane but keeping its session, and moving a pane to an existing tab each leave an entry on the undo shelf (bottom centre, 8 s, at most 3, newest on top). An entry holds a whole-tab snapshot of every tab it touched, and Undo sends `RestoreTabSnapshot` for a tab that still exists or `RestoreTab` at its old index for one that is gone; a tab this client has asked to remove (closing it, closing its last pane, moving its only pane out) counts as gone from the send until its removal arrives, so an Undo pressed inside that round trip still restores it, bringing back splits and ratios exactly; a pane whose session has since gone comes back empty. The shelf clears when the connection drops or a new `Welcome` arrives.
 
+## Keyboard reachability
+
+Settings → Appearance and the appearance editor share one set of keyboard stops. Each swatch line is one Tab stop, landing on the chosen swatch; Left and Right move along it, Enter or Space picks. The font filter is a stop, then the family list is one stop: Up and Down move a highlight that scrolls into view, Enter or Space picks. The size − and + buttons are two stops. Tab and Shift-Tab leave the hex and filter fields for the next or previous stop, as the Worktrees path field does, rather than staying inside the field.
+
 ## Tests
 
 Three tiers, all Rust tests:

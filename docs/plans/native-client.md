@@ -1,6 +1,6 @@
 # Native client: open items' rulings
 
-The rulings the native client's open items need before they are briefed. Each item is one line in [MAIN.md](./MAIN.md), which orders them; the client's settled design is in [docs/native-client.md](../native-client.md), and what each feature must do is in [native-client-parity.md](./native-client-parity.md), whose lines are ticked as items land. An item's section here is deleted in the commit that lands it; the file goes when the last one does.
+The rulings the native client's open items need before they are briefed. Each item is a Linear issue, ordered by its wave's project (snapshot: [MAIN.md](./MAIN.md)); the client's settled design is in [docs/native-client.md](../native-client.md), and what each feature must do is in [native-client-parity.md](./native-client-parity.md), whose lines are ticked as items land. An item's section here is deleted in the commit that lands it; the file goes when the last one does.
 
 ## Working rules
 
@@ -75,7 +75,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Size driver: "only one pane per session (its size driver) answers terminal queries" (`docs/native-client.md`, Terminal). A pop-out's terminal takes part in `tabs::size_drivers`.
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive and keep protocol 22 decodable (CLAUDE.md, Architecture invariants).
-- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (MAIN.md, Wave 9); "a visible result no test can prove lands on green gates and is listed for a hand-test" (MAIN.md, Gates).
+- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (Wave 9's project); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
 
 ### P5.1 Drag model: payloads, drop edges, reorder
 

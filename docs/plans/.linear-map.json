@@ -1,0 +1,308 @@
+{
+  "issues": {
+    "L100": {
+      "id": "7cb8f7c1-e815-4400-81bf-4cc6f5189dc2",
+      "identifier": "RT-37",
+      "linked": true
+    },
+    "L106": {
+      "id": "80b1470b-595b-42cb-920f-392ac4bf1ed0",
+      "identifier": "RT-38",
+      "linked": true
+    },
+    "L112": {
+      "id": "c6fca7c4-5197-4dd5-b0f4-7275ca62ce86",
+      "identifier": "RT-39",
+      "linked": true
+    },
+    "L118": {
+      "id": "3301aa3d-5fa8-453c-a460-1dc8634c160a",
+      "identifier": "RT-40",
+      "linked": true
+    },
+    "L119": {
+      "id": "cc3e7290-afe9-425d-989f-060691a5d362",
+      "identifier": "RT-58",
+      "linked": true
+    },
+    "L123": {
+      "id": "54e66c47-1572-4ebb-a60c-078eca02fbd8",
+      "identifier": "RT-41",
+      "linked": true
+    },
+    "L124": {
+      "id": "8afe1171-4bbc-4693-90c8-76c9a6fc1edd",
+      "identifier": "RT-42",
+      "linked": true
+    },
+    "L125": {
+      "id": "071c3b22-93f0-4660-a7f9-7a571517065c",
+      "identifier": "RT-43",
+      "linked": true
+    },
+    "L126": {
+      "id": "809d7952-0143-41bc-b483-258b818284b0",
+      "identifier": "RT-44",
+      "linked": true
+    },
+    "L127": {
+      "id": "19111ad8-8e93-47a0-80a8-e91f4d7bdbff",
+      "identifier": "RT-45",
+      "linked": true
+    },
+    "L131": {
+      "id": "c9e78ca5-c0dc-4301-a412-f3c553f98939",
+      "identifier": "RT-46",
+      "linked": true
+    },
+    "L132": {
+      "id": "25eef254-e75b-4499-ac0e-7dc48aa360e7",
+      "identifier": "RT-47",
+      "linked": true
+    },
+    "L136": {
+      "id": "5b5aee0a-b543-4865-8830-4365ee82c874",
+      "identifier": "RT-48",
+      "linked": true
+    },
+    "L138": {
+      "id": "911c6ced-6dcd-4367-9c75-036976fc091b",
+      "identifier": "RT-49",
+      "linked": true
+    },
+    "L142": {
+      "id": "de2bfc77-a5f7-4e9f-a52b-b126fe37c5b6",
+      "identifier": "RT-50",
+      "linked": true
+    },
+    "L148": {
+      "id": "37e1aa85-2cfc-42e3-beb2-ae8fae4020dc",
+      "identifier": "RT-51",
+      "linked": true
+    },
+    "L149": {
+      "id": "71e7e7e0-91a6-4a7f-8f8e-762ec0989d72",
+      "identifier": "RT-52",
+      "linked": true
+    },
+    "L150": {
+      "id": "f3613308-abd3-4873-8854-eb74e5d0d9d3",
+      "identifier": "RT-53",
+      "linked": true
+    },
+    "L151": {
+      "id": "3a1132ff-5e42-44c4-9cf3-18bf833151e6",
+      "identifier": "RT-54",
+      "linked": true
+    },
+    "L152": {
+      "id": "312ca2be-29e8-42ae-b521-fb0248ccceca",
+      "identifier": "RT-55",
+      "linked": true
+    },
+    "L153": {
+      "id": "bd576279-ac0a-48c5-8b49-36153137aca1",
+      "identifier": "RT-56",
+      "linked": true
+    },
+    "L154": {
+      "id": "9943fcb5-e7bb-472c-aa7d-672f891f2883",
+      "identifier": "RT-57",
+      "linked": true
+    },
+    "L27": {
+      "id": "91e74bd1-ad76-442a-a1a4-c454184a4c1d",
+      "identifier": "RT-3",
+      "linked": true
+    },
+    "L27-merge": {
+      "id": "8c5cd241-6907-430b-9bf7-f51500f82127",
+      "identifier": "RT-6",
+      "linked": true
+    },
+    "L27a": {
+      "id": "0717a295-9cc6-44bc-9315-6a6af09ef33f",
+      "identifier": "RT-4",
+      "linked": true
+    },
+    "L27b": {
+      "id": "b5ce1e43-846a-464f-b619-af7578e75938",
+      "identifier": "RT-5",
+      "linked": true
+    },
+    "L28": {
+      "id": "ee56f886-ce4d-49fa-af86-dade5129281a",
+      "identifier": "RT-7",
+      "linked": true
+    },
+    "L28-merge": {
+      "id": "72b01b81-1314-4ec3-86a1-15abb426c64b",
+      "identifier": "RT-10",
+      "linked": true
+    },
+    "L28a": {
+      "id": "a8d5b757-5ad2-4110-aabe-0fa54f9e474d",
+      "identifier": "RT-8",
+      "linked": true
+    },
+    "L28b": {
+      "id": "55447f22-0331-4c3d-b4bf-6cd9f7324302",
+      "identifier": "RT-9",
+      "linked": true
+    },
+    "L29": {
+      "id": "9d6697e4-0eeb-4228-8fd3-d81a6804e5a1",
+      "identifier": "RT-11",
+      "linked": true
+    },
+    "L35": {
+      "id": "0828acae-d232-4eef-9872-61cf8c6a8b8e",
+      "identifier": "RT-12",
+      "linked": true
+    },
+    "L36": {
+      "id": "c74acc04-e12c-4d36-9845-ee075c2c4441",
+      "identifier": "RT-13",
+      "linked": true
+    },
+    "L37": {
+      "id": "28100b35-2164-4f5a-bd51-ad15471cfa8d",
+      "identifier": "RT-14",
+      "linked": true
+    },
+    "L43": {
+      "id": "c992490c-d9a4-4073-b53a-f3f5d81cfb04",
+      "identifier": "RT-15",
+      "linked": true
+    },
+    "L44": {
+      "id": "2259d8f5-c597-4872-b074-051f54d1df22",
+      "identifier": "RT-16",
+      "linked": true
+    },
+    "L45": {
+      "id": "407d2c34-48a0-4a65-9e86-f190155ec70c",
+      "identifier": "RT-17",
+      "linked": true
+    },
+    "L46": {
+      "id": "be1c6f0a-d2b3-44ad-9f20-c4bfc79e8390",
+      "identifier": "RT-18",
+      "linked": true
+    },
+    "L47": {
+      "id": "845f2a8d-784c-44f1-932d-ca3bf4b92593",
+      "identifier": "RT-19",
+      "linked": true
+    },
+    "L48": {
+      "id": "8f8587b3-25b9-416b-8754-a0e3d6cd7994",
+      "identifier": "RT-20",
+      "linked": true
+    },
+    "L49": {
+      "id": "6819020b-b175-4125-b016-632fb4c3f365",
+      "identifier": "RT-21",
+      "linked": true
+    },
+    "L50": {
+      "id": "dbb37203-d9cf-449c-94da-8e72eb080bb7",
+      "identifier": "RT-22",
+      "linked": true
+    },
+    "L56": {
+      "id": "f8556bc9-ca46-443b-88be-5370a541448b",
+      "identifier": "RT-23",
+      "linked": true
+    },
+    "L57": {
+      "id": "5c34805c-e987-46fb-82ff-1d8c2633edec",
+      "identifier": "RT-24",
+      "linked": true
+    },
+    "L63": {
+      "id": "5ca7eae8-bce1-46ff-b919-7cdc1718a440",
+      "identifier": "RT-25",
+      "linked": true
+    },
+    "L69": {
+      "id": "c4dd7014-6e8c-4e6a-b85c-bc55bac38de2",
+      "identifier": "RT-26",
+      "linked": true
+    },
+    "L70": {
+      "id": "9c2bdab9-aac6-48b9-bddc-f4fd5596287c",
+      "identifier": "RT-27",
+      "linked": true
+    },
+    "L71": {
+      "id": "8f504b94-12cd-4f3e-8bf5-72c79f048aaa",
+      "identifier": "RT-28",
+      "linked": true
+    },
+    "L72": {
+      "id": "c20d2875-0831-4bcc-b5e4-78570e135498",
+      "identifier": "RT-29",
+      "linked": true
+    },
+    "L78": {
+      "id": "9346a404-a197-4372-aa3b-989940e03eb8",
+      "identifier": "RT-30",
+      "linked": true
+    },
+    "L84": {
+      "id": "f248a02c-f276-4a78-9eb3-97089b9ed6d0",
+      "identifier": "RT-31",
+      "linked": true
+    },
+    "L90": {
+      "id": "313be3a2-052f-4fd3-a4f8-5d07439ab9f0",
+      "identifier": "RT-32",
+      "linked": true
+    },
+    "L96": {
+      "id": "184ccc55-37fb-43ea-bf13-f48ff355673b",
+      "identifier": "RT-33",
+      "linked": true
+    },
+    "L97": {
+      "id": "48f18e2f-1dc2-4577-9408-8510abf507de",
+      "identifier": "RT-34",
+      "linked": true
+    },
+    "L98": {
+      "id": "4aecbcdb-ce2c-47f0-a7c4-2e8488972906",
+      "identifier": "RT-35",
+      "linked": true
+    },
+    "L99": {
+      "id": "b5f73110-9516-470b-9343-4ed9aa3800bd",
+      "identifier": "RT-36",
+      "linked": true
+    }
+  },
+  "projects": {
+    "AC": "c9e4a27f-036c-4de8-84c0-50b92f70814a",
+    "AH": "c9208d21-ee93-40d4-862a-a5b49963a169",
+    "BACKLOG": "e6463288-5ff5-43c0-b54f-d8c9ba3249d4",
+    "BT": "ea3fbc0f-c3f9-4a1e-a559-04874c993370",
+    "DOCS": "cc82e935-4a35-450d-b447-482e14e2decb",
+    "IDEAS": "48059b90-a30b-4878-8460-0cd731762db0",
+    "MAC": "7fcd7588-78ce-40d2-b35a-a04bbace7935",
+    "OQ": "1cba671f-54e9-473d-9717-48b038c6a08b",
+    "W10": "95d9a550-82a9-4d43-8185-0ca638d24577",
+    "W11": "55935611-f4df-438b-9dda-fe98d5661099",
+    "W12": "af0239c6-20a1-4693-a401-ccda97659e02",
+    "W1a": "114bd49e-5289-44ef-8802-0d0d83958b03",
+    "W1b": "0c23aea8-c887-4ce8-91a0-ab9b88f1a380",
+    "W1c": "10971716-1751-4559-8304-17aba2fa1252",
+    "W2": "503a4b67-cc3d-4ac3-8852-f8f11f4fd771",
+    "W3": "76ea3dfb-3f2f-47ed-9ed6-98343cfd9260",
+    "W4": "922c869e-9f4f-4806-be7b-6ffddb6fa89e",
+    "W5": "113edb4b-a2d8-427e-abcf-430ea5246d99",
+    "W6": "13f173a4-d179-4728-b30c-7249dd808c12",
+    "W7": "abb6179f-0e6a-4df6-8185-d209e9a7a297",
+    "W8": "21dc9ac5-71f5-4e19-b00a-6d3547e934d6",
+    "W9": "d236b73b-70c4-47d8-9ed6-5239d86ad113"
+  }
+}
