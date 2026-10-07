@@ -47,6 +47,14 @@
 - [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
 - [ ] RT-24 Keyboard stops and focus ring through the Appearance body and editor
 
+## Wave 4b — Dictation
+
+- [ ] RT-75 Dictate a prompt into any session from the native client
+  - [ ] RT-76 DI.1: Spike WinRT dictation and the Right Alt key in the unpackaged client
+  - [ ] RT-77 DI.2: Recognizer trait, WinRT recognizer and a scripted fake
+  - [ ] RT-78 DI.3: Dictation box and the Right Alt tap/hold key
+  - [ ] RT-79 DI.7: Document dictation in native-client.md
+
 ## Wave 5 — Hook-reported agent status
 
 - [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
@@ -54,6 +62,7 @@
 ## Wave 6 — Alerts, Dashboard and Needs You
 
 - [ ] RT-26 Speak a summary aloud when an agent waits
+- [ ] RT-80 DI.4: Hold spoken alerts while dictating, and count the box as presence
 - [ ] RT-27 Measure a local small model as the alerts' summarizer provider
 - [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
 - [ ] RT-67 Record ops-tower's Agents tab rulings against RT-28 and reconcile DB.1's summarizer
@@ -75,6 +84,7 @@
 
 - [ ] RT-33 MA1: shared client core for pinned TLS, host profiles and pairing
 - [ ] RT-34 Phase 6: remote mode and cutover
+- [ ] RT-81 DI.5: Check that dictation in remote mode reaches the remote session
 - [ ] RT-35 FT.2: native download sink for fetched files
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
 - [ ] RT-37 FT.4: "Fetch file…" popup
@@ -82,6 +92,7 @@
 ## Wave 11 — Mobile app
 
 - [ ] RT-38 Mobile app phases MA2–MA10
+- [ ] RT-83 MA11: Dictation in the mobile app
 
 ## Wave 12 — Claude accounts
 
@@ -108,6 +119,7 @@
 ## macOS
 
 - [!] RT-46 Verify macOS support M0–M3 on real Mac hardware
+- [ ] RT-82 DI.6: macOS dictation through SFSpeechRecognizer and right Option
 - [ ] RT-47 M4: macOS packaging, signing and notarization
 
 ## Agent CLIs
