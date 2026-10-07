@@ -56,7 +56,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
 - **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
 - **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
-- **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md` and `remote-file-transfer.md` under `docs/plans/`.
+- **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
 - **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).
 - **Hibernation**: stopping an idle, finished agent's process and resuming its conversation when the session is opened again; a planned idea (RT-73, `docs/plans/borrowed-ideas.md`).
@@ -79,6 +79,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Shared client core**: the planned Rust crate holding the pinned-TLS connect, host profiles and pairing, used by both the native client's remote mode and the mobile app.
 - **Tracer-log import**: the startup pass that rebuilds history entries from `logs/tracer-<id>.log` files for sessions that ended before history existed.
 - **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.
+- **Dictation box**: the planned overlay that collects speech recognized on the client (desktop or phone) for one session, for review before it is inserted as a paste or sent; see `docs/plans/dictation.md`.
 - **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/agents/providers.rs`).
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
 - **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
