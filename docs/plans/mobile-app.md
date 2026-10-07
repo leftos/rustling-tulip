@@ -43,6 +43,18 @@ Item ids are MA1, MA2, … (mobile app), distinct from the macOS plan's M0–M4.
 - [ ] **MA9 Conversation view.** Sessions as chats. Depends on the conversation-view item in [borrowed-ideas.md](./borrowed-ideas.md), and on `--print` staying on the subscription.
 - [ ] **MA10 Accounts screen.** Every Claude account with its 5h and 7d usage and reset times, a Switch button, and the auto-switch on/off and threshold, over the messages in [accounts.md](./accounts.md). Adding, removing and logging in stay on the desktop. MA7 sends auto-switch and all-exhausted events as pushes under their own toggle.
 
+## Prior art for the phases
+
+Details from Orca (`github.com/stablyai/orca`, which ships a phone app and a remote runtime) and ThinkTerm (`github.com/RoversX/ThinkTerm`, GPLv3: ideas only, which has browser and phone clients). None is adopted yet; each names the phase it would land in.
+
+- **MA1, client core layering.** ThinkTerm's session crate takes time, spawning, the wire and events through host traits, so it builds for `wasm32` and its phone bindings share it; pure decision rules (resize, watchdog) sit in their own module, unit-tested off the network (`thinkterm-session/src/lib.rs`, `decide.rs`). The shared client core would keep its session logic free of GPUI and tokio the same way.
+- **MA1, MA2, bounded receive queue.** ThinkTerm caps its receive queue by bytes and by chunk count and fails loudly when full (`thinkterm-session/src/byte_queue.rs`), so a slow phone link cannot grow memory without limit.
+- **MA3, revocation.** Orca gives each paired client its own token, disconnects that client's live connections the moment it is revoked, and replaces an unused access link when a new one is made (`docs/site/content/docs/remote-servers.mdx`). ThinkTerm stores its browser tokens as digests and gives them a TTL, with `mint`, `list` and `revoke` (`docs/thinkterm/web-access.md`).
+- **MA4, version check both ways.** Orca's handshake answers `client-too-old` or `server-too-old` with the version required, so the phone can say "update the desktop app" instead of failing (`src/shared/protocol-compat.ts`).
+- **MA6, MA10, retries that apply once.** Orca's phone journals each spend of a Codex rate-limit reset credit so a retry over a flaky link cannot spend two (`docs/site/content/docs/mobile.mdx`, accounts screen). Any phone action that isn't naturally idempotent, such as an account switch or create-session, needs the same.
+- **MA7, push only when away.** Orca pushes to the phone only while the desktop is locked or idle for 180 s or more, and pushes anyway when it cannot read presence (`src/main/notifications/desktop-away-state.ts`). On Windows that needs the session's idle time and lock state.
+- **MA8, size.** ThinkTerm's browser client claims a tab at its own size, and the desktop takes it back only on interaction there (`docs/thinkterm/web-access.md`), which matches the settled "last client to send input" rule below.
+
 ## Open questions
 
 - **Relay authentication:** settled (user, 2026-09-28): a shared relay secret, set up at pairing, that the daemon and each paired phone present; the relay drops anything else. It is separate from the end-to-end TLS.

@@ -1,9 +1,10 @@
-# Ideas borrowed from Orca and VelaTerm
+# Ideas borrowed from Orca, VelaTerm and ThinkTerm
 
-Features from two open-source agent managers that rustling-tulip lacks and could take over. Neither replaces rustling-tulip: neither has multi-repo workspace sessions, and VelaTerm's sessions die with its app. Both are MIT-licensed; ideas are free to take, and copied code keeps its MIT notice.
+Features from three open-source agent managers and terminals that rustling-tulip lacks and could take over. None replaces rustling-tulip: none has multi-repo workspace sessions, VelaTerm's sessions die with its app, and ThinkTerm's die with its server. Orca and VelaTerm are MIT-licensed; ideas are free to take, and copied code keeps its MIT notice. ThinkTerm is GPLv3, so only its ideas are taken, never its code.
 
-- **Orca**: an Electron agent development environment, `github.com/stablyai/orca`, docs at `onorca.dev/docs`. A daemon owns its PTYs, and there is one worktree per task.
+- **Orca**: an Electron agent development environment, `github.com/stablyai/orca`, docs at `onorca.dev/docs` (sources under `docs/site/content/docs/` in the repo). A daemon owns its PTYs, and there is one worktree per task.
 - **VelaTerm**: a Tauri 2 terminal and agent manager, `github.com/vlinx-io/VelaTerm`. Sessions are kept in a project → group → session tree, and its PTYs live in the app process.
+- **ThinkTerm**: a WezTerm fork with a built-in multiplexer, `github.com/RoversX/ThinkTerm`. A mux server owns the sessions and keeps the terminal state; desktop, TUI and browser clients attach and render row deltas. Its agent-status design is in `docs/agent-status.md`.
 
 Each idea taken up has its own subplan, linked from its entry, which holds its open work and steps; this file keeps where each idea came from and the rulings made when it was picked.
 
@@ -29,6 +30,20 @@ Each idea taken up has its own subplan, linked from its entry, which holds its o
 - **Resume agents after a reboot.** A reboot kills the tracers too. On the next start, offer to resume the sessions that were live at shutdown, not only through the Recover dialog. Orca records each live agent's conversation id at quit and injects `--resume <id>` into the restored pane on a cold start (stablyai/orca PR #5240). The session history and Recover already hold what's needed; this is the automatic prompt. Plan: [reboot-resume.md](./reboot-resume.md).
   - Ruling (user, 2026-09-28): prompt on start ("Resume all", "Choose…", "Dismiss"); a dismissed prompt leaves the sessions in Recover. Never resume without asking.
   - How to tell a reboot from a user Stop: the sessions whose tracers were lost with no end recorded.
+- **Seed new worktrees.** Before a new worktree's agent starts: copy the gitignored files a repo lists in `.worktreeinclude` (`.env`, editor settings) from the main checkout, link gitignored directories such as `node_modules` instead of copying them, and run a per-repo setup script in a visible terminal that the agent can wait on; an archive script runs before removal and blocks it on failure.
+
+  Orca: `src/main/git/worktree-include-file.ts` (256 KiB and 1000-entry caps, literal paths only), `src/main/ipc/worktree-symlinks.ts`, `src/main/setup-hook-env-vars.ts`, and the `orca.yaml` docs (`model/orca-yaml.mdx`). Linear: RT-71 (Seed new worktrees).
+  - On Windows a linked directory is a junction, since symlinks need privilege.
+  - A workspace seeds each member from its own repo's list and script.
+  - Open: where the per-repo config lives, and an approval step before running a script that came from the repo.
+- **Diff comments sent to an agent.** Line comments on a diff tab, sent as one prompt to a chosen or new session; unresolved comments go out again on the next send. This is the review loop for bringing agent work back in. Orca: `review/annotate-ai-diff.mdx`. Linear: RT-72 (Comment on a diff, then send the comments to an agent).
+- **Hibernate idle finished agents.** Stop the terminal of an agent that finished and sat idle for N minutes (Orca's default is 30) and resume it with its conversation id when opened.
+
+  Orca hibernates only an agent that is done, not in the foreground, with no keystrokes, no phone attached and no subagents left, and a worktree's agent panes together (`agents/hibernation.mdx`, `src/main/agent-hooks/server/server-reaping.ts`). Builds on hook status and on the recovery path reboot-resume uses. Linear: RT-73 (Hibernate idle finished agents).
+- **Steadier screen-based status.** For the `pty_state.rs` heuristic, which stays the fallback after hook status and the only source for agents without hooks. Linear: RT-74 (Steadier screen-based status). From ThinkTerm:
+  - Hysteresis: leaving `AwaitingInput`, and `Working` to `Idle`, wait for 3 checks 150 ms apart, capped at 700 ms, while entering `AwaitingInput` publishes at once (`mux/src/agent_status/hysteresis.rs`, after herdr's pending-idle confirmation).
+  - Prompt rules in versioned per-agent data files with a user override (`mux/src/agent_status/manifests/claude.toml`, `docs/agent-status.md`).
+  - Finding the agent in a Windows process tree by taking the topmost agent process, so `claude` wins over its MCP children (`mux/src/agent_status/windows_select.rs`).
 - [x] **Share the workspace design on Orca issue #1099** (multi-repo workspaces). Posted with the user's approval: https://github.com/stablyai/orca/issues/1099#issuecomment-5878340045. It describes the anchor-free worktree layout the daemon builds (CLAUDE.md, "Where things live on disk"). The text as posted:
 
   > 🤖 Posted by Claude Code on behalf of @leftos.

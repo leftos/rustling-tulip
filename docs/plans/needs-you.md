@@ -75,6 +75,15 @@ No new message. `pending_input` (HS.2) and `summary` (SA.1) arrive on the existi
 - **With Wave 5**: Asking becomes reliable for hook-driven Claude sessions, and line 2 carries the real question, permission or plan. Codex, Cursor and hook-less sessions stay on the heuristic.
 - **With Wave 6**: Answer rows appear (prose questions at a stop), and headlines fill line 2 where no `pending_input` exists.
 
+### Orca's board, for comparison
+
+Orca's agents board (`docs/site/content/docs/model/agents-sessions.mdx` in `github.com/stablyai/orca`) differs in ways worth weighing for NY.4 and later; none is adopted:
+
+- A fourth column, Idle, hidden by default, for sessions quiet about 30 minutes. Here idle sessions stay out of the list and belong to the Dashboard.
+- Filters by project, workspace status and PR state.
+- Each card shows the last user or agent message, and a session's subagents appear as child rows (compare `subagent-streams.md`).
+- A separate chronological Agents feed of completions, blocking questions and worktree creation, with unread badges (`activity.mdx`).
+
 ## Steps
 
 NY.1 to NY.3 need neither Wave 5 nor Wave 6 and land now, ahead of Wave 5, as the reduced view (Q1); NY.4 needs HS.2; NY.5 needs SA.1 (and shows Answer rows only once SA.6 fills summaries).

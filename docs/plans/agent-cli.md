@@ -77,6 +77,18 @@ Additive only; protocol 22 keeps decoding and `supported` does not change.
 
 A second subcommand of the tracer, dispatched before `Cli::parse` like HS.3's `hook`: `agent` in `crates/tracer/src/agent_cli.rs`, sharing a hand-written HTTP/1.1 client (`crates/tracer/src/http.rs`) with the hook shim, so the tracer gains no dependency, and the path in `RT_CLI` stays valid for the session's life (`binary_cache::gc` keeps copies a live sidecar references). Alternatives: Open question 10. How an agent learns it exists: Open question 11.
 
+### Checklist from ThinkTerm's proposal
+
+ThinkTerm's unadopted design note on agents driving each other (`docs/thinkterm/agent-collaboration.md` in `github.com/RoversX/ThinkTerm`, GPLv3: ideas only) lists the failure modes of plain `send-text` plus `get-text` and what a structured model needs.
+
+This design already covers most of them: a scoped verb list instead of raw input, `wait` instead of polling the screen, the `[from <caller label>]` origin prefix, and Q7's hold on `AwaitingInput` so a message can never answer a permission prompt. Points it raises that this design does not settle yet:
+
+- **Task ids.** With no id on a `send`, a caller that sent two messages cannot tell which one a later `read --last` answers. A `send` could return an id that `wait` and `read` accept.
+- **Provenance the receiver can trust.** The `[from …]` prefix is plain text any process can type. The daemon knows which session sent the bytes, so the native client could mark agent-sent input on the target's leaf or in a notice, where no agent can forge it.
+- **An audit record.** Sender, target, verb, the user's decision on any request, and the outcome, one line each in `daemon.log` or a per-session file, with prompt text optionally left out.
+- **References, not pasted content.** `--file` pastes a file's text into the prompt; for diffs and logs a path the target can read is faster and keeps structure. Workspace sessions need a path the target's worktree can resolve.
+- **No approval on another's behalf.** ThinkTerm lists approving a privileged action for the user as the one capability that stays off. Q7 covers typed input; this rules out any future verb that answers a permission prompt or a request card.
+
 ## Steps
 
 Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → AC.9 → AC.10. AC.4 builds on HS.4's router split and AC.7 on HS.3's HTTP client when those land first; otherwise each makes them. The gates are the nextup profile's (`.claude/skills/rustling-tulip-nextup/SKILL.md`, "Agents and gates").

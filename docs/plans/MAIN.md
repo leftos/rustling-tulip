@@ -133,6 +133,10 @@
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-57 Offer to resume the sessions a reboot killed, on the next start
 - [ ] RT-65 Decide on a dock-bar mode like ops-tower's desktop window
+- [ ] RT-71 Seed new worktrees: copy listed ignored files, link shared folders, run setup scripts
+- [ ] RT-72 Comment on a diff, then send the comments to an agent as one prompt
+- [ ] RT-73 Hibernate idle finished agents and resume them when opened
+- [ ] RT-74 Steadier screen-based status: hysteresis, rule files, agent process detection
 
 ## Backlog
 

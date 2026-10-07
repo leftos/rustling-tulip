@@ -58,6 +58,9 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
 - **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md` and `remote-file-transfer.md` under `docs/plans/`.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
+- **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).
+- **Hibernation**: stopping an idle, finished agent's process and resuming its conversation when the session is opened again; a planned idea (RT-73, `docs/plans/borrowed-ideas.md`).
+- **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
 - **Drawn-text probe**: the native client's debug-build record of the text each `ellipsis.rs` helper drew, keyed by element id, switched on by `ellipsis::enable_probe()` in specs and read with `ellipsis::drawn_text(id)`; see `docs/native-client.md` ("Truncating text with `…`").
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
