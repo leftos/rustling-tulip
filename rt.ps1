@@ -25,7 +25,7 @@
                  reconnects to the new daemon). Use it after changing the
                  daemon, tracer or protocol: `launch` and `native` reuse a
                  running compatible daemon even from an older build.
-      test       Run `cargo test` across the workspace.
+      test       Run `cargo test --profile test-release` across the workspace.
       clippy     Run the strict workspace clippy pass
                  (`--all-targets --all-features -- -D warnings`).
       fmt        Run `cargo fmt --all`.
@@ -552,8 +552,8 @@ function Invoke-Restart {
 
 function Invoke-Test {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
-    Write-Host '==> cargo test (workspace)...' -ForegroundColor Cyan
-    & cargo test --manifest-path $ManifestPath @Rest
+    Write-Host '==> cargo test --profile test-release (workspace)...' -ForegroundColor Cyan
+    & cargo test --manifest-path $ManifestPath --profile test-release @Rest
     Test-CargoExitOk 'cargo test'
 }
 

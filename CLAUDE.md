@@ -34,7 +34,7 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
-.\rt.ps1 test             # cargo test (workspace)
+.\rt.ps1 test             # cargo test --profile test-release (workspace)
 .\rt.ps1 clippy           # strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
 .\rt.ps1 clean            # cargo clean
@@ -57,12 +57,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 cargo deny check          # advisories, licenses, source allowlist (see deny.toml)
 
-# Run a single test
-cargo test -p daemon <test_name>
-cargo test -p protocol
+# Tests build with the test-release profile (Cargo.toml): optimised like release, but without LTO and with
+# incremental builds, so an edit rebuilds in seconds instead of minutes. --release is for shipping builds only.
+cargo test --workspace --profile test-release
+cargo test -p daemon --profile test-release <test_name>
+cargo test -p protocol --profile test-release
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
-cargo test -p rustling-tulip-native --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
+cargo test -p rustling-tulip-native --profile test-release --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
 # e2e_live.rs, e2e_recover.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 
@@ -72,7 +74,7 @@ The native client auto-spawns the daemon on first connect via `daemon_client::en
 
 The native client has three test tiers:
 
-- **UI specs** — `cargo test -p rustling-tulip-native --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon. Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
+- **UI specs** — `cargo test -p rustling-tulip-native --profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon. Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
 - **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer and runs `tests/e2e_live.rs` and `tests/e2e_recover.rs` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude shim.
 - **OS smoke** — `.\rt.ps1 native-smoke`: launches the native client exe in a cloaked window that never takes focus (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell.
 

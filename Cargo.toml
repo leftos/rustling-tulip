@@ -61,3 +61,12 @@ missing_panics_doc = "allow"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Tests build with `--profile test-release`: optimised like release, but LTO and a single codegen unit
+# made every test rebuild take ~4 minutes; this one rebuilds an edit in ~15 seconds.
+[profile.test-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false

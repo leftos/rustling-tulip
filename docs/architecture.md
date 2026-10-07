@@ -78,7 +78,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Change session actions and menus | `apps/native/src/session_menu.rs`, `session_actions.rs`, `branch_fate.rs`, `discard_confirm.rs` |
 | Change Settings | `apps/native/src/settings_view.rs`, `appearance.rs`, `appearance_view.rs`, `sidebar.rs` (`UiState` in native-ui.json) |
 | Change source control or diffs | `apps/native/src/source_control.rs`, `source_control_view.rs`, `changes_view.rs`, `sc_writes.rs`, `stashes.rs`, `history.rs`, `diff_model.rs`, `diff_view.rs`, `diff_tab.rs`, `syntax.rs` |
-| Run the tests | UI specs: `cargo test -p rustling-tulip-native --test ui ui_<name>` (`tests/ui/`); live e2e: `.\rt.ps1 native-e2e` (`tests/e2e_live.rs`, `tests/e2e_recover.rs`); OS smoke: `.\rt.ps1 native-smoke` (`tests/smoke_window.rs`) |
+| Run the tests | Everything: `.\rt.ps1 test` (`cargo test --workspace --profile test-release`); UI specs: `cargo test -p rustling-tulip-native --profile test-release --test ui ui_<name>` (`tests/ui/`); live e2e: `.\rt.ps1 native-e2e` (`tests/e2e_live.rs`, `tests/e2e_recover.rs`); OS smoke: `.\rt.ps1 native-smoke` (`tests/smoke_window.rs`) |
 | Look at a UI change, or show before and after shots | `.\rt.ps1 native-shot <view>` (`apps/native/examples/shot.rs`: views `main`, `main-compact`, `source-control`, `diff`, `settings`, `spawn` over a scripted fake daemon); read the PNG it prints. A new view is a fixture plus the keys or rail click that reach it in that file |
 
 ## Non-goals

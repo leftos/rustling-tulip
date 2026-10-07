@@ -36,7 +36,7 @@ linear: rustling-tulip
 - Gates, each run through the repo's gate from the worktree root as `pwsh tools/gate.ps1 -Log .tmp/<name>.log -TimeoutSeconds <n> -Slot <heavy|light> -- <command>` (no `nice` of its own; the gate lowers priority, takes a machine-wide slot, logs the whole output and prints the tail):
   - `cargo fmt --all --check` (light)
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy; what `.\rt.ps1 clippy` and prek run)
-  - `cargo test -p <crate>` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`)
+  - `cargo test -p <crate> --profile test-release` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`). Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes.
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).

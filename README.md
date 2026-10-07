@@ -46,6 +46,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
+- **test-release**: the Cargo profile tests build with (`cargo test --profile test-release`): release optimisation without LTO, with 16 codegen units and incremental builds, so an edit rebuilds in seconds.
 - **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
 - **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
 - **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
