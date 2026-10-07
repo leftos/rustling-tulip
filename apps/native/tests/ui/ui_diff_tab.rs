@@ -823,12 +823,21 @@ fn the_highlight_toggle_hides_the_colours_and_is_saved(cx: &mut TestAppContext) 
     let mut h = Harness::with(cx, &dir, &focused());
     let id = show(&mut h, &diff_tab("d1", "src/main.rs", None));
     answer(&mut h, &id, RUST_OLD, RUST_NEW);
-    assert!(!colors(&mut h, "d1", 0, Half::Old).is_empty());
+    assert_ne!(
+        colors(&mut h, "d1", 0, Half::Old),
+        [] as [(std::ops::Range<usize>, gpui::Hsla); 0]
+    );
 
     h.click_on("diff-highlight");
     assert!(!header(&mut h, "d1").highlight);
-    assert!(colors(&mut h, "d1", 0, Half::Old).is_empty());
-    assert!(colors(&mut h, "d1", 1, Half::New).is_empty());
+    assert_eq!(
+        colors(&mut h, "d1", 0, Half::Old),
+        [] as [(std::ops::Range<usize>, gpui::Hsla); 0]
+    );
+    assert_eq!(
+        colors(&mut h, "d1", 1, Half::New),
+        [] as [(std::ops::Range<usize>, gpui::Hsla); 0]
+    );
     assert_eq!(saved_ui(&dir)["diff_highlight"], json!(false));
     assert!(
         snapshot_requests(&mut h).is_empty(),
@@ -837,7 +846,10 @@ fn the_highlight_toggle_hides_the_colours_and_is_saved(cx: &mut TestAppContext) 
 
     h.click_on("diff-highlight");
     assert!(header(&mut h, "d1").highlight);
-    assert!(!colors(&mut h, "d1", 0, Half::Old).is_empty());
+    assert_ne!(
+        colors(&mut h, "d1", 0, Half::Old),
+        [] as [(std::ops::Range<usize>, gpui::Hsla); 0]
+    );
     assert_eq!(highlight_runs(&mut h, "d1"), 2, "the landed colours again");
     assert_eq!(saved_ui(&dir)["diff_highlight"], json!(true));
 }
@@ -874,7 +886,7 @@ fn the_whitespace_toggle_reuses_the_highlighting(cx: &mut TestAppContext) {
     answer(&mut h, &id, RUST_OLD, RUST_NEW);
     assert_eq!(highlight_runs(&mut h, "d1"), 2);
     let before = colors(&mut h, "d1", 1, Half::New);
-    assert!(!before.is_empty());
+    assert_ne!(before, [] as [(std::ops::Range<usize>, gpui::Hsla); 0]);
 
     h.click_on("diff-whitespace");
     assert!(!header(&mut h, "d1").include_whitespace);
@@ -885,7 +897,10 @@ fn the_whitespace_toggle_reuses_the_highlighting(cx: &mut TestAppContext) {
     let again = one_snapshot_id(&mut h);
     answer(&mut h, &again, RUST_OLD, "fn main() {}\n");
     assert_eq!(highlight_runs(&mut h, "d1"), 3, "new text on one side only");
-    assert!(!colors(&mut h, "d1", 0, Half::New).is_empty());
+    assert_ne!(
+        colors(&mut h, "d1", 0, Half::New),
+        [] as [(std::ops::Range<usize>, gpui::Hsla); 0]
+    );
 }
 
 #[gpui::test]
@@ -982,7 +997,15 @@ fn a_commits_diff_does_not_refetch(cx: &mut TestAppContext) {
     let id = show(&mut h, &diff_tab("d1", "src/main.rs", Some(SHA)));
     answer(&mut h, &id, "a\n", "b\n");
     h.send(status(&[], &["src/main.rs"], Some(TREE)));
-    assert!(snapshot_requests(&mut h).is_empty());
+    assert_eq!(
+        snapshot_requests(&mut h),
+        [] as [(
+            std::string::String,
+            std::string::String,
+            std::option::Option<std::string::String>,
+            std::option::Option<std::string::String>
+        ); 0]
+    );
     assert_eq!(header(&mut h, "d1").count, "1 change");
 }
 

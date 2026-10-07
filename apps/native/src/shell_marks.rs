@@ -709,6 +709,6 @@ mod tests {
         assert_eq!(prompts, [105]);
         assert_eq!(records.anchors(), [105, 106, 107, 111]);
         records.evict_below(200);
-        assert!(records.anchors().is_empty());
+        assert_eq!(records.anchors(), [] as [u64; 0]);
     }
 }

@@ -507,7 +507,7 @@ mod tests {
     fn drops_empty_title() {
         let mut p = Parser::new(false);
         let titles = feed_all(&mut p, &[b"\x1b]0;\x07"]);
-        assert!(titles.is_empty());
+        assert_eq!(titles, [] as [crate::osc_title::OscEvent; 0]);
     }
 
     #[test]
@@ -517,7 +517,7 @@ mod tests {
         s.extend(std::iter::repeat_n(b'a', MAX_TITLE_BYTES + 1));
         s.push(BEL);
         let titles = feed_all(&mut p, &[&s]);
-        assert!(titles.is_empty());
+        assert_eq!(titles, [] as [crate::osc_title::OscEvent; 0]);
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod tests {
         s.extend(std::iter::repeat_n(b'a', MAX_BUFFER_BYTES + 10));
         // No terminator at all in the chunk.
         let titles = feed_all(&mut p, &[&s]);
-        assert!(titles.is_empty());
+        assert_eq!(titles, [] as [crate::osc_title::OscEvent; 0]);
         // After the runaway, a fresh sequence should still parse.
         let titles = feed_all(&mut p, &[b"\x1b]0;ok\x07"]);
         assert_eq!(titles, vec![title("ok")]);
@@ -630,7 +630,7 @@ mod tests {
     fn ignores_powershell_prompt_text_when_prompt_inference_is_off() {
         let mut p = Parser::new(false);
         let events = feed_all(&mut p, &[b"PS X:\\dev\\rustling-tulip> "]);
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [crate::osc_title::OscEvent; 0]);
     }
 
     #[test]

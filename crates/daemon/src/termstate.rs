@@ -224,6 +224,6 @@ mod tests {
     #[test]
     fn replay_prefix_only_when_enabled() {
         assert_eq!(replay_prefix(true), ENABLE);
-        assert!(replay_prefix(false).is_empty());
+        assert_eq!(replay_prefix(false), b"");
     }
 }

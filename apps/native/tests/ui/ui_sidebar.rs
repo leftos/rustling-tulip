@@ -139,7 +139,7 @@ fn ctrl_b_is_input_in_the_terminal_and_toggles_the_sidebar_elsewhere(cx: &mut Te
     );
     h.keys("ctrl-b");
     assert!(h.root(|root, _| root.sidebar_collapsed()), "hidden");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 
     h.click_on("activity-sessions");
     assert!(!h.root(|root, _| root.sidebar_collapsed()), "shown again");

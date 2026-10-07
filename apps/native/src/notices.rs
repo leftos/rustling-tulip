@@ -532,7 +532,7 @@ mod tests {
         assert_eq!(toast.detail.as_deref(), Some("boom"));
 
         assert!(notices.expire(start + Duration::from_secs(8)));
-        assert!(notices.toasts().is_empty());
+        assert_eq!(notices.toasts(), []);
         assert_eq!(notices.next_expiry(), None);
     }
 
@@ -575,7 +575,7 @@ mod tests {
         assert!(!notices.expire(start + Duration::from_secs(60)));
         assert_eq!(titles(&notices), ["running"], "it outlasts any lifetime");
         assert!(notices.dismiss(1), "× still closes it");
-        assert!(notices.toasts().is_empty());
+        assert_eq!(notices.toasts(), []);
     }
 
     #[test]
@@ -629,7 +629,7 @@ mod tests {
         );
         assert_eq!(titles(&notices), ["job still"]);
         assert!(notices.expire(start + Duration::from_millis(14_100)));
-        assert!(notices.toasts().is_empty());
+        assert_eq!(notices.toasts(), []);
     }
 
     #[test]

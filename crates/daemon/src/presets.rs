@@ -1660,8 +1660,8 @@ mod tests {
 
     #[test]
     fn parse_prompts_empty() {
-        assert!(parse_prompts("").is_empty());
-        assert!(parse_prompts("\n\n  \n").is_empty());
+        assert_eq!(parse_prompts(""), [] as [std::string::String; 0]);
+        assert_eq!(parse_prompts("\n\n  \n"), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1807,7 +1807,7 @@ mod tests {
             label: "x".to_string(),
             variable: "missing".to_string(),
         }];
-        assert!(render_footer(&lines, &vars).is_empty());
+        assert_eq!(render_footer(&lines, &vars), "");
     }
 
     #[test]
@@ -1994,7 +1994,10 @@ mod tests {
         let cancelled = recv_job_update(&mut preset_rx).await;
         assert_eq!(cancelled.status, PresetLaunchJobStatus::Cancelled);
         assert_eq!(cancelled.launched, 0);
-        assert!(cancelled.created_session_ids.is_empty());
+        assert_eq!(
+            cancelled.created_session_ids,
+            [] as [std::string::String; 0]
+        );
         assert_eq!(spawn_count.load(Ordering::SeqCst), 0);
     }
 

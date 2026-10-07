@@ -691,7 +691,7 @@ mod tests {
     fn single_repo_no_options_no_prompt_is_empty() {
         let m = members(&["X:/dev/a"]);
         let args = build_args(&common(false, None, false), None, &m, None);
-        assert!(args.is_empty());
+        assert_eq!(args, [] as [std::string::String; 0]);
     }
 
     #[test]

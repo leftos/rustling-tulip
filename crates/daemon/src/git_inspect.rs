@@ -555,8 +555,8 @@ mod tests {
     #[test]
     fn parse_empty_input_returns_empty_buckets() {
         let (index, worktree) = parse_porcelain_z("");
-        assert!(index.is_empty());
-        assert!(worktree.is_empty());
+        assert_eq!(index, [] as [protocol::GitFileChange; 0]);
+        assert_eq!(worktree, [] as [protocol::GitFileChange; 0]);
     }
 
     #[test]
@@ -736,7 +736,7 @@ mod tests {
             .await
             .expect("root snapshot");
         assert_eq!(root_snapshot.unavailable, None);
-        assert!(root_snapshot.old.is_empty());
+        assert_eq!(root_snapshot.old, "");
         assert_eq!(root_snapshot.new, "one\n");
     }
 

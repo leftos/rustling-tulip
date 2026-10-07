@@ -266,7 +266,10 @@ mod tests {
     fn timeout_retries_clears_the_buffer_and_schedules_the_next_wait() {
         let t0 = Instant::now();
         let mut load = ScrollbackLoad::start(t0);
-        assert!(load.tick(t0 + REQUEST_TIMEOUT / 2).is_empty());
+        assert_eq!(
+            load.tick(t0 + REQUEST_TIMEOUT / 2),
+            [] as [crate::scrollback_load::Step; 0]
+        );
         assert_eq!(load.on_output(b"stale".to_vec()), None);
 
         let timed_out = t0 + REQUEST_TIMEOUT;

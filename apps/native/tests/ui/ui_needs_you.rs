@@ -271,7 +271,10 @@ fn empty_panel_shows_the_empty_text(cx: &mut TestAppContext) {
     };
     let mut h = Harness::with(cx, &dir, &fixture);
     h.click_on("activity-needs-you");
-    assert!(entries(&mut h).is_empty());
+    assert_eq!(
+        entries(&mut h),
+        [] as [rustling_tulip_native::NeedsYouEntry; 0]
+    );
     assert!(h.in_model("needs-you-empty"));
     assert!(h.bounds("needs-you-empty").size.height > px(0.0));
     assert_eq!(header(&mut h), "NEEDS YOU · 0");
@@ -369,7 +372,10 @@ fn an_empty_panel_does_not_repaint_until_a_row_arrives(cx: &mut TestAppContext) 
     };
     let mut h = Harness::with(cx, &dir, &fixture);
     h.click_on("activity-needs-you");
-    assert!(entries(&mut h).is_empty());
+    assert_eq!(
+        entries(&mut h),
+        [] as [rustling_tulip_native::NeedsYouEntry; 0]
+    );
 
     h.advance(std::time::Duration::from_secs(60));
     assert_eq!(repaints(&mut h), 0, "an empty panel has nothing to count");

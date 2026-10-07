@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn no_options_no_prompt_is_empty() {
         let args = build_args(&common(false, None, false), false, None, None);
-        assert!(args.is_empty());
+        assert_eq!(args, [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -472,7 +472,7 @@ mod tests {
             None,
             Some("would-be-prompt"),
         );
-        assert!(args.is_empty());
+        assert_eq!(args, [] as [std::string::String; 0]);
     }
 
     #[test]

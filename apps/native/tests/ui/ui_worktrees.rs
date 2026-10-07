@@ -457,7 +457,7 @@ fn delete_disabled_for_active(cx: &mut TestAppContext) {
     );
     h.click_on("worktrees-manager-row-delete-0");
     assert!(h.root(|root, _| root.worktrees_manager_confirm()).is_none());
-    assert!(deletes(&h.sent()).is_empty());
+    assert_eq!(deletes(&h.sent()), [] as [std::string::String; 0]);
 }
 
 #[gpui::test]

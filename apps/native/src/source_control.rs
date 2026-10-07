@@ -682,8 +682,14 @@ mod tests {
             "no members is the pinned path"
         );
 
-        assert!(sections(&[], None, None).is_empty());
-        assert!(sections(&[], None, Some("r1")).is_empty());
+        assert_eq!(
+            sections(&[], None, None),
+            [] as [crate::source_control::Section; 0]
+        );
+        assert_eq!(
+            sections(&[], None, Some("r1")),
+            [] as [crate::source_control::Section; 0]
+        );
     }
 
     #[test]
@@ -798,7 +804,10 @@ mod tests {
         let wanted = vec![main_tree("r1"), worktree("r1", "D:\\r1-wt")];
         model.request(main_tree("r1"));
         model.request(worktree("r1", "D:\\r1-wt"));
-        assert!(model.wanted_missing(&wanted).is_empty());
+        assert_eq!(
+            model.wanted_missing(&wanted),
+            [] as [crate::source_control::ScKey; 0]
+        );
 
         model.apply(&status_message("r1", None, Vec::new(), Vec::new()));
         model.apply(&DaemonMessage::Welcome {

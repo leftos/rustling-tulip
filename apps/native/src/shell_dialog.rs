@@ -497,7 +497,10 @@ mod tests {
             }
         );
         assert_eq!(request.model, None);
-        assert!(request.extra_env.is_empty());
+        assert_eq!(
+            request.extra_env,
+            [] as [(std::string::String, std::string::String); 0]
+        );
         assert!(request.prompt_injector.is_none());
         assert!(request.request_id.is_none(), "the view stamps its own");
         assert_eq!(

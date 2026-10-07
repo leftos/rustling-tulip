@@ -1206,7 +1206,7 @@ mod tests {
         )
         .expect("a file from before the appearance was saved");
         assert_eq!(older.app_appearance, AppColors::default());
-        assert!(older.recent_colors.is_empty());
+        assert_eq!(older.recent_colors, [] as [std::string::String; 0]);
 
         let partial: UiState =
             serde_json::from_str(r##"{ "app_appearance": { "accent_color": "#38bdf8" } }"##)

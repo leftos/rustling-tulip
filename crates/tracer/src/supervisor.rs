@@ -1091,6 +1091,6 @@ mod tests {
     fn watchdog_is_silent_once_shutdown_reaches_exiting() {
         let step = AtomicU8::new(ShutdownStep::Exiting as u8);
         let deadlines = [Duration::from_millis(10), Duration::from_millis(30)];
-        assert!(watch_shutdown(&step, &deadlines).is_empty());
+        assert_eq!(watch_shutdown(&step, &deadlines), Vec::<&str>::new());
     }
 }

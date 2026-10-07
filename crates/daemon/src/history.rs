@@ -1817,7 +1817,7 @@ mod import_tests {
         assert_eq!(entry.program_name.as_deref(), Some("pwsh"));
         assert_eq!(entry.current_cwd.as_deref(), Some(r"D:\"));
         assert_eq!(entry.primary_cwd.as_deref(), Some(r"D:\"));
-        assert!(entry.members.is_empty());
+        assert_eq!(entry.members, [] as [protocol::SessionMember; 0]);
         assert_eq!(entry.spawn_config, None);
         assert_eq!(entry.end, SessionEnd::Exited { code: 0 });
         assert_eq!(entry.skip_permissions, None);
@@ -1984,7 +1984,7 @@ mod import_tests {
         write_log(&dirs, "tracer-garbage.log", &["not a tracer log"]);
 
         assert_eq!(import(&dirs, &[], &[]), 0);
-        assert!(read_all(&dirs).is_empty());
+        assert_eq!(read_all(&dirs), [] as [protocol::HistoryEntry; 0]);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

@@ -483,7 +483,7 @@ mod tests {
         preview.follow(Some(repo_key("b", None)), now);
         assert_eq!(preview.reuse(), ReuseChoice::Recreate, "no change, kept");
         preview.follow(Some(repo_key("c", None)), now);
-        assert!(preview.members().is_empty());
+        assert_eq!(preview.members(), []);
         assert_eq!(preview.reuse(), ReuseChoice::Reuse);
         assert_eq!(preview.policy(), WorktreeReusePolicy::Reuse);
     }

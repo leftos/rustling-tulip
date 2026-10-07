@@ -653,7 +653,10 @@ mod tests {
             dialog.status_note(),
             Some("Couldn't determine branch state.")
         );
-        assert!(dialog.member_rows().is_empty());
+        assert_eq!(
+            dialog.member_rows(),
+            [] as [crate::branch_fate::MemberRow; 0]
+        );
         assert_eq!(dialog.deadline(), None);
         assert_eq!(dialog.focused(), DialogButton::KeepBranch);
         assert_eq!(

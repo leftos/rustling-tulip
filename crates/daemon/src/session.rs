@@ -1106,7 +1106,7 @@ mod tests {
     #[test]
     fn trim_recent_tail_empty_input_empty_output() {
         let tail = trim_recent_tail(&[]);
-        assert!(tail.is_empty());
+        assert_eq!(tail, [] as [std::string::String; 0]);
     }
 
     /// The attention reasons `events` holds, draining it.

@@ -93,7 +93,7 @@ fn ctrl_tab_cycles_tabs_from_the_terminal_and_wraps(cx: &mut TestAppContext) {
         h.sent_input("s1").is_empty(),
         "the terminal never saw a tab"
     );
-    assert!(h.sent_input("s2").is_empty());
+    assert_eq!(h.sent_input("s2"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -106,7 +106,7 @@ fn ctrl_shift_tab_goes_back_and_wraps(cx: &mut TestAppContext) {
     assert_eq!(active(&mut h).as_deref(), Some("d1"), "wraps to the last");
     h.keys("ctrl-shift-tab");
     assert_eq!(active(&mut h).as_deref(), Some("t2"));
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -132,7 +132,7 @@ fn ctrl_digit_jumps_to_that_tab_and_missing_tab_falls_through(cx: &mut TestAppCo
     assert_eq!(active(&mut h).as_deref(), Some("t1"));
     h.keys("ctrl-2");
     assert_eq!(active(&mut h).as_deref(), Some("t2"));
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
     assert!(
         h.sent_input("s2").is_empty(),
         "the terminal never saw a digit"
@@ -160,7 +160,7 @@ fn ctrl_t_outside_terminal_creates_a_tab_and_in_terminal_reaches_the_pty(cx: &mu
     h.keys("ctrl-t");
     let sent = h.sent();
     assert!(creates_tab(&sent), "sent {sent:?}");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]

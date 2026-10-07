@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn stopped_without_attention_is_not_listed() {
         let model = list(vec![ended("s1", SessionStatus::Stopped, Some(0))]);
-        assert!(rows(&model).is_empty());
+        assert_eq!(rows(&model), [] as [crate::needs_you::NeedsYouRow; 0]);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
         parked_error.is_inactive = true;
         let mut model = list(vec![parked, abandoned, parked_error]);
         attend(&mut model, "s3");
-        assert!(rows(&model).is_empty());
+        assert_eq!(rows(&model), [] as [crate::needs_you::NeedsYouRow; 0]);
     }
 
     #[test]

@@ -9221,7 +9221,7 @@ mod tests {
             let (program, prepend) = npm_shim_to_native_program(&shim)
                 .expect("resolver should find unscoped native exe");
             assert_eq!(program, exe);
-            assert!(prepend.is_empty());
+            assert_eq!(prepend, [] as [std::string::String; 0]);
         }
 
         /// A `.cmd` that isn't an npm shim (no sibling `node_modules`)

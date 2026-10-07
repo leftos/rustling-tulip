@@ -158,7 +158,10 @@ fn unticking_all_reads_retry_without_killing(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h).as_deref(), Some("cleanup-proc-10"));
     h.keys("space tab space");
     assert_eq!(focus(&mut h).as_deref(), Some("cleanup-proc-20"));
-    assert!(h.root(|root, _| root.cleanup_failed_ticked()).is_empty());
+    assert_eq!(
+        h.root(|root, _| root.cleanup_failed_ticked()),
+        [] as [u32; 0]
+    );
     assert_eq!(retry_label(&mut h), "Retry without killing");
 
     h.keys("tab tab enter");

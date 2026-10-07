@@ -202,7 +202,7 @@ fn marked_text_dropped_on_blur(cx: &mut TestAppContext) {
     let p2 = h.cell_center("p2", 0, 0);
     h.click(p2, Modifiers::none());
     assert_eq!(h.marked_text("p1"), None, "blur drops the composition");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -217,7 +217,7 @@ fn committed_text_dropped_when_stopped(cx: &mut TestAppContext) {
     assert_eq!(h.marked_text("p1"), None, "a stop drops the composition");
 
     h.commit("p1", "x");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -296,7 +296,7 @@ fn ctrl_c_without_selection_interrupts_and_ctrl_shift_c_sends_nothing(cx: &mut T
     h.keys("ctrl-c");
     assert_eq!(h.sent_input("s1"), [0x03]);
     h.keys("ctrl-shift-c");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -373,7 +373,7 @@ fn stopped_session_drops_keys_and_pastes(cx: &mut TestAppContext) {
     h.keys("a enter");
     h.set_clipboard("x");
     h.keys("ctrl-v");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]

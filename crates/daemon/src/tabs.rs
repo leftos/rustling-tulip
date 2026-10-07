@@ -1210,7 +1210,10 @@ mod tests {
         );
         let ids = panes_for_session(&grid, "s");
         assert_eq!(ids, vec!["p1".to_string(), "p2".to_string()]);
-        assert!(panes_for_session(&grid, "absent").is_empty());
+        assert_eq!(
+            panes_for_session(&grid, "absent"),
+            [] as [std::string::String; 0]
+        );
     }
 
     #[test]
@@ -1261,7 +1264,7 @@ mod tests {
         )];
         let result = close_session_panes(&mut tabs, "s");
         assert_eq!(result.removed_tab_ids, vec!["T".to_string()]);
-        assert!(result.updated.is_empty());
+        assert_eq!(result.updated, [] as [protocol::TabEntry; 0]);
         assert!(
             tabs.is_empty(),
             "tab with all panes on the session is removed"

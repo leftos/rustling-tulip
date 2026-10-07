@@ -139,7 +139,10 @@ fn quick_shell_spawns_standalone_in_home_when_no_default(cx: &mut TestAppContext
     assert_eq!(request.initial_prompt, None);
     assert!(!request.dangerously_skip_permissions);
     assert_eq!(request.model, None);
-    assert!(request.extra_env.is_empty());
+    assert_eq!(
+        request.extra_env,
+        [] as [(std::string::String, std::string::String); 0]
+    );
     assert!(request.prompt_injector.is_none());
 }
 
@@ -271,7 +274,7 @@ fn relative_folder_cannot_submit_and_shows_hint(cx: &mut TestAppContext) {
 
     h.click_on("shell-submit");
     assert!(is_open(&mut h), "nothing to open");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 
     h.keys("escape");
     h.open_shell_dialog_from_more();
@@ -390,7 +393,7 @@ fn shell_dialog_blank_folder_cannot_submit(cx: &mut TestAppContext) {
 
     h.click_on("shell-submit");
     assert!(is_open(&mut h), "a blank folder has nothing to open");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]
@@ -414,7 +417,7 @@ fn shell_dialog_escape_closes_and_backdrop_does_not(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h), Some("shell-folder"));
     h.keys("escape");
     assert!(!is_open(&mut h), "Esc in the folder field closes");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]

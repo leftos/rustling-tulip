@@ -396,7 +396,10 @@ mod tests {
         assert_eq!(model.request("r1"), "sc-stashes-1");
         assert_eq!(model.wanted_missing(&wanted), std::slice::from_ref(&other));
         model.apply(&stashes("r2", None, 0));
-        assert!(model.wanted_missing(&wanted).is_empty());
+        assert_eq!(
+            model.wanted_missing(&wanted),
+            [] as [crate::source_control::ScKey; 0]
+        );
         model.apply(&welcome());
         assert_eq!(model.wanted_missing(&wanted), [wt, other]);
     }

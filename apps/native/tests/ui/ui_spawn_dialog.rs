@@ -136,7 +136,7 @@ fn ctrl_n_in_a_terminal_reaches_the_pty(cx: &mut TestAppContext) {
     );
     h.keys("ctrl-n");
     assert!(is_open(&mut h), "outside the terminals Ctrl+N opens it");
-    assert!(h.sent_input("s1").is_empty());
+    assert_eq!(h.sent_input("s1"), [] as [u8; 0]);
 }
 
 #[gpui::test]
@@ -360,7 +360,7 @@ fn escape_closes_and_backdrop_click_does_not(cx: &mut TestAppContext) {
     assert_eq!(focus(&mut h).as_deref(), Some("spawn-branch"));
     h.keys("escape");
     assert!(!is_open(&mut h), "Esc in the branch field closes");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]
@@ -675,7 +675,7 @@ fn enter_in_the_prompt_inserts_a_newline_not_a_submit(cx: &mut TestAppContext) {
     let mut h = Harness::with(cx, &dir, &fixture());
     open_headless(&mut h);
     h.keys("a enter b");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
     assert!(is_open(&mut h));
     assert_eq!(prompt(&mut h).as_deref(), Some("a\nb"));
     h.keys("ctrl-enter");

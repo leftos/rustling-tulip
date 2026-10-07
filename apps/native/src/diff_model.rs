@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn two_empty_texts_have_no_rows_and_no_changes() {
         let model = build("", "");
-        assert!(model.rows().is_empty());
+        assert_eq!(model.rows(), []);
         assert_eq!(model.change_count(), 0);
         assert_eq!(model.next_hunk(0), None);
         assert_eq!(model.prev_hunk(0), None);

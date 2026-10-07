@@ -250,7 +250,7 @@ mod tests {
     fn base_list_offers_no_create_row_and_hides_when_empty() {
         let mut combo = Combobox::new(false);
         assert_eq!(labels(&combo, "LOG"), ["feature/Login"]);
-        assert!(labels(&combo, "zzz").is_empty());
+        assert_eq!(labels(&combo, "zzz"), [] as [std::string::String; 0]);
         combo.edited("zzz", &branches());
         assert!(combo.is_open());
         assert!(!combo.shown("zzz", &branches()), "no empty box");

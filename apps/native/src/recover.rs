@@ -1823,7 +1823,7 @@ mod tests {
         codex.own_agent_resumable = true;
         let mut dialog = dialog(&[codex]);
         let row = dialog.row("x").expect("row");
-        assert!(row.options.is_empty());
+        assert_eq!(row.options, [] as [crate::recover::RecoverOption; 0]);
         assert_eq!(
             row.disabled.as_deref(),
             Some("no spawn settings recorded"),
@@ -1863,7 +1863,10 @@ mod tests {
             Some("Codex session, fresh run: its conversation is gone")
         );
         assert!(!row.chosen().expect("chosen").resumes);
-        assert!(row.conversations.is_empty());
+        assert_eq!(
+            row.conversations,
+            [] as [(std::string::String, std::string::String); 0]
+        );
     }
 
     #[test]
@@ -1915,7 +1918,10 @@ mod tests {
         let mut dialog = dialog(&[codex]);
         let row = dialog.row("x").expect("row");
         assert!(!row.chosen().expect("chosen").resumes, "no id to resume");
-        assert!(row.conversations.is_empty());
+        assert_eq!(
+            row.conversations,
+            [] as [(std::string::String, std::string::String); 0]
+        );
         assert_eq!(
             row.fixed_how.as_deref(),
             Some("Codex session, fresh run: no conversation recorded")

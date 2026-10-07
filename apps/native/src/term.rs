@@ -1313,14 +1313,14 @@ mod tests {
     fn osc52_store_to_the_selection_target_is_ignored() {
         let mut term = fed(b"\x1b]52;p;aGk=\x07");
         assert!(term.take_copies().is_empty(), "only `c` reaches the chip");
-        assert!(term.take_replies().is_empty());
+        assert_eq!(term.take_replies(), [] as [u8; 0]);
     }
 
     #[test]
     fn osc52_store_is_collected() {
         let mut term = fed(b"\x1b]52;c;aGk=\x07");
         assert_eq!(term.take_copies(), ["hi".to_owned()]);
-        assert!(term.take_copies().is_empty());
+        assert_eq!(term.take_copies(), [] as [std::string::String; 0]);
         assert!(term.take_replies().is_empty(), "a store provokes no reply");
     }
 
@@ -1328,7 +1328,7 @@ mod tests {
     fn osc52_store_in_history_is_discarded() {
         let mut term = fed(b"");
         term.feed_history(b"\x1b]52;c;aGk=\x07");
-        assert!(term.take_copies().is_empty());
+        assert_eq!(term.take_copies(), [] as [std::string::String; 0]);
         term.feed(b"\x1b]52;c;aGk=\x07");
         assert_eq!(term.take_copies(), ["hi".to_owned()]);
     }
@@ -1337,7 +1337,7 @@ mod tests {
     fn osc52_load_is_answered_with_an_empty_clipboard() {
         let mut term = fed(b"\x1b]52;c;?\x07");
         assert_eq!(term.take_replies(), b"\x1b]52;c;\x07".to_vec());
-        assert!(term.take_copies().is_empty());
+        assert_eq!(term.take_copies(), [] as [std::string::String; 0]);
     }
 
     #[test]
@@ -1376,14 +1376,14 @@ mod tests {
     fn cursor_position_query_queues_a_reply() {
         let mut term = fed(b"ab\x1b[6n");
         assert_eq!(term.take_replies(), b"\x1b[1;3R".to_vec());
-        assert!(term.take_replies().is_empty());
+        assert_eq!(term.take_replies(), [] as [u8; 0]);
     }
 
     #[test]
     fn replies_to_replayed_history_are_discarded() {
         let mut term = fed(b"");
         term.feed_history(b"\x1b[6n");
-        assert!(term.take_replies().is_empty());
+        assert_eq!(term.take_replies(), [] as [u8; 0]);
         term.feed(b"\x1b[6n");
         assert_eq!(term.take_replies(), b"\x1b[1;1R".to_vec());
     }
@@ -1684,7 +1684,10 @@ mod tests {
     fn a_line_scrolled_into_history_is_readable() {
         let term = sized(b"X:/a/b.rs\r\nalpha\r\nbravo\r\ncharlie", 20, 3);
         assert_eq!(term.line_bounds(), (-1, 2));
-        assert!(term.detect_links_near(9).is_empty());
+        assert_eq!(
+            term.detect_links_near(9),
+            [] as [crate::links::TerminalLink; 0]
+        );
         let row = term.read_row(-1);
         assert_eq!(row.text, "X:/a/b.rs           ");
         let links = term.detect_links_near(-1);
@@ -1736,7 +1739,7 @@ mod tests {
         assert_eq!(whole.len(), 1);
         assert_eq!(whole[0].start_row, 0);
         assert_eq!(whole[0].end_row, 3);
-        assert!(term.links_near(0, 2).is_empty());
+        assert_eq!(term.links_near(0, 2), [] as [crate::links::TerminalLink; 0]);
     }
 }
 

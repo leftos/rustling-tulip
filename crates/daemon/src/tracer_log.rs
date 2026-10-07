@@ -411,8 +411,8 @@ mod tests {
         let summary = parse(&[LOST_CLAUDE_LOG[0]]);
 
         assert_eq!(summary.cwd, r"D:\yaat");
-        assert!(summary.program.is_empty());
-        assert!(summary.args.is_empty());
+        assert_eq!(summary.program, "");
+        assert_eq!(summary.args, [] as [std::string::String; 0]);
         assert_eq!(summary.last_line_at, summary.started_at);
     }
 

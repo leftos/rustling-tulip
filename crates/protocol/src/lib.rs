@@ -4282,8 +4282,8 @@ mod tests {
         assert_eq!(preset.id, "smoke");
         assert_eq!(preset.stagger_ms, 3000);
         assert!(!preset.dangerously_skip_permissions);
-        assert!(preset.variables.is_empty());
-        assert!(preset.context_footer_lines.is_empty());
+        assert_eq!(preset.variables, Vec::<PresetVariable>::new());
+        assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
         assert_eq!(
             preset.agent_options,
@@ -4832,7 +4832,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(protocol_version, 15);
-                assert!(protocol_versions.is_empty());
+                assert_eq!(protocol_versions, Vec::<u32>::new());
                 assert_eq!(auth_token, "abc");
             }
             _ => panic!("expected Hello"),
@@ -4873,7 +4873,7 @@ mod tests {
                 supported_versions,
             } => {
                 assert_eq!(protocol_version, 15);
-                assert!(supported_versions.is_empty());
+                assert_eq!(supported_versions, Vec::<u32>::new());
             }
             _ => panic!("expected Welcome"),
         }
@@ -5599,7 +5599,7 @@ mod tests {
         let json = r#"{"protocol_version":22,"port":40123,"auth_token":"t","pid":7}"#;
         let handshake: DaemonHandshake =
             serde_json::from_str(json).expect("decode a handshake without supported_versions");
-        assert!(handshake.supported_versions.is_empty());
+        assert_eq!(handshake.supported_versions, Vec::<u32>::new());
         assert_eq!(handshake.supported(), vec![22]);
     }
 

@@ -114,7 +114,7 @@ fn create_row_commits_typed_name(cx: &mut TestAppContext) {
     );
     assert_eq!(rows(&mut h), None, "a commit closes the list");
     assert!(is_open(&mut h));
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]
@@ -132,7 +132,7 @@ fn down_enter_commits_highlighted_branch(cx: &mut TestAppContext) {
     assert_eq!(branch(&mut h).as_deref(), Some("wt/red-fox"));
     assert_eq!(rows(&mut h), None);
     assert!(is_open(&mut h), "Enter committed the row, not the dialog");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]
@@ -148,7 +148,7 @@ fn esc_closes_list_not_dialog(cx: &mut TestAppContext) {
     assert_eq!(branch(&mut h).as_deref(), Some("f"), "and what was typed");
     h.keys("escape");
     assert!(!is_open(&mut h), "the second Esc closes the dialog");
-    assert!(spawns(&h.sent()).is_empty());
+    assert_eq!(spawns(&h.sent()), [] as [protocol::SpawnRequest; 0]);
 }
 
 #[gpui::test]

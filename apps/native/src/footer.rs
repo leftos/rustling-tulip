@@ -296,7 +296,10 @@ mod tests {
             agent("gone", SessionStatus::Stopped),
         ];
         assert_eq!(counts(&sessions, &[]), StatusCounts::default());
-        assert!(counts(&sessions, &[]).spans().is_empty());
+        assert_eq!(
+            counts(&sessions, &[]).spans(),
+            [] as [crate::footer::CountSpan; 0]
+        );
         assert!(counts(&[], &[]).spans().is_empty(), "no sessions at all");
     }
 

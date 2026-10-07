@@ -618,7 +618,10 @@ mod tests {
     fn missing_project_folder_yields_nothing() {
         let scratch = Scratch::new("missing");
 
-        assert!(all(scratch.home(), CWD).is_empty());
+        assert_eq!(
+            all(scratch.home(), CWD),
+            [] as [crate::transcripts::TranscriptCandidate; 0]
+        );
         assert!(!transcript_exists(scratch.home(), CWD, "abc"));
     }
 

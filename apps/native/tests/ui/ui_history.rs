@@ -367,7 +367,7 @@ fn a_merge_commits_detail_says_it_has_no_file_changes(cx: &mut TestAppContext) {
     h.click_on(&format!("sc-commit-{BROWSED}-{}", commit(1).sha));
     h.send(detail(1, 2, Vec::new()));
     let view = loaded_detail(&block(&mut h));
-    assert!(view.files.is_empty());
+    assert_eq!(view.files, [] as [rustling_tulip_native::DetailFile; 0]);
     assert_eq!(view.no_files, Some("no file changes (merge commit)"));
 
     h.click_on(&format!("sc-commit-{BROWSED}-{}", commit(2).sha));
@@ -407,7 +407,7 @@ fn clicking_a_detail_file_opens_its_diff_against_the_commit(cx: &mut TestAppCont
     else {
         panic!("filtered to diff tabs");
     };
-    assert!(!id.is_empty());
+    assert_ne!(id, "");
     assert_eq!(repo_id, "r1");
     assert_eq!(path, "src/main.rs");
     assert_eq!(against.as_deref(), Some(commit(1).sha.as_str()));
@@ -473,7 +473,7 @@ fn the_forge_button_is_disabled_with_each_tooltip(cx: &mut TestAppContext) {
     assert_eq!(forge.tooltip, "This repository has no origin remote");
     assert_eq!(toast_count(&mut h), 0);
     h.click_on(&format!("sc-history-forge-{BROWSED}"));
-    assert!(h.opened().is_empty());
+    assert_eq!(h.opened(), [] as [support::Opened; 0]);
 }
 
 #[gpui::test]
@@ -524,7 +524,16 @@ fn history_is_collapsed_for_a_focused_session_and_expanded_when_browsing(cx: &mu
     assert_eq!(shown.id, MEMBER, "the focused session's member");
     assert!(!shown.expanded, "collapsed by default");
     assert_eq!(shown.body, HistoryBody::Collapsed);
-    assert!(list_reads(&mut h).is_empty());
+    assert_eq!(
+        list_reads(&mut h),
+        [] as [(
+            std::string::String,
+            std::option::Option<std::string::String>,
+            u32,
+            u32,
+            std::string::String
+        ); 0]
+    );
     assert!(
         h.bounds("sc-changes").size.height > px(420.0),
         "with no History expanded the changes take the rest"

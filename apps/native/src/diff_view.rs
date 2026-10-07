@@ -1017,8 +1017,14 @@ mod tests {
 
     #[test]
     fn no_marks_for_an_empty_diff_or_an_unlaid_ruler() {
-        assert!(ruler_marks(&model("", ""), 100.0).is_empty());
-        assert!(ruler_marks(&model("a\n", "b\n"), 0.0).is_empty());
+        assert_eq!(
+            ruler_marks(&model("", ""), 100.0),
+            [] as [crate::diff_view::RulerMark; 0]
+        );
+        assert_eq!(
+            ruler_marks(&model("a\n", "b\n"), 0.0),
+            [] as [crate::diff_view::RulerMark; 0]
+        );
         assert!(
             ruler_marks(&model("a\n", "a\n"), 100.0).is_empty(),
             "no hunks"

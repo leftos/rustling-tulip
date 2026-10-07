@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn drive_letter_alone_is_not_a_path() {
-        assert!(detect_links("X:").is_empty());
+        assert_eq!(detect_links("X:"), [] as [crate::links::TerminalLink; 0]);
         assert_eq!(trim_link_candidate("X:"), "X:");
         assert_eq!(trim_link_candidate("X:/a:"), "X:/a");
     }

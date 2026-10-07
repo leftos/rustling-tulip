@@ -2843,7 +2843,7 @@ mod tests {
         let tabs = [diff_tab("d1"), tab("t1", &pane("p1", Some("s1")))];
         let tree = tab_view(&tabs, &[session("s1")]);
         assert_eq!(keys(&tree), ["tab:d1", "tab:t1"]);
-        assert!(tree[0].leaves.is_empty());
+        assert_eq!(tree[0].leaves, [] as [crate::sidebar::Leaf; 0]);
         assert_eq!(tree[0].kind, ContainerKind::Tab);
     }
 
@@ -2873,7 +2873,7 @@ mod tests {
     fn unbound_bucket_is_omitted_when_empty() {
         let tree = tab_view(&[tab("t1", &pane("p1", Some("s1")))], &[session("s1")]);
         assert_eq!(keys(&tree), ["tab:t1"]);
-        assert!(tab_view(&[], &[]).is_empty());
+        assert_eq!(tab_view(&[], &[]), [] as [crate::sidebar::Container; 0]);
     }
 
     #[test]

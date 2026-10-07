@@ -208,7 +208,7 @@ fn close_with_no_active_sessions_quits_without_asking(cx: &mut TestAppContext) {
     assert_eq!(h.quit_requests(), 1);
     assert!(!exit_open(&mut h), "nothing to ask about");
     assert!(h.sent().is_empty());
-    assert!(commands(&mut h).is_empty());
+    assert_eq!(commands(&mut h), [] as [std::string::String; 0]);
 }
 
 #[gpui::test]
@@ -225,7 +225,7 @@ fn close_with_only_orphans_and_stopped_quits_without_asking(cx: &mut TestAppCont
     assert_eq!(h.quit_requests(), 1, "the daemon could stop none of them");
     assert!(!exit_open(&mut h));
     assert!(h.sent().is_empty());
-    assert!(commands(&mut h).is_empty());
+    assert_eq!(commands(&mut h), [] as [std::string::String; 0]);
 }
 
 #[gpui::test]
@@ -237,7 +237,7 @@ fn close_while_disconnected_quits_without_asking(cx: &mut TestAppContext) {
     assert!(close(&mut h));
     assert_eq!(h.quit_requests(), 1);
     assert!(!exit_open(&mut h));
-    assert!(commands(&mut h).is_empty());
+    assert_eq!(commands(&mut h), [] as [std::string::String; 0]);
 }
 
 #[gpui::test]
@@ -287,7 +287,7 @@ fn close_with_active_sessions_opens_the_exit_dialog_focused_on_keep_running(
     assert!(exit_open(&mut h));
     assert_eq!(h.quit_requests(), 0);
     assert!(h.sent().is_empty());
-    assert!(commands(&mut h).is_empty());
+    assert_eq!(commands(&mut h), [] as [std::string::String; 0]);
 }
 
 #[gpui::test]
@@ -823,7 +823,7 @@ fn escape_cancels_the_exit_dialog(cx: &mut TestAppContext) {
     assert!(!exit_open(&mut h), "Esc cancels");
     assert_eq!(h.quit_requests(), 0);
     assert!(h.sent().is_empty());
-    assert!(commands(&mut h).is_empty());
+    assert_eq!(commands(&mut h), [] as [std::string::String; 0]);
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard back");
 

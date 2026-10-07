@@ -213,8 +213,14 @@ mod tests {
 
     #[test]
     fn rearrange_rows_follow_bound_count() {
-        assert!(rearrange_lines(0, WIDE, false).is_empty());
-        assert!(rearrange_lines(1, WIDE, true).is_empty());
+        assert_eq!(
+            rearrange_lines(0, WIDE, false),
+            [] as [crate::tab_menu::MenuLine; 0]
+        );
+        assert_eq!(
+            rearrange_lines(1, WIDE, true),
+            [] as [crate::tab_menu::MenuLine; 0]
+        );
 
         let two = rearrange_lines(2, WIDE, false);
         assert_eq!(two[0], MenuLine::Label("Rearrange panes".to_owned()));

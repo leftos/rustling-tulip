@@ -472,7 +472,7 @@ fn disabled_rows_show_reason(cx: &mut TestAppContext) {
         row(&mut h, "n").disabled.as_deref(),
         Some("no conversation found")
     );
-    assert!(ticked(&mut h).is_empty());
+    assert_eq!(ticked(&mut h), [] as [std::string::String; 0]);
     h.click_on("recover-row-n");
     h.click_on("recover-select-all");
     assert!(ticked(&mut h).is_empty(), "a disabled row never ticks");

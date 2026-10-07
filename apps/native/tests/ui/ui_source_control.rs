@@ -615,7 +615,13 @@ fn no_repos_shows_the_register_hint(cx: &mut TestAppContext) {
     );
     assert!(!h.in_model("sc-refresh"));
     assert!(h.in_model("sc-panel"));
-    assert!(status_requests(&mut h).is_empty());
+    assert_eq!(
+        status_requests(&mut h),
+        [] as [(
+            std::string::String,
+            std::option::Option<std::string::String>
+        ); 0]
+    );
     assert_eq!(badge(&mut h), None);
 }
 

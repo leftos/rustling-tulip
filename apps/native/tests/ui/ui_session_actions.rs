@@ -976,7 +976,7 @@ fn shift_duplicate_of_a_standalone_session_duplicates_it_plainly(cx: &mut TestAp
 
     shift_duplicate(&mut h, "duplicate-new-tab");
     let id = duplicate_request(&h.sent(), "s1");
-    assert!(!id.is_empty());
+    assert_ne!(id, "");
     assert!(!h.root(|root, _| root.spawn_dialog_open()));
 }
 

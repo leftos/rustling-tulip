@@ -116,7 +116,7 @@ fn headless_pane_shows_empty_log(cx: &mut TestAppContext) {
     assert!(painted(&mut h, "headless-log-p1"));
     assert!(painted(&mut h, "headless-empty-p1"), "the note is drawn");
     assert_eq!(empty_note(&mut h, "p1"), Some("No events yet…"));
-    assert!(rows(&mut h, "p1").is_empty());
+    assert_eq!(rows(&mut h, "p1"), [] as [(usize, std::string::String); 0]);
     assert!(!painted(&mut h, "headless-show-all-p1"));
 }
 

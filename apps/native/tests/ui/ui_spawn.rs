@@ -251,7 +251,7 @@ fn spawn_sends_request_with_request_id_and_shows_toast(cx: &mut TestAppContext) 
     });
     let sent = spawned(&h.sent());
     let first = sent.request_id.clone().expect("an id");
-    assert!(!first.is_empty());
+    assert_ne!(first, "");
     assert_eq!(
         sent.target,
         request(true).target,

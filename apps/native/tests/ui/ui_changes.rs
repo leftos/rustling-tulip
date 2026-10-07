@@ -456,7 +456,15 @@ fn the_right_click_menu_stages_and_discards(cx: &mut TestAppContext) {
     h.send(listing());
     h.right_click_on("sc-row-changes-r1::|c.rs");
     h.click_on("sc-file-menu-discard");
-    assert!(writes(&mut h).is_empty());
+    assert_eq!(
+        writes(&mut h),
+        [] as [(
+            &str,
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::option::Option<std::string::String>
+        ); 0]
+    );
     let confirm = h
         .root(|root, _| root.discard_confirm_view())
         .expect("the menu's discard asks first");
@@ -512,7 +520,15 @@ fn the_discard_confirm_lists_the_paths_and_cancel_sends_nothing(cx: &mut TestApp
         h.root(|root, _| root.discard_confirm_view()).is_none(),
         "✕ cancels"
     );
-    assert!(writes(&mut h).is_empty());
+    assert_eq!(
+        writes(&mut h),
+        [] as [(
+            &str,
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::option::Option<std::string::String>
+        ); 0]
+    );
 }
 
 /// Session `s1` on r1's main tree, in pane `p1` with the keyboard, and the
@@ -566,7 +582,15 @@ fn a_registry_without_the_repo_closes_the_discard_confirm(cx: &mut TestAppContex
     );
     h.keys("a");
     assert_eq!(h.sent_input("s1"), b"a", "the pane has the keyboard again");
-    assert!(writes(&mut h).is_empty());
+    assert_eq!(
+        writes(&mut h),
+        [] as [(
+            &str,
+            std::string::String,
+            std::vec::Vec<std::string::String>,
+            std::option::Option<std::string::String>
+        ); 0]
+    );
 }
 
 #[gpui::test]
