@@ -5,7 +5,7 @@
 ## Do first
 
 - [x] RT-68 Fix clippy's new assert_is_empty errors from Rust 1.99 — High · Build tooling
-- [/] RT-69 Give release tests their own profile so they build in minutes, not ten — High · Build tooling
+- [x] RT-69 Give release tests their own profile so they build in minutes, not ten — High · Build tooling
 
 ## Wave 1a — Claude sessions on DeepSeek
 
@@ -103,6 +103,7 @@
 - [ ] RT-45 Stop the live tier's tracer kill racing a young session
 - [ ] RT-60 Add the agent-mail-guard prek hook
 - [x] RT-61 Gate and commit the synced gate launcher (tools/gate.ps1)
+- [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 
 ## macOS
 
