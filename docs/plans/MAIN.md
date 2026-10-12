@@ -4,20 +4,17 @@
 
 ## Do first
 
-- [x] RT-68 Fix clippy's new assert_is_empty errors from Rust 1.99 — High · Build tooling
-- [x] RT-69 Give release tests their own profile so they build in minutes, not ten — High · Build tooling
+- [ ] RT-116 Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI — High · Build tooling
 
 ## Wave 1a — Claude sessions on DeepSeek
 
 - [ ] RT-3 Run Claude sessions on DeepSeek as a per-session Claude provider
-  - [x] RT-4 DK.1–DK.3: Claude options constructor and the provider field
   - [ ] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
 - [ ] RT-6 Merge feat/deepseek-sessions (#8)
 
 ## Wave 1b — Environment secrets
 
 - [ ] RT-7 Keep secret environment rows out of stored files and client messages
-  - [x] RT-8 ES.1–ES.7, ES.9, ES.10: secret store, sealing, picker, dialog and recovery
   - [ ] RT-9 ES.8: document env secrets in CLAUDE.md, architecture and native-client docs
 - [ ] RT-10 Merge feat/env-secrets (#9)
 
@@ -25,13 +22,48 @@
 
 - [ ] RT-11 P4.16: Exclude a session from busy tracking
 
-## Wave 2 — Tabs, panes and tab state
+## Wave 2 — Hook status, background work and hand-offs
+
+- [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
+  - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
+  - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
+
+## Wave 3 — Attention feed on the desktop
+
+- [ ] RT-87 Daemon attention feed: one event stream for needs-you, hand-offs, progress, done and fleet items
+- [ ] RT-88 Turn Needs You into an attention inbox with streams, unread state and mark unread
+- [ ] RT-29 Needs You: line 2 from hook detail, Answer rows from summaries
+- [ ] RT-89 Answer permissions and single-choice questions from Windows toasts
+- [ ] RT-91 Clear and continue: one click runs /clear then /nextup, refused while work runs
+- [ ] RT-92 Show context %, cost and prompt-cache expiry on each session
+- [ ] RT-93 Fleet items: stuck agents and per-repo inbox requests
+- [ ] RT-90 Sounds per attention stream and a taskbar badge
+
+## Wave 4 — Tabs, panes and tab state
 
 - [ ] RT-12 Clear a tab's stale closing mark when the daemon keeps the tab
 - [ ] RT-13 P4.17: Keep an untouched layout when panes come and go
 - [ ] RT-14 Disarm the pending create when CreateTab or MergeTabs is rejected
 
-## Wave 3 — Repos, containers and presets
+## Wave 5 — Remote desktop, relay and files across machines
+
+- [ ] RT-33 MA1: shared client core for pinned TLS, host profiles and pairing
+- [ ] RT-96 MA3: Per-device credentials, revocable from Settings
+- [ ] RT-34 Phase 6: remote mode and cutover
+- [ ] RT-95 Connect to a daemon over Tailscale by its MagicDNS name
+- [ ] RT-94 MA2: Relay that reaches the daemon from outside the LAN with end-to-end TLS
+- [ ] RT-35 FT.2: native download sink for fetched files
+- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
+- [ ] RT-97 Resolve clicked terminal paths on the daemon, using the lines above the click
+- [ ] RT-98 Index each session's transcript file paths and cwds for exact link resolution
+- [ ] RT-99 Pick between candidates when a clicked path matches several files
+- [ ] RT-58 Underline every terminal link and open it with a plain click
+- [ ] RT-37 FT.4: "Fetch file…" popup
+- [ ] RT-100 Open an unchanged fetched file from the local cache
+- [ ] RT-101 Paste an image or drop a file into a remote session
+- [ ] RT-102 Resume a remote connection without replaying scrollback
+
+## Wave 6 — Repos, containers and presets
 
 - [ ] RT-15 P4.10b: Remove a repo or workspace
 - [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
@@ -42,79 +74,90 @@
 - [ ] RT-21 P4.15a: Preset wizard sources and variables
 - [ ] RT-22 P4.15b: Preset wizard preview and launching
 
-## Wave 4 — Shared form controls
+## Wave 7 — Android app MVP
+
+- [ ] RT-38 Android app MVP: pairing, attention feed, reply and push
+  - [ ] RT-103 MA4: Flutter shell, Rust core bridge and QR pairing on Android
+  - [ ] RT-104 MA6: Phone home with the attention feed and sessions; reply, answer prompts, stop and resume
+  - [ ] RT-105 MA7: Phone push through FCM with action buttons, sent only when away
+  - [ ] RT-106 Phone files: open a tapped path in a viewer, browse a worktree, share into a session
+
+## Wave 8 — Shared form controls
 
 - [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
 - [ ] RT-24 Keyboard stops and focus ring through the Appearance body and editor
 
-## Wave 4b — Dictation
+## Wave 9 — Native client Phase 5: windows and drag-and-drop
+
+- [ ] RT-32 Phase 5: windows and drag-and-drop
+
+## Wave 10 — Chat mirror and phone session views
+
+- [ ] RT-51 Chat mirror: a Claude session as a chat over its live terminal, with interactive cards
+- [ ] RT-107 Running-work strip: subagents, background shells and wakeups over the chat
+- [ ] RT-110 Chat composer: slash commands, @ file mentions, image attach, quick replies
+- [ ] RT-108 MA8: Phone terminal with a key bar
+- [ ] RT-109 MA9: Phone chat view over the chat mirror
+
+## Wave 11 — Summaries, spoken alerts and the Dashboard
+
+- [ ] RT-67 Record ops-tower's Agents tab rulings against RT-28 and reconcile DB.1's summarizer
+- [ ] RT-27 Measure a local small model as the alerts' summarizer provider
+- [ ] RT-26 Speak a summary aloud when an agent waits
+- [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
+- [ ] RT-111 Summary view: one line per stretch of work, expandable into the chat
+
+## Wave 12 — Subagent streams
+
+- [ ] RT-30 View a session's running subagents as read-only sessions
+
+## Wave 13 — Follow dispatch runs
+
+- [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions
+
+## Wave 14 — Claude accounts and artifacts by account
+
+- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap
+- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching
+- [ ] RT-112 MA10: Accounts screen on the phone
+- [ ] RT-113 Open Claude artifact links in the account that published them
+- [ ] RT-115 Host-approved extra roots for file fetch
+- [ ] RT-114 Artifacts list, with read-only local copies served by the daemon
+
+## Wave 15 — ops-tower views: gates, board and dock
+
+- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates
+- [ ] RT-55 Gate dashboard in the client
+- [ ] RT-56 Plan board and daily briefing in the Dashboard
+- [ ] RT-65 Decide on a dock-bar mode like ops-tower's desktop window
+
+## Wave 16 — Dictation
 
 - [ ] RT-75 Dictate a prompt into any session from the native client
   - [ ] RT-76 DI.1: Spike WinRT dictation and the Right Alt key in the unpackaged client
   - [ ] RT-77 DI.2: Recognizer trait, WinRT recognizer and a scripted fake
   - [ ] RT-78 DI.3: Dictation box and the Right Alt tap/hold key
   - [ ] RT-79 DI.7: Document dictation in native-client.md
-
-## Wave 5 — Hook-reported agent status
-
-- [ ] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
-
-## Wave 6 — Alerts, Dashboard and Needs You
-
-- [ ] RT-26 Speak a summary aloud when an agent waits
 - [ ] RT-80 DI.4: Hold spoken alerts while dictating, and count the box as presence
-- [ ] RT-27 Measure a local small model as the alerts' summarizer provider
-- [ ] RT-28 Dashboard view: cards for every live session, fed by the summarizer
-- [ ] RT-67 Record ops-tower's Agents tab rulings against RT-28 and reconcile DB.1's summarizer
-- [ ] RT-29 Needs You: line 2 from hook detail, Answer rows from summaries
-
-## Wave 7 — Subagent streams
-
-- [ ] RT-30 View a session's running subagents as read-only sessions
-
-## Wave 8 — Follow dispatch runs
-
-- [ ] RT-31 Follow DeepSeek dispatch runs as read-only sessions
-
-## Wave 9 — Native client Phase 5: windows and drag-and-drop
-
-- [ ] RT-32 Phase 5: windows and drag-and-drop
-
-## Wave 10 — Remote, cutover and the shared client core
-
-- [ ] RT-33 MA1: shared client core for pinned TLS, host profiles and pairing
-- [ ] RT-34 Phase 6: remote mode and cutover
 - [ ] RT-81 DI.5: Check that dictation in remote mode reaches the remote session
-- [ ] RT-35 FT.2: native download sink for fetched files
-- [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
-- [ ] RT-37 FT.4: "Fetch file…" popup
-
-## Wave 11 — Mobile app
-
-- [ ] RT-38 Mobile app phases MA2–MA10
 - [ ] RT-83 MA11: Dictation in the mobile app
-
-## Wave 12 — Claude accounts
-
-- [ ] RT-39 Built-in claude-swap: several Claude logins, usage polling and switching
-- [ ] RT-66 Amend the accounts plan to take ops-tower's claude-accounts crate instead of porting cswap
 
 ## Docs
 
+- [ ] RT-86 Fix CLAUDE.md's transcript cost claim, add docs/README.md and a channels Task Index row
 - [ ] RT-40 Add Integration Footguns and Test locations sections to architecture.md
 - [ ] RT-62 Write down the ops-tower relationship in the docs and on RT-28, RT-55 and RT-56
 - [ ] RT-63 Split markdown lines of 500+ characters
 
 ## Build tooling
 
+- [ ] RT-60 Add the agent-mail-guard prek hook
+- [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 - [ ] RT-41 Find the timing two daemon tests depend on under load
 - [ ] RT-42 Find why smoke_posted_keys_reach_the_shell failed once
 - [ ] RT-43 Bump gpui past 0.2.2 to drop the proc-macro-error2 warning
 - [ ] RT-44 Find what holds tracer_protocol's incremental session directory
 - [ ] RT-45 Stop the live tier's tracer kill racing a young session
-- [ ] RT-60 Add the agent-mail-guard prek hook
-- [x] RT-61 Gate and commit the synced gate launcher (tools/gate.ps1)
-- [ ] RT-70 Speed up the daemon's git-fixture tests with shared fixture templates
 
 ## macOS
 
@@ -136,21 +179,25 @@
 
 ## Ideas needing a design pass
 
-- [ ] RT-51 Conversation view: a Claude session as a chat with tool cards
 - [ ] RT-52 Link a worktree to a GitHub issue or PR at spawn
 - [ ] RT-53 Agent CLI: let an agent in one session drive other sessions
 - [ ] RT-54 Agent skill pack: fan work out to worktrees, then review and merge
-- [ ] RT-55 Gate dashboard in the client
-- [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates
-- [ ] RT-56 Plan board and daily briefing in the Dashboard
 - [ ] RT-57 Offer to resume the sessions a reboot killed, on the next start
-- [ ] RT-65 Decide on a dock-bar mode like ops-tower's desktop window
 - [ ] RT-71 Seed new worktrees: copy listed ignored files, link shared folders, run setup scripts
 - [ ] RT-72 Comment on a diff, then send the comments to an agent as one prompt
 - [ ] RT-73 Hibernate idle finished agents and resume them when opened
 - [ ] RT-74 Steadier screen-based status: hysteresis, rule files, agent process detection
+- [ ] RT-118 Connect to several daemons at once, grouped by host
+- [ ] RT-119 Browse the host's folders for Add repo in remote mode
+- [ ] RT-120 Compress remote traffic and coalesce output frames
+- [ ] RT-121 Peek at a path's lines on hover, without opening
+- [ ] RT-122 Send an edited fetched file back to the host
+- [ ] RT-123 Open remote paths in VS Code Remote instead of copying
+- [ ] RT-124 Fetch every file a turn touched as one folder
+- [ ] RT-125 Launch a session from the phone: launch last again, a preset, or /nextup in a repo
+- [ ] RT-126 Phone home-screen widget with the needs-you count
 
 ## Backlog
 
-- [ ] RT-58 Underline every terminal link and open it with a plain click
 - [ ] RT-59 Split the oversized daemon, protocol and native UI source files
+- [ ] RT-117 MA5: iOS build pipeline through cloud macOS CI
