@@ -1,4 +1,5 @@
 #requires -Version 7
+
 <#
 .SYNOPSIS
 The gate a repo runs: it hands every word to the user-level gate when the machine has one, and otherwise runs the
@@ -10,16 +11,25 @@ the gate: a change to the canonical gate, at `$env:CLAUDE_CONFIG_DIR\tools\gate\
 `~/.claude\tools\gate\gate.ps1` when that variable is unset, reaches every repo at once, and a caller keeps invoking
 tools/gate.ps1 as it always did, `pwsh -NoProfile -File tools/gate.ps1 ...` or `& tools/gate.ps1 ...`.
 
-When the canonical gate is there, every word is handed to it in this same process, so the call is the gate's own:
--StopTree and the exit status included.
+After the cutover, once `%LOCALAPPDATA%\gate\cutover.flag` exists (its content is not read, and neither --state-dir nor
+GATE_STATE_DIR moves it), every word goes to `%LOCALAPPDATA%\gate\bin\gate.exe` instead, as the caller gave it,
+-StopTree included; a caller whose session ate the -- gets it put back before the first command word, and the
+-name:value words the session split after it joined again. The launcher prints nothing of its own: gate.exe's lines are
+the whole output. A Ctrl+C reaches gate.exe while the launcher ignores it, waits for gate.exe to end and exits with its
+whole status. With the flag set and gate.exe missing nothing runs: the launcher says `gate: the cutover flag is set but
+<path> is missing; reinstall with tools/install.ps1` on standard error and exits 127.
+
+Without the flag, when the canonical gate is there, every word is handed to it in this same process, so the call is
+the gate's own: -StopTree and the exit status included.
 
 When it is not, as on another developer's clone, the fallback runs the command itself. It keeps the whole output in the
 log, the last -Tail lines on the screen, the command's own exit status, the failure markers that make a zero exit whose
 output reports a failure a failure, below-normal priority for the command, and -StopTree, which stops the processes one
 Win32_Process snapshot shows under the pid, a process whose parent has already exited being beyond it, since only a job
 holds that one. It drops the parts that need the gate's machine: the slot pools, the watchdog's stall kill and ceiling,
-its wall-time backstop, and the handling of build servers. It says so on standard error before the command starts, one
-line, `gate: <path> not found; running without slots or watchdog`, so a run with no watchdog is never read as one with.
+its wall-time backstop, the handling of build servers, and routing to the build box (it reads -Local and ignores it).
+It says it has no gate on standard error before the command starts, one line, `gate: <path> not found; running without
+slots or watchdog`, so a run with no watchdog is never read as one with.
 
 Like the gate, and for the same reason, the options are read by hand out of $args rather than declared in a param
 block: a declared block sends the bare -- of a caller's command through PowerShell's parameter binder, which reads it
@@ -30,7 +40,7 @@ in that case, and a -name:value word the binder left as -name: and value is join
 launcher forwards to and the fallback's command both getting it whole.
 
 Usage: pwsh tools/gate.ps1 -Log <path> -TimeoutSeconds <n> -Slot heavy|light|critical [-StallSeconds <n>] [-Tail <n>]
-           [-NoMarkers] -- <command> [args...]
+           [-NoMarkers] [-Local] -- <command> [args...]
        pwsh tools/gate.ps1 -StopTree <pid>
 #>
 
@@ -41,8 +51,8 @@ $ErrorActionPreference = 'Stop'
 # assignments in their parse trees.
 $markers = '^Build FAILED\.|error CS\d+|: error |Test run summary: Failed!|^\s*failed: [1-9]|gate: (TIMED OUT|STALLED|BACKSTOP)'
 $usage = @(
-    'usage: pwsh tools/gate.ps1 -Log <path> -TimeoutSeconds <n> -Slot heavy|light|critical [-StallSeconds <n>] [-Tail <n>] [-NoMarkers] ' +
-    '-- <command> [args...]'
+    'usage: pwsh tools/gate.ps1 -Log <path> -TimeoutSeconds <n> -Slot heavy|light|critical [-StallSeconds <n>] [-Tail <n>] ' +
+    '[-NoMarkers] [-Local] -- <command> [args...]'
     '       pwsh tools/gate.ps1 -StopTree <pid>'
 )
 # The priority classes the fallback lowers for the command: a gate already at below normal or idle is left as it is.
@@ -128,10 +138,11 @@ function Expand-Word {
     return $flat.ToArray()
 }
 
-# Reads the option at $At into $Options; returns how many words it took, or 0 having said why it could not. An option
-# written -Name:value, as one word from the raw argv, is read as that option and its value in that one word.
+# Reads the option at $At into $Options; returns how many words it took, or 0 with the reason it could not added to
+# $Problems. An option written -Name:value, as one word from the raw argv, is read as that option and its value in that
+# one word.
 function Read-Option {
-    param([hashtable]$Options, [object[]]$Words, [int]$At)
+    param([hashtable]$Options, [object[]]$Words, [int]$At, [System.Collections.Generic.List[string]]$Problems)
     $word = [string]$Words[$At]
     $name = $word.Substring(1)
     $value = $null
@@ -140,12 +151,12 @@ function Read-Option {
         $value = $name.Substring($colon + 1)
         $name = $name.Substring(0, $colon)
     }
-    if ($name -eq 'NoMarkers') {
-        $Options['NoMarkers'] = $true
+    if ($name -in 'NoMarkers', 'Local') {
+        $Options[$name] = $true
         return 1
     }
     if (-not $Options.ContainsKey($name)) {
-        Write-Gate "gate: cannot read the option $word"
+        $Problems.Add("gate: cannot read the option $word")
         return 0
     }
     if ($null -ne $value) {
@@ -153,7 +164,7 @@ function Read-Option {
         return 1
     }
     if ($At + 1 -ge $Words.Count) {
-        Write-Gate "gate: $word needs a value"
+        $Problems.Add("gate: $word needs a value")
         return 0
     }
     $Options[$name] = [string]$Words[$At + 1]
@@ -181,27 +192,68 @@ function Join-ColonWord {
     return $joined.ToArray()
 }
 
+# Reads this launcher's options from the front of the words, exactly as gate.ps1 reads them, up to where the command
+# starts: Options, the options read; Dash, whether a -- is there; At, the index of that --, or, when the caller's session
+# ate it, of the first word that is not one of the options, the word count when there is no command, and -1, with the
+# reason added to $Problems, at an option it cannot read.
+function Find-CommandStart {
+    param([object[]]$Words, [System.Collections.Generic.List[string]]$Problems)
+    $options = @{ Log = ''; TimeoutSeconds = ''; Slot = ''; StallSeconds = '120'; Tail = '20'; NoMarkers = $false; Local = $false }
+    $read = 0
+    while ($read -lt $Words.Count) {
+        $word = [string]$Words[$read]
+        if ($word -eq '--') { return @{ Options = $options; Dash = $true; At = $read } }
+        # A caller in its own session had the -- eaten by PowerShell's parser, so the command starts at the first word
+        # that is not one of this launcher's options.
+        if (-not $word.StartsWith('-')) { return @{ Options = $options; Dash = $false; At = $read } }
+        $taken = Read-Option -Options $options -Words $Words -At $read -Problems $Problems
+        if ($taken -eq 0) { return @{ Options = $options; Dash = $false; At = -1 } }
+        $read += $taken
+    }
+    return @{ Options = $options; Dash = $false; At = $Words.Count }
+}
+
 # Splits the words into this launcher's options and the command, exactly as gate.ps1 splits them; $null, having said
 # why, for an option it cannot read.
 function Read-Argument {
     param([object[]]$Words)
-    $options = @{ Log = ''; TimeoutSeconds = ''; Slot = ''; StallSeconds = '120'; Tail = '20'; NoMarkers = $false }
-    $read = 0
-    while ($read -lt $Words.Count) {
-        $word = [string]$Words[$read]
-        if ($word -eq '--') {
-            return @{ Options = $options; Command = @(Join-ColonWord @($Words | Select-Object -Skip ($read + 1))) }
-        }
-        # A caller in its own session had the -- eaten by PowerShell's parser, so the command starts at the first word
-        # that is not one of this launcher's options.
-        if (-not $word.StartsWith('-')) {
-            return @{ Options = $options; Command = @(Join-ColonWord @($Words | Select-Object -Skip $read)) }
-        }
-        $taken = Read-Option -Options $options -Words $Words -At $read
-        if ($taken -eq 0) { return $null }
-        $read += $taken
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $found = Find-CommandStart -Words $Words -Problems $problems
+    if ($found.At -lt 0) {
+        foreach ($problem in $problems) { Write-Gate $problem }
+        return $null
     }
-    return @{ Options = $options; Command = @() }
+    $skip = if ($found.Dash) { $found.At + 1 } else { $found.At }
+    return @{ Options = $found.Options; Command = @(Join-ColonWord @($Words | Select-Object -Skip $skip)) }
+}
+
+# True when %LOCALAPPDATA%\gate\cutover.flag exists, whatever it holds: the flag that hands every call to gate.exe. A
+# process without a LOCALAPPDATA has no flag.
+function Test-CutoverFlag {
+    if (-not $env:LOCALAPPDATA) { return $false }
+    return Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'gate\cutover.flag')
+}
+
+# A Ctrl+C handler that cancels the break for this process, compiled from an expression tree: Ctrl+C runs it on a
+# thread with no runspace, where a script block cannot run and takes pwsh down.
+function New-BreakIgnorer {
+    $breakArgs = [System.Linq.Expressions.Expression]::Parameter([ConsoleCancelEventArgs], 'e')
+    $source = [System.Linq.Expressions.Expression]::Parameter([object], 'sender')
+    $cancel = [System.Linq.Expressions.Expression]::Assign(
+        [System.Linq.Expressions.Expression]::Property($breakArgs, 'Cancel'), [System.Linq.Expressions.Expression]::Constant($true))
+    $parameters = [System.Linq.Expressions.ParameterExpression[]]@($source, $breakArgs)
+    return [System.Linq.Expressions.Expression]::Lambda[ConsoleCancelEventHandler]($cancel, $parameters).Compile()
+}
+
+# The words gate.exe is given: the caller's as they came, or, when the caller's session ate the --, the same words with
+# the -- put back before the first command word and the command's -name:value words the session split joined again.
+function Get-HandOverWord {
+    param([object[]]$Words)
+    $found = Find-CommandStart -Words $Words -Problems ([System.Collections.Generic.List[string]]::new())
+    if ($found.Dash -or $found.At -lt 0 -or $found.At -ge $Words.Count) { return $Words }
+    $options = @($Words | Select-Object -First $found.At)
+    $command = @(Join-ColonWord @(Expand-Word -Words @($Words | Select-Object -Skip $found.At)))
+    return $options + @('--') + $command
 }
 
 # What the fallback must be given and cannot run without: the log, the command, and a -Tail it can read as a number.
@@ -377,9 +429,25 @@ function Invoke-Main {
     return Invoke-Fallback -Options $parsed.Options -Command $parsed.Command
 }
 
-# The canonical gate when the machine has one: every word, -StopTree and the separator included, is handed to it in
-# this same process, so nothing about the call changes.
+# Once the cutover flag is set, gate.exe takes every call: it is given the words, Ctrl+C included, while this launcher
+# ignores Ctrl+C, waits for it to end and exits with its whole status, printing nothing of its own; with gate.exe
+# missing, nothing runs. Without the flag, the canonical gate when the machine has one: every word, -StopTree and the
+# separator included, is handed to it in this same process, so nothing about the call changes.
 $words = @(Get-RawWord -Fallback $args)
+if (Test-CutoverFlag) {
+    $gateExe = Join-Path $env:LOCALAPPDATA 'gate\bin\gate.exe'
+    if (-not (Test-Path -LiteralPath $gateExe -PathType Leaf)) {
+        Write-Gate "gate: the cutover flag is set but $gateExe is missing; reinstall with tools/install.ps1"
+        exit 127
+    }
+    # Each word reaches gate.exe as itself, whatever quoting rule the caller's session set.
+    $PSNativeCommandArgumentPassing = 'Standard'
+    $ignoreBreak = New-BreakIgnorer
+    [Console]::add_CancelKeyPress($ignoreBreak)
+    try { & $gateExe @(Get-HandOverWord -Words $words) }
+    finally { [Console]::remove_CancelKeyPress($ignoreBreak) }
+    exit $LASTEXITCODE
+}
 if (Test-Path -LiteralPath $gatePath) {
     & $gatePath @words
     exit ([int]$LASTEXITCODE)
