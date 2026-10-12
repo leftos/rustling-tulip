@@ -42,65 +42,73 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 
 ## Glossary
 
-- **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
-- **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
-- **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
-- **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
-- **test-release**: the Cargo profile tests build with (`cargo test --profile test-release`): release optimisation without LTO, with 16 codegen units and incremental builds, so an edit rebuilds in seconds.
-- **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
-- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
-- **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
-- **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.
-- **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
-- **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
-- **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
-- **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
-- **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
-- **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
-- **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
-- **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).
-- **Hibernation**: stopping an idle, finished agent's process and resuming its conversation when the session is opened again; a planned idea (RT-73, `docs/plans/borrowed-ideas.md`).
-- **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
-- **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
-- **Drawn-text probe**: the native client's debug-build record of the text each `ellipsis.rs` helper drew, keyed by element id, switched on by `ellipsis::enable_probe()` in specs and read with `ellipsis::drawn_text(id)`; see `docs/native-client.md` ("Truncating text with `…`").
-- **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
-- **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
-- **Needs You**: the native client's rail panel listing every session waiting on the user, longest wait first; see `docs/native-client.md`.
-- **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
-- **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
-- **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code, Codex, Cursor, and the ones `docs/plans/agent-harnesses.md` adds); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
-- **Own-agent recovery**: recovering a Codex or Cursor history entry as a session of the same CLI in the same folder, resuming its recorded conversation when that CLI can, else a fresh run.
-- **Agent conversation id**: the id a Codex or Cursor session's own CLI resumes with, recorded on the session and its history entry (`agent_conversation_id`); Claude's stays in `claude_session_id`.
-- **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
-- **RA.1, CR.0**: step ids of the finished own-agent recovery design (RA recovery steps, CR the Cursor spike), named in commit messages.
-- **Folder-only entry**: a history entry with no spawn config (imported from a tracer log, or a standalone session); it is recovered by running claude in its folder with its `--add-dir` set, never by checking out a branch.
-- **MA1, MA2, …**: item ids in `docs/plans/mobile-app.md`, the iOS and Android app's phases (distinct from the macOS plan's M0–M4).
-- **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
-- **Shared client core**: the planned Rust crate holding the pinned-TLS connect, host profiles and pairing, used by both the native client's remote mode and the mobile app.
-- **Tracer-log import**: the startup pass that rebuilds history entries from `logs/tracer-<id>.log` files for sessions that ended before history existed.
-- **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.
-- **Dictation box**: the planned overlay that collects speech recognized on the client (desktop or phone) for one session, for review before it is inserted as a paste or sent; see `docs/plans/dictation.md`.
-- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/agents/providers.rs`).
-- **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
-- **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
-- **DK.1**: step ids in `deepseek-sessions.md` (DeepSeek Claude sessions), distinct from dispatch-follow's `DF` steps and `DS` leaf tag.
-- **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
-- **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
-- **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
-- **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
-- **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
-- **Fix round**: review findings sent back to the worker that made the change.
-- **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
-- **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
 - **Account store**: cswap's folder of saved logins (`~/.claude-swap-backup` on Windows), read and written by both cswap and the daemon.
 - **Active account**: the Claude login in `.credentials.json` that every Anthropic Claude session on the machine uses; a switch changes it for all of them at once.
+- **Agent conversation id**: the id a Codex or Cursor session's own CLI resumes with, recorded on the session and its history entry (`agent_conversation_id`); Claude's stays in `claude_session_id`.
+- **Agent harness**: a terminal coding-agent CLI the daemon can spawn as a session's runtime (Claude Code, Codex, Cursor, and the ones `docs/plans/agent-harnesses.md` adds); its Tier A / B / C says whether its conversation id is chosen before launch, pre-created, or found after launch.
+- **Agent skill pack**: the `rt-*` skills and the `rt-worker` agent under `agent-pack/`, installed into `~/.claude` so an agent can fan work out, review it and merge it.
+- **Attention feed**: the daemon's one stream of items that want the user (Needs you, Hand-off ready, Progress, Done, Fleet), shared by every client and the phone push, resolved everywhere at once; planned (RT-87, `docs/plans/off-orca.md`).
 - **Auto-switch**: moving the active account to another one when its binding usage window reaches the threshold, run by the daemon or by `cswap auto`, never both.
+- **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
-- **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
-- **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
-- **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
-- **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
+- **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
+- **Chat mirror**: the planned chat view of a Claude session, built from its transcript and hook prompts while its terminal keeps running, answering prompts by typing keys into the PTY (RT-51).
+- **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.
+- **Claude provider**: the service a Claude session's `claude` CLI talks to, Anthropic (the default) or DeepSeek, chosen per spawn and kept by every respawn; not an agent.
+- **claude-swap / cswap**: the user's multi-account switcher for Claude Code (`github.com/leftos/claude-swap`), whose store and rules the daemon's accounts module shares; see `docs/plans/accounts.md`.
+- **Clear and continue**: the planned one-click session action that types `/clear`, waits for the clear to finish, then types `/nextup`; refused while background work runs (RT-91).
+- **Connection origin**: whether a client connected on the local port (`Local`) or through the LAN listener or relay (`Remote`); account administration is local only.
+- **Dictation box**: the planned overlay that collects speech recognized on the client (desktop or phone) for one session, for review before it is inserted as a paste or sent; see `docs/plans/dictation.md`.
+- **DK.1**: step ids in `deepseek-sessions.md` (DeepSeek Claude sessions), distinct from dispatch-follow's `DF` steps and `DS` leaf tag.
+- **Drawn-text probe**: the native client's debug-build record of the text each `ellipsis.rs` helper drew, keyed by element id, switched on by `ellipsis::enable_probe()` in specs and read with `ellipsis::drawn_text(id)`; see `docs/native-client.md` ("Truncating text with `…`").
+- **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
+- **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
+- **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
+- **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
 - **Feature PR**: the draft pull request from a marker's `feat/<name>` into `main`, opened with the first item under the marker and merged with `--rebase` by `/ship` once every item under the marker has landed.
+- **Fix round**: review findings sent back to the worker that made the change.
+- **Folder-only entry**: a history entry with no spawn config (imported from a tracer log, or a standalone session); it is recovered by running claude in its folder with its `--add-dir` set, never by checking out a branch.
+- **Forwarder**: the daemon's per-connection task that streams one session's PTY output to one client; `LoadScrollback` replaces it.
+- **Hand-off ready**: a session whose orchestrator ended its turn with `Run /clear, then /nextup to continue.` and has no background work left (RT-85).
+- **Hibernation**: stopping an idle, finished agent's process and resuming its conversation when the session is opened again; a planned idea (RT-73, `docs/plans/borrowed-ideas.md`).
+- **HS.1, SA.1, DB.1, SS.1, DF.1, FT.1, DI.1**: step ids in the subplans `hook-status.md`, `spoken-alerts.md` (SA alerts, DB Dashboard), `subagent-streams.md`, `dispatch-follow.md`, `remote-file-transfer.md` and `dictation.md` under `docs/plans/`.
+- **Hysteresis (status)**: holding a status change until several checks agree, so a half-drawn screen does not flip a session's status and back; a planned idea for the screen-based status (RT-74).
+- **Landed**: an issue's state once its commit is on `main` (or on its feature branch), waiting for the owner's acknowledgement, which moves it to Done.
+- **Locked key**: a routing variable choosing the endpoint or the credential, which a session's environment rows may not set; a spawn that tries is refused.
+- **MA1, MA2, …**: item ids in `docs/plans/mobile-app.md`, the iOS and Android app's phases (distinct from the macOS plan's M0–M4).
+- **Native client**: the GPUI + `alacritty_terminal` desktop client under `apps/native`; see `docs/native-client.md`.
+- **Needs You**: the native client's rail panel listing every session waiting on the user, longest wait first; see `docs/native-client.md`.
+- **Own-agent recovery**: recovering a Codex or Cursor history entry as a session of the same CLI in the same folder, resuming its recorded conversation when that CLI can, else a fresh run.
+- **P1.1, P4.4b, …**: native client item ids, as phase number and item number (a letter for a split item); the open ones' rulings are in `docs/plans/native-client.md`.
+- **Parity checklist**: `docs/plans/native-client-parity.md`, every user-visible Tauri feature with its source file (paths on the `tauri-last` tag); the native client reaches parity when it is all ticked.
+- **Petal**: the approved refreshed look for the native client (graphite ground, tulip-coral accent, status shapes), its settled design in `docs/native-client.md` ("Petal chrome", "Theme and fonts").
+- **PF, AT, SV, RD, AR, OT**: idea ids in `docs/plans/off-orca.md` (files across machines, attention streams, session views, remote desktop, artifacts by account, absorbing ops-tower).
+- **Plan snapshot**: `docs/plans/MAIN.md`, generated from the Linear team's issues, one line an item, by wave in working order; never edited by hand.
+- **Progress update**: an attention-feed item for a stop while work continues, or a summary of work in progress; shown in the feed, never pushed to the phone.
+- **Provider table**: the daemon's built-in, not user-editable list of the environment variables each non-Anthropic provider sets, removes and locks (`crates/daemon/src/agents/providers.rs`).
+- **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
+- **RA.1, CR.0**: step ids of the finished own-agent recovery design (RA recovery steps, CR the Cursor spike), named in commit messages.
+- **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
+- **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
+- **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
+- **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
+- **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
+- **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
+- **Shared client core**: the planned Rust crate holding the pinned-TLS connect, host profiles and pairing, used by both the native client's remote mode and the mobile app.
+- **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
+- **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
+- **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
+- **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
+- **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
+- **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.
+- **test-release**: the Cargo profile tests build with (`cargo test --profile test-release`): release optimisation without LTO, with 16 codegen units and incremental builds, so an edit rebuilds in seconds.
+- **Tracer-log import**: the startup pass that rebuilds history entries from `logs/tracer-<id>.log` files for sessions that ended before history existed.
 - **Tracking issue**: the issue `Merge feat/<name> (#N)`, last in a feature marker's project, that stands for its feature PR until the PR merges.
+- **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.
+- **Unseen turn**: an agent session whose turn ended while this client wasn't showing it focused; it shows the waiting ring until focused.
+- **Warm-up gate**: auto-switch making no decision until every usable account has been polled since it started.
+- **Wave**: a release-sized bundle of plan items that share owning files, so one implementer reads those files once and one review covers the bundle; each wave is a Linear project whose content names its files, review and verification.
+- **Worker**: a subagent or rustling-tulip session running one brief in one worktree.
+- **Worktree seeding**: preparing a new worktree before its agent starts by copying the ignored files a repo lists, linking shared folders and running its setup script; a planned idea (RT-71, `docs/plans/borrowed-ideas.md`).

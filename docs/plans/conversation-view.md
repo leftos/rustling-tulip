@@ -4,6 +4,7 @@ Show a Claude session as a chat instead of the terminal UI: the user's messages,
 
 ## Rulings
 
+- **Superseded in part: the chat is a mirror over the live terminal session** (owner ruling on RT-51; [off-orca.md](./off-orca.md), SV.1–SV.3). Entries come from the transcript, prompts from hook `pending_input`, and messages and answers are typed into the PTY, so terminal and chat of one session can be open at once. The stream peer and view switch below are no longer the plan; this file is redesigned around the mirror before any CV step is briefed, keeping what still applies (the entry model, transcript seeding, prompt cards, the Markdown splitter).
 - A session remembers its last view, kept on the daemon's session; a new Claude session starts in the terminal view (user).
 - GUI mode runs through the user's own logged-in `claude` binary, for personal use only, and the terminal view stays the fallback (billing spike).
 - Claude only. Codex's app-server and Cursor stay terminal-only; the toggle is not offered for them.
