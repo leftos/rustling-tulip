@@ -68,7 +68,8 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **DK.1**: step ids in `deepseek-sessions.md` (DeepSeek Claude sessions), distinct from dispatch-follow's `DF` steps and `DS` leaf tag.
 - **Drawn-text probe**: the native client's debug-build record of the text each `ellipsis.rs` helper drew, keyed by element id, switched on by `ellipsis::enable_probe()` in specs and read with `ellipsis::drawn_text(id)`; see `docs/native-client.md` ("Truncating text with `…`").
 - **E2E tier / smoke tier**: the native client's opt-in test layers above the in-process UI specs. The e2e tier drives the client in-process against a real daemon isolated under `.tmp/`; the smoke tier launches the real exe in a cloaked window. They run through `rt.ps1 native-e2e` and `native-smoke`.
-- **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment at spawn; only the reference is stored and echoed.
+- **Env reference**: an environment-row value written `${env:NAME}`, resolved from the daemon's environment, then the user and system environment, at spawn; only the reference is stored and echoed; see Secret reference.
+- **ES.1, ES.9**: step ids of the finished secrets-in-env-rows design (ES sealing steps), named in commit messages; its decisions are in `docs/env-secrets.md`.
 - **Fan-out**: an agent splitting a task into independent parts, each run by a worker in its own worktree.
 - **Fan-out ledger**: the parent's event log for one fan-out, in the repo's git common dir.
 - **Feature marker**: `branch: feat/<name>` in a wave's Linear project content; every item in that project lands on the `feat/<name>` branch instead of `main` (user-level `nextup` §3, "Feature branches").
@@ -101,6 +102,9 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
 - **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
+- **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup; see `docs/env-secrets.md`.
+- **Secret reference**: an environment-row value written `${secret:<id>}`, standing for a value the daemon saved in Windows Credential Manager; resolved at spawn, stored and echoed in place of the value.
+- **Secret row**: an environment row whose key has a `KEY`, `TOKEN`, `SECRET` or `PASSWORD` segment or which the dialog's Secret toggle marks.
 - **Session history**: the daemon's record of ended sessions, one `history/<id>.json` per session under the config dir, kept 7 days; see `docs/architecture.md` (Session history and recovery) and `docs/native-client.md` (Session recovery).
 - **Shared client core**: the planned Rust crate holding the pinned-TLS connect, host profiles and pairing, used by both the native client's remote mode and the mobile app.
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.

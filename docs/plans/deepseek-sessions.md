@@ -114,5 +114,4 @@ Answered (user): Q1 (a) a DeepSeek entry recovers as Claude only; Q2 (a) endpoin
 
 ## Findings outside this item
 
-- `extra_env` is persisted verbatim in `meta.json`, `history/<id>.json`, `state.json` (`last_spawn_config`) and returned by `SpawnConfigReply`, and `SpawnRequest.extra_env`'s own doc comment suggests overriding `ANTHROPIC_API_KEY` there: any secret a user types into the environment rows is stored in plain text and sent to every client that asks. This design keeps the DeepSeek key out of it, but the general case is its own item for the orchestrator to put to the user.
 - PTY children inherit the daemon's whole environment (no `env_clear` in `tracer_command`), so `passthrough_env`'s keep-list only governs headless sessions; the comment in `crates/tracer/src/supervisor.rs` says the daemon populated the tracer "with the passthrough keep-list", which is not what happens. A docs-drift line for the orchestrator.

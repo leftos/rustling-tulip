@@ -18,6 +18,7 @@ apps/native/            binary = rustling-tulip-native (thin main.rs over a lib,
 tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
 docs/native-client.md   the native client's settled design decisions
+docs/env-secrets.md     how secret env rows are sealed into Credential Manager, and what is and isn't protected
 docs/plans/MAIN.md      the plan snapshot, generated from Linear team RT: every open item by wave, in working order
 docs/plans/*.md         design files: designs and rulings for open items, linked from their Linear issues
 ```
@@ -110,6 +111,7 @@ Both sides resolve the config dir via the `directories` crate as `ProjectDirs::f
 - `daemon.json` — handshake (port + auth_token + pid + supported_versions); written on daemon start, removed on graceful shutdown.
 - `sessions/<id>/meta.json` + `scrollback.bin` — orphan-recovery sidecar and PTY scrollback ring.
 - `history/<id>.json` — session history: one entry per ended session (how it ended, its spawn config and folders, its conversation id: Claude's `claude_session_id`, or the Codex or Cursor CLI's own `agent_conversation_id`), written on every end path, backfilled at startup from `logs/tracer-*.log`, pruned after 7 days (`crates/daemon/src/history.rs`). The recover dialog lists these and `RecoverSessions` respawns them: a Claude entry with `claude --resume`, a Codex or Cursor entry as its own agent in the same folder, resuming its conversation (`codex resume`, `cursor-agent --resume`) when it can, else a fresh run.
+- `env-secrets.json` — index of the secret env-row values sealed into Windows Credential Manager (`{id, key, created_at}`, never a value); the values are Credential Manager entries under the service `rustling-tulip` (`rustling-tulip:<8 hex of the config dir's SHA-256>` while `RUSTLING_TULIP_CONFIG_DIR` is set), user `env/<KEY>/<id>`. Stored configs carry `${secret:<id>}` references instead (`crates/daemon/src/env_secrets.rs`, `docs/env-secrets.md`).
 - `codex-contested.json` — Codex rollout ids found while two Codex sessions waited in one folder, which no session may claim as its conversation (`crates/daemon/src/codex_rollout.rs`); entries drop after 7 days.
 - `daemon.lock` — the single-instance lock; a second daemon on the same config dir exits without touching anything.
 - `logs/daemon.log` — daemon tracing output. Rotated on each daemon start: the previous run survives as `daemon.log.old` (see `crates/daemon/src/main.rs::init_tracing`).
