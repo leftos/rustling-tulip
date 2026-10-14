@@ -659,9 +659,6 @@ fn manager_closes_on_welcome(cx: &mut TestAppContext) {
     );
     h.keys("enter");
     assert!(manager_open(&mut h), "Enter reopens it");
-    h.send(DaemonMessage::Welcome {
-        protocol_version: PROTOCOL,
-        supported_versions: vec![PROTOCOL],
-    });
+    h.send(support::welcome(PROTOCOL));
     assert!(!manager_open(&mut h));
 }

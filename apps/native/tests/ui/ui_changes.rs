@@ -556,10 +556,7 @@ fn a_welcome_closes_the_discard_confirm(cx: &mut TestAppContext) {
     h.click_on("sc-discard-all-r1::");
     h.keys("tab");
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(
         h.root(|root, _| root.discard_confirm_view()).is_none(),
         "a new connection closes the confirm"

@@ -696,7 +696,8 @@ impl FakeDaemon {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(FAKE_PORT);
-        conn.on_welcome(version);
+        let features = vec![protocol::FEATURE_CLAUDE_PROVIDER.to_owned()];
+        conn.on_welcome(version, features.clone());
         self.event(NetEvent::State(conn))?;
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: FAKE_PORT,
@@ -706,6 +707,7 @@ impl FakeDaemon {
         self.send(DaemonMessage::Welcome {
             protocol_version: version,
             supported_versions: vec![version],
+            features,
         })?;
         self.send(fixture.repos.clone())?;
         self.send(fixture.workspaces.clone())?;

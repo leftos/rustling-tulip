@@ -23,6 +23,11 @@ pub const MDNS_TXT_FINGERPRINT: &str = "fp";
 /// mDNS TXT key carrying the host's human-readable name (e.g. its hostname).
 pub const MDNS_TXT_NAME: &str = "name";
 
+/// `Welcome.features` entry: the daemon can spawn a Claude session against a
+/// chosen provider (`ClaudeProvider`). A client offers the provider choice
+/// only when the connected daemon lists it.
+pub const FEATURE_CLAUDE_PROVIDER: &str = "claude_provider";
+
 fn default_true() -> bool {
     true
 }
@@ -3052,11 +3057,16 @@ pub enum DaemonMessage {
     /// from the intersection of its `SUPPORTED_PROTOCOL_VERSIONS` and the
     /// client's advertised set. `supported_versions` echoes the daemon's full
     /// support list so the client can dim feature-gated UI when running
-    /// against an older daemon.
+    /// against an older daemon. `features` names the capabilities this daemon
+    /// has beyond the negotiated version (`FEATURE_*` constants); a client
+    /// keeps strings it does not know and offers a capability only when it is
+    /// listed. Absent (and never sent) when empty.
     Welcome {
         protocol_version: u32,
         #[serde(default)]
         supported_versions: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     AuthFailed {
         reason: String,
@@ -5162,6 +5172,7 @@ mod tests {
             DaemonMessage::Welcome {
                 protocol_version,
                 supported_versions,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert_eq!(supported_versions, Vec::<u32>::new());
@@ -5230,12 +5241,47 @@ mod tests {
             DaemonMessage::Welcome {
                 protocol_version,
                 supported_versions,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert_eq!(supported_versions, vec![16, 15]);
             }
             _ => panic!("expected Welcome"),
         }
+    }
+
+    #[test]
+    fn welcome_features_round_trip() {
+        let welcome = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23, 22],
+            features: vec![FEATURE_CLAUDE_PROVIDER.to_owned(), "later".to_owned()],
+        };
+        let json = serde_json::to_value(&welcome).expect("encode welcome");
+        assert_eq!(
+            json["features"],
+            serde_json::json!(["claude_provider", "later"])
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("decode welcome");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::Welcome { protocol_version: 23, features, .. }
+                    if features == &["claude_provider", "later"]
+            ),
+            "{back:?}"
+        );
+
+        let bare = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+        };
+        let json = serde_json::to_value(&bare).expect("encode bare welcome");
+        assert!(
+            json.get("features").is_none(),
+            "an empty list stays off the wire: {json}"
+        );
     }
 
     #[test]

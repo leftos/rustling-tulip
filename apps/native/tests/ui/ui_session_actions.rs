@@ -562,10 +562,7 @@ fn failed_restart_clears_pending_and_allows_retry(cx: &mut TestAppContext) {
 
     h.click_on("exited-restart-p1");
     duplicate_request(&h.sent(), "s1");
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(!pending(&mut h, "s1"), "a reconnect forgets every restart");
 }
 
@@ -690,10 +687,7 @@ fn exit_update_between_welcome_and_sessions_list_is_not_discarded(cx: &mut TestA
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").status("working").build());
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     h.send(updated(session("s1").exited(0).build(), None));
 
     assert!(
