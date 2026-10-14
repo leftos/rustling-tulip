@@ -17,7 +17,8 @@
                  cargo-sweep; a build without it skips the sweep).
       setup      Install/check Windows build prerequisites via winget:
                  Git, Node.js LTS (fake-claude needs it), Rust/rustup,
-                 Visual Studio C++ Build Tools and cargo-sweep.
+                 Visual Studio C++ Build Tools, cargo-sweep and
+                 cargo-nextest.
       stop       Kill any running daemon and tracer process(es) and clean
                  the stale handshake file. No-op when nothing is running.
       restart    Build the daemon and tracer, stop the running daemon
@@ -26,7 +27,12 @@
                  reconnects to the new daemon). Use it after changing the
                  daemon, tracer or protocol: `launch` and `native` reuse a
                  running compatible daemon even from an older build.
-      test       Run `cargo test --profile test-release` across the workspace.
+      test       Run the workspace's tests with cargo-nextest
+                 (`cargo nextest run --cargo-profile test-release`).
+                 -Reached runs only the tests the change since -Base
+                 reaches, mapped through tools/test-map.json (a central or
+                 unmapped file runs the full suite); -PrintOnly prints the
+                 selection without running it; -Validate checks the map.
       clippy     Run the strict workspace clippy pass
                  (`--all-targets --all-features -- -D warnings`).
       fmt        Run `cargo fmt --all`.
@@ -35,13 +41,13 @@
                  Extra arguments go to the client (an optional session id
                  to focus, or to place in the active tab).
       native-e2e Build the daemon and tracer, then run the native client's
-                 end-to-end specs (`--test e2e_live --test e2e_recover
-                 -- --ignored`) against
-                 a real daemon isolated under `.tmp\native-e2e\`. The
-                 fake-claude spec needs `node` on PATH.
+                 end-to-end specs (`e2e_live`, `e2e_recover`, under
+                 nextest `--run-ignored only`, test-release profile)
+                 against a real daemon isolated under `.tmp\native-e2e\`.
+                 The fake-claude spec needs `node` on PATH.
       native-smoke
                  Build the daemon and tracer, then run the native client's
-                 OS smoke specs (`--test smoke_window -- --ignored`): the
+                 OS smoke specs (`smoke_window`, `--run-ignored only`): the
                  real client binary in a cloaked window that never
                  takes focus; checks it connects and that posted keys
                  reach the shell.
@@ -67,6 +73,24 @@
 .PARAMETER Out
     Applies to `native-shot`: the PNG to write, instead of the second
     positional argument and `.tmp\shots\<view>.png`.
+
+.PARAMETER Reached
+    Applies to `test`: run only the tests the files changed since -Base
+    reach (`git diff --name-only <base>` plus untracked files), mapped
+    through tools/test-map.json.
+
+.PARAMETER Base
+    Applies to `test -Reached`: the ref to diff against. Default: the
+    branch's `branch.<name>.base` git config, else main's merge-base with
+    HEAD.
+
+.PARAMETER PrintOnly
+    Applies to `test`: print the selection without running any test.
+
+.PARAMETER Validate
+    Applies to `test`: check that tools/test-map.json has a row (or a
+    central entry) for every native source and test file, and that its
+    filters name real nextest binaries and modules.
 
 .EXAMPLE
     .\rt.ps1                       # = .\rt.ps1 launch
@@ -96,8 +120,20 @@ param(
     # The PNG `native-shot` writes.
     [string]$Out,
 
-    # Extra arguments forwarded to the underlying tool (e.g. `cargo test --
-    # mytest`). Only meaningful for `launch`, `restart`, `test`, `clippy`,
+    # `test`: run only the tests the change since -Base reaches (tools/test-map.json).
+    [switch]$Reached,
+
+    # `test -Reached`: the ref to diff against.
+    [string]$Base,
+
+    # `test`: print the selection without running it.
+    [switch]$PrintOnly,
+
+    # `test`: check tools/test-map.json covers every native file and names real binaries.
+    [switch]$Validate,
+
+    # Extra arguments forwarded to the underlying tool (e.g. `cargo nextest
+    # run` filters). Only meaningful for `launch`, `restart`, `test`, `clippy`,
     # `fmt`, `native`, `native-shot` (the view).
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$Rest
@@ -138,6 +174,7 @@ $ManifestPath    = Join-Path $ScriptDir 'Cargo.toml'
 $ImageName       = 'rustling-tulipd'
 $TracerImageName = 'rt-tracer'
 $HandshakeFile   = Join-Path (Get-ConfigDir) 'daemon.json'
+$TestMapPath     = Join-Path $ScriptDir 'tools/test-map.json'
 
 $script:SetupRestartNeeded = $false
 
@@ -390,21 +427,21 @@ function Install-CommandDependency {
     Invoke-WingetInstall -Id $WingetId -Name $DisplayName
 }
 
-function Install-CargoSweep {
-    # Only cargo subcommand in the prerequisites -- not a winget package,
-    # so it gets its own installer rather than Install-CommandDependency.
+function Install-CargoSubcommand {
+    # Cargo subcommands are not winget packages, so they get their own
+    # installer rather than Install-CommandDependency.
     [CmdletBinding()]
-    param()
+    param([string]$Name)
 
-    if (Test-CommandAvailable 'cargo-sweep') {
-        Write-Host '==> cargo-sweep already available.' -ForegroundColor DarkGray
+    if (Test-CommandAvailable $Name) {
+        Write-Host "==> $Name already available." -ForegroundColor DarkGray
         return
     }
 
-    Write-Host '==> Installing cargo-sweep (cargo install cargo-sweep --locked)...' -ForegroundColor Cyan
-    & cargo install cargo-sweep --locked
+    Write-Host "==> Installing $Name (cargo install $Name --locked)..." -ForegroundColor Cyan
+    & cargo install $Name --locked
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo install cargo-sweep failed (exit $LASTEXITCODE)"
+        throw "cargo install $Name failed (exit $LASTEXITCODE)"
     }
 }
 
@@ -472,7 +509,8 @@ function Invoke-Setup {
     Initialize-RustToolchain
 
     Assert-Tooling
-    Install-CargoSweep
+    Install-CargoSubcommand 'cargo-sweep'
+    Install-CargoSubcommand 'cargo-nextest'
     if ($script:SetupRestartNeeded) {
         Write-Host '==> Setup complete. Restart Windows before building.' -ForegroundColor Yellow
     } else {
@@ -551,11 +589,190 @@ function Invoke-Restart {
     Start-NativeClient
 }
 
-function Invoke-Test {
+function Assert-Nextest {
     Test-Tool 'cargo' 'Install Rust via https://rustup.rs.'
-    Write-Host '==> cargo test --profile test-release (workspace)...' -ForegroundColor Cyan
-    & cargo test --manifest-path $ManifestPath --profile test-release @Rest
-    Test-CargoExitOk 'cargo test'
+    Test-Tool 'cargo-nextest' 'Tests run with cargo-nextest; run `.\rt.ps1 setup` to install it.'
+}
+
+function Invoke-Test {
+    Assert-Nextest
+    if ($Validate) { Test-TestMap; return }
+    if ($Reached) { Invoke-ReachedTest; return }
+    if ($PrintOnly) { Write-Host 'full suite'; return }
+    Invoke-FullSuite
+}
+
+function Invoke-FullSuite {
+    Write-Host '==> cargo nextest run --cargo-profile test-release (workspace)...' -ForegroundColor Cyan
+    & cargo nextest run --manifest-path $ManifestPath --workspace --cargo-profile test-release @Rest
+    Test-CargoExitOk 'cargo nextest run'
+}
+
+# ---------------------------------------------------------------------------
+# Reached tests: changed files -> nextest filters, through tools/test-map.json
+# ---------------------------------------------------------------------------
+
+function Get-TestMap {
+    return Get-Content -Raw -Path $TestMapPath | ConvertFrom-Json
+}
+
+# A glob over repo-relative `/` paths: `**/` is any number of folders, `**`
+# anything, `*` and `?` stay inside one path segment.
+function ConvertTo-GlobRegex([string]$Glob) {
+    $re = [regex]::Escape($Glob)
+    $re = $re -replace '\\\*\\\*/', "`u{1}" -replace '\\\*\\\*', "`u{2}"
+    $re = $re -replace '\\\*', '[^/]*' -replace '\\\?', '[^/]'
+    $re = $re -replace "`u{1}", '(.*/)?' -replace "`u{2}", '.*'
+    return "^$re$"
+}
+
+function Test-GlobMatch([string]$Path, [object[]]$Globs) {
+    foreach ($glob in $Globs) {
+        if ($Path -match (ConvertTo-GlobRegex $glob)) { return $true }
+    }
+    return $false
+}
+
+# The commit a reached run diffs against, and how it was chosen. -Base wins;
+# else the merge-base of `branch.<name>.base` (or main) with HEAD. When that is
+# HEAD itself and the tree is clean (a commit on main), the change is the last
+# push's or the last commit's: @{upstream}'s merge-base when it differs, else HEAD~1.
+function Get-ReachedBase {
+    if ($Base) { return [pscustomobject]@{ Ref = $Base; Label = "-Base $Base" } }
+    $branch = (& git -C $ScriptDir rev-parse --abbrev-ref HEAD).Trim()
+    $configured = & git -C $ScriptDir config "branch.$branch.base"
+    $anchor = if ($LASTEXITCODE -eq 0 -and $configured) { $configured.Trim() } else { 'main' }
+    $mergeBase = (& git -C $ScriptDir merge-base $anchor HEAD)
+    Test-CargoExitOk "git merge-base $anchor HEAD"
+    $mergeBase = $mergeBase.Trim()
+    $head = (& git -C $ScriptDir rev-parse HEAD).Trim()
+    $clean = -not (& git -C $ScriptDir status --porcelain)
+    if ($mergeBase -ne $head -or -not $clean) {
+        return [pscustomobject]@{ Ref = $mergeBase; Label = "merge-base of $anchor and HEAD" }
+    }
+    $upstream = & git -C $ScriptDir merge-base '@{upstream}' HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $upstream -and $upstream.Trim() -ne $head) {
+        return [pscustomobject]@{ Ref = $upstream.Trim(); Label = "merge-base of @{upstream} and HEAD (HEAD is $anchor's tip, tree clean)" }
+    }
+    return [pscustomobject]@{ Ref = 'HEAD~1'; Label = "HEAD~1 (HEAD is $anchor's tip, tree clean, no other upstream)" }
+}
+
+# Tracked files that differ from the base (committed or not), plus untracked
+# ones. A rename counts as both its old and its new path.
+function Get-ChangedFile([string]$From) {
+    & git -C $ScriptDir rev-parse --verify --quiet "$From^{commit}" *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Base '$From' is not a commit in this repository; pass -Base <branch, tag or sha>." }
+    $tracked = @(& git -C $ScriptDir -c core.quotePath=false diff --name-only --no-renames $From --)
+    Test-CargoExitOk "git diff --name-only $From"
+    $untracked = @(& git -C $ScriptDir ls-files --others --exclude-standard)
+    Test-CargoExitOk 'git ls-files --others'
+    return @($tracked + $untracked | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+# Maps changed files to one selection: Kind 'full' (a central or unmapped file),
+# 'none' (only ignored files) or 'filter' (the matching rows' filters).
+function Resolve-TestSelection([string[]]$Files, [object]$Map) {
+    $filters = [System.Collections.Generic.List[string]]::new()
+    foreach ($file in $Files) {
+        if (Test-GlobMatch $file $Map.central) {
+            return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is central" }
+        }
+        if (Test-GlobMatch $file $Map.ignore) { continue }
+        $rows = @($Map.rows | Where-Object { Test-GlobMatch $file $_.paths })
+        if ($rows.Count -eq 0) {
+            return [pscustomobject]@{ Kind = 'full'; Reason = "full suite: $file is unmapped" }
+        }
+        foreach ($row in $rows) {
+            if (-not $filters.Contains($row.filter)) { $filters.Add($row.filter) }
+        }
+    }
+    if ($filters.Count -eq 0) {
+        return [pscustomobject]@{ Kind = 'none'; Reason = 'no tests reached' }
+    }
+    $joined = ($filters | ForEach-Object { "($_)" }) -join ' | '
+    return [pscustomobject]@{ Kind = 'filter'; Reason = "reached: $joined"; Filter = $joined }
+}
+
+function Invoke-ReachedTest {
+    $from = Get-ReachedBase
+    $files = Get-ChangedFile $from.Ref
+    $selection = Resolve-TestSelection $files (Get-TestMap)
+    Write-Host "==> Reached tests against $($from.Ref): $($from.Label) ($($files.Count) changed file(s))" -ForegroundColor Cyan
+    Write-Host $selection.Reason
+    if ($PrintOnly -or $selection.Kind -eq 'none') { return }
+    if ($selection.Kind -eq 'full') { Invoke-FullSuite; return }
+    # A reached set may hold only ignored tests (the live specs): not a failure.
+    & cargo nextest run --manifest-path $ManifestPath --workspace --cargo-profile test-release --no-tests warn -E $selection.Filter @Rest
+    Test-CargoExitOk 'cargo nextest run (reached)'
+}
+
+# Fails when a native source or test file has no row and is not central, when a
+# filter names a binary id nextest does not list, or when a row's filter selects
+# no test (nextest rejects it, or it matches nothing, ignored tests included).
+function Test-TestMap {
+    $map = Get-TestMap
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $native = Join-Path $ScriptDir 'apps/native'
+    $sources = @(Get-ChildItem (Join-Path $native 'src') -Filter '*.rs') +
+        @(Get-ChildItem (Join-Path $native 'tests') -Filter '*.rs') +
+        @(Get-ChildItem (Join-Path $native 'tests/ui') -Filter '*.rs')
+    foreach ($item in $sources) {
+        $rel = [IO.Path]::GetRelativePath($ScriptDir, $item.FullName) -replace '\\', '/'
+        $covered = (Test-GlobMatch $rel $map.central) -or @($map.rows | Where-Object { Test-GlobMatch $rel $_.paths }).Count -gt 0
+        if (-not $covered) { $problems.Add("no row and not central: $rel") }
+    }
+    Test-MapFilterName $map $problems
+    if ($problems.Count -gt 0) {
+        $problems | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+        throw "tools/test-map.json has $($problems.Count) problem(s)."
+    }
+    Write-Host "test map ok: $(@($map.rows).Count) rows; $($sources.Count) native source and test files covered"
+}
+
+# nextest's stderr goes to this log; its tail is printed when a listing fails.
+function Invoke-NextestList([string]$LogPath, [string[]]$ListArgs) {
+    $output = & cargo nextest list --message-format json @ListArgs 2>> $LogPath
+    if ($LASTEXITCODE -ne 0) {
+        Get-Content -Path $LogPath -Tail 15 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        return $null
+    }
+    return $output
+}
+
+function Test-MapFilterName([object]$Map, [System.Collections.Generic.List[string]]$Problems) {
+    $tmp = Join-Path $ScriptDir '.tmp'
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $log = Join-Path $tmp 'test-map-validate.log'
+    Set-Content -Path $log -Value '' -NoNewline
+    $binariesPath = Join-Path $tmp 'test-map-binaries.json'
+    $metadataPath = Join-Path $tmp 'test-map-cargo-metadata.json'
+    $listArgs = @('--manifest-path', $ManifestPath, '--workspace', '--cargo-profile', 'test-release', '--list-type', 'binaries-only')
+    $binaries = Invoke-NextestList $log $listArgs
+    if (-not $binaries) { throw "cargo nextest list failed; see $log" }
+    Set-Content -Path $binariesPath -Value $binaries
+    & cargo metadata --manifest-path $ManifestPath --format-version 1 --all-features 2>> $log | Set-Content -Path $metadataPath
+    Test-CargoExitOk 'cargo metadata'
+    $binaryIds = @(($binaries | ConvertFrom-Json -AsHashtable)['rust-binaries'].Keys)
+    $text = ($Map.rows | ForEach-Object { $_.filter }) -join "`n"
+    foreach ($id in ([regex]::Matches($text, 'binary_id\(([^)]+)\)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)) {
+        if ($binaryIds -notcontains $id) { $Problems.Add("unknown binary id: $id") }
+    }
+    $reuse = @('--binaries-metadata', $binariesPath, '--cargo-metadata', $metadataPath, '--run-ignored', 'all')
+    foreach ($row in $Map.rows) {
+        $count = Get-RowTestCount $log ($reuse + @('-E', $row.filter))
+        if ($count -lt 1) { $Problems.Add("selects no test ($count): $($row.paths -join ', ') -> $($row.filter)") }
+    }
+}
+
+# The number of tests a filter selects, or -1 when nextest rejects it.
+function Get-RowTestCount([string]$LogPath, [string[]]$ListArgs) {
+    $json = Invoke-NextestList $LogPath $ListArgs
+    if (-not $json) { return -1 }
+    $count = 0
+    foreach ($suite in ($json | ConvertFrom-Json -AsHashtable)['rust-suites'].Values) {
+        $count += @($suite['testcases'].Values | Where-Object { $_['filter-match']['status'] -eq 'matches' }).Count
+    }
+    return $count
 }
 
 function Invoke-Clippy {
@@ -579,10 +796,11 @@ function Invoke-Clean {
     Test-CargoExitOk 'cargo clean'
 }
 
-function Build-DaemonAndTracer {
+function Build-DaemonAndTracer([string]$CargoProfile) {
     Assert-Tooling
     $buildArgs = @('build', '--manifest-path', $ManifestPath, '-p', 'daemon', '-p', 'tracer')
-    if ($Release) { $buildArgs += '--release' }
+    if ($CargoProfile) { $buildArgs += @('--profile', $CargoProfile) }
+    elseif ($Release) { $buildArgs += '--release' }
     Write-Host '==> Building daemon + tracer...' -ForegroundColor Cyan
     & cargo @buildArgs
     Test-CargoExitOk 'cargo build -p daemon -p tracer'
@@ -611,18 +829,19 @@ function Invoke-Native {
 
 # Runs one of the native client's ignored spec files. The specs start their
 # own daemon from the binaries beside the test binary, so the daemon and
-# tracer are built first in the same profile. One thread: each spec owns a
-# daemon and, for the smoke specs, a client window.
+# tracer are built first in the same profile (test-release, or release with
+# -Release). One at a time (the serial-live test group in
+# .config/nextest.toml): each spec owns a daemon and, for the smoke specs, a
+# client window.
 function Invoke-NativeSpecFile([string[]]$TestFiles) {
-    Build-DaemonAndTracer
-    $testArgs = @('test', '--manifest-path', $ManifestPath, '-p', 'rustling-tulip-native')
-    foreach ($file in $TestFiles) { $testArgs += @('--test', $file) }
-    if ($Release) { $testArgs += '--release' }
-    $testArgs += @('--', '--ignored', '--test-threads=1')
+    Assert-Nextest
+    $cargoProfile = if ($Release) { 'release' } else { 'test-release' }
+    Build-DaemonAndTracer $cargoProfile
+    $targets = @($TestFiles | ForEach-Object { @('--test', $_) })
     $names = $TestFiles -join ', '
-    Write-Host "==> Running native specs: $names..." -ForegroundColor Cyan
-    & cargo @testArgs
-    Test-CargoExitOk "cargo test -p rustling-tulip-native ($names)"
+    Write-Host "==> Running native specs: $names ($cargoProfile)..." -ForegroundColor Cyan
+    & cargo nextest run --manifest-path $ManifestPath -p rustling-tulip-native --cargo-profile $cargoProfile --run-ignored only @targets
+    Test-CargoExitOk "cargo nextest run -p rustling-tulip-native ($names)"
 }
 
 function Invoke-NativeE2e { Invoke-NativeSpecFile @('e2e_live', 'e2e_recover') }
@@ -670,14 +889,19 @@ Commands:
              build output older than 14 days out of target/ (needs
              cargo-sweep; a build without it skips the sweep).
   setup      Install/check Windows build prerequisites via winget (Git,
-             Node.js, Rust, C++ Build Tools, cargo-sweep). Run once
-             after cloning.
+             Node.js, Rust, C++ Build Tools, cargo-sweep,
+             cargo-nextest). Run once after cloning.
   stop       Kill any running daemon and tracers; remove the stale
              handshake.
   restart    Build daemon + tracer, stop the running daemon (sessions
              survive in their tracers), then run the native client (an
              open client is left to reconnect instead).
-  test       `cargo test` across the workspace.
+  test [-Reached [-Base <ref>]] [-PrintOnly] [-Validate]
+             `cargo nextest run --cargo-profile test-release` across the
+             workspace. -Reached: only the tests the change since <ref>
+             reaches (tools/test-map.json; a central or unmapped file
+             runs everything). -PrintOnly: print the selection, run
+             nothing. -Validate: check the test map.
   clippy     `cargo clippy --all-targets --all-features -- -D warnings`.
   fmt        `cargo fmt --all`.
   clean      `cargo clean`.
@@ -708,6 +932,11 @@ Flags:
   -Release           Use the release profile (build, launch, restart,
                      native, native-e2e, native-smoke, native-shot).
   -Out <path>        The PNG native-shot writes.
+  -Reached           test: only the tests the change reaches.
+  -Base <ref>        test -Reached: the ref to diff against (default:
+                     branch.<name>.base, else main's merge-base).
+  -PrintOnly         test: print the selection without running it.
+  -Validate          test: check tools/test-map.json.
 
 Examples:
   .\rt.ps1                       # build + run the native client
@@ -716,6 +945,7 @@ Examples:
   .\rt.ps1 launch -Release       # build + run the release client
   .\rt.ps1 restart               # rebuild, bounce the daemon, run client
   .\rt.ps1 clippy
+  .\rt.ps1 test -Reached         # the tests this branch's change reaches
 '@
     Write-Host $help
 }

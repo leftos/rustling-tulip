@@ -30,6 +30,11 @@ docs/
 .\rt.ps1
 ```
 
+```powershell
+# tests, run with cargo-nextest (`.\rt.ps1 setup` installs it)
+.\rt.ps1 test
+```
+
 `.\rt.ps1 help` lists the other commands.
 
 ## Run
@@ -91,6 +96,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Quarantine**: an account whose refresh token was rejected (`invalid_grant`), skipped until it is logged in again.
 - **RA.1, CR.0**: step ids of the finished own-agent recovery design (RA recovery steps, CR the Cursor spike), named in commit messages.
 - **Re-ask**: the native client resending a queued in-place spawn, unchanged, when its checkout prompt's turn comes, so the daemon answers with current numbers instead of the stale prompt being shown.
+- **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.
 - **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
 - **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
 - **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
@@ -103,7 +109,9 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
 - **tauri branch**: the maintenance branch holding the earlier Tauri desktop app, cut from the `tauri-last` tag. Tauri hotfixes are made there, daemon fixes are cherry-picked there from `main`, and the Tauri installer is built there; `main` keeps protocol 22 decodable for it.
-- **test-release**: the Cargo profile tests build with (`cargo test --profile test-release`): release optimisation without LTO, with 16 codegen units and incremental builds, so an edit rebuilds in seconds.
+- **Test map**: `tools/test-map.json`, which maps source paths to the nextest filterset that tests them (`rows`), and lists the `central` files that run the full suite and the paths to `ignore`; `.\rt.ps1 test -Validate` checks it.
+- **Test mode**: whether each landed change runs the full suite (`stable`) or only the fast checks and its reached tests (`unstable`, this repo's mode until the stable milestone, Wave 5); the full suite still runs before a push and before the release step.
+- **test-release**: the Cargo profile tests build with (`cargo nextest run --cargo-profile test-release`; nextest's own `--profile` is not the build profile): release optimisation without LTO, with 16 codegen units and incremental builds, so an edit rebuilds in seconds.
 - **Tracer-log import**: the startup pass that rebuilds history entries from `logs/tracer-<id>.log` files for sessions that ended before history existed.
 - **Tracking issue**: the issue `Merge feat/<name> (#N)`, last in a feature marker's project, that stands for its feature PR until the PR merges.
 - **Unexpected end**: a session whose tracer was lost (killed or crashed) rather than one that exited or was closed; these are pre-ticked for recovery.

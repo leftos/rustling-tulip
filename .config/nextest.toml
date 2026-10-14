@@ -1,0 +1,17 @@
+# cargo-nextest configuration (https://nexte.st/docs/configuration/).
+# The cargo build profile is chosen on the command line
+# (`--cargo-profile test-release`); `[profile.*]` here are nextest profiles.
+
+[test-groups]
+# The live e2e and OS smoke specs each own a real daemon, and the smoke specs
+# a real client window: run them one at a time.
+serial-live = { max-threads = 1 }
+
+[profile.default]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s" }
+
+[[profile.default.overrides]]
+filter = "binary_id(rustling-tulip-native::e2e_live) | binary_id(rustling-tulip-native::e2e_recover) | binary_id(rustling-tulip-native::smoke_window)"
+test-group = "serial-live"

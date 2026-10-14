@@ -26,26 +26,30 @@ linear: rustling-tulip
 ## Rulings every brief carries
 
 - **Protocol:** additive changes only, the `add-protocol-message` skill's 3-step pattern, no `protocol-version.json` bump for additive changes (CLAUDE.md "When to bump").
-- **Protocol 22 stays decodable** while the installed Tauri app is in use: a protocol change keeps every v22 message decoding, proved by `cargo test -p protocol v22_compat`.
-- **Testable core, thin view:** state that a feature adds (sidebar tree, split tree, tab list, key mapping, span building) lives in plain-Rust modules with unit tests; the GPUI view only renders it and forwards events. The proving command is that module's `cargo test -p <crate> <filter>`, red first.
+- **Protocol 22 stays decodable** while the installed Tauri app is in use: a protocol change keeps every v22 message decoding, proved by `cargo nextest run -p protocol --cargo-profile test-release v22_compat`.
+- **Testable core, thin view:** state that a feature adds (sidebar tree, split tree, tab list, key mapping, span building) lives in plain-Rust modules with unit tests; the GPUI view only renders it and forwards events. The proving command is that module's `cargo nextest run -p <crate> --cargo-profile test-release <filter>`, red first.
 
 ## Agents and gates
 
 - Explore: `Explore`. Rust design second opinion: `oracle`.
 - Reviewers: `code-review` for every item.
-- Gates, each run through the repo's gate from the worktree root as `pwsh tools/gate.ps1 -Log .tmp/<name>.log -TimeoutSeconds <n> -Slot <heavy|light> -- <command>` (no `nice` of its own; the gate lowers priority, takes a machine-wide slot, logs the whole output and prints the tail):
+- Gates, each run through the `gate` command on PATH from the worktree root as `gate run --log .tmp/<name>.log --timeout <n> --slot <heavy|light> -- <command>` (no `nice` of its own; the gate lowers priority, takes a machine-wide slot, logs the whole output and prints the tail). A machine without it installs it from the gate repo with `pwsh tools/install.ps1`; `--local` keeps a run on this PC. The gate routes `cargo nextest run *` heavy runs to a builder machine but not `rt.ps1 test`, so agent gates call nextest through `gate run` directly:
   - `cargo fmt --all --check` (light)
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy; what `.\rt.ps1 clippy` and prek run)
-  - `cargo test -p <crate> --profile test-release` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`). Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes.
+  - `cargo nextest run -p <crate> --cargo-profile test-release` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`); the full suite is `cargo nextest run --workspace --cargo-profile test-release`. Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes. nextest's own `--profile` is not the build profile.
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
+- test mode: unstable
+- stable milestone: Wave 5 — Remote desktop, relay and files across machines
+- release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: RT-129).
+- test map: `tools/test-map.json` (keys `central`, `ignore`, `rows`: source paths to nextest filtersets), read by `rt.ps1 test -Reached`. A landed change's reached tests are `pwsh ./rt.ps1 test -Reached -PrintOnly` for the filter, then `gate run … -- cargo nextest run --workspace --cargo-profile test-release --no-tests warn -E '<filter>'` so the run routes. A central file or an unmapped file runs the full suite. The live and smoke tiers run through `rt.ps1 native-e2e` and `native-smoke`.
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).
 - Parent-side gate: `git -C <wt> status --short` in the worktree and in the main checkout.
 
 ## Traps
 
 - **Probing against the user's live daemon.** Running the native client (or any test daemon) with default dirs attaches to the user's real sessions: the client's `Resize` changes their PTYs, and a probe daemon's startup reap kills every `rt-tracer*` under its binaries dir that its own config dir doesn't reference, so one started with only `RUSTLING_TULIP_CONFIG_DIR` isolated kills the installed app's live sessions machine-wide. A spawned daemon sets all of `RUSTLING_TULIP_CONFIG_DIR`, `RUSTLING_TULIP_BINARIES_DIR` and `RUSTLING_TULIP_WORKTREES_DIR` to `.tmp/` dirs (as `rt.ps1 native-e2e` does); a client run against the real daemon attaches only to a throwaway plain-shell session the brief names.
-- **GPUI in the workspace makes cold builds heavy.** Once `apps/native` is a member, `cargo clippy --workspace` and `cargo test --workspace` compile GPUI; a fresh worktree's first build does it from scratch. Each worktree keeps its own default `target/` (13–37 GB): a shared `CARGO_TARGET_DIR` mixed up two trees' `protocol` builds. The in-tree `target/` goes when the landing step removes the worktree.
+- **GPUI in the workspace makes cold builds heavy.** Once `apps/native` is a member, `cargo clippy --workspace` and `cargo nextest run --workspace` compile GPUI; a fresh worktree's first build does it from scratch. Each worktree keeps its own default `target/` (13–37 GB): a shared `CARGO_TARGET_DIR` mixed up two trees' `protocol` builds. The in-tree `target/` goes when the landing step removes the worktree.
 - **No `git stash`** to isolate edits, since parallel agents share the tree: show an error is pre-existing with `git diff -- <file>` instead.
 
 ## Concurrency
@@ -53,7 +57,7 @@ linear: rustling-tulip
 - Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default; a Tauri fix is cut from and lands on `tauri`).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
 - Depends on, where file lists hide it: the dependencies an issue or its design file names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 5 → Wave 6); a protocol message one item adds and another item's view consumes.
-- Context: read the status bar's figure at every landing (`jq .context_window.used_percentage <scratchpad>/statusline.json`); past 40% the loop stops refilling, per the user-level `nextup`.
+- Context: read the status bar's figure at every landing (`<scratchpad>/statusline.json`); past 400K tokens the loop stops refilling, per the user-level `nextup`.
 
 ## Docs map
 
@@ -62,6 +66,7 @@ linear: rustling-tulip
 | Native feature delivered | **land** its issue, delete its section in `docs/plans/native-client.md`, tick the parity lines it covered in `docs/plans/native-client-parity.md`, and record any lasting design decision in `docs/native-client.md` |
 | A file, module or flow a task-index row names added, moved or removed | `docs/architecture.md` (Components, Task index) |
 | A crate, binary, `rt.ps1` verb, env var or on-disk path added, moved or removed | `CLAUDE.md` (Project shape, Common commands, Environment variables, Where things live), `README.md` Layout / Build |
+| How tests run, or which tests a change reaches | `rt.ps1` (`Invoke-Test`), `tools/test-map.json`, `.config/nextest.toml`, `.pre-commit-config.yaml`, this profile's gates; `docs/architecture.md` Task index |
 | Wire protocol | `crates/protocol/src/lib.rs` doc comments, CLAUDE.md "Wire-protocol gotchas" when a rule changes |
 | Tracer ABI | `docs/tracer-abi.md` |
 | A term used in a project-specific sense (a new plan word, a phase name) | `README.md` Glossary |

@@ -9,6 +9,9 @@ repository.workspace = true
 description = "Daemon supervision shared by rustling-tulip clients: locate, spawn, reuse and stop rustling-tulipd"
 publish = false
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true
 

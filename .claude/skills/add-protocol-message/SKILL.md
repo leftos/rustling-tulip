@@ -79,8 +79,8 @@ The native client uses the Rust types from `crates/protocol` directly; there is 
 ## After the edits
 
 1. Run `cargo build` to confirm the workspace compiles.
-2. Run `cargo test -p protocol v22_compat` to confirm the change keeps protocol 22 decodable.
-3. Run `cargo test -p protocol` and the native client's UI spec that covers the message (`cargo test -p rustling-tulip-native --test ui ui_<name>`).
+2. Run `cargo nextest run -p protocol --cargo-profile test-release v22_compat` to confirm the change keeps protocol 22 decodable.
+3. Run `cargo nextest run -p protocol --cargo-profile test-release` and the native client's UI spec that covers the message (`cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_<name>`).
 4. Run `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Common mistakes to catch

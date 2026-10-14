@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 description = "Wire protocol shared between rustling-tulip daemon and clients"
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true
 

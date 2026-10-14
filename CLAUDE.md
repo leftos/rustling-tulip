@@ -31,10 +31,13 @@ PowerShell on Windows is the primary dev environment. `rt.ps1` in the repo root 
 .\rt.ps1                  # build daemon + tracer, then run the native client (same as `launch` / `native`)
 .\rt.ps1 build            # build only: daemon, tracer and native client, then sweep target/ output older than 14 days (cargo-sweep)
 .\rt.ps1 build -Release   # same, release profile (-Release also applies to launch, restart, native, native-e2e, native-smoke, native-shot)
-.\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep
+.\rt.ps1 setup            # install/check Windows build prerequisites via winget (Git, Node.js, Rust, C++ Build Tools), plus cargo-sweep and cargo-nextest
 .\rt.ps1 stop             # kill any running daemon and tracers; remove the stale handshake
 .\rt.ps1 restart          # build daemon + tracer, stop the daemon (sessions survive in their tracers), run the native client
-.\rt.ps1 test             # cargo test --profile test-release (workspace)
+.\rt.ps1 test             # cargo nextest run --workspace --cargo-profile test-release (fails pointing at `setup` without cargo-nextest)
+.\rt.ps1 test -Reached    # run only the tests the change reaches: a changed file's row in tools/test-map.json, else the full suite (-Base <ref> sets the diff base: branch.<name>.base, else main's merge-base with HEAD)
+.\rt.ps1 test -Reached -PrintOnly   # print the selection ("full suite: <file> is central" / "is unmapped", "reached: <filter>", or "no tests reached") and run nothing
+.\rt.ps1 test -Validate   # check tools/test-map.json ("test map ok: <n> rows; <m> native source and test files covered")
 .\rt.ps1 clippy           # strict lint pass (-D warnings)
 .\rt.ps1 fmt              # cargo fmt --all
 .\rt.ps1 clean            # cargo clean
@@ -57,26 +60,31 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 cargo deny check          # advisories, licenses, source allowlist (see deny.toml)
 
-# Tests build with the test-release profile (Cargo.toml): optimised like release, but without LTO and with
-# incremental builds, so an edit rebuilds in seconds instead of minutes. --release is for shipping builds only.
-cargo test --workspace --profile test-release
-cargo test -p daemon --profile test-release <test_name>
-cargo test -p protocol --profile test-release
+# Tests run with cargo-nextest and build with the test-release profile (Cargo.toml): optimised like release, but without LTO
+# and with incremental builds, so an edit rebuilds in seconds instead of minutes. --release is for shipping builds only.
+# nextest's own --profile picks a config profile, not the build profile: the build profile is --cargo-profile.
+cargo nextest run --workspace --cargo-profile test-release
+cargo nextest run -p daemon --cargo-profile test-release <test_name>
+cargo nextest run -p protocol --cargo-profile test-release
 
 # Native client UI specs: in-process GPUI (test-support), fake daemon, no real window or input
-cargo test -p rustling-tulip-native --profile test-release --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
+cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_terminal   # one ui binary; the filter picks a spec module (ui_sidebar, ui_tabs, …)
 # e2e_live.rs, e2e_recover.rs and smoke_window.rs are #[ignore]d here; run them through rt.ps1 native-e2e / native-smoke
 ```
 
-The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect. A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version; the daemon keeps protocol 22 in `supported` for the installed Tauri app (pinned to 22), and the `v22_compat` tests in `crates/protocol` (`cargo test -p protocol v22_compat`) fail if a change stops 22 decoding.
+Tests run with cargo-nextest although the full suite measured 1.41x slower than `cargo test`, because the daemon's git-fixture tests (RT-70) dominate it. `.config/nextest.toml` sets fail-fast off, no retries, a 60 s slow-timeout and a `serial-live` test group that runs `e2e_live`, `e2e_recover` and `smoke_window` one at a time. The protocol, tracer-protocol and daemon-client crates set `doctest = false`.
+
+The repo is in `test mode: unstable`: a change runs the fast checks and its reached tests (`.\rt.ps1 test -Reached`, from the **test map**, `tools/test-map.json`: keys `central`, `ignore`, `rows` of source paths to nextest filtersets), and the full suite runs before a push, before the release step and before a feature-branch merge. The stable milestone is Wave 5. The release step is cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (RT-129). Agent gates call nextest through `gate run` (on PATH, installed from the gate repo with `pwsh tools/install.ps1`) so heavy runs route to a builder machine, which `rt.ps1 test` does not.
+
+The native client auto-spawns the daemon on first connect via `daemon_client::ensure_running` (`crates/daemon-client`), passing the protocol versions it speaks. The daemon writes `port` + `auth_token` + `pid` + `supported_versions` to `daemon.json` in the config dir below; clients read that to connect. A daemon sharing none of the client's versions is retired and replaced. The native client speaks only the current version; the daemon keeps protocol 22 in `supported` for the installed Tauri app (pinned to 22), and the `v22_compat` tests in `crates/protocol` (`cargo nextest run -p protocol --cargo-profile test-release v22_compat`) fail if a change stops 22 decoding.
 
 ## E2E tests
 
 The native client has three test tiers:
 
-- **UI specs** — `cargo test -p rustling-tulip-native --profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon. Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
-- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer and runs `tests/e2e_live.rs` and `tests/e2e_recover.rs` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude shim.
-- **OS smoke** — `.\rt.ps1 native-smoke`: launches the native client exe in a cloaked window that never takes focus (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell.
+- **UI specs** — `cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui` (filter by module: `ui_terminal`, `ui_sidebar`, `ui_tabs`, `ui_session_actions`, …): in-process GPUI against a scripted fake daemon; no real window, input or daemon. Every spec file is a module of the one `tests/ui/main.rs` binary (a new spec is `tests/ui/ui_<name>.rs` plus its `mod` line there), since linking and starting a binary per file cost more than the tests themselves; the crate's lib has `doctest = false`.
+- **Live e2e** — `.\rt.ps1 native-e2e`: builds daemon + tracer in test-release and runs `tests/e2e_live.rs` and `tests/e2e_recover.rs` under `nextest --run-ignored only` against a real daemon isolated under `.tmp/`. Needs `node` for the fake-claude shim.
+- **OS smoke** — `.\rt.ps1 native-smoke`: builds daemon + tracer in test-release and launches the native client exe in a cloaked window that never takes focus, under `nextest --run-ignored only` (`tests/smoke_window.rs`) and checks it connects and that posted keys reach the shell.
 
 To look at a UI change, run `.\rt.ps1 native-shot <view>` (`main`, `main-compact` for the sidebar's Compact leaves, `source-control`, `diff`, `settings`, `spawn`): it writes a PNG of the real client window over a scripted fake daemon (`apps/native/examples/shot.rs`) to `.tmp\shots\` and prints its path; Read the PNG, and show the user before and after shots for any visual choice.
 
@@ -117,7 +125,7 @@ Worktrees live under a **separate** root resolved via `ProjectDirs::data_local_d
 
 ## Architecture invariants
 
-**Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`). When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching match arms in `crates/daemon/src/server.rs` (handler) and the native client's handling (`apps/native/src/net.rs`, `on_daemon_message`). Changes stay additive and keep protocol 22 decodable while the installed Tauri app is in use (`cargo test -p protocol v22_compat`).
+**Single source of truth for the wire protocol.** All daemon/client messages live in `crates/protocol/src/lib.rs` as tagged enums (`#[serde(tag = "type", rename_all = "snake_case")]`). When adding a message, update both directions (`ClientMessage` + `DaemonMessage` if it's a request/response) and the matching match arms in `crates/daemon/src/server.rs` (handler) and the native client's handling (`apps/native/src/net.rs`, `on_daemon_message`). Changes stay additive and keep protocol 22 decodable while the installed Tauri app is in use (`cargo nextest run -p protocol --cargo-profile test-release v22_compat`).
 
 **When to bump `protocol-version.json`.** *Additive* changes (new variant on a tagged enum, new `#[serde(default)]` field on a struct, new message type) are NOT a protocol bump. The range-based handshake (`SUPPORTED_PROTOCOL_VERSIONS`) + the `InboundClientMessage::Unknown` / `InboundDaemonMessage::Unknown` parse wrappers absorb unknown top-level types. Nested enums that grow over time (`TabLayout`, `RearrangeLayout`, `InjectorStep`, `PresetVariableKind`) each carry a `#[serde(other)] Unknown` unit variant that absorbs unrecognized values *in place* — the containing message keeps decoding. *Breaking* changes — renaming a field, removing a variant, changing semantics — DO require a bump. When bumping, keep the current version and every still-decodable prior version in `supported` (for example, a v18 daemon/client that can still speak v17 should advertise `[18, 17]`, not `[18]`). Only make `supported` a singleton when the new app cannot safely consume the older daemon's runtime messages. In that singleton case, verify `daemon_client::ensure_running` can retire the old healthy daemon through the HTTP `/shutdown` path and spawn the new daemon so tracer-backed sessions reattach instead of leaving the app stuck at `auth_failed`. New nested enums should follow the same `#[serde(other)]` pattern from day one.
 

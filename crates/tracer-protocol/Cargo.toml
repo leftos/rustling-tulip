@@ -8,6 +8,9 @@ authors.workspace = true
 repository.workspace = true
 description = "Stable ABI between rustling-tulipd and rt-tracer.exe. Bumps far less often than the main protocol — every change here is a forced re-spawn for live sessions."
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true
 
