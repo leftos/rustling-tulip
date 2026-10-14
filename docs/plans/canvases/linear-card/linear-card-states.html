@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linear card timing</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Tokens copied from apps/native/src/palette.rs (Petal chrome). */
+  :root {
+    --ground: #111013; --surface: #161519; --raised: #1b1a1f; --chip: #232129; --term: #0c0b0e;
+    --line: #2a2830; --line-strong: #3a3742; --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77;
+    --accent: #f07a62; --asking: #f6bc4e; --danger: #f26d6d; --ochre: #d9a15c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 12px/1.45 "Schibsted Grotesk", system-ui, sans-serif; padding: 24px 16px 48px; }
+  h1 { font-size: 16px; margin: 0 0 4px; } h2 { font-size: 14px; font-weight: 600; margin: 32px 0 4px; }
+  p.lede { color: var(--subtle); margin: 0 0 16px; max-width: 920px; }
+  .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .lane { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  .lane-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .lane-head b { font-size: 13px; white-space: nowrap; } .lane-head span { color: var(--subtle); }
+  .term { background: var(--term); border-radius: 6px; padding: 10px 12px; font: 12.5px/1.5 "Geist Mono", monospace; color: #cfcac4; min-height: 210px; position: relative; }
+  .dim { color: var(--faint); }
+  .id { white-space: nowrap; position: relative; }
+  .id.u, .id:hover.plain { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; color: var(--text); }
+  .card { position: absolute; left: 12px; top: 64px; font: 12px/1.45 "Schibsted Grotesk", sans-serif; color: var(--text); background: var(--chip); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 8px 24px #00000073; padding: 10px 12px; width: min(calc(100% - 24px), 300px); display: none; }
+  .card.show { display: block; }
+  .static .card { position: static; display: block; margin-top: 8px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .ident { font: 500 11.5px "Geist Mono", monospace; color: var(--subtle); white-space: nowrap; }
+  .title { font-weight: 600; font-size: 12.5px; margin: 3px 0 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 999px; background: var(--raised); border: 1px solid var(--line); white-space: nowrap; font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; } .ring { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--ochre); display: inline-block; }
+  .fields { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 6px 0 0; } .fields dt { color: var(--faint); } .fields dd { margin: 0; }
+  .notice { color: var(--subtle); margin-top: 6px; } .warn { color: var(--asking); }
+  .btn { border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 11.5px; margin-top: 8px; }
+  .tip { display: inline-block; margin-top: 8px; background: var(--chip); border: 1px solid var(--line-strong); border-radius: 6px; padding: 3px 8px; font: 12px "Schibsted Grotesk", sans-serif; color: var(--text); }
+  .note { color: var(--subtle); font-size: 11px; margin-top: 10px; }
+  .kbd { border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 4px; font: 11px "Geist Mono", monospace; }
+</style>
+</head>
+<body>
+<h1>Linear issue links: hover timing and fallback states</h1>
+<p class="lede">Mock for RT-133. Hover the ID in each lane of section 3 to feel the timing. Cards use the Standard density the owner picked.</p>
+
+<template id="std">
+  <div class="row"><span class="ident">RT-116</span><span style="flex:1"></span><span class="pill"><span class="dot" style="background:var(--danger)"></span>High</span><span class="pill"><span class="ring"></span>In Progress</span></div>
+  <div class="title">Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI</div>
+  <dl class="fields"><dt>Project</dt><dd>Build tooling</dd><dt>Release</dt><dd>vNext</dd><dt>Assignee</dt><dd>Leftos Aslanoglou</dd><dt>Updated</dt><dd>12 min ago</dd></dl>
+</template>
+
+<h2>3. Hover timing in the terminal</h2>
+<p class="lede">Today a terminal link underlines only while <span class="kbd">Ctrl</span> is held, and opens on <span class="kbd">Ctrl</span>+click.</p>
+<div class="lanes">
+  <section class="lane">
+    <div class="lane-head"><b>A · Ctrl-hover</b><span>card appears at once while Ctrl is held over the ID</span></div>
+    <div class="term" data-mode="ctrl"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id">RT-116</span>)<div class="card"></div></div>
+    <p class="note">Matches today's link rule; never pops up while you read or select text. Hold Ctrl, then hover.</p>
+  </section>
+  <section class="lane">
+    <div class="lane-head"><b>B · Plain hover, 500 ms</b><span>always underlined; card after resting half a second</span></div>
+    <div class="term" data-mode="delay" data-ms="500"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id u">RT-116</span>)<div class="card"></div></div>
+    <p class="note">Discoverable; can pop up while the mouse merely passes over build output.</p>
+  </section>
+  <section class="lane">
+    <div class="lane-head"><b>C · Plain hover, 1 s</b><span>always underlined; card after resting a full second</span></div>
+    <div class="term" data-mode="delay" data-ms="1000"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id u">RT-116</span>)<div class="card"></div></div>
+    <p class="note">Fewer accidental cards; feels slow when you want it.</p>
+  </section>
+</div>
+
+<h2>4. When the card has no data</h2>
+<p class="lede">Each lane shows the same three cases: no API key, still loading, Linear unreachable with an older copy cached.</p>
+<div class="lanes">
+  <section class="lane static">
+    <div class="lane-head"><b>A · Card with a notice</b><span>the card keeps its shape; a line says why</span></div>
+    <div class="card"><div class="row"><span class="ident">RT-116</span></div><div class="notice">Set <code>LINEAR_API_KEY</code> to see this issue's details.</div><button class="btn">Open in Linear</button></div>
+    <div class="card"><div class="row"><span class="ident">RT-116</span><span style="flex:1"></span><span class="pill">Loading…</span></div><div class="notice">Fetching from Linear</div></div>
+    <div class="card"><div class="row"><span class="ident">RT-116</span><span style="flex:1"></span><span class="pill"><span class="dot" style="background:var(--danger)"></span>High</span><span class="pill"><span class="ring"></span>In Progress</span></div><div class="title">Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI</div><div class="notice warn">Couldn't reach Linear · as of 25 min ago</div></div>
+  </section>
+  <section class="lane static">
+    <div class="lane-head"><b>B · One-line tooltip</b><span>no card until there is data; a plain tooltip instead</span></div>
+    <div><span class="tip">RT-116 · set LINEAR_API_KEY for details · click to open</span></div>
+    <div><span class="tip">RT-116 · loading…</span></div>
+    <div><span class="tip">RT-116 · Linear unreachable · click to open</span></div>
+    <p class="note">Lighter, but the stale case drops the cached details instead of showing them.</p>
+  </section>
+</div>
+
+<script>
+  const tpl = document.getElementById('std').innerHTML;
+  document.querySelectorAll('.term').forEach(term => {
+    const id = term.querySelector('.id'), card = term.querySelector('.card');
+    card.innerHTML = tpl;
+    let timer = null, over = false;
+    const hide = () => { clearTimeout(timer); card.classList.remove('show'); if (term.dataset.mode === 'ctrl') id.classList.remove('u'); };
+    if (term.dataset.mode === 'ctrl') {
+      const check = e => { if (over && e.ctrlKey) { id.classList.add('u'); card.classList.add('show'); } else if (!e.ctrlKey) hide(); };
+      id.addEventListener('mousemove', e => { over = true; check(e); });
+      id.addEventListener('mouseleave', () => { over = false; hide(); });
+      window.addEventListener('keydown', check); window.addEventListener('keyup', check);
+    } else {
+      id.addEventListener('mouseenter', () => { timer = setTimeout(() => card.classList.add('show'), Number(term.dataset.ms)); });
+      id.addEventListener('mouseleave', hide);
+    }
+  });
+</script>
+</body>
+</html>
