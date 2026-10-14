@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linear issue card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Tokens copied from apps/native/src/palette.rs (Petal chrome). */
+  :root {
+    --ground: #111013; --sunken: #0b0a0d; --surface: #161519; --raised: #1b1a1f;
+    --chip: #232129; --hover: #2c2a33; --term: #0c0b0e; --line: #2a2830; --line-strong: #3a3742;
+    --text: #ede9e4; --subtle: #8c8794; --faint: #6e6a77; --accent: #f07a62;
+    --working: #6ca6ff; --asking: #f6bc4e; --waiting: #4fc89d; --danger: #f26d6d;
+    --lilac: #c9b8ff; --ochre: #d9a15c; --rose: #e7849b; --periwinkle: #8fb3f0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--text); font: 12px/1.45 "Schibsted Grotesk", system-ui, sans-serif; padding: 24px 16px 48px; }
+  h1 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+  h2 { font-size: 14px; font-weight: 600; margin: 32px 0 4px; }
+  p.lede { color: var(--subtle); margin: 0 0 16px; max-width: 920px; }
+  .lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .lane { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  .lane-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .lane-head b { font-size: 13px; white-space: nowrap; }
+  .lane-head span { color: var(--subtle); }
+  .term { background: var(--term); border-radius: 6px; padding: 10px 12px; font: 12.5px/1.5 "Geist Mono", ui-monospace, monospace; color: #cfcac4; position: relative; min-height: 64px; }
+  .term .dim { color: var(--faint); }
+  .term .id { color: var(--text); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .term .id { white-space: nowrap; }
+  .card { font: 12px/1.45 "Schibsted Grotesk", system-ui, sans-serif; color: var(--text); margin: 6px 0 0 0; background: var(--chip); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 8px 24px #00000073; padding: 10px 12px; width: min(100%, 300px); }
+  .row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .ident { font: 500 11.5px "Geist Mono", monospace; color: var(--subtle); white-space: nowrap; }
+  .lane-head { flex-wrap: wrap; }
+  .row { flex-wrap: wrap; }
+  .title { font-weight: 600; font-size: 12.5px; margin: 3px 0 8px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 999px; background: var(--raised); border: 1px solid var(--line); white-space: nowrap; font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .ring { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--ochre); display: inline-block; }
+  .fields { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin-top: 6px; }
+  .fields dt { color: var(--faint); }
+  .fields dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sep { border-top: 1px solid var(--line); margin: 8px 0; }
+  .glyph { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .btn { border: 1px solid var(--line-strong); border-radius: 6px; padding: 3px 9px; color: var(--text); background: transparent; font: inherit; font-size: 11.5px; }
+  .btn.primary { border-color: var(--accent); color: var(--accent); }
+  .meta { color: var(--subtle); font-size: 11px; }
+  .header { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; background: var(--raised); border-left: 3px solid var(--accent); border-radius: 8px 8px 0 0; min-width: 0; }
+  .header .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header .rt { color: var(--subtle); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; font-size: 11px; }
+  .header u { text-underline-offset: 2px; text-decoration-color: var(--subtle); }
+  .ichip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); background: var(--chip); border-radius: 6px; padding: 0 6px; font: 500 11px "Geist Mono", monospace; white-space: nowrap; }
+  .leaf { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); background: var(--surface); border-radius: 0 0 8px 8px; }
+  .leaf .sub { color: var(--subtle); font-size: 11px; }
+  .note { color: var(--subtle); font-size: 11px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>Linear issue links: hover card and title treatment</h1>
+<p class="lede">Mock for RT-133. Petal tokens from <code>palette.rs</code>; the card sits in <code>popover_frame</code>'s look (CHIP, LINE_STRONG, 10 px radius). Example issue: RT-116 in this repo.</p>
+
+<h2>1. Card density</h2>
+<p class="lede">Hovering an underlined ID in the terminal shows one of these.</p>
+<div class="lanes">
+  <section class="lane">
+    <div class="lane-head"><b>A · Minimal</b><span>ID, title, state</span></div>
+    <div class="term"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id">RT-116</span>)
+      <div class="card">
+        <div class="row"><span class="ident">RT-116</span><span style="flex:1"></span><span class="pill"><span class="ring"></span>In Progress</span></div>
+        <div class="title" style="margin-bottom:0">Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI</div>
+      </div>
+    </div>
+    <p class="note">Smallest; status beyond the state needs a click into Linear.</p>
+  </section>
+
+  <section class="lane">
+    <div class="lane-head"><b>B · Standard</b><span>+ priority, project, release, assignee, updated</span></div>
+    <div class="term"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id">RT-116</span>)
+      <div class="card">
+        <div class="row"><span class="ident">RT-116</span><span style="flex:1"></span><span class="pill"><span class="dot" style="background:var(--danger)"></span>High</span><span class="pill"><span class="ring"></span>In Progress</span></div>
+        <div class="title">Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI</div>
+        <dl class="fields">
+          <dt>Project</dt><dd>Build tooling</dd>
+          <dt>Release</dt><dd>vNext</dd>
+          <dt>Assignee</dt><dd>Leftos Aslanoglou</dd>
+          <dt>Updated</dt><dd>12 min ago</dd>
+        </dl>
+      </div>
+    </div>
+    <p class="note">One glance answers "is this in the release, who has it, is it moving".</p>
+  </section>
+
+  <section class="lane">
+    <div class="lane-head"><b>C · Rich</b><span>+ kind, PR, sub-issues, sessions, actions</span></div>
+    <div class="term"><span class="dim">$</span> git log -1<br>abc1234 feat: reached tests (Refs: <span class="id">RT-116</span>)
+      <div class="card">
+        <div class="row"><span class="ident">RT-116</span><span class="pill" style="color:var(--periwinkle)">improvement</span><span style="flex:1"></span><span class="pill"><span class="dot" style="background:var(--danger)"></span>High</span><span class="pill"><span class="ring"></span>In Progress</span></div>
+        <div class="title">Faster iteration: affected-crate tests per item, full suite at checkpoints and in CI</div>
+        <dl class="fields">
+          <dt>Project</dt><dd>Build tooling</dd>
+          <dt>Release</dt><dd>vNext</dd>
+          <dt>Assignee</dt><dd>Leftos Aslanoglou</dd>
+          <dt>Branch</dt><dd><span style="font-family:'Geist Mono',monospace">test-tooling</span> · PR #12 <span style="color:var(--waiting)">✓ checks</span></dd>
+          <dt>Sub-issues</dt><dd>1 / 3 done · blocks RT-127</dd>
+          <dt>Updated</dt><dd>12 min ago</dd>
+        </dl>
+        <div class="sep"></div>
+        <div class="meta">Sessions on this issue</div>
+        <div class="row" style="margin-top:4px"><span class="glyph" style="background:var(--working)"></span>test-tooling · implementer<span style="flex:1"></span><span class="meta">working 4 m</span></div>
+        <div class="actions"><button class="btn primary">Open in Linear</button><button class="btn">Copy link</button><button class="btn">Spawn session…</button></div>
+      </div>
+    </div>
+    <p class="note">Ties the issue to rustling-tulip sessions; tallest, needs a click-to-pin so the buttons are reachable.</p>
+  </section>
+</div>
+
+<h2>2. Session title treatment</h2>
+<p class="lede">A session whose title names an issue, in the pane header and the sidebar leaf.</p>
+<div class="lanes">
+  <section class="lane">
+    <div class="lane-head"><b>A · Underlined text</b><span>the ID stays in the title, underlined; hover shows the card</span></div>
+    <div class="header"><span class="t"><u>RT-116</u>: nextest and reached tests</span><span class="rt">claude</span></div>
+    <div class="leaf"><span class="glyph" style="background:var(--working)"></span><span class="t"><u>RT-116</u>: nextest and reached tests</span><span style="flex:1"></span><span class="sub">test-tooling</span></div>
+    <p class="note">Quiet; the state is only visible on hover.</p>
+  </section>
+  <section class="lane">
+    <div class="lane-head"><b>B · State chip</b><span>the ID becomes a chip with Linear's state colour; hover shows the card</span></div>
+    <div class="header"><span class="ichip"><span class="ring" style="width:8px;height:8px"></span>RT-116</span><span class="t">nextest and reached tests</span><span class="rt">claude</span></div>
+    <div class="leaf"><span class="glyph" style="background:var(--working)"></span><span class="ichip"><span class="ring" style="width:8px;height:8px"></span>RT-116</span><span class="t">nextest and reached tests</span><span style="flex:1"></span><span class="sub">test-tooling</span></div>
+    <p class="note">State readable without hovering; costs title width in Compact leaves.</p>
+  </section>
+</div>
+</body>
+</html>
