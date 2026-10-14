@@ -4298,7 +4298,7 @@ mod tests {
             env(&[("API_TOKEN", SEALED)]),
             "sent verbatim"
         );
-        assert!(request.secret_env_keys.is_empty());
+        assert_eq!(request.secret_env_keys, Vec::<String>::new());
         press(&mut form, &Control::EnvReplace(0));
         assert_eq!(
             form.env_rows()[0].value,
@@ -4523,7 +4523,7 @@ mod tests {
         assert!(!form.env_secret_shown(0), "no Secret toggle");
         assert!(!form.env_value_masked(0), "a reference shows");
         assert!(!form.controls().contains(&Control::EnvSecret(0)));
-        assert!(request_of(&form).secret_env_keys.is_empty());
+        assert_eq!(request_of(&form).secret_env_keys, Vec::<String>::new());
     }
 
     #[test]

@@ -690,7 +690,7 @@ fn a_prefilled_sealed_row_shows_saved_secret(cx: &mut TestAppContext) {
         [("API_TOKEN".to_owned(), SEALED.to_owned())],
         "the reference goes unchanged"
     );
-    assert!(request.secret_env_keys.is_empty());
+    assert_eq!(request.secret_env_keys, Vec::<String>::new());
 
     open_sealed_duplicate(&mut h);
     h.click_on("spawn-env-replace-0");
@@ -894,7 +894,7 @@ fn the_name_picker_still_works_on_a_secret_row(cx: &mut TestAppContext) {
     assert_eq!(env_note(&mut h), None);
     h.click_on("spawn-submit");
     let request = the_spawn(&h.sent());
-    assert!(request.secret_env_keys.is_empty());
+    assert_eq!(request.secret_env_keys, Vec::<String>::new());
 }
 
 #[gpui::test]

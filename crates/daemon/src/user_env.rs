@@ -480,7 +480,7 @@ mod tests {
         assert!(!system.is_empty(), "windir is in the system environment");
         assert!(!system.contains('%'), "expanded: {system}");
         let (value, origin) = resolve("windir").expect("windir resolves");
-        assert!(!value.expose().is_empty());
+        assert_ne!(value.expose(), "");
         assert!(
             matches!(origin, Origin::Process | Origin::SystemScope),
             "{origin:?}"

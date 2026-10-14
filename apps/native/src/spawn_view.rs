@@ -415,7 +415,10 @@ impl RootView {
     /// the dialog is open and the row has one.
     #[must_use]
     pub fn spawn_dialog_env_note(&self, index: usize) -> Option<&'static str> {
-        self.form_dialog()?.form.env_row_note(index).map(EnvRowNote::text)
+        self.form_dialog()?
+            .form
+            .env_row_note(index)
+            .map(EnvRowNote::text)
     }
 
     /// Whether env row `index`'s value field is masked, while the dialog is
@@ -458,7 +461,7 @@ impl RootView {
     /// its scopes (`user · system`), or `None` while it is closed.
     #[must_use]
     pub fn spawn_env_name_rows(&self, index: usize) -> Option<Vec<(String, String)>> {
-        let form = &self.spawn_dialog.as_ref()?.form;
+        let form = &self.form_dialog()?.form;
         let field = ListField::EnvValue(index);
         form.list_shown(field).then(|| {
             form.list_rows(field)
