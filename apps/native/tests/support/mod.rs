@@ -33,6 +33,22 @@ pub mod live;
 
 pub const PROTOCOL: u32 = 1;
 
+/// The features the fake daemon lists in its `Welcome`, as a current daemon
+/// does.
+pub fn daemon_features() -> Vec<String> {
+    vec![protocol::FEATURE_CLAUDE_PROVIDER.to_owned()]
+}
+
+/// The fake daemon's `Welcome` on `protocol_version`, listing
+/// [`daemon_features`].
+pub fn welcome(protocol_version: u32) -> DaemonMessage {
+    DaemonMessage::Welcome {
+        protocol_version,
+        supported_versions: vec![protocol_version],
+        features: daemon_features(),
+    }
+}
+
 /// Whether the rail's side of the window shows what `selector` tags: the
 /// panels, the divider, the badge and the source-control panel's parts.
 /// Selectors it does not know count as present.
@@ -960,17 +976,14 @@ impl<'a> Harness<'a> {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(4242);
-        conn.on_welcome(PROTOCOL);
+        conn.on_welcome(PROTOCOL, daemon_features());
         self.event(NetEvent::State(conn));
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: 4242,
             pid: 1,
             protocol_version: PROTOCOL,
         }));
-        self.send(DaemonMessage::Welcome {
-            protocol_version: PROTOCOL,
-            supported_versions: vec![PROTOCOL],
-        });
+        self.send(welcome(PROTOCOL));
         // Every connection asks for the session history; the specs that
         // care about it send a Welcome of their own.
         self.drain();

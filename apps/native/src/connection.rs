@@ -26,8 +26,12 @@ pub enum State {
     /// A WebSocket connect is under way, or the socket is open and the
     /// daemon has not yet answered `Hello`.
     Connecting,
-    /// The daemon accepted `Hello` and negotiated this protocol version.
-    Open { negotiated: u32 },
+    /// The daemon accepted `Hello`, negotiated this protocol version and
+    /// listed these features in its `Welcome`.
+    Open {
+        negotiated: u32,
+        features: Vec<String>,
+    },
     /// The socket closed or could not be opened.
     Closed { reason: String },
     /// The daemon rejected the auth token. Terminal until a Restart.
@@ -124,6 +128,16 @@ impl Connection {
         matches!(self.state, State::Open { .. })
     }
 
+    /// Whether the connected daemon listed `feature` in its `Welcome`; false
+    /// whenever the connection is not open.
+    #[must_use]
+    pub fn supports(&self, feature: &str) -> bool {
+        match &self.state {
+            State::Open { features, .. } => features.iter().any(|listed| listed == feature),
+            _ => false,
+        }
+    }
+
     /// A WebSocket connect is starting.
     pub fn on_connecting(&mut self) {
         self.state = State::Connecting;
@@ -135,9 +149,12 @@ impl Connection {
         self.port = Some(port);
     }
 
-    /// The daemon answered `Hello` with `Welcome`.
-    pub fn on_welcome(&mut self, negotiated: u32) {
-        self.state = State::Open { negotiated };
+    /// The daemon answered `Hello` with `Welcome`, listing `features`.
+    pub fn on_welcome(&mut self, negotiated: u32, features: Vec<String>) {
+        self.state = State::Open {
+            negotiated,
+            features,
+        };
         self.attempt = 0;
         self.has_ever_connected = true;
     }
@@ -287,6 +304,7 @@ mod tests {
     use super::{
         Connection, DotKind, RESUME_GAP, RestartAction, State, TICK, Watchdog, backoff_delay,
     };
+    use protocol::FEATURE_CLAUDE_PROVIDER;
     use std::time::{Duration, SystemTime};
 
     const HALF_SECOND: Duration = Duration::from_millis(500);
@@ -295,7 +313,7 @@ mod tests {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(51418);
-        conn.on_welcome(negotiated);
+        conn.on_welcome(negotiated, Vec::new());
         conn
     }
 
@@ -318,7 +336,7 @@ mod tests {
             conn.on_closed("refused".to_owned());
         }
         conn.on_socket_open(51418);
-        conn.on_welcome(20);
+        conn.on_welcome(20, Vec::new());
         assert_eq!(conn.on_closed("dropped".to_owned()), Some(HALF_SECOND));
     }
 
@@ -389,7 +407,13 @@ mod tests {
     fn restart_when_open_sends_shutdown() {
         let mut conn = open(20);
         assert_eq!(conn.restart(), RestartAction::SendShutdown);
-        assert_eq!(conn.state(), &State::Open { negotiated: 20 });
+        assert_eq!(
+            conn.state(),
+            &State::Open {
+                negotiated: 20,
+                features: Vec::new()
+            }
+        );
 
         let mut closed = open(20);
         closed.on_closed("dropped".to_owned());
@@ -439,7 +463,7 @@ mod tests {
         assert_eq!(conn.footer(0).label, "connecting…");
         assert_eq!(conn.footer(0).dot, DotKind::Pending);
         conn.on_socket_open(51418);
-        conn.on_welcome(20);
+        conn.on_welcome(20, Vec::new());
         assert_eq!(conn.footer(0).label, "0 sessions");
         assert_eq!(conn.footer(1).label, "1 session");
         assert_eq!(conn.footer(3).label, "3 sessions");
@@ -468,7 +492,7 @@ mod tests {
         conn.on_connecting();
         conn.on_socket_open(51418);
         assert_eq!(conn.footer(0).port, None);
-        conn.on_welcome(20);
+        conn.on_welcome(20, Vec::new());
         assert_eq!(conn.footer(0).port, Some(51418));
         conn.on_closed("dropped".to_owned());
         assert_eq!(conn.footer(0).port, None);
@@ -510,5 +534,73 @@ mod tests {
         assert_eq!(conn.overlay(), Some("Daemon dropped — reconnecting…"));
         conn.stop();
         assert_eq!(conn.overlay(), Some("Waiting for daemon…"));
+    }
+
+    fn welcome(conn: &mut Connection) {
+        conn.on_socket_open(51418);
+        conn.on_welcome(
+            20,
+            vec![FEATURE_CLAUDE_PROVIDER.to_owned(), "later".to_owned()],
+        );
+    }
+
+    #[test]
+    fn features_come_with_welcome() {
+        let mut conn = Connection::new();
+        assert!(
+            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            "none before Welcome"
+        );
+        conn.on_connecting();
+        conn.on_socket_open(51418);
+        assert!(
+            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            "none before Welcome"
+        );
+        welcome(&mut conn);
+        assert!(conn.supports(FEATURE_CLAUDE_PROVIDER));
+        assert!(conn.supports("later"), "unknown features are kept");
+        assert!(!conn.supports("unlisted"));
+
+        let bare = open(20);
+        assert!(
+            !bare.supports(FEATURE_CLAUDE_PROVIDER),
+            "an older daemon lists none"
+        );
+    }
+
+    #[test]
+    fn features_clear_when_the_connection_drops() {
+        let mut conn = Connection::new();
+        welcome(&mut conn);
+        conn.on_closed("dropped".to_owned());
+        assert!(!conn.supports(FEATURE_CLAUDE_PROVIDER), "cleared on close");
+
+        welcome(&mut conn);
+        conn.on_error("no binary".to_owned());
+        assert!(!conn.supports(FEATURE_CLAUDE_PROVIDER), "cleared on error");
+
+        welcome(&mut conn);
+        conn.on_connecting();
+        assert!(
+            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            "cleared on reconnect"
+        );
+
+        welcome(&mut conn);
+        conn.on_auth_failed("bad token".to_owned());
+        assert!(
+            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            "cleared on auth failure"
+        );
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+
+        welcome(&mut conn);
+        conn.stop();
+        assert_eq!(conn.restart(), RestartAction::FreshConnect);
+        assert!(
+            !conn.supports(FEATURE_CLAUDE_PROVIDER),
+            "cleared on a fresh connect"
+        );
     }
 }

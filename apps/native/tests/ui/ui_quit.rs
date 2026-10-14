@@ -102,7 +102,7 @@ fn open_conn() -> Connection {
     let mut conn = Connection::new();
     conn.on_connecting();
     conn.on_socket_open(4242);
-    conn.on_welcome(1);
+    conn.on_welcome(1, support::daemon_features());
     conn
 }
 
@@ -689,13 +689,7 @@ fn fake_daemon(sessions: Vec<SessionSnapshot>) -> (u16, JoinHandle<(Option<bool>
             .expect("set a read timeout");
         let mut ws = tungstenite::accept(stream).expect("websocket upgrade");
         let _hello = ws.read().expect("the client's Hello");
-        let replies = [
-            DaemonMessage::Welcome {
-                protocol_version: 23,
-                supported_versions: vec![23],
-            },
-            DaemonMessage::Sessions { sessions },
-        ];
+        let replies = [support::welcome(23), DaemonMessage::Sessions { sessions }];
         for reply in replies {
             let text = serde_json::to_string(&reply).expect("encode a reply");
             ws.send(Message::text(text)).expect("send a reply");
@@ -842,10 +836,7 @@ fn exit_dialog_survives_welcome(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = asking(cx, &dir);
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(exit_open(&mut h), "a reconnect leaves the dialog open");
 
     h.set_connection(closed_conn());
@@ -869,10 +860,7 @@ fn exit_dialog_survives_welcome(cx: &mut TestAppContext) {
     assert!(commands(&mut h).is_empty(), "a disabled stop sends nothing");
 
     h.set_connection(open_conn());
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(exit_open(&mut h));
     assert!(exit_buttons(&mut h).iter().all(|(_, _, enabled)| *enabled));
 }

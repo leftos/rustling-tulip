@@ -886,6 +886,7 @@ mod tests {
         DaemonMessage::Welcome {
             protocol_version: 23,
             supported_versions: vec![23],
+            features: Vec::new(),
         }
     }
 

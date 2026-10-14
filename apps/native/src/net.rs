@@ -383,10 +383,12 @@ impl Net {
     fn on_daemon_message(&mut self, msg: Box<DaemonMessage>) {
         match &*msg {
             DaemonMessage::Welcome {
-                protocol_version, ..
+                protocol_version,
+                features,
+                ..
             } => {
                 info!(protocol_version, "connected to daemon");
-                self.conn.on_welcome(*protocol_version);
+                self.conn.on_welcome(*protocol_version, features.clone());
                 self.emit_state();
             }
             DaemonMessage::AuthFailed { reason } => {

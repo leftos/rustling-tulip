@@ -1363,15 +1363,30 @@ async fn handshake(
         client_id = client_id.as_deref().unwrap_or("(legacy)"),
         "handshake negotiated protocol version"
     );
-    let _ = out_tx.send(DaemonMessage::Welcome {
-        protocol_version: negotiated,
-        supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
-    });
+    let _ = out_tx.send(welcome_message(negotiated));
     Ok(Handshake {
         negotiated_version: negotiated,
         client_id,
         client_name,
     })
+}
+
+/// The capabilities this daemon lists in `Welcome.features` (`protocol::FEATURE_*`).
+/// A feature joins only once the daemon fully honours it, since a client that
+/// sees it listed offers the capability to the user.
+const DAEMON_FEATURES: &[&str] = &[];
+
+/// The `Welcome` answering an accepted `Hello`: the negotiated version, every
+/// version this daemon speaks, and [`DAEMON_FEATURES`].
+fn welcome_message(negotiated: u32) -> DaemonMessage {
+    DaemonMessage::Welcome {
+        protocol_version: negotiated,
+        supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+        features: DAEMON_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect(),
+    }
 }
 
 /// Pick the highest protocol version both the client and daemon understand.
@@ -7033,6 +7048,20 @@ mod child_env_probe {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn welcome_carries_the_daemon_features_and_the_negotiated_version() {
+        let welcome = welcome_message(22);
+        assert!(
+            matches!(
+                &welcome,
+                DaemonMessage::Welcome { protocol_version: 22, supported_versions, features }
+                    if supported_versions == SUPPORTED_PROTOCOL_VERSIONS
+                        && features == DAEMON_FEATURES
+            ),
+            "{welcome:?}"
+        );
+    }
 
     /// A scratch directory for a hub's config, state and worktrees, removed
     /// when the test ends.

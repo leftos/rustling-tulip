@@ -1011,10 +1011,7 @@ fn shelf_clears_on_welcome(cx: &mut TestAppContext) {
     h.click_on("tab-close-t2");
     assert_eq!(undo_entries(&mut h).len(), 1, "the close offers an undo");
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(
         undo_entries(&mut h).is_empty(),
         "a reconnect forgets what the ids stood for"

@@ -171,10 +171,7 @@ fn placements(sent: Vec<ClientMessage>) -> Vec<String> {
 }
 
 fn welcome(h: &mut Harness<'_>) {
-    h.send(DaemonMessage::Welcome {
-        protocol_version: PROTOCOL,
-        supported_versions: vec![PROTOCOL],
-    });
+    h.send(support::welcome(PROTOCOL));
 }
 
 fn asks_history(sent: &[ClientMessage]) -> bool {

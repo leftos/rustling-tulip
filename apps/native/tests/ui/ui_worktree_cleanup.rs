@@ -240,10 +240,7 @@ fn welcome_clears_the_queue(cx: &mut TestAppContext) {
     fail(&mut h, "s1", "one", vec![failure("a", vec![])]);
     fail(&mut h, "s2", "two", vec![failure("b", vec![])]);
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: PROTOCOL,
-        supported_versions: vec![PROTOCOL],
-    });
+    h.send(support::welcome(PROTOCOL));
 
     assert!(!h.in_model("cleanup-failed"));
 }
