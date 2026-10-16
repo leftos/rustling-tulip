@@ -39,8 +39,8 @@ pub struct Dirs {
     /// `<template-stem>-<sha256-prefix>.exe`. See [`crate::binary_cache`].
     pub binaries_dir: PathBuf,
     /// Directory holding the shipped `rt-tracer` template, from
-    /// `RUSTLING_TULIP_BIN_TEMPLATES` as `daemon-client` sets it for the daemon
-    /// it supervises. `None` falls back to the sibling-of-exe and
+    /// `RUSTLING_TULIP_BIN_TEMPLATES` as `daemon-client` or the `--detach`
+    /// launcher sets it for the daemon it starts. `None` falls back to the sibling-of-exe and
     /// installed-app lookups (see `tracer_client::locate_tracer_template`).
     pub bin_templates: Option<PathBuf>,
 }
@@ -302,7 +302,7 @@ pub fn resolve_binaries_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// The template directory `RUSTLING_TULIP_BIN_TEMPLATES` names, as
-/// `daemon-client` sets it when it spawns the daemon it supervises. `None`
+/// `daemon-client` or the `--detach` launcher sets it for the daemon it starts. `None`
 /// when the variable is unset or empty — the tracer lookup then falls back to
 /// the sibling-of-exe and installed-app locations.
 fn resolve_bin_templates_dir() -> Option<PathBuf> {

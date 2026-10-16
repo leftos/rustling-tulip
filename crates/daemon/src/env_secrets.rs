@@ -892,6 +892,7 @@ mod tests {
             sessions_dir: config.join("sessions"),
             worktrees_dir: root.join("worktrees"),
             binaries_dir: root.join("binaries"),
+            bin_templates: None,
         };
         std::fs::create_dir_all(&dirs.sessions_dir).expect("create the sessions dir");
         std::fs::create_dir_all(dirs.history_dir()).expect("create the history dir");
