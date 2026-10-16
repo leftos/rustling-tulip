@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
+mod hook;
 #[cfg(windows)]
 mod job_object;
 mod ring;
@@ -54,8 +55,26 @@ struct Cli {
     program_and_args: Vec<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // `rt-tracer hook` is the shim an agent session's injected settings run
+    // (see `hook`). It is dispatched before anything else and before a tokio
+    // runtime exists, so a hook event pays for neither, and its clock is taken
+    // here, at the earliest point the process can take one.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "hook") {
+        hook::run_from_env(hook::unix_nanos());
+        return Ok(());
+    }
+
+    // The multi-threaded, all-enabled runtime `#[tokio::main]` used to build
+    // for the tracer itself.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build the tokio runtime")?;
+    runtime.block_on(run_tracer())
+}
+
+async fn run_tracer() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
 
