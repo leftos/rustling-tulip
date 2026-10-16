@@ -5,7 +5,7 @@
 ## Wave 1a — Claude sessions on DeepSeek
 
 - [ ] RT-3 Run Claude sessions on DeepSeek as a per-session Claude provider
-  - [/] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
+  - [!] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
   - [!] RT-175 Don't seal an env row the DeepSeek provider removes from the child
 - [ ] RT-6 Merge feat/deepseek-sessions (#8)
 - [ ] RT-176 Import a DeepSeek session started with a model alias as DeepSeek
@@ -16,10 +16,7 @@
 
 ## Wave 2 — Daily driver: close the port's gaps
 
-- [/] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
-  - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
-  - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
-- [ ] RT-13 P4.17: Keep an untouched layout when panes come and go
+- [/] RT-13 P4.17: Keep an untouched layout when panes come and go
 - [ ] RT-23 Give the Shell dialog the shared checkbox row and make one section helper
 - [ ] RT-15 P4.10b: Remove a repo or workspace
 - [ ] RT-16 P4.11a: Container row keyboard fold, last-launch summary, Detached banner
@@ -35,9 +32,18 @@
 - [ ] RT-174 Refuse a plain-shell request's agent options before git work
 - [ ] RT-179 Keep keyboard focus when pressing Worktrees Save disables it
 - [ ] RT-181 Clear a tab's closing mark when the daemon rejects its ClosePane
-- [ ] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished
+- [!] RT-182 Replace the Tauri-era toasts with two notifications: Needs you and Finished
 - [ ] RT-183 Remove headless runs from the native client
 - [ ] RT-186 Resync the tab list when a connection's tab-event broadcast lags
+- [ ] RT-190 Re-pick the grid columns for a best-fit or auto pick as panes come and go
+
+## Wave 2b — Hook status
+
+- [/] RT-25 Report agent status from Claude Code hooks, with the PTY heuristic as fallback
+  - [ ] RT-84 Show a background state when a turn ends with subagents, shells or wakeups still running
+  - [ ] RT-85 Flag a session hand-off ready when its orchestrator says to /clear and /nextup
+  - [ ] RT-188 Keep subagent events, idle_prompt and a restart from clearing a pending hook prompt
+- [ ] RT-189 Merge feat/hook-status (#198)
 
 ## Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 
@@ -61,8 +67,8 @@
 - [ ] RT-36 FT.3: fetch a file by clicking a terminal path link in remote mode
 - [ ] RT-37 FT.4: "Fetch file…" popup
 - [ ] RT-129 Write the release procedure for v0.1.0-alpha
-- [/] RT-177 Await the tailnet certificate task when the listener's supervisor panics
 - [ ] RT-184 Let only the client with recent input own a session's terminal size
+- [ ] RT-187 Await the tailnet servers after the listener's supervisor panics
 
 ## Wave 4 — Mobile app (iPhone PWA over Tailscale)
 
