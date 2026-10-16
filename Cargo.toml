@@ -6,6 +6,7 @@ members = [
     "crates/tracer",
     "crates/daemon",
     "crates/daemon-client",
+    "crates/tailnet",
     "apps/native",
 ]
 

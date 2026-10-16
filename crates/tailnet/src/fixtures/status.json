@@ -1,0 +1,120 @@
+{
+  "Version": "1.90.1-t1234abcd",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "100.90.80.70",
+    "fd7a:115c:a1e0::aaaa:bbbb"
+  ],
+  "Self": {
+    "ID": "nHostCNTRL",
+    "NodeID": 7000000000000001,
+    "PublicKey": "nodekey:1111111111111111111111111111111111111111111111111111111111111111",
+    "HostName": "desktop",
+    "DNSName": "desktop.tail1234.ts.net.",
+    "OS": "windows",
+    "UserID": 61234567890123,
+    "TailscaleIPs": [
+      "100.90.80.70",
+      "fd7a:115c:a1e0::aaaa:bbbb"
+    ],
+    "Addrs": [],
+    "CurAddr": "",
+    "Relay": "sea",
+    "RxBytes": 0,
+    "TxBytes": 0,
+    "Created": "2025-01-02T03:04:05Z",
+    "LastWrite": "0001-01-01T00:00:00Z",
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "LastHandshake": "0001-01-01T00:00:00Z",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "PeerAPIURL": [
+      "http://100.90.80.70:12345"
+    ],
+    "TaildropTarget": 0,
+    "NoFileSharingReason": "",
+    "InNetworkMap": true,
+    "InMagicSock": false,
+    "InEngine": false
+  },
+  "Health": [],
+  "MagicDNSSuffix": "tail1234.ts.net",
+  "CurrentTailnet": {
+    "Name": "owner@example.com",
+    "MagicDNSSuffix": "tail1234.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "CertDomains": [
+    "desktop.tail1234.ts.net"
+  ],
+  "Peer": {
+    "nodekey:2222222222222222222222222222222222222222222222222222222222222222": {
+      "ID": "nLaptopCNTRL",
+      "NodeID": 7123456789012345,
+      "PublicKey": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+      "HostName": "laptop",
+      "DNSName": "laptop.tail1234.ts.net.",
+      "OS": "windows",
+      "UserID": 61234567890123,
+      "TailscaleIPs": [
+        "100.101.102.103",
+        "fd7a:115c:a1e0::1234:5678"
+      ],
+      "AllowedIPs": [
+        "100.101.102.103/32",
+        "fd7a:115c:a1e0::1234:5678/128"
+      ],
+      "Addrs": null,
+      "CurAddr": "",
+      "Relay": "sea",
+      "RxBytes": 1024,
+      "TxBytes": 2048,
+      "Created": "2025-10-14T09:00:00Z",
+      "LastWrite": "2026-10-15T12:00:00Z",
+      "LastSeen": "2026-10-15T12:00:00Z",
+      "LastHandshake": "2026-10-15T12:00:00Z",
+      "Online": true,
+      "ExitNode": false,
+      "ExitNodeOption": false,
+      "Active": true,
+      "PeerAPIURL": [
+        "http://100.101.102.103:23456"
+      ],
+      "TaildropTarget": 3,
+      "NoFileSharingReason": "",
+      "InNetworkMap": true,
+      "InMagicSock": true,
+      "InEngine": true
+    },
+    "nodekey:3333333333333333333333333333333333333333333333333333333333333333": {
+      "ID": "nServerCNTRL",
+      "NodeID": 7000000000000003,
+      "PublicKey": "nodekey:3333333333333333333333333333333333333333333333333333333333333333",
+      "HostName": "build-box",
+      "DNSName": "build-box.tail1234.ts.net.",
+      "OS": "linux",
+      "UserID": 61234567890123,
+      "TailscaleIPs": [
+        "100.64.0.9"
+      ],
+      "Tags": [
+        "tag:server"
+      ],
+      "Online": false,
+      "ShareeNode": true
+    }
+  },
+  "User": {
+    "61234567890123": {
+      "ID": 61234567890123,
+      "LoginName": "owner@example.com",
+      "DisplayName": "Owner Name"
+    }
+  },
+  "ClientVersion": null
+}

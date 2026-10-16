@@ -14,6 +14,7 @@ crates/daemon/          binary = rustling-tulipd: WS server, PTY pool, registry,
 crates/tracer/          binary = rt-tracer.exe: per-session ConPTY supervisor that survives daemon restarts
 crates/tracer-protocol/ stable ABI between daemon and tracer (additive-only; see docs/tracer-abi.md)
 crates/daemon-client/   client-side daemon supervision (ensure-running, handshake, config dir, client identity, stop) shared by the clients
+crates/tailnet/         Tailscale CLI wrapper (whois, whoami, status, cert) and the owner rule that decides which tailnet peers may connect (docs/plans/remote-access.md)
 apps/native/            binary = rustling-tulip-native (thin main.rs over a lib, rustling_tulip_native): GPUI + alacritty_terminal desktop client (see docs/native-client.md); tests/ui/ (one test binary, a module per spec) drive RootView::with_transport against a scripted fake daemon
 tools/e2e/fake-claude/  fake-claude CLI shim used by the native e2e tier
 docs/architecture.md    components, what the product does, and a task index: which files to read, in order, for each kind of change
@@ -98,6 +99,7 @@ The `tools/e2e/fake-claude/` shim (`fake-claude.cmd` + `index.mjs`) replaces the
 | `RUSTLING_TULIP_CLAUDE` | Path to `claude` binary | `claude` (PATH lookup) |
 | `RUSTLING_TULIP_CODEX` | Path to `codex` binary | `codex` (PATH lookup) |
 | `CODEX_HOME` | Codex's home; the daemon reads it (a spawn's own `CODEX_HOME` row first) to find a Codex session's rollout file and so its conversation id | `%USERPROFILE%\.codex` |
+| `RUSTLING_TULIP_TAILSCALE` | Path to the `tailscale` CLI that `crates/tailnet` runs | `%ProgramFiles%\Tailscale\tailscale.exe`, else `tailscale` (PATH lookup) |
 | `RUSTLING_TULIP_SHELL` | Shell used for plain-shell sessions | auto-detect |
 | `RUSTLING_TULIP_CONFIG_DIR` | Config dir override (useful for e2e test isolation) | `%APPDATA%\leftos\rustling-tulip\config\` |
 | `RUSTLING_TULIP_WORKTREES_DIR` | Worktrees root override | `%LOCALAPPDATA%\leftos\rustling-tulip\data\worktrees\` |

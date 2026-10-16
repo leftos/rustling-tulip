@@ -57,6 +57,12 @@
     },
     {
       "paths": [
+        "crates/tailnet/**"
+      ],
+      "filter": "rdeps(tailnet)"
+    },
+    {
+      "paths": [
         "apps/native/src/main.rs"
       ],
       "filter": "binary_id(rustling-tulip-native::bin/rustling-tulip-native)"

@@ -1,0 +1,50 @@
+{
+  "Node": {
+    "ID": 7123456789012345,
+    "StableID": "nLaptopCNTRL",
+    "Name": "laptop.tail1234.ts.net.",
+    "User": 61234567890123,
+    "Key": "nodekey:6a4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d",
+    "KeyExpiry": "2027-04-12T18:22:31Z",
+    "Machine": "mkey:1f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a79881f2e3d4c5b6a7988",
+    "DiscoKey": "discokey:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9",
+    "Addresses": [
+      "100.101.102.103/32",
+      "fd7a:115c:a1e0::1234:5678/128"
+    ],
+    "AllowedIPs": [
+      "100.101.102.103/32",
+      "fd7a:115c:a1e0::1234:5678/128"
+    ],
+    "Endpoints": [
+      "203.0.113.7:41641",
+      "192.168.1.20:41641"
+    ],
+    "HomeDERP": 1,
+    "Hostinfo": {
+      "OS": "windows",
+      "OSVersion": "10.0.26200.1000",
+      "Hostname": "laptop",
+      "Services": []
+    },
+    "Created": "2025-10-14T09:00:00Z",
+    "Cap": 120,
+    "Online": true,
+    "ComputedName": "laptop",
+    "ComputedNameWithHost": "laptop"
+  },
+  "UserProfile": {
+    "ID": 61234567890123,
+    "LoginName": "owner@example.com",
+    "DisplayName": "Owner Name",
+    "ProfilePicURL": "https://example.com/owner.png"
+  },
+  "CapMap": {
+    "https://tailscale.com/cap/file-sharing": null
+  },
+  "CurrentTailnet": {
+    "Name": "owner@example.com",
+    "MagicDNSSuffix": "tail1234.ts.net",
+    "MagicDNSEnabled": true
+  }
+}
