@@ -885,6 +885,45 @@ impl RootView {
         self.tabs.tabs().iter().map(|tab| tab.id.clone()).collect()
     }
 
+    /// Whether a dialog, modal or menu is drawn over the panes and holds the
+    /// keyboard: the Settings modal, the spawn, Shell…, delete-worktree,
+    /// discard, stash drop, run, recover, Manage worktrees, layout chooser,
+    /// cleanup-failed, exit and pane dialogs and menus, or a modal notice.
+    fn overlay_open(&self) -> bool {
+        self.spawn_dialog.is_some()
+            || self.shell_dialog.is_some()
+            || self.appearance_editor.is_some()
+            || self.worktrees_manager.is_some()
+            || self.recover.is_some()
+            || self.delete_dialog.is_some()
+            || self.changes.discard.is_some()
+            || self.changes.file_menu.is_some()
+            || self.stash.drop.is_some()
+            || self.run_confirm.is_some()
+            || self.notices.has_modal()
+            || self.layout_chooser.is_some()
+            || !self.cleanup_failed.is_empty()
+            || self.exit.is_some()
+            || self.pane_ui.close.is_some()
+            || self.pane_ui.move_panes.is_some()
+            || self.pane_ui.menu.is_some()
+    }
+
+    /// Whether a pane of the tab on screen shows `session_id` with nothing
+    /// drawn over the panes; a diff tab shows none.
+    pub(crate) fn session_on_screen(&self, session_id: &str) -> bool {
+        !self.overlay_open()
+            && self
+                .tabs
+                .active_tab()
+                .and_then(TabEntry::grid)
+                .is_some_and(|grid| {
+                    crate::tabs::collect_panes(grid)
+                        .iter()
+                        .any(|pane| pane.session == Some(session_id))
+                })
+    }
+
     /// The panes of the tab on screen.
     #[must_use]
     pub fn active_pane_ids(&self) -> Vec<String> {
@@ -1235,23 +1274,7 @@ impl RootView {
         self.prune_tab_font_sizes();
         self.apply_pane_fonts(cx);
         self.refresh_spawn_tabs();
-        let keyboard_free = self.spawn_dialog.is_none()
-            && self.shell_dialog.is_none()
-            && self.appearance_editor.is_none()
-            && self.worktrees_manager.is_none()
-            && self.recover.is_none()
-            && self.delete_dialog.is_none()
-            && self.changes.discard.is_none()
-            && self.changes.file_menu.is_none()
-            && self.stash.drop.is_none()
-            && self.run_confirm.is_none()
-            && !self.notices.has_modal()
-            && self.layout_chooser.is_none()
-            && self.cleanup_failed.is_empty()
-            && self.exit.is_none()
-            && self.pane_ui.close.is_none()
-            && self.pane_ui.move_panes.is_none()
-            && self.pane_ui.menu.is_none();
+        let keyboard_free = !self.overlay_open();
         if let Some(pane_id) = self.tabs.take_focus_request()
             && keyboard_free
         {
@@ -1366,7 +1389,6 @@ impl RootView {
     }
 
     fn send(&self, msg: ClientMessage) {
-        self.notifications.note_stops([&msg]);
         self.command(NetCommand::Send(Box::new(msg)));
     }
 
@@ -1517,7 +1539,9 @@ impl RootView {
         if let Some(discard) = exit_discard {
             self.send(discard);
         }
-        self.notify_on(&msg, cx);
+        // Windows deactivates a window it minimizes, so a minimized window
+        // counts as not focused.
+        self.notify_on(&msg, window.is_window_active(), cx);
         if self.on_panel_message(&msg, window, cx) {
             return;
         }

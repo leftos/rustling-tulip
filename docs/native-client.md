@@ -64,7 +64,11 @@ Settings → Worktrees edits the daemon's worktrees-root override, and shows `Sa
 
 ## Notifications
 
-OS toasts go through `tauri-winrt-notification` with no registered app id, so they show under a generic sender until the native installer exists. A stop this client sent does not notify this client. The daemon fans out `Attention { Error }` when a session enters Error, so every client agrees. The Notifications tab shows Windows' read-only toast state with a link to Windows' settings.
+OS toasts go through `tauri-winrt-notification` with no registered app id, so they show under a generic sender until the native installer exists. The one toast is `Needs you`, raised when the daemon's `Attention { AwaitingInput }` arrives (a question, a permission prompt or a plan approval); its body is the session's label. Stopped and errored sessions raise no toast: their `Stopped` and `Error` attentions still drive the sidebar `!` badge and the Needs You panel's Ended rows.
+
+The Notifications tab has a `Needs you` toggle and a `Skip notifications when` row: `Session on screen` (the default), `Window focused` or `Never`. Session on screen skips when the client window is focused and a pane of the active tab shows the session; an active diff tab, or any dialog, modal or pane menu open over the panes, means nothing is on screen. Window focused skips whenever the window is focused, and Never never skips. Each window decides for itself, and a session marked "Don't count as busy" still notifies.
+
+The setting is `notifications.awaiting_input` and `notifications.skip_when` (`on_screen`, `focused` or `never`) in `native-ui.json`. An unknown or non-string `skip_when` loads as `on_screen` with a warn line in `native.log`, and the rest of the file still loads. The tab also shows Windows' read-only toast state with a link to Windows' settings.
 
 ## Session recovery
 

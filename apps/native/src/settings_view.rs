@@ -1,6 +1,6 @@
 //! The Settings modal: a tab list on the left and the chosen tab's rows
 //! beside it. General holds keep-awake and copy on select, Notifications
-//! the per-reason notification toggles and Windows' toast state, Appearance
+//! the Needs you toggle and Windows' toast state, Appearance
 //! the appearance editor at the app level, App title the window title's
 //! settings; every change applies at once. The main window's title, which
 //! the App title tab controls, is kept here too.
@@ -14,7 +14,7 @@ use gpui::{
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
     prelude::*, px,
 };
-use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
+use protocol::{ClientMessage, CodexSandbox, PermissionMode};
 
 use crate::appearance;
 use crate::appearance_stops::{AppearanceStop, after_lost};
@@ -24,7 +24,7 @@ use crate::mouse::CopyOnSelect;
 use crate::notify::{NotifyState, WINDOWS_NOTIFICATION_SETTINGS};
 use crate::palette::{CHIP, HOVER, LINE, RAISED, SUBTLE, TEXT_2, TRANSPARENT};
 use crate::session_menu::{backdrop, dialog_button};
-use crate::sidebar::{LeafDensity, SidebarView};
+use crate::sidebar::{LeafDensity, NotifySkip, SidebarView};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, approval_label, codex_sandbox_label,
 };
@@ -125,6 +125,10 @@ const SIDEBAR_VIEW_CHOICES: [SidebarView; 2] = [SidebarView::Repos, SidebarView:
 /// The General tab's Leaf density choices, in the order they show.
 const LEAF_DENSITY_CHOICES: [LeafDensity; 2] = [LeafDensity::Comfortable, LeafDensity::Compact];
 
+/// The Notifications tab's skip choices, in the order they show.
+const NOTIFY_SKIP_CHOICES: [NotifySkip; 3] =
+    [NotifySkip::OnScreen, NotifySkip::Focused, NotifySkip::Never];
+
 /// A control of a Settings tab that Tab can reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsControl {
@@ -135,9 +139,8 @@ pub(crate) enum SettingsControl {
     TitleCount,
     TitleSuffix,
     NotifySettingsLink,
-    NotifyAwaitingInput,
-    NotifyStopped,
-    NotifyError,
+    NotifyNeedsYou,
+    NotifySkip(NotifySkip),
     SpawnTrusted,
     SpawnApproval(Option<PermissionMode>),
     SpawnCodexSandbox(Option<CodexSandbox>),
@@ -161,9 +164,10 @@ impl SettingsControl {
             Self::TitleCount => "settings-title-busy-count",
             Self::TitleSuffix => "settings-title-product-suffix",
             Self::NotifySettingsLink => "settings-open-windows-notifications",
-            Self::NotifyAwaitingInput => "settings-notify-awaiting-input",
-            Self::NotifyStopped => "settings-notify-stopped",
-            Self::NotifyError => "settings-notify-error",
+            Self::NotifyNeedsYou => "settings-notify-needs-you",
+            Self::NotifySkip(NotifySkip::OnScreen) => "settings-notify-skip-on-screen",
+            Self::NotifySkip(NotifySkip::Focused) => "settings-notify-skip-focused",
+            Self::NotifySkip(NotifySkip::Never) => "settings-notify-skip-never",
             Self::SpawnTrusted => "settings-spawn-trusted",
             Self::SpawnApproval(mode) => match mode {
                 None => "settings-spawn-approval-cli-default",
@@ -332,12 +336,13 @@ impl RootView {
             SettingsTab::AppTitle => {
                 vec![SettingsControl::TitleCount, SettingsControl::TitleSuffix]
             }
-            SettingsTab::Notifications => vec![
+            SettingsTab::Notifications => [
                 SettingsControl::NotifySettingsLink,
-                SettingsControl::NotifyAwaitingInput,
-                SettingsControl::NotifyStopped,
-                SettingsControl::NotifyError,
-            ],
+                SettingsControl::NotifyNeedsYou,
+            ]
+            .into_iter()
+            .chain(NOTIFY_SKIP_CHOICES.map(SettingsControl::NotifySkip))
+            .collect(),
             SettingsTab::SpawnDefaults => self.spawn_default_controls(),
             SettingsTab::Worktrees => {
                 let mut controls = vec![
@@ -493,13 +498,8 @@ impl RootView {
             SettingsControl::TitleCount => self.toggle_title_count(window, cx),
             SettingsControl::TitleSuffix => self.toggle_title_suffix(window, cx),
             SettingsControl::NotifySettingsLink => self.open_windows_notification_settings(cx),
-            SettingsControl::NotifyAwaitingInput => {
-                self.toggle_notification(AttentionReason::AwaitingInput, cx);
-            }
-            SettingsControl::NotifyStopped => {
-                self.toggle_notification(AttentionReason::Stopped, cx);
-            }
-            SettingsControl::NotifyError => self.toggle_notification(AttentionReason::Error, cx),
+            SettingsControl::NotifyNeedsYou => self.toggle_notification(cx),
+            SettingsControl::NotifySkip(skip) => self.set_notify_skip(skip, cx),
             SettingsControl::SpawnTrusted => self.toggle_spawn_trusted(cx),
             SettingsControl::SpawnApproval(mode) => self.set_spawn_permission_mode(mode, cx),
             SettingsControl::SpawnCodexSandbox(sandbox) => {
@@ -806,10 +806,19 @@ impl RootView {
         )
     }
 
-    fn toggle_notification(&mut self, reason: AttentionReason, cx: &mut Context<Self>) {
-        let on = !self.sidebar.ui_state().notifications.fires(reason);
-        self.sidebar.set_notification(reason, on);
+    fn toggle_notification(&mut self, cx: &mut Context<Self>) {
+        let on = !self.sidebar.ui_state().notifications.awaiting_input;
+        self.sidebar.set_notification(on);
         self.save_ui();
+        cx.notify();
+    }
+
+    /// Sets when a notification for a session on screen is skipped, saving
+    /// it when it changed.
+    fn set_notify_skip(&mut self, skip: NotifySkip, cx: &mut Context<Self>) {
+        if self.sidebar.set_notify_skip(skip) {
+            self.save_ui();
+        }
         cx.notify();
     }
 
@@ -1257,32 +1266,35 @@ impl RootView {
             .child(state)
             .child(open);
         let settings = &self.sidebar.ui_state().notifications;
-        let rows = [
+        let needs_you = toggle(
+            SettingsControl::NotifyNeedsYou,
+            settings.awaiting_input,
+            "Needs you",
+            focused,
+            cx,
+        );
+        let skip_when = settings.skip_when;
+        let skips = NOTIFY_SKIP_CHOICES.map(|choice| {
+            let text = match choice {
+                NotifySkip::OnScreen => "Session on screen",
+                NotifySkip::Focused => "Window focused",
+                NotifySkip::Never => "Never",
+            };
             (
-                SettingsControl::NotifyAwaitingInput,
-                AttentionReason::AwaitingInput,
-                "Awaiting input",
-            ),
-            (
-                SettingsControl::NotifyStopped,
-                AttentionReason::Stopped,
-                "Stopped",
-            ),
-            (
-                SettingsControl::NotifyError,
-                AttentionReason::Error,
-                "Errored",
-            ),
-        ]
-        .map(|(control, reason, label)| {
-            toggle(control, settings.fires(reason), label, focused, cx)
+                SettingsControl::NotifySkip(choice),
+                text,
+                choice == skip_when,
+            )
         });
+        let skip_row = choice_row("Skip notifications when", &skips, None, focused, cx);
         let section = section("Notifications")
             .child(windows)
             .child(hint(
-                "Fire an OS notification when a session transitions to:",
+                "Fire an OS notification when a session needs you: a question, \
+                 a permission prompt or a plan approval.",
             ))
-            .children(rows);
+            .child(needs_you)
+            .child(skip_row);
         vec![section.into_any_element()]
     }
 

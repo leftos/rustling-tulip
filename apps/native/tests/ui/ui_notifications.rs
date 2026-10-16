@@ -1,6 +1,6 @@
-//! Notification specs: what an attention event notifies, the per-reason
-//! toggles, a Stop this client sent staying quiet, and the Settings
-//! modal's Notifications tab.
+//! Notification specs: what an attention event notifies, the Needs you
+//! toggle, when a notification for a session on screen is skipped, and the
+//! Settings modal's Notifications tab.
 
 #![expect(
     clippy::expect_used,
@@ -10,9 +10,9 @@
 use crate::support;
 
 use gpui::{TestAppContext, px};
-use protocol::{AttentionReason, BranchFate, ClientMessage, DaemonMessage, MemberBranchFate};
+use protocol::{AttentionReason, DaemonMessage, TabEntry};
 use rustling_tulip_native::NotifyState;
-use support::{Fixture, Harness, Opened, TestDir, session};
+use support::{Fixture, Harness, Opened, TestDir, pane, repo, session, tab};
 
 fn attention(id: &str, reason: AttentionReason) -> DaemonMessage {
     DaemonMessage::Attention {
@@ -39,18 +39,15 @@ fn opened<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
 }
 
 #[gpui::test]
-fn awaiting_input_attention_notifies_with_label(cx: &mut TestAppContext) {
+fn awaiting_input_attention_notifies_needs_you_with_label(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
     h.send(attention("s1", AttentionReason::AwaitingInput));
-    assert_eq!(
-        h.notified(),
-        [shown("Claude is awaiting input", "fix login")]
-    );
+    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
 }
 
 #[gpui::test]
-fn an_excluded_session_still_notifies(cx: &mut TestAppContext) {
+fn an_excluded_session_still_notifies_needs_you(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut excluded = session("s1").user_label("dev server").build();
     excluded.busy_excluded = true;
@@ -60,127 +57,23 @@ fn an_excluded_session_still_notifies(cx: &mut TestAppContext) {
     h.send(attention("s1", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
-        [shown("Claude is awaiting input", "dev server")],
+        [shown("Needs you", "dev server")],
         "\"Don't count as busy\" leaves OS notifications alone"
     );
 }
 
 #[gpui::test]
-fn stopped_attention_respects_toggle(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    std::fs::write(
-        dir.path().join("native-ui.json"),
-        r#"{ "notifications": { "stopped": false } }"#,
-    )
-    .expect("write native-ui.json");
-    let mut h = opened(cx, &dir);
-    h.send(attention("s2", AttentionReason::Stopped));
-    assert!(h.notified().is_empty(), "Stopped is off");
-    h.send(attention("s2", AttentionReason::AwaitingInput));
-    assert_eq!(h.notified(), [shown("Claude is awaiting input", "review")]);
-}
-
-#[gpui::test]
-fn error_attention_notifies(cx: &mut TestAppContext) {
+fn stopped_and_error_attention_raise_no_toast(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = opened(cx, &dir);
-    h.send(attention("s2", AttentionReason::Error));
-    assert_eq!(h.notified(), [shown("Claude session errored", "review")]);
-}
-
-#[gpui::test]
-fn own_stop_does_not_notify(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = opened(cx, &dir);
-    h.click_on("pane-stop-p1");
-    h.click_on("pane-stop-confirm-p1");
-    assert_eq!(h.sent().len(), 1, "the stop went out");
-
-    // The daemon answers the requester, then broadcasts on the exit.
-    h.send(attention("s1", AttentionReason::Stopped));
-    h.send(updated(session("s1").user_label("fix login").exited(0)));
-    h.send(attention("s1", AttentionReason::Stopped));
-    assert!(h.notified().is_empty(), "this client stopped s1");
-
-    h.send(attention("s2", AttentionReason::Stopped));
-    assert_eq!(h.notified(), [shown("Claude session stopped", "review")]);
-}
-
-fn updated(session: support::SessionBuilder) -> DaemonMessage {
-    DaemonMessage::SessionUpdated {
-        session: session.build(),
-        request_id: None,
+    for id in ["s1", "s2"] {
+        h.send(attention(id, AttentionReason::Stopped));
+        h.send(attention(id, AttentionReason::Error));
     }
-}
-
-#[gpui::test]
-fn own_stop_clears_when_session_runs_again(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let mut h = opened(cx, &dir);
-    h.click_on("pane-stop-p1");
-    h.click_on("pane-stop-confirm-p1");
-    h.sent();
-    h.send(updated(
-        session("s1").user_label("fix login").status("working"),
-    ));
-    h.send(attention("s1", AttentionReason::Stopped));
     assert!(
         h.notified().is_empty(),
-        "running before the stop lands keeps it quiet"
+        "an exited or errored session raises no notification"
     );
-
-    h.send(updated(session("s1").user_label("fix login").exited(0)));
-    h.send(updated(
-        session("s1").user_label("fix login").status("working"),
-    ));
-    h.send(attention("s1", AttentionReason::Stopped));
-    assert_eq!(
-        h.notified(),
-        [shown("Claude session stopped", "fix login")],
-        "resumed after the stop, its next stop is not this client's"
-    );
-}
-
-#[gpui::test]
-fn quit_stop_does_not_notify(cx: &mut TestAppContext) {
-    let dir = TestDir::new();
-    let fixture = Fixture::single(session("s1").worktree("r1").build());
-    let mut h = Harness::with(cx, &dir, &fixture);
-    h.answer_scrollback("s1", b"");
-    assert!(!h.cx.simulate_close(), "the exit dialog asks first");
-    h.cx.run_until_parked();
-    h.click_on("exit-stop-remove-worktrees");
-    h.send(DaemonMessage::DiscardPreview {
-        session_id: "s1".to_owned(),
-        members: vec![MemberBranchFate {
-            repo_id: "r1".to_owned(),
-            repo_name: "r1".to_owned(),
-            branch: "wt/x".to_owned(),
-            fate: BranchFate::KeptByDefault {
-                unique_commits: Some(1),
-                checked_against: vec!["main".to_owned()],
-            },
-        }],
-    });
-    h.click_on("delete-worktree-keep-branch");
-    let stops = h
-        .commands()
-        .iter()
-        .filter_map(|command| match command {
-            rustling_tulip_native::NetCommand::Shutdown { before, .. } => Some(
-                before
-                    .iter()
-                    .filter(|msg| matches!(msg, ClientMessage::StopSession { .. }))
-                    .count(),
-            ),
-            _ => None,
-        })
-        .sum::<usize>();
-
-    assert_eq!(stops, 1, "the shutdown carries the stop");
-    h.send(attention("s1", AttentionReason::Stopped));
-    h.send(attention("s1", AttentionReason::Stopped));
-    assert!(h.notified().is_empty(), "this client stopped s1");
 }
 
 fn saved_ui(dir: &TestDir) -> serde_json::Value {
@@ -198,44 +91,212 @@ fn on_notifications_tab<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harnes
 }
 
 #[gpui::test]
-fn notifications_tab_toggles_saved(cx: &mut TestAppContext) {
+fn notifications_tab_has_one_needs_you_toggle(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = on_notifications_tab(cx, &dir);
+    assert!(
+        h.bounds("settings-notify-needs-you").origin.x >= px(0.0),
+        "the Needs you toggle is painted"
+    );
+    for gone in ["settings-notify-stopped", "settings-notify-error"] {
+        assert!(
+            h.bounds(gone).origin.x < px(0.0),
+            "{gone} left the Notifications tab"
+        );
+    }
+
+    h.click_on("settings-notify-needs-you");
+    let saved = saved_ui(&dir);
+    assert_eq!(saved["notifications"]["awaiting_input"], false);
+    assert!(saved["notifications"].get("stopped").is_none());
+    assert!(saved["notifications"].get("error").is_none());
+
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert!(h.notified().is_empty(), "the toggle took effect at once");
+
+    assert_eq!(settings_focus(&mut h), Some("settings-notify-needs-you"));
+    for stop in [
+        "settings-notify-skip-on-screen",
+        "settings-notify-skip-focused",
+        "settings-notify-skip-never",
+    ] {
+        h.keys("tab");
+        assert_eq!(settings_focus(&mut h), Some(stop), "each choice is a stop");
+    }
+    h.keys("tab tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("settings-open-windows-notifications"),
+        "past the tab list, round to the link"
+    );
+    h.keys("tab space");
+    assert_eq!(settings_focus(&mut h), Some("settings-notify-needs-you"));
+    assert_eq!(saved_ui(&dir)["notifications"]["awaiting_input"], true);
+}
+
+fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
+}
+
+#[gpui::test]
+fn skip_choice_is_saved(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = on_notifications_tab(cx, &dir);
     for selector in [
-        "settings-notify-awaiting-input",
-        "settings-notify-stopped",
-        "settings-notify-error",
+        "settings-notify-skip-on-screen",
+        "settings-notify-skip-focused",
+        "settings-notify-skip-never",
     ] {
         assert!(
             h.bounds(selector).origin.x >= px(0.0),
             "{selector} is painted"
         );
     }
-
-    h.click_on("settings-notify-stopped");
-    let saved = saved_ui(&dir);
-    assert_eq!(saved["notifications"]["stopped"], false);
-    assert_eq!(saved["notifications"]["awaiting_input"], true);
-    assert_eq!(saved["notifications"]["error"], true);
-
-    h.send(attention("s2", AttentionReason::Stopped));
-    assert!(h.notified().is_empty(), "the toggle took effect at once");
-
-    assert_eq!(settings_focus(&mut h), Some("settings-notify-stopped"));
-    h.keys("tab tab tab");
-    assert_eq!(
-        settings_focus(&mut h),
-        Some("settings-open-windows-notifications"),
-        "past Errored and the tab list, round to the link"
-    );
-    h.keys("tab tab space");
-    assert_eq!(settings_focus(&mut h), Some("settings-notify-stopped"));
-    assert_eq!(saved_ui(&dir)["notifications"]["stopped"], true);
+    h.click_on("settings-notify-skip-focused");
+    assert_eq!(saved_ui(&dir)["notifications"]["skip_when"], "focused");
 }
 
-fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
-    let root = h.root.clone();
-    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
+/// Writes `notifications` as the saved Notifications settings.
+fn save_notifications(dir: &TestDir, notifications: &serde_json::Value) {
+    let ui = serde_json::json!({ "notifications": notifications });
+    std::fs::write(dir.path().join("native-ui.json"), ui.to_string())
+        .expect("write native-ui.json");
+}
+
+/// Activates the test window, which starts inactive, as the desktop does
+/// when the owner clicks into it.
+fn focus_window(h: &mut Harness<'_>) {
+    h.cx.update(|window, _| window.activate_window());
+    h.cx.run_until_parked();
+    assert!(
+        h.cx.update(|window, _| window.is_window_active()),
+        "the window is focused"
+    );
+}
+
+/// The harness on `s1` (`fix login`) in tab `t1` and `s2` (`review`) in
+/// tab `t2`, with `t1` on screen.
+fn two_tabs<'a>(cx: &'a mut TestAppContext, dir: &TestDir) -> Harness<'a> {
+    let fixture = Fixture {
+        sessions: vec![
+            session("s1").user_label("fix login").build(),
+            session("s2").user_label("review").build(),
+        ],
+        tabs: vec![
+            tab("t1", &pane("p1", Some("s1"))),
+            tab("t2", &pane("p2", Some("s2"))),
+        ],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.sent();
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("t1".to_owned())
+    );
+    h
+}
+
+#[gpui::test]
+fn focused_window_and_visible_pane_skips_needs_you(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert!(
+        h.notified().is_empty(),
+        "the owner is looking at s1 already"
+    );
+}
+
+#[gpui::test]
+fn settings_open_over_the_pane_still_notifies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.keys("ctrl-,");
+    assert!(h.root(|root, _| root.settings_open()), "Settings is open");
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login")],
+        "the Settings modal hides s1's pane"
+    );
+}
+
+#[gpui::test]
+fn focused_window_other_tab_still_notifies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified(), [shown("Needs you", "review")]);
+}
+
+#[gpui::test]
+fn unfocused_window_notifies(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_tabs(cx, &dir);
+    assert!(
+        !h.cx.update(|window, _| window.is_window_active()),
+        "the test window starts inactive"
+    );
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
+}
+
+#[gpui::test]
+fn window_focused_choice_skips_a_session_on_another_tab(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "skip_when": "focused" }));
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(attention("s2", AttentionReason::AwaitingInput));
+    assert!(h.notified().is_empty(), "any session, window focused");
+}
+
+#[gpui::test]
+fn never_choice_notifies_when_focused_and_visible(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    save_notifications(&dir, &serde_json::json!({ "skip_when": "never" }));
+    let mut h = two_tabs(cx, &dir);
+    focus_window(&mut h);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(h.notified(), [shown("Needs you", "fix login")]);
+}
+
+#[gpui::test]
+fn diff_tab_active_counts_as_not_on_screen(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let diff: TabEntry = serde_json::from_value(serde_json::json!({
+        "id": "d1",
+        "name": "a.rs",
+        "content": { "kind": "diff", "repo_id": "r1", "path": "a.rs", "against": null },
+        "created_at": "2026-01-01T00:00:00Z",
+    }))
+    .expect("diff tab fixture");
+    let fixture = Fixture {
+        repos: vec![repo("r1", "D:/r1")],
+        sessions: vec![session("s1").user_label("fix login").build()],
+        tabs: vec![tab("t1", &pane("p1", Some("s1"))), diff],
+        ..Fixture::default()
+    };
+    let mut h = Harness::with(cx, &dir, &fixture);
+    h.answer_scrollback("s1", b"");
+    h.click_on("tab-d1");
+    assert_eq!(
+        h.root(|root, _| root.active_tab_id().map(str::to_owned)),
+        Some("d1".to_owned())
+    );
+    focus_window(&mut h);
+    h.send(attention("s1", AttentionReason::AwaitingInput));
+    assert_eq!(
+        h.notified(),
+        [shown("Needs you", "fix login")],
+        "a diff tab shows no session"
+    );
 }
 
 #[gpui::test]
@@ -283,12 +344,12 @@ fn unlabelled_session_body_is_product_name(cx: &mut TestAppContext) {
         .push(session("bare").label("").shell("").build());
     let mut h = Harness::with(cx, &dir, &fixture);
     h.send(attention("bare", AttentionReason::AwaitingInput));
-    h.send(attention("ghost", AttentionReason::Error));
+    h.send(attention("ghost", AttentionReason::AwaitingInput));
     assert_eq!(
         h.notified(),
         [
-            shown("Claude is awaiting input", "rustling-tulip"),
-            shown("Claude session errored", "rustling-tulip"),
+            shown("Needs you", "rustling-tulip"),
+            shown("Needs you", "rustling-tulip"),
         ]
     );
 }

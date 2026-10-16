@@ -35,8 +35,8 @@ The native client still fires the three OS toasts ported from the Tauri app: "Cl
 
 ## Steps
 
-- [ ] **TN.1 Needs you only.** Remove the stopped and errored toasts, their toggles, `notify.rs`'s own-stop bookkeeping and their specs; retitle the awaiting-input toast `Needs you`; one Needs you toggle remains in Settings → Notifications.
-- [ ] **TN.2 Desktop suppression setting.** The window-focused flag and the active tab's panes decide; the setting's three choices, default "skip when focused and the pane is on screen".
+- [x] **TN.1 Needs you only.** Remove the stopped and errored toasts, their toggles, `notify.rs`'s own-stop bookkeeping and their specs; retitle the awaiting-input toast `Needs you`; one Needs you toggle remains in Settings → Notifications.
+- [x] **TN.2 Desktop suppression setting.** The window-focused flag and the active tab's panes decide; the setting's three choices, default "skip when focused and the pane is on screen".
 - [ ] **TN.3 Finished**, after RT-84: the live Working → Idle transition with no background work, its toggle, and the same suppression.
 - [ ] **TN.4 Docs.** `docs/native-client.md` Notifications, `docs/architecture.md` (the "attention raises an OS notification" line), `docs/plans/spoken-alerts.md` (the Notifications tab no longer keeps three toggles), and the parity line in `docs/plans/native-client-parity.md`.
 

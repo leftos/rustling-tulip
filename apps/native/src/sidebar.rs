@@ -3,9 +3,8 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
-    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
-    WorkspaceEntry,
+    Agent, AppearanceOverrides, CodexSandbox, ContainerRef, DaemonMessage, PermissionMode,
+    RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry, WorkspaceEntry,
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -336,7 +335,7 @@ pub struct UiState {
     /// The Settings modal's App title tab.
     #[serde(default)]
     pub title: TitleSettings,
-    /// Which attention reasons fire an OS notification.
+    /// Which OS notifications fire.
     #[serde(default)]
     pub notifications: NotificationSettings,
     /// The Settings modal's Spawn defaults tab.
@@ -358,44 +357,56 @@ pub struct SpawnDefaults {
     pub codex_sandbox: Option<CodexSandbox>,
 }
 
-/// Which attention reasons fire an OS notification; each is on unless
-/// turned off.
+/// Which OS notifications fire. Keys this build does not know, such as
+/// the old `stopped` and `error` toggles, are dropped on load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationSettings {
+    /// Whether a session awaiting input raises Needs you; on unless turned
+    /// off.
     pub awaiting_input: bool,
-    pub stopped: bool,
-    pub error: bool,
+    /// When a notification for a session the owner is looking at is skipped.
+    #[serde(deserialize_with = "skip_or_default")]
+    pub skip_when: NotifySkip,
+}
+
+/// Reads `skip_when` so that any value that is not a known choice (null, a
+/// number, an object, an unknown word) loads as the default and never fails
+/// the rest of the file.
+fn skip_or_default<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<NotifySkip, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value.clone()).unwrap_or_else(|err| {
+        tracing::warn!(
+            "notifications.skip_when {value} is not a known choice ({err}); using on_screen"
+        );
+        NotifySkip::default()
+    }))
 }
 
 impl Default for NotificationSettings {
     fn default() -> Self {
         Self {
             awaiting_input: true,
-            stopped: true,
-            error: true,
+            skip_when: NotifySkip::default(),
         }
     }
 }
 
-impl NotificationSettings {
-    /// Whether `reason` fires a notification.
-    #[must_use]
-    pub const fn fires(&self, reason: AttentionReason) -> bool {
-        match reason {
-            AttentionReason::AwaitingInput => self.awaiting_input,
-            AttentionReason::Stopped => self.stopped,
-            AttentionReason::Error => self.error,
-        }
-    }
-
-    fn set(&mut self, reason: AttentionReason, on: bool) {
-        match reason {
-            AttentionReason::AwaitingInput => self.awaiting_input = on,
-            AttentionReason::Stopped => self.stopped = on,
-            AttentionReason::Error => self.error = on,
-        }
-    }
+/// When the desktop client skips a notification for a session the owner is
+/// already looking at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifySkip {
+    /// When the client window is focused and a pane of its active tab shows
+    /// the session, with nothing drawn over the panes.
+    #[default]
+    OnScreen,
+    /// Whenever the client window is focused.
+    Focused,
+    /// Never: every notification fires.
+    Never,
 }
 
 /// The General settings saved on this machine.
@@ -807,9 +818,19 @@ impl SidebarModel {
         self.ui.title.suffix = on;
     }
 
-    /// Whether `reason` fires an OS notification.
-    pub fn set_notification(&mut self, reason: AttentionReason, on: bool) {
-        self.ui.notifications.set(reason, on);
+    /// Whether a session awaiting input raises Needs you.
+    pub fn set_notification(&mut self, on: bool) {
+        self.ui.notifications.awaiting_input = on;
+    }
+
+    /// Records when a notification for a session on screen is skipped;
+    /// returns whether it changed.
+    pub fn set_notify_skip(&mut self, skip: NotifySkip) -> bool {
+        if self.ui.notifications.skip_when == skip {
+            return false;
+        }
+        self.ui.notifications.skip_when = skip;
+        true
     }
 
     /// Whether a spawn dialog opens with trusted launch on.
@@ -1666,7 +1687,9 @@ pub fn save_ui_state(dir: &Path, state: &UiState) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::tabs::tests::{pane, tab};
-    use protocol::{CodexSandbox, GridNode, PermissionMode, SessionMember, SplitDirection};
+    use protocol::{
+        AttentionReason, CodexSandbox, GridNode, PermissionMode, SessionMember, SplitDirection,
+    };
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2485,9 +2508,8 @@ mod tests {
                 suffix: false,
             },
             notifications: NotificationSettings {
-                awaiting_input: true,
-                stopped: false,
-                error: false,
+                awaiting_input: false,
+                skip_when: NotifySkip::Never,
             },
             spawn: SpawnDefaults {
                 trusted: true,
@@ -2730,33 +2752,98 @@ mod tests {
     }
 
     #[test]
-    fn notification_toggles_default_on_when_missing_and_round_trip() {
+    fn needs_you_toggle_defaults_on_when_missing() {
         let dir = TestDir::new("notifications");
         std::fs::write(dir.0.join(UI_FILE), r#"{ "sidebar_collapsed": true }"#).expect("write");
         let loaded = load_ui_state(&dir.0);
         assert_eq!(loaded.notifications, NotificationSettings::default());
-        for reason in [
-            AttentionReason::AwaitingInput,
-            AttentionReason::Stopped,
-            AttentionReason::Error,
-        ] {
-            assert!(loaded.notifications.fires(reason), "{reason:?} on");
-        }
+        assert!(loaded.notifications.awaiting_input, "Needs you is on");
+    }
 
+    #[test]
+    fn old_stopped_and_error_keys_are_dropped_on_load() {
+        let dir = TestDir::new("notifications-old-keys");
         std::fs::write(
             dir.0.join(UI_FILE),
-            r#"{ "notifications": { "stopped": false } }"#,
+            r#"{"notifications":{"awaiting_input":false,"stopped":false,"error":true}}"#,
         )
         .expect("write");
         let loaded = load_ui_state(&dir.0);
-        assert!(loaded.notifications.awaiting_input, "a missing field fills");
-        assert!(!loaded.notifications.fires(AttentionReason::Stopped));
+        assert!(
+            !loaded.notifications.awaiting_input,
+            "the saved choice survives"
+        );
 
-        let mut model = SidebarModel::new(loaded);
-        model.set_notification(AttentionReason::Error, false);
-        save_ui_state(&dir.0, model.ui_state()).expect("save");
-        assert_eq!(&load_ui_state(&dir.0), model.ui_state());
-        assert!(!load_ui_state(&dir.0).notifications.error);
+        save_ui_state(&dir.0, &loaded).expect("save");
+        let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+        let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        let notifications = &saved["notifications"];
+        assert_eq!(notifications["awaiting_input"], false);
+        assert!(notifications.get("stopped").is_none(), "no stopped key");
+        assert!(notifications.get("error").is_none(), "no error key");
+    }
+
+    #[test]
+    fn skip_when_defaults_to_on_screen_when_absent() {
+        let dir = TestDir::new("notify-skip-absent");
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{"notifications":{"awaiting_input":false}}"#,
+        )
+        .expect("write");
+        let loaded = load_ui_state(&dir.0);
+        assert_eq!(loaded.notifications.skip_when, NotifySkip::OnScreen);
+        assert!(!loaded.notifications.awaiting_input);
+    }
+
+    #[test]
+    fn unknown_skip_when_loads_as_on_screen_and_keeps_the_rest() {
+        let dir = TestDir::new("notify-skip-unknown");
+        for skip_when in [json!("sometimes"), json!(null), json!(3), json!({})] {
+            let ui = json!({
+                "sidebar_width": 333.0,
+                "sidebar_collapsed": true,
+                "notifications": { "awaiting_input": false, "skip_when": skip_when },
+            });
+            std::fs::write(dir.0.join(UI_FILE), ui.to_string()).expect("write");
+            let loaded = load_ui_state(&dir.0);
+            assert_eq!(
+                loaded.notifications.skip_when,
+                NotifySkip::OnScreen,
+                "{skip_when} loads as on_screen"
+            );
+            assert!(
+                !loaded.notifications.awaiting_input,
+                "{skip_when}: the toggle still loads"
+            );
+            assert!(
+                loaded.sidebar_collapsed,
+                "{skip_when}: the rest of the file still loads"
+            );
+            assert!(
+                (loaded.sidebar_width - 333.0).abs() < f32::EPSILON,
+                "{skip_when}: the sidebar width still loads"
+            );
+        }
+    }
+
+    #[test]
+    fn each_skip_choice_round_trips() {
+        let dir = TestDir::new("notify-skip-round-trip");
+        let mut model = SidebarModel::default();
+        for (choice, word) in [
+            (NotifySkip::Focused, "focused"),
+            (NotifySkip::Never, "never"),
+            (NotifySkip::OnScreen, "on_screen"),
+        ] {
+            assert!(model.set_notify_skip(choice), "{word} is a change");
+            assert!(!model.set_notify_skip(choice), "{word} again is not");
+            save_ui_state(&dir.0, model.ui_state()).expect("save");
+            let text = std::fs::read_to_string(dir.0.join(UI_FILE)).expect("read");
+            let saved: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            assert_eq!(saved["notifications"]["skip_when"], word);
+            assert_eq!(load_ui_state(&dir.0).notifications.skip_when, choice);
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@ Design for the "Spoken and phone alerts when an agent waits" item in [MAIN.md](.
 
 ## Problem
 
-The user runs many Claude sessions at once and is often not looking at the screen. Today the only signal that one is waiting is P4.3's OS toast ("Claude is awaiting input" plus the session label, `apps/native/src/notify.rs`), fired from the `pty_state.rs` heuristic. It says nothing about what the session wants, can't be heard from across the room, and finding out means reading the terminal. The same gap exists when the user does look: there is no view that says what every session is doing without opening each terminal.
+The user runs many Claude sessions at once and is often not looking at the screen. Today the only signal that one is waiting is P4.3's OS toast (`Needs you` plus the session label, `apps/native/src/notify.rs`), fired from the `pty_state.rs` heuristic. It says nothing about what the session wants, can't be heard from across the room, and finding out means reading the terminal. The same gap exists when the user does look: there is no view that says what every session is doing without opening each terminal.
 
 ## Rulings recap
 
@@ -79,7 +79,7 @@ Speech runs in the **native client**: it has the audio device and knows whether 
 
 ### Settings UI
 
-A new **Alerts** tab after Notifications in `settings_view.rs` (the Notifications tab keeps its three toggles and the Windows link):
+A new **Alerts** tab after Notifications in `settings_view.rs` (the Notifications tab keeps its `Needs you` toggle, the `Skip notifications when` row and the Windows link):
 
 1. Summarizer on / off; provider segmented (DeepSeek, Anthropic) with its privacy line; key source segmented (Stored key, Environment variable); a masked `text_input` with Save and Clear, or a variable-name field; the key state (`stored`, `found`, `not set`, `rejected`).
 2. Daily cap (dollars) and today's spend.

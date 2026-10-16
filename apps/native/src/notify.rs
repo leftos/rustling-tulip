@@ -1,16 +1,15 @@
-//! OS notifications for the daemon's attention events: which reasons fire,
-//! their title and body, the toast sender, and Windows' own setting for
-//! this app's toasts. A Stop this client sent does not notify it.
+//! OS notifications for the daemon's attention events: a session awaiting
+//! input raises Needs you, titled so with the session's label as its body;
+//! the toast sender, and Windows' own setting for this app's toasts. An
+//! exited or errored session raises none.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::Context;
-use protocol::{AttentionReason, ClientMessage, DaemonMessage, SessionSnapshot, SessionStatus};
+use protocol::{AttentionReason, DaemonMessage, SessionSnapshot};
 
 use crate::RootView;
-use crate::sidebar::display_label;
+use crate::sidebar::{NotifySkip, display_label};
 use crate::window_title::PRODUCT_NAME;
 
 /// The URI of Windows' notification settings page.
@@ -125,12 +124,6 @@ impl Notifier for SilentNotifier {
 pub(crate) struct Notifications {
     /// Shows the notifications, on background threads.
     pub(crate) notifier: Arc<dyn Notifier>,
-    /// The sessions this client sent a Stop for, each with whether the
-    /// daemon has reported it stopped since. Their Stopped attentions stay
-    /// quiet until the session is removed, runs again after it was seen
-    /// stopped, or the connection is new. Filled from the root's `send`,
-    /// which takes `&self`.
-    pub(crate) own_stops: RefCell<HashMap<String, bool>>,
     /// Windows' toast setting as last read when the Notifications tab
     /// opened; `None` while a read is out.
     pub(crate) state: Option<NotifyState>,
@@ -140,49 +133,28 @@ impl Notifications {
     pub(crate) fn new(notifier: Arc<dyn Notifier>) -> Self {
         Self {
             notifier,
-            own_stops: RefCell::default(),
             state: None,
         }
     }
-
-    /// Records the sessions `messages` stop.
-    pub(crate) fn note_stops<'a>(&self, messages: impl IntoIterator<Item = &'a ClientMessage>) {
-        let mut own = self.own_stops.borrow_mut();
-        for msg in messages {
-            if let ClientMessage::StopSession { session_id, .. } = msg {
-                own.insert(session_id.clone(), false);
-            }
-        }
-    }
-
-    /// Folds a session snapshot in: a stopped one is marked seen, and one
-    /// seen stopped that runs again is forgotten.
-    fn on_session(&self, session: &SessionSnapshot) {
-        let mut own = self.own_stops.borrow_mut();
-        let Some(seen_stopped) = own.get_mut(&session.id) else {
-            return;
-        };
-        if session.status == SessionStatus::Stopped {
-            *seen_stopped = true;
-        } else if *seen_stopped {
-            own.remove(&session.id);
-        }
-    }
-
-    /// Whether a Stopped attention for `session_id` is this client's own
-    /// stop.
-    fn is_own_stop(&self, session_id: &str) -> bool {
-        self.own_stops.borrow().contains_key(session_id)
-    }
 }
 
-/// The notification's title for `reason`.
+/// The title of the notification a session awaiting input raises.
+pub(crate) const NEEDS_YOU_TITLE: &str = "Needs you";
+
+/// Whether a notification for a session is skipped under `skip_when`:
+/// `focused` is whether the client window has the keyboard, `on_screen`
+/// answers whether a pane of its active tab shows the session, and is
+/// asked only for `OnScreen` with the window focused.
 #[must_use]
-pub(crate) const fn title(reason: AttentionReason) -> &'static str {
-    match reason {
-        AttentionReason::AwaitingInput => "Claude is awaiting input",
-        AttentionReason::Stopped => "Claude session stopped",
-        AttentionReason::Error => "Claude session errored",
+pub(crate) fn skips(
+    skip_when: NotifySkip,
+    focused: bool,
+    on_screen: impl FnOnce() -> bool,
+) -> bool {
+    match skip_when {
+        NotifySkip::OnScreen => focused && on_screen(),
+        NotifySkip::Focused => focused,
+        NotifySkip::Never => false,
     }
 }
 
@@ -197,41 +169,37 @@ pub(crate) fn body(session: Option<&SessionSnapshot>) -> String {
 }
 
 impl RootView {
-    /// Folds `msg` into the notifications: an attention may fire one, and
-    /// a removal or a new connection forgets this client's stops.
-    pub(crate) fn notify_on(&self, msg: &DaemonMessage, cx: &mut Context<Self>) {
-        match msg {
-            DaemonMessage::Attention { session_id, reason } => {
-                self.on_attention(session_id, *reason, cx);
-            }
-            DaemonMessage::SessionUpdated { session, .. } => {
-                self.notifications.on_session(session);
-            }
-            DaemonMessage::Sessions { sessions } => {
-                for session in sessions {
-                    self.notifications.on_session(session);
-                }
-            }
-            DaemonMessage::SessionRemoved { session_id } => {
-                self.notifications.own_stops.borrow_mut().remove(session_id);
-            }
-            DaemonMessage::Welcome { .. } => self.notifications.own_stops.borrow_mut().clear(),
-            _ => {}
-        }
-    }
-
-    fn on_attention(&self, session_id: &str, reason: AttentionReason, cx: &mut Context<Self>) {
-        if reason == AttentionReason::Stopped && self.notifications.is_own_stop(session_id) {
+    /// Folds `msg` into the notifications: a session awaiting input raises
+    /// Needs you while its toggle is on, unless the skip setting says the
+    /// owner is looking at it already. `window_focused` is whether this
+    /// client window has the keyboard.
+    pub(crate) fn notify_on(
+        &self,
+        msg: &DaemonMessage,
+        window_focused: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let DaemonMessage::Attention {
+            session_id,
+            reason: AttentionReason::AwaitingInput,
+        } = msg
+        else {
+            return;
+        };
+        let settings = &self.sidebar.ui_state().notifications;
+        if !settings.awaiting_input {
             return;
         }
-        if !self.sidebar.ui_state().notifications.fires(reason) {
+        if skips(settings.skip_when, window_focused, || {
+            self.session_on_screen(session_id)
+        }) {
             return;
         }
-        let session = self.sidebar.sessions().iter().find(|s| s.id == session_id);
+        let session = self.sidebar.sessions().iter().find(|s| &s.id == session_id);
         let body = body(session);
         let notifier = Arc::clone(&self.notifications.notifier);
         cx.background_executor()
-            .spawn(async move { notifier.notify(title(reason), &body) })
+            .spawn(async move { notifier.notify(NEEDS_YOU_TITLE, &body) })
             .detach();
     }
 }
@@ -264,14 +232,26 @@ mod tests {
         serde_json::from_value(session).expect("session fixture")
     }
 
+    /// `skip_when`'s verdict for (focused, on screen): both, focused only,
+    /// on screen only, neither.
+    fn verdicts(skip_when: NotifySkip) -> [bool; 4] {
+        [(true, true), (true, false), (false, true), (false, false)]
+            .map(|(focused, on_screen)| skips(skip_when, focused, || on_screen))
+    }
+
     #[test]
-    fn titles_are_tauri_strings() {
-        assert_eq!(
-            title(AttentionReason::AwaitingInput),
-            "Claude is awaiting input"
-        );
-        assert_eq!(title(AttentionReason::Stopped), "Claude session stopped");
-        assert_eq!(title(AttentionReason::Error), "Claude session errored");
+    fn on_screen_skips_only_when_focused_and_visible() {
+        assert_eq!(verdicts(NotifySkip::OnScreen), [true, false, false, false]);
+    }
+
+    #[test]
+    fn focused_skips_whenever_the_window_is_focused() {
+        assert_eq!(verdicts(NotifySkip::Focused), [true, true, false, false]);
+    }
+
+    #[test]
+    fn never_skips_nothing() {
+        assert_eq!(verdicts(NotifySkip::Never), [false; 4]);
     }
 
     #[test]
