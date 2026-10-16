@@ -854,9 +854,7 @@ mod tests {
             },
             mode: protocol::SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: protocol::AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: protocol::AgentOptions::claude(None),
             model: None,
             extra_env: rows
                 .iter()
