@@ -28,13 +28,16 @@ struct ProviderEntry {
     /// Variables an environment row may not set: they choose the endpoint
     /// or the credential.
     locked: &'static [&'static str],
-    /// Variables the child must not get, from the keep-list, the rows or the
-    /// daemon's own environment the tracer inherits.
+    /// Variables the child must not get, from the keep-list or the daemon's
+    /// own environment the tracer inherits. A row may not set them.
     remove: &'static [&'static str],
     /// Defaults an environment row overrides.
     tuning: &'static [(&'static str, &'static str)],
     /// The model passed as `--model` when the spawn names none.
     default_model: &'static str,
+    /// The start of every model name the provider serves, matched
+    /// case-insensitively, so the importer can tell its sessions by `--model`.
+    model_prefix: &'static str,
 }
 
 const DEEPSEEK_MODEL: &str = "deepseek-flash";
@@ -72,7 +75,11 @@ const DEEPSEEK: ProviderEntry = ProviderEntry {
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
     ],
     default_model: DEEPSEEK_MODEL,
+    model_prefix: "deepseek",
 };
+
+/// Every non-Anthropic provider with its table entry.
+const TABLE: [(ClaudeProvider, &ProviderEntry); 1] = [(ClaudeProvider::Deepseek, &DEEPSEEK)];
 
 /// The environment a spawn's child gets: `set` on top of what it inherits,
 /// with every name in `remove` taken away.
@@ -98,15 +105,18 @@ impl std::fmt::Debug for SpawnEnv {
 /// The table entry for `provider`: none for Anthropic, a refusal for a
 /// provider this daemon does not know.
 fn entry(provider: ClaudeProvider) -> Result<Option<&'static ProviderEntry>, SpawnFailure> {
-    match provider {
-        ClaudeProvider::Anthropic => Ok(None),
-        ClaudeProvider::Deepseek => Ok(Some(&DEEPSEEK)),
-        ClaudeProvider::Unknown => Err(SpawnFailure {
+    if provider.is_anthropic() {
+        return Ok(None);
+    }
+    TABLE
+        .iter()
+        .find(|(listed, _)| *listed == provider)
+        .map(|(_, entry)| Some(*entry))
+        .ok_or_else(|| SpawnFailure {
             title: "Couldn't start the Claude session".to_owned(),
             detail: "This daemon does not know the requested Claude provider.".to_owned(),
             hint: None,
-        }),
-    }
+        })
 }
 
 /// The model a spawn on `provider` passes as `--model` when it names none.
@@ -116,6 +126,28 @@ pub fn default_model(provider: ClaudeProvider) -> Option<&'static str> {
         .ok()
         .flatten()
         .map(|entry| entry.default_model)
+}
+
+/// The name the user reads for `provider`: none for Anthropic and for a
+/// provider this daemon does not know.
+#[must_use]
+pub fn display_name(provider: ClaudeProvider) -> Option<&'static str> {
+    entry(provider).ok().flatten().map(|entry| entry.display)
+}
+
+/// The first provider in the table whose model prefix `model` starts with,
+/// case-insensitively, else Anthropic. The tracer-log importer reads a
+/// session's provider this way from its `--model`.
+#[must_use]
+pub fn provider_for_model(model: &str) -> ClaudeProvider {
+    TABLE
+        .iter()
+        .find(|(_, entry)| {
+            model
+                .get(..entry.model_prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
+        })
+        .map_or(ClaudeProvider::Anthropic, |(provider, _)| *provider)
 }
 
 /// The name in `list` that `key` matches. Windows environment names are
@@ -128,8 +160,9 @@ fn named(list: &[&'static str], key: &str) -> Option<&'static str> {
 
 /// Refuse a spawn request before anything is written or checked out: a plain
 /// shell asking for a non-Anthropic provider, an unknown provider, or an
-/// environment row setting one of the provider's locked variables. Reads the
-/// rows' keys only, so it may run before the rows are sealed.
+/// environment row setting one of the provider's locked or removed
+/// variables. Reads the rows' keys only, so it may run before the rows are
+/// sealed.
 pub fn check_request(
     mode: SessionMode,
     provider: ClaudeProvider,
@@ -146,21 +179,29 @@ pub fn check_request(
 }
 
 /// Refuse an unknown `provider`, or a row setting one of its locked
-/// variables.
+/// variables or a variable it removes from the child. Names the variable,
+/// never a row's value.
 fn check_rows(provider: ClaudeProvider, rows: &[(String, String)]) -> Result<(), SpawnFailure> {
     let Some(entry) = entry(provider)? else {
         return Ok(());
     };
+    let refusal = |detail: String| SpawnFailure {
+        title: format!("Couldn't start the {} session", entry.display),
+        detail,
+        hint: None,
+    };
     for (key, _) in rows {
         if let Some(locked) = named(entry.locked, key) {
-            return Err(SpawnFailure {
-                title: format!("Couldn't start the {} session", entry.display),
-                detail: format!(
-                    "`{locked}` is set by the {} provider; remove it from the environment rows.",
-                    entry.display
-                ),
-                hint: None,
-            });
+            return Err(refusal(format!(
+                "`{locked}` is set by the {} provider; remove it from the environment rows.",
+                entry.display
+            )));
+        }
+        if let Some(removed) = named(entry.remove, key) {
+            return Err(refusal(format!(
+                "`{removed}` is removed from {} sessions; remove it from the environment rows.",
+                entry.display
+            )));
         }
     }
     Ok(())
@@ -174,8 +215,10 @@ fn check_rows(provider: ClaudeProvider, rows: &[(String, String)]) -> Result<(),
 /// then its locked variables with the key read through `resolve`, with its
 /// removed variables dropped from `set` and listed in `remove`.
 ///
-/// Refuses an unknown provider, a row setting a locked variable, and a key
-/// `resolve` cannot find, naming the variable and never a value.
+/// Refuses an unknown provider, a row setting a locked or removed variable,
+/// and a key `resolve` cannot find, naming the variable and never a value.
+/// A removed variable can still reach `set` from the keep-list, so it is
+/// dropped there.
 pub fn spawn_env(
     provider: ClaudeProvider,
     extra_env: &[(String, String)],
@@ -346,22 +389,8 @@ mod tests {
 
     #[test]
     fn deepseek_sets_routing_and_removes_anthropic_api_key() {
-        let extra = rows(&[
-            ("RT_ROW", "1"),
-            ("CLAUDE_CODE_OAUTH_TOKEN", "x"),
-            ("claude_code_use_bedrock", "1"),
-        ]);
+        let extra = rows(&[("RT_ROW", "1")]);
         let env = spawn_env(ClaudeProvider::Deepseek, &extra, with_key).expect("deepseek builds");
-        for row in ["CLAUDE_CODE_OAUTH_TOKEN", "claude_code_use_bedrock"] {
-            assert!(
-                !env.set.iter().any(|(k, _)| k.eq_ignore_ascii_case(row)),
-                "a removed variable's row is dropped from set: {row} in {env:?}"
-            );
-            assert!(
-                env.remove.iter().any(|r| r.eq_ignore_ascii_case(row)),
-                "{row} is removed: {env:?}"
-            );
-        }
         for (key, expected) in DEEPSEEK.fixed.iter().chain(DEEPSEEK.tuning) {
             assert_eq!(value(&env, key), Some(*expected), "{key}");
         }
@@ -434,6 +463,65 @@ mod tests {
                     "an Anthropic spawn keeps today's rows: {key}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn removed_key_in_extra_env_refuses() {
+        for removed in DEEPSEEK.remove {
+            for key in [(*removed).to_owned(), removed.to_ascii_lowercase()] {
+                let extra = rows(&[(key.as_str(), "row-value-sentinel")]);
+                let failure = check_rows(ClaudeProvider::Deepseek, &extra)
+                    .expect_err("a removed row refuses");
+                assert_eq!(
+                    failure.title, "Couldn't start the DeepSeek session",
+                    "{key}"
+                );
+                assert!(
+                    failure.detail.contains(&format!("`{removed}`")),
+                    "{key}: {}",
+                    failure.detail
+                );
+                if named(DEEPSEEK.locked, removed).is_none() {
+                    assert_eq!(
+                        failure.detail,
+                        format!(
+                            "`{removed}` is removed from DeepSeek sessions; remove it from the environment rows."
+                        )
+                    );
+                }
+                assert!(
+                    !failure_text(&failure).contains("row-value-sentinel"),
+                    "{key}"
+                );
+                assert!(
+                    spawn_env(ClaudeProvider::Deepseek, &extra, with_key).is_err(),
+                    "{key}"
+                );
+                assert!(
+                    check_request(SessionMode::Interactive, ClaudeProvider::Anthropic, &extra)
+                        .is_ok(),
+                    "an Anthropic spawn keeps today's rows: {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_model_is_matched_to_its_provider_by_prefix() {
+        for model in ["deepseek-flash", "deepseek-pro", "DeepSeek-Flash"] {
+            assert_eq!(
+                provider_for_model(model),
+                ClaudeProvider::Deepseek,
+                "{model}"
+            );
+        }
+        for model in ["opus", "claude-sonnet-4-5", "", "deep"] {
+            assert_eq!(
+                provider_for_model(model),
+                ClaudeProvider::Anthropic,
+                "{model}"
+            );
         }
     }
 
