@@ -46,6 +46,8 @@ New, not a parity line. When a tab's layout was last set by picking a layout typ
 
 Pane / tab / session pop-outs as windows of one process, pane drag-and-drop with edge overlays, sidebar and tab drag-to-reorder. The split below goes to the user with its open questions before anything is dispatched. Items run in build order: drag-and-drop first (P5.1–P5.5), then pop-outs (P5.6–P5.11), then docs (P5.12). Each is a plain-Rust model with unit tests under a thin GPUI view, and ticks the parity lines it delivers; parity lines are cited by their opening words and section in [native-client-parity.md](./native-client-parity.md).
 
+Drag-and-drop (P5.1–P5.5) is Phase 5a, RT-171 in Wave 2, before the cutover; the pop-outs (P5.6–P5.12) are Phase 5b, RT-32 in Wave 7, after it.
+
 ### What already exists
 
 - **Protocol**: drag-and-drop needs no change. `MovePane` with `PaneDropEdge` (`Left`, `Right`, `Top`, `Bottom`, `Replace`, `OuterLeft`/`OuterRight`/`OuterTop`/`OuterBottom`), `ReorderTabs`, `ReorderContainers`, `ReorderSessions`, `SplitPane { new_session_id }` and `ReplacePaneSession` are all in `crates/protocol/src/lib.rs`. The daemon's move (`crates/daemon/src/server.rs` `move_pane`, `crates/daemon/src/tabs.rs` `insert_adjacent` / `insert_in`) keeps the moved pane's id, swaps sessions for a same-tab `Replace`, gives the destination pane the source's session for a cross-tab `Replace` (its old session goes unbound), wraps the whole root for an outer edge, refuses moving a tab's only pane within that tab, and removes a source tab left empty.
@@ -75,7 +77,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - Size driver: "only one pane per session (its size driver) answers terminal queries" (`docs/native-client.md`, Terminal). A pop-out's terminal takes part in `tabs::size_drivers`.
 - Unseen turns clear "when … a focused pane shows it", and "The unseen set is per window and not saved" (`docs/native-client.md`, Status glyphs). A session focused in a pop-out counts as shown.
 - Protocol: changes stay additive and keep protocol 22 decodable (CLAUDE.md, Architecture invariants).
-- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (Wave 9's project); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
+- Verification: "UI hand-test (multi-window and drag can't be fully specced)" (the Phase 5 project's verification, now Wave 2's for drag-and-drop and Wave 7's for pop-outs); "a visible result no test can prove lands on green gates and is listed for a hand-test" (the nextup profile, "Agents and gates").
 
 ### P5.1 Drag model: payloads, drop edges, reorder
 
@@ -107,7 +109,7 @@ Read from `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gpui-0.2.2/src
 - **Files**: `sidebar.rs` (local apply of container and session order); `sidebar_view.rs`; `tab_bar.rs` (the pill accepts a tab-container drop); new `tests/ui/ui_sidebar_drag.rs`.
 - **Core / view**: `drag::reorder` and `SidebarModel`'s local order, unit-tested in `sidebar.rs`; the view draws the line.
 - **Proof**: `cargo test -p rustling-tulip-native --lib sidebar::tests::local_order` and `--test ui ui_sidebar_drag`, red first: `container_dropped_before_another_sends_the_full_order`, `shell_and_dir_containers_do_not_drag`, `tab_container_reorders_the_strip`, `leaf_reorders_within_its_repo`, `leaf_dropped_in_another_container_does_nothing`, `local_order_holds_until_the_echo`.
-- **Needs**: P5.1; P5.3 (the shared tab payload); Petal's PT.6a / PT.6b (landed) and Wave 3's P4.10 / P4.11 (they reshape the rows it drags).
+- **Needs**: P5.1; P5.3 (the shared tab payload); Petal's PT.6a / PT.6b (landed) and Wave 2's P4.10 / P4.11 (they reshape the rows it drags).
 
 ### P5.5 Drag a leaf onto a pane or a tab pill
 

@@ -12,7 +12,7 @@ linear: rustling-tulip
 
 ## Plan and tracker
 
-- The plan lives in Linear: every task is a Linear issue in team RT, per `~/.claude/docs/plan-operations.md`; `docs/plans/MAIN.md` is its generated snapshot, never edited by hand. Project order, which is the order the queue is worked: the waves, Wave 1a to Wave 12 (the first is the one in flight), then `Docs`, `Build tooling`, `macOS`, `Agent CLIs`, `Agent harnesses`, `Open questions and blocked items`, `Ideas needing a design pass` and `Backlog`. A bug report or anything that blocks a wave goes in a `High priority` project ahead of the waves, which it outranks. Each wave's project content names its shared files, review gate, verification split and design file. A new item joins the wave whose files or subject it shares, or opens a new wave project after the last wave.
+- The plan lives in Linear: every task is a Linear issue in team RT, per `~/.claude/docs/plan-operations.md`; `docs/plans/MAIN.md` is its generated snapshot, never edited by hand. Project order, which is the order the queue is worked: the waves, Wave 1a to Wave 15 (the first is the one in flight), then `Docs`, `Build tooling`, `macOS`, `Agent CLIs`, `Agent harnesses`, `Open questions and blocked items`, `Ideas needing a design pass` and `Backlog`. A bug report or anything that blocks a wave goes in a `High priority` project ahead of the waves, which it outranks. Each wave's project content names its shared files, review gate, verification split and design file. A new item joins the wave whose files or subject it shares, or opens a new wave project after the last wave.
 - An issue is one item: its title the action, its description the files, who asked and a link to its design file in `docs/plans/` (native client items: `docs/plans/native-client.md`; feature scope: the parity sections in `docs/plans/native-client-parity.md`). Decisions and rulings a brief needs live in that design file or in `docs/`, never in the description. A native feature ticks the parity lines it delivered in `native-client-parity.md` in its own commit.
 - A coarse issue (Phase 5, Phase 6, the mobile app's phases, a design that still needs a pass) is a *design* item when its wave comes up: split it into brief-sized items (`P<n>.<m>` for the native client), put the split to the user in the decision round before anything is dispatched, and give each part an **add** with `--parent` the coarse issue.
 - A review finding the item doesn't fix gets an **add** in the wave sharing its files.
@@ -40,7 +40,7 @@ linear: rustling-tulip
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
 - test mode: unstable
-- stable milestone: Wave 5 — Remote desktop, relay and files across machines
+- stable milestone: Wave 3 — Cutover: remote mode, installer and v0.1.0-alpha
 - release step: cutting a versioned release (the first is `v0.1.0-alpha`) from the Linear release pipeline's `vNext`, only after a green full suite (procedure: RT-129).
 - test map: `tools/test-map.json` (keys `central`, `ignore`, `rows`: source paths to nextest filtersets), read by `rt.ps1 test -Reached`. A landed change's reached tests are `pwsh ./rt.ps1 test -Reached -PrintOnly` for the filter, then `gate run … -- cargo nextest run --workspace --cargo-profile test-release --no-tests warn -E '<filter>'` so the run routes. A central file or an unmapped file runs the full suite. The live and smoke tiers run through `rt.ps1 native-e2e` and `native-smoke`.
 - UI that only a person can verify: when a native item's visible result can't be proved by a test, it lands on green gates, and the checkpoint lists it under "hand-test" with what to look at. A **visual fix** (something already landed that looks wrong) is not committed until the user confirms it by hand-testing; edit, ask, then squash (memory: commit-only-after-confirmation).
@@ -56,7 +56,7 @@ linear: rustling-tulip
 
 - Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default; a Tauri fix is cut from and lands on `tauri`).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
-- Depends on, where file lists hide it: the dependencies an issue or its design file names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 5 → Wave 6); a protocol message one item adds and another item's view consumes.
+- Depends on, where file lists hide it: the dependencies an issue or its design file names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 2's hook status → Wave 5 and Wave 9); a protocol message one item adds and another item's view consumes.
 - Context: read the status bar's figure at every landing (`<scratchpad>/statusline.json`); past 400K tokens the loop stops refilling, per the user-level `nextup`.
 
 ## Docs map

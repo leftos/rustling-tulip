@@ -5,7 +5,7 @@ A phone client for the daemon, for the user's own use: check on sessions, answer
 ## Rulings
 
 - **Scope, in phases:** monitor and respond first, then a full terminal, then the conversation view.
-- **Reach: anywhere, over Tailscale or through the relay, both built from the start** (and LAN direct at home). This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 5 with the remote desktop, which uses them too.
+- **Reach: anywhere, over Tailscale or through the relay, both built from the start** (and LAN direct at home). This reverses the "attach beyond the LAN" and "mobile companion app" non-goals in [architecture.md](../architecture.md#non-goals). The relay (MA2, RT-94) and per-device credentials (MA3, RT-96) are built in Wave 3 with the remote desktop, which uses them too.
 - **Android first.** The MVP is Android (RT-38 and its sub-issues), built and sideloaded from Windows; the iOS pipeline (MA5, RT-117) is in the backlog. What the app shows and how it alerts is in [off-orca.md](./off-orca.md) (sections 2, 3 and 5).
 - **Relay:** a Rust binary in this workspace (`crates/relay`) on a small VPS (Fly.io or Hetzner). It pairs a daemon with a phone and forwards bytes it cannot read.
 - **Encryption:** the pinned TLS of the LAN listener, run end to end through the relay. The phone does the same TLS handshake it would do on the LAN, pinned to the daemon's certificate fingerprint, inside the relay's WebSocket. The relay never holds a key, and one crypto path serves both the LAN and the relay.

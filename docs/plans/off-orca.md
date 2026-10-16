@@ -14,31 +14,30 @@ The owner runs Orca today and will leave it once rustling-tulip covers three thi
 
 ## Roadmap
 
-The waves in Linear team RT, in working order (snapshot: [MAIN.md](./MAIN.md)). The first seven, with Waves 1a–1c finishing work already in flight, are the path off Orca.
+The waves in Linear team RT, in working order (snapshot: [MAIN.md](./MAIN.md)). Waves 1a to 5 are the path off Orca: Waves 1a–1c finish work already in flight, then the native client becomes a daily driver (Wave 2), with the remote client (Wave 3) and the mobile app (Wave 4).
 
 | Wave | What | Issues from this file |
 |---|---|---|
-| 1a, 1b, 1c | DeepSeek sessions, env secrets (before remote: secrets must not reach remote clients), busy tracking | |
-| 2 | Hook status, background work and hand-offs | RT-84 (AT.1), RT-85 (AT.2) under RT-25 |
-| 3 | Attention feed on the desktop (`feat/attention-feed`) | RT-87 (AT.3), RT-88 (AT.4), RT-89 (AT.5), RT-90 (AT.7, AT.8), RT-91 (SV.5), RT-92 (SV.6), RT-93 (fleet) |
-| 4 | Tabs, panes and tab state | |
-| 5 | Remote desktop, relay and files across machines | RT-94 (relay), RT-95 (RD.1), RT-96 (MA3), RT-97 (PF.1–PF.3), RT-98 (PF.4), RT-99 (PF.5), RT-100 (PF.8), RT-101 (PF.12), RT-102 (RD.4) |
-| 6 | Repos, containers and presets | |
-| 7 | Android app MVP | RT-103 (MA4), RT-104 (MA6), RT-105 (MA7), RT-106 (MA.e) under RT-38 |
-| 8, 9 | Shared form controls; Phase 5 drag-and-drop and pop-outs | |
-| 10 | Chat mirror and phone session views (`feat/chat-mirror`) | RT-51 (SV.1, SV.2), RT-107 (SV.3), RT-108 (MA8), RT-109 (MA9), RT-110 (SV.7) |
-| 11 | Summaries, spoken alerts and the Dashboard | RT-111 (SV.4) |
-| 12, 13 | Subagent streams; dispatch runs | |
-| 14 | Claude accounts and artifacts by account | RT-112 (MA10), RT-113 (AR.1–AR.3), RT-114 (AR.4, AR.5), RT-115 (PF.14) |
-| 15 | ops-tower views: gates, board and dock | (OT) |
-| 16 | Dictation | |
+| 1a, 1b, 1c | DeepSeek sessions, retiring the Tauri app, busy tracking | |
+| 2 | Daily driver: close the port's gaps (hook status, tabs and panes, forms, repos, containers and presets, Phase 5a drag-and-drop) | RT-84 (AT.1), RT-85 (AT.2) under RT-25 |
+| 3 | Cutover: remote mode over Tailscale, file fetch, installer and `v0.1.0-alpha` | RT-96 (MA3) |
+| 4 | Mobile app (iPhone PWA over Tailscale) | RT-103 (MA4), RT-104 (MA6), RT-105 (MA7), RT-106 (MA.e) under RT-38, re-cut by RT-143 |
+| 5 | Attention feed on the desktop (`feat/attention-feed`) | RT-87 (AT.3), RT-88 (AT.4), RT-89 (AT.5), RT-90 (AT.7, AT.8), RT-91 (SV.5), RT-92 (SV.6), RT-93 (fleet) |
+| 6 | Remote enhancements | RT-97 (PF.1–PF.3), RT-98 (PF.4), RT-99 (PF.5), RT-100 (PF.8), RT-101 (PF.12), RT-102 (RD.4) |
+| 7 | Pop-out windows (Phase 5b) | |
+| 8 | Chat mirror and phone session views (`feat/chat-mirror`) | RT-51 (SV.1, SV.2), RT-107 (SV.3), RT-108 (MA8), RT-109 (MA9), RT-110 (SV.7) |
+| 9 | Summaries, spoken alerts and the Dashboard | RT-111 (SV.4) |
+| 10, 11 | Subagent streams; dispatch runs | |
+| 12 | Claude accounts and artifacts by account | RT-112 (MA10), RT-113 (AR.1–AR.3), RT-114 (AR.4, AR.5), RT-115 (PF.14) |
+| 13 | ops-tower views: gates, board and dock | (OT) |
+| 14, 15 | Dictation; Linear issue links | |
 | Ideas, Backlog | | RT-117 (MA5 iOS), RT-118 (RD.5), RT-119 (RD.6), RT-120 (RD.7), RT-121 (PF.9), RT-122 (PF.10), RT-123 (PF.11), RT-124 (PF.13), RT-125 (MA.f), RT-126 (MA.g) |
 
 Build tooling's RT-116 (affected-crate tests per item, the full suite at checkpoints and in CI) shortens every wave.
 
 ## Where things stand
 
-- **Desktop:** 107 of 150 parity lines done (`native-client-parity.md`). Open: repos/containers/presets (Wave 3), drag-and-drop and pop-outs (Phase 5), remote (Phase 6), a few keyboard and toast lines.
+- **Desktop:** 107 of 150 parity lines done (`native-client-parity.md`). Open: repos/containers/presets and drag-and-drop (Phase 5a), both in Wave 2; remote (Phase 6, Wave 3); pop-outs (Phase 5b, Wave 7); a few keyboard and toast lines.
 - **Remote:** the daemon half is done (`lan.rs` pinned-TLS listener, `pairing.rs`, mDNS, FT.1 `FetchFile` streaming). The native client dials only `ws://127.0.0.1` (`apps/native/src/net.rs:285`); no TLS pinning, host profiles, pairing UI or remote mode yet (RT-33, RT-34). No upload direction exists at all.
 - **Links:** Ctrl+click only; regex over grid rows with soft-wrap and box-border stitching up to 64 rows (`links.rs:105`, `term.rs:931`); resolved client-side against the session cwd, then member worktrees (`open.rs:238-346`), first existing candidate wins.
 - **Attention:** one `Attention { reason }` message (`AwaitingInput | Stopped | Error`, heuristic-driven), a Windows toast with no content and no click action (`notify.rs:223`), the Needs You rail (NY.1–NY.3). No sound, no phone, no hook status yet (RT-25 is design only).

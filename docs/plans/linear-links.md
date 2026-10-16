@@ -8,7 +8,7 @@ Research: [linear-links.md](../research/linear-links.md). Code map at the time o
 
 - **Card (owner):** the Standard card, mock section 1 lane B. It shows the identifier, title, state (Linear's state colour), priority, project, release, assignee and when it was last updated.
 - **Session titles (owner):** an identifier in a session title is drawn as a state chip, mock section 2 lane B: a small chip holding the identifier and a dot in Linear's state colour. Hover shows the card, click opens the issue. This applies in the pane header and the sidebar leaf.
-- **Credential (owner):** the daemon reads `LINEAR_API_KEY` through `user_env::resolve` (process environment, then `HKCU\Environment`), and through the env-secrets store once Wave 1b merges. A read-only personal API key scoped to the owner's teams is enough (`Authorization: {key}`, no `Bearer`).
+- **Credential (owner):** the daemon reads `LINEAR_API_KEY` through `user_env::resolve` (process environment, then `HKCU\Environment`), and through the env-secrets store ([env-secrets.md](../env-secrets.md)). A read-only personal API key scoped to the owner's teams is enough (`Authorization: {key}`, no `Bearer`).
 - **Detection (owner):** an identifier counts only when its team key is one of the workspace's teams. The daemon fetches the keys (`teams { nodes { key } }`) and refreshes them daily. Any `linear.app/{workspace}/issue/{ID}` URL also counts. With no key configured, only URLs are detected.
 
 - **Hover timing (owner):** in the terminal, a detected identifier is always underlined (mock [linear-card-states.html](./canvases/linear-card/linear-card-states.html) section 3, lane B). Resting the mouse on it for 500 ms shows the card; holding Ctrl over it shows the card at once (lane A). A session-title chip shows the card on plain hover, as its tooltip does today.
@@ -18,7 +18,7 @@ Research: [linear-links.md](../research/linear-links.md). Code map at the time o
 
 - **Click (owner):** Ctrl+click on a terminal identifier opens it, as paths and URLs open today; a plain click keeps selecting text. RT-58 (plain-click links) later moves every link kind together. A click on a title chip opens the issue.
 - **Phone (owner):** in the Android app, a tap on an identifier shows the same card from the daemon's cache, with an Open button. This lands in a phone wave, not in this one.
-- **Placement (owner):** Wave 17, after Wave 16.
+- **Placement (owner):** Wave 15, after Wave 14 (Dictation).
 
 ## Orchestrator decisions (not owner rulings; open to the owner)
 

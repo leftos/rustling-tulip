@@ -43,7 +43,7 @@ The user runs Claude Code on DeepSeek with `~/.claude/bin/claude-deepseek.ps1`: 
 ### Key resolution
 
 - New `crates/daemon/src/user_env.rs`: `Secret` (a `String` newtype with no `Display`, no `Serialize` and a `Debug` that prints `Secret(<redacted>)`, exposing its text only through `expose()` to `spawn_env`), and `resolve(name) -> Option<(Secret, Origin)>`, with `Origin { Process, UserScope }` so a log line can say where the key came from without its value. An empty value counts as unset. On Windows the user scope is read with `RegGetValueW(HKEY_CURRENT_USER, "Environment", name, RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ)` (expanded), which needs only the `Win32_System_Registry` feature on the `windows` 0.61 dependency, no new crate; elsewhere, the process environment only. `resolve_with(name, process, user_scope)` takes both lookups as closures so tests never touch the real registry.
-- Spoken alerts' SA.2 ([spoken-alerts.md](./spoken-alerts.md), Wave 6) plans the same env-then-`HKCU\Environment` `KeySource` resolution and a redacting key type. The helper above landed with spawn env references, and SA.2 calls `user_env::resolve` and reuses `Secret` instead of writing its own.
+- Spoken alerts' SA.2 ([spoken-alerts.md](./spoken-alerts.md), Wave 9) plans the same env-then-`HKCU\Environment` `KeySource` resolution and a redacting key type. The helper above landed with spawn env references, and SA.2 calls `user_env::resolve` and reuses `Secret` instead of writing its own.
 - The key lives in the daemon's memory for the length of one spawn, then in the tracer's and the child's environment, as it does under `claude-deepseek.ps1`. Any same-user process can already read a process's environment, so this adds no exposure beyond the script's.
 
 ### Persistence

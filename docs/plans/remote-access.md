@@ -1,6 +1,6 @@
 # Remote access over Tailscale
 
-Design for Wave 5's remote desktop (Linear RT-33, RT-34 and their sub-issues). Remote use of the daemon is **Tailscale-first**: Tailscale is required, and the daemon's only remote listener serves its tailnet. Local use (loopback, the `daemon.json` token) is unchanged. The iPhone PWA (RT-143, `docs/research/pwa-iphone.md`) reaches the same listener.
+Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). Remote use of the daemon is **Tailscale-first**: Tailscale is required, and the daemon's only remote listener serves its tailnet. Local use (loopback, the `daemon.json` token) is unchanged. The iPhone PWA (RT-143, `docs/research/pwa-iphone.md`) reaches the same listener.
 
 ## Owner rulings
 
