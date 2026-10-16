@@ -133,9 +133,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // applying the builder's env map, so the child receives ZERO inherited
     // vars unless we explicitly add them. Forward this process's env: the
     // daemon's whole environment (tracer_client::tracer_command never clears
-    // it) plus the spawn's extra vars; the passthrough keep-list governs
-    // headless sessions only. Skip the tracer-internal log var so it doesn't
-    // leak into the child env.
+    // it, and only removes the variables the spawn's provider strips) plus
+    // the spawn's extra vars; the passthrough keep-list governs headless
+    // sessions only. Skip the tracer-internal log var so it doesn't leak into
+    // the child env.
     let mut forwarded_env_count = 0_usize;
     for (k, v) in std::env::vars_os() {
         if k == "RUSTLING_TULIP_TRACER_LOG" {
