@@ -43,6 +43,7 @@
   - [ ] RT-161 TS.3: wire the tailnet listener into the daemon: auth kind, device token, router, idle exit
   - [ ] RT-162 TS.4: ConfigureRemote and RemoteStatus messages
   - [ ] RT-163 TS.5: retire the LAN listener, /pair and mDNS
+  - [ ] RT-166 TS.3b: device tokens issued only after the owner approves the device on the host PC
 - [ ] RT-96 Remote devices: list connected tailnet devices, block one and drop its connections
 - [ ] RT-34 Phase 6: remote mode and cutover
   - [ ] RT-150 P6.1: Transport seam: Target::{Local, Tailnet(host)} in net.rs over public-CA TLS

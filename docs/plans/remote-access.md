@@ -5,7 +5,7 @@ Design for Wave 5's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 ## Owner rulings
 
 - Tailscale is a requirement for remote use. The daemon serves TLS with its `tailscale cert` (`*.ts.net`, public CA), one listener for the desktop client and the PWA; clients verify the certificate normally and nothing is pinned.
-- A connecting device is authorized by `tailscale whois` **plus a per-device token** stored on the device. No pairing codes. A device without a token (a new device, or the PWA after Safari evicts its storage) asks for one, and the token is issued only once the owner **approves that device on the host PC**: whois alone never mints a token, so another program or Windows account on an owner device cannot get one unseen. A wiped phone is approved again.
+- A connecting device is authorized by `tailscale whois` **plus a per-device token** stored on the device. No pairing codes. A device without a token (a new device, or the PWA after Safari evicts its storage) asks for one, and the token is issued only once the owner **approves that device on the host PC**: whois alone never mints a token, so another program or Windows account on an owner device cannot get one unseen. Approval is a **QR code** the host PC shows, which the device scans (the iPhone PWA with its camera), with a short **pairing code** beside it that a device with no camera types instead; the QR code and the code are one-time, short-lived and good only for a whois-authorized device. A wiped phone is approved again.
 - "The owner" is a device logged in as the host node's own Tailscale user (numeric `UserID`, never the display login), untagged, not shared in, and not the host itself.
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the fixed port 8787, rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.
@@ -49,7 +49,7 @@ Hotspot items (touching `crates/protocol/src/lib.rs` or `crates/daemon/src/serve
 | TS.1 | `crates/tailnet`: the Tailscale CLI wrapper (typed errors for every failure) and the owner rule, table-tested | no | none |
 | TS.2 | Daemon tailnet listener module: cert, bind with rebind, whois acceptor attaching a peer identity | no | TS.1 |
 | TS.3 | Wire the listener into the daemon: boot, the auth kind per listener, a separate router, the `Origin`/`Host` check, idle exit held, `remote.json` | yes | TS.2 |
-| TS.3b | Device tokens: a whois-authorized device without a token waits as a pending request; the token is issued only after the owner approves it from a local (loopback) client; tokens are stored hashed and checked in `Hello`; the approval prompt on the host PC | yes | TS.3, TS.4 |
+| TS.3b | Device tokens: a whois-authorized device without a token waits as a pending request; the token is issued once it presents the one-time approval the host PC shows (a QR code to scan, or the pairing code beside it for a device with no camera), started from a local (loopback) client; tokens are stored hashed and checked in `Hello` | yes | TS.3, TS.4 |
 | TS.4 | `ConfigureRemote` / `RemoteStatus` messages: every state (not installed, not running, other Windows user, not connected, HTTPS disabled, host tagged, serving with name, port and cert expiry) | yes | TS.3 |
 | TS.5 | Retire the LAN listener, `/pair` and mDNS; the six variants inert | yes | TS.3 |
 | RT-96 | Remote devices: list the tailnet devices that connected, block one and drop its connections | yes | TS.4, P6.4 |
