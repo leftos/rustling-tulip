@@ -368,27 +368,18 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
         };
         return (options, 0);
     }
-    let mut options = Vec::new();
-    let path = folder(&item.entry).unwrap_or_default();
-    if let Some(repo_id) = &item.folder_repo_id {
-        let repo = names
-            .repos
-            .get(repo_id)
-            .cloned()
-            .unwrap_or_else(|| last_segment(path).to_owned());
-        options.push(RecoverOption {
-            how: RecoverAs::Claude,
-            label: format!("Claude session in {repo}"),
-            resumes: true,
-        });
-    } else if item.folder_is_git_repo && !path.is_empty() {
-        options.push(RecoverOption {
-            how: RecoverAs::RegisterRepoThenClaude {
-                path: path.to_owned(),
-            },
-            label: format!("Register {path} as a repo, then Claude session"),
-            resumes: true,
-        });
+    let mut options = folder_claude_options(item, names);
+    // A shell typing `claude --resume` would resume the conversation on
+    // Anthropic, so an entry on any other provider recovers as Claude only.
+    if !entry.claude_provider().is_anthropic() {
+        if options.is_empty() {
+            options.push(RecoverOption {
+                how: RecoverAs::Claude,
+                label: "Claude session".to_owned(),
+                resumes: true,
+            });
+        }
+        return (options, 0);
     }
     let default = if item.folder_repo_id.is_some() {
         0
@@ -401,6 +392,35 @@ fn recover_options(item: &SessionHistoryItem, names: &Names) -> (Vec<RecoverOpti
         resumes: true,
     });
     (options, default)
+}
+
+/// The Claude choice for a row known by its folder: a Claude session in the
+/// registered repo at the folder, else registering the folder as a repo
+/// first when it is a git repo; none otherwise.
+fn folder_claude_options(item: &SessionHistoryItem, names: &Names) -> Vec<RecoverOption> {
+    let path = folder(&item.entry).unwrap_or_default();
+    if let Some(repo_id) = &item.folder_repo_id {
+        let repo = names
+            .repos
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_else(|| last_segment(path).to_owned());
+        vec![RecoverOption {
+            how: RecoverAs::Claude,
+            label: format!("Claude session in {repo}"),
+            resumes: true,
+        }]
+    } else if item.folder_is_git_repo && !path.is_empty() {
+        vec![RecoverOption {
+            how: RecoverAs::RegisterRepoThenClaude {
+                path: path.to_owned(),
+            },
+            label: format!("Register {path} as a repo, then Claude session"),
+            resumes: true,
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Whether a row joins the pre-tick: a loss the daemon may recover, and not
@@ -1094,7 +1114,7 @@ fn step(index: usize, len: usize, forward: bool) -> usize {
 mod tests {
     use super::*;
     use chrono::FixedOffset;
-    use protocol::{AgentOptions, SpawnConfig, SpawnTarget, WorktreeReusePolicy};
+    use protocol::{AgentOptions, ClaudeProvider, SpawnConfig, SpawnTarget, WorktreeReusePolicy};
     use serde_json::json;
 
     /// 2026-09-28 12:00 at UTC+2.
@@ -1121,9 +1141,7 @@ mod tests {
             },
             mode: SessionMode::Interactive,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: Vec::new(),
         }
@@ -1389,6 +1407,30 @@ mod tests {
         dialog.select_all();
         assert!(!dialog.is_ticked("n"), "a disabled row never ticks");
         assert!(!dialog.is_ticked("r"));
+    }
+
+    #[test]
+    fn an_unknown_provider_entry_offers_no_shell() {
+        let mut git = lost("u", "2026-09-28T09:00:00Z");
+        git.entry.spawn_config = None;
+        git.entry.current_cwd = Some("D:\\proj".to_owned());
+        git.entry.provider = ClaudeProvider::Unknown;
+        let mut plain = git.clone();
+        plain.folder_is_git_repo = false;
+        for (item, only) in [
+            (
+                &git,
+                RecoverAs::RegisterRepoThenClaude {
+                    path: "D:\\proj".to_owned(),
+                },
+            ),
+            (&plain, RecoverAs::Claude),
+        ] {
+            let (options, default) = recover_options(item, &Names::default());
+            let hows: Vec<RecoverAs> = options.iter().map(|o| o.how.clone()).collect();
+            assert_eq!(hows, std::slice::from_ref(&only), "{only:?}");
+            assert_eq!(default, 0, "{only:?}");
+        }
     }
 
     #[test]

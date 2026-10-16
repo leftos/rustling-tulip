@@ -19,8 +19,8 @@ use gpui::{
     px,
 };
 use protocol::{
-    ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot, SplitDirection, TabEntry,
-    WorkspaceEntry,
+    ClaudeProvider, ClientMessage, DaemonMessage, GridNode, RepoEntry, SessionSnapshot,
+    SplitDirection, TabEntry, WorkspaceEntry,
 };
 use rustling_tulip_native::{
     Activity, Clock, Connection, ContainerKind, FolderPicker, HandshakeInfo, NetCommand, NetDeps,
@@ -32,6 +32,31 @@ use serde_json::{Value, json};
 pub mod live;
 
 pub const PROTOCOL: u32 = 1;
+
+/// The features the fake daemon lists in its `Welcome`, as a current daemon
+/// does.
+pub fn daemon_features() -> Vec<String> {
+    vec![protocol::FEATURE_CLAUDE_PROVIDER.to_owned()]
+}
+
+/// The fake daemon's `Welcome` on `protocol_version`, listing
+/// [`daemon_features`].
+pub fn welcome(protocol_version: u32) -> DaemonMessage {
+    DaemonMessage::Welcome {
+        protocol_version,
+        supported_versions: vec![protocol_version],
+        features: daemon_features(),
+    }
+}
+
+/// A connection open on the fake daemon's port, welcomed with `features`.
+fn connected(features: Vec<String>) -> Connection {
+    let mut conn = Connection::new();
+    conn.on_connecting();
+    conn.on_socket_open(4242);
+    conn.on_welcome(PROTOCOL, features);
+    conn
+}
 
 /// Whether the rail's side of the window shows what `selector` tags: the
 /// panels, the divider, the badge and the source-control panel's parts.
@@ -423,6 +448,12 @@ impl SessionBuilder {
     /// Launched with approval prompts bypassed.
     pub fn trusted(self) -> Self {
         self.set("elevated_authority", json!(true))
+    }
+
+    /// Routed to `provider`'s endpoint, as the daemon derives it from the
+    /// session's spawn config.
+    pub fn claude_provider(self, provider: ClaudeProvider) -> Self {
+        self.set("claude_provider", json!(provider))
     }
 
     pub fn terminal_title(self, title: &str) -> Self {
@@ -956,21 +987,26 @@ impl<'a> Harness<'a> {
         harness
     }
 
+    /// Reports the connection as an older daemon's, whose `Welcome` lists
+    /// none of [`daemon_features`].
+    pub fn welcome_without_features(&mut self) {
+        self.event(NetEvent::State(connected(Vec::new())));
+    }
+
+    /// Reports the connection as a current daemon's, whose `Welcome` lists
+    /// [`daemon_features`], as after a restart onto a newer daemon.
+    pub fn welcome_with_features(&mut self) {
+        self.event(NetEvent::State(connected(daemon_features())));
+    }
+
     fn connect(&mut self) {
-        let mut conn = Connection::new();
-        conn.on_connecting();
-        conn.on_socket_open(4242);
-        conn.on_welcome(PROTOCOL);
-        self.event(NetEvent::State(conn));
+        self.event(NetEvent::State(connected(daemon_features())));
         self.event(NetEvent::Handshake(HandshakeInfo {
             port: 4242,
             pid: 1,
             protocol_version: PROTOCOL,
         }));
-        self.send(DaemonMessage::Welcome {
-            protocol_version: PROTOCOL,
-            supported_versions: vec![PROTOCOL],
-        });
+        self.send(welcome(PROTOCOL));
         // Every connection asks for the session history; the specs that
         // care about it send a Welcome of their own.
         self.drain();

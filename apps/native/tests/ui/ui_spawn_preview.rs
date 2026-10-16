@@ -624,6 +624,8 @@ fn workspace_preview_table_rows(cx: &mut TestAppContext) {
 fn workspace_collision_choice_sent(cx: &mut TestAppContext) {
     let dir = TestDir::new();
     let mut h = Harness::with(cx, &dir, &fixture());
+    // Tall enough that the collision choices show inside the dialog's body.
+    h.cx.simulate_resize(gpui::size(px(1000.0), px(1400.0)));
     open_workspace(&mut h);
     preview_workspace(&mut h);
     let collides = MemberSpawnPreview {

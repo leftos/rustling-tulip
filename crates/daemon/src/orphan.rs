@@ -998,6 +998,54 @@ mod tests {
     }
 
     #[test]
+    fn a_deepseek_spawn_config_survives_the_sidecar() {
+        let dirs = scratch_dirs("deepseek-provider");
+        let options = protocol::AgentOptions::Claude {
+            permission_mode: None,
+            provider: protocol::ClaudeProvider::Deepseek,
+        };
+        let config = SpawnConfig {
+            target: protocol::SpawnTarget::Standalone {
+                cwd: Some(r"D:\proj".to_owned()),
+                add_dirs: Vec::new(),
+            },
+            mode: SessionMode::Interactive,
+            dangerously_skip_permissions: false,
+            agent_options: options.clone(),
+            model: None,
+            extra_env: Vec::new(),
+        };
+        let meta = meta_from_record(
+            "s-deepseek".to_string(),
+            4242,
+            "proj".to_string(),
+            SessionKind::Standalone,
+            SessionMode::Interactive,
+            vec![],
+            chrono::DateTime::from_timestamp(0, 0).unwrap(),
+            None,
+            Some("rt-tracer".to_string()),
+            Agent::Claude,
+            Some(config),
+            None,
+            None,
+            Some(4242),
+            Some(r"\\.\pipe\rt-tracer-s-deepseek".to_string()),
+            None,
+            None,
+        )
+        .expect("build meta");
+        write_meta(&dirs, &meta).expect("write meta");
+        let loaded = load_meta(&dirs, "s-deepseek").expect("load meta");
+        assert_eq!(
+            loaded.spawn_config.map(|config| config.agent_options),
+            Some(options),
+            "a reattached session keeps its provider"
+        );
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
     fn agent_conversation_id_round_trips_and_defaults_on_old_meta() {
         let dirs = scratch_dirs("agent-conversation-id");
         let mut meta = meta_from_record(

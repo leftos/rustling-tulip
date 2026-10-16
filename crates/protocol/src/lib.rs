@@ -23,6 +23,11 @@ pub const MDNS_TXT_FINGERPRINT: &str = "fp";
 /// mDNS TXT key carrying the host's human-readable name (e.g. its hostname).
 pub const MDNS_TXT_NAME: &str = "name";
 
+/// `Welcome.features` entry: the daemon can spawn a Claude session against a
+/// chosen provider (`ClaudeProvider`). A client offers the provider choice
+/// only when the connected daemon lists it.
+pub const FEATURE_CLAUDE_PROVIDER: &str = "claude_provider";
+
 fn default_true() -> bool {
     true
 }
@@ -57,6 +62,31 @@ impl Agent {
     }
 }
 
+/// Which Anthropic-compatible endpoint a Claude Code session talks to. The
+/// provider chooses the child's routing environment at spawn; the credential
+/// it selects is never stored here.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeProvider {
+    /// Anthropic's own API (the default).
+    #[default]
+    Anthropic,
+    /// `DeepSeek`'s Anthropic-compatible endpoint.
+    Deepseek,
+    /// A provider from a newer daemon or client.
+    #[serde(other)]
+    Unknown,
+}
+
+impl ClaudeProvider {
+    /// True for [`ClaudeProvider::Anthropic`], the value serde omits on the way
+    /// out so an Anthropic spawn is byte-identical to a pre-provider one.
+    #[must_use]
+    pub fn is_anthropic(&self) -> bool {
+        matches!(self, Self::Anthropic)
+    }
+}
+
 /// Per-agent configuration carried on [`SpawnRequest`], [`SpawnConfig`], and
 /// [`PresetEntry`]. The discriminant doubles as the agent selector — its
 /// `agent()` accessor returns the matching [`Agent`] variant — so callers do
@@ -70,6 +100,11 @@ pub enum AgentOptions {
         /// omitted) when [`SpawnRequest::dangerously_skip_permissions`] is true.
         #[serde(default)]
         permission_mode: Option<PermissionMode>,
+        /// The endpoint the CLI talks to. Skipped on the wire when
+        /// [`ClaudeProvider::Anthropic`], so an Anthropic spawn serializes
+        /// exactly as it did before this field existed.
+        #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
+        provider: ClaudeProvider,
     },
     Codex {
         /// Codex's `--sandbox <value>` flag. Ignored when
@@ -101,13 +136,32 @@ impl AgentOptions {
             Self::Cursor { .. } => Agent::Cursor,
         }
     }
+
+    /// Constructs [`AgentOptions::Claude`] with `permission_mode`. The
+    /// provider is [`ClaudeProvider::Anthropic`]; a `DeepSeek` spawn names its
+    /// provider on the variant directly.
+    #[must_use]
+    pub fn claude(permission_mode: Option<PermissionMode>) -> Self {
+        Self::Claude {
+            permission_mode,
+            provider: ClaudeProvider::Anthropic,
+        }
+    }
+
+    /// The Claude provider this variant carries. `None` for Codex and Cursor,
+    /// which have no provider.
+    #[must_use]
+    pub fn claude_provider(&self) -> Option<ClaudeProvider> {
+        match self {
+            Self::Claude { provider, .. } => Some(*provider),
+            Self::Codex { .. } | Self::Cursor { .. } => None,
+        }
+    }
 }
 
 impl Default for AgentOptions {
     fn default() -> Self {
-        Self::Claude {
-            permission_mode: None,
-        }
+        Self::claude(None)
     }
 }
 
@@ -535,6 +589,11 @@ pub struct SessionSnapshot {
     /// session recovery, not by Duplicate.
     #[serde(default)]
     pub busy_excluded: bool,
+    /// The endpoint this session's `claude` CLI talks to, derived from the
+    /// session's spawn config. [`ClaudeProvider::Anthropic`] when the session
+    /// has no stored spawn config or is not a Claude session.
+    #[serde(default)]
+    pub claude_provider: ClaudeProvider,
 }
 
 /// How a session ended, as recorded in its history entry.
@@ -636,6 +695,24 @@ pub struct HistoryEntry {
     /// recovered session keeps it. Absent means false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub busy_excluded: bool,
+    /// The Claude provider an imported session ran on, inferred from the
+    /// `--model` its tracer log recorded. A recorded entry leaves it
+    /// Anthropic: its provider is its `spawn_config`'s (see
+    /// [`HistoryEntry::claude_provider`]). Skipped when Anthropic.
+    #[serde(default, skip_serializing_if = "ClaudeProvider::is_anthropic")]
+    pub provider: ClaudeProvider,
+}
+
+impl HistoryEntry {
+    /// The Claude provider the session ran on: its spawn config's when that
+    /// holds Claude's options, else [`HistoryEntry::provider`].
+    #[must_use]
+    pub fn claude_provider(&self) -> ClaudeProvider {
+        self.spawn_config
+            .as_ref()
+            .and_then(|config| config.agent_options.claude_provider())
+            .unwrap_or(self.provider)
+    }
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -903,9 +980,7 @@ impl<'de> Deserialize<'de> for SpawnConfig {
             helper
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::Claude {
-                        permission_mode: helper.permission_mode,
-                    },
+                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
                     },
@@ -1805,9 +1880,7 @@ impl<'de> Deserialize<'de> for PresetEntry {
             helper
                 .agent_options
                 .unwrap_or_else(|| match helper.agent.unwrap_or_default() {
-                    Agent::Claude => AgentOptions::Claude {
-                        permission_mode: helper.permission_mode,
-                    },
+                    Agent::Claude => AgentOptions::claude(helper.permission_mode),
                     Agent::Codex => AgentOptions::Codex {
                         sandbox: helper.codex_sandbox,
                     },
@@ -3026,11 +3099,16 @@ pub enum DaemonMessage {
     /// from the intersection of its `SUPPORTED_PROTOCOL_VERSIONS` and the
     /// client's advertised set. `supported_versions` echoes the daemon's full
     /// support list so the client can dim feature-gated UI when running
-    /// against an older daemon.
+    /// against an older daemon. `features` names the capabilities this daemon
+    /// has beyond the negotiated version (`FEATURE_*` constants); a client
+    /// keeps strings it does not know and offers a capability only when it is
+    /// listed. Absent (and never sent) when empty.
     Welcome {
         protocol_version: u32,
         #[serde(default)]
         supported_versions: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
     AuthFailed {
         reason: String,
@@ -4253,9 +4331,7 @@ mod tests {
             default_use_worktree: Some(true),
             dangerously_skip_permissions: true,
             model: None,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             tab_grouping: TabGroupingConfig::NewTab {
                 layout: TabLayout::BalancedHorizontal,
                 max_panes_per_tab: Some(6),
@@ -4544,12 +4620,7 @@ mod tests {
         assert_eq!(preset.variables, Vec::<PresetVariable>::new());
         assert_eq!(preset.context_footer_lines, Vec::<FooterLine>::new());
         assert_eq!(preset.default_use_worktree, None);
-        assert_eq!(
-            preset.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None,
-            }
-        );
+        assert_eq!(preset.agent_options, AgentOptions::claude(None));
     }
 
     #[test]
@@ -4568,9 +4639,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             prompt_injector: Some(PromptInjector {
@@ -4689,9 +4758,7 @@ mod tests {
             mode: SessionMode::PlainShell,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             secret_env_keys: Vec::new(),
@@ -4706,14 +4773,102 @@ mod tests {
         assert!(json.contains(r#""mode":"plain_shell""#));
     }
 
+    /// A Claude spawn request whose only varying option is the provider.
+    fn claude_spawn_request(provider: ClaudeProvider) -> SpawnRequest {
+        SpawnRequest {
+            label: None,
+            target: SpawnTarget::Single {
+                repo_id: "r1".to_string(),
+                branch_name: "main".to_string(),
+                base_branch: None,
+                use_worktree: false,
+                checkout_strategy: None,
+                worktree_reuse: WorktreeReusePolicy::Reuse,
+                existing_worktree: None,
+            },
+            mode: SessionMode::Interactive,
+            initial_prompt: None,
+            dangerously_skip_permissions: false,
+            agent_options: AgentOptions::Claude {
+                permission_mode: None,
+                provider,
+            },
+            model: None,
+            extra_env: vec![],
+            secret_env_keys: Vec::new(),
+            prompt_injector: None,
+            request_id: None,
+            resume_conversation: None,
+        }
+    }
+
+    #[test]
+    fn an_anthropic_spawn_request_has_no_provider_key() {
+        let req = claude_spawn_request(ClaudeProvider::Anthropic);
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(!json.contains(r#""provider""#), "{json}");
+    }
+
+    #[test]
+    fn a_deepseek_spawn_request_round_trips() {
+        let req = claude_spawn_request(ClaudeProvider::Deepseek);
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains(r#""provider":"deepseek""#), "{json}");
+        let back: SpawnRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, req);
+        assert_eq!(
+            back.agent_options.claude_provider(),
+            Some(ClaudeProvider::Deepseek)
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_decodes_as_unknown() {
+        let options: AgentOptions =
+            serde_json::from_str(r#"{"kind":"claude","provider":"mistral"}"#).expect("decode");
+        assert_eq!(options.claude_provider(), Some(ClaudeProvider::Unknown));
+        // Only a Claude variant carries a provider; Codex and Cursor have none.
+        assert_eq!(
+            AgentOptions::Codex { sandbox: None }.claude_provider(),
+            None
+        );
+        assert_eq!(
+            AgentOptions::Cursor {
+                plan_mode: false,
+                sandbox: None,
+            }
+            .claude_provider(),
+            None
+        );
+    }
+
+    #[test]
+    fn clone_and_duplicate_keep_the_provider() {
+        let req = claude_spawn_request(ClaudeProvider::Deepseek);
+        let config = SpawnConfig::from_request(&req);
+        assert_eq!(
+            config.agent_options.claude_provider(),
+            Some(ClaudeProvider::Deepseek)
+        );
+        assert_eq!(
+            config.to_clone_request().agent_options.claude_provider(),
+            Some(ClaudeProvider::Deepseek)
+        );
+        assert_eq!(
+            config
+                .to_duplicate_request(Some("wt/brave-lynx".to_string()))
+                .agent_options
+                .claude_provider(),
+            Some(ClaudeProvider::Deepseek)
+        );
+    }
+
     fn duplicate_source_config(target: SpawnTarget) -> SpawnConfig {
         SpawnConfig {
             target,
             mode: SessionMode::PlainShell,
             dangerously_skip_permissions: true,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: Some("sonnet-4".to_string()),
             extra_env: vec![("RT_TEST".to_string(), "1".to_string())],
         }
@@ -5134,6 +5289,7 @@ mod tests {
             DaemonMessage::Welcome {
                 protocol_version,
                 supported_versions,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert_eq!(supported_versions, Vec::<u32>::new());
@@ -5202,12 +5358,47 @@ mod tests {
             DaemonMessage::Welcome {
                 protocol_version,
                 supported_versions,
+                ..
             } => {
                 assert_eq!(protocol_version, 15);
                 assert_eq!(supported_versions, vec![16, 15]);
             }
             _ => panic!("expected Welcome"),
         }
+    }
+
+    #[test]
+    fn welcome_features_round_trip() {
+        let welcome = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23, 22],
+            features: vec![FEATURE_CLAUDE_PROVIDER.to_owned(), "later".to_owned()],
+        };
+        let json = serde_json::to_value(&welcome).expect("encode welcome");
+        assert_eq!(
+            json["features"],
+            serde_json::json!(["claude_provider", "later"])
+        );
+        let back: DaemonMessage = serde_json::from_value(json).expect("decode welcome");
+        assert!(
+            matches!(
+                &back,
+                DaemonMessage::Welcome { protocol_version: 23, features, .. }
+                    if features == &["claude_provider", "later"]
+            ),
+            "{back:?}"
+        );
+
+        let bare = DaemonMessage::Welcome {
+            protocol_version: 23,
+            supported_versions: vec![23],
+            features: Vec::new(),
+        };
+        let json = serde_json::to_value(&bare).expect("encode bare welcome");
+        assert!(
+            json.get("features").is_none(),
+            "an empty list stays off the wire: {json}"
+        );
     }
 
     #[test]
@@ -5266,12 +5457,7 @@ mod tests {
             "injector": {"startup_delay_ms": 0, "pre_input": [], "post_input": []}
         }"#;
         let preset: PresetEntry = serde_json::from_str(legacy).expect("parse legacy preset");
-        assert_eq!(
-            preset.agent_options,
-            AgentOptions::Claude {
-                permission_mode: None,
-            }
-        );
+        assert_eq!(preset.agent_options, AgentOptions::claude(None));
     }
 
     #[test]
@@ -5470,9 +5656,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: vec![],
             secret_env_keys: Vec::new(),
@@ -6360,6 +6544,23 @@ mod tests {
             ),
             "{carried:?}"
         );
+    }
+
+    #[test]
+    fn history_entry_provider_defaults_to_anthropic_and_round_trips_deepseek() {
+        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
+        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
+        assert_eq!(entry.provider, ClaudeProvider::Anthropic);
+        assert_eq!(entry.claude_provider(), ClaudeProvider::Anthropic);
+        let encoded = serde_json::to_value(&entry).expect("encode");
+        assert!(encoded.get("provider").is_none(), "{encoded}");
+
+        let json = format!(
+            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":2,"provider":"deepseek"}}"#
+        );
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert_eq!(entry.provider, ClaudeProvider::Deepseek);
+        assert_eq!(entry.claude_provider(), ClaudeProvider::Deepseek);
     }
 
     #[test]

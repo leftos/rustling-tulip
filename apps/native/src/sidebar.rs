@@ -3,11 +3,11 @@
 //! layout. Plain Rust, so every rule is unit-tested; `sidebar_view` renders it.
 
 use protocol::{
-    Agent, AppearanceOverrides, AttentionReason, CodexSandbox, ContainerRef, DaemonMessage,
-    PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot, SessionStatus, TabEntry,
-    WorkspaceEntry,
+    Agent, AppearanceOverrides, AttentionReason, ClaudeProvider, CodexSandbox, ContainerRef,
+    DaemonMessage, PermissionMode, RepoEntry, SessionKind, SessionMode, SessionSnapshot,
+    SessionStatus, TabEntry, WorkspaceEntry,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 use crate::appearance::{self, AppColors, AppLevel, Resolved};
 use crate::fonts::{self, FontSettings};
 use crate::source_control::{Part, ScKey, ScUiState};
+use crate::spawn_form::provider_hover_name;
 use crate::tabs::collect_panes;
 use crate::window_state::WindowState;
 
@@ -103,6 +104,10 @@ pub struct Leaf {
     /// branches, or a shell's folder.
     pub subline: Option<String>,
     pub runtime: Option<String>,
+    /// A Claude session's non-Anthropic endpoint, or `None` when there is
+    /// nothing to say: an Anthropic session, or one that is not Claude at
+    /// all.
+    pub provider: Option<ClaudeProvider>,
     /// The session is in the attention set; Needs You reads this raw value,
     /// the `!` badge reads [`Leaf::shows_attention`].
     pub attention: bool,
@@ -356,6 +361,26 @@ pub struct SpawnDefaults {
     pub permission_mode: Option<PermissionMode>,
     /// Codex's `--sandbox` pre-fill.
     pub codex_sandbox: Option<CodexSandbox>,
+    /// The endpoint a Claude spawn pre-selects; a provider this client does
+    /// not know loads as Anthropic.
+    #[serde(deserialize_with = "deserialize_known_provider")]
+    pub claude_provider: ClaudeProvider,
+}
+
+/// `provider`, with one this client does not know read as Anthropic, so
+/// nothing pre-selects a provider the dialog cannot show.
+pub(crate) fn known_provider(provider: ClaudeProvider) -> ClaudeProvider {
+    match provider {
+        ClaudeProvider::Unknown => ClaudeProvider::Anthropic,
+        known => known,
+    }
+}
+
+/// A stored provider, read through [`known_provider`].
+fn deserialize_known_provider<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ClaudeProvider, D::Error> {
+    ClaudeProvider::deserialize(deserializer).map(known_provider)
 }
 
 /// Which attention reasons fire an OS notification; each is on unless
@@ -822,6 +847,11 @@ impl SidebarModel {
         self.ui.spawn.permission_mode = mode;
     }
 
+    /// The provider a spawn dialog opens with for Claude.
+    pub fn set_spawn_claude_provider(&mut self, provider: ClaudeProvider) {
+        self.ui.spawn.claude_provider = provider;
+    }
+
     /// The sandbox mode a spawn dialog opens with for Codex.
     pub fn set_spawn_codex_sandbox(&mut self, sandbox: Option<CodexSandbox>) {
         self.ui.spawn.codex_sandbox = sandbox;
@@ -1201,12 +1231,13 @@ fn leaf(
         label: display_label(s),
         subline: subline(s, HOME.as_deref(), tabs_view),
         runtime: runtime_label(s),
+        provider: chip_provider(s),
         attention: attention.contains(&s.id),
         busy_excluded: s.busy_excluded,
         unseen: unseen.contains(&s.id),
         state: LeafState::of(s),
         trusted: s.elevated_authority,
-        tooltip: label_tooltip(s),
+        tooltip: leaf_tooltip(s),
     }
 }
 
@@ -1448,6 +1479,7 @@ pub fn display_label(s: &SessionSnapshot) -> String {
 
 /// A session name's hover text: the name, then the daemon's label and the
 /// terminal title where they say something else, then the working directory.
+/// It is the pane header's title tip as well as part of a leaf's hover.
 pub fn label_tooltip(s: &SessionSnapshot) -> String {
     let display = display_label(s);
     let mut lines = vec![display.clone()];
@@ -1461,6 +1493,18 @@ pub fn label_tooltip(s: &SessionSnapshot) -> String {
         lines.push(format!("Cwd: {cwd}"));
     }
     lines.join("\n")
+}
+
+/// A leaf's hover text: [`label_tooltip`], then the endpoint line when the
+/// session is routed somewhere other than Anthropic. Only the leaf carries
+/// it, since its pane header already shows a provider chip saying the same.
+pub fn leaf_tooltip(s: &SessionSnapshot) -> String {
+    let mut text = label_tooltip(s);
+    if let Some(provider) = chip_provider(s) {
+        text.push_str("\nProvider: ");
+        text.push_str(provider_hover_name(provider));
+    }
+    text
 }
 
 /// The line under a leaf's label: a plain shell's folder with `home` shown
@@ -1518,6 +1562,19 @@ pub fn runtime_label(s: &SessionSnapshot) -> Option<String> {
         return Some(s.agent.as_label().to_owned());
     }
     s.program_name.clone().filter(|p| !p.is_empty())
+}
+
+/// The endpoint a session is routed to when a chip should say so: its
+/// Claude provider on any non-Anthropic endpoint, and `None` for an
+/// Anthropic session or one that is not Claude at all (a Codex or Cursor
+/// session, or a plain shell), whatever its provider field reads. Both the
+/// pane header and the leaf go through this, so the two cannot disagree.
+#[must_use]
+pub fn chip_provider(s: &SessionSnapshot) -> Option<ClaudeProvider> {
+    if s.agent != Agent::Claude || s.mode == SessionMode::PlainShell {
+        return None;
+    }
+    (!s.claude_provider.is_anthropic()).then_some(s.claude_provider)
 }
 
 /// Whether a leaf click may attach the terminal to the session: only
@@ -2094,6 +2151,59 @@ mod tests {
     }
 
     #[test]
+    fn a_deepseek_claude_leaf_carries_its_provider() {
+        let mut s = session("id");
+        s.claude_provider = ClaudeProvider::Deepseek;
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, Some(ClaudeProvider::Deepseek));
+        assert_eq!(listed.tooltip, "id\nProvider: DeepSeek");
+        assert_eq!(
+            label_tooltip(&s),
+            "id",
+            "the pane header says it in its chip, not in the title tip"
+        );
+    }
+
+    #[test]
+    fn an_anthropic_claude_leaf_has_no_provider() {
+        let s = session("id");
+        assert_eq!(s.claude_provider, ClaudeProvider::Anthropic);
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, None);
+        assert_eq!(listed.tooltip, "id", "no line is added");
+        assert_eq!(leaf_tooltip(&s), label_tooltip(&s));
+    }
+
+    #[test]
+    fn an_unknown_provider_is_named_unknown() {
+        let mut s = session("id");
+        s.claude_provider = ClaudeProvider::Unknown;
+        let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, Some(ClaudeProvider::Unknown));
+        assert_eq!(listed.tooltip, "id\nProvider: unknown");
+    }
+
+    #[test]
+    fn only_a_claude_session_carries_a_provider() {
+        for agent in [Agent::Codex, Agent::Cursor] {
+            let mut s = session("id");
+            s.agent = agent;
+            s.claude_provider = ClaudeProvider::Deepseek;
+            let listed = leaf(&s, &HashSet::new(), &HashSet::new(), false);
+            assert_eq!(
+                listed.provider, None,
+                "a {agent:?} session says no provider"
+            );
+            assert_eq!(listed.tooltip, "id");
+        }
+        let mut sh = shell("sh", Some("D:/src/app"), SessionKind::Standalone);
+        sh.claude_provider = ClaudeProvider::Deepseek;
+        let listed = leaf(&sh, &HashSet::new(), &HashSet::new(), false);
+        assert_eq!(listed.provider, None, "a plain shell says no provider");
+        assert!(!listed.tooltip.contains("Provider:"));
+    }
+
+    #[test]
     fn only_pty_sessions_can_attach() {
         assert!(can_attach(&session("interactive")));
         assert!(can_attach(&shell("shell", None, SessionKind::Standalone)));
@@ -2493,6 +2603,7 @@ mod tests {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
                 codex_sandbox: Some(CodexSandbox::DangerFullAccess),
+                claude_provider: ClaudeProvider::Deepseek,
             },
         };
         save_ui_state(&dir.0, &state).expect("first save");
@@ -2508,6 +2619,7 @@ mod tests {
             trusted: true,
             permission_mode: Some(PermissionMode::AcceptEdits),
             codex_sandbox: Some(CodexSandbox::WorkspaceWrite),
+            claude_provider: ClaudeProvider::Anthropic,
         };
         let state = UiState {
             spawn: defaults,
@@ -2535,13 +2647,51 @@ mod tests {
         model.set_spawn_trusted(true);
         model.set_spawn_permission_mode(Some(PermissionMode::Plan));
         model.set_spawn_codex_sandbox(Some(CodexSandbox::ReadOnly));
+        model.set_spawn_claude_provider(ClaudeProvider::Deepseek);
         assert_eq!(
             model.ui_state().spawn,
             SpawnDefaults {
                 trusted: true,
                 permission_mode: Some(PermissionMode::Plan),
                 codex_sandbox: Some(CodexSandbox::ReadOnly),
+                claude_provider: ClaudeProvider::Deepseek,
             }
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_loads_as_anthropic() {
+        let dir = TestDir::new("spawn-provider");
+        let deepseek = UiState {
+            spawn: SpawnDefaults {
+                claude_provider: ClaudeProvider::Deepseek,
+                ..SpawnDefaults::default()
+            },
+            ..UiState::default()
+        };
+        save_ui_state(&dir.0, &deepseek).expect("save");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Deepseek,
+            "round trips"
+        );
+
+        std::fs::write(
+            dir.0.join(UI_FILE),
+            r#"{ "spawn": { "claude_provider": "bedrock" } }"#,
+        )
+        .expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Anthropic,
+            "a provider this client does not know loads as Anthropic"
+        );
+
+        std::fs::write(dir.0.join(UI_FILE), r#"{ "spawn": { "trusted": true } }"#).expect("write");
+        assert_eq!(
+            load_ui_state(&dir.0).spawn.claude_provider,
+            ClaudeProvider::Anthropic,
+            "a file saved before the provider existed loads Anthropic"
         );
     }
 

@@ -562,10 +562,7 @@ fn failed_restart_clears_pending_and_allows_retry(cx: &mut TestAppContext) {
 
     h.click_on("exited-restart-p1");
     duplicate_request(&h.sent(), "s1");
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     assert!(!pending(&mut h, "s1"), "a reconnect forgets every restart");
 }
 
@@ -690,10 +687,7 @@ fn exit_update_between_welcome_and_sessions_list_is_not_discarded(cx: &mut TestA
     let dir = TestDir::new();
     let mut h = single(cx, &dir, session("s1").status("working").build());
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     h.send(updated(session("s1").exited(0).build(), None));
 
     assert!(
@@ -1026,6 +1020,35 @@ fn shift_duplicate_reply_opens_the_locked_prefilled_dialog(cx: &mut TestAppConte
     assert!(
         !painted(&mut h, "spawn-target-repo-r2"),
         "the locked target shows alone"
+    );
+}
+
+#[gpui::test]
+fn shift_duplicate_of_a_deepseek_source_prefills_deepseek(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let mut h = two_repos(cx, &dir, "r1");
+    shift_duplicate(&mut h, "duplicate-new-tab");
+    h.sent();
+    h.send(config_reply(
+        "s1",
+        Some(serde_json::json!({
+            "target": { "kind": "single", "repo_id": "r1", "branch_name": "feat/dup",
+                "base_branch": "origin/dev", "use_worktree": true },
+            "mode": "interactive",
+            "dangerously_skip_permissions": false,
+            "agent_options": { "kind": "claude", "provider": "deepseek" },
+            "model": "deepseek-flash",
+        })),
+    ));
+    assert!(h.root(|root, _| root.spawn_dialog_open()));
+    let selected = dialog_selected(&mut h);
+    assert!(
+        selected.contains(&"spawn-provider-deepseek".to_owned()),
+        "the source's provider is picked: {selected:?}"
+    );
+    assert_eq!(
+        h.root(RootView::spawn_dialog_model).as_deref(),
+        Some("deepseek-flash")
     );
 }
 

@@ -740,6 +740,7 @@ mod tests {
             model.apply(&DaemonMessage::Welcome {
                 protocol_version: 22,
                 supported_versions: vec![22],
+                features: Vec::new(),
             }),
             "clearing a populated store is a change"
         );
@@ -748,6 +749,7 @@ mod tests {
             !model.apply(&DaemonMessage::Welcome {
                 protocol_version: 22,
                 supported_versions: vec![22],
+                features: Vec::new(),
             }),
             "clearing an empty store is no change"
         );
@@ -813,6 +815,7 @@ mod tests {
         model.apply(&DaemonMessage::Welcome {
             protocol_version: 22,
             supported_versions: vec![22],
+            features: Vec::new(),
         });
         assert_eq!(
             model.wanted_missing(&wanted),
@@ -889,6 +892,7 @@ mod tests {
             model.apply(&DaemonMessage::Welcome {
                 protocol_version: 22,
                 supported_versions: vec![22],
+                features: Vec::new(),
             }),
             "dropping a failure is a change"
         );

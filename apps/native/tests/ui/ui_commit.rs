@@ -299,10 +299,7 @@ fn a_draft_survives_folding_the_section_and_a_welcome(cx: &mut TestAppContext) {
     assert_eq!(draft(&mut h, &main_key()).as_deref(), Some("wip"));
     assert_eq!(button(&mut h), Some(("Commit", true)));
 
-    h.send(DaemonMessage::Welcome {
-        protocol_version: 1,
-        supported_versions: vec![1],
-    });
+    h.send(support::welcome(1));
     h.send(status(&["a.rs"], &["b.rs"]));
     assert_eq!(draft(&mut h, &main_key()).as_deref(), Some("wip"));
     assert_eq!(button(&mut h), Some(("Commit", true)));

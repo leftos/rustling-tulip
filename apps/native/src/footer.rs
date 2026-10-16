@@ -379,7 +379,7 @@ mod tests {
         let mut conn = Connection::new();
         conn.on_connecting();
         conn.on_socket_open(HANDSHAKE.port);
-        conn.on_welcome(HANDSHAKE.protocol_version);
+        conn.on_welcome(HANDSHAKE.protocol_version, Vec::new());
         conn
     }
 

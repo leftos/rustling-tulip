@@ -308,6 +308,11 @@ fn tracer_command(launch: &TracerLaunch<'_>) -> std::process::Command {
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+    // The tracer inherits the daemon's environment, so a variable the spawn
+    // must not pass on is removed rather than left out of `env`.
+    for k in &spec.env_remove {
+        cmd.env_remove(k);
+    }
     cmd.env(TRACER_OWNER_ENV, launch.owner);
     // Per-session tracer log so we can debug spawn issues for things like
     // `.cmd` shims and shebang scripts that CreateProcess handles weirdly.
@@ -1002,6 +1007,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("cwd"),
             env: Vec::new(),
+            env_remove: Vec::new(),
             cols: 80,
             rows: 24,
         };
@@ -1019,6 +1025,34 @@ mod tests {
         let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
         assert!(env.contains(&(OsStr::new(super::TRACER_OWNER_ENV), Some(owner.as_os_str()))));
         assert!(env.contains(&(OsStr::new(super::TRACER_LOG_ENV), Some(log.as_os_str()))));
+    }
+
+    #[test]
+    fn tracer_command_removes_listed_env() {
+        use std::ffi::OsStr;
+        let spec = crate::pty::PtySpawnSpec {
+            session_id: "abc".to_string(),
+            program: "prog".to_string(),
+            args: Vec::new(),
+            cwd: PathBuf::from("cwd"),
+            env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-row".to_owned())],
+            env_remove: vec!["ANTHROPIC_API_KEY".to_owned()],
+            cols: 80,
+            rows: 24,
+        };
+        let owner = PathBuf::from("owner-config");
+        let cmd = super::tracer_command(&super::TracerLaunch {
+            tracer: Path::new("rt-tracer"),
+            spec: &spec,
+            pipe_name: "pipe",
+            log_path: None,
+            owner: &owner,
+        });
+        let env: Vec<(&OsStr, Option<&OsStr>)> = cmd.get_envs().collect();
+        assert!(
+            env.contains(&(OsStr::new("ANTHROPIC_API_KEY"), None)),
+            "the inherited variable is removed: {env:?}"
+        );
     }
 
     #[test]

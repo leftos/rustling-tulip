@@ -26,9 +26,9 @@ use crate::palette::{
 use crate::session_menu::{backdrop, dialog_button};
 use crate::spawn_form::{
     APPROVAL_CHOICES, CODEX_SANDBOX_CHOICES, CURSOR_SANDBOX_CHOICES, Control, EnvRow, EnvRowNote,
-    FormInputs, ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, Prefill, RunMode, Runtime,
-    ShareButton, SpawnForm, TabChoices, Target, WorktreeMode, approval_label, codex_sandbox_label,
-    cursor_sandbox_label,
+    FormInputs, ListField, Lock, MODEL_ALIASES, OpenChoice, Outcome, PROVIDER_CHOICES, Prefill,
+    RunMode, Runtime, ShareButton, SpawnForm, TabChoices, Target, WorktreeMode, approval_label,
+    codex_sandbox_label, cursor_sandbox_label, provider_label,
 };
 use crate::spawn_preview::{
     CollisionNotice, RECREATE_LABEL, REUSE_NOTE, ReuseChoice, Tone, collision_notice, member_row,
@@ -88,7 +88,6 @@ const FETCH_FAILED: &str = "Couldn't reach the remote — comparing against the 
 const CURRENT_TAB_DISABLED: &str = "The current tab cannot host terminal panes";
 const HEADLESS_DISABLED: &str = "headless mode is not yet supported for cursor";
 const PROMPT_ROWS: (usize, usize) = (3, 8);
-const MODEL_PLACEHOLDER: &str = "CLI default";
 pub(crate) const CLAUDE_LOCKED: &str = "Ignored while trusted launch is on. Claude will run without --permission-mode. The chosen value is preserved for when you toggle trusted launch off.";
 pub(crate) const CODEX_LOCKED: &str = "Ignored while trusted launch is on. Codex will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
 const CURSOR_LOCKED: &str = "Ignored while trusted launch is on. Cursor will run with --yolo, which overrides sandbox mode. The chosen value is preserved for when you toggle trusted launch off.";
@@ -306,6 +305,10 @@ impl RootView {
             Control::Runtime(form.runtime()),
             Control::OpenIn(form.open_in().clone()),
         ];
+        chosen.extend(
+            form.provider_shown()
+                .then(|| Control::Provider(form.provider())),
+        );
         chosen.extend(form.trusted().then_some(Control::Trusted));
         chosen.extend(form.use_worktree().then_some(Control::UseWorktree));
         chosen.extend(form.use_worktree().then_some(Control::Mode(form.mode())));
@@ -409,6 +412,13 @@ impl RootView {
                 .map(|row| (text(&row.key), text(&row.value)))
                 .collect(),
         )
+    }
+
+    /// Why the Provider row is disabled, while the dialog is open and it
+    /// is.
+    #[must_use]
+    pub fn spawn_dialog_provider_tip(&self) -> Option<&'static str> {
+        self.form_dialog()?.form.provider_tip()
     }
 
     /// The note env row `index` shows about where its value is kept, while
@@ -546,6 +556,7 @@ impl RootView {
             tabs: TabChoices::from_tabs(self.tabs.tabs(), self.tabs.active_id()),
             spawn_defaults: self.sidebar.ui_state().spawn,
             lock,
+            claude_provider_supported: self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER),
         };
         let now = (self.now)();
         let Some((mut form, mut messages)) = SpawnForm::open(inputs, &mut self.branch_cache, now)
@@ -566,7 +577,7 @@ impl RootView {
                 .with_rows(PROMPT_ROWS.0, PROMPT_ROWS.1)
         });
         let model_input =
-            cx.new(|cx| TextInput::new(form.model().to_owned(), MODEL_PLACEHOLDER, cx));
+            cx.new(|cx| TextInput::new(form.model().to_owned(), form.model_placeholder(), cx));
         let mut subscriptions = Self::watch_field(&branch_input, Field::Branch, window, cx);
         subscriptions.extend(Self::watch_field(&base_input, Field::Base, window, cx));
         subscriptions.extend(Self::watch_field(&prompt_input, Field::Prompt, window, cx));
@@ -894,6 +905,19 @@ impl RootView {
         }
     }
 
+    /// Tells the open dialog whether the daemon now connected routes Claude
+    /// to a chosen provider; called on every connection change, so a
+    /// dialog that outlives a daemon restart never sends a provider the new
+    /// daemon would ignore.
+    pub(crate) fn sync_spawn_provider_support(&mut self, cx: &mut Context<Self>) {
+        let supported = self.conn.supports(protocol::FEATURE_CLAUDE_PROVIDER);
+        let Some(SpawnModal::Form(dialog)) = &mut self.spawn_dialog else {
+            return;
+        };
+        dialog.form.set_provider_supported(supported);
+        self.after_spawn_change(cx);
+    }
+
     /// The fields follow the form, a timer waits out a suggestion, and the
     /// preview follows the fields, a timer waiting out its debounce.
     fn after_spawn_change(&mut self, cx: &mut Context<Self>) {
@@ -920,7 +944,7 @@ impl RootView {
         sync_field(
             &dialog.model_input,
             &model,
-            MODEL_PLACEHOLDER.to_owned(),
+            form.model_placeholder().to_owned(),
             cx,
         );
         for (index, (row, inputs)) in form.env_rows().iter().zip(&dialog.env_inputs).enumerate() {
@@ -1168,6 +1192,7 @@ impl RootView {
         let placement = group()
             .child(target_field(form, &focus, cx))
             .child(runtime_field(form, &focus, cx))
+            .children(provider_field(form, &focus, cx))
             .child(open_in_field(form, &focus, cx));
         let run = divided()
             .children(run_rows(dialog, &focus, cx))
@@ -1748,6 +1773,32 @@ fn runtime_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) 
         })
         .collect();
     field("Runtime").child(segmented(buttons))
+}
+
+/// The Provider row under Runtime, for Claude only; disabled, with a
+/// tooltip saying why, while the daemon cannot route to another provider.
+fn provider_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Option<Div> {
+    if !form.provider_shown() {
+        return None;
+    }
+    let buttons = PROVIDER_CHOICES
+        .into_iter()
+        .map(|provider| {
+            let control = Control::Provider(provider);
+            let look = Look {
+                selected: provider == form.provider(),
+                focused: focus == &control,
+                enabled: form.provider_enabled(),
+            };
+            option_button(&control, provider_label(provider), look, cx).into_any_element()
+        })
+        .collect();
+    let row = div().id("spawn-provider").flex().child(segmented(buttons));
+    let row = match form.provider_tip() {
+        Some(tip) => row.tooltip(tooltip(tip)),
+        None => row,
+    };
+    Some(field("Provider").child(row))
 }
 
 fn open_in_field(form: &SpawnForm, focus: &Control, cx: &mut Context<RootView>) -> Div {

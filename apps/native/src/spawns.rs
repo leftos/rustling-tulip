@@ -503,9 +503,7 @@ mod tests {
             mode: SessionMode::Interactive,
             initial_prompt: None,
             dangerously_skip_permissions: false,
-            agent_options: AgentOptions::Claude {
-                permission_mode: None,
-            },
+            agent_options: AgentOptions::claude(None),
             model: None,
             extra_env: Vec::new(),
             secret_env_keys: Vec::new(),

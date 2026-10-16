@@ -69,6 +69,13 @@ pub struct LiveDaemon {
 impl LiveDaemon {
     /// Starts a daemon for `test` and waits for its handshake and `/health`.
     pub fn start(test: &str) -> Self {
+        Self::start_with_env(test, &[])
+    }
+
+    /// [`Self::start`], with `extra` set on the daemon's process after the
+    /// isolation variables (so a row can override one) and kept in
+    /// [`Self::envs`].
+    pub fn start_with_env(test: &str, extra: &[(&'static str, OsString)]) -> Self {
         let daemon =
             target_bin_dir().join(format!("rustling-tulipd{}", std::env::consts::EXE_SUFFIX));
         assert!(
@@ -92,7 +99,8 @@ impl LiveDaemon {
             std::fs::create_dir_all(root.join(sub)).expect("create the test's scratch dirs");
         }
         write_claude_stub(&root.join("fake-bin"));
-        let envs = isolated_envs(&root, test);
+        let mut envs = isolated_envs(&root, test);
+        envs.extend(extra.iter().cloned());
         let mut command = Command::new(&daemon);
         command
             .envs(envs.iter().map(|(key, value)| (*key, value)))

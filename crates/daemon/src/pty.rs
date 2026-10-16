@@ -46,6 +46,9 @@ pub struct PtySpawnSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    /// Variables the tracer, and so the child, must not inherit from the
+    /// daemon's environment (a provider's removed variables).
+    pub env_remove: Vec<String>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -60,6 +63,7 @@ impl std::fmt::Debug for PtySpawnSpec {
             .field("args", &self.args)
             .field("cwd", &self.cwd)
             .field("env_keys", &env_keys)
+            .field("env_remove", &self.env_remove)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
             .finish()
@@ -192,6 +196,7 @@ mod tests {
             args: Vec::new(),
             cwd: PathBuf::from("."),
             env: vec![("ANTHROPIC_API_KEY".to_owned(), "sk-ant-hunter2".to_owned())],
+            env_remove: Vec::new(),
             cols: 80,
             rows: 24,
         };
