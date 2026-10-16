@@ -1823,6 +1823,7 @@ impl RootView {
         if self.appearance_editor.is_some() {
             let typing = self.settings_typing(window, cx);
             if self.on_settings_key(ks, window, cx)
+                || self.on_editor_key(ks, window, cx)
                 || (!typing && self.on_appearance_key(ks, window, cx))
             {
                 cx.stop_propagation();

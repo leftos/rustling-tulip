@@ -92,7 +92,9 @@ Each swatch line is one stop, landing on the chosen swatch, else the first; Left
 
 Picking a swatch, by mouse or keyboard, adds its colour to the recent colours (deduped, at the front) once the level takes the change; a recent swatch's tooltip reads "Recent color #rrggbb". A press that disables its own stop (Apply, a reset link) hands the keyboard to the next enabled stop after it. A click on any Appearance control moves the keyboard stop there, and closing Settings clears its stop.
 
-The stop order, cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
+The editor walks the same stops, Close included, and draws the focus ring on its focused stop. It opens with no stop focused: Tab lands on the first stop and Shift-Tab on Close. The ring wraps, from Close to the first stop and from the first stop back to Close. Enter or Space on Close closes the editor, Tab leaves the hex and filter fields with the typed text kept, and Esc closes the editor whatever stop has focus.
+
+The stop order, ring step (`step`), where focus goes when a press disables its stop (`after_lost`, shared by Settings and the editor), cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
 
 ## Tests
 

@@ -139,6 +139,43 @@ pub(crate) fn stops(
     ring
 }
 
+/// The stop Tab (or Shift-Tab, `back`) moves to from `at` along `ring`,
+/// wrapping at both ends; from no stop, or one the ring no longer holds,
+/// the first stop (the last with `back`).
+pub(crate) fn step(
+    ring: &[AppearanceStop],
+    at: Option<AppearanceStop>,
+    back: bool,
+) -> Option<AppearanceStop> {
+    let last = ring.len().checked_sub(1)?;
+    let next = match at.and_then(|at| ring.iter().position(|stop| *stop == at)) {
+        None | Some(0) if back => last,
+        None => 0,
+        Some(index) if back => index - 1,
+        Some(index) if index == last => 0,
+        Some(index) => index + 1,
+    };
+    ring.get(next).copied()
+}
+
+/// The stop the keyboard moves to when a press took `stop` out of `ring`:
+/// the first stop after its place in `order` (every stop, enabled or not)
+/// that `ring` still holds, searching on round to the start.
+pub(crate) fn after_lost(
+    order: &[AppearanceStop],
+    ring: &[AppearanceStop],
+    stop: AppearanceStop,
+) -> Option<AppearanceStop> {
+    let at = order.iter().position(|s| *s == stop)?;
+    let (before, after) = order.split_at(at);
+    after
+        .iter()
+        .skip(1)
+        .chain(before)
+        .find(|s| ring.contains(s))
+        .copied()
+}
+
 /// Where a swatch line's cursor stands among `colors`: on `cursor` while
 /// the line holds it, else on the `chosen` colour, else on the first.
 pub(crate) fn swatch_cursor(
@@ -426,6 +463,80 @@ mod tests {
             all_off.contains(&FamilyList) && all_off.contains(&Bold),
             "only Apply and the reset links can be disabled"
         );
+    }
+
+    #[test]
+    fn step_wraps_at_both_ends() {
+        let ring = [Swatches(Accent, Presets), Hex(Accent), Bold, Close];
+        assert_eq!(
+            step(&ring, None, false),
+            Some(Swatches(Accent, Presets)),
+            "Tab from no stop: the first"
+        );
+        assert_eq!(
+            step(&ring, None, true),
+            Some(Close),
+            "Shift-Tab from no stop: the last"
+        );
+        assert_eq!(step(&ring, Some(Hex(Accent)), false), Some(Bold));
+        assert_eq!(
+            step(&ring, Some(Hex(Accent)), true),
+            Some(Swatches(Accent, Presets))
+        );
+        assert_eq!(
+            step(&ring, Some(Close), false),
+            Some(Swatches(Accent, Presets)),
+            "forward from the last wraps to the first"
+        );
+        assert_eq!(
+            step(&ring, Some(Swatches(Accent, Presets)), true),
+            Some(Close),
+            "back from the first wraps to the last"
+        );
+        assert_eq!(
+            step(&ring, Some(SizeUp), false),
+            Some(Swatches(Accent, Presets)),
+            "a stop the ring lost counts as none"
+        );
+    }
+
+    #[test]
+    fn after_lost_moves_to_the_next_stop_the_ring_holds() {
+        let order = stops(false, true, |_| true);
+        let ring = stops(false, true, |stop| {
+            !matches!(stop, Apply(Accent) | Reset(ResetRow::Color(Accent)))
+        });
+        assert_eq!(
+            after_lost(&order, &ring, Apply(Accent)),
+            Some(Swatches(Background, Presets)),
+            "past the disabled reset link to the next enabled stop"
+        );
+        let ring_without_bold_reset = stops(false, false, |stop| stop != Reset(ResetRow::Bold));
+        assert_eq!(
+            after_lost(
+                &stops(false, false, |_| true),
+                &ring_without_bold_reset,
+                Reset(ResetRow::Bold)
+            ),
+            Some(Swatches(Accent, Presets)),
+            "the last stop lost: round to the first"
+        );
+        assert_eq!(
+            after_lost(&order, &[], Apply(Accent)),
+            None,
+            "a ring that lost every stop"
+        );
+        assert_eq!(
+            after_lost(&[Bold], &[Bold], Close),
+            None,
+            "a stop the order does not hold"
+        );
+    }
+
+    #[test]
+    fn step_on_an_empty_ring_goes_nowhere() {
+        assert_eq!(step(&[], None, false), None);
+        assert_eq!(step(&[], Some(Close), true), None);
     }
 
     #[test]

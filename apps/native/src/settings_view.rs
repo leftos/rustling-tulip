@@ -17,7 +17,7 @@ use gpui::{
 use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
 
 use crate::appearance;
-use crate::appearance_stops::AppearanceStop;
+use crate::appearance_stops::{AppearanceStop, after_lost};
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
@@ -299,15 +299,21 @@ impl RootView {
         }
     }
 
-    /// What in the Settings frame has the keyboard: `"list"` for the tab
-    /// list, else the focused control's selector.
+    /// What in the Settings frame, or in a session's, repo's or
+    /// workspace's appearance editor, has the keyboard: `"list"` for the
+    /// Settings tab list, else the focused control's or stop's selector.
     #[must_use]
     pub fn settings_focus(&self, window: &Window, cx: &App) -> Option<&'static str> {
         if self.settings_tabs_focus.is_focused(window) {
             return Some("list");
         }
-        self.focused_settings_control(window, cx)
-            .map(SettingsControl::selector)
+        if self.settings_open() {
+            return self
+                .focused_settings_control(window, cx)
+                .map(SettingsControl::selector);
+        }
+        self.focused_appearance_stop(window, cx)
+            .map(AppearanceStop::selector)
     }
 
     /// The shown tab's controls Tab reaches, in order; a disabled one is
@@ -521,23 +527,17 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ring = self.settings_controls(cx);
-        if ring.contains(&SettingsControl::Appearance(stop)) {
+        let ring: Vec<AppearanceStop> = self
+            .settings_controls(cx)
+            .into_iter()
+            .filter_map(SettingsControl::appearance_stop)
+            .collect();
+        if ring.contains(&stop) {
             return;
         }
         let order = self.appearance_stop_order(false);
-        let Some(at) = order.iter().position(|s| *s == stop) else {
-            return;
-        };
-        let (before, after) = order.split_at(at);
-        let next = after
-            .iter()
-            .skip(1)
-            .chain(before)
-            .map(|s| SettingsControl::Appearance(*s))
-            .find(|control| ring.contains(control));
-        if let Some(next) = next {
-            self.move_settings_focus(next, window, cx);
+        if let Some(next) = after_lost(&order, &ring, stop) {
+            self.move_settings_focus(SettingsControl::Appearance(next), window, cx);
         }
     }
 
@@ -1022,7 +1022,7 @@ impl RootView {
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar("Settings", close))
             .child(body)
-            .child(close_footer("settings-footer-close", cx));
+            .child(close_footer("settings-footer-close", false, cx));
         Some(backdrop("settings", panel))
     }
 

@@ -256,6 +256,258 @@ fn a_settings_appearance_stop_does_not_follow_into_the_session_editor(cx: &mut T
     );
 }
 
+/// The stops Settings → Appearance walks with Tab, in order, read by
+/// walking them from its tab list round to it again; Settings is closed
+/// after.
+fn settings_appearance_ring(h: &mut Harness<'_>) -> Vec<&'static str> {
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    assert_eq!(settings_focus(h), Some("list"));
+    let mut ring = Vec::new();
+    for _ in 0..40 {
+        h.keys("tab");
+        let stop = settings_focus(h).expect("Tab stays in the Settings ring");
+        if stop == "list" {
+            break;
+        }
+        ring.push(stop);
+    }
+    assert_eq!(settings_focus(h), Some("list"), "the ring came round");
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+    ring
+}
+
+/// Presses Tab until `stop` has the keyboard.
+fn tab_to(h: &mut Harness<'_>, stop: &str) {
+    for _ in 0..30 {
+        if settings_focus(h) == Some(stop) {
+            return;
+        }
+        h.keys("tab");
+    }
+    assert_eq!(settings_focus(h), Some(stop), "Tab never reached {stop}");
+}
+
+#[gpui::test]
+fn editor_tab_walks_the_same_stops_as_settings(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    let mut ring = settings_appearance_ring(&mut h);
+    assert!(
+        ring.len() > 5,
+        "Settings walks its Appearance stops: {ring:?}"
+    );
+    ring.push("appearance-footer-close");
+
+    open_session_editor(&mut h, "s1");
+    assert_eq!(settings_focus(&mut h), None, "no stop on open");
+    for stop in &ring {
+        h.keys("tab");
+        assert_eq!(
+            settings_focus(&mut h),
+            Some(*stop),
+            "Settings' order, then Close"
+        );
+    }
+    let close = h.bounds("appearance-footer-close");
+    let drawn = h.bounds("appearance-footer-close-ring");
+    assert!(drawn.origin.x >= px(0.0), "Close wears the ring");
+    assert!(
+        drawn.origin.x < close.origin.x && drawn.size.width > close.size.width,
+        "the ring sits round Close"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some(ring[0]),
+        "Tab from Close wraps to the first stop"
+    );
+    assert!(
+        h.bounds("appearance-footer-close-ring").origin.x < px(0.0),
+        "the ring left Close"
+    );
+    h.keys("shift-tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-footer-close"),
+        "Shift-Tab from the first stop lands on Close"
+    );
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some(ring[ring.len() - 2]));
+}
+
+#[gpui::test]
+fn editor_press_that_disables_a_stop_keeps_the_keyboard(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    h.click_on("appearance-accent-hex");
+    type_text(&mut h, "#12AB34");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-apply"));
+    h.keys("enter");
+    assert_eq!(
+        session_appearances(&h.sent(), "s1"),
+        [colored(Some("#12ab34"), None)]
+    );
+    assert!(
+        !can_apply(&mut h, "accent"),
+        "Apply has nothing left to apply"
+    );
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-accent-reset"),
+        "the keyboard moves to the stop after Apply: the reset link the apply enabled"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-background-presets"),
+        "Tab walks on from there"
+    );
+}
+
+#[gpui::test]
+fn editor_click_then_tab_continues_from_the_clicked_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+    tab_to(&mut h, "appearance-bold");
+
+    h.click_on("appearance-background-preset-ink");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-background-presets"),
+        "the click moves the stop"
+    );
+    h.keys("tab");
+    assert_eq!(
+        settings_focus(&mut h),
+        Some("appearance-background-recents"),
+        "the next stop after the clicked line: the recent line the pick made"
+    );
+}
+
+#[gpui::test]
+fn editor_swatch_enter_sends_session_appearance(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-accent-presets"));
+    h.keys("right");
+    assert_eq!(
+        appearance_sends(&h.sent()),
+        0,
+        "Right only moves the cursor"
+    );
+    h.keys("enter");
+
+    let sent = h.sent();
+    assert_eq!(
+        session_appearances(&sent, "s1"),
+        [colored(Some("#e7849b"), None)],
+        "Rose, right of Coral; sent {sent:?}"
+    );
+    assert_eq!(
+        h.root(|root, _| root.appearance_recent_rows("accent")),
+        ["appearance-accent-recent-e7849b"],
+        "a keyboard pick joins the recent colours"
+    );
+    assert!(editor_title(&mut h).is_some(), "the editor stays open");
+}
+
+#[gpui::test]
+fn editor_filter_tab_leaves_the_field(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    h.click_on("appearance-family-filter");
+    assert_eq!(settings_focus(&mut h), Some("appearance-family-filter"));
+    type_text(&mut h, "FIRA");
+    h.keys("tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-family-list"));
+    let names = family_names(&mut h);
+    assert!(
+        !names.is_empty()
+            && names
+                .iter()
+                .all(|name| name.to_lowercase().contains("fira")),
+        "the typed filter stays: {names:?}"
+    );
+    type_text(&mut h, "zzz");
+    assert!(
+        family_names(&mut h).iter().any(|name| name == "Fira Code"),
+        "typing no longer reaches the filter"
+    );
+}
+
+#[gpui::test]
+fn escape_in_editor_with_a_stop_focused_still_closes(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+
+    open_session_editor(&mut h, "s1");
+    tab_to(&mut h, "appearance-bold");
+    h.keys("escape");
+    assert!(editor_title(&mut h).is_none(), "Esc on the bold checkbox");
+
+    open_session_editor(&mut h, "s1");
+    assert_eq!(settings_focus(&mut h), None, "closing cleared the stop");
+    tab_to(&mut h, "appearance-accent-hex");
+    h.keys("escape");
+    assert!(editor_title(&mut h).is_none(), "Esc in the hex field");
+}
+
+#[gpui::test]
+fn editor_close_stop_closes_on_enter(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    h.keys("shift-tab");
+    assert_eq!(settings_focus(&mut h), Some("appearance-footer-close"));
+    h.keys("enter");
+    assert!(editor_title(&mut h).is_none(), "Enter on Close closes");
+    assert_eq!(appearance_sends(&h.sent()), 0);
+}
+
+#[gpui::test]
+fn editor_draws_the_focus_ring_on_its_stop(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    let field = "appearance-accent-hex";
+    let ring = format!("{field}-ring");
+    assert!(h.bounds(&ring).origin.x < px(0.0), "no ring on open");
+    tab_to(&mut h, field);
+    let frame = h.bounds(field);
+    let drawn = h.bounds(&ring);
+    assert!(drawn.origin.x >= px(0.0), "the ring is drawn");
+    assert!(
+        drawn.origin.x < frame.origin.x && drawn.size.width > frame.size.width,
+        "the ring sits round the frame"
+    );
+    h.keys("tab");
+    assert!(
+        h.bounds(&ring).origin.x < px(0.0),
+        "the ring left with the stop"
+    );
+}
+
 #[gpui::test]
 fn clicking_a_preset_swatch_adds_it_to_recents_once(cx: &mut TestAppContext) {
     let dir = TestDir::new();

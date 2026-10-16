@@ -16,8 +16,8 @@ use crate::appearance::{
     Source,
 };
 use crate::appearance_stops::{
-    AppearanceStop, ColorRow, FamilyEntry, FamilyPick, ResetRow, SwatchLine, family_entries,
-    family_highlight, step_family, step_swatch, stops, swatch_cursor,
+    AppearanceStop, ColorRow, FamilyEntry, FamilyPick, ResetRow, SwatchLine, after_lost,
+    family_entries, family_highlight, step, step_family, step_swatch, stops, swatch_cursor,
 };
 use crate::buttons::{ButtonSize, field_frame_with_ring, focus_ring, outlined_button};
 use crate::fonts;
@@ -87,6 +87,9 @@ pub(crate) struct AppearanceEditor {
     family_highlight: Option<FamilyPick>,
     /// Where the family list is scrolled to.
     family_scroll: ScrollHandle,
+    /// The stop Tab walks on from in a session's, repo's or workspace's
+    /// editor; Settings keeps its own.
+    stop: Option<AppearanceStop>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -334,6 +337,7 @@ impl RootView {
             swatch_cursor: None,
             family_highlight: None,
             family_scroll: ScrollHandle::new(),
+            stop: None,
             _subscriptions: subscriptions,
         });
         self.appearance_focus.focus(window);
@@ -666,15 +670,20 @@ impl RootView {
                 this.close_appearance_editor(window, cx);
             },
         ));
+        let focus = self.focused_appearance_stop(window, cx);
         let body = div()
             .px(px(BODY_PAD_X))
             .py(px(BODY_PAD_Y))
-            .children(self.appearance_body(self.focused_appearance_stop(window, cx), cx));
+            .children(self.appearance_body(focus, cx));
         let panel = dialog_card("appearance-panel", EDITOR_WIDTH)
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar(title, close))
             .child(body)
-            .child(close_footer(AppearanceStop::Close.selector(), cx));
+            .child(close_footer(
+                AppearanceStop::Close.selector(),
+                focus == Some(AppearanceStop::Close),
+                cx,
+            ));
         Some(backdrop("appearance-editor", panel))
     }
 
@@ -961,9 +970,112 @@ impl RootView {
         stops(!self.sidebar.recent_colors().is_empty(), close, |_| true)
     }
 
-    /// The Appearance stop that has the keyboard, if one does.
-    fn focused_appearance_stop(&self, window: &Window, cx: &App) -> Option<AppearanceStop> {
-        self.focused_settings_control(window, cx)?.appearance_stop()
+    /// The Appearance stop that has the keyboard, if one does: Settings'
+    /// while Settings is open, else the open editor's.
+    pub(crate) fn focused_appearance_stop(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<AppearanceStop> {
+        if self.settings_open() {
+            return self.focused_settings_control(window, cx)?.appearance_stop();
+        }
+        let stop = self.appearance_editor.as_ref()?.stop?;
+        let has_keyboard = if stop.is_field() {
+            self.appearance_field_has_keyboard(stop, window, cx)
+        } else {
+            self.appearance_focus.is_focused(window)
+        };
+        (has_keyboard && self.appearance_stops(true, cx).contains(&stop)).then_some(stop)
+    }
+
+    /// Whether a session's, repo's or workspace's editor is open.
+    fn editor_open(&self) -> bool {
+        self.appearance_editor
+            .as_ref()
+            .is_some_and(|editor| editor.level != Level::App)
+    }
+
+    /// Gives the editor's keyboard to `stop`; arriving at a stop puts its
+    /// cursor or highlight back on the chosen value.
+    fn move_editor_focus(&mut self, stop: AppearanceStop, window: &mut Window, cx: &App) {
+        let Some(editor) = self.appearance_editor.as_ref() else {
+            return;
+        };
+        if editor.stop != Some(stop) {
+            self.arrive_at_appearance_stop(stop, cx);
+        }
+        if let Some(editor) = self.appearance_editor.as_mut() {
+            editor.stop = Some(stop);
+        }
+        self.focus_appearance_stop(stop, window, cx);
+    }
+
+    /// Tab (Shift-Tab with `back`) in the editor: on to the next stop,
+    /// wrapping between Close and the first stop.
+    fn step_editor_focus(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let ring = self.appearance_stops(true, cx);
+        let at = self.focused_appearance_stop(window, cx);
+        if let Some(next) = step(&ring, at, back) {
+            self.move_editor_focus(next, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Space or Enter on the editor's `stop`, or a click on it. When the
+    /// press took the stop out of the ring, the keyboard moves to the stop
+    /// after its place, so the next Tab walks on from there.
+    fn press_editor_stop(
+        &mut self,
+        stop: AppearanceStop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.press_appearance_stop(stop, window, cx);
+        if self.editor_open() {
+            let ring = self.appearance_stops(true, cx);
+            if !ring.contains(&stop)
+                && let Some(next) = after_lost(&self.appearance_stop_order(true), &ring, stop)
+            {
+                self.move_editor_focus(next, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A key while a session's, repo's or workspace's editor is open;
+    /// returns whether it was the editor's stops'. Tab and Shift-Tab walk
+    /// the stops, Space or Enter presses the focused one, and the arrows
+    /// move along a swatch line or the family list. While a text field has
+    /// the keyboard, only Tab is theirs.
+    pub(crate) fn on_editor_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mods = &keystroke.modifiers;
+        if !self.editor_open() || mods.control || mods.alt || mods.platform || mods.function {
+            return false;
+        }
+        match (keystroke.key.as_str(), mods.shift) {
+            ("tab", back) => {
+                self.step_editor_focus(back, window, cx);
+                true
+            }
+            _ if self.appearance_field_focused(window, cx) => false,
+            ("space" | "enter", false) => match self.focused_appearance_stop(window, cx) {
+                Some(stop) => {
+                    self.press_editor_stop(stop, window, cx);
+                    true
+                }
+                None => false,
+            },
+            (key, false) => self
+                .focused_appearance_stop(window, cx)
+                .is_some_and(|stop| self.on_appearance_stop_key(stop, key, cx)),
+            _ => false,
+        }
     }
 
     /// The text field a field stop is.
@@ -1144,8 +1256,8 @@ impl RootView {
         self.change_appearance(&AppearanceChange::font_family(family), cx);
     }
 
-    /// A press in field stop `stop`'s frame gives the field the keyboard;
-    /// in the Settings modal it also makes it the stop Tab walks on from.
+    /// A press in field stop `stop`'s frame gives the field the keyboard
+    /// and makes it the stop Tab walks on from.
     fn press_appearance_field(
         &mut self,
         stop: AppearanceStop,
@@ -1155,7 +1267,7 @@ impl RootView {
         if self.settings_open() {
             self.press_settings_control(SettingsControl::Appearance(stop), window, cx);
         } else {
-            self.focus_appearance_stop(stop, window, cx);
+            self.move_editor_focus(stop, window, cx);
         }
     }
 
@@ -1169,7 +1281,6 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let control = SettingsControl::Appearance(stop);
         let aimed = !matches!(aim, Aim::Stop);
         if let Some(editor) = self.appearance_editor.as_mut() {
             match aim {
@@ -1178,20 +1289,32 @@ impl RootView {
                 Aim::Family(pick) => editor.family_highlight = Some(pick),
             }
         }
-        if !self.settings_open() {
-            self.press_appearance_stop(stop, window, cx);
-            return;
-        }
         if aimed {
             // The clicked swatch or row stands: arriving would move the
             // cursor or highlight, and the list's scroll, back to the
             // chosen one.
-            self.settings_control = Some(control);
+            self.hold_appearance_stop(stop);
             self.focus_appearance_stop(stop, window, cx);
+        } else if self.settings_open() {
+            self.move_settings_focus(SettingsControl::Appearance(stop), window, cx);
         } else {
-            self.move_settings_focus(control, window, cx);
+            self.move_editor_focus(stop, window, cx);
         }
-        self.press_settings_control(control, window, cx);
+        if self.settings_open() {
+            self.press_settings_control(SettingsControl::Appearance(stop), window, cx);
+        } else {
+            self.press_editor_stop(stop, window, cx);
+        }
+    }
+
+    /// Makes `stop` the one Tab walks on from, without arriving at it: in
+    /// Settings' slot while Settings is open, else in the editor's.
+    fn hold_appearance_stop(&mut self, stop: AppearanceStop) {
+        if self.settings_open() {
+            self.settings_control = Some(SettingsControl::Appearance(stop));
+        } else if let Some(editor) = self.appearance_editor.as_mut() {
+            editor.stop = Some(stop);
+        }
     }
 }
 
@@ -1518,13 +1641,20 @@ fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<
     }
 }
 
-/// The footer band with its Close button, tagged `selector`.
-pub(crate) fn close_footer(selector: &'static str, cx: &mut Context<RootView>) -> Div {
+/// The footer band with its Close button, tagged `selector` and ringed
+/// while `focused`, the ring tagged `<selector>-ring`.
+pub(crate) fn close_footer(
+    selector: &'static str,
+    focused: bool,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let ring =
+        focus_ring(ButtonSize::Regular.radius()).debug_selector(move || format!("{selector}-ring"));
     dialog_footer().child(
-        dialog_button(selector, "Close".to_owned(), false, false, true).on_click(cx.listener(
-            |this, _: &ClickEvent, window, cx| {
+        dialog_button(selector, "Close".to_owned(), false, false, true)
+            .when(focused, |close| close.child(ring))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 this.close_appearance_editor(window, cx);
-            },
-        )),
+            })),
     )
 }
