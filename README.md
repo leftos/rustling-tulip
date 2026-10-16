@@ -102,6 +102,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Reached tests**: the tests a change's diff reaches through the test map, as one nextest filterset; `.\rt.ps1 test -Reached` runs them, and a central or unmapped file reaches the full suite instead.
 - **Recovery**: respawning a session from its history entry: a Claude entry with `claude --resume <conversation id>`, as a Claude session or as a shell that types the command; a Codex or Cursor entry by own-agent recovery.
 - **Relay**: the planned `crates/relay` service on a small VPS that joins a daemon's outbound connection to the phone's, forwarding bytes it cannot read; the pinned TLS runs end to end through it.
+- **Ring (keyboard)**: a native dialog's ordered, wrapping list of stops that Tab and Shift-Tab walk; not the drawn focus ring, the outline around the focused control; see `docs/native-client.md` ("Keyboard reachability").
 - **Rollout file**: Codex's per-thread transcript under `$CODEX_HOME/sessions/YYYY/MM/DD/`, whose name carries the thread id.
 - **Routing variables**: the `ANTHROPIC_*` and `CLAUDE_*` environment variables that point Claude Code at another endpoint, credential and model; built at each spawn, never stored.
 - **Sealing**: the daemon's replacing of a secret row's literal value with a secret reference before the spawn config is captured, at spawn and, for older files, at startup; see `docs/env-secrets.md`.
@@ -112,8 +113,10 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Spike**: throwaway code that proves an approach works, kept outside the main build (`spikes/`) and deleted once its code is ported.
 - **Status glyph**: the shape-and-colour mark for a session's status in the native client (working arc, asking diamond, waiting ring, idle dot); see `docs/native-client.md`.
 - **`status_since`**: the daemon's stamp of a session's last status change, on its snapshot and kept across a reattach; Needs You measures waits from it.
+- **Stop (keyboard)**: a control Tab and Shift-Tab land on in a native dialog; see `docs/native-client.md` ("Keyboard reachability").
 - **Subplan**: a `docs/plans/*.md` design file holding the design and rulings for open items, linked from their issues and deleted once nothing open links it and its durable text is promoted into `docs/`.
 - **Summary view**: the planned third view of a session beside terminal and chat, one summarizer line per stretch of work (RT-111).
+- **Swatch line**: one row of colour swatches in the native client's Appearance views that is a single keyboard stop; Left and Right move along it.
 - **Tailnet**: the user's Tailscale network; the daemon's tailnet listener serves TLS on the host's tailnet addresses (port 8787) with a `tailscale cert` certificate, and `crates/tailnet` wraps the `tailscale` CLI; see `docs/plans/remote-access.md`.
 - **tauri branch**: the branch holding the earlier, retired Tauri desktop app, cut from the `tauri-last` tag and kept as history. Nothing is fixed or built there, and daemon fixes are not cherry-picked to it.
 - **Test map**: `tools/test-map.json`, which maps source paths to the nextest filterset that tests them (`rows`), and lists the `central` files that run the full suite and the paths to `ignore`; `.\rt.ps1 test -Validate` checks it.

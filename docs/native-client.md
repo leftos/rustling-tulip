@@ -82,7 +82,17 @@ Closing a tab, closing a pane but keeping its session, and moving a pane to an e
 
 ## Keyboard reachability
 
-Settings → Appearance and the appearance editor share one set of keyboard stops. Each swatch line is one Tab stop, landing on the chosen swatch; Left and Right move along it, Enter or Space picks. The font filter is a stop, then the family list is one stop: Up and Down move a highlight that scrolls into view, Enter or Space picks. The size − and + buttons are two stops. Tab and Shift-Tab leave the hex and filter fields for the next or previous stop, as the Worktrees path field does, rather than staying inside the field.
+Settings → Appearance and the appearance editor share one set of keyboard stops. Tab and Shift-Tab leave the hex and filter fields for the next or previous stop, as the Worktrees path field does, rather than staying inside the field.
+
+Stops run in reading order, column 1 then column 2: per colour section (Accent, then Background) the preset swatch line, the recent swatch line (only when recents exist), the hex field, Apply (while enabled) and the reset link (while enabled); then the font filter and the family list; size −, size + and the size reset link; the bold checkbox and the bold reset link; then Close, in the session, repo and workspace editor only.
+
+Disabled stops are skipped. The family row has no reset link; the list's Reset row covers it.
+
+Each swatch line is one stop, landing on the chosen swatch, else the first; Left and Right move along it and stop at the ends without wrapping, Enter or Space picks. The family list is one stop, landing on the chosen family, else the first row: Up and Down move a highlight that skips headers, stops at the ends and scrolls into view, Enter or Space picks. After a filter edit the highlight stays on the same family while it is listed, else moves to the first row.
+
+Picking a swatch, by mouse or keyboard, adds its colour to the recent colours (deduped, at the front) once the level takes the change; a recent swatch's tooltip reads "Recent color #rrggbb". A press that disables its own stop (Apply, a reset link) hands the keyboard to the next enabled stop after it. A click on any Appearance control moves the keyboard stop there, and closing Settings clears its stop.
+
+The stop order, cursor and highlight logic is plain Rust in `appearance_stops.rs`, unit-tested; Settings keeps its one focus slot, `settings_control`.
 
 ## Tests
 

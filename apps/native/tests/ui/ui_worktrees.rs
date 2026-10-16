@@ -56,7 +56,7 @@ fn type_text(h: &mut Harness<'_>, text: &str) {
 
 fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
     let root = h.root.clone();
-    h.cx.update(|window, cx| root.read(cx).settings_focus(window))
+    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
 }
 
 fn path(h: &mut Harness<'_>) -> Option<String> {

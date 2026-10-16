@@ -10,13 +10,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
+    AnyElement, App, ClickEvent, Context, Div, Entity, EntityId, FocusHandle, Focusable as _,
     FontWeight, Keystroke, MouseButton, MouseDownEvent, Stateful, Subscription, Window, div,
     prelude::*, px,
 };
 use protocol::{AttentionReason, ClientMessage, CodexSandbox, PermissionMode};
 
 use crate::appearance;
+use crate::appearance_stops::AppearanceStop;
 use crate::appearance_view::{Level, close_footer};
 use crate::buttons::{field_frame, focus_ring};
 use crate::mouse::CopyOnSelect;
@@ -145,6 +146,7 @@ pub(crate) enum SettingsControl {
     WorktreesSave,
     WorktreesReset,
     WorktreesManage,
+    Appearance(AppearanceStop),
 }
 
 impl SettingsControl {
@@ -187,6 +189,15 @@ impl SettingsControl {
             Self::WorktreesSave => "settings-worktrees-root-save",
             Self::WorktreesReset => "settings-worktrees-root-reset",
             Self::WorktreesManage => "settings-worktrees-open-manager",
+            Self::Appearance(stop) => stop.selector(),
+        }
+    }
+
+    /// The Appearance stop this control is, if it is one.
+    pub(crate) const fn appearance_stop(self) -> Option<AppearanceStop> {
+        match self {
+            Self::Appearance(stop) => Some(stop),
+            _ => None,
         }
     }
 }
@@ -291,17 +302,17 @@ impl RootView {
     /// What in the Settings frame has the keyboard: `"list"` for the tab
     /// list, else the focused control's selector.
     #[must_use]
-    pub fn settings_focus(&self, window: &Window) -> Option<&'static str> {
+    pub fn settings_focus(&self, window: &Window, cx: &App) -> Option<&'static str> {
         if self.settings_tabs_focus.is_focused(window) {
             return Some("list");
         }
-        self.focused_settings_control(window)
+        self.focused_settings_control(window, cx)
             .map(SettingsControl::selector)
     }
 
     /// The shown tab's controls Tab reaches, in order; a disabled one is
     /// left out.
-    fn settings_controls(&self) -> Vec<SettingsControl> {
+    fn settings_controls(&self, cx: &App) -> Vec<SettingsControl> {
         match self.settings_tab {
             SettingsTab::General => {
                 let keep_awake = self.keep_awake.map(|_| SettingsControl::KeepAwake);
@@ -336,7 +347,11 @@ impl RootView {
                 controls.push(SettingsControl::WorktreesManage);
                 controls
             }
-            SettingsTab::Appearance => Vec::new(),
+            SettingsTab::Appearance => self
+                .appearance_stops(false, cx)
+                .into_iter()
+                .map(SettingsControl::Appearance)
+                .collect(),
         }
     }
 
@@ -351,16 +366,62 @@ impl RootView {
         controls
     }
 
-    /// The control holding the keyboard, if one does.
-    fn focused_settings_control(&self, window: &Window) -> Option<SettingsControl> {
+    /// The control holding the keyboard, if one does; none while Settings
+    /// is closed.
+    pub(crate) fn focused_settings_control(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<SettingsControl> {
+        if !self.settings_open() {
+            return None;
+        }
+        self.focused_control_in(&self.settings_controls(cx), window, cx)
+    }
+
+    /// The control holding the keyboard among `controls`, the shown tab's
+    /// ring, if one does.
+    fn focused_control_in(
+        &self,
+        controls: &[SettingsControl],
+        window: &Window,
+        cx: &App,
+    ) -> Option<SettingsControl> {
+        if !self.settings_open() {
+            return None;
+        }
         self.settings_control.filter(|control| {
-            let has_keyboard = if *control == SettingsControl::WorktreesPath {
-                self.worktrees_path_focused(window)
-            } else {
-                self.appearance_focus.is_focused(window)
+            let has_keyboard = match control {
+                SettingsControl::WorktreesPath => self.worktrees_path_focused(window),
+                SettingsControl::Appearance(stop) if stop.is_field() => {
+                    self.appearance_field_has_keyboard(*stop, window, cx)
+                }
+                _ => self.appearance_focus.is_focused(window),
             };
-            has_keyboard && self.settings_controls().contains(control)
+            has_keyboard && controls.contains(control)
         })
+    }
+
+    /// Gives the keyboard to `control` as Tab or a press does: a field
+    /// takes it itself. Arriving at an Appearance stop puts its cursor or
+    /// highlight back on the chosen value.
+    pub(crate) fn move_settings_focus(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let arriving = self.settings_control != Some(control);
+        match control {
+            SettingsControl::Appearance(stop) => {
+                if arriving {
+                    self.arrive_at_appearance_stop(stop, cx);
+                }
+                self.settings_control = Some(control);
+                self.focus_appearance_stop(stop, window, cx);
+            }
+            _ => self.focus_settings_control(control, window),
+        }
     }
 
     /// Gives the keyboard to `control`: the path field takes it itself,
@@ -387,11 +448,11 @@ impl RootView {
     /// shown tab's controls make, backwards with `back`. From anywhere off
     /// the ring it goes to the tab list.
     fn step_settings_focus(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let controls = self.settings_controls();
+        let controls = self.settings_controls(cx);
         let at = if self.settings_tabs_focus.is_focused(window) {
             Some(0)
         } else {
-            self.focused_settings_control(window)
+            self.focused_control_in(&controls, window, cx)
                 .and_then(|control| controls.iter().position(|c| *c == control))
                 .map(|index| index + 1)
         };
@@ -405,18 +466,19 @@ impl RootView {
             self.settings_control = None;
             self.settings_tabs_focus.focus(window);
         } else {
-            self.focus_settings_control(controls[next - 1], window);
+            self.move_settings_focus(controls[next - 1], window, cx);
         }
         cx.notify();
     }
 
-    fn press_settings_control(
+    /// A click on `control`, or Space or Enter while it has the keyboard.
+    pub(crate) fn press_settings_control(
         &mut self,
         control: SettingsControl,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus_settings_control(control, window);
+        self.move_settings_focus(control, window, cx);
         match control {
             SettingsControl::KeepAwake => self.toggle_keep_awake(),
             SettingsControl::SidebarView(view) => self.set_sidebar_view(view, cx),
@@ -442,8 +504,41 @@ impl RootView {
             SettingsControl::WorktreesSave => self.save_worktrees_root(),
             SettingsControl::WorktreesReset => self.reset_worktrees_root(cx),
             SettingsControl::WorktreesManage => self.open_worktrees_manager(window, cx),
+            SettingsControl::Appearance(stop) => {
+                self.press_appearance_stop(stop, window, cx);
+                self.keep_keyboard_after_press(stop, window, cx);
+            }
         }
         cx.notify();
+    }
+
+    /// After a press of Appearance stop `stop`: when the press disabled it,
+    /// the keyboard moves to the first stop after its place that the ring
+    /// now holds, so the next Tab walks on from there.
+    fn keep_keyboard_after_press(
+        &mut self,
+        stop: AppearanceStop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ring = self.settings_controls(cx);
+        if ring.contains(&SettingsControl::Appearance(stop)) {
+            return;
+        }
+        let order = self.appearance_stop_order(false);
+        let Some(at) = order.iter().position(|s| *s == stop) else {
+            return;
+        };
+        let (before, after) = order.split_at(at);
+        let next = after
+            .iter()
+            .skip(1)
+            .chain(before)
+            .map(|s| SettingsControl::Appearance(*s))
+            .find(|control| ring.contains(control));
+        if let Some(next) = next {
+            self.move_settings_focus(next, window, cx);
+        }
     }
 
     /// The worktrees root the user set, if they set one.
@@ -752,9 +847,10 @@ impl RootView {
 
     /// A key while Settings is open; returns whether it was the frame's.
     /// Tab and Shift+Tab walk the ring of the tab list and the shown tab's
-    /// controls, Up and Down on the tab list change the tab, and Space or
-    /// Enter presses the focused control. On Appearance, a key anywhere
-    /// but the tab list is the appearance editor's.
+    /// controls, Up and Down on the tab list change the tab, Space or
+    /// Enter presses the focused control, and the arrows move along an
+    /// Appearance swatch line or family list. While a text field has the
+    /// keyboard, only Tab is the frame's.
     pub(crate) fn on_settings_key(
         &mut self,
         keystroke: &Keystroke,
@@ -766,10 +862,7 @@ impl RootView {
             return false;
         }
         let on_list = self.settings_tabs_focus.is_focused(window);
-        if self.settings_tab == SettingsTab::Appearance && !on_list {
-            return false;
-        }
-        let typing = self.worktrees_path_focused(window);
+        let typing = self.settings_typing(window, cx);
         match (keystroke.key.as_str(), mods.shift) {
             ("tab", back) => {
                 self.step_settings_focus(back, window, cx);
@@ -781,15 +874,27 @@ impl RootView {
                 self.select_settings_tab(tab, window, cx);
                 true
             }
-            ("space" | "enter", false) => match self.focused_settings_control(window) {
+            ("space" | "enter", false) => match self.focused_settings_control(window, cx) {
                 Some(control) => {
                     self.press_settings_control(control, window, cx);
                     true
                 }
                 None => false,
             },
+            (key, false) => match self.focused_settings_control(window, cx) {
+                Some(SettingsControl::Appearance(stop)) => {
+                    self.on_appearance_stop_key(stop, key, cx)
+                }
+                _ => false,
+            },
             _ => false,
         }
+    }
+
+    /// Whether a text field in the Settings modal or the appearance editor
+    /// has the keyboard, so keys other than Tab are its.
+    pub(crate) fn settings_typing(&self, window: &Window, cx: &App) -> bool {
+        self.worktrees_path_focused(window) || self.appearance_field_focused(window, cx)
     }
 
     /// The daemon's keep-awake state, or `None` when this connection has
@@ -976,11 +1081,11 @@ impl RootView {
     }
 
     fn settings_content(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let focused = self.focused_settings_control(window);
+        let focused = self.focused_settings_control(window, cx);
         match self.settings_tab {
             SettingsTab::General => self.general_tab(focused, cx),
             SettingsTab::Appearance => self
-                .appearance_body(cx)
+                .appearance_body(focused.and_then(SettingsControl::appearance_stop), cx)
                 .map(IntoElement::into_any_element)
                 .into_iter()
                 .collect(),

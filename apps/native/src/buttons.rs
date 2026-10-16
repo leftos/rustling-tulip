@@ -248,7 +248,21 @@ pub(crate) fn field_look(focused: bool) -> FieldLook {
 /// The frame of a text field, ringed while `focused`; the caller adds the
 /// input as its child.
 pub(crate) fn field_frame(focused: bool) -> Div {
+    framed_field(focused, None)
+}
+
+/// [`field_frame`] whose focus ring, while drawn, is tagged `ring_selector`.
+pub(crate) fn field_frame_with_ring(focused: bool, ring_selector: String) -> Div {
+    framed_field(focused, Some(ring_selector))
+}
+
+fn framed_field(focused: bool, ring_selector: Option<String>) -> Div {
     let look = field_look(focused);
+    let ring = focus_ring(look.radius);
+    let ring = match ring_selector {
+        Some(selector) => ring.debug_selector(move || selector),
+        None => ring,
+    };
     div()
         .flex()
         .items_center()
@@ -258,7 +272,7 @@ pub(crate) fn field_frame(focused: bool) -> Div {
         .border_1()
         .border_color(gpui::rgb(look.border))
         .rounded(px(look.radius))
-        .when(look.ring, |field| field.child(focus_ring(look.radius)))
+        .when(look.ring, |field| field.child(ring))
 }
 
 #[cfg(test)]

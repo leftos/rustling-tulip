@@ -235,7 +235,7 @@ fn notifications_tab_toggles_saved(cx: &mut TestAppContext) {
 
 fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
     let root = h.root.clone();
-    h.cx.update(|window, cx| root.read(cx).settings_focus(window))
+    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
 }
 
 #[gpui::test]

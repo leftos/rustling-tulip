@@ -219,10 +219,66 @@ fn a_preset_click_sends_accent_and_frame_for_the_session(cx: &mut TestAppContext
         "Resolved: #e7849b from current",
         "the send still on its way shows"
     );
-    assert!(
-        h.root(|root, _| root.appearance_recent_rows("accent"))
-            .is_empty(),
-        "a preset is not a recent colour"
+    assert_eq!(
+        h.root(|root, _| root.appearance_recent_rows("accent")),
+        ["appearance-accent-recent-e7849b"],
+        "a picked preset joins the recent colours"
+    );
+}
+
+fn settings_focus(h: &mut Harness<'_>) -> Option<&'static str> {
+    let root = h.root.clone();
+    h.cx.update(|window, cx| root.read(cx).settings_focus(window, cx))
+}
+
+#[gpui::test]
+fn a_settings_appearance_stop_does_not_follow_into_the_session_editor(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    h.keys("ctrl-,");
+    h.click_on("settings-tab-appearance");
+    for _ in 0..30 {
+        if settings_focus(&mut h) == Some("appearance-bold") {
+            break;
+        }
+        h.keys("tab");
+    }
+    assert_eq!(settings_focus(&mut h), Some("appearance-bold"));
+    h.keys("escape");
+    assert!(!h.root(|root, _| root.settings_open()), "Settings closed");
+
+    open_session_editor(&mut h, "s1");
+    assert_eq!(
+        settings_focus(&mut h),
+        None,
+        "no stop is focused, so none draws the ring"
+    );
+}
+
+#[gpui::test]
+fn clicking_a_preset_swatch_adds_it_to_recents_once(cx: &mut TestAppContext) {
+    let dir = TestDir::new();
+    let fixture = single_in_repo(AppearanceOverrides::default(), repo("r1", "C:/repos/r1"));
+    let mut h = focused(cx, &dir, &fixture);
+    open_session_editor(&mut h, "s1");
+
+    h.click_on("appearance-background-preset-ink");
+    h.click_on("appearance-accent-preset-rose");
+    h.click_on("appearance-accent-preset-rose");
+
+    assert_eq!(
+        h.root(|root, _| root.appearance_recent_rows("accent")),
+        [
+            "appearance-accent-recent-e7849b",
+            "appearance-accent-recent-0b1020"
+        ],
+        "each picked colour once, the newest first"
+    );
+    assert_eq!(
+        saved_ui(&dir)["recent_colors"],
+        serde_json::json!(["#e7849b", "#0b1020"]),
+        "the recent colours are saved"
     );
 }
 

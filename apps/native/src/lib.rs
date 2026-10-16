@@ -7,6 +7,7 @@
 
 mod activity_bar;
 pub mod appearance;
+mod appearance_stops;
 mod appearance_view;
 mod assets;
 mod branch_fate;
@@ -1820,7 +1821,7 @@ impl RootView {
             return;
         }
         if self.appearance_editor.is_some() {
-            let typing = self.worktrees_path_focused(window);
+            let typing = self.settings_typing(window, cx);
             if self.on_settings_key(ks, window, cx)
                 || (!typing && self.on_appearance_key(ks, window, cx))
             {
@@ -2144,7 +2145,7 @@ impl Render for RootView {
             .children(self.chip_layer())
             .children(self.spawn_dialog_layers(cx))
             .children(self.shell_dialog_layer(cx))
-            .children(self.appearance_editor_layer(cx))
+            .children(self.appearance_editor_layer(window, cx))
             .children(self.settings_layer(window, cx))
             .children(self.worktrees_manager_layer(window, cx))
             .children(self.recover_layer(window, cx))

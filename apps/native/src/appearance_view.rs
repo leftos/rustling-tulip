@@ -6,7 +6,8 @@
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, Keystroke,
-    SharedString, Stateful, Subscription, Window, div, prelude::*, px,
+    MouseButton, MouseDownEvent, ScrollHandle, SharedString, Stateful, Subscription, Window, div,
+    prelude::*, px,
 };
 use protocol::{AppearanceOverrides, ClientMessage};
 
@@ -14,11 +15,16 @@ use crate::appearance::{
     self, ACCENT_PRESETS, AppLevel, AppearanceChange, BACKGROUND_PRESETS, Field, Preset, Resolved,
     Source,
 };
-use crate::buttons::{ButtonSize, field_frame, outlined_button};
-use crate::fonts::{self, BUNDLED_FAMILIES};
+use crate::appearance_stops::{
+    AppearanceStop, ColorRow, FamilyEntry, FamilyPick, ResetRow, SwatchLine, family_entries,
+    family_highlight, step_family, step_swatch, stops, swatch_cursor,
+};
+use crate::buttons::{ButtonSize, field_frame_with_ring, focus_ring, outlined_button};
+use crate::fonts;
 use crate::notices::ToastKind;
 use crate::palette::{GROUND, HOVER, LINE_STRONG};
 use crate::session_menu::{backdrop, dialog_button, muted_row};
+use crate::settings_view::SettingsControl;
 use crate::spawn_view::{
     checkbox_row, close_button, dialog_card, dialog_footer, dialog_title_bar, field_label,
 };
@@ -33,6 +39,9 @@ const SWATCH_SIZE: f32 = 18.0;
 const SWATCH_RADIUS: f32 = 5.0;
 /// The family list's corner radius, a text field's.
 const LIST_RADIUS: f32 = 7.0;
+/// A family list row's corner radius, and a reset link's.
+const ROW_RADIUS: f32 = 4.0;
+const LINK_RADIUS: f32 = 4.0;
 /// The padding round the editor's rows.
 const BODY_PAD_X: f32 = 18.0;
 const BODY_PAD_Y: f32 = 16.0;
@@ -70,25 +79,18 @@ pub(crate) struct AppearanceEditor {
     family_filter: Entity<TextInput>,
     /// The installed families, loaded when the editor opens.
     system_families: Vec<SharedString>,
+    /// The colour under the focused swatch line's cursor, once an arrow
+    /// moved it off the chosen swatch.
+    swatch_cursor: Option<u32>,
+    /// The family list row the highlight is on, once an arrow moved it off
+    /// the chosen family.
+    family_highlight: Option<FamilyPick>,
+    /// Where the family list is scrolled to.
+    family_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
-/// A colour row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ColorRow {
-    /// The accent, which sets the pane frame with it.
-    Accent,
-    Background,
-}
-
 impl ColorRow {
-    const fn key(self) -> &'static str {
-        match self {
-            Self::Accent => "accent",
-            Self::Background => "background",
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Accent => "Sidebar accent and pane frame",
@@ -204,52 +206,6 @@ impl LevelView {
             _ => ColorRow::named(row).map(|row| self.color_hint(row)),
         }
     }
-}
-
-/// One line of the font family list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FamilyEntry {
-    /// The row that clears the level's family.
-    Reset,
-    Header(&'static str),
-    /// A family, `saved` when it is the level's value from neither list.
-    Family {
-        name: SharedString,
-        saved: bool,
-    },
-}
-
-/// The family list: the reset row, then each group with a match for
-/// `filter` (case-insensitive) under its header.
-fn family_entries(system: &[SharedString], own: Option<&str>, filter: &str) -> Vec<FamilyEntry> {
-    let needle = filter.trim().to_lowercase();
-    let matches = |name: &str| name.to_lowercase().contains(&needle);
-    let bundled: Vec<SharedString> = BUNDLED_FAMILIES
-        .iter()
-        .map(|name| SharedString::from(*name))
-        .collect();
-    let saved: Vec<SharedString> = own
-        .filter(|name| !bundled.iter().chain(system).any(|family| family == name))
-        .map(|name| SharedString::from(name.to_owned()))
-        .into_iter()
-        .collect();
-    let mut entries = vec![FamilyEntry::Reset];
-    for (header, names, is_saved) in [
-        ("Current", &saved, true),
-        ("Bundled", &bundled, false),
-        ("System", &system.to_vec(), false),
-    ] {
-        let shown: Vec<&SharedString> = names.iter().filter(|name| matches(name)).collect();
-        if shown.is_empty() {
-            continue;
-        }
-        entries.push(FamilyEntry::Header(header));
-        entries.extend(shown.into_iter().map(|name| FamilyEntry::Family {
-            name: name.clone(),
-            saved: is_saved,
-        }));
-    }
-    entries
 }
 
 impl RootView {
@@ -375,6 +331,9 @@ impl RootView {
             background_hex,
             family_filter,
             system_families: fonts::system_families(cx),
+            swatch_cursor: None,
+            family_highlight: None,
+            family_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         });
         self.appearance_focus.focus(window);
@@ -387,6 +346,7 @@ impl RootView {
             // The Worktrees tab lives with Settings: dropping it here means
             // a picker answer arriving later finds nothing to fill.
             self.worktrees_tab = None;
+            self.settings_control = None;
             self.focus_active_pane(window, cx);
             cx.notify();
         }
@@ -466,7 +426,7 @@ impl RootView {
         !self.appearance_field_focused(window, cx)
     }
 
-    fn appearance_field_focused(&self, window: &Window, cx: &App) -> bool {
+    pub(crate) fn appearance_field_focused(&self, window: &Window, cx: &App) -> bool {
         self.appearance_editor.as_ref().is_some_and(|editor| {
             [
                 &editor.accent_hex,
@@ -535,8 +495,14 @@ impl RootView {
     /// too.
     fn hex_ready(&self, row: ColorRow, cx: &App) -> Option<String> {
         let editor = self.appearance_editor.as_ref()?;
-        let typed = appearance::parse_hex_input(row.input(editor).read(cx).text())?;
         let view = self.level_view(&editor.level)?;
+        self.hex_ready_in(row, &view, cx)
+    }
+
+    /// [`Self::hex_ready`] against the level as `view` has it.
+    fn hex_ready_in(&self, row: ColorRow, view: &LevelView, cx: &App) -> Option<String> {
+        let editor = self.appearance_editor.as_ref()?;
+        let typed = appearance::parse_hex_input(row.input(editor).read(cx).text())?;
         let change = row.change(Some(typed.clone())).normalized().ok()?;
         (!change.changes_nothing_in(&view.own)).then_some(typed)
     }
@@ -570,23 +536,37 @@ impl RootView {
         let Some(color) = self.hex_ready(row, cx) else {
             return;
         };
-        if self.sidebar.push_recent_color(&color) {
+        if self.change_appearance(&row.change(Some(color.clone())), cx)
+            && self.sidebar.push_recent_color(&color)
+        {
             self.save_ui();
         }
-        self.change_appearance(&row.change(Some(color)), cx);
+    }
+
+    /// A swatch picked by click, Enter or Space: sets its colour and, once
+    /// the level takes it, puts it first among the recent colours, which
+    /// are saved.
+    fn pick_swatch(&mut self, row: ColorRow, color: &str, cx: &mut Context<Self>) {
+        if self.change_appearance(&row.change(Some(color.to_owned())), cx)
+            && self.sidebar.push_recent_color(color)
+        {
+            self.save_ui();
+        }
     }
 
     /// Sets `change` at the editor's level: a session's goes out in flight
     /// under a request id, a repo's or workspace's with its other stored
     /// fields, the app's is saved on this machine. A change that changes
     /// nothing does nothing; a value the protocol refuses raises a toast.
-    fn change_appearance(&mut self, change: &AppearanceChange, cx: &mut Context<Self>) {
+    /// Returns whether the level took the change, one that changes nothing
+    /// included.
+    fn change_appearance(&mut self, change: &AppearanceChange, cx: &mut Context<Self>) -> bool {
         let Some(editor) = self.appearance_editor.as_ref() else {
-            return;
+            return false;
         };
         let level = editor.level.clone();
         let Some(view) = self.level_view(&level) else {
-            return;
+            return false;
         };
         let change = match change.clone().normalized() {
             Ok(change) => change,
@@ -598,11 +578,11 @@ impl RootView {
                     Some(err.to_string()),
                     cx,
                 );
-                return;
+                return false;
             }
         };
         if change.changes_nothing_in(&view.own) {
-            return;
+            return true;
         }
         let appearance = change.apply_to(&view.own);
         if matches!(level, Level::Repo(_) | Level::Workspace(_)) {
@@ -622,6 +602,7 @@ impl RootView {
             Level::App => self.set_app_appearance(&appearance, cx),
         }
         cx.notify();
+        true
     }
 
     /// Makes `overrides` the app level: its colours and its font, each
@@ -670,7 +651,11 @@ impl RootView {
 
     /// The editor of a session, repo or workspace over a backdrop that takes
     /// every click beneath it; the app level's is the Settings modal's.
-    pub(crate) fn appearance_editor_layer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn appearance_editor_layer(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let editor = self.appearance_editor.as_ref()?;
         if editor.level == Level::App {
             return None;
@@ -684,17 +669,22 @@ impl RootView {
         let body = div()
             .px(px(BODY_PAD_X))
             .py(px(BODY_PAD_Y))
-            .children(self.appearance_body(cx));
+            .children(self.appearance_body(self.focused_appearance_stop(window, cx), cx));
         let panel = dialog_card("appearance-panel", EDITOR_WIDTH)
             .track_focus(&self.appearance_focus)
             .child(dialog_title_bar(title, close))
             .child(body)
-            .child(close_footer("appearance-footer-close", cx));
+            .child(close_footer(AppearanceStop::Close.selector(), cx));
         Some(backdrop("appearance-editor", panel))
     }
 
-    /// The editor's rows in two columns: the colours, then the font.
-    pub(crate) fn appearance_body(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// The editor's rows in two columns: the colours, then the font; stop
+    /// `focus`, which has the keyboard, wears the focus ring.
+    pub(crate) fn appearance_body(
+        &self,
+        focus: Option<AppearanceStop>,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let editor = self.appearance_editor.as_ref()?;
         let view = self.level_view(&editor.level)?;
         let reset = editor.level.reset_label();
@@ -703,33 +693,45 @@ impl RootView {
             .flex_col()
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
-            .child(self.color_section(editor, &view, ColorRow::Accent, cx))
-            .child(self.color_section(editor, &view, ColorRow::Background, cx));
+            .child(self.color_section(editor, &view, ColorRow::Accent, focus, cx))
+            .child(self.color_section(editor, &view, ColorRow::Background, focus, cx));
         let font = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
             .w(px(COLUMN_WIDTH))
-            .child(Self::family_section(editor, &view, cx))
-            .child(size_section(&view, reset, cx))
-            .child(bold_section(&view, reset, cx));
+            .child(Self::family_section(editor, &view, focus, cx))
+            .child(size_section(&view, reset, focus, cx))
+            .child(bold_section(&view, reset, focus, cx));
         Some(div().flex().gap(px(16.0)).child(colours).child(font))
     }
 
-    /// The font family: its filter, then the list under it.
-    fn family_section(editor: &AppearanceEditor, view: &LevelView, cx: &mut Context<Self>) -> Div {
+    /// The font family: its filter, then the list under it, its highlight
+    /// ringed while the list has the keyboard.
+    fn family_section(
+        editor: &AppearanceEditor,
+        view: &LevelView,
+        focus: Option<AppearanceStop>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let own = view.own.terminal_font_family.as_deref();
         let filter = editor.family_filter.read(cx).text().to_owned();
         let entries = family_entries(&editor.system_families, own, &filter);
         let reset = editor.level.reset_label();
+        let highlight = (focus == Some(AppearanceStop::FamilyList))
+            .then(|| family_highlight(&entries, editor.family_highlight.as_ref(), own))
+            .flatten();
         let rows: Vec<AnyElement> = entries
             .into_iter()
-            .map(|entry| family_row(&entry, own, reset, cx))
+            .enumerate()
+            .map(|(at, entry)| family_row(&entry, own, reset, highlight == Some(at), cx))
             .collect();
         let list = div()
-            .id("appearance-family-list")
+            .id(AppearanceStop::FamilyList.selector())
+            .debug_selector(|| AppearanceStop::FamilyList.selector().to_owned())
             .h(px(FAMILY_LIST_HEIGHT))
             .overflow_y_scroll()
+            .track_scroll(&editor.family_scroll)
             .flex()
             .flex_col()
             .p(px(3.0))
@@ -739,7 +741,12 @@ impl RootView {
             .rounded(px(LIST_RADIUS))
             .children(rows);
         section("Font family")
-            .child(input_box("appearance-family-filter", &editor.family_filter))
+            .child(input_box(
+                AppearanceStop::FamilyFilter,
+                &editor.family_filter,
+                focus,
+                cx,
+            ))
             .child(list)
             .child(hint_line("appearance-family-hint", view.family_hint()))
     }
@@ -754,38 +761,52 @@ fn section(label: &'static str) -> Div {
         .child(field_label(label))
 }
 
-/// A row's reset link: its selector, its text and the change it makes.
-struct Reset {
-    selector: &'static str,
+/// A row's reset link: its row, its text, and whether it has the keyboard.
+#[derive(Clone, Copy)]
+struct ResetLink {
+    row: ResetRow,
     label: &'static str,
-    change: AppearanceChange,
+    focused: bool,
 }
 
 /// The change a row's reset link makes: it clears the row's field.
-fn reset_change(row: &str) -> Option<AppearanceChange> {
+fn reset_change(row: ResetRow) -> AppearanceChange {
     match row {
-        "family" => Some(AppearanceChange::font_family(None)),
-        "size" => Some(AppearanceChange::font_size(None)),
-        "bold" => Some(AppearanceChange::font_bold(None)),
-        _ => ColorRow::named(row).map(|row| row.change(None)),
+        ResetRow::Color(row) => row.change(None),
+        ResetRow::Size => AppearanceChange::font_size(None),
+        ResetRow::Bold => AppearanceChange::font_bold(None),
     }
 }
 
-/// `label` with the row's reset link at the right; the link is dimmed and
-/// inert while the level `own` does not set the field.
+/// Whether row `row`'s reset link acts: the level `own` sets the field.
+fn can_reset(row: ResetRow, own: &AppearanceOverrides) -> bool {
+    !reset_change(row).changes_nothing_in(own)
+}
+
+/// The reset row named `name` (`accent`, `background`, `size` or `bold`).
+fn reset_row_named(name: &str) -> Option<ResetRow> {
+    match name {
+        "size" => Some(ResetRow::Size),
+        "bold" => Some(ResetRow::Bold),
+        _ => ColorRow::named(name).map(ResetRow::Color),
+    }
+}
+
+/// `label` with the row's reset link at the right, ringed while it has
+/// the keyboard; the link is dimmed and inert while the level `own` does
+/// not set the field.
 fn header_with_reset(
     label: impl IntoElement,
-    reset: Reset,
+    reset: ResetLink,
     own: &AppearanceOverrides,
     cx: &mut Context<RootView>,
 ) -> Div {
-    let enabled = !reset.change.changes_nothing_in(own);
-    let link = link(reset.selector, reset.label, enabled);
+    let stop = AppearanceStop::Reset(reset.row);
+    let enabled = can_reset(reset.row, own);
+    let link = link(stop.selector(), reset.label, enabled)
+        .when(reset.focused, |link| link.child(focus_ring(LINK_RADIUS)));
     let link = if enabled {
-        let change = reset.change;
-        link.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            this.change_appearance(&change, cx);
-        }))
+        link.on_click(click_stop(stop, Aim::Stop, cx))
     } else {
         link
     };
@@ -798,8 +819,8 @@ fn header_with_reset(
 }
 
 impl RootView {
-    /// Whether row `row`'s reset link acts: the editor's level sets the
-    /// row's field.
+    /// Whether row `row`'s reset link (`accent`, `background`, `size` or
+    /// `bold`) acts: the editor's level sets the row's field.
     #[must_use]
     pub fn appearance_can_reset(&self, row: &str) -> bool {
         let Some(view) = self
@@ -809,7 +830,7 @@ impl RootView {
         else {
             return false;
         };
-        reset_change(row).is_some_and(|change| !change.changes_nothing_in(&view.own))
+        reset_row_named(row).is_some_and(|row| can_reset(row, &view.own))
     }
 
     /// A colour row: the presets, the recent colours, the hex field with
@@ -819,16 +840,26 @@ impl RootView {
         editor: &AppearanceEditor,
         view: &LevelView,
         row: ColorRow,
+        focus: Option<AppearanceStop>,
         cx: &mut Context<Self>,
     ) -> Div {
         let recent = self.sidebar.recent_colors();
-        let ready = self.hex_ready(row, cx).is_some();
+        let ready = self.hex_ready_in(row, view, cx).is_some();
         let own = row.own(&view.own);
         let key = row.key();
+        // The swatch under a focused line's cursor wears the ring.
+        let cursor = |line: SwatchLine, colors: &[u32]| {
+            (focus == Some(AppearanceStop::Swatches(row, line)))
+                .then(|| swatch_cursor(colors, editor.swatch_cursor, own))
+                .flatten()
+        };
+        let preset_colors: Vec<u32> = row.presets().iter().map(|preset| preset.color).collect();
+        let preset_cursor = cursor(SwatchLine::Presets, &preset_colors);
         let presets: Vec<AnyElement> = row
             .presets()
             .iter()
-            .map(|preset| {
+            .enumerate()
+            .map(|(at, preset)| {
                 let color = appearance::hex(preset.color);
                 swatch(
                     format!(
@@ -837,41 +868,53 @@ impl RootView {
                     ),
                     preset.color,
                     format!("{} ({color})", preset.name),
-                    own == Some(preset.color),
+                    Mark {
+                        chosen: own == Some(preset.color),
+                        focused: preset_cursor == Some(at),
+                    },
                 )
-                .on_click(pick(row, color, cx))
+                .on_click(click_stop(
+                    AppearanceStop::Swatches(row, SwatchLine::Presets),
+                    Aim::Swatch(preset.color),
+                    cx,
+                ))
                 .into_any_element()
             })
             .collect();
+        let recent_cursor = cursor(SwatchLine::Recent, &recent);
         let recent: Vec<AnyElement> = recent
             .iter()
-            .map(|&value| {
+            .enumerate()
+            .map(|(at, &value)| {
                 let color = appearance::hex(value);
                 swatch(
                     format!("appearance-{key}-recent-{value:06x}"),
                     value,
-                    format!("Recent custom color {color}"),
-                    own == Some(value),
+                    format!("Recent color {color}"),
+                    Mark {
+                        chosen: own == Some(value),
+                        focused: recent_cursor == Some(at),
+                    },
                 )
-                .on_click(pick(row, color, cx))
+                .on_click(click_stop(
+                    AppearanceStop::Swatches(row, SwatchLine::Recent),
+                    Aim::Swatch(value),
+                    cx,
+                ))
                 .into_any_element()
             })
             .collect();
         let label = field_label(row.label());
-        let reset_selector = match row {
-            ColorRow::Accent => "appearance-accent-reset",
-            ColorRow::Background => "appearance-background-reset",
-        };
         div()
             .flex()
             .flex_col()
             .gap(px(7.0))
             .child(header_with_reset(
                 label,
-                Reset {
-                    selector: reset_selector,
+                ResetLink {
+                    row: ResetRow::Color(row),
                     label: editor.level.reset_label(),
-                    change: row.change(None),
+                    focused: focus == Some(AppearanceStop::Reset(ResetRow::Color(row))),
                 },
                 &view.own,
                 cx,
@@ -880,7 +923,7 @@ impl RootView {
             .when(!recent.is_empty(), |section| {
                 section.child(swatch_line(recent))
             })
-            .child(hex_line(editor, row, ready, cx))
+            .child(hex_line(editor, row, ready, focus, cx))
             .child(hint_line(
                 match row {
                     ColorRow::Accent => "appearance-accent-hint",
@@ -891,15 +934,284 @@ impl RootView {
     }
 }
 
-/// The click that sets `color` in `row`, without entering it among the
-/// recent colours.
-fn pick(
-    row: ColorRow,
-    color: String,
+/// The keyboard stops of the editor's rows ([`crate::appearance_stops`]).
+impl RootView {
+    /// The stops Tab walks, Apply and the reset links only while they act;
+    /// `close` adds the editor's Close.
+    pub(crate) fn appearance_stops(&self, close: bool, cx: &App) -> Vec<AppearanceStop> {
+        let has_recent = !self.sidebar.recent_colors().is_empty();
+        let view = self
+            .appearance_editor
+            .as_ref()
+            .and_then(|editor| self.level_view(&editor.level));
+        stops(has_recent, close, |stop| match stop {
+            AppearanceStop::Apply(row) => view
+                .as_ref()
+                .is_some_and(|view| self.hex_ready_in(row, view, cx).is_some()),
+            AppearanceStop::Reset(row) => {
+                view.as_ref().is_some_and(|view| can_reset(row, &view.own))
+            }
+            _ => true,
+        })
+    }
+
+    /// Every stop in the order Tab walks them, enabled or not; `close`
+    /// adds the editor's Close.
+    pub(crate) fn appearance_stop_order(&self, close: bool) -> Vec<AppearanceStop> {
+        stops(!self.sidebar.recent_colors().is_empty(), close, |_| true)
+    }
+
+    /// The Appearance stop that has the keyboard, if one does.
+    fn focused_appearance_stop(&self, window: &Window, cx: &App) -> Option<AppearanceStop> {
+        self.focused_settings_control(window, cx)?.appearance_stop()
+    }
+
+    /// The text field a field stop is.
+    fn stop_field(&self, stop: AppearanceStop) -> Option<&Entity<TextInput>> {
+        let editor = self.appearance_editor.as_ref()?;
+        match stop {
+            AppearanceStop::Hex(row) => Some(row.input(editor)),
+            AppearanceStop::FamilyFilter => Some(&editor.family_filter),
+            _ => None,
+        }
+    }
+
+    /// Whether field stop `stop`'s text field has the keyboard.
+    pub(crate) fn appearance_field_has_keyboard(
+        &self,
+        stop: AppearanceStop,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        self.stop_field(stop)
+            .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Gives the keyboard to `stop`: a field takes it itself, every other
+    /// stop through the modal's focus.
+    pub(crate) fn focus_appearance_stop(
+        &self,
+        stop: AppearanceStop,
+        window: &mut Window,
+        cx: &App,
+    ) {
+        match self.stop_field(stop) {
+            Some(input) => input.read(cx).focus_handle(cx).focus(window),
+            None => self.appearance_focus.focus(window),
+        }
+    }
+
+    /// The keyboard arrives at `stop`: a swatch line's cursor goes back to
+    /// the chosen swatch and the family list's highlight to the chosen
+    /// family, scrolled into view.
+    pub(crate) fn arrive_at_appearance_stop(&mut self, stop: AppearanceStop, cx: &App) {
+        let Some(editor) = self.appearance_editor.as_mut() else {
+            return;
+        };
+        editor.swatch_cursor = None;
+        editor.family_highlight = None;
+        if stop == AppearanceStop::FamilyList
+            && let Some((entries, chosen)) = self.family_list(cx)
+        {
+            self.reveal_family_highlight(&entries, chosen.as_deref());
+        }
+    }
+
+    /// Space or Enter on `stop`, or a click on it.
+    pub(crate) fn press_appearance_stop(
+        &mut self,
+        stop: AppearanceStop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match stop {
+            AppearanceStop::Swatches(row, line) => {
+                if let Some(color) = self.swatch_under_cursor(row, line) {
+                    self.pick_swatch(row, &appearance::hex(color), cx);
+                }
+            }
+            AppearanceStop::Hex(_) | AppearanceStop::FamilyFilter => {}
+            AppearanceStop::Apply(row) => self.apply_hex(row, cx),
+            AppearanceStop::Reset(row) => self.reset_appearance_row(row, cx),
+            AppearanceStop::FamilyList => self.pick_highlighted_family(cx),
+            AppearanceStop::SizeDown => self.step_appearance_size(-1.0, cx),
+            AppearanceStop::SizeUp => self.step_appearance_size(1.0, cx),
+            AppearanceStop::Bold => self.toggle_appearance_bold(cx),
+            AppearanceStop::Close => self.close_appearance_editor(window, cx),
+        }
+    }
+
+    /// An arrow key on `stop`: Left and Right move a swatch line's cursor,
+    /// Up and Down the family list's highlight, each stopping at the ends.
+    /// Returns whether the key was the stop's.
+    pub(crate) fn on_appearance_stop_key(
+        &mut self,
+        stop: AppearanceStop,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match (stop, key) {
+            (AppearanceStop::Swatches(row, line), "left" | "right") => {
+                let colors = self.swatch_colors(row, line);
+                let chosen = self.chosen_color(row);
+                if let Some(editor) = self.appearance_editor.as_mut() {
+                    editor.swatch_cursor =
+                        step_swatch(&colors, editor.swatch_cursor, chosen, key == "right");
+                }
+            }
+            (AppearanceStop::FamilyList, "up" | "down") => {
+                if let Some((entries, chosen)) = self.family_list(cx) {
+                    if let Some(editor) = self.appearance_editor.as_mut() {
+                        editor.family_highlight = step_family(
+                            &entries,
+                            editor.family_highlight.as_ref(),
+                            chosen.as_deref(),
+                            key == "down",
+                        );
+                    }
+                    self.reveal_family_highlight(&entries, chosen.as_deref());
+                }
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    /// The colours of `row`'s swatch line `line`, in order.
+    fn swatch_colors(&self, row: ColorRow, line: SwatchLine) -> Vec<u32> {
+        match line {
+            SwatchLine::Presets => row.presets().iter().map(|preset| preset.color).collect(),
+            SwatchLine::Recent => self.sidebar.recent_colors(),
+        }
+    }
+
+    /// The colour the editor's level sets in `row`.
+    fn chosen_color(&self, row: ColorRow) -> Option<u32> {
+        let editor = self.appearance_editor.as_ref()?;
+        row.own(&self.level_view(&editor.level)?.own)
+    }
+
+    fn swatch_under_cursor(&self, row: ColorRow, line: SwatchLine) -> Option<u32> {
+        let editor = self.appearance_editor.as_ref()?;
+        let colors = self.swatch_colors(row, line);
+        let at = swatch_cursor(&colors, editor.swatch_cursor, self.chosen_color(row))?;
+        colors.get(at).copied()
+    }
+
+    fn reset_appearance_row(&mut self, row: ResetRow, cx: &mut Context<Self>) {
+        self.change_appearance(&reset_change(row), cx);
+    }
+
+    /// The family list as it shows under the filter, and the level's own
+    /// family.
+    fn family_list(&self, cx: &App) -> Option<(Vec<FamilyEntry>, Option<String>)> {
+        let editor = self.appearance_editor.as_ref()?;
+        let own = self.level_view(&editor.level)?.own.terminal_font_family;
+        let filter = editor.family_filter.read(cx).text();
+        let entries = family_entries(&editor.system_families, own.as_deref(), filter);
+        Some((entries, own))
+    }
+
+    /// The family list row the highlight stands on.
+    fn highlighted_family_row(&self, cx: &App) -> Option<(Vec<FamilyEntry>, usize)> {
+        let editor = self.appearance_editor.as_ref()?;
+        let (entries, own) = self.family_list(cx)?;
+        let at = family_highlight(&entries, editor.family_highlight.as_ref(), own.as_deref())?;
+        Some((entries, at))
+    }
+
+    /// Scrolls the family list, as `entries` lists it with the level's
+    /// own family `chosen`, so the highlighted row shows.
+    fn reveal_family_highlight(&self, entries: &[FamilyEntry], chosen: Option<&str>) {
+        let Some(editor) = self.appearance_editor.as_ref() else {
+            return;
+        };
+        if let Some(at) = family_highlight(entries, editor.family_highlight.as_ref(), chosen) {
+            editor.family_scroll.scroll_to_item(at);
+        }
+    }
+
+    fn pick_highlighted_family(&mut self, cx: &mut Context<Self>) {
+        let pick = self
+            .highlighted_family_row(cx)
+            .and_then(|(entries, at)| entries.get(at).and_then(FamilyEntry::pick));
+        let family = match pick {
+            Some(FamilyPick::Reset) => None,
+            Some(FamilyPick::Family(name)) => Some(name.to_string()),
+            None => return,
+        };
+        self.change_appearance(&AppearanceChange::font_family(family), cx);
+    }
+
+    /// A press in field stop `stop`'s frame gives the field the keyboard;
+    /// in the Settings modal it also makes it the stop Tab walks on from.
+    fn press_appearance_field(
+        &mut self,
+        stop: AppearanceStop,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_open() {
+            self.press_settings_control(SettingsControl::Appearance(stop), window, cx);
+        } else {
+            self.focus_appearance_stop(stop, window, cx);
+        }
+    }
+
+    /// A click on `stop`'s control `aim`: in the Settings modal `stop`
+    /// takes the keyboard, as every Settings control does; its cursor or
+    /// highlight moves to what was clicked, and the stop is pressed.
+    fn click_appearance_stop(
+        &mut self,
+        stop: AppearanceStop,
+        aim: Aim,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let control = SettingsControl::Appearance(stop);
+        let aimed = !matches!(aim, Aim::Stop);
+        if let Some(editor) = self.appearance_editor.as_mut() {
+            match aim {
+                Aim::Stop => {}
+                Aim::Swatch(color) => editor.swatch_cursor = Some(color),
+                Aim::Family(pick) => editor.family_highlight = Some(pick),
+            }
+        }
+        if !self.settings_open() {
+            self.press_appearance_stop(stop, window, cx);
+            return;
+        }
+        if aimed {
+            // The clicked swatch or row stands: arriving would move the
+            // cursor or highlight, and the list's scroll, back to the
+            // chosen one.
+            self.settings_control = Some(control);
+            self.focus_appearance_stop(stop, window, cx);
+        } else {
+            self.move_settings_focus(control, window, cx);
+        }
+        self.press_settings_control(control, window, cx);
+    }
+}
+
+/// What a click on a stop lands on: a swatch of a swatch line, a row of
+/// the family list, or the stop as a whole.
+#[derive(Debug, Clone)]
+enum Aim {
+    Stop,
+    Swatch(u32),
+    Family(FamilyPick),
+}
+
+/// The click on `stop`'s control `aim`.
+fn click_stop(
+    stop: AppearanceStop,
+    aim: Aim,
     cx: &mut Context<RootView>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    cx.listener(move |this, _: &ClickEvent, _, cx| {
-        this.change_appearance(&row.change(Some(color.clone())), cx);
+    cx.listener(move |this, _: &ClickEvent, window, cx| {
+        this.click_appearance_stop(stop, aim.clone(), window, cx);
     })
 }
 
@@ -909,6 +1221,7 @@ fn hex_line(
     editor: &AppearanceEditor,
     row: ColorRow,
     ready: bool,
+    focus: Option<AppearanceStop>,
     cx: &mut Context<RootView>,
 ) -> Div {
     let input = row.input(editor);
@@ -927,9 +1240,13 @@ fn hex_line(
             parsed.as_deref().and_then(appearance::parse_color),
             |swatch, color| swatch.bg(gpui::rgb(color)),
         );
-    let apply = apply_button(&format!("appearance-{key}-apply"), ready);
+    let apply_stop = AppearanceStop::Apply(row);
+    let apply = apply_button(apply_stop.selector(), ready)
+        .when(focus == Some(apply_stop), |apply| {
+            apply.child(focus_ring(ButtonSize::Regular.radius()))
+        });
     let apply = if ready {
-        apply.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_hex(row, cx)))
+        apply.on_click(click_stop(apply_stop, Aim::Stop, cx))
     } else {
         apply
     };
@@ -939,13 +1256,7 @@ fn hex_line(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .child(input_box(
-            match row {
-                ColorRow::Accent => "appearance-accent-hex",
-                ColorRow::Background => "appearance-background-hex",
-            },
-            input,
-        ))
+        .child(input_box(AppearanceStop::Hex(row), input, focus, cx))
         .child(preview)
         .child(apply)
         .when(bad, |line| {
@@ -972,9 +1283,18 @@ fn swatch_line(swatches: Vec<AnyElement>) -> Div {
     div().flex().flex_wrap().gap(px(6.0)).children(swatches)
 }
 
+/// How a swatch is marked: the level's own colour, and the one under a
+/// focused line's cursor.
+#[derive(Clone, Copy)]
+struct Mark {
+    chosen: bool,
+    focused: bool,
+}
+
 /// A clickable colour swatch with its tooltip; the level's own colour is
-/// outlined in the text colour, two pixels wide.
-fn swatch(selector: String, color: u32, tip: String, chosen: bool) -> Stateful<Div> {
+/// outlined in the text colour, two pixels wide, and the one under a
+/// focused line's cursor wears the focus ring.
+fn swatch(selector: String, color: u32, tip: String, mark: Mark) -> Stateful<Div> {
     let swatch = div()
         .id(ElementId::Name(SharedString::from(selector.clone())))
         .debug_selector(|| selector)
@@ -983,8 +1303,11 @@ fn swatch(selector: String, color: u32, tip: String, chosen: bool) -> Stateful<D
         .rounded(px(SWATCH_RADIUS))
         .bg(gpui::rgb(color))
         .cursor_pointer()
-        .tooltip(tooltip(tip));
-    if chosen {
+        .tooltip(tooltip(tip))
+        .when(mark.focused, |swatch| {
+            swatch.child(focus_ring(SWATCH_RADIUS))
+        });
+    if mark.chosen {
         swatch.border_2().border_color(gpui::rgb(TEXT))
     } else {
         swatch.border_1().border_color(gpui::rgb(LINE_STRONG))
@@ -992,19 +1315,23 @@ fn swatch(selector: String, color: u32, tip: String, chosen: bool) -> Stateful<D
 }
 
 /// One line of the family list: the reset row, a group header, or a
-/// family, the chosen one ticked.
+/// family, the chosen one ticked and the `highlighted` one ringed.
 fn family_row(
     entry: &FamilyEntry,
     own: Option<&str>,
     reset: &'static str,
+    highlighted: bool,
     cx: &mut Context<RootView>,
 ) -> AnyElement {
+    let ring = |row: Stateful<Div>| row.when(highlighted, |row| row.child(focus_ring(ROW_RADIUS)));
     match entry {
         FamilyEntry::Header(header) => muted_row(*header).into_any_element(),
-        FamilyEntry::Reset => list_row("appearance-family-reset", reset, own.is_none())
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.change_appearance(&AppearanceChange::font_family(None), cx);
-            }))
+        FamilyEntry::Reset => ring(list_row("appearance-family-reset", reset, own.is_none()))
+            .on_click(click_stop(
+                AppearanceStop::FamilyList,
+                Aim::Family(FamilyPick::Reset),
+                cx,
+            ))
             .into_any_element(),
         FamilyEntry::Family { name, saved } => {
             let label = if *saved {
@@ -1013,13 +1340,17 @@ fn family_row(
                 name.to_string()
             };
             let chosen = own == Some(name.as_ref());
-            let family = name.to_string();
-            list_row(&format!("appearance-family-option-{name}"), label, chosen)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let change = AppearanceChange::font_family(Some(family.clone()));
-                    this.change_appearance(&change, cx);
-                }))
-                .into_any_element()
+            ring(list_row(
+                &format!("appearance-family-option-{name}"),
+                label,
+                chosen,
+            ))
+            .on_click(click_stop(
+                AppearanceStop::FamilyList,
+                Aim::Family(FamilyPick::Family(name.clone())),
+                cx,
+            ))
+            .into_any_element()
         }
     }
 }
@@ -1035,7 +1366,7 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
         .gap(px(6.0))
         .px(px(6.0))
         .py(px(2.0))
-        .rounded(px(4.0))
+        .rounded(px(ROW_RADIUS))
         .cursor_pointer()
         .hover(|style| style.bg(gpui::rgb(HOVER)))
         .child(
@@ -1048,11 +1379,29 @@ fn list_row(selector: &str, label: impl Into<SharedString>, chosen: bool) -> Sta
 }
 
 /// The size: `−`, the size it resolves to, `+`.
-fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView>) -> Div {
-    let down = dialog_button("appearance-size-down", "−".to_owned(), false, false, true)
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_appearance_size(-1.0, cx)));
-    let up = dialog_button("appearance-size-up", "+".to_owned(), false, false, true)
-        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_appearance_size(1.0, cx)));
+fn size_section(
+    view: &LevelView,
+    reset: &'static str,
+    focus: Option<AppearanceStop>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let focused = |stop| focus == Some(stop);
+    let down = dialog_button(
+        AppearanceStop::SizeDown.selector(),
+        "−".to_owned(),
+        false,
+        focused(AppearanceStop::SizeDown),
+        true,
+    )
+    .on_click(click_stop(AppearanceStop::SizeDown, Aim::Stop, cx));
+    let up = dialog_button(
+        AppearanceStop::SizeUp.selector(),
+        "+".to_owned(),
+        false,
+        focused(AppearanceStop::SizeUp),
+        true,
+    )
+    .on_click(click_stop(AppearanceStop::SizeUp, Aim::Stop, cx));
     let value = format!("{}px", view.resolved.font_size.value);
     let stepper = div()
         .flex()
@@ -1072,10 +1421,10 @@ fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
         .gap(px(7.0))
         .child(header_with_reset(
             label,
-            Reset {
-                selector: "appearance-size-reset",
+            ResetLink {
+                row: ResetRow::Size,
                 label: reset,
-                change: AppearanceChange::font_size(None),
+                focused: focused(AppearanceStop::Reset(ResetRow::Size)),
             },
             &view.own,
             cx,
@@ -1085,24 +1434,29 @@ fn size_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
 }
 
 /// The bold checkbox, ticked while the level resolves to bold.
-fn bold_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView>) -> Div {
+fn bold_section(
+    view: &LevelView,
+    reset: &'static str,
+    focus: Option<AppearanceStop>,
+    cx: &mut Context<RootView>,
+) -> Div {
     let checkbox = checkbox_row(
-        "appearance-bold",
+        AppearanceStop::Bold.selector(),
         view.resolved.font_bold.value,
-        false,
+        focus == Some(AppearanceStop::Bold),
         BOLD_LABEL,
     )
-    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_appearance_bold(cx)));
+    .on_click(click_stop(AppearanceStop::Bold, Aim::Stop, cx));
     div()
         .flex()
         .flex_col()
         .gap(px(7.0))
         .child(header_with_reset(
             checkbox,
-            Reset {
-                selector: "appearance-bold-reset",
+            ResetLink {
+                row: ResetRow::Bold,
                 label: reset,
-                change: AppearanceChange::font_bold(None),
+                focused: focus == Some(AppearanceStop::Reset(ResetRow::Bold)),
             },
             &view.own,
             cx,
@@ -1110,12 +1464,31 @@ fn bold_section(view: &LevelView, reset: &'static str, cx: &mut Context<RootView
         .child(hint_line("appearance-bold-hint", view.bold_hint()))
 }
 
-/// A text field in its frame.
-fn input_box(selector: &'static str, input: &Entity<TextInput>) -> Div {
-    field_frame(false)
+/// Field stop `stop`'s text field in its frame, tagged `<selector>`. The
+/// frame is ringed while the field has the keyboard, the ring tagged
+/// `<selector>-ring`. A press anywhere in the frame gives the field the
+/// keyboard and makes it the stop Tab walks on from; the press is kept
+/// from the modal's own focus.
+fn input_box(
+    stop: AppearanceStop,
+    input: &Entity<TextInput>,
+    focus: Option<AppearanceStop>,
+    cx: &mut Context<RootView>,
+) -> Div {
+    let selector = stop.selector();
+    let focused = focus == Some(stop);
+    field_frame_with_ring(focused, format!("{selector}-ring"))
         .debug_selector(move || selector.to_owned())
         .flex_1()
         .min_w(px(0.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                // The modal's tracked focus would take the keyboard back.
+                window.prevent_default();
+                this.press_appearance_field(stop, window, cx);
+            }),
+        )
         .child(input.clone())
 }
 
@@ -1134,7 +1507,7 @@ fn link(selector: &'static str, label: &'static str, enabled: bool) -> Stateful<
         .id(selector)
         .debug_selector(move || selector.to_owned())
         .px(px(4.0))
-        .rounded(px(4.0))
+        .rounded(px(LINK_RADIUS))
         .text_color(gpui::rgb(MUTED))
         .child(label);
     if enabled {
@@ -1154,58 +1527,4 @@ pub(crate) fn close_footer(selector: &'static str, cx: &mut Context<RootView>) -
             },
         )),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn names(entries: &[FamilyEntry]) -> Vec<String> {
-        entries
-            .iter()
-            .map(|entry| match entry {
-                FamilyEntry::Reset => "reset".to_owned(),
-                FamilyEntry::Header(header) => format!("[{header}]"),
-                FamilyEntry::Family { name, saved } => {
-                    format!("{name}{}", if *saved { " (saved)" } else { "" })
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_family_list_groups_and_filters() {
-        let system = [SharedString::from("Arial"), SharedString::from("Consolas")];
-        assert_eq!(
-            names(&family_entries(&system, None, "")),
-            [
-                "reset",
-                "[Bundled]",
-                "Geist Mono",
-                "Fira Code",
-                "JetBrains Mono",
-                "Cascadia Code",
-                "[System]",
-                "Arial",
-                "Consolas",
-            ]
-        );
-        assert_eq!(
-            names(&family_entries(&system, Some("Lost Mono"), "MONO")),
-            [
-                "reset",
-                "[Current]",
-                "Lost Mono (saved)",
-                "[Bundled]",
-                "Geist Mono",
-                "JetBrains Mono",
-            ],
-            "a case-insensitive substring; a saved family neither list has"
-        );
-        assert_eq!(
-            names(&family_entries(&system, Some("Arial"), "zzz")),
-            ["reset"],
-            "a listed family is not saved; nothing matches"
-        );
-    }
 }
