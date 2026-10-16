@@ -21,6 +21,14 @@ mod git_watch;
 mod git_write;
 mod headless;
 mod history;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "hook_status::map_event has no caller in the daemon yet"
+    )
+)]
+mod hook_status;
 mod idle_exit;
 mod inject;
 mod instance_lock;

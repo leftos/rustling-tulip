@@ -535,6 +535,54 @@ pub struct SessionSnapshot {
     /// session recovery, not by Duplicate.
     #[serde(default)]
     pub busy_excluded: bool,
+    /// What the session is waiting for while its status is
+    /// [`SessionStatus::AwaitingInput`], as reported by the agent CLI's own
+    /// hooks. `None` when nothing describes it: a session the hooks never
+    /// reported on, or a daemon that predates the field. A kind from a newer
+    /// daemon decodes as [`PendingInput::Unknown`].
+    #[serde(default)]
+    pub pending_input: Option<PendingInput>,
+}
+
+/// What a session is waiting for, as the agent CLI's own hooks last reported
+/// it. A newer daemon may send a `kind` this build does not know; it decodes
+/// as [`PendingInput::Unknown`] rather than failing the containing snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PendingInput {
+    /// An `AskUserQuestion` prompt, with its questions and their choices.
+    Question { questions: Vec<PendingQuestion> },
+    /// A permission prompt for one tool call, with what that call would do.
+    Permission { tool_name: String, summary: String },
+    /// A plan-mode approval prompt. `plan` is the plan text when the tool
+    /// call carried one; some calls carry none.
+    PlanApproval {
+        #[serde(default)]
+        plan: Option<String>,
+    },
+    /// A prompt the daemon can describe only with the agent's own message,
+    /// such as an MCP server's elicitation.
+    Other { message: String },
+    /// Forward-compat fallback: a kind the current build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One question of a [`PendingInput::Question`] prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingQuestion {
+    /// The question the agent asks.
+    pub question: String,
+    /// The short heading the prompt shows above the question; empty when the
+    /// payload carried none.
+    #[serde(default)]
+    pub header: String,
+    /// The choice labels, in the order the prompt shows them.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// True when the prompt accepts more than one choice.
+    #[serde(default)]
+    pub multi_select: bool,
 }
 
 /// How a session ended, as recorded in its history entry.
@@ -6382,6 +6430,97 @@ mod tests {
         let snapshot: SessionSnapshot =
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
         assert_eq!(snapshot.status_since, None, "an absent stamp reads as None");
+    }
+
+    #[test]
+    fn pending_input_round_trips() {
+        let cases = vec![
+            PendingInput::Question {
+                questions: vec![
+                    PendingQuestion {
+                        question: "Do you prefer tea or coffee?".to_owned(),
+                        header: "Drink".to_owned(),
+                        options: vec!["Tea".to_owned(), "Coffee".to_owned()],
+                        multi_select: true,
+                    },
+                    PendingQuestion {
+                        question: "Which editor?".to_owned(),
+                        header: String::new(),
+                        options: Vec::new(),
+                        multi_select: false,
+                    },
+                ],
+            },
+            PendingInput::Permission {
+                tool_name: "Bash".to_owned(),
+                summary: "echo hi > out.txt".to_owned(),
+            },
+            PendingInput::PlanApproval {
+                plan: Some("1. Print toasty".to_owned()),
+            },
+            PendingInput::PlanApproval { plan: None },
+            PendingInput::Other {
+                message: "linear: which issue?".to_owned(),
+            },
+            PendingInput::Unknown,
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).expect("serialize");
+            let decoded: PendingInput = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(original, decoded, "{json}");
+        }
+
+        let kinds = [
+            (
+                PendingInput::Question {
+                    questions: Vec::new(),
+                },
+                "question",
+            ),
+            (
+                PendingInput::Permission {
+                    tool_name: "Bash".to_owned(),
+                    summary: String::new(),
+                },
+                "permission",
+            ),
+            (PendingInput::PlanApproval { plan: None }, "plan_approval"),
+            (
+                PendingInput::Other {
+                    message: String::new(),
+                },
+                "other",
+            ),
+        ];
+        for (input, kind) in kinds {
+            let json = serde_json::to_value(&input).expect("encode");
+            assert_eq!(json["kind"].as_str(), Some(kind), "{json}");
+        }
+    }
+
+    #[test]
+    fn unknown_pending_kind_decodes_as_unknown() {
+        let unknown: PendingInput = serde_json::from_str(r#"{"kind":"future_thing","x":1}"#)
+            .expect("an unknown kind decodes to Unknown");
+        assert_eq!(unknown, PendingInput::Unknown);
+
+        // A kind from a newer daemon must not fail the containing snapshot.
+        let json = SNAPSHOT_WITHOUT_STATUS_SINCE.replace(
+            r#""agent":"claude""#,
+            r#""agent":"claude","pending_input":{"kind":"future_thing","x":1}"#,
+        );
+        let snapshot: SessionSnapshot = serde_json::from_str(&json).expect("decodes");
+        assert_eq!(snapshot.pending_input, Some(PendingInput::Unknown));
+    }
+
+    #[test]
+    fn snapshot_without_pending_input_decodes() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
+        assert_eq!(
+            snapshot.pending_input, None,
+            "a snapshot from before the field reads as None"
+        );
     }
 
     #[test]

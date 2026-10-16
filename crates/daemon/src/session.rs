@@ -10,8 +10,8 @@ use crate::sync::{lock, read, write};
 use crate::termstate::{self, BracketedPasteTracker};
 use chrono::{DateTime, Utc};
 use protocol::{
-    Agent, AppearanceOverrides, SessionKind, SessionMember, SessionMetrics, SessionMode,
-    SessionSnapshot, SessionStatus, SpawnConfig,
+    Agent, AppearanceOverrides, PendingInput, SessionKind, SessionMember, SessionMetrics,
+    SessionMode, SessionSnapshot, SessionStatus, SpawnConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -183,6 +183,12 @@ pub struct SessionRecord {
     /// `SetSessionBusyExcluded`, mirrored into the sidecar and copied into the
     /// session's history entry, so reattach, Resume and recovery keep it.
     pub busy_excluded: bool,
+    /// What the session is waiting for while its status is
+    /// [`SessionStatus::AwaitingInput`], as the agent CLI's own hooks last
+    /// reported it. `None` until a hook reports one; copied into
+    /// [`SessionSnapshot::pending_input`]. Not persisted to the sidecar, so a
+    /// reattached session starts with none and learns it from the next hook.
+    pub pending_input: Option<PendingInput>,
 }
 
 impl SessionRecord {
@@ -238,6 +244,7 @@ impl SessionRecord {
             worktree_paths: self.worktree_paths.clone(),
             claude_session_id: self.claude_session_id.clone(),
             busy_excluded: self.busy_excluded,
+            pending_input: self.pending_input.clone(),
         }
     }
 }
@@ -863,6 +870,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            pending_input: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
@@ -924,6 +932,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            pending_input: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -970,6 +979,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            pending_input: None,
             busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
@@ -1041,6 +1051,7 @@ mod tests {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            pending_input: None,
             busy_excluded: false,
         }
     }
