@@ -3787,6 +3787,7 @@ fn interactive_record(
         spawn_origin: None,
         claude_session_id: new.claude_session_id,
         agent_conversation_id: conversation.own.clone(),
+        pending_input: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "session started".to_string());
@@ -4132,6 +4133,7 @@ async fn spawn_plain_shell_session(
         spawn_origin: None,
         claude_session_id: None,
         agent_conversation_id: None,
+        pending_input: None,
         busy_excluded: false,
     };
     push_recent_action(
@@ -4278,6 +4280,7 @@ fn spawn_headless_session(
         spawn_origin: None,
         claude_session_id: None,
         agent_conversation_id: None,
+        pending_input: None,
         busy_excluded: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
@@ -7775,6 +7778,7 @@ mod tests {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            pending_input: None,
             busy_excluded: false,
         }
     }
