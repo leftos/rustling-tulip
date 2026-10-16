@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Status window options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --page:#0e0f12;--panel:#121318;--ink:#e6e8ee;--dim:#a0a7b3;--faint:#6f7684;--line:#262a33;
+  --win:#16181d;--win2:#20242c;--wline:#2e333d;
+  --work:#5aa9ff;--await:#f2b544;--idle:#7c8494;--ended:#4cc38a;--bad:#ff8f8f;
+  --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;--ui:Inter,system-ui,'Segoe UI',sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 var(--ui)}
+main{max-width:1320px;margin:0 auto;padding:28px 16px 40px}
+h1{font-size:22px;margin:0 0 8px}
+.lede{color:var(--dim);max-width:980px;margin:6px 0}
+.quote{border-left:3px solid var(--await);padding:4px 12px;margin:12px 0;font-style:italic;max-width:980px}
+.legend{display:flex;flex-wrap:wrap;gap:16px;color:var(--dim);font-size:13px;margin-top:10px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.lane{border:1px solid var(--line);border-radius:12px;padding:18px;margin-top:22px;background:var(--panel)}
+.lane-h{display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:start;margin-bottom:14px}
+.badge{width:40px;height:40px;border-radius:10px;background:var(--await);color:#1a1300;font:700 22px/40px var(--ui);text-align:center}
+.lane-h h2{margin:0;font-size:17px}
+.lane-h p{margin:3px 0 0;max-width:820px}
+.worst{color:var(--bad)}
+.click{color:var(--dim);font-size:13px}
+.click b{color:var(--ink);font-weight:600}
+.frames{display:flex;gap:20px;flex-wrap:wrap}
+figure{margin:0}
+figcaption{color:var(--dim);font-size:12.5px;margin-top:6px}
+figcaption b{color:var(--ink)}
+.desk{position:relative;width:600px;max-width:100%;height:560px;overflow:hidden;border-radius:8px;border:1px solid var(--line);
+  background:#1b1d22 var(--desk) right bottom/1920px 1080px no-repeat}
+.mapbox{font-size:11.5px;color:var(--faint);text-align:right}
+.mini{position:relative;width:192px;height:108px;border:1px solid var(--line);border-radius:4px;margin-bottom:4px;
+  background:#1b1d22 var(--desk) 0 0/192px 108px no-repeat}
+.mini i{position:absolute;right:1px;bottom:6px;border:1px solid var(--await)}
+.mini i.on{background:rgba(242,181,68,.45)}
+.mini i.hv{border-style:dashed;border-color:#fff}
+.cursor{position:absolute;width:18px;height:24px;pointer-events:none;filter:drop-shadow(0 1px 1px rgba(0,0,0,.6))}
+footer{color:var(--faint);font-size:12.5px;margin-top:22px;max-width:980px}
+
+/* the status window */
+.win{position:absolute;right:12px;bottom:60px;opacity:.55;transition:opacity .15s;font:12.5px/1.35 var(--ui);color:var(--ink);cursor:default}
+.win:hover,.win.force{opacity:1}
+.card{background:var(--win);border:1px solid var(--wline);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.55);overflow:hidden}
+.hd{display:flex;align-items:center;gap:5px;padding:8px 10px;border-bottom:1px solid var(--wline);color:var(--dim);font-size:12px;white-space:nowrap}
+.hd .n{font-weight:700}
+.grip{margin-left:auto;color:var(--faint);opacity:0;letter-spacing:1px}
+.win:hover .grip,.win.force .grip{opacity:1}
+.k-work{color:var(--work)}.k-await{color:var(--await)}.k-idle{color:var(--idle)}.k-ended{color:var(--ended)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+.dot.work{background:var(--work);animation:pulse 1.6s ease-in-out infinite}
+.dot.await{background:var(--await);box-shadow:0 0 0 3px rgba(242,181,68,.22)}
+.dot.idle{background:var(--idle)}
+.dot.ended{background:var(--ended)}
+@keyframes pulse{50%{box-shadow:0 0 0 4px rgba(90,169,255,.25)}}
+.row{display:flex;align-items:center;gap:8px;padding:5px 10px;min-height:27px}
+.row:hover,.row.sim{background:var(--win2)}
+.repo{font:500 11.5px var(--mono);color:#d3d9e4;white-space:nowrap}
+.row>.repo{width:104px;flex:none;overflow:hidden;text-overflow:ellipsis}
+.lab{color:var(--dim);white-space:nowrap}
+.prog{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.age{font:11px var(--mono);color:var(--faint);white-space:nowrap;margin-left:auto}
+.wait{color:var(--await)}
+.row.ask{align-items:flex-start;border-left:3px solid var(--await);background:rgba(242,181,68,.08);padding-left:7px}
+.row.ask .dot{margin-top:4px}
+.rb{flex:1;min-width:0}
+.l1{display:flex;align-items:center;gap:7px}
+.asktext{color:#ffd88a;margin-top:1px}
+.det{display:none;color:var(--faint);font-size:11.5px;margin-top:2px}
+.ok{color:var(--ended);width:8px;flex:none;text-align:center;font-weight:700}
+.fx{display:none;flex:none;font:500 11px var(--ui);color:var(--ink);background:#2a3140;border:1px solid #3d4759;border-radius:5px;padding:2px 7px;cursor:pointer}
+.fx:hover{background:#34405a}
+.x{display:none;color:var(--faint);cursor:pointer;padding:0 2px}
+
+/* A: pill */
+.wa{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.pill{display:flex;align-items:center;gap:7px;height:32px;padding:0 12px;border-radius:16px;background:var(--win);
+  border:1px solid rgba(242,181,68,.55);box-shadow:0 6px 20px rgba(0,0,0,.5);white-space:nowrap}
+.sep{color:#4a505c}
+.wa .panel{display:none;width:400px}
+.wa:hover .panel,.wa.force .panel{display:block}
+
+/* B: card list */
+.wb .card{width:400px}
+
+/* C: smart digest */
+.wc .card{width:430px}
+.wc:hover .more .age,.wc.force .more .age{display:none}
+.lbl-h{display:none}
+.wc:hover .lbl-h,.wc.force .lbl-h{display:inline}
+.wc:hover .lbl-i,.wc.force .lbl-i{display:none}
+.sh{display:flex;align-items:center;gap:6px;padding:8px 10px 3px;font:600 10.5px var(--ui);letter-spacing:.07em;text-transform:uppercase;color:var(--faint)}
+.sh .c{color:var(--dim)}
+.tick{display:flex;align-items:center;gap:7px;padding:6px 10px 9px}
+.tick b{font-weight:600;white-space:nowrap}
+.ticker{transition:opacity .3s}
+.chev{color:var(--faint);width:10px}
+.more{display:none;padding-bottom:6px}
+.wc:hover .more,.wc.force .more{display:block}
+.wc:hover .ticker,.wc.force .ticker{display:none}
+.wc:hover .det,.wc.force .det{display:block}
+.wc:hover .fx,.wc.force .fx{display:inline-block}
+.wc:hover .x,.wc.force .x{display:inline}
+.wc .chev::before{content:'\25B8'}
+.wc:hover .chev::before,.wc.force .chev::before{content:'\25BE'}
+.hint{border-top:1px solid var(--wline);padding:6px 10px;color:var(--faint);font-size:11px;display:none}
+.wc:hover .hint,.wc.force .hint,.wa:hover .hint,.wa.force .hint{display:block}
+</style>
+</head>
+<body>
+<main>
+  <h1>Status window: three options</h1>
+  <p class="quote">"A semi-translucent, opaque on hover, status window, that can stay tucked in a corner of the monitor, and shows a smart status of running sessions, what agent needs me if any, short progress updates, etc."</p>
+  <p class="lede">Each frame is the bottom-right 600&times;560 of a 1920&times;1080 desktop at 1:1, so the window is drawn at its real size, 12px above the taskbar. Left frame: <b>idle</b> at 55% opacity (hover it: the CSS hover is real). Right frame: <b>hovered</b>, forced opaque. Every lane shows the same 7 sessions.</p>
+  <div class="legend">
+    <span><i class="dot work"></i>Working</span><span><i class="dot await"></i>Awaiting input (needs you)</span>
+    <span><i class="dot idle"></i>Idle</span><span><i class="dot ended"></i>Ended</span>
+    <span>Minimap: filled = idle footprint, dashed = hovered footprint</span>
+  </div>
+  <div id="lanes"></div>
+  <footer>Opacity is whole-window alpha, the way a layered window renders it: text fades with the background, and no acrylic blur is assumed. Fake data; desktop background drawn on a canvas.</footer>
+</main>
+<script>
+"use strict";
+const S = [
+  {repo:'gate', lab:'slot lease', st:'await', ask:'permission: run cargo test -p gate-core?', short:'run cargo test?',
+   wait:'6m 12s', w:'6m', br:'feat/slot-lease', ag:'claude', since:'14:26'},
+  {repo:'yaat', lab:'YAAT-412', st:'await', ask:'asks: which branch \u2014 main or feat/taxi-callup?', short:'which branch?',
+   wait:'1m 40s', w:'1m', br:'main', ag:'claude', since:'14:30'},
+  {repo:'rustling-tulip', lab:'RT-144', st:'work', p:'RT-144: gate passed, writing report', age:'12m'},
+  {repo:'rustling-tulip', lab:'status-window', st:'work', p:'editing server.rs (3 files)', age:'4m'},
+  {repo:'ops-tower', lab:'OT-58', st:'work', p:'OT-58: vitest 212/340 passing', age:'9m'},
+  {repo:'yaat', lab:'yaat + yaat-data', st:'idle', p:'idle 8m \u00b7 last: pushed 3 commits', age:'8m'},
+  {repo:'ops-tower', lab:'OT-55', st:'ended', p:'OT-55 done \u00b7 exit 0', age:'2m ago'},
+];
+const by = st => S.filter(s => s.st === st);
+const esc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+const summary = () =>
+  `<span class="n k-work">${by('work').length}</span> working <span class="sep">\u00b7</span>
+   <span class="n k-await">${by('await').length}</span> need you <span class="sep">\u00b7</span>
+   <span class="n k-idle">${by('idle').length}</span> idle <span class="sep">\u00b7</span>
+   <span class="n k-ended">${by('ended').length}</span> ended<span class="grip">\u283F</span>`;
+
+function askRow(s, focus) {
+  return `<div class="row ask"><span class="dot await"></span><div class="rb">
+    <div class="l1"><span class="repo">${s.repo}</span><span class="lab">${s.lab}</span><span class="age wait">${s.wait}</span></div>
+    <div class="asktext">${esc(s.ask)}</div>
+    <div class="det">${s.br} \u00b7 ${s.ag} \u00b7 waiting since ${s.since}</div></div>
+    ${focus ? '<button class="fx">Focus \u2197</button>' : ''}</div>`;
+}
+function plainRow(s, focus, sim) {
+  const mark = s.st === 'ended' ? '<span class="ok">\u2713</span>' : `<span class="dot ${s.st}"></span>`;
+  const tail = s.st === 'ended' ? '<span class="x">\u2715</span>' : (focus ? '<button class="fx">Focus \u2197</button>' : '');
+  return `<div class="row${sim ? ' sim' : ''}">${mark}<span class="repo">${s.repo}</span>
+    <span class="prog">${esc(s.p)}</span><span class="age">${s.age}</span>${tail}</div>`;
+}
+const fullList = () => `<div class="hd">${summary()}</div>` +
+  by('await').map(s => askRow(s, false)).join('') +
+  [...by('work'), ...by('idle'), ...by('ended')].map(s => plainRow(s, false)).join('');
+
+const LANES = [
+  {id:'A', cls:'wa', title:'Compact pill',
+   cap:'One 32px line in the corner: the needs-you count, the oldest ask and its wait, the working count. Hover grows it upward into the full list.',
+   worst:'Worst case: a second waiting agent is only a number, and any progress line costs a hover, so a glance tells you little.',
+   click:'<b>Click the pill:</b> focus the oldest waiting session in the main window. <b>Hovered, click a row:</b> focus that session.',
+   html: () => {
+     const a = by('await')[0];
+     return `<div class="panel card">${fullList()}<div class="hint">click a row: focus it in the main window</div></div>
+       <div class="pill"><span class="dot await"></span><b class="wait">${by('await').length} need you</b><span class="sep">\u00b7</span>
+       <span class="repo">${a.repo}</span><span>${a.short}</span><span class="age wait">${a.w}</span><span class="sep">|</span>
+       <span class="dot work"></span><span>${by('work').length} working</span></div>`;
+   }},
+  {id:'B', cls:'wb', title:'Card list',
+   cap:'Always a small card with one row per session: status dot, repo, one-line progress, age. Needs-you rows are pinned on top with an amber edge and the ask spelled out. Hover only raises opacity.',
+   worst:'Worst case: ~270px of permanent screen at 7 sessions that grows with every session, and at 55% its small text over busy code is hard to read.',
+   click:'<b>Click a row:</b> focus that session in the main window. Nothing expands, so idle and hovered show the same rows.',
+   html: () => `<div class="card">${fullList()}</div>`},
+  {id:'C', cls:'wc', title:'Smart digest',
+   cap:'A prioritised feed: Needs you first, then Just finished, then one collapsed Working line whose ticker rotates through the latest progress. Hover opens per-session detail and a Focus button.',
+   worst:'Worst case: rows reorder as states change, so the item under your cursor can move; the ticker shows one working session at a time and can hide the one you care about.',
+   click:'<b>Click an item or Focus:</b> focus that session in the main window. <b>\u2715 on a finished item:</b> dismiss it from the digest.',
+   html: () => `<div class="card"><div class="hd">${summary()}</div>
+     <div class="sh">Needs you <span class="c">${by('await').length}</span></div>${by('await').map(s => askRow(s, true)).join('')}
+     <div class="sh">Just finished</div>${by('ended').map(s => plainRow(s, false)).join('')}
+     <div class="sh">Working <span class="c">${by('work').length}</span> \u00b7 idle <span class="c">${by('idle').length}</span></div>
+     <div class="tick"><span class="chev"></span><span class="dot work"></span><b><span class="lbl-i">latest</span><span class="lbl-h">all sessions</span></b>
+       <span class="ticker prog"></span></div>
+     <div class="more">${by('work').map((s, i) => plainRow(s, true, i === 0)).join('')}${by('idle').map(s => plainRow(s, true)).join('')}</div>
+     <div class="hint">click: focus the session \u00b7 \u2715 dismisses a finished item</div></div>`},
+];
+
+const CURSOR = '<svg class="cursor" viewBox="0 0 18 24" style="right:CRpx;bottom:CBpx"><path d="M1 1 L1 19 L5.5 14.8 L8.6 22 L11.6 20.7 L8.6 13.8 L14.6 13.8 Z" fill="#fff" stroke="#000" stroke-width="1.2"/></svg>';
+
+function renderLanes() {
+  const host = document.getElementById('lanes');
+  host.innerHTML = LANES.map(l => `<section class="lane">
+    <div class="lane-h"><div class="badge">${l.id}</div>
+      <div><h2>${l.id}. ${l.title}</h2><p>${l.cap}</p><p class="worst">${l.worst}</p><p class="click">${l.click}</p></div>
+      <div class="mapbox"><div class="mini" id="mini-${l.id}"></div>where it sits on 1920&times;1080</div></div>
+    <div class="frames">
+      <figure><div class="desk"><div class="win ${l.cls}" id="idle-${l.id}">${l.html()}</div></div>
+        <figcaption><b>Idle</b> \u00b7 55% opacity \u00b7 hover it to see the real hover</figcaption></figure>
+      <figure><div class="desk"><div class="win ${l.cls} force" id="hov-${l.id}">${l.html()}</div>${CURSOR}</div>
+        <figcaption><b>Hovered</b> \u00b7 100% opacity (forced)</figcaption></figure>
+    </div></section>`).join('');
+}
+
+function placeCursorsAndMinimaps() {
+  for (const l of LANES) {
+    const idle = document.getElementById('idle-' + l.id), hov = document.getElementById('hov-' + l.id);
+    const cur = hov.parentElement.querySelector('.cursor');
+    const target = hov.querySelector('.row.sim') || hov.querySelector('.row') || hov;
+    const dr = hov.parentElement.getBoundingClientRect(), tr = target.getBoundingClientRect();
+    cur.style.right = Math.round(dr.right - tr.right + 60) + 'px';
+    cur.style.bottom = Math.round(dr.bottom - tr.bottom - 4) + 'px';
+    const mini = document.getElementById('mini-' + l.id), k = 0.1;
+    const box = (el, c) => `<i class="${c}" style="width:${Math.max(2, el.offsetWidth * k)}px;height:${Math.max(2, el.offsetHeight * k)}px;right:${12 * k}px;bottom:${60 * k}px"></i>`;
+    mini.innerHTML = box(hov, 'hv') + box(idle, 'on');
+  }
+}
+
+function startTickers() {
+  const work = by('work');
+  let i = 0;
+  const show = () => document.querySelectorAll('.ticker').forEach(t => {
+    t.style.opacity = 0;
+    setTimeout(() => { const s = work[i % work.length]; t.textContent = `${s.repo} \u00b7 ${s.p}`; t.style.opacity = 1; }, 150);
+  });
+  document.querySelectorAll('.ticker').forEach(t => { t.textContent = `${work[0].repo} \u00b7 ${work[0].p}`; });
+  setInterval(() => { i++; show(); }, 2800);
+}
+
+/* Fake desktop: an editor with two groups and two terminals, blurred, plus a crisp taskbar. */
+const CODE = [
+  'use crate::registry::{SessionRegistry, SessionStatus};',
+  'use anyhow::{Context, Result};',
+  '',
+  '// Collect the sessions a status digest should surface first.',
+  'pub fn digest(registry: &SessionRegistry, now: Instant) -> Digest {',
+  '    let mut digest = Digest::default();',
+  '    for session in registry.iter() {',
+  '        match session.status {',
+  '            SessionStatus::AwaitingInput => digest.needs_you.push(session.id),',
+  '            SessionStatus::Working => digest.working.push(session.id),',
+  '            SessionStatus::Idle => digest.idle += 1,',
+  '            SessionStatus::Ended => {',
+  '                if now - session.status_since < FINISHED_WINDOW {',
+  '                    digest.finished.push(session.id);',
+  '                }',
+  '            }',
+  '        }',
+  '    }',
+  '    digest.needs_you.sort_by_key(|id| registry.waited_since(*id));',
+  '    digest',
+  '}',
+  '',
+  'impl Hub {',
+  '    pub async fn broadcast_status(&self, snapshot: SessionSnapshot) -> Result<()> {',
+  '        let frame = serde_json::to_string(&snapshot).context("encode snapshot")?;',
+  '        for client in self.clients.lock().await.iter() {',
+  '            client.send(frame.clone()).await?;',
+  '        }',
+  '        Ok(())',
+  '    }',
+  '}',
+];
+const TERM_L = [
+  'PS X:\\dev\\rustling-tulip> .\\rt.ps1 test -Reached',
+  'reached: package(daemon) + package(protocol)',
+  '   Compiling protocol v0.1.0 (X:\\dev\\rustling-tulip\\crates\\protocol)',
+  '   Compiling daemon v0.1.0 (X:\\dev\\rustling-tulip\\crates\\daemon)',
+  '    Finished `test-release` profile [optimized] target(s) in 38.71s',
+  '    Starting 214 tests across 6 binaries',
+];
+const TESTS = ['registry::digest_orders_needs_you_by_wait', 'server::spawn_echoes_request_id', 'git::status_parses_renames',
+  'pty_state::prompt_regex_matches_permission', 'history::prunes_after_seven_days', 'osc_title::spinner_counts_as_activity',
+  'tracer_client::reattach_replays_ring', 'git_watch::ignores_target_dir', 'protocol::v22_compat::decodes_hello',
+  'workspace::anchor_preserves_relative_paths', 'state::round_trips_keep_awake', 'orphan::dead_pid_is_abandoned'];
+const KW = /\b(use|pub|fn|let|mut|for|in|match|if|impl|async|await|self|Ok|Err|Some|None|crate|struct|enum)\b/;
+
+function drawLine(x, text, px, py) {
+  const re = /(\/\/.*$)|("[^"]*")|(\b[A-Za-z_]\w*\b)|([^A-Za-z_"\/]+|\/)/g;
+  let m, cx = px;
+  while ((m = re.exec(text)) !== null) {
+    const tok = m[0];
+    x.fillStyle = m[1] ? '#6a9955' : m[2] ? '#ce9178' : m[3] && KW.test(tok) ? '#c586c0'
+      : m[3] && /^[A-Z]/.test(tok) ? '#4ec9b0' : m[3] && text[re.lastIndex] === '(' ? '#dcdcaa' : m[3] ? '#9cdcfe' : '#d4d4d4';
+    x.fillText(tok, cx, py);
+    cx += x.measureText(tok).width;
+  }
+}
+function drawCode(x, left, top, bottom, offset) {
+  x.font = '14px Consolas, "Courier New", monospace';
+  for (let i = 0, y = top; y < bottom; i++, y += 20) {
+    x.fillStyle = '#5a5f69';
+    x.fillText(String(i + 1 + offset).padStart(3), left, y);
+    drawLine(x, CODE[(i + offset) % CODE.length], left + 46, y);
+  }
+}
+function drawTerm(x, left, top, bottom, seed) {
+  x.font = '13px Consolas, "Courier New", monospace';
+  let y = top, i = 0;
+  for (const l of TERM_L) { x.fillStyle = l.startsWith('PS') ? '#e5e5e5' : '#b5bac4'; x.fillText(l, left, y); y += 19; }
+  while (y < bottom) {
+    const t = TESTS[(i * 5 + seed) % TESTS.length], ms = ((i * 37 + seed * 11) % 900 + 40) / 1000;
+    x.fillStyle = '#4cc38a'; x.fillText('        PASS', left, y);
+    x.fillStyle = '#b5bac4'; x.fillText(`[ ${ms.toFixed(3)}s] daemon ${t}`, left + 100, y);
+    y += 19; i++;
+  }
+}
+function paintDesk() {
+  const c = document.createElement('canvas');
+  c.width = 1920; c.height = 1080;
+  const x = c.getContext('2d');
+  x.fillStyle = '#1e1f24'; x.fillRect(0, 0, 1920, 1080);
+  x.filter = 'blur(1.4px)';
+  x.fillStyle = '#16171b'; x.fillRect(0, 0, 1920, 34);
+  x.fillStyle = '#18191e'; x.fillRect(0, 34, 48, 998);
+  x.fillStyle = '#1b1c21'; x.fillRect(48, 34, 260, 998);
+  x.font = '13px Segoe UI, sans-serif';
+  ['crates', '  daemon', '    src', '      digest.rs', '      server.rs', '      registry.rs', '      git_watch.rs', '  protocol',
+   '  tracer', 'apps', '  native', '    src', '      status_window.rs', '      sidebar.rs', 'docs', 'tools', 'Cargo.toml', 'rt.ps1']
+    .forEach((n, i) => { x.fillStyle = i === 3 ? '#ffffff' : '#a9adb6'; x.fillText(n, 62, 64 + i * 22); });
+  x.fillStyle = '#16171b'; x.fillRect(308, 34, 1612, 36);
+  [[308, 'digest.rs'], [438, 'server.rs'], [1114, 'status_window.rs'], [1284, 'registry.rs']].forEach(([tx, n], i) => {
+    x.fillStyle = i % 2 ? '#16171b' : '#1e1f24'; x.fillRect(tx, 34, 128 + (n.length > 10 ? 40 : 0), 36);
+    x.fillStyle = '#c8ccd4'; x.fillText(n, tx + 14, 57);
+  });
+  x.fillStyle = '#2b2d33'; x.fillRect(1110, 34, 4, 566);
+  drawCode(x, 318, 94, 600, 0);
+  drawCode(x, 1124, 94, 600, 9);
+  x.fillStyle = '#131418'; x.fillRect(308, 600, 1612, 432);
+  x.fillStyle = '#2b2d33'; x.fillRect(308, 600, 1612, 2); x.fillRect(1110, 600, 4, 432);
+  x.font = '12px Segoe UI, sans-serif'; x.fillStyle = '#c8ccd4';
+  x.fillText('TERMINAL   pwsh', 320, 622); x.fillText('TERMINAL   pwsh (2)', 1126, 622);
+  drawTerm(x, 320, 650, 1030, 0);
+  drawTerm(x, 1126, 650, 1030, 3);
+  x.filter = 'none';
+  x.fillStyle = '#202227'; x.fillRect(0, 1032, 1920, 48);
+  x.fillStyle = '#2e3138'; x.fillRect(0, 1032, 1920, 1);
+  for (let i = 0; i < 7; i++) { x.fillStyle = i === 3 ? '#4a7bd0' : '#3a3e47'; x.beginPath(); x.roundRect(812 + i * 44, 1040, 32, 32, 6); x.fill(); }
+  x.fillStyle = '#e6e8ee'; x.font = '12px Segoe UI, sans-serif'; x.textAlign = 'right';
+  x.fillText('14:32', 1896, 1053); x.fillText('16/10/2026', 1896, 1070);
+  document.documentElement.style.setProperty('--desk', `url(${c.toDataURL('image/png')})`);
+}
+
+paintDesk();
+renderLanes();
+startTickers();
+requestAnimationFrame(placeCursorsAndMinimaps);
+document.fonts.ready.then(placeCursorsAndMinimaps);
+</script>
+</body>
+</html>
