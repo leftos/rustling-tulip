@@ -169,20 +169,28 @@ struct Wiring<A, S> {
 pub struct TailnetListener {
     status: watch::Receiver<ListenerStatus>,
     name: watch::Receiver<Option<String>>,
-    /// `None` once [`TailnetListener::stopped`] took it.
-    supervisor: Option<JoinHandle<()>>,
+    /// The supervisor task. [`TailnetListener::stopped`] waits on it in
+    /// place rather than taking it, so a `stopped()` dropped before it
+    /// returns still leaves the handle here for [`Drop`] to abort.
+    supervisor: JoinHandle<()>,
+    /// What the certificate task publishes to the supervisor; the sender goes
+    /// with the task, so `changed` stops yielding `Ok` once the task has
+    /// ended, whether it ended on its own or was aborted by the supervisor's
+    /// own end.
+    cert_state: watch::Receiver<CertState>,
     /// How many times a changed certificate was swapped in.
     #[cfg(test)]
     reloads: Arc<AtomicUsize>,
-    /// Ends the cert task, as a panic in it would.
+    /// Ends the cert task for the test that needs it ended while the
+    /// supervisor runs; the supervisor's own end already ends it.
     #[cfg(test)]
     cert_task: tokio::task::AbortHandle,
-    /// What the cert task publishes to the supervisor.
-    #[cfg(test)]
-    cert_state: watch::Receiver<CertState>,
     /// Whether the cert task had finished when the supervisor returned.
     #[cfg(test)]
     cert_done_at_exit: Arc<AtomicBool>,
+    /// Whether the supervisor should panic at the top of its loop.
+    #[cfg(test)]
+    panic_supervisor: Arc<AtomicBool>,
 }
 
 impl TailnetListener {
@@ -228,13 +236,13 @@ impl TailnetListener {
         let (name_tx, name) = watch::channel(None);
         #[cfg(test)]
         let reloads = Arc::new(AtomicUsize::new(0));
-        let (cert_state, cert) = watch::channel(CertState::Pending);
+        let (cert_tx, cert) = watch::channel(CertState::Pending);
         let (cert_name, wanted) = watch::channel(None);
         let worker = CertWorker {
             api: Arc::clone(&api),
             options,
             tailnet_dir,
-            state: cert_state,
+            state: cert_tx,
             tls: None,
             loaded: None,
             checked_name: None,
@@ -247,10 +255,11 @@ impl TailnetListener {
         let cert_task = AbortOnDrop(tokio::spawn(worker.run(wanted)));
         #[cfg(test)]
         let cert_abort = cert_task.0.abort_handle();
-        #[cfg(test)]
         let cert_state = cert.clone();
         #[cfg(test)]
         let cert_done_at_exit = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let panic_supervisor = Arc::new(AtomicBool::new(false));
         let supervisor = Supervisor {
             api,
             serve,
@@ -271,20 +280,23 @@ impl TailnetListener {
             last_down_error: None,
             #[cfg(test)]
             cert_done_at_exit: Arc::clone(&cert_done_at_exit),
+            #[cfg(test)]
+            panic_now: Arc::clone(&panic_supervisor),
         };
         let supervisor = tokio::spawn(supervisor.run(shutdown));
         Self {
             status,
             name,
-            supervisor: Some(supervisor),
+            supervisor,
+            cert_state,
             #[cfg(test)]
             reloads,
             #[cfg(test)]
             cert_task: cert_abort,
             #[cfg(test)]
-            cert_state,
-            #[cfg(test)]
             cert_done_at_exit,
+            #[cfg(test)]
+            panic_supervisor,
         }
     }
 
@@ -311,26 +323,37 @@ impl TailnetListener {
         self.name.borrow().clone()
     }
 
-    /// Wait until the supervisor has ended, after shutdown was asked for,
-    /// every server has released its address, and the cert task has ended
-    /// (so no `tailscale cert` call outlives the listener).
+    /// Wait until the supervisor has ended and the cert task has ended too,
+    /// so no `tailscale cert` call outlives the listener.
+    ///
+    /// On the normal path the supervisor has released every server's address
+    /// by then as well: it aborts the cert task and waits for it before it
+    /// stops the servers. A supervisor that panicked never runs that
+    /// shutdown, and its servers are dropped — each asking its handle to shut
+    /// down — without waiting out their grace, so one may hold its address
+    /// for up to [`ListenerOptions::shutdown_grace`] after this returns. What
+    /// holds on every path is the cert task's end; the supervisor's own end
+    /// aborts it, and the wait below sees that abort through.
+    ///
+    /// Dropping this future before it returns hands the listener to [`Drop`],
+    /// which aborts the supervisor, and with it the cert task.
     pub async fn stopped(mut self) {
-        let Some(supervisor) = self.supervisor.take() else {
-            return;
-        };
-        if let Err(err) = supervisor.await {
+        if let Err(err) = (&mut self.supervisor).await
+            && !err.is_cancelled()
+        {
             tracing::warn!(%err, "tailnet listener supervisor failed");
         }
+        // The task's sender goes with it, so this ends once its future is
+        // gone.
+        while self.cert_state.changed().await.is_ok() {}
     }
 }
 
 impl Drop for TailnetListener {
     /// Stop the supervisor; dropping it drops every [`Server`], which shuts
-    /// each one down.
+    /// each one down, and its `AbortOnDrop`, which ends the cert task.
     fn drop(&mut self) {
-        if let Some(supervisor) = &self.supervisor {
-            supervisor.abort();
-        }
+        self.supervisor.abort();
     }
 }
 
@@ -702,12 +725,32 @@ struct Supervisor<A, S> {
     last_down_error: Option<TailnetError>,
     #[cfg(test)]
     cert_done_at_exit: Arc<AtomicBool>,
+    /// Whether a test asked the supervisor to panic at the top of its loop.
+    #[cfg(test)]
+    panic_now: Arc<AtomicBool>,
 }
 
 impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
+    /// A test can make the supervisor panic here, standing in for a panic
+    /// anywhere in it, so the rest of its own shutdown — the wait for the
+    /// cert task's abort included — never runs. The `AbortOnDrop` the cert
+    /// task's abort comes from lives in the task's state machine, not on the
+    /// stack: the unwind does not drop it, tokio drops the future once it has
+    /// caught the panic, and that drop still aborts the cert task.
+    #[cfg(test)]
+    #[expect(clippy::panic, reason = "the test asks for a supervisor panic")]
+    fn panic_if_asked(&self) {
+        if !self.panic_now.load(Ordering::SeqCst) {
+            return;
+        }
+        panic!("scripted tailnet supervisor panic");
+    }
+
     async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         let mut down_backoff = self.options.down_backoff;
         while !*shutdown.borrow() {
+            #[cfg(test)]
+            self.panic_if_asked();
             let Some(answer) = until_shutdown(self.api.whoami(), &mut shutdown).await else {
                 break;
             };
@@ -3185,6 +3228,64 @@ mod tests {
             1,
             "the held tailscale cert call was dropped before stopped returned"
         );
+    }
+
+    /// A supervisor that panics still has its cert task aborted, by the
+    /// `AbortOnDrop` tokio drops once it has caught the panic, but nothing
+    /// waits for that abort, so `stopped` has to: it returns with the held
+    /// `tailscale cert` call accounted for.
+    ///
+    /// This passes on the pre-fix code as well, under this test's
+    /// current-thread runtime: there the supervisor task's drop, and so the
+    /// cert task's abort and its marker, lands before the pre-fix waiter
+    /// wakes. It is a regression guard — a cert task nothing aborts fails it
+    /// — not red evidence for the wait.
+    #[tokio::test(start_paused = true)]
+    async fn stopped_waits_for_the_cert_task_when_the_supervisor_panics() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.cert_held.send_replace(true);
+        let serve = Arc::new(PlainServe::default());
+        let (listener, shutdown) = start(&fake, &serve, options(0));
+        wait_for_cert_calls(&fake, 1).await;
+
+        listener.panic_supervisor.store(true, Ordering::SeqCst);
+        listener.stopped().await;
+        assert_eq!(
+            fake.cert_dropped(),
+            1,
+            "the held tailscale cert call was dropped before stopped returned"
+        );
+        drop(shutdown);
+    }
+
+    /// A `stopped` dropped before it returns leaves the supervisor and the
+    /// cert task running unless it hands them to `Drop`.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_stopped_midway_aborts_the_supervisor_and_the_cert_task() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.cert_held.send_replace(true);
+        let serve = Arc::new(PlainServe::default());
+        let options = options(0);
+        let (listener, shutdown) = start(&fake, &serve, options);
+        wait_for_cert_calls(&fake, 1).await;
+
+        let outcome = tokio::time::timeout(Duration::from_secs(1), listener.stopped()).await;
+        assert!(
+            outcome.is_err(),
+            "the supervisor never ends on its own, so the timeout wins"
+        );
+
+        wait_until("the cert call to drop", || fake.cert_dropped() == 1).await;
+        let asked = fake.whoami_calls();
+        // Three poll intervals: a supervisor that was not aborted would have
+        // asked Tailscale again by then.
+        tokio::time::sleep(options.poll_interval * 3).await;
+        assert_eq!(
+            fake.whoami_calls(),
+            asked,
+            "the supervisor was aborted, so Tailscale is not asked again"
+        );
+        drop(shutdown);
     }
 
     /// Set the fake's `cert` script and wait until a call made with it has
