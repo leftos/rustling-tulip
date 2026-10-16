@@ -8,11 +8,6 @@
   - [ ] RT-5 DK.3b, DK.5–DK.13: provider capability, spawn environment, dialog and chip
 - [ ] RT-6 Merge feat/deepseek-sessions (#8)
 
-## Wave 1b — Environment secrets
-
-- [ ] RT-7 Keep secret environment rows out of stored files and client messages
-- [ ] RT-10 Merge feat/env-secrets (#9)
-
 ## Wave 1c — Session labels, menus and busy tracking
 
 - [ ] RT-11 P4.16: Exclude a session from busy tracking
@@ -43,8 +38,21 @@
 ## Wave 5 — Remote desktop, relay and files across machines
 
 - [ ] RT-33 MA1: shared client core for pinned TLS, host profiles and pairing
+  - [ ] RT-146 MA1.a: Crate skeleton, connection code and host profiles
+  - [ ] RT-147 MA1.b: Pinned-TLS connector and probe
+  - [ ] RT-148 MA1.c: Pairing client
+  - [ ] RT-149 MA1.d: LAN discovery
 - [ ] RT-96 MA3: Per-device credentials, revocable from Settings
 - [ ] RT-34 Phase 6: remote mode and cutover
+  - [ ] RT-150 P6.1: Transport seam: `Target::{Local, Remote(profile)}` in `net.rs`
+  - [ ] RT-151 P6.2: Remote-mode rules: what is disabled, hidden or retargeted
+  - [ ] RT-152 P6.3: Connection picker (saved hosts) and boot reconnect
+  - [ ] RT-153 P6.4: Add host by connection code
+  - [ ] RT-154 P6.5: Host Settings: Remote access panel
+  - [ ] RT-155 P6.6: Pair with a discovered host
+  - [ ] RT-156 P6.7: Autostart recovered: Start daemon on login
+  - [ ] RT-157 P6.8: Cutover: installer
+  - [ ] RT-158 P6.9: Live remote e2e and the docs pass
 - [ ] RT-95 Connect to a daemon over Tailscale by its MagicDNS name
 - [ ] RT-94 MA2: Relay that reaches the daemon from outside the LAN with end-to-end TLS
 - [ ] RT-35 FT.2: native download sink for fetched files
@@ -126,7 +134,7 @@
 - [ ] RT-64 Re-cut RT-55 and gate-dashboard.md around ops-tower's gate-state and proc-table crates
 - [ ] RT-55 Gate dashboard in the client
 - [ ] RT-56 Plan board and daily briefing in the Dashboard
-- [ ] RT-65 Decide on a dock-bar mode like ops-tower's desktop window
+- [ ] RT-159 Corner status window: Needs you, Just finished and a Working ticker
 
 ## Wave 16 — Dictation
 
