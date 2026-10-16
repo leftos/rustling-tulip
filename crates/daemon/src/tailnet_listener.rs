@@ -10,26 +10,36 @@
 //! `cert_interval`, and swapped into every server at once when its PEM
 //! changes. Until one has loaded, nothing binds: there is no plaintext path
 //! and no self-signed fallback.
+//!
+//! Every accepted connection passes the [`TailnetAcceptor`] before its TLS
+//! handshake: a peer outside Tailscale's ranges, a peer `tailscale whois`
+//! cannot identify, and a peer the owner rule refuses are dropped without a
+//! byte written. An admitted connection's requests carry its
+//! [`AuthorizedPeer`].
 
 use anyhow::Context as _;
+use axum::middleware::AddExtension;
 use axum_server::Handle;
+use axum_server::accept::Accept;
 use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest as _, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
-use tailnet::{TailnetError, WhoIs};
-use tokio::sync::watch;
+use tailnet::{Denied, PeerIdentity, TailnetError, WhoIs};
+use tokio::sync::{OnceCell, Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tower::Layer as _;
 
 /// Consecutive transient `whoami` failures after which Tailscale counts as
 /// down.
@@ -111,36 +121,47 @@ impl ListenerOptions {
     };
 }
 
-/// Serves the connections of one bound listener with `tls` until its handle
-/// is shut down. Every server is handed the same `tls`, so a reload reaches
-/// all of them at once.
-pub trait Serve: Send + Sync + 'static {
+/// Serves the connections of one bound listener with `tls`, admitting only
+/// the peers `acceptor` lets through, until its handle is shut down. Every
+/// server is handed the same `tls` and the same `acceptor`, so a reload
+/// reaches all of them at once and they share one verdict cache.
+pub trait Serve<A: TailnetApi>: Send + Sync + 'static {
     fn serve(
         &self,
         listener: std::net::TcpListener,
         handle: Handle<SocketAddr>,
         tls: RustlsConfig,
+        acceptor: TailnetAcceptor<A>,
     ) -> impl Future<Output = std::io::Result<()>> + Send;
 }
 
-/// The production [`Serve`]: `router` over TLS.
+/// The production [`Serve`]: `router` over TLS, behind the whois acceptor.
 struct TlsServe {
     router: axum::Router,
 }
 
-impl Serve for TlsServe {
+impl<A: TailnetApi> Serve<A> for TlsServe {
     async fn serve(
         &self,
         listener: std::net::TcpListener,
         handle: Handle<SocketAddr>,
         tls: RustlsConfig,
+        acceptor: TailnetAcceptor<A>,
     ) -> std::io::Result<()> {
         axum_server::from_tcp(listener)?
             .handle(handle)
-            .acceptor(RustlsAcceptor::new(tls))
+            .acceptor(RustlsAcceptor::new(tls).acceptor(acceptor))
             .serve(self.router.clone().into_make_service())
             .await
     }
+}
+
+/// What [`TailnetListener::start_with`] serves with: the CLI seam, the
+/// server, and the peer policy.
+struct Wiring<A, S> {
+    api: Arc<A>,
+    serve: Arc<S>,
+    policy: PeerPolicy,
 }
 
 /// The running listener: a supervisor task that owns the servers, and the
@@ -169,32 +190,40 @@ impl TailnetListener {
     /// port 8787 of each of the host's tailnet addresses, with the
     /// certificate `tailscale cert` writes into `tailnet_dir` as
     /// `<name>.crt` and `<name>.key`, until `shutdown` turns true (or its
-    /// sender is dropped) or the listener is dropped.
+    /// sender is dropped) or the listener is dropped. Only the host owner's
+    /// own devices get past the [`TailnetAcceptor`], and every request
+    /// `router` sees carries their [`AuthorizedPeer`].
     pub fn start(
         router: axum::Router,
         tailnet_dir: PathBuf,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
-        Self::start_with(
-            Arc::new(tailnet::Cli::locate()),
-            Arc::new(TlsServe { router }),
-            ListenerOptions::PRODUCTION,
-            tailnet_dir,
-            shutdown,
-        )
+        let wiring = Wiring {
+            api: Arc::new(tailnet::Cli::locate()),
+            serve: Arc::new(TlsServe { router }),
+            policy: PeerPolicy::PRODUCTION,
+        };
+        Self::start_with(wiring, ListenerOptions::PRODUCTION, tailnet_dir, shutdown)
     }
 
     /// Start the supervisor and return at once; it asks `whoami` for the
     /// addresses, `tailscale cert` for the certificate, binds one server per
     /// address on `options.port`, and polls for changes until `shutdown`
     /// turns true (or its sender is dropped), then shuts every server down.
-    fn start_with<A: TailnetApi, S: Serve>(
-        api: Arc<A>,
-        serve: Arc<S>,
+    fn start_with<A: TailnetApi, S: Serve<A>>(
+        wiring: Wiring<A, S>,
         options: ListenerOptions,
         tailnet_dir: PathBuf,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
+        let Wiring { api, serve, policy } = wiring;
+        let (host, host_answer) = watch::channel(None);
+        let acceptor = TailnetAcceptor::new(
+            Arc::clone(&api),
+            host_answer,
+            policy,
+            WhoisLimits::PRODUCTION,
+        );
         let (status_tx, status) = watch::channel(ListenerStatus::Starting);
         let (name_tx, name) = watch::channel(None);
         #[cfg(test)]
@@ -225,6 +254,8 @@ impl TailnetListener {
         let supervisor = Supervisor {
             api,
             serve,
+            acceptor,
+            host,
             options,
             status: status_tx,
             name: name_tx,
@@ -640,6 +671,11 @@ enum Flow {
 struct Supervisor<A, S> {
     api: Arc<A>,
     serve: Arc<S>,
+    /// The gate every server's connections pass, shared by all of them.
+    acceptor: TailnetAcceptor<A>,
+    /// The last `whoami` answer while Tailscale is up, for the acceptor's
+    /// owner rule; `None` before one and after Tailscale went down.
+    host: watch::Sender<Option<WhoIs>>,
     options: ListenerOptions,
     status: watch::Sender<ListenerStatus>,
     name: watch::Sender<Option<String>>,
@@ -668,7 +704,7 @@ struct Supervisor<A, S> {
     cert_done_at_exit: Arc<AtomicBool>,
 }
 
-impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
+impl<A: TailnetApi, S: Serve<A>> Supervisor<A, S> {
     async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
         let mut down_backoff = self.options.down_backoff;
         while !*shutdown.borrow() {
@@ -677,6 +713,7 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             };
             let pause = match answer {
                 Ok(who) => {
+                    self.host.send_replace(Some(who.clone()));
                     down_backoff = self.options.down_backoff;
                     self.transient_failures = 0;
                     self.last_down_error = None;
@@ -769,6 +806,7 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
         }
         self.last_down_error = Some(err.clone());
         self.last_who = None;
+        self.host.send_replace(None);
         self.stop_all().await;
         self.publish(ListenerStatus::TailscaleDown(err));
     }
@@ -936,8 +974,9 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
         let serve = Arc::clone(&self.serve);
         let task_handle = handle.clone();
         let tls = tls.clone();
+        let acceptor = self.acceptor.clone();
         let task = tokio::spawn(async move {
-            if let Err(err) = serve.serve(listener, task_handle, tls).await {
+            if let Err(err) = serve.serve(listener, task_handle, tls, acceptor).await {
                 tracing::warn!(addr = %local, %err, "tailnet server stopped with an error");
             }
         });
@@ -994,6 +1033,394 @@ impl<A: TailnetApi, S: Serve> Supervisor<A, S> {
             }
             changed
         });
+    }
+}
+
+/// How long a verdict on a peer IP is reused before `whois` is asked again.
+const VERDICT_TTL: Duration = Duration::from_secs(30);
+
+/// The most peer IPs the verdict cache holds.
+const VERDICT_CAP: usize = 256;
+
+/// The most `whois` calls in flight at once, across every peer.
+const WHOIS_CONCURRENCY: usize = 4;
+
+/// The tailnet device a connection came from, on every request the tailnet
+/// listener serves. Only this module makes one, and only for a connection
+/// the owner rule admitted, so a handler that finds it can trust it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedPeer(PeerIdentity);
+
+impl AuthorizedPeer {
+    /// The device's identity from `tailscale whois`.
+    #[must_use]
+    pub fn identity(&self) -> &PeerIdentity {
+        &self.0
+    }
+}
+
+/// Which peer addresses are tailnet ones, and the owner rule. The listener
+/// serves with [`PeerPolicy::PRODUCTION`]; only tests pass another, through
+/// the private [`TailnetListener::start_with`].
+#[derive(Clone, Copy)]
+struct PeerPolicy {
+    in_range: fn(IpAddr) -> bool,
+    authorize: fn(IpAddr, &WhoIs, &WhoIs) -> Result<PeerIdentity, Denied>,
+}
+
+impl PeerPolicy {
+    const PRODUCTION: Self = Self {
+        in_range: tailnet::in_tailscale_range,
+        authorize: tailnet::authorize,
+    };
+}
+
+/// What the owner rule decided about a peer IP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    Allow(PeerIdentity),
+    Deny(Denied),
+}
+
+/// How long a peer IP whose `whois` failed is refused without asking again.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+
+/// How long a `whois` may take, and how long a connection may wait for one
+/// of the permits to ask it.
+#[derive(Debug, Clone, Copy)]
+struct WhoisLimits {
+    timeout: Duration,
+    permit_wait: Duration,
+}
+
+impl WhoisLimits {
+    const PRODUCTION: Self = Self {
+        timeout: tailnet::DEFAULT_TIMEOUT,
+        permit_wait: tailnet::DEFAULT_TIMEOUT,
+    };
+}
+
+/// Entries per canonical peer IP, each good for `ttl`. Holds at most `cap`:
+/// a new IP in a full map first drops the expired entries, then the oldest.
+struct TtlMap<V> {
+    ttl: Duration,
+    cap: usize,
+    entries: HashMap<IpAddr, (Instant, V)>,
+}
+
+impl<V> TtlMap<V> {
+    fn new(ttl: Duration, cap: usize) -> Self {
+        Self {
+            ttl,
+            cap,
+            entries: HashMap::new(),
+        }
+    }
+
+    /// The entry for `ip`, unless it is older than the TTL at `now`.
+    fn get(&self, ip: IpAddr, now: Instant) -> Option<&V> {
+        self.entries
+            .get(&ip)
+            .filter(|(at, _)| now.saturating_duration_since(*at) < self.ttl)
+            .map(|(_, value)| value)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn insert(&mut self, ip: IpAddr, value: V, now: Instant) {
+        if !self.entries.contains_key(&ip) && self.entries.len() >= self.cap {
+            let ttl = self.ttl;
+            self.entries
+                .retain(|_, (at, _)| now.saturating_duration_since(*at) < ttl);
+            if self.entries.len() >= self.cap {
+                let oldest = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(oldest, _)| *oldest);
+                if let Some(oldest) = oldest {
+                    self.entries.remove(&oldest);
+                }
+            }
+        }
+        self.entries.insert(ip, (now, value));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// The gate before every tailnet connection's TLS handshake: it admits a
+/// peer only when its address is in Tailscale's ranges, `tailscale whois`
+/// identifies it, and the owner rule allows it, and drops every other
+/// connection without writing a byte. Every server of one listener shares
+/// it, and so its verdict cache.
+pub struct TailnetAcceptor<A> {
+    gate: Arc<Gate<A>>,
+}
+
+impl<A> Clone for TailnetAcceptor<A> {
+    fn clone(&self) -> Self {
+        Self {
+            gate: Arc::clone(&self.gate),
+        }
+    }
+}
+
+struct Gate<A> {
+    api: Arc<A>,
+    /// The host's latest `whoami` answer; `None` denies every peer.
+    host: watch::Receiver<Option<WhoIs>>,
+    policy: PeerPolicy,
+    limits: WhoisLimits,
+    permits: Semaphore,
+    state: std::sync::Mutex<GateState>,
+}
+
+/// The host identity verdicts are bound to: its node id and user id.
+type HostKey = (i64, i64);
+
+fn host_key(host: &WhoIs) -> HostKey {
+    (host.node.id, host.node.user)
+}
+
+/// One `whois` round for a peer IP; `None` when it failed.
+type Round = Arc<OnceCell<Option<Verdict>>>;
+
+struct GateState {
+    /// The host the verdicts and the rounds under way were made against;
+    /// `None` while there is no host answer.
+    host: Option<HostKey>,
+    /// Whether "no whoami answer" was logged at warn since the host went.
+    no_host_reported: bool,
+    cache: TtlMap<Verdict>,
+    /// Peer IPs whose last `whois` round failed, refused until it expires.
+    failures: TtlMap<()>,
+    /// The `whois` round under way per peer IP, which every connection from
+    /// that IP waits on.
+    flights: HashMap<IpAddr, Round>,
+}
+
+impl GateState {
+    /// Bind the state to `host`: a changed host identity drops every
+    /// verdict and every round under way.
+    fn follow_host(&mut self, host: Option<HostKey>) {
+        if self.host != host {
+            self.host = host;
+            self.no_host_reported = false;
+            self.cache.clear();
+            self.flights.clear();
+        }
+    }
+}
+
+/// How a connection's verdict is reached.
+enum Lookup {
+    /// Without a round: a cached verdict, or `None` to refuse.
+    Settled(Option<Verdict>),
+    /// The `whois` round to run or join, against `host`.
+    Round { round: Round, host: WhoIs },
+}
+
+impl<A: TailnetApi> TailnetAcceptor<A> {
+    fn new(
+        api: Arc<A>,
+        host: watch::Receiver<Option<WhoIs>>,
+        policy: PeerPolicy,
+        limits: WhoisLimits,
+    ) -> Self {
+        let gate = Gate {
+            api,
+            host,
+            policy,
+            limits,
+            permits: Semaphore::new(WHOIS_CONCURRENCY),
+            state: std::sync::Mutex::new(GateState {
+                host: None,
+                no_host_reported: false,
+                cache: TtlMap::new(VERDICT_TTL, VERDICT_CAP),
+                failures: TtlMap::new(FAILURE_BACKOFF, VERDICT_CAP),
+                flights: HashMap::new(),
+            }),
+        };
+        Self {
+            gate: Arc::new(gate),
+        }
+    }
+}
+
+impl<A: TailnetApi> Gate<A> {
+    /// Admit the connection from `peer`, the accepted socket's own peer
+    /// address, or say why not.
+    async fn admit(&self, peer: SocketAddr) -> std::io::Result<PeerIdentity> {
+        let peer = SocketAddr::new(peer.ip().to_canonical(), peer.port());
+        if !(self.policy.in_range)(peer.ip()) {
+            tracing::debug!(%peer, "tailnet listener: dropped a peer outside Tailscale's ranges");
+            return Err(refused("outside Tailscale's ranges"));
+        }
+        let verdict = match self.lookup(peer) {
+            Lookup::Settled(verdict) => verdict,
+            Lookup::Round { round, host } => round
+                .get_or_init(|| self.run_round(peer, &round, host))
+                .await
+                .clone(),
+        };
+        match verdict {
+            Some(Verdict::Allow(identity)) => Ok(identity),
+            Some(Verdict::Deny(denied)) => Err(refused(&denied.to_string())),
+            None => Err(refused("no verdict from whois")),
+        }
+    }
+
+    fn state(&self) -> MutexGuard<'_, GateState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn current_host(&self) -> Option<WhoIs> {
+        self.host.borrow().clone()
+    }
+
+    /// Settle `peer`'s connection without a round where one is not needed:
+    /// no host answer refuses, a cached verdict (against the current host)
+    /// answers, a recent failure refuses. Else the round to run or join.
+    /// Refusals here log at debug: their window's first one warned.
+    fn lookup(&self, peer: SocketAddr) -> Lookup {
+        let ip = peer.ip();
+        let host = self.current_host();
+        let now = Instant::now();
+        let mut state = self.state();
+        state.follow_host(host.as_ref().map(host_key));
+        let Some(host) = host else {
+            if state.no_host_reported {
+                tracing::debug!(%peer, "tailnet listener: no whoami answer yet; connection dropped");
+            } else {
+                tracing::warn!(%peer, "tailnet listener: no whoami answer yet; connection dropped");
+                state.no_host_reported = true;
+            }
+            return Lookup::Settled(None);
+        };
+        if let Some(verdict) = state.cache.get(ip, now).cloned() {
+            if let Verdict::Deny(reason) = &verdict {
+                tracing::debug!(%peer, %reason, "tailnet listener: peer refused by the owner rule (cached)");
+            }
+            return Lookup::Settled(Some(verdict));
+        }
+        if state.failures.get(ip, now).is_some() {
+            tracing::debug!(%peer, "tailnet listener: whois failed recently; connection dropped");
+            return Lookup::Settled(None);
+        }
+        let round = Arc::clone(state.flights.entry(ip).or_default());
+        Lookup::Round { round, host }
+    }
+
+    /// Run `round` for `peer` against `host` and land it. It runs inside the
+    /// round's cell, so it lands once and every waiting connection gets its
+    /// outcome.
+    async fn run_round(&self, peer: SocketAddr, round: &Round, host: WhoIs) -> Option<Verdict> {
+        let verdict = self.decide(peer, &host).await;
+        self.land(peer, round, &host, verdict)
+    }
+
+    /// End `round`: no connection joins it from now on, its verdict is
+    /// cached, and a failure starts the peer's backoff. A round that ran
+    /// against a host that has changed since is discarded and refuses.
+    fn land(
+        &self,
+        peer: SocketAddr,
+        round: &Round,
+        host: &WhoIs,
+        verdict: Option<Verdict>,
+    ) -> Option<Verdict> {
+        let ip = peer.ip();
+        let current = self.current_host().as_ref().map(host_key);
+        let mut state = self.state();
+        state.follow_host(current);
+        if current != Some(host_key(host)) {
+            tracing::warn!(%peer, "tailnet listener: the host's identity changed during whois; connection dropped");
+            return None;
+        }
+        if state
+            .flights
+            .get(&ip)
+            .is_some_and(|under_way| Arc::ptr_eq(under_way, round))
+        {
+            state.flights.remove(&ip);
+        }
+        let now = Instant::now();
+        match &verdict {
+            Some(verdict) => state.cache.insert(ip, verdict.clone(), now),
+            None => state.failures.insert(ip, (), now),
+        }
+        verdict
+    }
+
+    /// One `whois` round for `peer` against `host`: a permit, `whois`, then
+    /// the owner rule; `None` on any failure. Each outcome logs once per
+    /// round, so once per window per peer IP.
+    async fn decide(&self, peer: SocketAddr, host: &WhoIs) -> Option<Verdict> {
+        let permit = tokio::time::timeout(self.limits.permit_wait, self.permits.acquire()).await;
+        let Ok(Ok(permit)) = permit else {
+            tracing::warn!(%peer, "tailnet listener: too many whois calls in flight; connection dropped");
+            return None;
+        };
+        let answer = tokio::time::timeout(self.limits.timeout, self.api.whois(peer))
+            .await
+            .unwrap_or(Err(TailnetError::Timeout));
+        drop(permit);
+        let who = match answer {
+            Ok(who) => who,
+            Err(err) => {
+                tracing::warn!(%peer, %err, "tailnet listener: whois failed; connection dropped");
+                return None;
+            }
+        };
+        match (self.policy.authorize)(peer.ip(), &who, host) {
+            Ok(identity) => {
+                tracing::info!(
+                    %peer,
+                    device = %identity.name,
+                    stable_id = %identity.stable_id,
+                    "tailnet listener: peer admitted"
+                );
+                Some(Verdict::Allow(identity))
+            }
+            Err(denied) => {
+                tracing::warn!(%peer, reason = %denied, "tailnet listener: peer refused by the owner rule");
+                Some(Verdict::Deny(denied))
+            }
+        }
+    }
+}
+
+/// The refusal a dropped connection's accept ends with; axum-server drops
+/// the connection on it, before the TLS handshake.
+fn refused(reason: &str) -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::PermissionDenied,
+        format!("tailnet peer refused: {reason}"),
+    )
+}
+
+impl<A: TailnetApi, S: Send + 'static> Accept<tokio::net::TcpStream, S> for TailnetAcceptor<A> {
+    type Stream = tokio::net::TcpStream;
+    type Service = AddExtension<S, AuthorizedPeer>;
+    type Future =
+        Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>>;
+
+    fn accept(&self, stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        let gate = Arc::clone(&self.gate);
+        Box::pin(async move {
+            let peer = stream.peer_addr().inspect_err(|err| {
+                tracing::debug!(%err, "tailnet listener: the accepted socket has no peer address; connection dropped");
+            })?;
+            let identity = gate.admit(peer).await?;
+            let service = axum::Extension(AuthorizedPeer(identity)).layer(service);
+            Ok((stream, service))
+        })
     }
 }
 
@@ -1285,9 +1712,14 @@ mod tests {
     struct FakeTailnet {
         whoami: Mutex<Result<WhoIs, TailnetError>>,
         whois: Mutex<Result<WhoIs, TailnetError>>,
+        /// Per-IP `whois` answers, ahead of `whois`.
+        whois_for: Mutex<HashMap<IpAddr, Result<WhoIs, TailnetError>>>,
         cert: Mutex<CertScript>,
         whoami_times: Mutex<Vec<Instant>>,
-        whois_calls: AtomicUsize,
+        /// The address each `whois` call asked about.
+        whois_addrs: Mutex<Vec<SocketAddr>>,
+        /// While true, a `whois` call waits before it answers.
+        whois_held: watch::Sender<bool>,
         cert_calls: Mutex<Vec<CertCall>>,
         /// `cert` calls that ran to their end.
         cert_finished: AtomicUsize,
@@ -1332,10 +1764,12 @@ mod tests {
             let leaf = ca.leaf();
             Self {
                 whoami: Mutex::new(whoami),
-                whois: Mutex::new(Err(TailnetError::NotConnected)),
+                whois: Mutex::new(Ok(peer_whois())),
+                whois_for: Mutex::new(HashMap::new()),
                 cert: Mutex::new(CertScript::leaf(&leaf)),
                 whoami_times: Mutex::new(Vec::new()),
-                whois_calls: AtomicUsize::new(0),
+                whois_addrs: Mutex::new(Vec::new()),
+                whois_held: watch::Sender::new(false),
                 cert_calls: Mutex::new(Vec::new()),
                 cert_finished: AtomicUsize::new(0),
                 cert_dropped: AtomicUsize::new(0),
@@ -1387,15 +1821,54 @@ mod tests {
         fn whoami_calls(&self) -> usize {
             self.whoami_times().len()
         }
+
+        fn set_whois(&self, whois: Result<WhoIs, TailnetError>) {
+            *self.whois.lock().expect("whois lock") = whois;
+        }
+
+        fn whois_addrs(&self) -> Vec<SocketAddr> {
+            self.whois_addrs.lock().expect("whois addrs lock").clone()
+        }
+
+        fn set_whois_for(&self, ip: IpAddr, whois: Result<WhoIs, TailnetError>) {
+            self.whois_for
+                .lock()
+                .expect("whois for lock")
+                .insert(ip, whois);
+        }
+
+        /// The `whois` calls that asked about `ip`.
+        fn whois_calls_for(&self, ip: IpAddr) -> usize {
+            self.whois_addrs()
+                .iter()
+                .filter(|addr| addr.ip() == ip)
+                .count()
+        }
     }
 
     impl TailnetApi for FakeTailnet {
         fn whois(
             &self,
-            _addr: SocketAddr,
+            addr: SocketAddr,
         ) -> impl Future<Output = Result<WhoIs, TailnetError>> + Send {
-            self.whois_calls.fetch_add(1, Ordering::SeqCst);
-            std::future::ready(self.whois.lock().expect("whois lock").clone())
+            self.whois_addrs
+                .lock()
+                .expect("whois addrs lock")
+                .push(addr);
+            let scripted = self
+                .whois_for
+                .lock()
+                .expect("whois for lock")
+                .get(&addr.ip())
+                .cloned();
+            let answer = scripted.unwrap_or_else(|| self.whois.lock().expect("whois lock").clone());
+            let mut held = self.whois_held.subscribe();
+            async move {
+                held.wait_for(|held| !*held)
+                    .await
+                    .expect("the fake outlives its whois calls");
+                answer
+            }
         }
 
         fn whoami(&self) -> impl Future<Output = Result<WhoIs, TailnetError>> + Send {
@@ -1471,12 +1944,13 @@ mod tests {
         events: Option<Arc<Mutex<Vec<&'static str>>>>,
     }
 
-    impl Serve for PlainServe {
+    impl<A: TailnetApi> Serve<A> for PlainServe {
         async fn serve(
             &self,
             listener: std::net::TcpListener,
             handle: Handle<SocketAddr>,
             _tls: RustlsConfig,
+            _acceptor: TailnetAcceptor<A>,
         ) -> std::io::Result<()> {
             self.started.fetch_add(1, Ordering::SeqCst);
             if self.fail_first.swap(false, Ordering::SeqCst) {
@@ -1501,29 +1975,90 @@ mod tests {
         }
     }
 
-    fn start_with_shutdown<S: Serve>(
+    /// The tailnet address the loopback test peer stands for.
+    const PEER_TAILNET_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(100, 101, 102, 103));
+
+    /// The owner's laptop as `whois` describes it: the host's user, untagged,
+    /// at [`PEER_TAILNET_IP`].
+    fn peer_whois() -> WhoIs {
+        WhoIs {
+            node: Node {
+                id: 2,
+                stable_id: "nPeerCNTRL".to_owned(),
+                name: "laptop.tail1234.ts.net.".to_owned(),
+                user: 2,
+                sharer: 0,
+                addresses: vec![format!("{PEER_TAILNET_IP}/32")],
+                tags: Vec::new(),
+                hostinfo: Hostinfo::default(),
+            },
+            user_profile: UserProfile {
+                id: 2,
+                login_name: "owner@example.com".to_owned(),
+                display_name: "Owner".to_owned(),
+            },
+        }
+    }
+
+    /// Admits loopback peers, the only ones a test can make, and judges each
+    /// by the real owner rule as if it came from [`PEER_TAILNET_IP`].
+    fn loopback_policy() -> PeerPolicy {
+        PeerPolicy {
+            in_range: |ip: IpAddr| ip.is_loopback(),
+            authorize: |ip: IpAddr, peer: &WhoIs, host: &WhoIs| {
+                let ip = if ip.is_loopback() {
+                    PEER_TAILNET_IP
+                } else {
+                    ip
+                };
+                tailnet::authorize(ip, peer, host)
+            },
+        }
+    }
+
+    fn launch<S: Serve<FakeTailnet>>(
+        fake: &Arc<FakeTailnet>,
+        serve: &Arc<S>,
+        options: ListenerOptions,
+        policy: PeerPolicy,
+        shutdown: watch::Receiver<bool>,
+    ) -> TailnetListener {
+        let wiring = Wiring {
+            api: Arc::clone(fake),
+            serve: Arc::clone(serve),
+            policy,
+        };
+        TailnetListener::start_with(wiring, options, fake.dir(), shutdown)
+    }
+
+    fn start_with_shutdown<S: Serve<FakeTailnet>>(
         fake: &Arc<FakeTailnet>,
         serve: &Arc<S>,
         options: ListenerOptions,
         shutdown: watch::Receiver<bool>,
     ) -> TailnetListener {
-        TailnetListener::start_with(
-            Arc::clone(fake),
-            Arc::clone(serve),
-            options,
-            fake.dir(),
-            shutdown,
-        )
+        launch(fake, serve, options, loopback_policy(), shutdown)
     }
 
-    fn start<S: Serve>(
+    fn start_policy<S: Serve<FakeTailnet>>(
+        fake: &Arc<FakeTailnet>,
+        serve: &Arc<S>,
+        options: ListenerOptions,
+        policy: PeerPolicy,
+    ) -> (TailnetListener, watch::Sender<bool>) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let listener = launch(fake, serve, options, policy, shutdown_rx);
+        (listener, shutdown_tx)
+    }
+
+    /// Start with [`loopback_policy`], so a loopback client is the owner's
+    /// laptop.
+    fn start<S: Serve<FakeTailnet>>(
         fake: &Arc<FakeTailnet>,
         serve: &Arc<S>,
         options: ListenerOptions,
     ) -> (TailnetListener, watch::Sender<bool>) {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let listener = start_with_shutdown(fake, serve, options, shutdown_rx);
-        (listener, shutdown_tx)
+        start_policy(fake, serve, options, loopback_policy())
     }
 
     async fn wait_for_status(
@@ -1875,9 +2410,19 @@ mod tests {
         drop(held);
     }
 
+    /// `/probe` answers "probe ok"; `/peer` answers the [`AuthorizedPeer`]
+    /// the request carries, as `stable_id|name|user_id|login`.
     fn tls_serve() -> Arc<TlsServe> {
-        let router =
-            axum::Router::new().route("/probe", axum::routing::get(|| async { "probe ok" }));
+        let peer = |axum::Extension(peer): axum::Extension<AuthorizedPeer>| async move {
+            let identity = peer.identity();
+            format!(
+                "{}|{}|{}|{}",
+                identity.stable_id, identity.name, identity.user_id, identity.login
+            )
+        };
+        let router = axum::Router::new()
+            .route("/probe", axum::routing::get(|| async { "probe ok" }))
+            .route("/peer", axum::routing::get(peer));
         Arc::new(TlsServe { router })
     }
 
@@ -1915,8 +2460,8 @@ mod tests {
         stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
     }
 
-    /// Connect over TLS trusting only `ca`, offering ALPN `h2` and `http/1.1`.
-    async fn tls_connect(addr: SocketAddr, ca: &TestCa) -> Handshake {
+    /// A client config trusting only `ca`, offering ALPN `h2` and `http/1.1`.
+    fn client_config(ca: &TestCa) -> Arc<rustls::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca.der.clone()).expect("trust the test CA");
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -1926,12 +2471,62 @@ mod tests {
             .with_root_certificates(roots)
             .with_no_client_auth();
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Arc::new(config)
+    }
+
+    fn server_name() -> ServerName<'static> {
+        ServerName::try_from(host().to_owned()).expect("a valid server name")
+    }
+
+    /// Open a plain TCP connection, send a TLS `ClientHello` for [`host`],
+    /// and return every byte the server sends until it ends the exchange.
+    /// A dropped connection returns nothing; a TLS server would at least
+    /// answer with its `ServerHello`.
+    async fn hello_reply(addr: SocketAddr, ca: &TestCa) -> Vec<u8> {
+        hello_reply_from(V4_LOOPBACK, addr, ca).await
+    }
+
+    /// [`hello_reply`] from a client socket bound to `from`.
+    async fn hello_reply_from(from: IpAddr, addr: SocketAddr, ca: &TestCa) -> Vec<u8> {
+        let mut client =
+            rustls::ClientConnection::new(client_config(ca), server_name()).expect("a TLS client");
+        let mut hello = Vec::new();
+        client
+            .write_tls(&mut hello)
+            .expect("encode the ClientHello");
+        let socket = tokio::net::TcpSocket::new_v4().expect("a client socket");
+        socket
+            .bind(SocketAddr::new(from, 0))
+            .expect("bind the client socket");
+        let mut tcp = socket.connect(addr).await.expect("connect to the listener");
+        let mut seen = Vec::new();
+        if tcp.write_all(&hello).await.is_err() {
+            return seen;
+        }
+        let mut chunk = [0u8; 1024];
+        // A dropped connection ends at once; a served one at the latest at
+        // the server's handshake timeout, waiting for the client's reply.
+        let read_all = async {
+            loop {
+                match tcp.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => seen.extend_from_slice(&chunk[..read]),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), read_all)
+            .await
+            .expect("the server ends the exchange");
+        seen
+    }
+
+    /// Connect over TLS trusting only `ca`, offering ALPN `h2` and `http/1.1`.
+    async fn tls_connect(addr: SocketAddr, ca: &TestCa) -> Handshake {
         let tcp = tokio::net::TcpStream::connect(addr)
             .await
             .expect("connect to the listener");
-        let server_name = ServerName::try_from(host().to_owned()).expect("a valid server name");
-        let stream = TlsConnector::from(Arc::new(config))
-            .connect(server_name, tcp)
+        let stream = TlsConnector::from(client_config(ca))
+            .connect(server_name(), tcp)
             .await
             .expect("the TLS handshake completes against the test CA");
         let (_, connection) = stream.get_ref();
@@ -1944,7 +2539,8 @@ mod tests {
         Handshake { alpn, leaf, stream }
     }
 
-    /// Send an HTTP/1.1 `GET` of `path`; the response up to its status line.
+    /// Send an HTTP/1.1 `GET` of `path`; the whole response, read until the
+    /// server closes the connection.
     async fn http_get(
         stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
         path: &str,
@@ -1959,13 +2555,19 @@ mod tests {
             .expect("send the request");
         let mut response = Vec::new();
         let mut chunk = [0u8; 1024];
-        while !response.windows(2).any(|pair| pair == b"\r\n") {
-            let read = stream.read(&mut chunk).await.expect("read the response");
-            if read == 0 {
-                break;
+        // `Connection: close`: the server ends the stream after the response.
+        let read_all = async {
+            loop {
+                let read = stream.read(&mut chunk).await.expect("read the response");
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&chunk[..read]);
             }
-            response.extend_from_slice(&chunk[..read]);
-        }
+        };
+        tokio::time::timeout(Duration::from_secs(60), read_all)
+            .await
+            .expect("the server ends the response");
         String::from_utf8_lossy(&response).into_owned()
     }
 
@@ -2754,5 +3356,471 @@ mod tests {
             "the same failure again publishes no new state"
         );
         shutdown.send_replace(true);
+    }
+
+    /// Start a [`tls_serve`] listener with `policy`; its serving address.
+    async fn serving_tls(
+        fake: &Arc<FakeTailnet>,
+        policy: PeerPolicy,
+    ) -> (TailnetListener, watch::Sender<bool>, SocketAddr) {
+        let (listener, shutdown) = start_policy(fake, &tls_serve(), options(0), policy);
+        let addr = serving_addrs(&wait_for_status(&listener, is_serving).await)[0];
+        (listener, shutdown, addr)
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_peer_is_dropped_before_whois() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, PeerPolicy::PRODUCTION).await;
+        assert_eq!(
+            hello_reply(addr, &fake.ca).await.len(),
+            0,
+            "127.0.0.1 is outside Tailscale's ranges: dropped before the TLS handshake"
+        );
+        assert_eq!(fake.whois_addrs(), [], "whois is never asked");
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn every_whois_error_drops_the_connection() {
+        let errors = [
+            TailnetError::NotInstalled,
+            TailnetError::NotRunning,
+            TailnetError::AccessDenied,
+            TailnetError::NotConnected,
+            TailnetError::HttpsDisabled,
+            TailnetError::Timeout,
+            TailnetError::BadOutput("whois --json: expected value".to_owned()),
+            TailnetError::Failed("exited with exit code: 1".to_owned()),
+        ];
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, loopback_policy()).await;
+        // Each error from its own client IP, so no failure backoff carries over.
+        for (n, err) in (10u8..).zip(errors) {
+            fake.set_whois(Err(err.clone()));
+            let from = IpAddr::from([127, 0, 0, n]);
+            for attempt in ["first", "second"] {
+                assert_eq!(
+                    hello_reply_from(from, addr, &fake.ca).await.len(),
+                    0,
+                    "{err:?}: the {attempt} connection is dropped before the TLS handshake"
+                );
+            }
+            assert_eq!(
+                fake.whois_calls_for(from),
+                1,
+                "{err:?}: the second connection, inside the failure backoff, asks no whois"
+            );
+        }
+        shutdown.send_replace(true);
+    }
+
+    /// An acceptor over `fake` with [`loopback_policy`], the host's `whoami`
+    /// answer `host`, and `limits`; and the sender of that answer.
+    fn gate(
+        fake: &Arc<FakeTailnet>,
+        host: Option<WhoIs>,
+        limits: WhoisLimits,
+    ) -> (TailnetAcceptor<FakeTailnet>, watch::Sender<Option<WhoIs>>) {
+        let (host_tx, host_rx) = watch::channel(host);
+        let acceptor = TailnetAcceptor::new(Arc::clone(fake), host_rx, loopback_policy(), limits);
+        (acceptor, host_tx)
+    }
+
+    /// A loopback peer address, `127.0.0.<n>`.
+    fn loopback_peer(n: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::from([127, 0, 0, n]), 40_000 + u16::from(n))
+    }
+
+    /// The host's `whoami` answer the gate tests start from.
+    fn test_host() -> WhoIs {
+        whoami_with(&["127.0.0.1/32"])
+    }
+
+    /// The verdict `acceptor` holds for `ip` now.
+    fn cached(acceptor: &TailnetAcceptor<FakeTailnet>, ip: IpAddr) -> Option<Verdict> {
+        acceptor.gate.state().cache.get(ip, Instant::now()).cloned()
+    }
+
+    /// Connect to `listener` and pass the accepted socket through
+    /// `acceptor`: whether it was admitted.
+    async fn admitted(
+        acceptor: &TailnetAcceptor<FakeTailnet>,
+        listener: &tokio::net::TcpListener,
+    ) -> bool {
+        let addr = listener.local_addr().expect("the test listener's address");
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let _client = client.expect("connect to the test listener");
+        let (stream, _) = accepted.expect("accept the test connection");
+        acceptor.accept(stream, ()).await.is_ok()
+    }
+
+    async fn loopback_listener() -> tokio::net::TcpListener {
+        tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind a loopback test listener")
+    }
+
+    #[tokio::test]
+    async fn no_host_identity_yet_denies() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (acceptor, host) = gate(&fake, None, WhoisLimits::PRODUCTION);
+        let listener = loopback_listener().await;
+        assert!(
+            !admitted(&acceptor, &listener).await,
+            "no whoami answer yet: denied"
+        );
+        assert_eq!(fake.whois_addrs(), [], "no whois while nothing can allow");
+        host.send_replace(Some(whoami_with(&["127.0.0.1/32"])));
+        assert!(
+            admitted(&acceptor, &listener).await,
+            "the denial was not cached: admitted once the host answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn whois_is_asked_about_the_accepted_peer_addr() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, loopback_policy()).await;
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the listener");
+        let local = client.local_addr().expect("the client's own address");
+        wait_until("the whois call", || !fake.whois_addrs().is_empty()).await;
+        assert_eq!(
+            fake.whois_addrs(),
+            [local],
+            "whois asked about the client socket's own address"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_peer_reaches_the_router_with_its_identity() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (_listener, shutdown, addr) = serving_tls(&fake, loopback_policy()).await;
+        let mut handshake = tls_connect(addr, &fake.ca).await;
+        let response = http_get(&mut handshake.stream, "/peer").await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let who = peer_whois();
+        let expected = format!(
+            "{}|laptop.tail1234.ts.net|{}|{}",
+            who.node.stable_id, who.node.user, who.user_profile.login_name
+        );
+        assert!(
+            response.ends_with(&expected),
+            "the handler sees the fake's whois identity: {response}"
+        );
+        shutdown.send_replace(true);
+    }
+
+    #[tokio::test]
+    async fn denied_owner_rule_outcomes_drop() {
+        let mut tagged = peer_whois();
+        tagged.node.tags = vec!["tag:server".to_owned()];
+        let mut other_user = peer_whois();
+        other_user.node.user = 3;
+        // The host's own whoami answer: the host's user and node id.
+        let host_node = whoami_with(&["127.0.0.1/32"]);
+        for (what, whois, reason) in [
+            ("a tagged node", tagged, Denied::Tagged),
+            ("another user's node", other_user, Denied::OtherUser),
+            ("the host node itself", host_node, Denied::HostNode),
+        ] {
+            let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+            fake.set_whois(Ok(whois));
+            let (acceptor, _host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+            assert!(
+                acceptor.gate.admit(loopback_peer(1)).await.is_err(),
+                "{what}"
+            );
+            assert_eq!(
+                cached(&acceptor, loopback_peer(1).ip()),
+                Some(Verdict::Deny(reason)),
+                "{what}: refused for its own reason, and cached"
+            );
+            fake.whois_addrs.lock().expect("whois addrs lock").clear();
+            let (listener, shutdown, addr) = serving_tls(&fake, loopback_policy()).await;
+            for attempt in ["first", "second"] {
+                assert_eq!(
+                    hello_reply(addr, &fake.ca).await.len(),
+                    0,
+                    "{what}: the {attempt} connection is dropped before the TLS handshake"
+                );
+            }
+            assert_eq!(
+                fake.whois_addrs().len(),
+                1,
+                "{what}: the denial is cached, so whois was asked once"
+            );
+            shutdown.send_replace(true);
+            listener.stopped().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_verdict_is_cached_for_thirty_seconds() {
+        assert_eq!(VERDICT_TTL, Duration::from_secs(30));
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (acceptor, _host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        let listener = loopback_listener().await;
+        assert!(admitted(&acceptor, &listener).await);
+        assert_eq!(fake.whois_addrs().len(), 1);
+        tokio::time::advance(Duration::from_secs(29)).await;
+        assert!(admitted(&acceptor, &listener).await);
+        assert_eq!(fake.whois_addrs().len(), 1, "inside the TTL: no whois");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(admitted(&acceptor, &listener).await);
+        assert_eq!(fake.whois_addrs().len(), 2, "past the TTL: whois again");
+    }
+
+    /// How many connections wait on `ip`'s `whois` round.
+    fn round_waiters(acceptor: &TailnetAcceptor<FakeTailnet>, ip: IpAddr) -> usize {
+        acceptor
+            .gate
+            .state()
+            .flights
+            .get(&ip)
+            .map_or(0, |round| Arc::strong_count(round) - 1)
+    }
+
+    #[tokio::test]
+    async fn concurrent_connections_from_one_ip_share_one_whois() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.whois_held.send_replace(true);
+        // Real time and a whois timeout no busy machine reaches: the round is
+        // held until both connections wait on it.
+        let limits = WhoisLimits {
+            timeout: Duration::from_secs(120),
+            permit_wait: Duration::from_secs(120),
+        };
+        let (acceptor, _host) = gate(&fake, Some(test_host()), limits);
+        let listener = loopback_listener().await;
+        let both = async {
+            tokio::join!(
+                admitted(&acceptor, &listener),
+                admitted(&acceptor, &listener)
+            )
+        };
+        let release = async {
+            wait_until("both connections to wait on one round", || {
+                round_waiters(&acceptor, V4_LOOPBACK) == 2
+            })
+            .await;
+            fake.whois_held.send_replace(false);
+        };
+        let ((first, second), ()) = tokio::join!(both, release);
+        assert!(first && second, "both admitted");
+        assert_eq!(fake.whois_addrs().len(), 1, "one whois for both");
+    }
+
+    #[test]
+    fn the_cache_holds_at_most_256_entries() {
+        assert_eq!(VERDICT_CAP, 256);
+        let base = Instant::now();
+        let at = |millis: u64| base + Duration::from_millis(millis);
+        let ip = |n: u32| IpAddr::V4(Ipv4Addr::from(0x6440_0000 + n));
+        let deny = Verdict::Deny(Denied::Tagged);
+        let mut cache = TtlMap::new(VERDICT_TTL, VERDICT_CAP);
+        for n in 0..256 {
+            cache.insert(ip(n), deny.clone(), at(u64::from(n)));
+        }
+        assert_eq!(cache.len(), 256);
+
+        cache.insert(ip(256), deny.clone(), at(300));
+        assert_eq!(cache.len(), 256, "full: the oldest made room");
+        assert_eq!(cache.get(ip(0), at(300)), None, "the oldest was dropped");
+        assert!(cache.get(ip(1), at(300)).is_some());
+        assert!(cache.get(ip(256), at(300)).is_some());
+
+        // Entries 1 to 100 are past the TTL by now: they go first, the
+        // fresher ones stay.
+        let later = base + VERDICT_TTL + Duration::from_millis(100);
+        cache.insert(ip(257), deny, later);
+        assert_eq!(cache.len(), 157, "the expired entries were dropped");
+        assert_eq!(cache.get(ip(100), later), None);
+        assert!(cache.get(ip(101), later).is_some());
+        assert!(cache.get(ip(257), later).is_some());
+    }
+
+    /// The host's `whoami` answer once another Tailscale user logged in.
+    fn other_user_host() -> WhoIs {
+        let mut host = whoami_with(&["127.0.0.1/32"]);
+        host.node.user = 3;
+        host
+    }
+
+    /// Yield to the other tasks until `done` holds, without letting a paused
+    /// clock advance.
+    async fn yield_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..10_000 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(done(), "never saw {what}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_change_drops_the_cached_verdicts() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (acceptor, host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        let peer = loopback_peer(1);
+        assert!(acceptor.gate.admit(peer).await.is_ok());
+        assert!(acceptor.gate.admit(peer).await.is_ok());
+        assert_eq!(fake.whois_addrs().len(), 1, "the allow is cached");
+
+        host.send_replace(Some(other_user_host()));
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "refused under the new host"
+        );
+        assert_eq!(fake.whois_addrs().len(), 2, "whois was asked again");
+        assert_eq!(
+            cached(&acceptor, peer.ip()),
+            Some(Verdict::Deny(Denied::OtherUser)),
+            "by the owner rule, against the new host"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cached_allow_is_denied_once_the_host_is_gone() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (acceptor, host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        let peer = loopback_peer(1);
+        assert!(acceptor.gate.admit(peer).await.is_ok());
+        host.send_replace(None);
+        assert!(
+            acceptor.gate.admit(peer).await.is_err(),
+            "no host answer: the cached allow no longer admits"
+        );
+        assert_eq!(fake.whois_addrs().len(), 1, "and no whois is asked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_round_that_outlives_its_host_is_discarded() {
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.whois_held.send_replace(true);
+        let limits = WhoisLimits {
+            timeout: Duration::from_secs(3600),
+            permit_wait: Duration::from_secs(3600),
+        };
+        let (acceptor, host) = gate(&fake, Some(test_host()), limits);
+        let peer = loopback_peer(1);
+        let gate = Arc::clone(&acceptor.gate);
+        let round = tokio::spawn(async move { gate.admit(peer).await.is_ok() });
+        yield_until("the whois call", || fake.whois_addrs().len() == 1).await;
+
+        host.send_replace(Some(other_user_host()));
+        fake.whois_held.send_replace(false);
+        assert!(
+            !round.await.expect("the round's task"),
+            "allowed against the old host, so denied"
+        );
+        assert_eq!(cached(&acceptor, peer.ip()), None, "and not cached");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_whois_backs_the_peer_off_for_five_seconds() {
+        assert_eq!(FAILURE_BACKOFF, Duration::from_secs(5));
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (failing, other) = (loopback_peer(1), loopback_peer(2));
+        fake.set_whois_for(failing.ip(), Err(TailnetError::NotRunning));
+        let (acceptor, _host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        assert!(acceptor.gate.admit(failing).await.is_err());
+        assert_eq!(fake.whois_calls_for(failing.ip()), 1);
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(acceptor.gate.admit(failing).await.is_err());
+        assert_eq!(
+            fake.whois_calls_for(failing.ip()),
+            1,
+            "inside the backoff: refused without a whois"
+        );
+        assert!(
+            acceptor.gate.admit(other).await.is_ok(),
+            "another peer is still admitted"
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(acceptor.gate.admit(failing).await.is_err());
+        assert_eq!(
+            fake.whois_calls_for(failing.ip()),
+            2,
+            "past the backoff: whois again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_warns_once_per_ip_per_window() {
+        let logs = LogCapture::default();
+        let _logs = logs.install();
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        let (failing, tagged) = (loopback_peer(1), loopback_peer(2));
+        fake.set_whois_for(failing.ip(), Err(TailnetError::NotRunning));
+        let mut tagged_whois = peer_whois();
+        tagged_whois.node.tags = vec!["tag:server".to_owned()];
+        fake.set_whois_for(tagged.ip(), Ok(tagged_whois));
+        let (acceptor, _host) = gate(&fake, Some(test_host()), WhoisLimits::PRODUCTION);
+        for _ in 0..3 {
+            assert!(acceptor.gate.admit(failing).await.is_err());
+            assert!(acceptor.gate.admit(tagged).await.is_err());
+        }
+        assert_eq!(logs.count("WARN", "whois failed"), 1);
+        assert_eq!(logs.count("DEBUG", "whois failed"), 2);
+        assert_eq!(logs.count("WARN", "refused by the owner rule"), 1);
+        assert_eq!(logs.count("DEBUG", "refused by the owner rule"), 2);
+
+        tokio::time::advance(FAILURE_BACKOFF).await;
+        assert!(acceptor.gate.admit(failing).await.is_err());
+        assert_eq!(
+            logs.count("WARN", "whois failed"),
+            2,
+            "a new window warns again"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fifth_round_waits_no_longer_than_the_whois_timeout() {
+        assert_eq!(WHOIS_CONCURRENCY, 4);
+        let fake = Arc::new(FakeTailnet::with_addresses(&["127.0.0.1/32"]));
+        fake.whois_held.send_replace(true);
+        // The four rounds' own whois outlasts the fifth's wait for a permit.
+        let limits = WhoisLimits {
+            timeout: Duration::from_secs(3600),
+            ..WhoisLimits::PRODUCTION
+        };
+        let (acceptor, _host) = gate(&fake, Some(test_host()), limits);
+        let rounds: Vec<_> = (1..=4)
+            .map(|n| {
+                let gate = Arc::clone(&acceptor.gate);
+                tokio::spawn(async move { gate.admit(loopback_peer(n)).await.is_ok() })
+            })
+            .collect();
+        yield_until("four whois calls", || fake.whois_addrs().len() == 4).await;
+
+        let began = Instant::now();
+        let fifth = loopback_peer(5);
+        assert!(
+            acceptor.gate.admit(fifth).await.is_err(),
+            "no permit: denied"
+        );
+        let waited = began.elapsed();
+        assert!(
+            waited >= WhoisLimits::PRODUCTION.permit_wait
+                && waited < WhoisLimits::PRODUCTION.permit_wait + Duration::from_secs(1),
+            "denied once the whois timeout passed: {waited:?}"
+        );
+        assert_eq!(fake.whois_calls_for(fifth.ip()), 0, "with no whois call");
+
+        fake.whois_held.send_replace(false);
+        for round in rounds {
+            assert!(
+                round.await.expect("a round's task"),
+                "the four rounds are admitted"
+            );
+        }
     }
 }
