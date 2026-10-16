@@ -9,7 +9,7 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 ## Rulings
 
 - Ruling (user): GitHub only, through `gh`; no provider abstraction.
-- Additive protocol only: no version bump, protocol 22 keeps decoding (`cargo test -p protocol v22_compat`).
+- Additive protocol only: no version bump.
 - Testable core, thin view: parsing, lookup state, chip text and PR-state logic live in plain-Rust modules with unit tests; GPUI views only render.
 
 ## Design
@@ -29,7 +29,6 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 - `SpawnRequest.link: Option<IssueLink>` and `SpawnConfig.link: Option<IssueLink>`, both `#[serde(default, skip_serializing_if = "Option::is_none")]`, so unlinked spawns and stored configs stay byte-identical; `from_request` and `to_clone_request` copy it; `to_duplicate_request` follows Open question 6.
 - `SessionSnapshot.link: Option<IssueLink>` (from `spawn_config`) and `SessionSnapshot.pr: Option<PrInfo>` (the daemon's last lookup), both `#[serde(default)]`.
 - `ClientMessage::LookupIssues { request_id, target: SuggestTarget, query: String }` → `DaemonMessage::IssueLookup { request_id, outcome: LookupOutcome }`, `LookupOutcome { Found { items: Vec<IssueLink> }, NotGithub, GhMissing, GhUnauthenticated, Failed { message }, #[serde(other)] Unknown }`. A `#123`, `owner/repo#123` or `https://github.com/o/r/(issues|pull)/123` query resolves one item; other text searches open issues and PRs of the target's repo.
-- Protocol 22: the Tauri app ignores the new fields and messages. Its Launch last re-sends a decoded `SpawnConfig` without the link; its Duplicate, Restart and Resume go through the daemon and keep it. Stated, not fixed (the Tauri app is being retired).
 
 ### Daemon
 
@@ -53,7 +52,9 @@ A worktree session is usually about one GitHub issue or one pull request, but no
 
 Order: GL.1 → GL.2 → GL.3 → GL.4 → GL.5; GL.6 needs GL.1; GL.7 needs GL.3, GL.6 and PT.8b; GL.8 needs GL.5, GL.6, PT.6b and PT.7; GL.9 follows the rest. Gates are the nextup profile's (`.claude/skills/rustling-tulip-nextup/SKILL.md`, "Agents and gates").
 
-- [ ] **GL.1 Protocol types.** `IssueLink`, `LinkKind`, `PrInfo`, `PrState`, `SpawnRequest.link`, `SpawnConfig.link` (with the `Helper` field, `from_request`, `to_clone_request`, `to_duplicate_request`), `SessionSnapshot.link` / `.pr`, `LookupIssues`, `IssueLookup`, `LookupOutcome`. Files: `crates/protocol/src/lib.rs`. Proof, red first: new tests `issue_link_round_trips`, `unlinked_spawn_request_has_no_link_key`, `unknown_link_kind_and_pr_state_decode`, `spawn_config_carries_link_through_clone`, `lookup_issues_round_trips`; `cargo test -p protocol` (includes `v22_compat`).
+- [ ] **GL.1 Protocol types.** `IssueLink`, `LinkKind`, `PrInfo`, `PrState`, `SpawnRequest.link`, `SpawnConfig.link` (with the `Helper` field, `from_request`, `to_clone_request`, `to_duplicate_request`), `SessionSnapshot.link` / `.pr`, `LookupIssues`, `IssueLookup`, `LookupOutcome`. Files: `crates/protocol/src/lib.rs`.
+
+  Proof, red first: new tests `issue_link_round_trips`, `unlinked_spawn_request_has_no_link_key`, `unknown_link_kind_and_pr_state_decode`, `spawn_config_carries_link_through_clone`, `lookup_issues_round_trips`; `cargo test -p protocol`.
 - [ ] **GL.2 `gh` module.** New `crates/daemon/src/gh.rs` (`github_repo`, `Query::parse`, argument builders, JSON parsers, `classify`, `GhRunner` and the process runner), its `mod` line in `main.rs`, `parse_forge` made `pub(crate)`. Proof: unit tests `query_parses_hash_number_owner_repo_and_urls`, `non_github_remote_is_none`, `parses_issue_pr_search_and_pr_list_json`, `classify_missing_and_unauthenticated`, `runner_sets_prompt_disabled_env`; `cargo test -p daemon gh::`.
 - [ ] **GL.3 Lookup handler.** `LookupIssues` in `server.rs` over a `GhRunner` on the hub (the process runner in production, a fake in tests). Files: `crates/daemon/src/server.rs`. Proof: `test_hub` tests `lookup_by_url_replies_found_to_requester_only`, `lookup_on_gitlab_remote_replies_not_github`, `lookup_with_gh_missing_replies_gh_missing`; `cargo test -p daemon lookup_`.
 - [ ] **GL.4 Link on spawn and carry-over.** `spawn_session` stores the link; `SessionRecord::snapshot` derives `link`; carry-over tests for Restart, `resume_abandoned`, Recover's `claude_request`, Duplicate (per Open question 6) and `last_spawn_config`. Files: `crates/daemon/src/session.rs`, `server.rs`, `history.rs` (tests). Proof: `linked_spawn_snapshots_link`, `resume_and_recover_keep_link`, `duplicate_link_follows_ruling`; `cargo test -p daemon`.

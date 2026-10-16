@@ -61,12 +61,12 @@ Nothing else is reachable: no stop, discard, git, settings or shutdown (Open que
 
 ### Agent requests on the wire
 
-Additive only; protocol 22 keeps decoding and `supported` does not change.
+Additive only; `supported` does not change.
 
 - `SessionSnapshot.parent: Option<SessionParent>` (`#[serde(default)]`).
 - `AgentRequest { id, from_session_id, from_label, created_at, kind: AgentRequestKind }`; `AgentRequestKind` is tagged (`kind`, snake_case): `Spawn { container_label, branch, worktree, agent, prompt }`, `Access { target_session_id, target_label }`, `#[serde(other)] Unknown`.
 - `DaemonMessage::AgentRequests { requests }`: the full pending list, broadcast on every change and sent in `push_initial_state`.
-- `ClientMessage::AnswerAgentRequest { id, approve: bool, prompt: Option<String> }` (an edited prompt). The Tauri app logs `AgentRequests` as unknown and cannot answer, so its user's requests time out.
+- `ClientMessage::AnswerAgentRequest { id, approve: bool, prompt: Option<String> }` (an edited prompt).
 
 ### Native client
 
@@ -93,7 +93,7 @@ This design already covers most of them: a scoped verb list instead of raw input
 
 Order: AC.1 → AC.2 → AC.3 → AC.4 → AC.5 and AC.6 → AC.7 → AC.8 → AC.9 → AC.10. AC.4 builds on HS.4's router split and AC.7 on HS.3's HTTP client when those land first; otherwise each makes them. The gates are the nextup profile's (`.claude/skills/rustling-tulip-nextup/SKILL.md`, "Agents and gates").
 
-- [ ] **AC.1 Protocol.** `crates/protocol/src/lib.rs`: `SessionParent`, `SessionSnapshot.parent`, `AgentRequest`, `AgentRequestKind` (with `Unknown`), `DaemonMessage::AgentRequests`, `ClientMessage::AnswerAgentRequest`. Proof: round-trip tests for each, an unknown `kind` decoding as `Unknown`, a snapshot without `parent`; `cargo test -p protocol` (includes `v22_compat`).
+- [ ] **AC.1 Protocol.** `crates/protocol/src/lib.rs`: `SessionParent`, `SessionSnapshot.parent`, `AgentRequest`, `AgentRequestKind` (with `Unknown`), `DaemonMessage::AgentRequests`, `ClientMessage::AnswerAgentRequest`. Proof: round-trip tests for each, an unknown `kind` decoding as `Unknown`, a snapshot without `parent`; `cargo test -p protocol`.
 - [ ] **AC.2 Token and environment.** New `crates/daemon/src/agent_token.rs` (generate, hash, verify); `session.rs` (`agent_token_sha256`, `parent` on the record, snapshot fills `parent`); `orphan.rs` (`OrphanMeta` fields, `#[serde(default)]`); `server.rs` spawn paths, `tracer_client.rs`, `headless.rs` (the four variables; name-only `Debug`); revoke on end, park, discard. Proof: `agent_token` unit tests (verify, wrong token, revoked); a `tracer_client` test that `tracer_command`'s `get_envs()` has `RT_AGENT_TOKEN`; a meta round trip holding the hash and never the token; a `Debug` test with no token text; `cargo test -p daemon -- agent_token tracer_client orphan`.
 - [ ] **AC.3 The core.** New `crates/daemon/src/agent_api.rs`, plain functions: caller scope, limits, `child_spawn_request(caller, args) -> Result<SpawnRequest, Refusal>` (placement, inheritance, authority cap, prompt cap), send gating by target status, read caps. Proof: table-driven tests: family and non-family targets, each limit at and past its bound, worktree and in-place placement for a repo, a workspace and a standalone caller, a flag asking for more authority than the caller has, a 16 KiB + 1 prompt; `cargo test -p daemon agent_api`.
 - [ ] **AC.4 Routes and requests.** `server.rs`: loopback-only `/agent/v1/*`, bearer check, the pending-request registry with timeout, `AgentRequests` broadcast and initial push, the `AnswerAgentRequest` arm, spawns through `spawn_session` with `parent` set. Proof: router `oneshot` tests: `401` without or with a wrong token, the LAN router has no `/agent` route, a spawn waits and an approval yields a session whose snapshot has `parent`, a denial answers `403`, no answer `408`, a limit `429`; `cargo test -p daemon agent_routes`.

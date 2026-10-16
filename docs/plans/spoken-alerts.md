@@ -55,7 +55,7 @@ A typed key is stored in **Windows Credential Manager** through `keyring-core` 1
 - A paired LAN client may set a key: pairing already grants spawning a shell, so this adds no power.
 - Never in `state.json` or `native-ui.json`. `state.json` gains a secret-free `summarizer` block: `enabled`, `provider`, per-provider key source (`stored` or `env` with a variable name), `daily_cap_usd`, `dashboard_refresh`.
 
-### Protocol (additive; protocol 22 stays decodable)
+### Protocol (additive)
 
 New types in `crates/protocol/src/lib.rs`, each nested enum with `#[serde(other)] Unknown`:
 
@@ -66,8 +66,6 @@ New types in `crates/protocol/src/lib.rs`, each nested enum with `#[serde(other)
 - `DaemonMessage::Attention` gains `alert_id: Option<String>` (`#[serde(default, skip_serializing_if = "Option::is_none")]`): an alert for this attention follows.
 - `ClientMessage::SetSummarizerSettings { settings }`, `ClientMessage::SetProviderKey { provider, key: Option<String> }` (`None` deletes), `ClientMessage::TestAlert { request_id }` (the daemon summarizes a fixed sample message and answers the requester alone with a `WaitingAlert` or an `Error`), `ClientMessage::WatchDashboard { on }` (turns `working` refreshes on for that connection), `DaemonMessage::SummarizerStatus { settings, keys, spend_today_usd, cap_reached }`, broadcast on change and on connect.
 - `RepoEntry.spoken_name` and `WorkspaceEntry.spoken_name`: `Option<String>`, `#[serde(default)]`, set by `SetRepoSpokenName` / `SetWorkspaceSpokenName` like the existing `SetRepoAppearance` pair.
-
-`cargo test -p protocol v22_compat` proves each change leaves v22 decodable.
 
 ### Speech, toasts and debouncing (native client)
 
@@ -121,7 +119,7 @@ Answered (user): Q3 every 3 min while watched and the transcript grew, plus a su
 
 Steps marked *(hook-status)* need [hook-status.md](./hook-status.md)'s events first. The CLAUDE.md exception lands with SA.6.
 
-- [ ] **SA.1 Protocol types.** `crates/protocol/src/lib.rs`: the types, fields and messages above. Proof: round-trip tests for each, an `Unknown` test per new nested enum, and `cargo test -p protocol v22_compat` still passing.
+- [ ] **SA.1 Protocol types.** `crates/protocol/src/lib.rs`: the types, fields and messages above. Proof: round-trip tests for each, and an `Unknown` test per new nested enum.
 - [ ] **SA.2 Key store.** `crates/daemon/src/summarizer/keys.rs`, `crates/daemon/Cargo.toml`, `deny.toml` if a licence needs listing: `KeySource` resolution (env, then `HKCU\Environment`, through `user_env::resolve`, reusing its redacting `Secret`), Credential Manager set / get / delete, reusing the store setup in `crates/daemon/src/env_secrets.rs` (`env_secrets::init`, see `docs/env-secrets.md`), redacting `Debug`. Proof: unit tests on `keyring_core::mock`, including delete and a missing variable, and a test that `format!("{:?}")` of a key shows no key text.
 - [ ] **SA.3 Provider client.** `crates/daemon/src/summarizer/client.rs`: request, fence-tolerant parse, caps, timeouts, the retry rule, `rejected`, cost from `usage`. Proof: tests against a local axum mock covering 200, fenced JSON, 429 then 200, 401, a timeout, and JSON with an unknown `kind`.
 - [ ] **SA.4 Prompt v3 and input shaping.** `crates/daemon/src/summarizer/prompt.md`, `prompt.rs`: head / tail cap, redaction, question rendering, trigger line. Proof: unit tests for each; then rerun the spike's `api.py` with v3 on its three messages and add the results to the spike doc.

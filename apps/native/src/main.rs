@@ -20,7 +20,7 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// Move a non-empty `native.log` to `native.log.old`, replacing any older
 /// generation, so each launch logs to a fresh file and the previous launch's
-/// log survives one more launch. Mirrors the Tauri host's `app.log` rotation.
+/// log survives one more launch.
 fn rotate_log(path: &Path) -> std::io::Result<()> {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > 0) {
         let old = path.with_extension("log.old");

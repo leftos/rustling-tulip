@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn native_client_retires_daemon_that_speaks_only_22() {
+    fn native_client_retires_daemon_that_speaks_only_an_older_version() {
         let daemon = handshake(22, &[]);
         assert_eq!(
             action_for(protocol_kind(&daemon, &[23])),
@@ -822,15 +822,8 @@ mod tests {
     }
 
     #[test]
-    fn v22_client_reuses_daemon_speaking_23_and_22() {
-        let daemon = handshake(23, &[23, 22]);
-        assert!(protocol_compatible(&daemon, &[22]));
-        assert_eq!(protocol_kind(&daemon, &[22]), ExistingKind::Compatible);
-    }
-
-    #[test]
     fn native_client_reuses_daemon_speaking_23() {
-        let daemon = handshake(23, &[23, 22]);
+        let daemon = handshake(23, &[23]);
         assert!(protocol_compatible(&daemon, &[23]));
         assert_eq!(action_for(protocol_kind(&daemon, &[23])), Action::Reuse);
     }

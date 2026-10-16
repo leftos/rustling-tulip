@@ -1,6 +1,6 @@
 ---
 name: add-protocol-message
-description: Add a new message to the rustling-tulip wire protocol. Walks the user through the 3-step pattern (Rust enum -> daemon handler -> native client handling) and enforces the project's invariants (snake_case tags, data_b64 for binary, additive-versus-breaking change rules, protocol 22 kept decodable for the installed Tauri app).
+description: Add a new message to the rustling-tulip wire protocol. Walks the user through the 3-step pattern (Rust enum -> daemon handler -> native client handling) and enforces the project's invariants (snake_case tags, data_b64 for binary, additive-versus-breaking change rules).
 ---
 
 # Add a protocol message
@@ -28,9 +28,7 @@ These come from `CLAUDE.md` — re-state them so the user is making the call del
 - **Additive (no bump)**: new variant on an existing tagged enum, new field on a struct with `#[serde(default)]`, new nested-enum variant that joins an enum already carrying `#[serde(other)] Unknown`.
 - **Breaking (bump)**: renaming a field, removing a variant, changing a variant's wire tag, changing semantics of an existing field.
 
-When in doubt, treat it as breaking. If the user picks "bump", also remind them to append the new version to `SUPPORTED_PROTOCOL_VERSIONS` so older clients can still negotiate.
-
-The daemon keeps protocol 22 in `supported` while the installed Tauri app (the `tauri` branch) is in use, so a change must leave every v22 message decodable. The `v22_compat` tests in `crates/protocol` fail if it does not.
+When in doubt, treat it as breaking. If the user picks "bump", set `version` and `supported` in `protocol-version.json` as CLAUDE.md "When to bump" says (`supported` lists only the versions the new daemon can serve), and verify there that `daemon_client::ensure_running` retires the old daemon.
 
 ## The 3-step edit pattern
 
@@ -79,13 +77,11 @@ The native client uses the Rust types from `crates/protocol` directly; there is 
 ## After the edits
 
 1. Run `cargo build` to confirm the workspace compiles.
-2. Run `cargo nextest run -p protocol --cargo-profile test-release v22_compat` to confirm the change keeps protocol 22 decodable.
-3. Run `cargo nextest run -p protocol --cargo-profile test-release` and the native client's UI spec that covers the message (`cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_<name>`).
-4. Run `cargo clippy --all-targets --all-features -- -D warnings`.
+2. Run `cargo nextest run -p protocol --cargo-profile test-release` and the native client's UI spec that covers the message (`cargo nextest run -p rustling-tulip-native --cargo-profile test-release --test ui ui_<name>`).
+3. Run `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ## Common mistakes to catch
 
 - Forgetting the `#[serde(default)]` on a new optional field that was claimed as additive — without it, older peers will fail to decode.
 - Adding a `DaemonMessage` variant but no arm in the native client's `on_message` — the message arrives and is silently dropped.
-- Changing a field or variant that a v22 message uses: the installed Tauri app still speaks 22, and `v22_compat` catches it.
 - Treating a field-rename as additive. Rename is always breaking — bump the version.

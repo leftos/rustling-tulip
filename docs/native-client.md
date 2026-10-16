@@ -1,11 +1,12 @@
 # Native client
 
-The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed's UI framework) with `alacritty_terminal` for the terminal grid. It replaced the Tauri/WebView2 app, which lives on the `tauri` maintenance branch (tag `tauri-last`). The daemon, tracer and `crates/protocol` are shared and unchanged by the client. This doc records the decisions a change to the client needs to know; what each feature must do is in the [parity checklist](./plans/native-client-parity.md), and open work is in [plans/MAIN.md](./plans/MAIN.md). How the pieces fit together: [architecture.md](./architecture.md).
+The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed's UI framework) with `alacritty_terminal` for the terminal grid. It replaced the Tauri/WebView2 app, which is retired and kept as history on the `tauri` branch (tag `tauri-last`). The daemon, tracer and `crates/protocol` are shared and unchanged by the client.
+
+This doc records the decisions a change to the client needs to know; what each feature must do is in the [parity checklist](./plans/native-client-parity.md), and open work is in [plans/MAIN.md](./plans/MAIN.md). How the pieces fit together: [architecture.md](./architecture.md).
 
 ## Stack
 
 - **GPUI 0.2.2 + `alacritty_terminal` 0.26.** The client moved off the web stack; GPUI draws natively and `alacritty_terminal` supplies a mature VT parser and grid. Iced is the fallback if GPUI's API churn becomes a problem.
-- The native client can run side by side with the Tauri app against one daemon, since the daemon accepts several clients.
 - **Crate rules.** `apps/native` is a main-workspace member under the workspace lints, prek clippy, `cargo nextest run` and `cargo deny check`. `main.rs` is a thin binary over the library `rustling_tulip_native`, so specs link the library.
 - **Testable core, thin view.** State a feature adds (sidebar tree, split tree, tab list, key mapping, span building, forms, dialogs' focus rings) lives in plain-Rust modules with unit tests; the GPUI `*_view.rs` renders it and forwards events. Every feature mounts into `RootView` (`lib.rs`), the hotspot concurrent items rebase over.
 - **Clipboard** goes through GPUI's own API (no `arboard`).
@@ -16,8 +17,8 @@ The desktop client is `apps/native` (binary `rustling-tulip-native`): GPUI (Zed'
 
 - The client ensures the daemon through `crates/daemon-client` (`ensure_running`, passing `NATIVE_PROTOCOL_VERSIONS` from `net.rs`). A running daemon is reused when its supported versions intersect the client's, even from another build, so the client never fights another client over a stale binary; a daemon sharing none is retired through `/shutdown` and replaced, and its tracer sessions reattach.
 - daemon.json carries `supported_versions` (`#[serde(default)]`; an older file reads as its scalar `protocol_version`).
-- The native client speaks only the current protocol version (23). The daemon's `supported` keeps 22 for the installed Tauri app, and `main` keeps 22 decodable by discipline, proved by `cargo nextest run -p protocol --cargo-profile test-release v22_compat`; there is no TypeScript mirror on `main`.
-- **Client identity**: the native client keeps its own id file, `client-id-native`, so its tab layout stays separate from the Tauri app's (`client-id`).
+- The native client speaks only the current protocol version (23), and the daemon's `supported` lists only that version; there is no TypeScript mirror on `main`.
+- **Client identity**: the native client keeps its id in the file `client-id-native` and sends it in `Hello`; the daemon keys its tab layout on it.
 - **Reconnect**: backoff 0.5 s → 10 s, a standby-resume watchdog, a connecting overlay with "Restart daemon", and a footer pill with a troubleshooting flyout. After a user-chosen shutdown the client never reconnects or respawns the daemon.
 - **Request ids**: a client that must match a reply to its request sets the optional `request_id` (spawn, duplicate, scrollback, appearance, git reads, spawn previews, checkout prompts); the daemon echoes it only to the requester (CLAUDE.md, "Wire-protocol gotchas"). Adding one is additive; a reply without one (an older daemon) falls back to matching by content.
 - Unknown daemon message types are logged with their tag and skipped; a frame that fails to decode is logged as an error.

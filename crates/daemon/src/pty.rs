@@ -109,8 +109,8 @@ impl PtyHandle {
     }
 
     pub fn write_input(&self, data: Vec<u8>) {
-        // Paste-fidelity instrumentation (pairs with the frontend's app.log
-        // `paste#N ... sentBytes=` line). `chunks` records how many tracer Input
+        // Paste-fidelity instrumentation (pairs with the native client's
+        // `paste#N ... sent_bytes=` log line in `term_view.rs`). `chunks` records how many tracer Input
         // frames this write was split into. Kept at `debug` now that the send
         // path is proven byte-exact end to end and the ConPTY-overrun loss is
         // paced against in the tracer writer thread (see supervisor.rs); the

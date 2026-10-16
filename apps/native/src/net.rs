@@ -595,7 +595,7 @@ mod tests {
                 port: SILENT_PORT.load(Ordering::SeqCst),
                 auth_token: "test-token".to_owned(),
                 pid: 0,
-                supported_versions: vec![23, 22],
+                supported_versions: vec![23],
             })
         })
     }

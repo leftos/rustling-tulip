@@ -31,7 +31,9 @@ Re-read this section against `pty_state.rs` and `session.rs` before HS.6: the st
 
 - **Spawn.** `server.rs::spawn_interactive_session` builds argv through `AgentBackend::build_interactive_args` (`crates/daemon/src/agents/claude.rs`, `codex.rs`, `cursor.rs`), with the cross-agent `CommonSpawnFields` from `agents/mod.rs`. Claude gets `--session-id <uuid>` (new) or `--resume <id>` (recovery). The argv is logged at `info!` and handed to `tracer_client::spawn` in a `PtySpawnSpec` with `env: merged_env(&cfg.extra_env)`; the tracer runs the child from its content-addressed copy under the binaries cache (`binary_cache.rs`).
 - **HTTP.** `build_router` in `server.rs` serves `/ws`, `/health`, `/shutdown` (bearer auth against the in-memory `auth_token`, compared with `secret::constant_time_eq`) and `/pair`. The same router is served on the loopback listener and on the opt-in LAN TLS listener. The loopback port is ephemeral (`127.0.0.1:0`) and changes on every daemon start; `daemon.json` carries the current port and token.
-- **Status.** `protocol::SessionStatus` is `Spawning | Idle | Working | AwaitingInput | Stopped | Error` on `SessionSnapshot.status`. Neither it nor `AttentionReason` has a `#[serde(other)] Unknown`, so neither can gain a variant while protocol 22 must decode. `pty_state::watch` writes `rec.status` and sends an `AttentionEvent` (forwarded as `DaemonMessage::Attention`) on each transition into `AwaitingInput`. Today `AwaitingInput` means "a permission or question prompt is up" and `Idle` means "the turn is over".
+- **Status.** `protocol::SessionStatus` is `Spawning | Idle | Working | AwaitingInput | Stopped | Error` on `SessionSnapshot.status`. Neither it nor `AttentionReason` has a `#[serde(other)] Unknown`, so neither can gain a variant without a protocol bump (CLAUDE.md "When to bump").
+
+  `pty_state::watch` writes `rec.status` and sends an `AttentionEvent` (forwarded as `DaemonMessage::Attention`) on each transition into `AwaitingInput`. Today `AwaitingInput` means "a permission or question prompt is up" and `Idle` means "the turn is over".
 - **Headless.** `claude --print --output-format stream-json` sessions are parsed in `ClaudeBackend::handle_headless_line`; they already get structured status and need no hooks.
 
 ## Design
@@ -103,10 +105,9 @@ A session whose hooks never run (Codex, Cursor, a `disableAllHooks` or `allowMan
 
 ### Protocol changes
 
-Additive only; protocol 22 keeps decoding and `supported` does not change.
+Additive only; `supported` does not change.
 
-- `SessionSnapshot` gains `#[serde(default)] pending_input: Option<PendingInput>`. A v22 client ignores the unknown field.
-- `PendingInput` is a new tagged enum (`#[serde(tag = "kind", rename_all = "snake_case")]`) with `Question { questions: Vec<PendingQuestion> }`, `Permission { tool_name, summary }`, `PlanApproval { plan }`, `Other { message }` and `#[serde(other)] Unknown`. `PendingQuestion` is `{ question, header, options: Vec<String>, multi_select }`.
+- `SessionSnapshot` gains `#[serde(default)] pending_input: Option<PendingInput>`.- `PendingInput` is a new tagged enum (`#[serde(tag = "kind", rename_all = "snake_case")]`) with `Question { questions: Vec<PendingQuestion> }`, `Permission { tool_name, summary }`, `PlanApproval { plan }`, `Other { message }` and `#[serde(other)] Unknown`. `PendingQuestion` is `{ question, header, options: Vec<String>, multi_select }`.
 - `SessionStatus` and `AttentionReason` are not touched.
 
 ### Resumed, duplicated and recovered sessions
@@ -152,7 +153,7 @@ Answered (user): Q3 `Stop` means `Idle`, as today; `AwaitingInput` is kept for r
 
 - [ ] **HS.0 Spike: verify the CLI behaviour this design leans on.** With a real `claude` on Windows: a `--settings` file's hooks run alongside a user hook and a repo `.claude/settings.json` hook; async exec-form command hooks run a `.exe` with `args`; hooks from `--settings` wait for workspace trust in a fresh worktree; which events fire for an `ExitPlanMode` approval, a denied permission and an Esc interrupt; whether `SessionStart` fires before the first prompt; whether `claude --add-dir` loads hooks and `settings.json` from each additional root or only from the primary cwd. Record the runs in `docs/spikes/hook-status.md`. Proof: the spike note, with each answer quoted from a run.
 - [ ] **HS.1 Event parsing and mapping.** New `crates/daemon/src/hook_status.rs`: tolerant payload types and `map_event(&Value) -> Option<HookSignal>` per the mapping table. Proof: table-driven unit tests, one per row, plus an unknown event and a malformed body returning `None`.
-- [ ] **HS.2 Protocol: `pending_input`.** `crates/protocol/src/lib.rs`: `PendingInput`, `PendingQuestion`, the `SessionSnapshot` field; the daemon's snapshot builder (`session.rs`) fills it. Proof: a round-trip test, a `#[serde(other)]` test for an unknown `kind`, and `cargo test -p protocol v22_compat` still green with a snapshot carrying the field.
+- [ ] **HS.2 Protocol: `pending_input`.** `crates/protocol/src/lib.rs`: `PendingInput`, `PendingQuestion`, the `SessionSnapshot` field; the daemon's snapshot builder (`session.rs`) fills it. Proof: a round-trip test and a `#[serde(other)]` test for an unknown `kind`.
 - [ ] **HS.3 The shim.** `crates/tracer/src/main.rs` dispatches a leading `hook` argument to a new `crates/tracer/src/hook.rs` (stdin, `daemon.json`, POST, always exit 0). Proof: tests against a local `TcpListener` fake asserting the path, bearer token, `X-RT-Hook-Time` and verbatim body; missing `daemon.json` and a refused connection both exit 0 within the budget.
 - [ ] **HS.4 The daemon route.** `server.rs`: loopback-only `POST /hook/:session_id` (split `build_router`), bearer check through `secret::constant_time_eq`, `204` at once, hand-off to the session's hook state with out-of-order drop by `X-RT-Hook-Time`. Proof: router `oneshot` tests for `401` without or with a wrong token, `204` for an unknown session, a stale event ignored; a test that the LAN router has no `/hook` route.
 - [ ] **HS.5 Settings injection.** `agents/mod.rs` `CommonSpawnFields` gains a required `hook_settings: Option<&Path>` set by every caller; `agents/claude.rs` writes `hook-settings.json` (a `build_hook_settings` fn) and pushes `--settings <path>` for interactive spawns, fresh and resumed, never headless; `spawn_interactive_session` and `duplicate_session` pass it. Proof: unit tests on the argv (fresh, `--resume`, headless without it) and on the JSON (events, matchers, exec form, `async: true`, the cached tracer path).

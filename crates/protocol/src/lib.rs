@@ -806,8 +806,7 @@ pub struct SpawnRequest {
     /// [`Self::secret_env_keys`] — is sealed before the spawn config is
     /// captured: the daemon moves the value into the store and replaces it with
     /// a secret reference. A literal secret is never stored and never echoed
-    /// back, so a client that replays a config verbatim (the Tauri app) keeps
-    /// working.
+    /// back, so a client that replays a config verbatim keeps working.
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
     /// Keys whose rows this client considers secret whatever their name, set by
@@ -5778,12 +5777,12 @@ mod tests {
             port: 40123,
             auth_token: "t".to_owned(),
             pid: 7,
-            supported_versions: vec![23, 22],
+            supported_versions: vec![23],
         };
         let json = serde_json::to_string(&handshake).expect("encode handshake");
         let decoded: DaemonHandshake = serde_json::from_str(&json).expect("decode handshake");
-        assert_eq!(decoded.supported_versions, vec![23, 22]);
-        assert_eq!(decoded.supported(), vec![23, 22]);
+        assert_eq!(decoded.supported_versions, vec![23]);
+        assert_eq!(decoded.supported(), vec![23]);
         assert_eq!(decoded.protocol_version, 23);
     }
 
@@ -6309,165 +6308,5 @@ mod tests {
         };
         let json = serde_json::to_string(&req).expect("encode");
         assert!(json.contains(r#""secret_env_keys":["GH_PAT"]"#), "{json}");
-    }
-}
-
-/// Protocol 22 is still in `supported` for installed clients that speak only
-/// it. The fixtures are messages a v22 client may send or read: the minimal
-/// shapes (every optional field left out, a scalar `protocol_version` on
-/// `Hello`) and the fuller ones the v22 Tauri client sent (`Hello` with
-/// `protocol_versions` and `client_id`, a spawn with a `request_id`). A change
-/// that stops decoding them, or a `supported` list that drops 22, fails here.
-#[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "tests assert preconditions with expect; failure messages aid debugging"
-)]
-mod v22_compat {
-    use super::*;
-
-    const V22_SNAPSHOT: &str = r#"{"id":"s1","label":"repo","kind":"single","members":[{"repo_id":"r1","repo_name":"repo","branch":"main","worktree_path":"D:/repo"}],"status":"idle","mode":"interactive","started_at":"2026-01-01T00:00:00Z","exit_code":null,"metrics":{"input_tokens":0,"output_tokens":0,"cost_usd":0.0,"last_activity_at":null},"recent_actions":[],"agent":"claude"}"#;
-
-    #[test]
-    fn v22_hello_decodes() {
-        let hello: ClientMessage =
-            serde_json::from_str(r#"{"type":"hello","protocol_version":22,"auth_token":"tok"}"#)
-                .expect("a v22 hello decodes");
-        assert!(
-            matches!(
-                &hello,
-                ClientMessage::Hello { protocol_version: 22, protocol_versions, auth_token, client_id: None, client_name: None }
-                    if protocol_versions.is_empty() && auth_token == "tok"
-            ),
-            "{hello:?}"
-        );
-    }
-
-    #[test]
-    fn v22_spawn_session_decodes() {
-        let spawn: ClientMessage = serde_json::from_str(
-            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null}"#,
-        )
-        .expect("a v22 spawn_session decodes");
-        assert!(
-            matches!(
-                &spawn,
-                ClientMessage::SpawnSession(SpawnRequest {
-                    target: SpawnTarget::Single { repo_id, .. },
-                    mode: SessionMode::Interactive,
-                    request_id: None,
-                    ..
-                }) if repo_id == "r1"
-            ),
-            "{spawn:?}"
-        );
-    }
-
-    #[test]
-    fn v22_hello_with_versions_decodes() {
-        let hello: ClientMessage = serde_json::from_str(
-            r#"{"type":"hello","protocol_version":22,"protocol_versions":[22],"auth_token":"tok","client_id":"c1"}"#,
-        )
-        .expect("a v22 hello with its version list decodes");
-        assert!(
-            matches!(
-                &hello,
-                ClientMessage::Hello { protocol_version: 22, protocol_versions, client_id: Some(id), .. }
-                    if protocol_versions == &[22] && id == "c1"
-            ),
-            "{hello:?}"
-        );
-    }
-
-    #[test]
-    fn v22_spawn_with_request_id_decodes() {
-        let spawn: ClientMessage = serde_json::from_str(
-            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null,"request_id":"q1"}"#,
-        )
-        .expect("a v22 spawn_session with a request_id decodes");
-        assert!(
-            matches!(
-                &spawn,
-                ClientMessage::SpawnSession(SpawnRequest { request_id: Some(id), .. }) if id == "q1"
-            ),
-            "{spawn:?}"
-        );
-    }
-
-    #[test]
-    fn v22_spawn_session_with_a_literal_env_row_decodes() {
-        let spawn: ClientMessage = serde_json::from_str(
-            r#"{"type":"spawn_session","label":null,"target":{"kind":"single","repo_id":"r1","branch_name":"main","base_branch":null,"use_worktree":false},"mode":"interactive","initial_prompt":null,"dangerously_skip_permissions":false,"agent_options":{"kind":"claude"},"model":null,"extra_env":[["ANTHROPIC_API_KEY","sk-ant-literal"]]}"#,
-        )
-        .expect("a v22 spawn_session with a literal env row decodes");
-        assert!(
-            matches!(
-                &spawn,
-                ClientMessage::SpawnSession(SpawnRequest { extra_env, secret_env_keys, .. })
-                    if extra_env.len() == 1
-                        && extra_env.first().is_some_and(|(key, value)| key == "ANTHROPIC_API_KEY" && value == "sk-ant-literal")
-                        && secret_env_keys.is_empty()
-            ),
-            "{spawn:?}"
-        );
-    }
-
-    #[test]
-    fn v22_load_scrollback_decodes() {
-        let load: ClientMessage =
-            serde_json::from_str(r#"{"type":"load_scrollback","session_id":"s1"}"#)
-                .expect("a v22 load_scrollback decodes");
-        assert!(
-            matches!(
-                &load,
-                ClientMessage::LoadScrollback { session_id, request_id: None } if session_id == "s1"
-            ),
-            "{load:?}"
-        );
-    }
-
-    #[test]
-    fn v22_session_updated_decodes() {
-        let updated: DaemonMessage = serde_json::from_str(&format!(
-            r#"{{"type":"session_updated","session":{V22_SNAPSHOT}}}"#
-        ))
-        .expect("a v22 session_updated decodes");
-        assert!(
-            matches!(
-                &updated,
-                DaemonMessage::SessionUpdated { session, request_id: None } if session.id == "s1"
-            ),
-            "{updated:?}"
-        );
-
-        let listed: DaemonMessage = serde_json::from_str(&format!(
-            r#"{{"type":"sessions","sessions":[{V22_SNAPSHOT}]}}"#
-        ))
-        .expect("a v22 sessions list decodes");
-        assert!(
-            matches!(
-                &listed,
-                DaemonMessage::Sessions { sessions } if sessions.len() == 1 && sessions[0].id == "s1"
-            ),
-            "{listed:?}"
-        );
-    }
-
-    #[test]
-    fn v22_snapshot_without_the_busy_flag_decodes_as_counted() {
-        let snapshot: SessionSnapshot =
-            serde_json::from_str(V22_SNAPSHOT).expect("a v22 snapshot decodes");
-        assert!(
-            !snapshot.busy_excluded,
-            "a snapshot without the flag counts as busy"
-        );
-    }
-
-    #[test]
-    fn supported_versions_keep_22() {
-        assert!(
-            SUPPORTED_PROTOCOL_VERSIONS.contains(&22),
-            "installed v22 clients still connect; supported = {SUPPORTED_PROTOCOL_VERSIONS:?}"
-        );
     }
 }

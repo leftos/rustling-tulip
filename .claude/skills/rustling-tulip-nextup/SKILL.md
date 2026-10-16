@@ -19,14 +19,13 @@ linear: rustling-tulip
 - Subplan fate: a design file stays in `docs/plans/` while an open issue or project links it. Once nothing open links it, its durable decisions are promoted into `docs/` (`architecture.md`, `native-client.md`, or a doc of their own) and the design file is deleted in that commit, so under `plan-doc-hygiene` its verdict is promote, then delete. `docs/plans/archive/` holds designs finished before the plan moved to Linear, left as they are; nothing new moves there.
 - Feature markers: a wave on a feature branch carries `branch: feat/<name>` in its project's content. The first item under it opens the branch and its draft feature PR, and the project gets a tracking issue `Merge feat/<name> (#N)`, last in the project. An item that lands on the branch is **land**ed with the note `on feat/<name>, ships with #N`.
 - Pre-loop hooks: none.
-- Tracker: **triage** as plan-operations says (GitHub issues reach team RT through Linear's sync; an untriaged one is top-level with no project), each placed in the project that shares its files, else in `Backlog`. A bug in the Tauri app is fixed on the `tauri` branch, not `main`; a daemon fix lands on `main` first and is cherry-picked there.
-- Pull requests: `gh pr list --repo leftos/rustling-tulip --state open --json number,title,baseRefName`. An unplanned PR gets an **add**, "Review and land PR #N", naming its base branch (`main` or `tauri`), its files, whether the checks pass and whether it merges cleanly; a bot's dependency bump goes to `Backlog`.
+- Tracker: **triage** as plan-operations says (GitHub issues reach team RT through Linear's sync; an untriaged one is top-level with no project), each placed in the project that shares its files, else in `Backlog`.
+- Pull requests: `gh pr list --repo leftos/rustling-tulip --state open --json number,title,baseRefName`. An unplanned PR gets an **add**, "Review and land PR #N", naming its base branch, its files, whether the checks pass and whether it merges cleanly; a bot's dependency bump goes to `Backlog`.
 - Hotspots (two items touching one wait on each other): `crates/protocol/src/lib.rs`, `crates/daemon/src/server.rs`, and in the native client `apps/native/src/lib.rs` (`RootView`), which every native item mounts into.
 
 ## Rulings every brief carries
 
 - **Protocol:** additive changes only, the `add-protocol-message` skill's 3-step pattern, no `protocol-version.json` bump for additive changes (CLAUDE.md "When to bump").
-- **Protocol 22 stays decodable** while the installed Tauri app is in use: a protocol change keeps every v22 message decoding, proved by `cargo nextest run -p protocol --cargo-profile test-release v22_compat`.
 - **Testable core, thin view:** state that a feature adds (sidebar tree, split tree, tab list, key mapping, span building) lives in plain-Rust modules with unit tests; the GPUI view only renders it and forwards events. The proving command is that module's `cargo nextest run -p <crate> --cargo-profile test-release <filter>`, red first.
 
 ## Agents and gates
@@ -36,7 +35,7 @@ linear: rustling-tulip
 - Gates, each run through the `gate` command on PATH from the worktree root as `gate run --log .tmp/<name>.log --timeout <n> --slot <heavy|light> -- <command>` (no `nice` of its own; the gate lowers priority, takes a machine-wide slot, logs the whole output and prints the tail). A machine without it installs it from the gate repo with `pwsh tools/install.ps1`; `--local` keeps a run on this PC. The gate routes `cargo nextest run *` heavy runs to a builder machine but not `rt.ps1 test`, so agent gates call nextest through `gate run` directly:
   - `cargo fmt --all --check` (light)
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings` (heavy; what `.\rt.ps1 clippy` and prek run)
-  - `cargo nextest run -p <crate> --cargo-profile test-release` for each touched crate (heavy; for `crates/protocol` this includes `v22_compat`); the full suite is `cargo nextest run --workspace --cargo-profile test-release`. Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes. nextest's own `--profile` is not the build profile.
+  - `cargo nextest run -p <crate> --cargo-profile test-release` for each touched crate (heavy); the full suite is `cargo nextest run --workspace --cargo-profile test-release`. Never `--release` for tests: that profile's LTO and single codegen unit make every rebuild take minutes. nextest's own `--profile` is not the build profile.
   - `cargo deny check` when `Cargo.toml` or `Cargo.lock` changed (light)
   - the live tier, `pwsh ./rt.ps1 native-e2e` (heavy), and the OS tier, `pwsh ./rt.ps1 native-smoke` (light), when a wave's verification names them
 - test mode: unstable
@@ -54,7 +53,7 @@ linear: rustling-tulip
 
 ## Concurrency
 
-- Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default; a Tauri fix is cut from and lands on `tauri`).
+- Worktrees: `git worktree add ../rustling-tulip.wt/<slug> -b <slug> <base>` from the main checkout, then `branch.<slug>.base` and `branch.<slug>.landOn` recorded as the user-level `nextup` §3 **Base and target** says (`main` and `main` by default).
 - Ceiling: **three** implementers; items inside one wave share files, so parallel items come from different waves or from a wave whose subplan says its steps separate.
 - Depends on, where file lists hide it: the dependencies an issue or its design file names (P4.4b → P4.12c, P4.12b → P4.12c, P4.11 → P4.15b, Wave 2's hook status → Wave 5 and Wave 9); a protocol message one item adds and another item's view consumes.
 - Context: read the status bar's figure at every landing (`<scratchpad>/statusline.json`); past 400K tokens the loop stops refilling, per the user-level `nextup`.

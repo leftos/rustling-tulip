@@ -26,7 +26,7 @@ The wire protocol is JSON over a localhost WebSocket (`crates/protocol/src/lib.r
 
 | Component | Path | Role |
 |---|---|---|
-| Protocol | `crates/protocol/` | The daemon/client contract: tagged enums `ClientMessage` and `DaemonMessage`, `SessionSnapshot`, and the forward-compatible `Unknown` wrappers. Additive changes only while protocol 22 must decode (`cargo nextest run -p protocol --cargo-profile test-release v22_compat`). |
+| Protocol | `crates/protocol/` | The daemon/client contract: tagged enums `ClientMessage` and `DaemonMessage`, `SessionSnapshot`, and the forward-compatible `Unknown` wrappers. Additive changes need no version bump; a breaking change follows CLAUDE.md "When to bump `protocol-version.json`". |
 | Daemon | `crates/daemon/` (binary `rustling-tulipd`) | WS server and HTTP `/shutdown` (`server.rs`), session registry and lifecycle (`registry.rs`, `session.rs`, which serialises each session's sidecar writes and its delete under one per-session gate), persisted repos, workspaces, tabs and host settings (`state.rs`), per-agent spawn arguments (`agents/`), env references in spawn env rows resolved from the process, user and system environment (`user_env.rs`), secret env rows sealed into Windows Credential Manager (`env_secrets.rs`), status heuristics (`pty_state.rs`, `osc_title.rs`), headless stream-json sessions (`headless.rs`), scrollback ring (`scrollback.rs`), orphan recovery (`orphan.rs`), session history and recovery (`history.rs`, `transcripts.rs`, `tracer_log.rs`), git and worktrees (`git.rs`, `git_write.rs`, `git_inspect.rs`, `git_watch.rs`, `workspace.rs`, `worktrees_admin.rs`, `worktree_cleanup.rs`, `branch_fate.rs`, `branch_names.rs`), LAN access (`lan.rs`, `pairing.rs`, `discovery.rs`, `secret.rs`), keep-awake (`keep_awake.rs`), single-instance lock (`instance_lock.rs`), login launch (`detach.rs`). |
 | Tracer | `crates/tracer/` (binary `rt-tracer.exe`) | One supervisor process per interactive or shell session. It owns the ConPTY, keeps draining output into a 4 MB ring while no daemon is attached, and survives daemon restarts. |
 | Tracer protocol | `crates/tracer-protocol/` | The daemon/tracer ABI, frozen and additive-only; see [tracer-abi.md](./tracer-abi.md). |
@@ -34,7 +34,7 @@ The wire protocol is JSON over a localhost WebSocket (`crates/protocol/src/lib.r
 | Native client | `apps/native/` (binary `rustling-tulip-native`) | The GPUI + `alacritty_terminal` desktop client; see [native-client.md](./native-client.md). |
 | fake-claude | `tools/e2e/fake-claude/` | A scripted stand-in for the `claude` CLI used by the native e2e tier, selected with `RUSTLING_TULIP_CLAUDE`. |
 
-The earlier Tauri desktop app is not on `main`: it lives on the `tauri` maintenance branch, cut from the `tauri-last` tag, where its hotfixes are made and its installer is built. Daemon fixes land on `main` first and are cherry-picked there. The daemon keeps protocol 22 in `supported` for the installed Tauri app.
+The earlier Tauri desktop app is retired and not on `main`: the `tauri` branch, cut from the `tauri-last` tag, keeps it as history only, and daemon fixes are not cherry-picked to it.
 
 ## What it does
 
@@ -57,6 +57,7 @@ Where to start for common changes, in the order a change usually flows through t
 | Task | Files |
 |---|---|
 | Add a daemon/client message | `crates/protocol/src/lib.rs` → `crates/daemon/src/server.rs` (handler) → `apps/native/src/net.rs` (`on_daemon_message`) → the view that consumes it; the `add-protocol-message` skill walks it |
+| Change the supported protocol versions or retire a client generation | CLAUDE.md "When to bump `protocol-version.json`" → `protocol-version.json` → `crates/protocol/build.rs` → `crates/protocol/src/lib.rs` (`ClientMessage::Hello`, `DaemonMessage::Welcome`, `DaemonHandshake::supported`) → `crates/daemon/src/server.rs` (`handshake`, `negotiate_protocol_version`) → `crates/daemon-client/src/supervisor.rs` (`classify_existing_daemon`, `retire_daemon` and their tests) → `apps/native/src/net.rs` (`NATIVE_PROTOCOL_VERSIONS`) |
 | Change what a session snapshot carries | `crates/protocol/src/lib.rs` (`SessionSnapshot`) → `crates/daemon/src/session.rs` (snapshot builder) → `apps/native/src/sidebar.rs` |
 | Add a per-session daemon flag that clients read | `crates/protocol/src/lib.rs` (`SessionSnapshot`, the `ClientMessage` that sets it) → `crates/daemon/src/session.rs` (`SessionRecord`, snapshot, `record_mirror`) → `crates/daemon/src/orphan.rs` (`OrphanMeta`, `RecordMirror`) → `crates/daemon/src/history.rs` (`entry_from_record`) → `crates/daemon/src/server.rs` (the handler, `duplicate_session`, `resume_abandoned`, `recover_one`) → the client readers (native: `apps/native/src/tabs.rs` `tab_session_counts`, `footer.rs`, `sidebar.rs` leaf and `shows_attention`, `session_actions.rs` and `session_menu.rs` for the toggle); `busy_excluded` is the model |
 | Change spawn arguments for an agent | `crates/daemon/src/agents/mod.rs`, `agents/claude.rs`, `agents/codex.rs`, `agents/cursor.rs`, `crates/daemon/src/spawn_plan.rs` |

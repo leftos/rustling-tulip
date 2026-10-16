@@ -34,7 +34,7 @@ Research: [linear-links.md](../research/linear-links.md). Code map at the time o
 
 Order: LL.1 first; LL.2 and LL.4 after it, in parallel; LL.3 needs LL.2; LL.5 needs LL.4; LL.6 needs LL.3 and LL.5; LL.7 needs LL.6; LL.8 last. Each step lands on `feat/linear-links`.
 
-- [ ] **LL.1 Protocol.** `LinearContext`, `GetLinearIssues`, `LinearIssues`, `LinearIssue` and its state type with `#[serde(other)] Unknown` where it holds an enum; doc comments. Proof, red first: round-trip tests and a `v22_compat` case that a v22 peer's messages still decode. Files: `crates/protocol/src/lib.rs`.
+- [ ] **LL.1 Protocol.** `LinearContext`, `GetLinearIssues`, `LinearIssues`, `LinearIssue` and its state type with `#[serde(other)] Unknown` where it holds an enum; doc comments. Proof, red first: round-trip tests. Files: `crates/protocol/src/lib.rs`.
 - [ ] **LL.2 Daemon Linear client.** New `crates/daemon/src/linear.rs`: the key from `user_env::resolve("LINEAR_API_KEY")`, the transport trait and its `reqwest` implementation, the team-keys and `urlKey` query (refreshed daily), the batched issue query, and the cache with `fetched_at` and staleness.
 
   Proof, red first: unit tests over a fake transport for parsing, batching, a missing key, an HTTP error marking entries stale, and identifier matching against team keys; `cargo deny check`. Files: `crates/daemon/src/linear.rs`, `crates/daemon/Cargo.toml`.

@@ -10,7 +10,7 @@ Design for Wave 3's remote desktop (Linear RT-33, RT-34 and their sub-issues). R
 - The listener binds the host's own tailnet addresses only (v4 and v6), on the fixed port 8787, rebinding when they change.
 - Shutdown and turning remote access off are refused from tailnet connections: host-only.
 - Revocation is a block list in rustling-tulip: Settings lists the tailnet devices that have connected, and blocking one drops its live connections at once (RT-96, rewritten).
-- The LAN listener (`0.0.0.0:8787`, `/pair`, mDNS) is retired once the tailnet listener lands. Its six wire variants (`ConfigureLan`, `StartPairing`, `CancelPairing`, `LanStatus`, `PairingStarted`, `PairingEnded`) stay decodable and inert while protocol 22 is supported. The installed Tauri app's remote mode stops working against a daemon built from `main`.
+- The LAN listener (`0.0.0.0:8787`, `/pair`, mDNS) is retired once the tailnet listener lands. Its six wire variants (`ConfigureLan`, `StartPairing`, `CancelPairing`, `LanStatus`, `PairingStarted`, `PairingEnded`) stay decodable and inert.
 - Placement: the daemon side (TS.1 to TS.5) lands on `main`, behind a `remote.json` switch that is off by default; the native client's remote mode (P6.1 to P6.4 and the tests) is built on `feat/remote-mode` and merged by `/ship` after a green full suite. The installer and the docs pass land on `main` after the merge.
 - The native client dials TLS itself inside `net.rs`; there is no loopback bridge.
 - The relay (RT-94), pinned TLS, mDNS discovery, pairing by code and add-by-pasted-code are dropped. RT-95 (Tailscale by MagicDNS name) folds into the host picker.

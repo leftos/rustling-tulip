@@ -60,8 +60,8 @@ Not protected:
 - The value still reaches the tracer's and the child's environment, as `${env:NAME}` values and DeepSeek's key do; any same-user process can read a process's environment.
 - Scrollback, which may hold anything a session printed, is not scrubbed.
 - A client that learns a reference can spawn with it and so gets the value into a child. That is no more than the auth token already allows (any authenticated client can spawn a shell and read the user's Credential Manager or environment itself).
-- A secret under a name the pattern misses stays literal when the client has no Secret toggle (the installed Tauri app).
+- A secret under a name the pattern misses stays literal unless its row's Secret toggle is on (its key is in `secret_env_keys`).
 
 ## Protocol
 
-All additive, no bump: `SpawnRequest.secret_env_keys` (default empty, skipped when empty), `ListEnvNames` / `EnvNames`, and the `protocol::env_rows` helpers shared by the daemon and the native client so the pattern and the reference parser cannot drift. A protocol 22 `SpawnSession` without the field decodes and the replies keep their shape (`cargo test -p protocol v22_compat`). The Tauri app shows a `${secret:<id>}` as plain value text and sends it back unchanged, which works.
+All additive, no bump: `SpawnRequest.secret_env_keys` (default empty, skipped when empty), `ListEnvNames` / `EnvNames`, and the `protocol::env_rows` helpers shared by the daemon and the native client so the pattern and the reference parser cannot drift.
