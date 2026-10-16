@@ -35,7 +35,17 @@ Split in two. **P4.15a** sources (file, folder, inline, GitHub issue ranges) and
 
 ## P4.17 Keep an untouched layout when panes come and go
 
-New, not a parity line. When a tab's layout was last set by picking a layout type (side by side, grid, …) and the user has not resized its panes since, adding or removing a session rebuilds that same layout type over the new pane count, so side by side stays evenly balanced. Once the user drags a divider, the tab keeps its sizes and adding or removing a pane falls back to today's behaviour. Rulings (user): the "untouched since picked" flag is per client, since two clients can show the same sessions in different tabs and layouts (a laptop attached remotely beside the desktop's big screen); it is saved with that tab's layout, which the daemon already keys by client id. Both pickers set it: Rearrange ▸ and the first-connect chooser.
+New, not a parity line. When a tab's layout was last set by picking a layout type (side by side, grid, …) and the user has not resized its panes since, adding or removing a session rebuilds that same layout type over the new pane count, so side by side stays evenly balanced. Once the user drags a divider, the tab keeps its sizes and adding or removing a pane falls back to today's behaviour.
+
+Rulings (user): the "untouched since picked" flag is per client, since two clients can show the same sessions in different tabs and layouts (a laptop attached remotely beside the desktop's big screen); it is saved with that tab's layout, which the daemon already keys by client id. Both pickers set it: Rearrange ▸ and the first-connect chooser.
+
+A picked grid keeps its column count as panes come and go (3 columns plus a 4th pane is 3 + 1); a pick of the automatic count (the Rearrange shortcut, the chooser's best fit) re-picks it for the new pane count (mock: [canvases/rt-13-grid-cols](./canvases/rt-13-grid-cols/index.html)).
+
+Orchestrator decisions (not owner rulings), from the code map: the flag is `TabEntry.picked_layout: Option<RearrangeLayout>` (`#[serde(default)]`, additive, also read by `TabEntry`'s hand-written deserializer), held and applied in the daemon, which owns the layouts (`crates/daemon/src/tabs.rs`, the `server.rs` tab handlers); the client changes nothing. Only `RearrangeTab` sets it, which covers both pickers; `SetPaneRatio` (a divider drag) and any same-tab `MovePane` clear it.
+
+Every pane add or removal on a flagged tab rebuilds it: `SplitPane`, `ClosePane`, `close_session_panes` (each client's tabs separately), the source of `ExtractToNewTab` and of a cross-tab `MovePane`, and the destination of a cross-tab `MovePane`. `MergeTabs`, preset-launched tabs and Move panes to a new tab leave it unset.
+
+Undo snapshots and cloned layouts carry it as is. A rebuild keeps unbound (empty) panes and the panes' current order, so a spawned pane lands where the split put it. Nothing in the UI shows the flag.
 
 ## Phase 5 — windows and drag-and-drop
 
