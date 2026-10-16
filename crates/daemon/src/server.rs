@@ -1650,8 +1650,14 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
         ClientMessage::DuplicateSession {
             session_id,
             request_id,
+            carry_busy_excluded,
         } => {
-            duplicate_session(hub, &session_id, request_id, connection, out_tx).await;
+            let ask = DuplicateAsk {
+                session_id: &session_id,
+                request_id,
+                carry_busy_excluded,
+            };
+            duplicate_session(hub, ask, connection, out_tx).await;
         }
         ClientMessage::GetSpawnConfig { session_id } => {
             let config = hub
@@ -1679,6 +1685,17 @@ async fn dispatch(hub: &Hub, msg: ClientMessage, ctx: &ConnCtx<'_>) -> anyhow::R
                 guard.label = normalized
                     .clone()
                     .unwrap_or_else(|| guard.default_label.clone());
+            });
+        }
+        ClientMessage::SetSessionBusyExcluded {
+            session_id,
+            excluded,
+        } => {
+            // The registry update mirrors the flag into the sidecar and
+            // broadcasts the session; an unknown session is ignored, as a
+            // rename of one is.
+            hub.sessions.update(&session_id, |guard| {
+                guard.busy_excluded = excluded;
             });
         }
         ClientMessage::SetRepoAppearance {
@@ -3709,6 +3726,7 @@ fn interactive_record(
         spawn_origin: None,
         claude_session_id: new.claude_session_id,
         agent_conversation_id: conversation.own.clone(),
+        busy_excluded: false,
     };
     push_recent_action(&mut record, "session started".to_string());
     record
@@ -4047,6 +4065,7 @@ async fn spawn_plain_shell_session(
         spawn_origin: None,
         claude_session_id: None,
         agent_conversation_id: None,
+        busy_excluded: false,
     };
     push_recent_action(
         &mut record,
@@ -4190,6 +4209,7 @@ fn spawn_headless_session(
         spawn_origin: None,
         claude_session_id: None,
         agent_conversation_id: None,
+        busy_excluded: false,
     };
     push_recent_action(&mut record, "headless session started".to_string());
     // Held unpublished until the child runs, so a failed spawn is never
@@ -4461,16 +4481,29 @@ fn classify_worktree_error(err: &anyhow::Error, branch_name: &str) -> spawn_plan
     }
 }
 
-/// Spawns a copy of `session_id` from its stored config. The copy's first
-/// broadcast carries `request_id` on connection `connection`; a failure
-/// answers the requester directly, carrying it too.
+/// A [`ClientMessage::DuplicateSession`], as the daemon handles it.
+struct DuplicateAsk<'a> {
+    session_id: &'a str,
+    request_id: Option<String>,
+    carry_busy_excluded: bool,
+}
+
+/// Spawns a copy of the asked session from its stored config, carrying its
+/// busy exclusion when asked to. The copy's first broadcast carries
+/// `request_id` on connection `connection`; a failure answers the requester
+/// directly, carrying it too.
 async fn duplicate_session(
     hub: &Hub,
-    session_id: &str,
-    request_id: Option<String>,
+    ask: DuplicateAsk<'_>,
     connection: u64,
     out_tx: &mpsc::UnboundedSender<DaemonMessage>,
 ) {
+    let DuplicateAsk {
+        session_id,
+        request_id,
+        carry_busy_excluded,
+    } = ask;
+    let busy_excluded = carried_busy_excluded(&hub.sessions, session_id, carry_busy_excluded);
     let req = match duplicate_request(hub, session_id).await {
         Ok(req) => req,
         Err(err) => {
@@ -4482,8 +4515,42 @@ async fn duplicate_session(
         }
     };
     let origin = request_origin(connection, request_id.clone());
-    if let Err(err) = spawn_session(hub, req, origin).await {
+    if let Err(err) = spawn_keeping_busy_excluded(hub, req, origin, busy_excluded).await {
         send_spawn_failure(out_tx, &err, request_id.as_deref());
+    }
+}
+
+/// Spawn `req`, then, when `busy_excluded` is set, mark the new session as
+/// not counted as busy (see [`adopt_busy_excluded`]). Every spawn that keeps
+/// a session's exclusion (Restart, Resume, recovery) goes through here. The
+/// returned snapshot is the spawn's, taken before the flag was set.
+async fn spawn_keeping_busy_excluded(
+    hub: &Hub,
+    req: SpawnRequest,
+    origin: Option<UpdateOrigin>,
+    busy_excluded: bool,
+) -> anyhow::Result<protocol::SessionSnapshot> {
+    let snapshot = spawn_session(hub, req, origin).await?;
+    adopt_busy_excluded(&hub.sessions, &snapshot.id, busy_excluded);
+    Ok(snapshot)
+}
+
+/// The busy exclusion a copy of `source_id` starts with: the source's when
+/// `carry` is set (a Restart or a Resume), else none (a Duplicate). A source
+/// the registry no longer holds has nothing to carry.
+fn carried_busy_excluded(sessions: &SessionRegistry, source_id: &str, carry: bool) -> bool {
+    carry
+        && sessions
+            .get(source_id)
+            .is_some_and(|rec| crate::sync::lock(&rec).busy_excluded)
+}
+
+/// Mark the freshly spawned `session_id` as not counted as busy when
+/// `excluded` is set; the registry update mirrors it into the sidecar and
+/// broadcasts the session. A counted session needs no update.
+fn adopt_busy_excluded(sessions: &SessionRegistry, session_id: &str, excluded: bool) {
+    if excluded {
+        sessions.update(session_id, |guard| guard.busy_excluded = true);
     }
 }
 
@@ -5314,29 +5381,29 @@ async fn resume_abandoned(
         .sessions
         .get(session_id)
         .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let (is_abandoned, spawn_config, last_prompt) = {
-        let guard = crate::sync::lock(&rec);
-        (
-            guard.is_abandoned,
-            guard.spawn_config.clone(),
-            guard.last_prompt.clone(),
-        )
-    };
-    if !is_abandoned {
+    let (req, busy_excluded) = abandoned_resume_request(&crate::sync::lock(&rec))?;
+    let snap = spawn_keeping_busy_excluded(hub, req, None, busy_excluded).await?;
+    finish_resume(hub, session_id, &snap.id, out_tx);
+    Ok(())
+}
+
+/// The request that resumes the abandoned `rec`, replaying its first prompt,
+/// and the busy exclusion the resumed session keeps.
+fn abandoned_resume_request(rec: &SessionRecord) -> anyhow::Result<(SpawnRequest, bool)> {
+    let session_id = &rec.id;
+    if !rec.is_abandoned {
         return Err(anyhow!(
             "session {session_id} is not abandoned; refusing to resume"
         ));
     }
-    let Some(stored) = spawn_config else {
+    let Some(stored) = &rec.spawn_config else {
         return Err(anyhow!(
             "session {session_id} has no stored spawn config; cannot resume"
         ));
     };
     let mut req = stored.to_clone_request();
-    req.initial_prompt = last_prompt;
-    let snap = spawn_session(hub, req, None).await?;
-    finish_resume(hub, session_id, &snap.id, out_tx);
-    Ok(())
+    req.initial_prompt.clone_from(&rec.last_prompt);
+    Ok((req, rec.busy_excluded))
 }
 
 /// After a successful Resume spawn of the abandoned `old_id` as `new_id`:
@@ -5531,6 +5598,11 @@ async fn recover_one(
     if let Err(failure) = check_env_rows(history::recorded_env(&entry), &[]) {
         return Err(format!("{failure}"));
     }
+    let busy_excluded = {
+        let live = hub.sessions.get(&item.history_id);
+        let guard = live.as_ref().map(|rec| crate::sync::lock(rec));
+        recovery_busy_excluded(guard.as_deref(), &entry)
+    };
     let (repos, workspaces) = hub
         .state
         .with_persisted(|s| (s.repos.clone(), s.workspaces.clone()));
@@ -5558,11 +5630,21 @@ async fn recover_one(
         let current = git::current_branch(Path::new(folder)).await;
         plan.name_branch(history::branch_or_placeholder(current));
     }
-    let snapshot = spawn_session(hub, plan.request, None)
+    let snapshot = spawn_keeping_busy_excluded(hub, plan.request, None, busy_excluded)
         .await
         .map_err(|err| format!("{err:#}"))?;
     finish_recovery(hub, &item.history_id, &snapshot.id, out_tx);
     Ok(snapshot.id)
+}
+
+/// The busy exclusion a recovered session starts with. A session still in
+/// the Abandoned group (`live`) may have been toggled after its history entry
+/// was written, so its flag wins; otherwise the entry's.
+fn recovery_busy_excluded(live: Option<&SessionRecord>, entry: &protocol::HistoryEntry) -> bool {
+    match live {
+        Some(rec) if rec.is_abandoned => rec.busy_excluded,
+        _ => entry.busy_excluded,
+    }
 }
 
 /// Whether `agent` still holds conversation `id` for `folder`: Claude Code's
@@ -7473,6 +7555,7 @@ mod tests {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            busy_excluded: false,
         }
     }
 
@@ -7847,6 +7930,185 @@ mod tests {
         let entry = history::read_one(&hub.dirs, "lost").expect("entry kept");
         assert!(entry.recovered_at.is_some(), "a resume counts as recovery");
         assert_eq!(entry.end, SessionEnd::TracerLost);
+    }
+
+    /// Every message dispatching `msg` puts on the wire, for a message that
+    /// may answer with none.
+    async fn dispatch_all(hub: &Hub, msg: ClientMessage) -> Vec<DaemonMessage> {
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let (file_tx, _file_rx) = mpsc::channel(1);
+        let pty_forwarders: PtyForwarders = Arc::new(AsyncMutex::new(HashMap::new()));
+        let fetches: FetchRegistry = Arc::new(AsyncMutex::new(HashMap::new()));
+        let ctx = ConnCtx {
+            out_tx: &out_tx,
+            file_tx: &file_tx,
+            pty_forwarders: &pty_forwarders,
+            fetches: &fetches,
+            client_id: "c1",
+            client_name: None,
+            connection: 1,
+        };
+        dispatch(hub, msg, &ctx).await.expect("dispatch succeeds");
+        let mut sent = Vec::new();
+        while let Ok(message) = out_rx.try_recv() {
+            sent.push(message);
+        }
+        sent
+    }
+
+    #[tokio::test]
+    #[expect(clippy::panic, reason = "a missing broadcast fails the test loudly")]
+    async fn set_session_busy_excluded_updates_the_registry_and_broadcasts() {
+        let (hub, _scratch) = test_hub("busy-excluded-set");
+        hub.sessions.insert(idle_record("s1"));
+        let mut events = hub.sessions.subscribe();
+        for excluded in [true, false] {
+            let sent = dispatch_all(
+                &hub,
+                ClientMessage::SetSessionBusyExcluded {
+                    session_id: "s1".to_owned(),
+                    excluded,
+                },
+            )
+            .await;
+            assert!(sent.is_empty(), "the broadcast is the answer: {sent:?}");
+            let rec = hub.sessions.get("s1").expect("s1 is registered");
+            assert_eq!(crate::sync::lock(&rec).busy_excluded, excluded);
+            let Ok(SessionEvent::Updated(snap, None)) = events.try_recv() else {
+                panic!("expected a SessionUpdated broadcast for excluded = {excluded}");
+            };
+            assert_eq!(snap.busy_excluded, excluded);
+        }
+    }
+
+    #[tokio::test]
+    async fn set_session_busy_excluded_for_an_unknown_session_answers_like_rename() {
+        let (hub, _scratch) = test_hub("busy-excluded-unknown");
+        let renamed = dispatch_all(
+            &hub,
+            ClientMessage::RenameSession {
+                session_id: "ghost".to_owned(),
+                label: Some("x".to_owned()),
+            },
+        )
+        .await;
+        let excluded = dispatch_all(
+            &hub,
+            ClientMessage::SetSessionBusyExcluded {
+                session_id: "ghost".to_owned(),
+                excluded: true,
+            },
+        )
+        .await;
+        assert!(
+            renamed.is_empty(),
+            "a rename of an unknown session: {renamed:?}"
+        );
+        assert!(
+            excluded.is_empty(),
+            "answers as a rename does: {excluded:?}"
+        );
+        assert!(hub.sessions.get("ghost").is_none(), "no session is made");
+    }
+
+    #[test]
+    fn carried_busy_excluded_is_the_sources_flag_only_when_carried() {
+        let (sessions, _dirs) = appearance_registry("busy-carry");
+        sessions.update("s1", |rec| rec.busy_excluded = true);
+        assert!(
+            !carried_busy_excluded(&sessions, "s1", false),
+            "a Duplicate starts counted"
+        );
+        assert!(
+            carried_busy_excluded(&sessions, "s1", true),
+            "a Restart or Resume keeps the flag"
+        );
+        assert!(!carried_busy_excluded(&sessions, "ghost", true));
+    }
+
+    #[test]
+    fn adopt_busy_excluded_marks_and_broadcasts_only_an_excluded_session() {
+        let (sessions, _dirs) = appearance_registry("busy-adopt");
+        sessions.insert(idle_record("copy"));
+        let mut events = sessions.subscribe();
+        adopt_busy_excluded(&sessions, "copy", false);
+        assert!(events.try_recv().is_err(), "a counted copy needs no update");
+        adopt_busy_excluded(&sessions, "copy", true);
+        let rec = sessions.get("copy").expect("the copy is registered");
+        assert!(crate::sync::lock(&rec).busy_excluded);
+        assert!(
+            matches!(events.try_recv(), Ok(SessionEvent::Updated(snap, None)) if snap.busy_excluded),
+            "the copy's flag is broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_resume_request_returns_the_records_busy_flag() {
+        let (hub, scratch) = spawnless_test_hub("resume-busy-excluded");
+        insert_abandoned_with_history(&hub, "lost");
+        let target = SpawnTarget::Standalone {
+            cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            add_dirs: Vec::new(),
+        };
+        let stored = protocol::SpawnConfig::from_request(&env_spawn(
+            target,
+            SessionMode::Interactive,
+            Vec::new(),
+            None,
+        ));
+        hub.sessions.update("lost", |rec| {
+            rec.spawn_config = Some(stored);
+            rec.busy_excluded = true;
+        });
+        let rec = hub.sessions.get("lost").expect("lost is registered");
+        let (_request, busy_excluded) =
+            abandoned_resume_request(&crate::sync::lock(&rec)).expect("lost can resume");
+        assert!(busy_excluded, "the resumed session keeps the flag");
+    }
+
+    #[tokio::test]
+    async fn the_end_path_writes_the_busy_flag_into_the_history_entry() {
+        let (hub, _scratch) = spawnless_test_hub("recover-busy-excluded");
+        let mut rec = history::test_support::record("s1", SessionMode::Interactive);
+        rec.busy_excluded = true;
+        hub.sessions.insert(rec);
+        record_end(&hub, "s1", SessionEnd::TracerLost);
+        let entry = history::test_support::wait_for_entry(&hub.dirs, "s1").await;
+        assert!(
+            entry.busy_excluded,
+            "the end path writes the flag recovery reads"
+        );
+    }
+
+    #[test]
+    fn recovery_takes_the_busy_flag_from_a_still_abandoned_session_else_the_entry() {
+        let mut entry = history::entry_from_record(
+            &history::test_support::record("lost", SessionMode::Interactive),
+            SessionEnd::TracerLost,
+            Utc::now(),
+        );
+        entry.busy_excluded = true;
+        let mut abandoned = history::test_support::record("lost", SessionMode::Interactive);
+        abandoned.is_abandoned = true;
+        assert!(
+            !recovery_busy_excluded(Some(&abandoned), &entry),
+            "a toggle on the abandoned leaf after the entry was written wins"
+        );
+        abandoned.busy_excluded = true;
+        entry.busy_excluded = false;
+        assert!(recovery_busy_excluded(Some(&abandoned), &entry));
+
+        let mut live = history::test_support::record("lost", SessionMode::Interactive);
+        live.busy_excluded = true;
+        assert!(
+            !recovery_busy_excluded(Some(&live), &entry),
+            "a session that is not abandoned is not the one being recovered"
+        );
+        entry.busy_excluded = true;
+        assert!(
+            recovery_busy_excluded(None, &entry),
+            "with no session left, the entry's flag"
+        );
     }
 
     #[tokio::test]
@@ -8698,7 +8960,12 @@ mod tests {
         source.spawn_config = Some(stored.clone());
         hub.sessions.insert(source);
         let _ = child_env_probe::take();
-        duplicate_session(&hub, "source", None, 1, &out_tx).await;
+        let ask = DuplicateAsk {
+            session_id: "source",
+            request_id: None,
+            carry_busy_excluded: false,
+        };
+        duplicate_session(&hub, ask, 1, &out_tx).await;
         assert_eq!(
             child_value(
                 &child_env_probe::take().expect("the duplicate built an env"),

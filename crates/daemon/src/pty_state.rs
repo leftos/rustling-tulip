@@ -617,6 +617,7 @@ mod hysteresis_tests {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            busy_excluded: false,
         }
     }
 

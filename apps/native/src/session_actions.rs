@@ -781,6 +781,7 @@ impl Duplicates {
         Some(ClientMessage::DuplicateSession {
             session_id: session_id.to_owned(),
             request_id: Some(request_id),
+            carry_busy_excluded: false,
         })
     }
 
@@ -1558,7 +1559,7 @@ mod tests {
         let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::NewTab);
         assert!(matches!(
             request,
-            Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id) }) if session_id == "s1" && id == "req-1"
+            Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }) if session_id == "s1" && id == "req-1"
         ));
         assert!(!dups.is_pending("s1"), "a copy is no restart on the way");
         assert!(dups.has_request("req-1"));
@@ -1695,7 +1696,7 @@ mod tests {
         let request = dups.request("s1", "req-1".to_owned(), DuplicateTarget::Restart);
         assert!(matches!(
             request,
-            Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id) }) if session_id == "s1" && id == "req-1"
+            Some(ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }) if session_id == "s1" && id == "req-1"
         ));
         let tabs = model_with(&[
             tab(

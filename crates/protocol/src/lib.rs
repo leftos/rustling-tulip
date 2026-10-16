@@ -528,6 +528,13 @@ pub struct SessionSnapshot {
     /// and sessions spawned before the daemon recorded it.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// True when the user asked that this session not count as busy (a dev
+    /// server, a watcher): clients leave it out of their busy counts and
+    /// attention highlight. It still raises notifications. Set via
+    /// [`ClientMessage::SetSessionBusyExcluded`]; kept by Resume, Restart and
+    /// session recovery, not by Duplicate.
+    #[serde(default)]
+    pub busy_excluded: bool,
 }
 
 /// How a session ended, as recorded in its history entry.
@@ -625,6 +632,10 @@ pub struct HistoryEntry {
     /// `claude_session_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_conversation_id: Option<String>,
+    /// The session's [`SessionSnapshot::busy_excluded`] when it ended, so a
+    /// recovered session keeps it. Absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy_excluded: bool,
 }
 
 /// One workspace member bound to a specific worktree directory that already
@@ -2028,6 +2039,11 @@ pub enum ClientMessage {
         /// the duplicate, as for [`SpawnRequest::request_id`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+        /// True when the new session takes the source's
+        /// [`SessionSnapshot::busy_excluded`]: a Restart or a Resume. False
+        /// (and absent) for a Duplicate, which starts counted.
+        #[serde(default)]
+        carry_busy_excluded: bool,
     },
     /// Fetch the persisted [`SpawnConfig`] for a session so the spawn
     /// dialog can pre-fill all fields with the source's values. Replied
@@ -2044,6 +2060,14 @@ pub enum ClientMessage {
     RenameSession {
         session_id: String,
         label: Option<String>,
+    },
+    /// Set whether a session counts as busy
+    /// ([`SessionSnapshot::busy_excluded`]). `excluded` is the absolute new
+    /// value, not a toggle. Persisted on the orphan sidecar; answered with a
+    /// broadcast [`DaemonMessage::SessionUpdated`].
+    SetSessionBusyExcluded {
+        session_id: String,
+        excluded: bool,
     },
     /// Set appearance defaults inherited by sessions launched from this repo.
     SetRepoAppearance {
@@ -5379,13 +5403,14 @@ mod tests {
         assert!(
             matches!(
                 &old,
-                ClientMessage::DuplicateSession { session_id, request_id: None } if session_id == "s1"
+                ClientMessage::DuplicateSession { session_id, request_id: None, .. } if session_id == "s1"
             ),
             "{old:?}"
         );
         let msg = ClientMessage::DuplicateSession {
             session_id: "s1".to_string(),
             request_id: Some("req-2".to_string()),
+            carry_busy_excluded: false,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains(r#""request_id":"req-2""#), "{json}");
@@ -5393,7 +5418,7 @@ mod tests {
         assert!(
             matches!(
                 &decoded,
-                ClientMessage::DuplicateSession { session_id, request_id: Some(id) }
+                ClientMessage::DuplicateSession { session_id, request_id: Some(id), .. }
                     if session_id == "s1" && id == "req-2"
             ),
             "{decoded:?}"
@@ -6185,6 +6210,77 @@ mod tests {
     }
 
     #[test]
+    fn session_snapshot_round_trips_the_busy_exclusion() {
+        let mut snapshot: SessionSnapshot =
+            serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("a snapshot decodes");
+        snapshot.busy_excluded = true;
+        let encoded = serde_json::to_string(&snapshot).expect("encodes");
+        assert!(encoded.contains(r#""busy_excluded":true"#), "{encoded}");
+        let back: SessionSnapshot = serde_json::from_str(&encoded).expect("round-trips");
+        assert!(back.busy_excluded, "the flag survives a round trip");
+    }
+
+    #[test]
+    fn set_session_busy_excluded_round_trips() {
+        let decoded: ClientMessage = assert_round_trip(
+            r#"{"type":"set_session_busy_excluded","session_id":"s1","excluded":true}"#,
+        );
+        assert!(
+            matches!(
+                &decoded,
+                ClientMessage::SetSessionBusyExcluded { session_id, excluded: true } if session_id == "s1"
+            ),
+            "{decoded:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_session_without_carry_decodes_false() {
+        let old: ClientMessage =
+            serde_json::from_str(r#"{"type":"duplicate_session","session_id":"s1"}"#)
+                .expect("a message without carry_busy_excluded decodes");
+        assert!(
+            matches!(
+                &old,
+                ClientMessage::DuplicateSession {
+                    carry_busy_excluded: false,
+                    ..
+                }
+            ),
+            "{old:?}"
+        );
+        let carried: ClientMessage = serde_json::from_str(
+            r#"{"type":"duplicate_session","session_id":"s1","carry_busy_excluded":true}"#,
+        )
+        .expect("a message with carry_busy_excluded decodes");
+        assert!(
+            matches!(
+                &carried,
+                ClientMessage::DuplicateSession {
+                    carry_busy_excluded: true,
+                    ..
+                }
+            ),
+            "{carried:?}"
+        );
+    }
+
+    #[test]
+    fn history_entry_without_the_busy_flag_decodes_false() {
+        let old = format!("{IMPORTED_ENTRY_PREFIX}}}");
+        let entry: HistoryEntry = serde_json::from_str(&old).expect("decode an older entry");
+        assert!(!entry.busy_excluded);
+        let encoded = serde_json::to_value(&entry).expect("encode");
+        assert!(encoded.get("busy_excluded").is_none(), "{encoded}");
+
+        let json = format!(
+            r#"{IMPORTED_ENTRY_PREFIX},"end_time_known":true,"import_rev":0,"busy_excluded":true}}"#
+        );
+        let entry: HistoryEntry = assert_round_trip(&json);
+        assert!(entry.busy_excluded);
+    }
+
+    #[test]
     fn session_snapshot_without_status_since_decodes() {
         let snapshot: SessionSnapshot =
             serde_json::from_str(SNAPSHOT_WITHOUT_STATUS_SINCE).expect("an older snapshot decodes");
@@ -6354,6 +6450,16 @@ mod v22_compat {
                 DaemonMessage::Sessions { sessions } if sessions.len() == 1 && sessions[0].id == "s1"
             ),
             "{listed:?}"
+        );
+    }
+
+    #[test]
+    fn v22_snapshot_without_the_busy_flag_decodes_as_counted() {
+        let snapshot: SessionSnapshot =
+            serde_json::from_str(V22_SNAPSHOT).expect("a v22 snapshot decodes");
+        assert!(
+            !snapshot.busy_excluded,
+            "a snapshot without the flag counts as busy"
         );
     }
 

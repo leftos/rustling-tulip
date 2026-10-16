@@ -558,7 +558,7 @@ fn inactive_leaf_resume_duplicates(cx: &mut TestAppContext) {
     assert!(
         matches!(
             sent.as_slice(),
-            [ClientMessage::DuplicateSession { session_id, request_id: Some(_) }] if session_id == "s1"
+            [ClientMessage::DuplicateSession { session_id, request_id: Some(_), .. }] if session_id == "s1"
         ),
         "sent {sent:?}"
     );

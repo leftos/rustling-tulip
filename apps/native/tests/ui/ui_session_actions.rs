@@ -44,6 +44,7 @@ fn duplicate_request(sent: &[ClientMessage], id: &str) -> String {
             ClientMessage::DuplicateSession {
                 session_id,
                 request_id: Some(request_id),
+                ..
             },
         ] if session_id == id => request_id.clone(),
         other => panic!("expected one DuplicateSession of {id} with an id, sent {other:?}"),

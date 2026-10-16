@@ -359,6 +359,7 @@ fn restart_during_a_pane_spawn_keeps_the_restarted_session(cx: &mut TestAppConte
             ClientMessage::DuplicateSession {
                 session_id,
                 request_id,
+                ..
             } if session_id == "s1" => request_id,
             _ => None,
         })

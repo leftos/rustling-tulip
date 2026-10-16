@@ -57,6 +57,7 @@ Start with [docs/architecture.md](docs/architecture.md) for how the pieces fit a
 - **Background state**: a session whose turn ended while its subagents, background shells or a scheduled wakeup still run; it never counts as finished (RT-84).
 - **Binding window**: whichever of an account's usage windows (5-hour, 7-day, per-model) is fullest; its percentage decides auto-switch.
 - **Brief**: a worker's instructions: tree root, files, the change, and a proving command.
+- **Busy-excluded**: a per-session daemon flag (`busy_excluded` on the snapshot, sidecar and history entry) marking a session the user does not want counted as busy; set by `SetSessionBusyExcluded`, optionally carried to a duplicate and kept through reattach and recovery.
 - **CA.0, CA.1, …**: step ids in `docs/plans/accounts.md` (Claude accounts), distinct from `agent-cli.md`'s AC steps.
 - **Chat mirror**: the planned chat view of a Claude session, built from its transcript and hook prompts while its terminal keeps running, answering prompts by typing keys into the PTY (RT-51).
 - **Claim lease**: a short-lived marker in the account store saying one process is fetching an account's usage, so another does not fetch it too.

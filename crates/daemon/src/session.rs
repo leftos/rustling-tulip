@@ -179,6 +179,10 @@ pub struct SessionRecord {
     /// for Codex and Cursor sessions once it is known. Mirrored into the
     /// sidecar and copied into the session's history entry.
     pub agent_conversation_id: Option<String>,
+    /// True when the user asked that this session not count as busy. Set by
+    /// `SetSessionBusyExcluded`, mirrored into the sidecar and copied into the
+    /// session's history entry, so reattach, Resume and recovery keep it.
+    pub busy_excluded: bool,
 }
 
 impl SessionRecord {
@@ -233,6 +237,7 @@ impl SessionRecord {
             is_inactive: self.is_inactive,
             worktree_paths: self.worktree_paths.clone(),
             claude_session_id: self.claude_session_id.clone(),
+            busy_excluded: self.busy_excluded,
         }
     }
 }
@@ -465,6 +470,7 @@ impl SessionRegistry {
             label: guard.label.clone(),
             appearance: guard.appearance.clone(),
             agent_conversation_id: guard.agent_conversation_id.clone(),
+            busy_excluded: guard.busy_excluded,
         }
     }
 
@@ -857,6 +863,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            busy_excluded: meta.busy_excluded,
         };
         push_recent_action(&mut record, "reattached after daemon restart".to_string());
         self.insert(record);
@@ -917,6 +924,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
             &mut record,
@@ -962,6 +970,7 @@ impl SessionRegistry {
             spawn_origin: None,
             claude_session_id: meta.claude_session_id.clone(),
             agent_conversation_id: meta.agent_conversation_id.clone(),
+            busy_excluded: meta.busy_excluded,
         };
         push_recent_action(
             &mut record,
@@ -1032,6 +1041,7 @@ mod tests {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            busy_excluded: false,
         }
     }
 
@@ -1473,6 +1483,75 @@ mod tests {
             .publish();
 
         assert_keeps_agent_conversation_id(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn an_excluded_record_snapshot_carries_the_busy_flag() {
+        let mut rec = record("s1");
+        assert!(!rec.snapshot().busy_excluded, "a record starts counted");
+        rec.busy_excluded = true;
+        assert!(rec.snapshot().busy_excluded);
+    }
+
+    #[test]
+    fn setting_busy_excluded_on_the_record_reaches_the_sidecar() {
+        use crate::history::test_support::{record, scratch_dirs, write_meta_for};
+        let dirs = scratch_dirs("sidecar-busy-excluded");
+        write_meta_for(&dirs, "s1");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert(record("s1", SessionMode::Interactive));
+
+        registry.update("s1", |rec| rec.busy_excluded = true);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert!(meta.busy_excluded, "the flag is mirrored into the sidecar");
+
+        registry.update("s1", |rec| rec.busy_excluded = false);
+        let meta = crate::orphan::load_meta(&dirs, "s1").expect("load meta");
+        assert!(!meta.busy_excluded, "clearing it is mirrored too");
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    /// A sidecar for `s1` whose session does not count as busy.
+    fn excluded_meta() -> OrphanMeta {
+        let mut meta = codex_meta_with_conversation();
+        meta.busy_excluded = true;
+        meta
+    }
+
+    fn assert_keeps_busy_excluded(registry: &SessionRegistry) {
+        let arc = registry.get("s1").expect("the inserted session");
+        assert!(lock(&arc).busy_excluded, "the sidecar's flag is restored");
+    }
+
+    #[test]
+    fn abandoned_insert_keeps_busy_excluded() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("abandoned-busy-excluded");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_abandoned(&excluded_meta());
+        assert_keeps_busy_excluded(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[test]
+    fn orphan_insert_keeps_busy_excluded() {
+        use crate::history::test_support::scratch_dirs;
+        let dirs = scratch_dirs("orphan-busy-excluded");
+        let registry = SessionRegistry::new(dirs.clone());
+        registry.insert_orphan(&excluded_meta());
+        assert_keeps_busy_excluded(&registry);
+        let _ = std::fs::remove_dir_all(&dirs.config);
+    }
+
+    #[tokio::test]
+    async fn reattached_insert_keeps_busy_excluded() {
+        use crate::history::test_support::{fake_pty, scratch_dirs};
+        let dirs = scratch_dirs("reattached-busy-excluded");
+        let registry = SessionRegistry::new(dirs.clone());
+        let (pty, _exit_tx) = fake_pty();
+        registry.insert_reattached(&excluded_meta(), pty).publish();
+        assert_keeps_busy_excluded(&registry);
         let _ = std::fs::remove_dir_all(&dirs.config);
     }
 

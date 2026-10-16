@@ -58,6 +58,7 @@ Where to start for common changes, in the order a change usually flows through t
 |---|---|
 | Add a daemon/client message | `crates/protocol/src/lib.rs` → `crates/daemon/src/server.rs` (handler) → `apps/native/src/net.rs` (`on_daemon_message`) → the view that consumes it; the `add-protocol-message` skill walks it |
 | Change what a session snapshot carries | `crates/protocol/src/lib.rs` (`SessionSnapshot`) → `crates/daemon/src/session.rs` (snapshot builder) → `apps/native/src/sidebar.rs` |
+| Add a per-session daemon flag that clients read | `crates/protocol/src/lib.rs` (`SessionSnapshot`, the `ClientMessage` that sets it) → `crates/daemon/src/session.rs` (`SessionRecord`, snapshot, `record_mirror`) → `crates/daemon/src/orphan.rs` (`OrphanMeta`, `RecordMirror`) → `crates/daemon/src/history.rs` (`entry_from_record`) → `crates/daemon/src/server.rs` (the handler, `duplicate_session`, `resume_abandoned`, `recover_one`) → the client readers; `busy_excluded` is the model |
 | Change spawn arguments for an agent | `crates/daemon/src/agents/mod.rs`, `agents/claude.rs`, `agents/codex.rs`, `agents/cursor.rs`, `crates/daemon/src/spawn_plan.rs` |
 | Change PTY or tracer behaviour | `crates/daemon/src/tracer_client.rs`, `crates/daemon/src/pty.rs`, `crates/tracer/src/supervisor.rs`, `crates/tracer-protocol/src/lib.rs`, [tracer-abi.md](./tracer-abi.md) |
 | Change status detection | `crates/daemon/src/pty_state.rs`, `crates/daemon/src/osc_title.rs` |

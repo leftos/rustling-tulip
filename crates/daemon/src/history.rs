@@ -125,6 +125,7 @@ pub fn entry_from_record(
         end_time_known: true,
         import_rev: 0,
         agent_conversation_id: rec.agent_conversation_id.clone(),
+        busy_excluded: rec.busy_excluded,
     }
 }
 
@@ -608,6 +609,8 @@ fn entry_from_tracer_log(
         end_time_known: end.known,
         import_rev: IMPORT_REV,
         agent_conversation_id: None,
+        // A tracer log does not record the flag; an imported session counts.
+        busy_excluded: false,
     })
 }
 
@@ -1439,6 +1442,7 @@ pub(crate) mod test_support {
             spawn_origin: None,
             claude_session_id: None,
             agent_conversation_id: None,
+            busy_excluded: false,
         }
     }
 
@@ -1504,6 +1508,15 @@ mod tests {
             Some("019a2b3c-codex")
         );
         assert_eq!(entry.claude_session_id, None);
+    }
+
+    #[test]
+    fn entry_from_record_copies_busy_excluded() {
+        let mut rec = record("s1", SessionMode::Interactive);
+        assert!(!entry_from_record(&rec, SessionEnd::TracerLost, Utc::now()).busy_excluded);
+        rec.busy_excluded = true;
+        let entry = entry_from_record(&rec, SessionEnd::TracerLost, Utc::now());
+        assert!(entry.busy_excluded, "a recovered session keeps the flag");
     }
 
     #[test]

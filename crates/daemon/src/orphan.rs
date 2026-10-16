@@ -168,6 +168,11 @@ pub struct OrphanMeta {
     /// known yet, and for sidecars written before this field existed.
     #[serde(default)]
     pub agent_conversation_id: Option<String>,
+    /// True when the user asked that this session not count as busy, so a
+    /// reattached session keeps it. False for sidecars written before this
+    /// field existed.
+    #[serde(default)]
+    pub busy_excluded: bool,
 }
 
 fn meta_path(dirs: &Dirs, session_id: &str) -> PathBuf {
@@ -543,6 +548,7 @@ pub fn meta_from_record(
         claude_session_id,
         // Mirrored from the record, like the status.
         agent_conversation_id: None,
+        busy_excluded: false,
     })
 }
 
@@ -563,6 +569,7 @@ pub struct RecordMirror {
     pub label: String,
     pub appearance: AppearanceOverrides,
     pub agent_conversation_id: Option<String>,
+    pub busy_excluded: bool,
 }
 
 impl RecordMirror {
@@ -578,6 +585,7 @@ impl RecordMirror {
             && meta.appearance == self.appearance
             && meta.accent_color.is_none()
             && meta.agent_conversation_id == self.agent_conversation_id
+            && meta.busy_excluded == self.busy_excluded
     }
 
     fn apply(&self, meta: &mut OrphanMeta) {
@@ -596,15 +604,16 @@ impl RecordMirror {
         meta.appearance = self.appearance.clone();
         meta.agent_conversation_id
             .clone_from(&self.agent_conversation_id);
+        meta.busy_excluded = self.busy_excluded;
     }
 }
 
 /// Best-effort sync of the record's on-disk mirror into the sidecar: the
 /// recent-actions tail, the status/stamp pair, the terminal title and cwd,
-/// the labels and the appearance. Called by the registry after every
-/// `update()` so abandoned sessions retain the most recent operational
-/// context and a reattach can bring back a session that was still waiting
-/// for input. Silently no-ops if the sidecar doesn't exist (e.g. for a
+/// the labels, the appearance and the busy exclusion. Called by the registry
+/// after every `update()` so abandoned sessions retain the most recent
+/// operational context and a reattach can bring back a session that was still
+/// waiting for input. Silently no-ops if the sidecar doesn't exist (e.g. for a
 /// brand-new session whose spawn pipeline hasn't written it yet, or a session
 /// that never had a sidecar — plain shells in some configurations).
 ///
@@ -843,6 +852,7 @@ mod tests {
             tracer_exe_path: Some(r"C:\cache\rt-tracer-aaaaaaaaaaaaaaaa.exe".to_string()),
             claude_session_id: None,
             agent_conversation_id: None,
+            busy_excluded: false,
         };
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let decoded = load_meta_from_bytes(&bytes).expect("decode");
@@ -886,6 +896,34 @@ mod tests {
         let meta = load_meta_from_bytes(v2).expect("parse v2 without exe path");
         assert_eq!(meta.tracer_pid, Some(4321));
         assert_eq!(meta.tracer_exe_path, None);
+    }
+
+    #[test]
+    fn a_sidecar_without_the_busy_flag_loads_counted() {
+        let legacy = br#"{
+            "on_disk_version": 2,
+            "session_id": "legacy",
+            "pid": 1234,
+            "label": "legacy",
+            "kind": "standalone",
+            "mode": "interactive",
+            "members": [],
+            "started_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let meta = load_meta_from_bytes(legacy).expect("parse a sidecar without the flag");
+        assert!(
+            !meta.busy_excluded,
+            "an older sidecar's session counts as busy"
+        );
+
+        let mut excluded = meta;
+        excluded.busy_excluded = true;
+        let bytes = serde_json::to_vec(&excluded).expect("serialize");
+        let decoded = load_meta_from_bytes(&bytes).expect("decode");
+        assert!(
+            decoded.busy_excluded,
+            "the flag round-trips through the sidecar"
+        );
     }
 
     #[test]
